@@ -44,6 +44,14 @@ export function InspectorIcon(props: IconProps) {
   );
 }
 
+export function FilterIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M4 7h16M7 12h10M10 17h4" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </IconBase>
+  );
+}
+
 export function ChevronIcon({ className, ...props }: IconProps) {
   return (
     <IconBase className={className} {...props}>

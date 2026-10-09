@@ -309,7 +309,7 @@ it("starts as one line, expands on focus, and preserves a draft when focus leave
   expect(textbox()).toHaveAttribute("rows", "1");
   fireEvent.focus(textbox());
   expect(textbox()).toHaveAttribute("rows", "3");
-  expect(screen.getByRole("button", { name: "Send" }).parentElement).toBe(textbox().parentElement);
+  expect(screen.getByRole("button", { name: "Send" }).closest(".session-composer__box")).toContainElement(textbox());
   fireEvent.blur(textbox());
   expect(textbox()).toHaveAttribute("rows", "1");
   draft("Keep my draft\nand its newline");

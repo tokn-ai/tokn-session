@@ -34,6 +34,7 @@ function renderSidebar(
   sessions: SessionSummary[],
   pendingProviders: ViewerProvider[] = [],
   error: string | null = null,
+  onCollapse?: () => void,
 ) {
   return render(
     <Sidebar
@@ -43,6 +44,7 @@ function renderSidebar(
       is_loading={false}
       is_loading_more={false}
       on_children_load={vi.fn()}
+      on_collapse={onCollapse}
       on_children_load_more={vi.fn()}
       on_children_retry={vi.fn()}
       on_load_more={vi.fn()}
@@ -61,6 +63,17 @@ function renderSidebar(
 }
 
 describe("Sidebar session identity", () => {
+  it("keeps provider controls in a disclosure and delegates desktop collapse", () => {
+    const collapse = vi.fn();
+    renderSidebar([session()], [], null, collapse);
+    const disclosure = screen.getByText("Providers").closest("details");
+    expect(disclosure).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByText("Providers"));
+    expect(disclosure).toHaveAttribute("open");
+    expect(screen.getByRole("button", { name: "Codex" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Collapse sessions" }));
+    expect(collapse).toHaveBeenCalledOnce();
+  });
   it("keeps async question attention visible beside running state and unread replies", () => {
     const { rerender } = renderSidebar([session({ is_running: true, question_attention: { required_count: 0, available_count: 2 } })]);
     expect(screen.getByRole("img", { name: "Question available, 2 unanswered questions" })).toBeInTheDocument();
@@ -132,21 +145,21 @@ describe("Sidebar session identity", () => {
     expect(within(titled).getByText("First prompt should not win")).toHaveClass("session-row__preview");
     expect(within(titled).getByText("Codex")).toHaveClass("session-row__provider");
     expect(within(titled).queryByText(titledId)).not.toBeInTheDocument();
-    expect(titled).toHaveAttribute("title", `Provider title\n${titledId}`);
+    expect(titled).toHaveAttribute("title", `Provider title\nCodex · Viewer\n${titledId}`);
 
     const preview = screen.getByRole("button", {
       name: `First user prompt, Codex session ${previewId}`,
     });
     expect(within(preview).getByText("First user prompt")).toHaveClass("session-row__title");
     expect(within(preview).getByText("Codex")).toHaveClass("session-row__provider");
-    expect(preview).toHaveAttribute("title", `First user prompt\n${previewId}`);
+    expect(preview).toHaveAttribute("title", `First user prompt\nCodex · Viewer\n${previewId}`);
 
     const untitled = screen.getByRole("button", {
       name: `Untitled session, Codex session ${untitledId}`,
     });
     expect(within(untitled).getByText("Untitled session")).toHaveClass("session-row__title");
     expect(within(untitled).getByText("Codex")).toHaveClass("session-row__provider");
-    expect(untitled).toHaveAttribute("title", `Untitled session\n${untitledId}`);
+    expect(untitled).toHaveAttribute("title", `Untitled session\nCodex · Viewer\n${untitledId}`);
   });
 
   it("loads missing child metadata only after an expansion commits", async () => {

@@ -2,6 +2,7 @@ import type { EventSummary } from "../lib/types";
 import { formatTimestamp } from "../lib/state";
 import { useMessageTranslation } from "../lib/useMessageTranslation";
 import { MarkdownContent } from "./MarkdownContent";
+import { InspectorIcon } from "./Icons";
 import { useTranslationEngine, useTranslationStatus } from "./TranslationProvider";
 
 interface MessageCardProps {
@@ -24,7 +25,7 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
   return (
     <article className="message-event" data-presentation={presentation} data-role={role} data-selected={is_selected}>
       <div className="message-event__surface">
-        <span className="message-event__role">{role}</span>
+        <span className={role === "user" || role === "assistant" ? "sr-only" : "message-event__role"}>{role}</span>
         {usesMarkdown ? (
           <div aria-busy={translation.loading} lang={translation.showing_translation ? "zh-Hans" : undefined}>
             <MarkdownContent class_name="message-event__text" content={translation.content || event.title} />
@@ -76,7 +77,7 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
             onClick={() => on_select(event.event_key)}
             type="button"
           >
-            {event.summary_truncated && !event.is_hidden ? "View full message" : "Inspect"}
+            {event.summary_truncated && !event.is_hidden ? "View full message" : <InspectorIcon />}
           </button>
         </div>
         <time className="message-event__time" dateTime={event.timestamp ?? undefined} title={formatTimestamp(event.timestamp)}>

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type {
   AgentActivityCardSummary,
   EventDetail,
+  ExpandedActivityState,
   EventSummary,
   SessionSummary,
   ToolCardSummary,
@@ -17,12 +18,15 @@ import {
 } from "../lib/state";
 import {
   ChevronIcon,
+  InspectorIcon,
   ReasoningIcon,
   TechnicalIcon,
   ToolIcon,
   UsageIcon,
   WarningIcon,
 } from "./Icons";
+import { ActivityGroup, groupActivity } from "./ActivityGroup";
+import { ShellOutputSection } from "./ShellOutputSection";
 import { MessageCard } from "./MessageCard";
 import type { TechnicalCardHeading } from "./CardPresentation";
 import { ReasoningCard, reasoningHeading } from "./ReasoningCard";
@@ -52,6 +56,8 @@ interface EventCardProps {
   on_trajectory_load_older?: (trajectory_key: string) => void;
   on_trajectory_load_newer?: (trajectory_key: string) => void;
   on_trajectory_retry?: (trajectory_key: string) => void;
+  expanded_activity_keys?: Set<string>;
+  expanded_activities?: Map<string, ExpandedActivityState>;
   trajectory_expanded_event_key?: string | null;
   trajectory_expanded_detail?: EventDetail | null;
   trajectory_expanded_detail_error?: string | null;
@@ -206,7 +212,7 @@ function pluralize(count: number, singular: string, plural = `${singular}s`): st
  *
  * The backend keeps this as a string because it may be a Rust u64, which can
  * exceed JavaScript's safe integer range. BigInt lets the UI retain every
- * recorded millisecond while still presenting a compact, exact duration.
+ * recorded value while displaying whole seconds rather than milliseconds.
  */
 export function formatTrajectoryDuration(durationMs: string | null): string | null {
   const source = durationMs?.trim() ?? "";
@@ -226,7 +232,6 @@ export function formatTrajectoryDuration(durationMs: string | null): string | nu
     [3_600_000n, "h"],
     [60_000n, "m"],
     [1_000n, "s"],
-    [1n, "ms"],
   ];
   const parts: string[] = [];
   for (const [unitMs, label] of units) {
@@ -236,7 +241,7 @@ export function formatTrajectoryDuration(durationMs: string | null): string | nu
       remaining %= unitMs;
     }
   }
-  return parts.join(" ") || "0ms";
+  return parts.join(" ") || "0s";
 }
 
 function trajectoryFacts(trajectory: TrajectoryCardSummary): string {
@@ -478,6 +483,8 @@ function TrajectorySection({
   expanded_child_detail_error,
   expanded_child_detail_loading,
   expanded_child_event_key,
+  expanded_activity_keys,
+  expanded_activities,
 }: {
   session_key?: string;
   hide_lifecycle: boolean;
@@ -499,6 +506,8 @@ function TrajectorySection({
   expanded_child_detail_error: string | null;
   expanded_child_detail_loading: boolean;
   expanded_child_event_key: string | null;
+  expanded_activity_keys?: Set<string>;
+  expanded_activities?: Map<string, ExpandedActivityState>;
 }) {
   const heading = useTrajectoryHeading(event);
   const regionId = `${button_id}-details`;
@@ -519,13 +528,16 @@ function TrajectorySection({
           onClick={() => on_toggle(event.event_key)}
           type="button"
         >
-          <span aria-hidden="true" className="trajectory-section__line" />
-          <span className="trajectory-section__label" id={labelId}>{heading.primary}</span>
-          {heading.secondary ? (
-            <span className="trajectory-section__facts">{heading.secondary}</span>
-          ) : null}
-          <span aria-hidden="true" className="trajectory-section__line" />
           <ChevronIcon className={is_expanded ? "chevron chevron--open" : "chevron"} />
+          <span className="trajectory-section__summary">
+            <span className="trajectory-section__label" id={labelId}>
+              {event.trajectory?.status === "working" ? <span aria-hidden="true" className="inline-spinner" /> : null}
+              {heading.primary}
+            </span>
+            {heading.secondary ? (
+              <span className="trajectory-section__facts">{heading.secondary}</span>
+            ) : null}
+          </span>
         </button>
         <button
           aria-label={`Inspect ${heading.primary}`}
@@ -534,12 +546,13 @@ function TrajectorySection({
           onClick={() => on_select(event.event_key)}
           type="button"
         >
-          Inspect
+          <InspectorIcon />
         </button>
       </div>
 
-      {is_expanded ? (
+      {is_expanded || page?.has_loaded ? (
         <div
+          hidden={!is_expanded}
           aria-labelledby={labelId}
           className="trajectory-section__body"
           id={regionId}
@@ -589,32 +602,44 @@ function TrajectorySection({
 
               {visibleEvents.length > 0 ? (
                 <div aria-label="Events in this turn" className="trajectory-section__events" role="list">
-                  {visibleEvents.map((childEvent) => (
-                    <div data-scroll-key={`${event.event_key}/${childEvent.event_key}`} key={childEvent.event_key} role="listitem">
-                      <EventCard
-                        session_key={session_key}
-                        hide_lifecycle={hide_lifecycle}
-                        button_id={eventButtonId(childEvent.event_key)}
-                        detail={childEvent.event_key === expanded_child_event_key
-                          ? expanded_child_detail
-                          : null}
-                        detail_error={childEvent.event_key === expanded_child_event_key
-                          ? expanded_child_detail_error
-                          : null}
-                        detail_loading={childEvent.event_key === expanded_child_event_key
-                          && expanded_child_detail_loading}
-                        event={childEvent}
-                        is_expanded={childEvent.event_key === expanded_child_event_key}
-                        is_selected={childEvent.event_key === selected_event_key}
-                        on_open_related_session={on_open_related_session}
-                        on_retry_detail={() => {
-                          on_retry_child_detail?.(event.event_key, childEvent.event_key);
-                        }}
-                        on_select={on_select}
-                        on_toggle={(eventKey) => on_toggle_child?.(event.event_key, eventKey)}
-                        selected_event_key={selected_event_key}
-                      />
-                    </div>
+                  {groupActivity(visibleEvents).map((group) => (
+                    <ActivityGroup key={group[0].event_key} events={group} selected_event_key={selected_event_key}
+                      reveal={group.some((child) => expanded_activity_keys?.has(child.event_key)
+                        ?? child.event_key === expanded_child_event_key)}>
+                      {group.map((childEvent) => (
+                        <div
+                          className="trajectory-section__item"
+                          data-error={childEvent.is_error || childEvent.type === "error"}
+                          data-scroll-key={`${event.event_key}/${childEvent.event_key}`}
+                          key={childEvent.event_key}
+                          role="listitem"
+                        >
+                          <EventCard
+                            session_key={session_key}
+                            hide_lifecycle={hide_lifecycle}
+                            button_id={eventButtonId(childEvent.event_key)}
+                            detail={expanded_activities?.get(childEvent.event_key)?.detail ?? (childEvent.event_key === expanded_child_event_key
+                              ? expanded_child_detail
+                              : null)}
+                            detail_error={expanded_activities?.get(childEvent.event_key)?.error ?? (childEvent.event_key === expanded_child_event_key
+                              ? expanded_child_detail_error
+                              : null)}
+                            detail_loading={expanded_activities?.get(childEvent.event_key)?.is_loading
+                              ?? (childEvent.event_key === expanded_child_event_key && expanded_child_detail_loading)}
+                            event={childEvent}
+                            is_expanded={expanded_activity_keys?.has(childEvent.event_key) ?? (childEvent.event_key === expanded_child_event_key)}
+                            is_selected={childEvent.event_key === selected_event_key}
+                            on_open_related_session={on_open_related_session}
+                            on_retry_detail={() => {
+                              on_retry_child_detail?.(event.event_key, childEvent.event_key);
+                            }}
+                            on_select={on_select}
+                            on_toggle={(eventKey) => on_toggle_child?.(event.event_key, eventKey)}
+                            selected_event_key={selected_event_key}
+                          />
+                        </div>
+                      ))}
+                    </ActivityGroup>
                   ))}
                 </div>
               ) : page.events.length === 0 && !page.error ? (
@@ -698,10 +723,22 @@ function ToolOutput({
   }
 
   const toolLabel = toolHeading(event).primary;
+  const isShell = event.tool?.kind === "shell" || event.tool?.kind === "terminal";
   return (
-    <div aria-busy={is_loading} className="tool-output">
+    <div aria-busy={is_loading} className={isShell ? "tool-output shell-output" : "tool-output"}>
       <DetailRefreshError error={error} on_retry={on_retry} />
-      {output.sections.map((section, index) => (
+      {isShell ? (
+        <header className="shell-output__header">
+          {event.tool?.cwd ? <span className="shell-output__cwd" title={event.tool.cwd}>{event.tool.cwd}</span> : null}
+          <code className="shell-output__command"><span aria-hidden="true">{event.tool?.kind === "shell" ? "$ " : ""}</span>{event.tool?.command || toolLabel}</code>
+          {event.tool?.exit_code !== null && event.tool?.exit_code !== undefined ? (
+            <span className="shell-output__exit" data-error={event.tool.exit_code !== 0}>Exit {event.tool.exit_code}</span>
+          ) : null}
+        </header>
+      ) : null}
+      {output.sections.map((section, index) => isShell ? (
+        <ShellOutputSection key={`${event.event_key}-${index}`} section={section} command={toolLabel} />
+      ) : (
         <section className="tool-output__section" key={`${section.label ?? "output"}-${index}`}>
           {section.label ? <h4>{section.label}</h4> : null}
           <pre
@@ -743,6 +780,8 @@ export function EventCard({
   on_trajectory_load_older,
   on_trajectory_load_newer,
   on_trajectory_retry,
+  expanded_activity_keys,
+  expanded_activities,
   trajectory_expanded_event_key,
   trajectory_expanded_detail,
   trajectory_expanded_detail_error,
@@ -762,6 +801,8 @@ export function EventCard({
         hide_lifecycle={hide_lifecycle}
         button_id={button_id}
         event={event}
+        expanded_activity_keys={expanded_activity_keys}
+        expanded_activities={expanded_activities}
         expanded_child_detail={trajectory_expanded_detail ?? null}
         expanded_child_detail_error={trajectory_expanded_detail_error ?? null}
         expanded_child_detail_loading={trajectory_expanded_detail_loading ?? false}
@@ -803,6 +844,8 @@ export function EventCard({
       className="technical-event"
       data-selected={is_selected}
       data-tone={eventTone(event)}
+      data-expanded={cardIsExpanded}
+      data-shell={event.tool?.kind === "shell" || event.tool?.kind === "terminal"}
     >
       <div className="technical-event__header">
         <button
@@ -832,7 +875,7 @@ export function EventCard({
                 {title}
               </span>
             </span>
-            {heading?.secondary ? (
+            {heading?.secondary && !(cardIsExpanded && (event.tool?.kind === "shell" || event.tool?.kind === "terminal")) ? (
               <span className="technical-event__secondary" title={heading.secondary}>
                 {heading.secondary}
               </span>
@@ -867,7 +910,7 @@ export function EventCard({
             onClick={() => on_select(event.event_key)}
             type="button"
           >
-            {event.summary_truncated && !event.is_hidden ? "Full detail" : "Inspect"}
+            {event.summary_truncated && !event.is_hidden ? "Full detail" : <InspectorIcon />}
           </button>
         </div>
       </div>
@@ -919,7 +962,7 @@ export function EventCard({
           ) : (
             <p>{event.is_hidden ? "Hidden extension event" : event.summary || "No summary available."}</p>
           )}
-          <span className="event-kind-label">{event.type.replace(/_/g, " ")}</span>
+          {event.type !== "tool_call" ? <span className="event-kind-label">{event.type.replace(/_/g, " ")}</span> : null}
         </div>
       ) : null}
     </article>

@@ -554,6 +554,7 @@ describe("EventCard whole-turn trajectories", () => {
     expect(container.querySelector(".trajectory-section")).toBeInTheDocument();
     expect(container.querySelector(".trajectory-section .message-event")).toBeInTheDocument();
     expect(container.querySelector(".trajectory-section .technical-event")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Ran 1 command, recorded 1 agent activity" }));
     expect(screen.getByRole("button", { name: "Shell: cargo test" })).toBeInTheDocument();
     expect(screen.getByText("Showing 3 of 4 events.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Load earlier events" })).toBeInTheDocument();
@@ -567,6 +568,21 @@ describe("EventCard whole-turn trajectories", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Open subagent Hubble" }));
     expect(onOpenSubagent).toHaveBeenCalledWith(child);
+  });
+
+  it("retains exploration disclosure state while folding the enclosing work", () => {
+    const children = [event({event_key: "read", type: "tool_call", tool: tool({kind: "file_read", path: "a.rs"})}),
+      event({event_key: "search", type: "tool_call", tool: tool({kind: "search", query: "state"})})];
+    const props = {button_id: "work", event: trajectoryEvent, is_selected: false, detail: null,
+      detail_error: null, detail_loading: false, on_retry_detail: vi.fn(), on_select: vi.fn(), on_toggle: vi.fn(),
+      trajectory_page: trajectoryPage({events: children})};
+    const {rerender} = render(<EventCard {...props} is_expanded />);
+    fireEvent.click(screen.getByRole("button", {name: "Read 1 file, performed 1 search"}));
+    expect(screen.getByRole("button", {name: "Read: a.rs"})).toBeVisible();
+    rerender(<EventCard {...props} is_expanded={false} />);
+    expect(screen.queryByRole("button", {name: "Read: a.rs"})).not.toBeInTheDocument();
+    rerender(<EventCard {...props} is_expanded />);
+    expect(screen.getByRole("button", {name: "Read: a.rs"})).toBeVisible();
   });
 
   it("retains pagination, errors, and raw counts when every loaded child is filtered", () => {
@@ -639,9 +655,12 @@ describe("EventCard whole-turn trajectories", () => {
     expect(onRetry).toHaveBeenCalledWith(trajectoryEvent.event_key);
   });
 
-  it("formats decimal millisecond strings exactly without Number precision loss", () => {
-    expect(formatTrajectoryDuration("9007199254740993")).toBe("104249991d 8h 59m 993ms");
-    expect(formatTrajectoryDuration("0")).toBe("0ms");
+  it("formats whole-second durations without Number precision loss", () => {
+    expect(formatTrajectoryDuration("9007199254740993")).toBe("104249991d 8h 59m");
+    expect(formatTrajectoryDuration("0")).toBe("0s");
+    expect(formatTrajectoryDuration("999")).toBe("0s");
+    expect(formatTrajectoryDuration("1999")).toBe("1s");
+    expect(formatTrajectoryDuration("61234")).toBe("1m 1s");
     expect(formatTrajectoryDuration("not-a-duration")).toBeNull();
   });
 });
