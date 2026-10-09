@@ -153,13 +153,22 @@ while malformed legacy tool arguments retain their ordinary tool representation.
 
 `question_reply` contains a recorded structured answer: request/turn IDs,
 question IDs, original prompts/headers when known, answer strings, native payload,
-and timestamp. Codex `request_user_input` tool results are correlated by call ID
+and timestamp. Request IDs are optional when only an opaque question identity
+is recorded. Codex `request_user_input` tool results are correlated by call ID
 in both legacy and paginated history, including incremental reads. Canonical
 outputs explicitly named `request_user_input` can stand alone without invented
 prompts. Duplicate raw/canonical results produce one reply; correlation retains
 the latest 256 requests. Unknown question IDs and empty answers stay visible,
-and malformed results become unknown events. Async acceptance is not an answer;
-ordinary user messages are not paired to async questions by proximity.
+and malformed results become unknown events. Async acceptance is not an answer.
+Desktop/TUI user messages containing complete
+`<send_user_message_question_reply>` envelopes normalize as replies in both
+history modes, including single objects, arrays, and IDE context prefixes.
+Their `questionItemId` is preserved; `["request_user_input_async", item_id, index]`
+provides the request ID and matches the normalized async question ID. The
+envelope's recorded prompt and answer remain readable without the request.
+An object-replacement marker at the JSON boundary is tolerated. Quoted,
+malformed, incomplete, and attachment-bearing messages remain ordinary text;
+ordinary messages are not paired by proximity.
 
 The viewer keeps requests outside work trajectories and shows Markdown prompts,
 static choice lists, and free-text/secret markers. It does not infer current

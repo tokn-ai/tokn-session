@@ -349,7 +349,7 @@ fn event_message_id(event: &tokn_session_core::AgentEvent) -> Option<&str> {
   match event {
     AgentEvent::Message(event) => event.message_id.as_deref(),
     AgentEvent::QuestionRequest(event) => event.request_id.as_deref(),
-    AgentEvent::QuestionReply(event) => Some(event.request_id.as_str()),
+    AgentEvent::QuestionReply(event) => event.request_id.as_deref(),
     AgentEvent::Reasoning(event) => event.message_id.as_deref(),
     AgentEvent::ToolCall(event) => event.message_id.as_deref(),
     _ => None,

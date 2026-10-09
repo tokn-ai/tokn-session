@@ -129,7 +129,7 @@ pub struct UserQuestionOption {
 pub struct QuestionReplyEvent {
   pub provider: Provider,
   pub session_id: Option<String>,
-  pub request_id: String,
+  pub request_id: Option<String>,
   pub turn_id: Option<String>,
   pub replies: Vec<UserQuestionReply>,
   pub native: Value,

@@ -25,8 +25,10 @@ Native payloads stay inspectable, and malformed canonical question items remain
 unknown. Structured tool results now become `question_reply` user rows, with
 answers linked to question IDs and prompts by call ID across incremental reads.
 Empty answers remain visible; malformed replies retain native unknown records.
-Async replies remain ordinary user messages without inferred pairing. Cards
-show recorded history; live answering is deferred.
+Desktop/TUI `<send_user_message_question_reply>` envelopes now also become
+answer cards, preserving `questionItemId` and deriving the request ID from its
+async identity tuple. Ordinary, malformed, or quoted messages remain text.
+Cards show recorded history; live answering is deferred.
 `vendor/codex` is pinned to upstream `2351d9e1b6` (2026-10-09).
 See [question semantics](event-ir.md#questions).
 

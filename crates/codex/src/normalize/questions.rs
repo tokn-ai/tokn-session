@@ -25,9 +25,14 @@ impl RepliesNormalizer {
       let AgentEvent::QuestionRequest(request) = event else {
         continue;
       };
-      // Async acceptance is not a user reply. Canonical async questions do
-      // not expose a structured response channel in persisted history.
-      if request.questions.iter().all(|question| question.id.is_none()) {
+      // Async acceptance is not a user reply. Its answers arrive separately
+      // through user-message envelopes, not function outputs.
+      if request.native["item"]["delivery"] == "async"
+        || request.native["name"]
+          .as_str()
+          .is_some_and(|name| name.rsplit('.').next() == Some("request_user_input_async"))
+        || request.questions.iter().all(|question| question.id.is_none())
+      {
         continue;
       }
       let Some(id) = request.request_id.as_ref() else {
@@ -149,7 +154,7 @@ impl RepliesNormalizer {
     Some(vec![AgentEvent::QuestionReply(tokn_session_core::QuestionReplyEvent {
       provider: Provider::Codex,
       session_id,
-      request_id: id,
+      request_id: Some(id),
       turn_id: string_field(payload, "turn_id").or_else(|| request.and_then(|request| request.turn_id.clone())),
       replies,
       native: payload.clone(),
@@ -186,7 +191,7 @@ pub(super) fn async_message(
   if item.get("delivery")?.as_str()? != "async" {
     return None;
   }
-  let questions = async_questions(item.get("questions")?)?;
+  let questions = async_questions(item.get("questions")?, item["id"].as_str())?;
   Some(AgentEvent::QuestionRequest(QuestionRequestEvent {
     provider: Provider::Codex,
     session_id,
@@ -201,7 +206,7 @@ pub(super) fn async_message(
   }))
 }
 
-fn async_questions(value: &Value) -> Option<Vec<UserQuestion>> {
+fn async_questions(value: &Value, request_id: Option<&str>) -> Option<Vec<UserQuestion>> {
   let questions: Vec<AsyncUserInputQuestion> = serde_json::from_value(value.clone()).ok()?;
   if questions.is_empty()
     || questions.iter().any(|question| {
@@ -217,8 +222,9 @@ fn async_questions(value: &Value) -> Option<Vec<UserQuestion>> {
   Some(
     questions
       .into_iter()
-      .map(|question| UserQuestion {
-        id: None,
+      .enumerate()
+      .map(|(index, question)| UserQuestion {
+        id: request_id.map(|id| serde_json::json!(["request_user_input_async", id, index]).to_string()),
         header: None,
         question: question.title,
         options: question.options.map(|options| {
@@ -258,7 +264,7 @@ pub(super) fn function_call(
       is_blocking: Some(false),
       phase: Phase::Finished,
       text: None,
-      questions: async_questions(input.get("questions")?)?,
+      questions: async_questions(input.get("questions")?, item.call_id.as_deref())?,
       native,
       timestamp,
     }));
@@ -382,7 +388,7 @@ mod tests {
         .collect();
       assert_eq!(replies.len(), 1);
       let reply = replies[0];
-      assert_eq!(reply.request_id, "call-1");
+      assert_eq!(reply.request_id.as_deref(), Some("call-1"));
       assert_eq!(reply.session_id.as_deref(), Some("session-1"));
       assert_eq!(reply.replies[0].question_id, "storage");
       assert_eq!(reply.replies[0].question.as_deref(), Some("Which storage?"));

@@ -4,7 +4,7 @@ mod questions;
 mod rollout;
 
 pub use questions::{
-  AsyncUserInputQuestion, RequestUserInputAnswer, RequestUserInputEvent, RequestUserInputOption,
+  AsyncQuestionReply, AsyncUserInputQuestion, RequestUserInputAnswer, RequestUserInputEvent, RequestUserInputOption,
   RequestUserInputQuestion, RequestUserInputResponse,
 };
 

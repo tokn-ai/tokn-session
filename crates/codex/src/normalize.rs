@@ -1,3 +1,4 @@
+mod async_replies;
 mod code_mode;
 mod communication;
 mod item_lifecycle;
@@ -155,6 +156,9 @@ impl CodexNormalizer {
       return Vec::new();
     }
 
+    if let Some(events) = async_replies::normalize(&line, self.session_id.clone()) {
+      return events;
+    }
     if let Some(events) = self.question_replies.output(&line, self.session_id.clone()) {
       return events;
     }
