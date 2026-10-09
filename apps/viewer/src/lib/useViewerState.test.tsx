@@ -2264,6 +2264,69 @@ describe("useViewerState agent communication detail", () => {
     expect(loadEventDetail).toHaveBeenCalledOnce();
   });
 
+  it.each(["question_reply", "message"])("clears question badges from resolved %s pages despite a stale catalog", async (type) => {
+    let emit: ((change: RelayChange) => void) | undefined;
+    let indexChange: ((change: SessionIndexChangedEvent) => void) | undefined;
+    vi.mocked(listenForRelayChanges).mockImplementation((handler) => { emit = handler; return Promise.resolve(vi.fn()); });
+    vi.mocked(listenForSessionIndexChanges).mockImplementation((handler) => { indexChange = handler; return Promise.resolve(vi.fn()); });
+    const stale = { ...session("codex:communication"), question_attention: { required_count: 0, available_count: 2 } };
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [stale, session("codex:next")], next_cursor: null, source_errors: [], pending_providers: [] });
+    const pending = { ...communicationPage(), outstanding_questions: [
+      { event_key: "event.v1.communication", requires_input: false, unanswered_count: 2 },
+    ] };
+    vi.mocked(loadEventPage).mockResolvedValueOnce(pending)
+      .mockResolvedValue({ ...communicationPage(), events: [{ ...communicationPage().events[0], type }], outstanding_questions: [] });
+    const { result } = renderHook(() => useViewerState());
+    await selectListedSession(result, "codex:communication");
+    await waitFor(() => expect(result.current.outstandingQuestions).toHaveLength(1));
+    act(() => emit?.({ session_key: "codex:communication", reset: false }));
+    await waitFor(() => expect(result.current.outstandingQuestions).toEqual([]));
+    expect(result.current.sessions[0].question_attention).toEqual({ required_count: 0, available_count: 0 });
+    expect(result.current.selectedSession?.question_attention?.available_count).toBe(0);
+    act(() => indexChange?.({ changed: true, attention_session_keys: [] }));
+    await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(2));
+    expect(result.current.sessions[0].question_attention?.available_count).toBe(0);
+  });
+
+  it("clears cached child question badges and keeps them cleared after switching back to the parent", async () => {
+    const root = session("codex:communication");
+    const child = { ...session("codex:child"), parent_session_id: root.session_id, is_subagent: true,
+      question_attention: { required_count: 1, available_count: 0 } };
+    root.child_count = 1;
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [root], next_cursor: null, source_errors: [], pending_providers: [] });
+    vi.mocked(loadEventPage).mockResolvedValue({ ...communicationPage(), outstanding_questions: [] });
+    const { result } = renderHook(() => useViewerState());
+    await selectListedSession(result, root.session_key);
+    await waitFor(() => expect(result.current.initialPageLoaded).toBe(true));
+    act(() => result.current.openRelatedSession(root.session_key, child));
+    await waitFor(() => expect(result.current.selectedSession?.question_attention?.required_count).toBe(0));
+    act(() => result.current.selectSession(root.session_key));
+    expect(result.current.sessionChildren.get(root.session_key)?.sessions.find((row) => row.session_key === child.session_key)?.question_attention)
+      .toEqual({ required_count: 0, available_count: 0 });
+  });
+
+  it("opens an outstanding question from the sidebar without consuming it and clears navigation on session switches", async () => {
+    const page = communicationPage();
+    page.events = [{ ...page.events[0], type: "question_request", agent_activity: null, title: "Questions" }];
+    page.outstanding_questions = [{ event_key: "event.v1.communication", requires_input: false, unanswered_count: 2 }];
+    vi.mocked(loadEventPage).mockResolvedValue(page);
+    vi.mocked(loadEventDetail).mockResolvedValue(communicationDetail());
+    const { result } = renderHook(() => useViewerState());
+    await waitFor(() => expect(result.current.sessions).toHaveLength(2));
+    act(() => result.current.selectQuestionSession("codex:communication"));
+    await waitFor(() => expect(result.current.expandedEventKey).toBe("event.v1.communication"));
+    expect(result.current.outstandingQuestions).toEqual(page.outstanding_questions);
+    expect(result.current.questionNavigation?.event_key).toBe("event.v1.communication");
+    await waitFor(() => expect(result.current.expandedDetail).not.toBeNull());
+    const previous = result.current.questionNavigation?.revision ?? 0;
+    act(() => result.current.selectQuestionSession("codex:communication"));
+    expect(result.current.questionNavigation?.revision).toBeGreaterThan(previous);
+    expect(result.current.outstandingQuestions).toHaveLength(1);
+    act(() => result.current.selectSession("codex:next"));
+    expect(result.current.outstandingQuestions).toEqual([]);
+    expect(result.current.questionNavigation).toBeNull();
+  });
+
   it("loads after expansion, retries failures, and shares detail with Inspector", async () => {
     vi.mocked(loadEventPage).mockResolvedValue(communicationPage());
     vi.mocked(loadEventDetail).mockRejectedValueOnce(new Error("Snapshot changed"))

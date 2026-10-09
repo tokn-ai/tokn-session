@@ -170,6 +170,16 @@ An object-replacement marker at the JSON boundary is tolerated. Quoted,
 malformed, incomplete, and attachment-bearing messages remain ordinary text;
 ordinary messages are not paired by proximity.
 
+The viewer derives outstanding question attention from these historical events.
+Only an explicit true blocking flag is labeled **Input required**; false or
+unknown blocking is **Question available**. A reply resolves only its exact
+question IDs with recorded answers, including explicit empty strings; empty
+answer arrays do not resolve questions. Reading a session does not resolve them.
+Turn completion/interruption, a superseding turn, a final assistant reply, or a
+provider error retires remaining questions. This projection retains at most 256
+request identities. Historical cards remain after their attention retires;
+approval handling and live answering remain separate work.
+
 The viewer keeps requests outside work trajectories and shows Markdown prompts,
 static choice lists, and free-text/secret markers. It does not infer current
 pending state, selected answers, or submission controls from history. Replies

@@ -97,6 +97,11 @@ impl ViewerService {
       } else {
         previous.unwrap_or_else(|| turn_start(&loaded.events, loaded.events.len()))
       };
+      let mut questions = crate::questions::Questions::default();
+      for (index, event) in loaded.events.iter().enumerate() {
+        questions.observe(event, index);
+      }
+      let start = questions.first_index().map_or(start, |question| start.min(question));
       if let Some(cache) = cached {
         cache.retained_start = Some(start);
       }
@@ -133,6 +138,7 @@ impl ViewerService {
         .then(|| encode_history_cursor(identity.generation.as_deref(), identity.event_offset + start)),
       history_status: loaded.history_status.into(),
       attention_revision,
+      outstanding_questions: outstanding_questions(&loaded.events, &identity),
     })
   }
 }

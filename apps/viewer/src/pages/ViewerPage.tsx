@@ -49,6 +49,7 @@ function ViewerContent({ remote, connection }: ViewerPageProps) {
             on_retry={viewer.retrySessions}
             on_search_change={viewer.setSearch}
             on_session_select={viewer.selectSession}
+            on_question_session_select={viewer.selectQuestionSession}
             pending_providers={viewer.pendingProviders}
             search={viewer.search}
             session_children={viewer.sessionChildren}
@@ -59,6 +60,9 @@ function ViewerContent({ remote, connection }: ViewerPageProps) {
         </SessionDrawer>
 
         <Conversation
+          outstanding_questions={viewer.outstandingQuestions}
+          question_navigation={viewer.questionNavigation}
+          on_question_open={viewer.openQuestion}
           pending_live_activity={viewer.pendingLiveActivity}
           on_show_live_activity={viewer.showLiveActivity}
           on_follow_change={viewer.setFollowingLive}

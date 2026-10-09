@@ -31,6 +31,7 @@ import {
   PROVIDERS,
   type EventDetail,
   type EventSummary,
+  type OutstandingQuestion,
   type SessionChildrenState,
   type SessionHistoryStatus,
   type SessionIndexProgress,
@@ -204,6 +205,10 @@ export function useViewerState() {
   }, []);
 
   const [events, setEvents] = useState<EventSummary[]>([]);
+  const [outstandingQuestions, setOutstandingQuestions] = useState<OutstandingQuestion[]>([]);
+  const [pageQuestionAttention, setPageQuestionAttention] = useState<SessionSummary["question_attention"]>(undefined);
+  const [questionNavigation, setQuestionNavigation] = useState<{ event_key: string; revision: number } | null>(null);
+  const pendingQuestionSession = useRef<string | null>(null);
   const [eventsOwnerKey, setEventsOwnerKey] = useState<string | null>(null);
   const eventsOwnerKeyRef = useRef<string | null>(null);
   const [initialPageSessionKey, setInitialPageSessionKey] = useState<string | null>(null);
@@ -802,6 +807,9 @@ export function useViewerState() {
     setNewerLoading(false);
     setTotalEvents(null);
     setHistoryStatus(null);
+    setOutstandingQuestions([]);
+    setPageQuestionAttention(undefined);
+    setQuestionNavigation(null);
     setEventsError(null);
     manualExpansion.current = false;
     expansionRevision.current += 1;
@@ -947,10 +955,59 @@ export function useViewerState() {
     }
   }, [requestSessionChildPage]);
 
+  const applyQuestionPage = useCallback((sessionKey: string, questions: OutstandingQuestion[] | undefined) => {
+    setOutstandingQuestions(questions ?? []);
+    if (questions === undefined) {
+      setPageQuestionAttention(undefined);
+      return;
+    }
+    const question_attention = { required_count: 0, available_count: 0 };
+    for (const question of questions) {
+      if (question.requires_input) question_attention.required_count += question.unanswered_count;
+      else question_attention.available_count += question.unanswered_count;
+    }
+    setPageQuestionAttention(question_attention);
+    const update = (session: SessionSummary) => session.session_key === sessionKey
+      ? { ...session, question_attention }
+      : session;
+    // Event pages are fresher than the background catalog. Keep cached child
+    // rows in sync too, so switching sessions cannot restore their old badge.
+    setSessions((current) => current.map(update));
+    setSelectedSessionMetadata((current) => current ? update(current) : current);
+    const children = new Map(sessionChildrenRef.current);
+    let childrenChanged = false;
+    for (const [parent, state] of children) {
+      if (state.sessions.some((session) => session.session_key === sessionKey)) {
+        children.set(parent, { ...state, sessions: state.sessions.map(update) });
+        childrenChanged = true;
+      }
+    }
+    if (childrenChanged) {
+      sessionChildrenRef.current = children;
+      setSessionChildren(children);
+    }
+  }, []);
+
+  // A catalog refresh may still contain the previous attention counts while
+  // indexing catches up. The accepted page owns the selected session's badge.
+  const displayedSessions = useMemo(() => {
+    if (pageQuestionAttention === undefined) return { sessions, children: sessionChildren };
+    const update = (session: SessionSummary) => pageQuestionAttention !== undefined
+      && session.session_key === selectedSessionKey
+      ? { ...session, question_attention: pageQuestionAttention }
+      : session;
+    return {
+      sessions: sessions.map(update),
+      children: new Map([...sessionChildren].map(([parent, state]) => [
+        parent, { ...state, sessions: state.sessions.map(update) },
+      ])),
+    };
+  }, [pageQuestionAttention, selectedSessionKey, sessionChildren, sessions]);
+
   const selectedSession = useMemo(
-    () => findKnownSession(sessions, sessionChildren, selectedSessionKey)
+    () => findKnownSession(displayedSessions.sessions, displayedSessions.children, selectedSessionKey)
       ?? (selectedSessionMetadata?.session_key === selectedSessionKey ? selectedSessionMetadata : null),
-    [selectedSessionKey, selectedSessionMetadata, sessionChildren, sessions],
+    [selectedSessionKey, selectedSessionMetadata, displayedSessions],
   );
   useSessionView(selectedSessionKey, selectedSession, sessions, sessionChildren);
 
@@ -1110,6 +1167,9 @@ export function useViewerState() {
     if (!isLiveRefresh) {
       setTotalEvents(null);
       setHistoryStatus(null);
+      setOutstandingQuestions([]);
+      setPageQuestionAttention(undefined);
+      setQuestionNavigation(null);
     }
     setEventsError(null);
 
@@ -1216,7 +1276,18 @@ export function useViewerState() {
         setNewerCursor(response.next_cursor);
         setTotalEvents(response.total_events);
         setHistoryStatus(response.history_status);
+        applyQuestionPage(selectedSessionKey, response.outstanding_questions);
         setInitialPageSessionKey(selectedSessionKey);
+        if (pendingQuestionSession.current === selectedSessionKey) {
+          pendingQuestionSession.current = null;
+          const question = response.outstanding_questions?.[0];
+          if (question) {
+            manualExpansion.current = true;
+            expansionRevision.current += 1;
+            applyExpandedEventKey(question.event_key);
+            setQuestionNavigation((current) => ({ event_key: question.event_key, revision: (current?.revision ?? 0) + 1 }));
+          }
+        }
         applyEventSelection(
           preserveEventSelection(selectedEventKeyRef.current, response.events),
           false,
@@ -1248,6 +1319,7 @@ export function useViewerState() {
   }, [
     applyEventSelection,
     applyExpandedEventKey,
+    applyQuestionPage,
     clearTrajectoryPages,
     eventsAttempt,
     invalidateEventDetails,
@@ -1588,9 +1660,27 @@ export function useViewerState() {
   }, []);
 
   const selectSession = useCallback((sessionKey: string) => {
+    pendingQuestionSession.current = null;
     applySessionSelection(sessionKey);
     setMobileSidebarOpen(false);
   }, [applySessionSelection]);
+
+  const openQuestion = useCallback((eventKey: string) => {
+    manualExpansion.current = true;
+    expansionRevision.current += 1;
+    applyExpandedEventKey(eventKey);
+    setQuestionNavigation((current) => ({ event_key: eventKey, revision: (current?.revision ?? 0) + 1 }));
+  }, [applyExpandedEventKey]);
+
+  const selectQuestionSession = useCallback((sessionKey: string) => {
+    if (sessionKey === selectedSessionKey && outstandingQuestions.length) {
+      openQuestion(outstandingQuestions[0].event_key);
+    } else {
+      pendingQuestionSession.current = sessionKey;
+      applySessionSelection(sessionKey);
+    }
+    setMobileSidebarOpen(false);
+  }, [applySessionSelection, openQuestion, outstandingQuestions, selectedSessionKey]);
 
   const selectEvent = useCallback((eventKey: string) => {
     inspectorTriggerRef.current = document.getElementById(eventButtonId(eventKey));
@@ -1738,6 +1828,7 @@ export function useViewerState() {
         setNewerCursor(response.next_cursor);
         setTotalEvents(response.total_events);
         setHistoryStatus(response.history_status);
+        applyQuestionPage(selectedSessionKey, response.outstanding_questions);
       })
       .catch((error: unknown) => {
         if (eventsRequest.current === requestGeneration) {
@@ -1755,7 +1846,7 @@ export function useViewerState() {
           }
         }
       });
-  }, [invalidateEventDetails, olderCursor, olderLoading, selectedSessionKey]);
+  }, [applyQuestionPage, invalidateEventDetails, olderCursor, olderLoading, selectedSessionKey]);
 
   const loadNewerEvents = useCallback(() => {
     if (
@@ -1783,6 +1874,7 @@ export function useViewerState() {
         setEvents((current) => mergeEvents(current, response.events, "after"));
         setNewerCursor(response.next_cursor);
         setTotalEvents(response.total_events);
+        applyQuestionPage(selectedSessionKey, response.outstanding_questions);
       })
       .catch((error: unknown) => {
         if (eventsRequest.current === requestGeneration) {
@@ -1794,7 +1886,7 @@ export function useViewerState() {
           setNewerLoading(false);
         }
       });
-  }, [invalidateEventDetails, newerCursor, newerLoading, selectedSessionKey]);
+  }, [applyQuestionPage, invalidateEventDetails, newerCursor, newerLoading, selectedSessionKey]);
 
   const retrySessions = useCallback(() => {
     // Preserve the old immediate SQLite reread so a previously committed
@@ -1810,8 +1902,8 @@ export function useViewerState() {
     setSearch: changeSearch,
     enabledProviders,
     toggleProvider,
-    sessions,
-    sessionChildren,
+    sessions: displayedSessions.sessions,
+    sessionChildren: displayedSessions.children,
     loadSessionChildren,
     retrySessionChildren,
     loadMoreSessionChildren,
@@ -1833,6 +1925,10 @@ export function useViewerState() {
     sessionIndexRetrying,
     retrySessionIndex,
     events: visibleEvents,
+    outstandingQuestions: eventsAreOwned ? outstandingQuestions : [],
+    questionNavigation: eventsAreOwned ? questionNavigation : null,
+    openQuestion,
+    selectQuestionSession,
     eventsOwnerKey: eventsAreOwned ? eventsOwnerKey : null,
     initialPageLoaded: initialPageSessionKey === selectedSessionKey && eventsAreOwned,
     selectedEvent,

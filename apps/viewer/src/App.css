@@ -3240,3 +3240,43 @@ button:disabled {
 @media (max-width: 860px) {
   .sidebar-order button { min-height: 40px; }
 }
+
+.session-row__question {
+  flex: none;
+  padding: 1px 5px;
+  border-radius: 6px;
+  color: var(--text-soft);
+  background: var(--surface-raised);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.session-row__question[data-blocking="true"],
+.question-attention__item[data-blocking="true"] strong {
+  color: var(--warning);
+}
+
+.question-attention {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.question-attention__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.question-attention__item:hover {
+  background: var(--surface-raised);
+}

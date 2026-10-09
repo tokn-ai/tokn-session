@@ -17,6 +17,8 @@ pub(crate) struct Activity {
   active_turn: Option<String>,
   last_final_id: Option<String>,
   pub presentation: SessionPresentation,
+  questions: crate::questions::Questions,
+  pub question_attention: crate::model::QuestionAttention,
 }
 
 impl Activity {
@@ -41,6 +43,8 @@ impl Activity {
     if event.is_hidden() {
       return;
     }
+    self.questions.observe(event, 0);
+    self.question_attention = self.questions.summary();
     match event {
       AgentEvent::Lifecycle(l) if matches!(l.scope, LifecycleScope::Turn) => {
         if l.phase == Phase::Started {
@@ -83,10 +87,35 @@ impl Activity {
   }
 
   pub fn marker(&self) -> String {
-    format!("final-replies.v2.{}.{}", self.final_count, u8::from(self.running))
+    format!(
+      "session-activity.v3.{}.{}.{}.{}",
+      self.final_count,
+      u8::from(self.running),
+      self.question_attention.required_count,
+      self.question_attention.available_count
+    )
   }
 
   pub fn from_marker(marker: Option<&str>) -> Option<Self> {
+    if let Some(body) = marker?.strip_prefix("session-activity.v3.") {
+      let parts: Vec<_> = body.split('.').collect();
+      if parts.len() != 4 {
+        return None;
+      }
+      return Some(Self {
+        final_count: parts[0].parse().ok()?,
+        running: match parts[1] {
+          "0" => false,
+          "1" => true,
+          _ => return None,
+        },
+        question_attention: crate::model::QuestionAttention {
+          required_count: parts[2].parse().ok()?,
+          available_count: parts[3].parse().ok()?,
+        },
+        ..Default::default()
+      });
+    }
     let (count, running) = marker?.strip_prefix("final-replies.v2.")?.split_once('.')?;
     Some(Self {
       final_count: count.parse().ok()?,

@@ -4,6 +4,7 @@ mod index_queries;
 mod indexer;
 mod input;
 pub mod model;
+mod questions;
 pub mod relay;
 mod repository;
 pub mod runtime;

@@ -35,6 +35,7 @@ interface SidebarProps {
   on_search_change: (value: string) => void;
   on_provider_toggle: (provider: ViewerProvider) => void;
   on_session_select: (session_key: string) => void;
+  on_question_session_select?: (session_key: string) => void;
   on_children_load: (parent_session_key: string) => void;
   on_children_retry: (parent_session_key: string) => void;
   on_children_load_more: (parent_session_key: string) => void;
@@ -52,6 +53,7 @@ interface SessionBranchProps {
   on_toggle: (session_key: string) => void;
   on_children_load: (parent_session_key: string) => void;
   on_session_select: (session_key: string) => void;
+  on_question_session_select?: (session_key: string) => void;
   on_children_retry: (parent_session_key: string) => void;
   on_children_load_more: (parent_session_key: string) => void;
 }
@@ -80,6 +82,7 @@ function SessionBranch({
   on_toggle,
   on_children_load,
   on_session_select,
+  on_question_session_select,
   on_children_retry,
   on_children_load_more,
 }: SessionBranchProps) {
@@ -91,11 +94,15 @@ function SessionBranch({
   const title = sessionDisplayTitle(session);
   const preview = session.preview?.replace(/\s+/g, " ").trim();
   const sessionDescription = depth > 0 ? `subagent ${title}` : title;
-  const isRunning = session.is_running === true || session.has_running_descendant === true;
+  const requiredCount = session.question_attention?.required_count ?? 0;
+  const availableCount = session.question_attention?.available_count ?? 0;
+  const isRunning = requiredCount === 0 && (session.is_running === true || session.has_running_descendant === true);
   const unreadCount = session.unread_final_count ?? Number(session.has_unread);
   const hasUnread = !isRunning && unreadCount > 0;
   const unreadLabel = `${unreadCount} unread final ${unreadCount === 1 ? "reply" : "replies"}`;
   const runningLabel = session.is_running ? "Running" : "Subagent running";
+  const questionCount = requiredCount + availableCount;
+  const questionLabel = requiredCount > 0 ? "Input required" : "Question available";
 
   useEffect(() => {
     if (hasChildren && isExpanded && !childrenState) {
@@ -121,12 +128,12 @@ function SessionBranch({
         )}
         <button
           aria-current={session.session_key === selected_session_key ? "page" : undefined}
-          aria-label={`${sessionDescription}, ${providerLabel(session.provider)} session ${session.session_id}${isRunning ? `, ${runningLabel.toLowerCase()}` : hasUnread ? `, ${unreadLabel}` : ""}`}
+          aria-label={`${sessionDescription}, ${providerLabel(session.provider)} session ${session.session_id}${questionCount ? `, ${questionLabel.toLowerCase()}` : ""}${isRunning ? `, ${runningLabel.toLowerCase()}` : hasUnread ? `, ${unreadLabel}` : ""}`}
           className="session-row"
           data-selected={session.session_key === selected_session_key}
           data-subagent={depth > 0}
           data-unread={hasUnread || undefined}
-          onClick={() => on_session_select(session.session_key)}
+          onClick={() => questionCount && on_question_session_select ? on_question_session_select(session.session_key) : on_session_select(session.session_key)}
           title={`${title}\n${session.session_id}`}
           type="button"
         >
@@ -134,6 +141,7 @@ function SessionBranch({
             <span className="session-row__headline">
               {depth > 0 ? <BranchIcon className="session-row__branch-icon" /> : null}
               <span className="session-row__title">{title}</span>
+              {questionCount > 0 ? <span className="session-row__question" data-blocking={requiredCount > 0} role="img" aria-label={`${questionLabel}, ${questionCount} unanswered ${questionCount === 1 ? "question" : "questions"}`} title={questionLabel}>?{questionCount > 1 ? questionCount : ""}</span> : null}
               {isRunning ? (
                 <span aria-label={runningLabel} className="session-row__running inline-spinner" role="img" />
               ) : hasUnread ? (
@@ -193,6 +201,7 @@ function SessionBranch({
               on_children_load_more={on_children_load_more}
               on_children_retry={on_children_retry}
               on_session_select={on_session_select}
+              on_question_session_select={on_question_session_select}
               on_toggle={on_toggle}
               selected_session_key={selected_session_key}
               session={child}
@@ -241,6 +250,7 @@ export function Sidebar({
   on_search_change,
   on_provider_toggle,
   on_session_select,
+  on_question_session_select,
   on_children_load,
   on_children_retry,
   on_children_load_more,
@@ -438,6 +448,7 @@ export function Sidebar({
                   on_children_load_more={on_children_load_more}
                   on_children_retry={on_children_retry}
                   on_session_select={on_session_select}
+                  on_question_session_select={on_question_session_select}
                   on_toggle={toggleSessionBranch}
                   selected_session_key={selected_session_key}
                   session={session}

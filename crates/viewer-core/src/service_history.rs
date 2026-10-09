@@ -58,6 +58,7 @@ pub(crate) struct History {
   length: usize,
   pub events: usize,
   pub bytes: usize,
+  questions: crate::questions::Questions,
 }
 
 impl History {
@@ -76,6 +77,7 @@ impl History {
       length: 0,
       events: 0,
       bytes: 0,
+      questions: Default::default(),
     })
   }
 
@@ -168,6 +170,7 @@ impl History {
     let mut event_position = self.events;
     for record in records {
       for event in &record.record.events {
+        self.questions.observe(event, event_position);
         match event {
           AgentEvent::Lifecycle(event)
             if matches!(event.scope, LifecycleScope::Turn) && event.phase == Phase::Started =>
@@ -265,6 +268,9 @@ impl History {
   }
 
   fn complete_context(&self, journal: &Journal, mut start: usize) -> usize {
+    if let Some(question) = self.questions.first_index() {
+      start = start.min(question);
+    }
     loop {
       let before = start;
       let position = journal.index[..self.length].partition_point(|record| record.event_start + record.events <= start);
@@ -485,6 +491,39 @@ mod tests {
     ]))]).unwrap();
     assert_eq!(older.window_start(None, None), 4);
     assert_eq!(history.window_start(None, None), 8);
+  }
+
+  #[test]
+  fn outstanding_questions_retain_navigation_context_without_mutating_old_snapshots() {
+    let mut normalizer = tokn_session_codex::normalize::CodexNormalizer::new();
+    let events: Vec<_> = include_str!("../../codex/fixtures/async_question_replies.jsonl")
+      .lines()
+      .take(5)
+      .flat_map(|line| normalizer.normalize(serde_json::from_str(line).unwrap()))
+      .collect();
+    let mut history = History::new().unwrap();
+    history
+      .append(&[record(0, serde_json::to_value(events).unwrap())])
+      .unwrap();
+    for index in 1..8 {
+      history.append(&[record(index, json!([{"type":"message","provider":"codex","message_id":format!("user-{index}"),"role":"user","delivery":"unspecified","phase":"finished","text":"ordinary follow-up"}]))]).unwrap();
+    }
+    assert_eq!(history.window_start(None, None), 0);
+    let before = history.clone();
+    let answer = normalizer.normalize(
+      serde_json::from_str(
+        include_str!("../../codex/fixtures/async_question_replies.jsonl")
+          .lines()
+          .nth(5)
+          .unwrap(),
+      )
+      .unwrap(),
+    );
+    history
+      .append(&[record(9, serde_json::to_value(answer).unwrap())])
+      .unwrap();
+    assert!(history.window_start(None, None) > 0);
+    assert_eq!(before.window_start(None, None), 0);
   }
 
   #[test]
