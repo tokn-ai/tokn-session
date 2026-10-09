@@ -14,7 +14,10 @@ Lifecycle/bookkeeping is hidden by default, with an explicit reveal toggle.
 Running and failed activity automatically opens its inner group. Child outputs open
 independently and retain content during live refreshes. Shell panels expose the
 command, cwd, exit status, and an eight-line output preview with local expansion.
-Collapsed event headings occupy one line; expanded paths wrap. Live work shows a spinner. Provider filters and session metadata live in disclosures.
+Collapsed event headings occupy one line; expanded paths wrap. Work durations
+use whole seconds. When questions or compaction split an active turn, only its
+latest work segment remains running; earlier durations stop at the separator.
+Live work shows a spinner. Provider filters and session metadata live in disclosures.
 Desktop sidebar collapse preserves navigation state and removes hidden controls
 from keyboard focus; mobile retains the modal session drawer. The latest-activity
 button floats inside the history area so it does not shift the reading position.

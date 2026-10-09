@@ -7,7 +7,35 @@ pub(super) fn is_turn_start(entry: &TimelineEntry, events: &[AgentEvent]) -> boo
       if matches!(l.scope, LifecycleScope::Turn) && l.phase == Phase::Started))
 }
 
+/// A display boundary can split a still-active turn. Once substantive work
+/// resumes after it, the earlier segment is complete even though the turn is
+/// not. Use the separator's timestamp rather than the turn's eventual final.
+fn superseding_boundary_timestamp<'a>(trajectory: &Trajectory, events: &'a [AgentEvent]) -> Option<Option<&'a str>> {
+  let end = trajectory_source_event_indices(trajectory).into_iter().max()?;
+  let mut separator = None;
+  for (index, event) in events.iter().enumerate().skip(end + 1) {
+    let entry = TimelineEntry::Event {
+      source_event_index: index,
+    };
+    if is_trajectory_boundary(&entry, events) {
+      separator.get_or_insert(index);
+    } else if let Some(separator) = separator
+      && (matches!(event, AgentEvent::ToolCall(_)) || is_substantive_work_entry(&entry, events))
+    {
+      let boundary = &events[separator];
+      return Some(match boundary {
+        AgentEvent::Message(message) if message.role == Role::User => None,
+        _ => timestamp_for_event(boundary),
+      });
+    }
+  }
+  None
+}
+
 pub(super) fn status(trajectory: &Trajectory, events: &[AgentEvent]) -> &'static str {
+  if superseding_boundary_timestamp(trajectory, events).is_some() {
+    return "complete";
+  }
   let end = trajectory_source_event_indices(trajectory)
     .into_iter()
     .max()
@@ -54,6 +82,9 @@ pub(super) fn status(trajectory: &Trajectory, events: &[AgentEvent]) -> &'static
 }
 
 pub(super) fn completion_timestamp<'a>(trajectory: &Trajectory, events: &'a [AgentEvent]) -> Option<&'a str> {
+  if let Some(timestamp) = superseding_boundary_timestamp(trajectory, events) {
+    return timestamp;
+  }
   let end = trajectory_source_event_indices(trajectory).into_iter().max()?;
   let turn_id = active_turn_id(&events[..=end]);
   for event in &events[end + 1..] {
@@ -162,6 +193,43 @@ mod tests {
       next.events.last().unwrap().trajectory.as_ref().unwrap().status,
       "working"
     );
+  }
+
+  #[test]
+  fn only_the_latest_segment_of_an_active_turn_is_working() {
+    use tokn_session_core::{CompactionEvent, CompactionState};
+    let mut separator = CompactionEvent::new(Provider::Codex, Some("fixture".into()), CompactionState::Completed);
+    separator.timestamp = Some("2026-09-03T00:00:02Z".into());
+    let mut normalizer = tokn_session_codex::normalize::CodexNormalizer::new();
+    let mut question = include_str!("../../../codex/fixtures/questions.jsonl")
+      .lines()
+      .flat_map(|line| normalizer.normalize(serde_json::from_str(line).unwrap()))
+      .find(|event| matches!(event, AgentEvent::QuestionRequest(_)))
+      .unwrap();
+    if let AgentEvent::QuestionRequest(question) = &mut question {
+      question.timestamp = separator.timestamp.clone();
+    }
+    for separator in [AgentEvent::Compaction(separator), question] {
+      let mut events = vec![
+        boundary(Phase::Started),
+        message_event_with_role("before", Role::Assistant, MessageDelivery::Commentary),
+        separator,
+        message_event_with_role("after", Role::Assistant, MessageDelivery::Commentary),
+      ];
+      let runs: Vec<_> = timeline_entries(&events)
+        .into_iter()
+        .filter_map(|entry| match entry {
+          TimelineEntry::Trajectory { trajectory } => Some(trajectory),
+          _ => None,
+        })
+        .collect();
+      assert_eq!(runs.len(), 2);
+      assert_eq!(status(&runs[0], &events), "complete");
+      assert_eq!(completion_timestamp(&runs[0], &events), Some("2026-09-03T00:00:02Z"));
+      assert_eq!(status(&runs[1], &events), "working");
+      events.push(message_event_with_role("done", Role::Assistant, MessageDelivery::Final));
+      assert!(runs.iter().all(|run| status(run, &events) == "complete"));
+    }
   }
 
   #[test]

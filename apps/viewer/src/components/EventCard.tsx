@@ -212,7 +212,7 @@ function pluralize(count: number, singular: string, plural = `${singular}s`): st
  *
  * The backend keeps this as a string because it may be a Rust u64, which can
  * exceed JavaScript's safe integer range. BigInt lets the UI retain every
- * recorded millisecond while still presenting a compact, exact duration.
+ * recorded value while displaying whole seconds rather than milliseconds.
  */
 export function formatTrajectoryDuration(durationMs: string | null): string | null {
   const source = durationMs?.trim() ?? "";
@@ -232,7 +232,6 @@ export function formatTrajectoryDuration(durationMs: string | null): string | nu
     [3_600_000n, "h"],
     [60_000n, "m"],
     [1_000n, "s"],
-    [1n, "ms"],
   ];
   const parts: string[] = [];
   for (const [unitMs, label] of units) {
@@ -242,7 +241,7 @@ export function formatTrajectoryDuration(durationMs: string | null): string | nu
       remaining %= unitMs;
     }
   }
-  return parts.join(" ") || "0ms";
+  return parts.join(" ") || "0s";
 }
 
 function trajectoryFacts(trajectory: TrajectoryCardSummary): string {

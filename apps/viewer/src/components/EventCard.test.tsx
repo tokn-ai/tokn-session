@@ -655,9 +655,12 @@ describe("EventCard whole-turn trajectories", () => {
     expect(onRetry).toHaveBeenCalledWith(trajectoryEvent.event_key);
   });
 
-  it("formats decimal millisecond strings exactly without Number precision loss", () => {
-    expect(formatTrajectoryDuration("9007199254740993")).toBe("104249991d 8h 59m 993ms");
-    expect(formatTrajectoryDuration("0")).toBe("0ms");
+  it("formats whole-second durations without Number precision loss", () => {
+    expect(formatTrajectoryDuration("9007199254740993")).toBe("104249991d 8h 59m");
+    expect(formatTrajectoryDuration("0")).toBe("0s");
+    expect(formatTrajectoryDuration("999")).toBe("0s");
+    expect(formatTrajectoryDuration("1999")).toBe("1s");
+    expect(formatTrajectoryDuration("61234")).toBe("1m 1s");
     expect(formatTrajectoryDuration("not-a-duration")).toBeNull();
   });
 });
