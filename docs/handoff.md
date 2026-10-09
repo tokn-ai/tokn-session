@@ -6,7 +6,9 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 The viewer sidebar and conversation use a compact Codex-style layout with neutral
 light/dark colors, larger message text, inline expandable tool activity, and an
-aligned composer. Provider filters and session metadata live in disclosures.
+aligned composer. Worked/Working disclosures use wrapping activity summaries and
+an indented activity trail, with failure markers and expandable tool details.
+Expanded commands and paths wrap; live work shows a spinner. Provider filters and session metadata live in disclosures.
 Desktop sidebar collapse preserves navigation state and removes hidden controls
 from keyboard focus; mobile retains the modal session drawer. The latest-activity
 button floats inside the history area so it does not shift the reading position.

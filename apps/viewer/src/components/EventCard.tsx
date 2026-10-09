@@ -520,13 +520,16 @@ function TrajectorySection({
           onClick={() => on_toggle(event.event_key)}
           type="button"
         >
-          <span aria-hidden="true" className="trajectory-section__line" />
-          <span className="trajectory-section__label" id={labelId}>{heading.primary}</span>
-          {heading.secondary ? (
-            <span className="trajectory-section__facts">{heading.secondary}</span>
-          ) : null}
-          <span aria-hidden="true" className="trajectory-section__line" />
           <ChevronIcon className={is_expanded ? "chevron chevron--open" : "chevron"} />
+          <span className="trajectory-section__summary">
+            <span className="trajectory-section__label" id={labelId}>
+              {event.trajectory?.status === "working" ? <span aria-hidden="true" className="inline-spinner" /> : null}
+              {heading.primary}
+            </span>
+            {heading.secondary ? (
+              <span className="trajectory-section__facts">{heading.secondary}</span>
+            ) : null}
+          </span>
         </button>
         <button
           aria-label={`Inspect ${heading.primary}`}
@@ -535,7 +538,7 @@ function TrajectorySection({
           onClick={() => on_select(event.event_key)}
           type="button"
         >
-          Inspect
+          <InspectorIcon />
         </button>
       </div>
 
@@ -591,7 +594,13 @@ function TrajectorySection({
               {visibleEvents.length > 0 ? (
                 <div aria-label="Events in this turn" className="trajectory-section__events" role="list">
                   {visibleEvents.map((childEvent) => (
-                    <div data-scroll-key={`${event.event_key}/${childEvent.event_key}`} key={childEvent.event_key} role="listitem">
+                    <div
+                      className="trajectory-section__item"
+                      data-error={childEvent.is_error || childEvent.type === "error"}
+                      data-scroll-key={`${event.event_key}/${childEvent.event_key}`}
+                      key={childEvent.event_key}
+                      role="listitem"
+                    >
                       <EventCard
                         session_key={session_key}
                         hide_lifecycle={hide_lifecycle}
