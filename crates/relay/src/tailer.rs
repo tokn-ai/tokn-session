@@ -692,6 +692,7 @@ pub struct FileState {
   offset: u64,
   pending: Vec<u8>,
   normalizer: SessionNormalizer,
+  codex_seed_length: Option<u64>,
   context: SessionContext,
   project_catalog: SharedProjectCatalog,
   include_native: bool,
@@ -730,6 +731,7 @@ impl FileState {
       offset: 0,
       pending: Vec::new(),
       normalizer: SessionNormalizer::new(provider),
+      codex_seed_length: None,
       context,
       project_catalog,
       include_native: false,
@@ -778,6 +780,57 @@ impl FileState {
     self.offset = self.initial_length;
     let mut file = reader.into_inner();
     self.pending = trailing_partial_line(&mut file, &self.path, self.offset)?;
+    // Restore stateful Codex history only if the file actually appends. Idle
+    // rollouts keep the inexpensive header/EOF seed used by other JSONL feeds.
+    self.codex_seed_length = (self.provider == Provider::Codex).then_some(self.initial_length);
+    Ok(update)
+  }
+
+  /// Codex requests, code-mode calls, compactions and settings can affect later
+  /// records. Restore their state without replaying historical events. Limit
+  /// the read to the discovery snapshot so concurrent appends remain live.
+  fn restore_codex_seed(&mut self, file: &mut File, seed_length: u64) -> Result<TailUpdate, String> {
+    self.normalizer = SessionNormalizer::new(self.provider);
+    self.context = SessionContext::from_path(self.provider, &self.path);
+    self.pending.clear();
+    let mut reader = BufReader::new(file.take(seed_length));
+    let mut line = Vec::new();
+    let mut update = TailUpdate::default();
+    let project_catalog = self
+      .project_catalog
+      .read()
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
+    loop {
+      line.clear();
+      let bytes = reader
+        .read_until(b'\n', &mut line)
+        .map_err(|err| format!("failed to read {}: {err}", self.path.display()))?;
+      if bytes == 0 {
+        break;
+      }
+      if !line.ends_with(b"\n") {
+        self.pending = line;
+        break;
+      }
+      let line = match std::str::from_utf8(&line) {
+        Ok(line) if !line.trim().is_empty() => line.trim_end_matches(['\r', '\n']),
+        Ok(_) => continue,
+        Err(err) => {
+          update
+            .warnings
+            .push(format!("invalid UTF-8 while seeding {}: {err}", self.path.display()));
+          continue;
+        }
+      };
+      if let Err(err) = self
+        .normalizer
+        .normalize_line(line, &mut self.context, &project_catalog, false)
+      {
+        update
+          .warnings
+          .push(format!("failed to seed {}: {err}", self.path.display()));
+      }
+    }
     Ok(update)
   }
 
@@ -807,6 +860,7 @@ impl FileState {
       self.offset = 0;
       self.pending.clear();
       self.normalizer = SessionNormalizer::new(self.provider);
+      self.codex_seed_length = None;
       self.context = SessionContext::from_path(self.provider, &self.path);
       should_publish = true;
       restarted = true;
@@ -817,6 +871,11 @@ impl FileState {
     }
 
     let mut file = File::open(&self.path).map_err(|err| format!("failed to open {}: {err}", self.path.display()))?;
+    let mut update = TailUpdate::default();
+    if let Some(seed_length) = self.codex_seed_length {
+      update.append(self.restore_codex_seed(&mut file, seed_length)?);
+      self.codex_seed_length = None;
+    }
     file
       .seek(SeekFrom::Start(self.offset))
       .map_err(|err| format!("failed to seek {}: {err}", self.path.display()))?;
@@ -834,12 +893,11 @@ impl FileState {
       .map(|index| index + 1)
       .unwrap_or(0);
     if complete_length == 0 {
-      return Ok((TailUpdate::default(), restarted));
+      return Ok((update, restarted));
     }
 
     let mut line_offset = self.offset - self.pending.len() as u64;
     let complete = self.pending.drain(..complete_length).collect::<Vec<_>>();
-    let mut update = TailUpdate::default();
     let project_catalog = self
       .project_catalog
       .read()
@@ -1814,7 +1872,7 @@ mod tests {
   }
 
   #[test]
-  fn codex_tail_starts_with_a_snapshot_without_replaying_previous_accounting() {
+  fn codex_tail_restores_accounting_without_replaying_historical_snapshots() {
     let fixture = TempDir::new().unwrap();
     let path = fixture.path().join("rollout-usage.jsonl");
     let counters = serde_json::json!({"input_tokens":100,"cached_input_tokens":20,
@@ -1840,12 +1898,179 @@ mod tests {
     assert!(update.warnings.is_empty());
     assert_eq!(update.records.len(), 2);
     assert_eq!(update.records[0].topic, "codex.accounting-session");
+    assert!(update.records[0].record.events.is_empty());
     assert!(update.records[1].record.events.is_empty());
     assert_eq!(update.records[1].record.native.as_ref(), Some(&record));
     assert_ne!(update.records[0].record.record_id, update.records[1].record.record_id);
+    let changed = serde_json::json!({"type":"event_msg","payload":{"type":"token_count",
+      "info":{"total_token_usage":{"input_tokens":110,"cached_input_tokens":20,
+        "output_tokens":5,"reasoning_output_tokens":2,"total_tokens":115},
+        "last_token_usage":counters},"rate_limits":null}});
+    append(&update.records[0].path, &format!("{changed}\n{changed}\n"));
+    let update = tailer.scan().unwrap();
+    assert_eq!(update.records.len(), 2);
     assert!(matches!(&update.records[0].record.events[0], AgentEvent::Usage(event)
       if event.kind == tokn_session_core::UsageKind::SessionSnapshot
-        && event.input_tokens == 100 && event.total_tokens == Some(105)));
+        && event.input_tokens == 110 && event.total_tokens == Some(115)));
+    assert!(update.records[1].record.events.is_empty());
+  }
+
+  #[test]
+  fn codex_restores_requests_and_settings_before_a_split_startup_reply() {
+    for mode in ["legacy", "paginated"] {
+      let fixture = TempDir::new().unwrap();
+      let path = fixture.path().join("rollout-questions.jsonl");
+      let mut history = format!(
+        "{}\n",
+        serde_json::json!({"type":"session_meta","payload":{"id":"questions-session",
+          "history_mode":mode,"cwd":"/old","timestamp":"2026-10-09T00:00:00Z"}})
+      );
+      // Required state can occur arbitrarily far beyond the cheap startup header.
+      for _ in 0..70 {
+        history.push_str("{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"old\"}}\n");
+      }
+      history.push_str(&format!(
+        "{}\n{}\n",
+        serde_json::json!({"type":"event_msg","payload":{"type":"thread_settings_applied",
+          "thread_settings":{"cwd":"/new"}}}),
+        serde_json::json!({"type":"response_item","payload":{"type":"function_call",
+          "name":"request_user_input","call_id":"call-1","arguments":serde_json::json!({"questions":[
+            {"id":"storage","header":"Storage","question":"Which storage?",
+              "options":[{"label":"SQLite","description":"Local"}]}
+          ]}).to_string()}})
+      ));
+      let output = format!(
+        "{}\n",
+        serde_json::json!({"type":"response_item","payload":{"type":"function_call_output",
+          "call_id":"call-1","output":serde_json::json!({"answers":{"storage":{"answers":["数据库"]}}}).to_string()}})
+      );
+      let split = output.find('数').unwrap() + 1;
+      let mut initial_bytes = history.into_bytes();
+      initial_bytes.extend_from_slice(&output.as_bytes()[..split]);
+      std::fs::write(&path, initial_bytes).unwrap();
+      let mut tailer = SessionTailer::prepare(
+        vec![ProviderRoot::new(Provider::Codex, fixture.path().to_path_buf())],
+        NewFileReplay::Messages(3),
+      )
+      .unwrap();
+      // Completion racing startup must remain a live observation exactly once.
+      OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(&output.as_bytes()[split..])
+        .unwrap();
+      let initial = tailer.start().unwrap();
+      assert!(initial.records.is_empty());
+      assert!(initial.warnings.is_empty());
+      assert!(tailer.files[&path].codex_seed_length.is_some());
+
+      let update = tailer.scan_paths(HashSet::from([path.clone()])).unwrap();
+      assert!(update.warnings.is_empty());
+      assert_eq!(update.records.len(), 1);
+      assert_eq!(update.records[0].session.cwd.as_deref(), Some("/new"));
+      let AgentEvent::QuestionReply(reply) = &update.records[0].record.events[0] else {
+        panic!("expected restored question reply in {mode} mode");
+      };
+      assert_eq!(reply.request_id.as_deref(), Some("call-1"));
+      assert_eq!(reply.replies[0].question.as_deref(), Some("Which storage?"));
+      assert_eq!(reply.replies[0].answers, ["数据库"]);
+      assert!(tailer.files[&path].codex_seed_length.is_none());
+      assert!(tailer.scan().unwrap().records.is_empty());
+    }
+  }
+
+  #[test]
+  fn codex_restores_preexisting_code_mode_calls_before_their_results() {
+    let fixture = TempDir::new().unwrap();
+    let path = fixture.path().join("rollout-code-mode.jsonl");
+    let mut lines = include_str!("../../codex/fixtures/code_mode_wrappers.jsonl").lines();
+    let header = lines.next().unwrap();
+    let invocation = lines.next().unwrap();
+    let output = lines.next().unwrap();
+    std::fs::write(&path, format!("{header}\n{invocation}\n")).unwrap();
+    let (mut tailer, initial) = SessionTailer::initialize(
+      vec![ProviderRoot::new(Provider::Codex, fixture.path().to_path_buf())],
+      NewFileReplay::All,
+    )
+    .unwrap();
+    assert!(initial.records.is_empty());
+    append(&path, &format!("{output}\n"));
+    let update = tailer.scan().unwrap();
+    assert!(update.warnings.is_empty());
+    assert_eq!(update.records.len(), 1);
+    let AgentEvent::ToolCall(result) = &update.records[0].record.events[0] else {
+      panic!("expected code-mode result");
+    };
+    assert_eq!(result.tool_name.as_deref(), Some("write_stdin"));
+    assert_eq!(result.provider_tool_name.as_deref(), Some("exec"));
+    assert_eq!(result.turn_id.as_deref(), Some("turn-write"));
+    assert_eq!(result.input.as_ref().unwrap()["session_id"], 90855);
+    assert_eq!(result.output.as_ref().unwrap()["text"], "Refreshing checks status");
+    assert_eq!(result.transport, Some(tokn_session_core::ToolTransport::CodeExecution));
+  }
+
+  #[test]
+  fn codex_restores_preexisting_compaction_correlation() {
+    let fixture = TempDir::new().unwrap();
+    let path = fixture.path().join("rollout-compaction.jsonl");
+    std::fs::write(
+      &path,
+      concat!(
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"compaction-session\"}}\n",
+        "{\"type\":\"compacted\",\"payload\":{\"message\":\"Checkpoint\"}}\n"
+      ),
+    )
+    .unwrap();
+    let (mut tailer, initial) = SessionTailer::initialize(
+      vec![ProviderRoot::new(Provider::Codex, fixture.path().to_path_buf())],
+      NewFileReplay::All,
+    )
+    .unwrap();
+    assert!(initial.records.is_empty());
+    append(
+      &path,
+      "{\"type\":\"event_msg\",\"payload\":{\"type\":\"context_compacted\"}}\n",
+    );
+    let update = tailer.scan().unwrap();
+    assert!(update.warnings.is_empty());
+    assert_eq!(update.records.len(), 1);
+    let AgentEvent::Compaction(completion) = &update.records[0].record.events[0] else {
+      panic!("expected correlated compaction completion");
+    };
+    assert_eq!(completion.compaction_id.as_deref(), Some("checkpoint:1"));
+  }
+
+  #[test]
+  fn codex_replacement_discards_deferred_seed_state() {
+    let fixture = TempDir::new().unwrap();
+    let path = fixture.path().join("rollout-replaced.jsonl");
+    std::fs::write(
+      &path,
+      "{\"type\":\"session_meta\",\"payload\":{\"id\":\"old-session\"}}\n",
+    )
+    .unwrap();
+    let (mut tailer, _) = SessionTailer::initialize(
+      vec![ProviderRoot::new(Provider::Codex, fixture.path().to_path_buf())],
+      NewFileReplay::All,
+    )
+    .unwrap();
+    assert!(tailer.files[&path].codex_seed_length.is_some());
+    let replacement = fixture.path().join("replacement");
+    std::fs::write(
+      &replacement,
+      concat!(
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"new-session\"}}\n",
+        "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"new\"}}\n"
+      ),
+    )
+    .unwrap();
+    std::fs::rename(replacement, &path).unwrap();
+    let update = tailer.scan().unwrap();
+    assert!(update.warnings.is_empty());
+    assert_eq!(update.records.len(), 2);
+    assert!(update.records.iter().all(|record| record.topic == "codex.new-session"));
+    assert!(tailer.files[&path].codex_seed_length.is_none());
   }
 
   #[test]

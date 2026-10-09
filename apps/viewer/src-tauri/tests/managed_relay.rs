@@ -4,6 +4,7 @@ use tokio::{
   io::{AsyncBufReadExt, BufReader},
   process::{Child, ChildStdout, Command},
 };
+use tokn_session_relay::stdio::{MAX_LINE_BYTES, VERSION};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_tokn-session-viewer");
 const HEADER: &str =
@@ -38,7 +39,7 @@ async fn ready(child: &mut Child) -> BufReader<ChildStdout> {
     .unwrap()
     .unwrap();
   let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-  assert_eq!(value, serde_json::json!({"type":"ready", "version":1}));
+  assert_eq!(value, serde_json::json!({"type":"ready", "version":VERSION}));
   output
 }
 async fn start(root: &Path, native: bool) -> (Child, BufReader<ChildStdout>) {
@@ -57,7 +58,7 @@ async fn stop(child: &mut Child) {
   );
 }
 #[tokio::test]
-async fn packaged_child_streams_new_records_with_optional_native_and_exits_on_eof() {
+async fn packaged_child_streams_compact_session_hints_with_optional_native_flag_and_exits_on_eof() {
   for native in [false, true] {
     let root = tempfile::tempdir().unwrap();
     let (mut child, output) = start(root.path(), native).await;
@@ -72,7 +73,9 @@ async fn packaged_child_streams_new_records_with_optional_native_and_exits_on_eo
         tokio::select! {
           line = lines.next_line() => {
             let value: serde_json::Value = serde_json::from_str(&line.unwrap().expect("Relay exited during live probe")).unwrap();
-            if value["session"]["provider"] == "pi" { break; }
+            if value["sessions"].as_array().is_some_and(|sessions| {
+              sessions.iter().any(|hint| hint["provider"] == "pi")
+            }) { break; }
           }
           _ = tick.tick() => {
             let header = HEADER.replace("managed-fixture", &format!("probe-{probe}"));
@@ -86,22 +89,37 @@ async fn packaged_child_streams_new_records_with_optional_native_and_exits_on_eo
     .expect("Relay did not begin live delivery after transport readiness");
     let path = root.path().join("pi/session.jsonl");
     std::fs::write(&path, format!("{HEADER}{MESSAGE}")).unwrap();
-    let record = tokio::time::timeout(Duration::from_secs(10), async {
+    let (changes, hint) = tokio::time::timeout(Duration::from_secs(10), async {
       loop {
         let line = lines
           .next_line()
           .await
           .unwrap()
           .expect("Relay exited before delivering the new file");
+        assert!(line.len() < MAX_LINE_BYTES);
         let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-        if value["session"]["provider"] == "pi" && value["session"]["session_id"] == "managed-fixture" {
-          break value;
+        if let Some(hint) = value["sessions"].as_array().and_then(|sessions| {
+          sessions
+            .iter()
+            .find(|hint| hint["provider"] == "pi" && hint["session_id"] == "managed-fixture")
+        }) {
+          break (value.clone(), hint.clone());
         }
       }
     })
     .await
     .unwrap();
-    assert_eq!(!record["native"].is_null(), native);
+    assert_eq!(
+      changes.as_object().unwrap().len(),
+      1,
+      "managed pipe carries only session hints"
+    );
+    assert_eq!(
+      hint.as_object().unwrap().len(),
+      3,
+      "native records and events stay out of the pipe"
+    );
+    assert_eq!(hint["path"], serde_json::json!(path));
     stop(&mut child).await;
   }
 }
@@ -130,6 +148,19 @@ async fn invalid_configuration_fails_before_readiness() {
   assert!(!output.status.success());
   assert!(output.stdout.is_empty());
   assert!(String::from_utf8_lossy(&output.stderr).contains(":memory:"));
+}
+#[tokio::test]
+async fn unsupported_child_arguments_fail_before_readiness() {
+  let root = tempfile::tempdir().unwrap();
+  let output = tokio::time::timeout(
+    Duration::from_secs(5),
+    command(root.path(), false).arg("--unexpected").output(),
+  )
+  .await
+  .unwrap()
+  .unwrap();
+  assert_eq!(output.status.code(), Some(2));
+  assert!(output.stdout.is_empty());
 }
 #[cfg(unix)]
 #[test]

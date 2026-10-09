@@ -181,8 +181,11 @@ delivery already in progress. Never automatically retry an unknown outcome.
 Named events match Tauri: `relay-changed`, `relay-status`,
 `session-index-changed`, and `session-index-progress`. Events invalidate data;
 they are not complete transcript payloads. A lagging subscriber disconnects.
-The browser retries, then reloads the catalog and selected timeline so missed
-notifications cannot leave stale data indefinitely. The browser shows its
+The browser retries, then reloads catalog, selected timeline, index progress,
+and Relay status. Reconnects establish a fresh progress-revision baseline for
+API restarts; stale in-flight responses cannot override new state. Event pages
+include `follow_error` while a follower retries, preserving last-good cards
+with a visible stale-data warning until recovery. The browser shows its
 connection state and preserves last-received data during temporary outages.
 Ctrl-C closes event streams and stops the managed child.
 

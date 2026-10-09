@@ -146,8 +146,13 @@ Core now owns the old viewer service/model/repository, native index scheduler,
 and snapshot/follow/metadata code formerly in Relay. Automatic mode launches a
 bundled Relay live-feed child over stdio; stdout is bounded versioned JSONL,
 stderr carries diagnostics, and stdin EOF ends the child even after parent death.
-Core uses live records as invalidation hints and retains authoritative snapshot
-readers and polling recovery. The supervisor keeps the ten-second readiness
+The version-2 pipe carries compact provider/path/session batches rather than
+event/native payloads. Core wakes only those snapshot readers; 50 ms quiet
+batching is capped at 200 ms. Authoritative readers retain polling recovery.
+Unchanged Relay status is not rebroadcast for each session update. Browser
+reconnects refresh progress/status as well as catalog/timeline, and event pages
+expose `follow_error` while retaining last-good cards during follower retries.
+The supervisor keeps the ten-second readiness
 limit and three attempts with one-/two-second backoff. No private TCP port is
 needed. Missing provider roots are empty catalogs; corrupt existing roots remain
 errors. External desktop mode connects to `tokn-viewer-api snapshot --bind
@@ -381,8 +386,8 @@ the publication modes retain their existing best-effort behavior.
 Recoverable scan failures are reported per file or provider without dropping
 successful records from that pass; failed OpenCode sessions remain eligible for
 retry. OpenCode/ZCode catalog refresh counts messages with one grouped query
-instead of a query per session. The viewer-managed pipe skips an individual
-record above its 8 MiB frame limit and keeps following later records.
+instead of a query per session. Managed hints omit transcript/native bodies,
+including source records larger than the pipe's 8 MiB frame limit.
 Watcher paths now accumulate in a bounded inbox; overflow requests a complete
 recovery scan. See [Relay I/O measurements](relay-performance.md) for the
 first baseline comparison and benchmark driver. A later
@@ -393,7 +398,13 @@ timestamp-free part edits. Full record loads reuse messages for counts and
 untitled previews. JSONL scans now use one metadata lookup per tracked file.
 Codex/Pi directory notifications avoid a second metadata probe for discovered
 rollouts, and startup reuses each header file handle to check only the final
-byte of newline-terminated files before following at EOF. Metadata errors
+byte of newline-terminated files before following at EOF. Stateful Codex feeds
+silently restore the original prefix once on the first append, retaining
+pre-start question/tool/compaction correlation and current cwd. Idle startup
+stays cheap; the first active append pays for that prefix read, and later
+appends remain incremental. Mutable pet activity matching compares event
+occurrence counts rather than array slots, so shifted context events do not
+replay unchanged replies. Metadata errors
 retain file state for retry.
 The database is opened read-only with WAL visibility and an immutable fallback;
 the relay never runs provider migrations.

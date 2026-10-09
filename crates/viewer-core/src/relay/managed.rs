@@ -1,4 +1,4 @@
-use std::{path::Path, process::Stdio, sync::Arc, time::Duration};
+use std::{collections::HashSet, path::Path, process::Stdio, sync::Arc, time::Duration};
 
 use tokio::{
   io::{AsyncBufReadExt, AsyncReadExt, BufReader},
@@ -22,7 +22,7 @@ struct ManagedChild {
 }
 
 impl ManagedChild {
-  fn spawn(executable: &Path, native: bool) -> Result<Self, String> {
+  fn spawn(executable: &Path) -> Result<Self, String> {
     let mut command = Command::new(executable);
     command
       .arg(CHILD_FLAG)
@@ -30,9 +30,6 @@ impl ManagedChild {
       .stdout(Stdio::piped())
       .stderr(Stdio::inherit())
       .kill_on_drop(true);
-    if native {
-      command.arg("--native");
-    }
     #[cfg(windows)]
     command.creation_flags(0x08000000); // CREATE_NO_WINDOW
     Self::spawn_command(&mut command)
@@ -74,12 +71,18 @@ impl ManagedChild {
 
   async fn consume(&mut self, snapshots: &crate::service_server::Service, manager: &ViewerRelay) -> Result<(), String> {
     loop {
-      let record: tokn_session_relay::RelayRecord =
-        serde_json::from_slice(&self.line().await?).map_err(|e| format!("Invalid Relay record: {e}"))?;
-      snapshots.invalidate().await;
-      if let Some(provider) = super::viewer_provider(record.session.provider) {
-        manager.changed_session_source(provider, &record.path, Some(&record.session.session_id));
-        let _ = manager.index_wakes.send((provider, record.path));
+      let changes: tokn_session_relay::stdio::SessionChanges =
+        serde_json::from_slice(&self.line().await?).map_err(|e| format!("Invalid Relay changes: {e}"))?;
+      snapshots.invalidate_sessions(&changes.sessions).await;
+      let mut changed_paths = HashSet::new();
+      for hint in changes.sessions {
+        if let Some(provider) = super::viewer_provider(hint.provider) {
+          manager.changed_session_source(provider, &hint.path, Some(&hint.session_id));
+          changed_paths.insert((provider, hint.path));
+        }
+      }
+      for path in changed_paths {
+        let _ = manager.index_wakes.send(path);
       }
     }
   }
@@ -162,7 +165,7 @@ impl ViewerRelay {
         return;
       }
       self.managed_phase(epoch, if attempt == 0 { "starting" } else { "retrying" }, None);
-      let error = match ManagedChild::spawn(executable, native) {
+      let error = match ManagedChild::spawn(executable) {
         Ok(mut child) => {
           let ready = tokio::select! {
             biased;

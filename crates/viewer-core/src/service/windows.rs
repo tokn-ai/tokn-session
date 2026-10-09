@@ -137,6 +137,7 @@ impl ViewerService {
       previous_cursor: has_earlier
         .then(|| encode_history_cursor(identity.generation.as_deref(), identity.event_offset + start)),
       history_status: loaded.history_status.into(),
+      follow_error: self.page_follow_error(&locator),
       attention_revision,
       outstanding_questions: outstanding_questions(&loaded.events, &identity),
     })
@@ -327,6 +328,94 @@ mod tests {
     .await
     .unwrap()
     .unwrap()
+  }
+
+  #[tokio::test]
+  async fn shared_pages_redact_follow_diagnostics_in_retained_and_legacy_modes() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("shared-session.jsonl");
+    let header = json!({"type":"session", "id":"shared", "timestamp":"2026-01-01", "cwd":"/tmp"});
+    let message = json!({"type":"message", "id":"one", "message":{"role":"user", "content":"hello"}});
+    std::fs::write(&path, format!("{header}\n{message}\n")).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("tcp://{}", listener.local_addr().unwrap());
+    let mut config = RelayConfig::new(vec![ProviderRoot::new(Provider::Pi, root.path().into())]);
+    config.poll_interval = Duration::from_millis(20);
+    let server = tokio::spawn(crate::service_server::serve_listener(listener, config));
+    let service = ViewerService::new(Arc::new(NativeRepository::default()));
+    let mut changes = service.relay.changes.subscribe();
+    service
+      .relay
+      .configure(RelaySettings {
+        mode: RelayMode::External,
+        endpoint,
+        ..Default::default()
+      })
+      .unwrap();
+    tokio::time::timeout(Duration::from_secs(4), async {
+      while !service.relay.has_catalog() {
+        changes.recv().await.unwrap();
+      }
+    })
+    .await
+    .unwrap();
+    let locator = SessionLocator {
+      version: 1,
+      provider: ViewerProvider::Pi,
+      session_id: "shared".into(),
+      source_path: path.clone(),
+    };
+    let key = encode_session_key(&locator).unwrap();
+    let shared = service.scoped_to_sessions(&[key.clone()]).unwrap();
+    let initial = window(&shared, &key, None).await;
+    assert!(initial.follow_error.is_none());
+
+    std::fs::OpenOptions::new()
+      .append(true)
+      .open(&path)
+      .unwrap()
+      .write_all(&[0xff, b'\n'])
+      .unwrap();
+    tokio::time::timeout(Duration::from_secs(4), async {
+      loop {
+        let change = changes.recv().await.unwrap();
+        if change.session_key.as_deref() == Some(key.as_str()) && service.relay.follow_error(&locator).is_some() {
+          break;
+        }
+      }
+    })
+    .await
+    .unwrap();
+    let owner = window(&service, &key, None).await;
+    assert!(owner.follow_error.unwrap().contains(path.to_str().unwrap()));
+
+    let retained = window(&shared, &key, None).await;
+    assert_eq!(
+      retained.follow_error.as_deref(),
+      Some("Live updates are temporarily unavailable; retrying.")
+    );
+    assert_eq!(
+      retained.events.len(),
+      initial.events.len(),
+      "last-good history remains visible"
+    );
+    let shared_legacy = shared.clone();
+    let legacy = tokio::task::spawn_blocking(move || {
+      shared_legacy.load_event_page(EventPageRequest {
+        session_key: key,
+        window_mode: None,
+        cursor: None,
+        offset: None,
+        direction: PageDirection::Backward,
+        limit: None,
+      })
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(legacy.follow_error, retained.follow_error);
+    assert_eq!(legacy.events.len(), initial.events.len());
+    server.abort();
   }
 
   #[tokio::test]

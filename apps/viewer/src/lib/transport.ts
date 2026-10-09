@@ -2,6 +2,7 @@ export type UnlistenFn = () => void;
 export type CommandInvoker = <T>(command: string, payload?: Record<string, unknown>) => Promise<T>;
 type Handler = (event: { payload: unknown }) => void;
 export type ConnectionState = "connecting" | "connected" | "reconnecting";
+const MAX_EVENT_FRAME_LENGTH = 2 * 1024 * 1024;
 export const isDesktop = () => "__TAURI_INTERNALS__" in window;
 
 // One selected machine owns requests and subscriptions. Closing it aborts both,
@@ -100,18 +101,22 @@ export class RemoteClient {
             clearTimeout(watchdog);
             watchdog = setTimeout(abort, 45_000);
             buffer += decoder.decode(value, { stream: true }).replace(/\r/g, "");
-            if (buffer.length > 2 * 1024 * 1024) throw new Error("Live event exceeds size limit");
             let end: number;
             while ((end = buffer.indexOf("\n\n")) !== -1) {
+              if (end > MAX_EVENT_FRAME_LENGTH) throw new Error("Live event exceeds size limit");
               const frame = buffer.slice(0, end); buffer = buffer.slice(end + 2);
               const parsed = parseEvent(frame);
               if (!parsed) continue;
               if (parsed.event === "ready") {
                 this.onState("connected");
-                if (connected) this.emit("relay-changed", { session_key: null, reset: true });
+                if (connected) {
+                  this.emit("transport-reconnected", {});
+                  this.emit("relay-changed", { session_key: null, reset: true });
+                }
                 connected = true; ready();
               } else this.emit(parsed.event, parsed.payload);
             }
+            if (buffer.length > MAX_EVENT_FRAME_LENGTH) throw new Error("Live event exceeds size limit");
           }
         } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
       } catch {

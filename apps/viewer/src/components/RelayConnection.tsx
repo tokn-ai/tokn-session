@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { configureRelay, getRelayStatus, listenForRelayStatus } from "../lib/tauri";
+import { configureRelay, getRelayStatus, listenForRelayStatus, listenForTransportReconnect } from "../lib/tauri";
 import { useFloatingPanel } from "../lib/useFloatingPanel";
 import { CloseIcon } from "./Icons";
 import type { RelayMode, RelaySettings, RelayStatus } from "../lib/types";
@@ -13,12 +13,14 @@ const PHASE_LABELS: Record<RelayStatus["phase"], string> = {
   retrying: "Reconnecting",
   failed: "Connection needs attention",
 };
+const STATUS_LOAD_ERROR = "Relay connection status is unavailable.";
 
 export function RelayConnection() {
   const [status, setStatus] = useState<RelayStatus | null>(null);
   const [settings, setSettings] = useState<RelaySettings>({ mode: "automatic", endpoint: "tcp://127.0.0.1:5557", include_native: false });
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const statusRevision = useRef(0);
   const [is_open, setOpen] = useState(false);
   const panel_id = useId();
@@ -28,34 +30,91 @@ export function RelayConnection() {
   useEffect(() => {
     let disposed = false;
     let stop: (() => void) | undefined;
-    let latest: RelayStatus | null = null;
+    let stopReconnect: (() => void) | undefined;
+    let settingsInitialized = false;
+    let connectionEpoch = 0;
+    void listenForTransportReconnect(() => {
+      if (disposed) return;
+      const epoch = ++connectionEpoch;
+      const before = statusRevision.current;
+      void getRelayStatus().then((next) => {
+        if (!disposed && epoch === connectionEpoch) {
+          setLoadError(null);
+          if (statusRevision.current === before) {
+            statusRevision.current += 1;
+            setStatus(next);
+            if (!settingsInitialized) {
+              settingsInitialized = true;
+              setSettings(next.settings);
+            }
+          }
+        }
+      }).catch(() => {
+        if (!disposed && epoch === connectionEpoch && statusRevision.current === before) {
+          setLoadError(STATUS_LOAD_ERROR);
+        }
+      });
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else stopReconnect = unlisten;
+    }).catch(() => {});
+    const subscribeEpoch = connectionEpoch;
+    const subscribeRevision = statusRevision.current;
     void listenForRelayStatus((next) => {
       statusRevision.current += 1;
-      latest = next;
-      if (!disposed) setStatus(next);
+      if (!disposed) {
+        setStatus(next);
+        setLoadError(null);
+        if (!settingsInitialized) {
+          settingsInitialized = true;
+          setSettings(next.settings);
+        }
+      }
     }).then(async (unlisten) => {
       if (disposed) { unlisten(); return; }
       stop = unlisten;
+      const epoch = connectionEpoch;
       const before = statusRevision.current;
-      const next = await getRelayStatus();
-      if (!disposed) {
-        if (statusRevision.current === before) setStatus(next);
-        setSettings((latest ?? next).settings);
+      try {
+        const next = await getRelayStatus();
+        if (!disposed && epoch === connectionEpoch) {
+          setLoadError(null);
+          if (statusRevision.current === before) {
+            statusRevision.current += 1;
+            setStatus(next);
+            if (!settingsInitialized) {
+              settingsInitialized = true;
+              setSettings(next.settings);
+            }
+          }
+        }
+      } catch {
+        if (!disposed && epoch === connectionEpoch && statusRevision.current === before) {
+          setLoadError(STATUS_LOAD_ERROR);
+        }
       }
-    }).catch(() => { if (!disposed) setError("Relay settings are available in the desktop app."); });
-    return () => { disposed = true; stop?.(); };
+    }).catch(() => {
+      if (!disposed && connectionEpoch === subscribeEpoch && statusRevision.current === subscribeRevision) {
+        setLoadError(STATUS_LOAD_ERROR);
+      }
+    });
+    return () => { disposed = true; stop?.(); stopReconnect?.(); };
   }, []);
 
   async function save() {
     if (busy || !status) return;
     setBusy(true);
-    setError(null);
+    setSaveError(null);
     const before = statusRevision.current;
     try {
       const next = await configureRelay({ ...settings, endpoint: settings.endpoint.trim() });
-      if (statusRevision.current === before) setStatus(next);
+      if (statusRevision.current === before) {
+        statusRevision.current += 1;
+        setStatus(next);
+      }
+      setLoadError(null);
     } catch (error) {
-      setError(String(error));
+      setSaveError(String(error));
     } finally {
       setBusy(false);
     }
@@ -63,8 +122,9 @@ export function RelayConnection() {
 
   const mode = status?.settings.mode ?? "automatic";
   const phase = status?.phase ?? "starting";
-  const label = error
-    ? status ? "Settings need attention" : "Connection unavailable"
+  const error = saveError ?? loadError;
+  const label = saveError ? "Settings need attention"
+    : loadError ? "Connection unavailable"
     : mode === "local" ? "Local history" : PHASE_LABELS[phase];
 
   return (

@@ -76,6 +76,7 @@ function ViewerContent({ remote, connection }: ViewerPageProps) {
           on_follow_change={viewer.setFollowingLive}
           on_input_accepted={viewer.refreshSessionAfterInput}
           error={viewer.eventsError}
+          follow_error={viewer.followError}
           events={viewer.events}
           expanded_detail={viewer.expandedDetail}
           expanded_detail_error={viewer.expandedDetailError}

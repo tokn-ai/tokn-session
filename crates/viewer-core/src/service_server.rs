@@ -22,7 +22,10 @@ use crate::{
 struct FollowedSession {
   current: OnceCell<watch::Sender<Arc<Snapshot>>>,
   initialized: watch::Sender<Option<Result<(), String>>>,
+  wake: watch::Sender<()>,
   cancel: CancellationToken,
+  #[cfg(test)]
+  polls: std::sync::atomic::AtomicUsize,
 }
 
 impl FollowedSession {
@@ -37,9 +40,32 @@ impl Drop for FollowedSession {
   }
 }
 
+// A burst gets one reader pass after a short quiet period, bounded so sustained
+// writes still reach the viewer. Changes arriving during a poll remain pending.
+const READER_QUIET_PERIOD: Duration = Duration::from_millis(50);
+const READER_MAX_BATCH_AGE: Duration = Duration::from_millis(200);
+
+async fn wait_for_reader_poll(wake: &mut watch::Receiver<()>, cancel: &CancellationToken, interval: Duration) -> bool {
+  tokio::select! {
+    biased;
+    _ = cancel.cancelled() => return false,
+    _ = tokio::time::sleep(interval) => return true,
+    result = wake.changed() => if result.is_err() { return false; },
+  }
+  let deadline = tokio::time::Instant::now() + READER_MAX_BATCH_AGE;
+  loop {
+    let quiet = (tokio::time::Instant::now() + READER_QUIET_PERIOD).min(deadline);
+    tokio::select! {
+      biased;
+      _ = cancel.cancelled() => return false,
+      _ = tokio::time::sleep_until(quiet) => return true,
+      result = wake.changed() => if result.is_err() { return false; },
+    }
+  }
+}
+
 pub struct Service {
   index: Option<Arc<tokn_session_index::SessionIndex>>,
-  wake: watch::Sender<()>,
   config: RelayConfig,
   sessions: Mutex<HashMap<String, Weak<FollowedSession>>>,
   catalog: Mutex<Option<(std::time::Instant, Arc<Vec<CatalogEntry>>, Vec<String>)>>,
@@ -117,7 +143,6 @@ impl Service {
       sessions: Mutex::new(HashMap::new()),
       catalog: Mutex::new(None),
       metadata: Arc::new(PresentationCache::default()),
-      wake: watch::channel(()).0,
       #[cfg(test)]
       load_gates: std::sync::Mutex::new(HashMap::new()),
     });
@@ -144,7 +169,28 @@ impl Service {
   /// the recovery path for feed startup gaps, restarts, or omitted records.
   pub async fn invalidate(&self) {
     *self.catalog.lock().await = None;
-    self.wake.send_replace(());
+    for session in self.sessions.lock().await.values().filter_map(Weak::upgrade) {
+      session.wake.send_replace(());
+    }
+  }
+
+  /// A managed feed update targets just the source readers it changed. Each
+  /// watch channel retains one pending wake, including during initial loading.
+  pub(crate) async fn invalidate_sessions(&self, hints: &[tokn_session_relay::stdio::SessionHint]) {
+    if hints.is_empty() {
+      return;
+    }
+    if self.index.is_none() {
+      *self.catalog.lock().await = None;
+    }
+    let sessions = self.sessions.lock().await;
+    for hint in hints {
+      let key = serde_json::to_string(&(hint.provider, &hint.path, &hint.session_id))
+        .expect("session source identity is serializable");
+      if let Some(session) = sessions.get(&key).and_then(Weak::upgrade) {
+        session.wake.send_replace(());
+      }
+    }
   }
 
   async fn catalog(&self) -> Result<(Arc<Vec<CatalogEntry>>, Vec<String>), String> {
@@ -207,7 +253,10 @@ impl Service {
         let session = Arc::new(FollowedSession {
           current: OnceCell::new(),
           initialized: watch::channel(None).0,
+          wake: watch::channel(()).0,
           cancel: CancellationToken::new(),
+          #[cfg(test)]
+          polls: std::sync::atomic::AtomicUsize::new(0),
         });
         // Reserve this key before any I/O. The weak entry counts in-flight
         // loads toward the limit without making unused readers resident.
@@ -216,6 +265,7 @@ impl Service {
         let key = key.to_owned();
         let worker = Arc::downgrade(&session);
         let cancel = session.cancel.clone();
+        let wake = session.wake.subscribe();
         tokio::spawn(async move {
           let result = tokio::select! {
             _ = cancel.cancelled() => return,
@@ -231,7 +281,7 @@ impl Service {
                 .set(watch::channel(Arc::new(reader.snapshot.clone())).0)
                 .unwrap_or_else(|_| unreachable!("one initializer per reserved session"));
               session.initialized.send_replace(Some(Ok(())));
-              service.follow_reader(reader, worker, cancel);
+              service.follow_reader(reader, worker, cancel, wake);
             }
             Err(error) => {
               session.initialized.send_replace(Some(Err(error)));
@@ -297,18 +347,25 @@ impl Service {
       .map_err(|e| e.to_string())?
   }
 
-  fn follow_reader(&self, reader: SessionReader, worker: Weak<FollowedSession>, cancel: CancellationToken) {
+  fn follow_reader(
+    &self,
+    reader: SessionReader,
+    worker: Weak<FollowedSession>,
+    cancel: CancellationToken,
+    mut wake: watch::Receiver<()>,
+  ) {
     let interval = self.config.poll_interval;
     let metadata = self.metadata.clone();
     let index = self.index.clone();
-    let mut wake = self.wake.subscribe();
     tokio::spawn(async move {
       let mut reader = reader;
       loop {
-        tokio::select! {
-          _ = cancel.cancelled() => break,
-          _ = tokio::time::sleep(interval) => {},
-          result = wake.changed() => { if result.is_err() { break; } }
+        if !wait_for_reader_poll(&mut wake, &cancel, interval).await {
+          break;
+        }
+        #[cfg(test)]
+        if let Some(worker) = worker.upgrade() {
+          worker.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         let metadata = metadata.clone();
         let index = index.clone();
@@ -596,6 +653,77 @@ mod tests {
 
   async fn session_cancel(service: &Service, key: &str) -> CancellationToken {
     service.sessions.lock().await[key].upgrade().unwrap().cancel.clone()
+  }
+
+  #[tokio::test]
+  async fn managed_bursts_poll_only_the_changed_session_once() {
+    use std::io::Write;
+    use tokn_session_relay::stdio::SessionHint;
+    let (root, service, keys) = fixture().await;
+    let slow = service.follow(&keys[0]).await.unwrap();
+    let fast = service.follow(&keys[1]).await.unwrap();
+    let mut slow_changes = slow.snapshots().subscribe();
+    let mut fast_changes = fast.snapshots().subscribe();
+    for id in ["slow", "fast"] {
+      let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(root.path().join(format!("{id}.jsonl")))
+        .unwrap();
+      writeln!(
+        file,
+        "{{\"type\":\"message\",\"id\":\"appended\",\"message\":{{\"role\":\"user\",\"content\":\"new prompt\"}}}}"
+      )
+      .unwrap();
+    }
+    let hint = SessionHint {
+      provider: Provider::Pi,
+      path: root.path().join("slow.jsonl"),
+      session_id: "slow".into(),
+    };
+    for _ in 0..100 {
+      service.invalidate_sessions(std::slice::from_ref(&hint)).await;
+    }
+    tokio::time::timeout(Duration::from_secs(2), slow_changes.changed())
+      .await
+      .unwrap()
+      .unwrap();
+    assert_eq!(slow_changes.borrow().records.len(), 3);
+    assert_eq!(
+      slow.polls.load(Ordering::SeqCst),
+      1,
+      "a hundred hints must coalesce into one reader poll"
+    );
+    assert_eq!(fast.polls.load(Ordering::SeqCst), 0, "unrelated sources must not poll");
+    assert_eq!(fast_changes.borrow().records.len(), 2);
+
+    service
+      .invalidate_sessions(&[SessionHint {
+        provider: Provider::Pi,
+        path: root.path().join("fast.jsonl"),
+        session_id: "fast".into(),
+      }])
+      .await;
+    tokio::time::timeout(Duration::from_secs(2), fast_changes.changed())
+      .await
+      .unwrap()
+      .unwrap();
+    assert_eq!(fast_changes.borrow().records.len(), 3);
+    assert_eq!(fast.polls.load(Ordering::SeqCst), 1);
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn sustained_reader_hints_cannot_postpone_a_poll_indefinitely() {
+    let (sender, mut receiver) = watch::channel(());
+    let producer = tokio::spawn(async move {
+      loop {
+        sender.send_replace(());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+      }
+    });
+    let started = tokio::time::Instant::now();
+    assert!(wait_for_reader_poll(&mut receiver, &CancellationToken::new(), Duration::from_secs(60)).await);
+    assert_eq!(started.elapsed(), READER_MAX_BATCH_AGE);
+    producer.abort();
   }
 
   #[tokio::test]

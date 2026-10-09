@@ -189,4 +189,12 @@ describe("Conversation quick filter", () => {
     expect(screen.getByText("No events in this session")).toBeInTheDocument();
     expect(screen.queryByText(/No events match/)).not.toBeInTheDocument();
   });
+
+  it("labels last-good history as stale while its live reader retries", () => {
+    const view = render(<Conversation {...props({ events: [event("Previous event")], follow_error: "source read failed" })} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Showing last loaded history while live updates retry: source read failed");
+    expect(screen.getByRole("button", { name: "Previous event" })).toBeInTheDocument();
+    view.rerender(<Conversation {...props({ events: [event("Previous event")], follow_error: null })} />);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
 });

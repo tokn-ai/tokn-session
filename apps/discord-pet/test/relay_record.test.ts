@@ -15,7 +15,7 @@ const envelope = {
 };
 
 describe("shared Relay record protocol", () => {
-  test.each(["opencode", "zcode", "workbuddy", "dsh"])("does not replay unchanged %s event slots on native or record updates", async (provider) => {
+  test.each(["opencode", "zcode", "workbuddy", "dsh"])("does not replay unchanged %s events on native or record updates", async (provider) => {
     const activity = new RelayActivityDispatcher(2);
     const record = parseRelayRecord({ ...envelope, topic: `${provider}.session-1`, record_id: "message:1" })!;
     const seen: string[] = [];
@@ -33,6 +33,72 @@ describe("shared Relay record protocol", () => {
     await activity.dispatch({ ...record, record_id: "message:3" }, observe);
     await activity.dispatch(record, observe);
     expect(seen).toHaveLength(16);
+  });
+
+  test.each(["opencode", "zcode", "workbuddy", "dsh"])("does not replay %s messages when model changes shift their position", async (provider) => {
+    const activity = new RelayActivityDispatcher();
+    const record = parseRelayRecord({ ...envelope, topic: `${provider}.session-1`, record_id: "message:1" })!;
+    const model = { type: "provider_changed", model_id: "model-a" };
+    const message = { type: "message", message_id: "1", text: "reply" };
+    const seen: RelayEvent["event"][] = [];
+    const observe = (input: RelayEvent): void => { seen.push(input.event); };
+    await activity.dispatch({ ...record, events: [model, message] }, observe);
+    await activity.dispatch({ ...record, events: [message] }, observe);
+    expect(seen).toEqual([model, message]);
+    const next_model = { ...model, model_id: "model-b" };
+    await activity.dispatch({ ...record, events: [next_model, message] }, observe);
+    expect(seen).toEqual([model, message, next_model]);
+    const changed_message = { ...message, text: "edited reply" };
+    await activity.dispatch({ ...record, events: [changed_message, next_model] }, observe);
+    expect(seen).toEqual([model, message, next_model, changed_message]);
+  });
+
+  test("dispatches added identical occurrences and changed events in batch order", async () => {
+    const activity = new RelayActivityDispatcher();
+    const record = parseRelayRecord({ ...envelope, topic: "opencode.session-1", record_id: "message:1" })!;
+    const usage = { type: "usage", input_tokens: 1 };
+    const reasoning = { type: "reasoning", text: "thinking" };
+    const message = { type: "message", text: "reply" };
+    const seen: RelayEvent["event"][] = [];
+    const observe = (input: RelayEvent): void => { seen.push(input.event); };
+    await activity.dispatch({ ...record, events: [usage, usage, reasoning] }, observe);
+    expect(seen).toEqual([usage, usage, reasoning]);
+    seen.length = 0;
+    await activity.dispatch({ ...record, events: [usage, message, reasoning, usage, usage] }, observe);
+    expect(seen).toEqual([message, usage]);
+    seen.length = 0;
+    await activity.dispatch({ ...record, events: [usage, usage, usage, reasoning, message] }, observe);
+    expect(seen).toEqual([]);
+    await activity.dispatch({ ...record, events: [usage] }, observe);
+    await activity.dispatch({ ...record, events: [usage, usage] }, observe);
+    expect(seen).toEqual([usage]);
+  });
+
+  test("keeps JSONL append observations outside the mutable-record cache", async () => {
+    const activity = new RelayActivityDispatcher();
+    const record = parseRelayRecord(envelope)!;
+    const seen: string[] = [];
+    const observe = (input: RelayEvent): void => { seen.push(input.event.type); };
+    await activity.dispatch(record, observe);
+    await activity.dispatch(record, observe);
+    expect(seen).toEqual(["reasoning", "message", "tool_call", "reasoning", "message", "tool_call"]);
+  });
+
+  test("does not cache a mutable batch interrupted by cancellation", async () => {
+    const activity = new RelayActivityDispatcher();
+    const record = parseRelayRecord({ ...envelope, topic: "opencode.session-1", record_id: "message:1" })!;
+    const abort = new AbortController();
+    const seen: string[] = [];
+    await activity.dispatch(record, async (input) => {
+      seen.push(input.event.type);
+      await Promise.resolve();
+      abort.abort();
+    }, abort.signal);
+    expect(seen).toEqual(["reasoning"]);
+    await activity.dispatch(record, (input) => { seen.push(input.event.type); });
+    expect(seen).toEqual(["reasoning", "reasoning", "message", "tool_call"]);
+    await activity.dispatch(record, (input) => { seen.push(input.event.type); });
+    expect(seen).toHaveLength(4);
   });
 
   test("preserves ordered batches, session metadata and optional native data", async () => {
