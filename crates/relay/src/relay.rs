@@ -17,7 +17,6 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// Default number of recent messages replayed from a newly discovered session.
 pub const DEFAULT_REPLAY_MESSAGES: usize = 3;
 const MAX_PENDING_WATCH_PATHS: usize = 4096;
-const WATCH_COALESCE_DELAY: Duration = Duration::from_millis(20);
 
 /// History emitted when a session file is discovered or replaced after startup.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -158,12 +157,7 @@ impl SessionRelay {
         let (_, _, warnings) = self.collect_watcher_events();
         (true, HashSet::new(), warnings)
       }
-      ScanRequest::Watcher => {
-        // A fixed window merges callback bursts without letting a continuous
-        // stream postpone a scan indefinitely.
-        tokio::time::sleep(WATCH_COALESCE_DELAY).await;
-        self.collect_watcher_events()
-      }
+      ScanRequest::Watcher => self.collect_watcher_events(),
       ScanRequest::WatcherStopped => (
         true,
         HashSet::new(),

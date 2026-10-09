@@ -338,6 +338,10 @@ successful records from that pass; failed OpenCode sessions remain eligible for
 retry. OpenCode/ZCode catalog refresh counts messages with one grouped query
 instead of a query per session. The viewer-managed pipe skips an individual
 record above its 8 MiB frame limit and keeps following later records.
+Watcher paths now accumulate in a bounded inbox; overflow requests a complete
+recovery scan. See [Relay I/O measurements](relay-performance.md) for the
+baseline comparison and benchmark driver. The tested updates read the same
+number of bytes; idle discovery performs fewer metadata calls.
 The database is opened read-only with WAL visibility and an immutable fallback;
 the relay never runs provider migrations.
 
