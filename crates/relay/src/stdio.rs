@@ -58,7 +58,13 @@ async fn run(native: bool) -> Result<(), String> {
       eprintln!("{warning}");
     }
     for record in update.records {
-      write_line(&mut stdout, &record)?;
+      if !write_record(&mut stdout, &record)? {
+        eprintln!(
+          "Relay skipped oversized record {} in {} (pipe frame limit: {MAX_LINE_BYTES} bytes)",
+          record.record.record_id,
+          record.path.display()
+        );
+      }
     }
   }
 }
@@ -84,8 +90,23 @@ fn write_line(writer: &mut impl Write, value: &impl serde::Serialize) -> Result<
   if bytes.len() >= MAX_LINE_BYTES {
     return Err("Relay record exceeds pipe frame limit".into());
   }
+  write_bytes_line(writer, &bytes)
+}
+
+/// A single oversized live hint must not stop the entire managed feed. The
+/// viewer retains authoritative snapshot readers and its own recovery scan.
+fn write_record(writer: &mut impl Write, record: &impl serde::Serialize) -> Result<bool, String> {
+  let bytes = serde_json::to_vec(record).map_err(|e| e.to_string())?;
+  if bytes.len() >= MAX_LINE_BYTES {
+    return Ok(false);
+  }
+  write_bytes_line(writer, &bytes)?;
+  Ok(true)
+}
+
+fn write_bytes_line(writer: &mut impl Write, bytes: &[u8]) -> Result<(), String> {
   writer
-    .write_all(&bytes)
+    .write_all(bytes)
     .and_then(|_| writer.write_all(b"\n"))
     .and_then(|_| writer.flush())
     .map_err(|e| e.to_string())
@@ -118,5 +139,16 @@ mod tests {
   #[test]
   fn managed_feed_uses_coarse_full_scan_recovery() {
     assert_eq!(managed_config(false).unwrap().poll_interval, MANAGED_POLL_INTERVAL);
+  }
+
+  #[test]
+  fn oversized_record_does_not_prevent_later_records() {
+    let mut output = Vec::new();
+    let oversized = serde_json::json!({"payload": "x".repeat(MAX_LINE_BYTES)});
+    let following = serde_json::json!({"record_id": "later"});
+
+    assert!(!write_record(&mut output, &oversized).unwrap());
+    assert!(write_record(&mut output, &following).unwrap());
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&output).unwrap(), following);
   }
 }

@@ -261,6 +261,9 @@ five-minute fallback because viewer-core already owns native index watches and
 durable recovery; this avoids duplicate whole-history scans while idle.
 Watcher notifications retain and coalesce their affected paths, so
 normal updates inspect only changed files instead of rescanning every session.
+The callback inbox bounds unique paths and coalesces bursts before scanning;
+overflow requests a full recovery scan. Discovery skips nested directory
+symlinks to avoid loops, while configured symlinked roots still work.
 OpenCode/ZCode are watched non-recursively at its data directory plus the database and
 SQLite WAL file; its transient SHM index is deliberately excluded because
 readers can update it and feed their own watcher notifications back into the
@@ -323,12 +326,18 @@ errors, lifecycle events, and unknown provider-native shapes. It buffers partial
 JSONL records, discovers newly created files, handles truncation/replacement,
 and combines native filesystem notifications with a periodic rescan. OpenCode
 session summaries are cached, so a database notification reloads only new or
-changed sessions on the normal path; when message/part timestamps cannot prove
-which session changed, it performs one correctness fallback over the current
-sessions. New sessions use the replay window, while changed message records
+changed sessions on the normal path; if no summaries change, it reloads current
+sessions once to catch in-place message/part edits. A simultaneous summary
+change in another session can mask such an edit until a later fallback scan.
+New sessions use the replay window, while changed message records
 republish their whole normalized batch. JSONL updates decode each appended
 complete line once. The viewer uses the snapshot service above when configured;
 the publication modes retain their existing best-effort behavior.
+Recoverable scan failures are reported per file or provider without dropping
+successful records from that pass; failed OpenCode sessions remain eligible for
+retry. OpenCode/ZCode catalog refresh counts messages with one grouped query
+instead of a query per session. The viewer-managed pipe skips an individual
+record above its 8 MiB frame limit and keeps following later records.
 The database is opened read-only with WAL visibility and an immutable fallback;
 the relay never runs provider migrations.
 

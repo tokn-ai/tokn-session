@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use notify::{EventKind, RecursiveMode, Watcher, event::ModifyKind};
@@ -15,6 +16,8 @@ use crate::{ProviderRoot, SessionTailer, TailUpdate};
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// Default number of recent messages replayed from a newly discovered session.
 pub const DEFAULT_REPLAY_MESSAGES: usize = 3;
+const MAX_PENDING_WATCH_PATHS: usize = 4096;
+const WATCH_COALESCE_DELAY: Duration = Duration::from_millis(20);
 
 /// History emitted when a session file is discovered or replaced after startup.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,8 +54,9 @@ impl RelayConfig {
 pub struct SessionRelay {
   tailer: SessionTailer,
   watcher: Option<NativeWatcher>,
-  watched_paths: HashSet<PathBuf>,
-  wake_rx: mpsc::UnboundedReceiver<Result<WatcherWake, String>>,
+  watched_paths: HashMap<PathBuf, WatchedPath>,
+  wake_rx: mpsc::Receiver<()>,
+  pending_wakes: Arc<Mutex<PendingWakes>>,
   poll: tokio::time::Interval,
   initial: Option<TailUpdate>,
 }
@@ -83,7 +87,12 @@ impl SessionRelay {
     // session. Defer that expensive discovery until after readiness.
     let mut tailer = SessionTailer::prepare_deferred(config.roots, config.new_file_replay)?;
     tailer.set_include_native(config.include_native);
-    let (wake_tx, wake_rx) = mpsc::unbounded_channel();
+    let (signal_tx, wake_rx) = mpsc::channel(1);
+    let pending_wakes = Arc::new(Mutex::new(PendingWakes::default()));
+    let wake_tx = WatcherSender {
+      signal_tx,
+      pending_wakes: Arc::clone(&pending_wakes),
+    };
     let mut warnings = Vec::new();
     let watcher = match create_watcher(wake_tx) {
       Ok(watcher) => Some(watcher),
@@ -95,8 +104,9 @@ impl SessionRelay {
     let mut relay = Self {
       tailer,
       watcher,
-      watched_paths: HashSet::new(),
+      watched_paths: HashMap::new(),
       wake_rx,
+      pending_wakes,
       poll: tokio::time::interval_at(Instant::now() + config.poll_interval, config.poll_interval),
       initial: None,
     };
@@ -134,15 +144,26 @@ impl SessionRelay {
       _ = self.poll.tick() => ScanRequest::Full,
       wake = self.wake_rx.recv(), if self.watcher.is_some() => {
         match wake {
-          Some(wake) => ScanRequest::Watcher(wake),
+          Some(()) => ScanRequest::Watcher,
           None => ScanRequest::WatcherStopped,
         }
       }
     };
 
     let (mut scan_all, paths, mut watcher_warnings) = match wake {
-      ScanRequest::Full => (true, HashSet::new(), Vec::new()),
-      ScanRequest::Watcher(first) => self.collect_watcher_events(first),
+      ScanRequest::Full => {
+        // A poll may win the select while a callback signal is queued. The
+        // full scan already covers those paths, so consume the coalesced wake
+        // and apply any watch invalidations without a redundant next scan.
+        let (_, _, warnings) = self.collect_watcher_events();
+        (true, HashSet::new(), warnings)
+      }
+      ScanRequest::Watcher => {
+        // A fixed window merges callback bursts without letting a continuous
+        // stream postpone a scan indefinitely.
+        tokio::time::sleep(WATCH_COALESCE_DELAY).await;
+        self.collect_watcher_events()
+      }
       ScanRequest::WatcherStopped => (
         true,
         HashSet::new(),
@@ -195,26 +216,28 @@ impl SessionRelay {
     self.poll.reset();
   }
 
-  fn collect_watcher_events(&mut self, first: Result<WatcherWake, String>) -> (bool, HashSet<PathBuf>, Vec<String>) {
-    let mut scan_all = false;
-    let mut paths = HashSet::new();
-    let mut warnings = Vec::new();
-    let mut wakes = vec![first];
-    while let Ok(wake) = self.wake_rx.try_recv() {
-      wakes.push(wake);
-    }
-    for wake in wakes {
-      match wake {
-        Ok(event) => {
-          merge_watcher_event(&mut self.watched_paths, &mut scan_all, &mut paths, event);
-        }
-        Err(err) => {
-          scan_all = true;
-          warnings.push(format!("filesystem watcher error: {err}"));
-        }
+  fn collect_watcher_events(&mut self) -> (bool, HashSet<PathBuf>, Vec<String>) {
+    let mut guard = self
+      .pending_wakes
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // The sender merges and signals under this same lock. Drain stale signals
+    // before taking the inbox so a wake after this handoff remains observable.
+    while self.wake_rx.try_recv().is_ok() {}
+    let pending = std::mem::take(&mut *guard);
+    drop(guard);
+    let mut paths = HashSet::with_capacity(pending.paths.len());
+    for (path, invalidates_watch) in pending.paths {
+      if invalidates_watch && let Some(watched) = self.watched_paths.get_mut(&path) {
+        watched.invalidated = true;
       }
+      paths.insert(path);
     }
-    (scan_all, paths, warnings)
+    let warnings = pending
+      .error
+      .map(|error| vec![format!("filesystem watcher error: {error}")])
+      .unwrap_or_default();
+    (pending.scan_all, paths, warnings)
   }
 
   fn watch_available_roots(&mut self) -> Result<(), String> {
@@ -224,15 +247,63 @@ impl SessionRelay {
     if self.wake_rx.is_closed() {
       return Err("filesystem watcher stopped unexpectedly".to_string());
     }
+    // A removed target may be absent from watch_targets(), particularly a
+    // deleted root or SQLite WAL. Release its registration before it returns.
+    let mut missing = Vec::new();
+    for path in self.watched_paths.keys() {
+      match std::fs::metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => missing.push(path.clone()),
+        Err(error) => return Err(format!("failed to inspect watch target {}: {error}", path.display())),
+      }
+    }
+    for path in missing {
+      if let Err(error) = watcher.unwatch(&path) {
+        if !watch_not_found(&error) {
+          return Err(format!(
+            "failed to remove missing watch for {}: {error}",
+            path.display()
+          ));
+        }
+      }
+      self.watched_paths.remove(&path);
+    }
     for root in self.tailer.roots() {
       for (path, mode) in watch_targets(root) {
-        if !path.exists() || self.watched_paths.contains(&path) {
+        let metadata = match std::fs::metadata(&path) {
+          Ok(metadata) => metadata,
+          Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+          Err(error) => return Err(format!("failed to inspect watch target {}: {error}", path.display())),
+        };
+        let identity = watch_identity(&metadata);
+        if self
+          .watched_paths
+          .get(&path)
+          .is_some_and(|watched| watched.identity == identity && !watched.invalidated)
+        {
           continue;
+        }
+        if self.watched_paths.contains_key(&path) {
+          // Kqueue can keep a stale path registration across replacement.
+          // Remove it before adding the new inode; duplicate registrations
+          // can otherwise leak descriptors.
+          if let Err(error) = watcher.unwatch(&path) {
+            if !watch_not_found(&error) {
+              return Err(format!("failed to replace watch for {}: {error}", path.display()));
+            }
+          }
+          self.watched_paths.remove(&path);
         }
         watcher
           .watch(&path, mode)
           .map_err(|err| format!("failed to watch {}: {err}", path.display()))?;
-        self.watched_paths.insert(path);
+        self.watched_paths.insert(
+          path,
+          WatchedPath {
+            identity,
+            invalidated: false,
+          },
+        );
       }
     }
     Ok(())
@@ -248,12 +319,88 @@ struct WatcherWake {
 
 enum ScanRequest {
   Full,
-  Watcher(Result<WatcherWake, String>),
+  Watcher,
   WatcherStopped,
 }
 
 type NativeWatcher = Box<dyn Watcher + Send>;
-type WatcherSender = mpsc::UnboundedSender<Result<WatcherWake, String>>;
+
+struct WatchedPath {
+  identity: WatchIdentity,
+  invalidated: bool,
+}
+
+fn watch_not_found(error: &notify::Error) -> bool {
+  matches!(&error.kind, notify::ErrorKind::WatchNotFound)
+    // notify 8's KqueueWatcher wraps its internal WatchNotFound as Generic.
+    || matches!(&error.kind, notify::ErrorKind::Generic(message) if message == "No watch was found.")
+}
+
+#[derive(Default)]
+struct PendingWakes {
+  // The bool records whether a remove/rename invalidated a registered watch.
+  paths: HashMap<PathBuf, bool>,
+  scan_all: bool,
+  overflowed: bool,
+  error: Option<String>,
+}
+
+impl PendingWakes {
+  fn merge(&mut self, wake: Result<WatcherWake, String>) {
+    match wake {
+      Ok(wake) => {
+        self.scan_all |= wake.need_rescan;
+        if self.overflowed {
+          return;
+        }
+        let invalidates_watch = matches!(wake.kind, EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_)));
+        for path in wake.paths {
+          if let Some(previous) = self.paths.get_mut(&path) {
+            *previous |= invalidates_watch;
+          } else if self.paths.len() == MAX_PENDING_WATCH_PATHS {
+            // Path detail is incomplete. Recover from all roots. Watch-target
+            // identity checks will repair a dropped remove/rename notification.
+            self.paths.clear();
+            self.scan_all = true;
+            self.overflowed = true;
+            break;
+          } else {
+            self.paths.insert(path, invalidates_watch);
+          }
+        }
+      }
+      Err(error) => {
+        self.scan_all = true;
+        if self.error.is_none() {
+          self.error = Some(error);
+        }
+      }
+    }
+  }
+}
+
+#[derive(Clone)]
+struct WatcherSender {
+  signal_tx: mpsc::Sender<()>,
+  pending_wakes: Arc<Mutex<PendingWakes>>,
+}
+
+impl WatcherSender {
+  fn send(&self, wake: Result<WatcherWake, String>) -> Result<(), ()> {
+    if self.signal_tx.is_closed() {
+      return Err(());
+    }
+    let mut guard = self
+      .pending_wakes
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.merge(wake);
+    match self.signal_tx.try_send(()) {
+      Ok(()) | Err(mpsc::error::TrySendError::Full(())) => Ok(()),
+      Err(mpsc::error::TrySendError::Closed(())) => Err(()),
+    }
+  }
+}
 
 fn create_native_watcher(wake_tx: WatcherSender) -> notify::Result<NativeWatcher> {
   notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
@@ -276,22 +423,21 @@ fn polling_warning(error: String) -> String {
   format!("{error}; filesystem notifications disabled, continuing with periodic polling")
 }
 
-fn merge_watcher_event(
-  watched_paths: &mut HashSet<PathBuf>,
-  scan_all: &mut bool,
-  paths: &mut HashSet<PathBuf>,
-  event: WatcherWake,
-) {
-  if matches!(
-    event.kind,
-    EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
-  ) {
-    for path in &event.paths {
-      watched_paths.remove(path);
-    }
-  }
-  *scan_all |= event.need_rescan;
-  paths.extend(event.paths);
+#[cfg(unix)]
+type WatchIdentity = (u64, u64);
+
+#[cfg(unix)]
+fn watch_identity(metadata: &std::fs::Metadata) -> WatchIdentity {
+  use std::os::unix::fs::MetadataExt;
+  (metadata.dev(), metadata.ino())
+}
+
+#[cfg(not(unix))]
+type WatchIdentity = Option<std::time::SystemTime>;
+
+#[cfg(not(unix))]
+fn watch_identity(metadata: &std::fs::Metadata) -> WatchIdentity {
+  metadata.created().ok()
 }
 
 fn watch_targets(root: &ProviderRoot) -> Vec<(PathBuf, RecursiveMode)> {
@@ -350,31 +496,58 @@ mod tests {
   use std::task::{Context, Waker};
   use std::time::Duration;
 
-  use notify::{EventKind, RecursiveMode, Watcher};
+  use notify::{EventKind, RecursiveMode, Watcher, event::RemoveKind};
   use rusqlite::{Connection, params};
   use tempfile::TempDir;
   use tokn_session_core::{AgentEvent, Provider};
 
-  use super::{RelayConfig, SessionRelay, WatcherSender, WatcherWake, merge_watcher_event, watch_targets};
+  use super::{
+    MAX_PENDING_WATCH_PATHS, PendingWakes, RelayConfig, SessionRelay, WatcherSender, WatcherWake, watch_targets,
+  };
   use crate::ProviderRoot;
 
   #[test]
   fn ordinary_empty_watcher_events_do_not_force_a_full_scan() {
-    let mut watched_paths = std::collections::HashSet::new();
-    let mut scan_all = false;
-    let mut paths = std::collections::HashSet::new();
-    merge_watcher_event(
-      &mut watched_paths,
-      &mut scan_all,
-      &mut paths,
-      WatcherWake {
-        paths: Vec::new(),
+    let mut pending = PendingWakes::default();
+    pending.merge(Ok(WatcherWake {
+      paths: Vec::new(),
+      kind: EventKind::Other,
+      need_rescan: false,
+    }));
+    assert!(!pending.scan_all);
+    assert!(pending.paths.is_empty());
+  }
+
+  #[test]
+  fn watcher_bursts_keep_only_bounded_unique_paths() {
+    let mut pending = PendingWakes::default();
+    let path = PathBuf::from("session.jsonl");
+    for _ in 0..10_000 {
+      pending.merge(Ok(WatcherWake {
+        paths: vec![path.clone()],
         kind: EventKind::Other,
         need_rescan: false,
-      },
-    );
-    assert!(!scan_all);
-    assert!(paths.is_empty());
+      }));
+    }
+    assert_eq!(pending.paths.len(), 1);
+    assert!(!pending.scan_all);
+    pending.merge(Ok(WatcherWake {
+      paths: vec![path.clone()],
+      kind: EventKind::Remove(RemoveKind::Any),
+      need_rescan: false,
+    }));
+    assert_eq!(pending.paths.get(&path), Some(&true));
+
+    for index in 0..=MAX_PENDING_WATCH_PATHS {
+      pending.merge(Ok(WatcherWake {
+        paths: vec![PathBuf::from(format!("session_{index}.jsonl"))],
+        kind: EventKind::Other,
+        need_rescan: false,
+      }));
+    }
+    assert!(pending.scan_all);
+    assert!(pending.overflowed);
+    assert!(pending.paths.is_empty());
   }
 
   #[test]
@@ -417,6 +590,7 @@ mod tests {
   struct TestWatcher {
     wake_tx: Option<WatcherSender>,
     watches: Arc<AtomicUsize>,
+    unwatches: Arc<AtomicUsize>,
     dropped: Arc<AtomicBool>,
     fail_on_watch: Option<usize>,
     panic_on_drop: bool,
@@ -437,6 +611,7 @@ mod tests {
     }
 
     fn unwatch(&mut self, _path: &Path) -> notify::Result<()> {
+      self.unwatches.fetch_add(1, Ordering::SeqCst);
       Ok(())
     }
 
@@ -479,6 +654,230 @@ mod tests {
         .poll(&mut Context::from_waker(Waker::noop()))
         .is_pending()
     );
+  }
+
+  fn send_watcher_storm(sender: &WatcherSender, root: &Path) {
+    for index in 0..=MAX_PENDING_WATCH_PATHS {
+      sender
+        .send(Ok(WatcherWake {
+          paths: vec![root.join(format!("unrelated-{index}"))],
+          kind: EventKind::Other,
+          need_rescan: false,
+        }))
+        .unwrap();
+    }
+  }
+
+  #[tokio::test]
+  async fn watcher_path_overflow_runs_full_recovery_without_duplicate_watches() {
+    let (_fixture, path, mut config) = polling_fixture();
+    config.poll_interval = Duration::from_secs(3600);
+    let root = path.parent().unwrap().to_path_buf();
+    let mut sender = None;
+    let watches = Arc::new(AtomicUsize::new(0));
+    let mut relay = SessionRelay::new_with_watcher(
+      config,
+      || Ok(()),
+      |wake_tx| {
+        sender = Some(wake_tx.clone());
+        Ok(Box::new(TestWatcher {
+          wake_tx: Some(wake_tx),
+          watches: watches.clone(),
+          unwatches: Arc::new(AtomicUsize::new(0)),
+          dropped: Arc::new(AtomicBool::new(false)),
+          fail_on_watch: None,
+          panic_on_drop: false,
+        }))
+      },
+    )
+    .await
+    .unwrap();
+    relay.next_update().await.unwrap();
+    assert_eq!(watches.load(Ordering::SeqCst), 1);
+
+    append_polling_message(&path);
+    send_watcher_storm(sender.as_ref().unwrap(), &root);
+    let update = relay.next_update().await.unwrap();
+    assert_eq!(update.records.len(), 1);
+    assert_eq!(watches.load(Ordering::SeqCst), 1);
+    assert_waits_for_poll(&mut relay);
+
+    append_polling_message(&path);
+    sender
+      .as_ref()
+      .unwrap()
+      .send(Ok(WatcherWake {
+        paths: vec![path],
+        kind: EventKind::Other,
+        need_rescan: false,
+      }))
+      .unwrap();
+    assert_eq!(relay.next_update().await.unwrap().records.len(), 1);
+  }
+
+  #[tokio::test]
+  async fn watcher_path_overflow_replaces_a_recreated_root_watch() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("sessions");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(
+      root.join("session_old.jsonl"),
+      "{\"type\":\"session\",\"id\":\"old-session\"}\n",
+    )
+    .unwrap();
+    let mut config = RelayConfig::new(vec![ProviderRoot::new(Provider::Pi, root.clone())]);
+    config.poll_interval = Duration::from_secs(3600);
+    let mut sender = None;
+    let watches = Arc::new(AtomicUsize::new(0));
+    let unwatches = Arc::new(AtomicUsize::new(0));
+    let mut relay = SessionRelay::new_with_watcher(
+      config,
+      || Ok(()),
+      |wake_tx| {
+        sender = Some(wake_tx.clone());
+        Ok(Box::new(TestWatcher {
+          wake_tx: Some(wake_tx),
+          watches: watches.clone(),
+          unwatches: unwatches.clone(),
+          dropped: Arc::new(AtomicBool::new(false)),
+          fail_on_watch: None,
+          panic_on_drop: false,
+        }))
+      },
+    )
+    .await
+    .unwrap();
+    relay.next_update().await.unwrap();
+    assert_eq!(watches.load(Ordering::SeqCst), 1);
+
+    let old_root = fixture.path().join("old-sessions");
+    std::fs::rename(&root, &old_root).unwrap();
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(
+      root.join("session_new.jsonl"),
+      "{\"type\":\"session\",\"id\":\"new-session\"}\n{\"type\":\"message\",\"id\":\"new\",\"message\":{\"role\":\"user\",\"content\":\"new\"}}\n",
+    )
+    .unwrap();
+    send_watcher_storm(sender.as_ref().unwrap(), &root);
+    let update = relay.next_update().await.unwrap();
+    assert_eq!(watches.load(Ordering::SeqCst), 2);
+    assert_eq!(unwatches.load(Ordering::SeqCst), 1);
+    assert!(update.records.iter().any(|record| record.topic == "pi.new-session"));
+  }
+
+  #[tokio::test]
+  async fn remove_and_recreate_replaces_existing_watch_before_registering_again() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("sessions");
+    std::fs::create_dir(&root).unwrap();
+    let mut config = RelayConfig::new(vec![ProviderRoot::new(Provider::Pi, root.clone())]);
+    config.poll_interval = Duration::from_secs(3600);
+    let watches = Arc::new(AtomicUsize::new(0));
+    let unwatches = Arc::new(AtomicUsize::new(0));
+    let mut sender = None;
+    let mut relay = SessionRelay::new_with_watcher(
+      config,
+      || Ok(()),
+      |wake_tx| {
+        sender = Some(wake_tx.clone());
+        Ok(Box::new(TestWatcher {
+          wake_tx: Some(wake_tx),
+          watches: watches.clone(),
+          unwatches: unwatches.clone(),
+          dropped: Arc::new(AtomicBool::new(false)),
+          fail_on_watch: None,
+          panic_on_drop: false,
+        }))
+      },
+    )
+    .await
+    .unwrap();
+    relay.next_update().await.unwrap();
+    assert_eq!(watches.load(Ordering::SeqCst), 1);
+
+    std::fs::rename(&root, fixture.path().join("old-sessions")).unwrap();
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(
+      root.join("session_new.jsonl"),
+      "{\"type\":\"session\",\"id\":\"new-session\"}\n",
+    )
+    .unwrap();
+    sender
+      .as_ref()
+      .unwrap()
+      .send(Ok(WatcherWake {
+        paths: vec![root],
+        kind: EventKind::Remove(RemoveKind::Any),
+        need_rescan: false,
+      }))
+      .unwrap();
+    let update = relay.next_update().await.unwrap();
+    assert_eq!(unwatches.load(Ordering::SeqCst), 1);
+    assert_eq!(watches.load(Ordering::SeqCst), 2);
+    assert!(update.records.iter().any(|record| record.topic == "pi.new-session"));
+  }
+
+  #[tokio::test]
+  async fn missing_watch_target_is_released_before_later_recreation() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("sessions");
+    std::fs::create_dir(&root).unwrap();
+    let mut config = RelayConfig::new(vec![ProviderRoot::new(Provider::Pi, root.clone())]);
+    config.poll_interval = Duration::from_secs(3600);
+    let watches = Arc::new(AtomicUsize::new(0));
+    let unwatches = Arc::new(AtomicUsize::new(0));
+    let mut sender = None;
+    let mut relay = SessionRelay::new_with_watcher(
+      config,
+      || Ok(()),
+      |wake_tx| {
+        sender = Some(wake_tx.clone());
+        Ok(Box::new(TestWatcher {
+          wake_tx: Some(wake_tx),
+          watches: watches.clone(),
+          unwatches: unwatches.clone(),
+          dropped: Arc::new(AtomicBool::new(false)),
+          fail_on_watch: None,
+          panic_on_drop: false,
+        }))
+      },
+    )
+    .await
+    .unwrap();
+    relay.next_update().await.unwrap();
+
+    std::fs::rename(&root, fixture.path().join("old-sessions")).unwrap();
+    sender
+      .as_ref()
+      .unwrap()
+      .send(Ok(WatcherWake {
+        paths: vec![root.clone()],
+        kind: EventKind::Remove(RemoveKind::Any),
+        need_rescan: false,
+      }))
+      .unwrap();
+    relay.next_update().await.unwrap();
+    assert_eq!(unwatches.load(Ordering::SeqCst), 1);
+    assert!(relay.watched_paths.is_empty());
+
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(
+      root.join("session_new.jsonl"),
+      "{\"type\":\"session\",\"id\":\"new-session\"}\n",
+    )
+    .unwrap();
+    sender
+      .as_ref()
+      .unwrap()
+      .send(Ok(WatcherWake {
+        paths: vec![root],
+        kind: EventKind::Create(notify::event::CreateKind::Folder),
+        need_rescan: false,
+      }))
+      .unwrap();
+    let update = relay.next_update().await.unwrap();
+    assert_eq!(watches.load(Ordering::SeqCst), 2);
+    assert!(update.records.iter().any(|record| record.topic == "pi.new-session"));
   }
 
   #[tokio::test]
@@ -526,6 +925,7 @@ mod tests {
         Ok(Box::new(TestWatcher {
           wake_tx: Some(wake_tx),
           watches: watches.clone(),
+          unwatches: Arc::new(AtomicUsize::new(0)),
           dropped: dropped.clone(),
           fail_on_watch: Some(2),
           panic_on_drop: false,
@@ -559,6 +959,7 @@ mod tests {
         Ok(Box::new(TestWatcher {
           wake_tx: Some(wake_tx),
           watches: Arc::new(AtomicUsize::new(0)),
+          unwatches: Arc::new(AtomicUsize::new(0)),
           dropped: dropped.clone(),
           fail_on_watch: None,
           panic_on_drop: false,
@@ -594,6 +995,7 @@ mod tests {
         Ok(Box::new(TestWatcher {
           wake_tx: Some(wake_tx),
           watches: Arc::new(AtomicUsize::new(0)),
+          unwatches: Arc::new(AtomicUsize::new(0)),
           dropped: Arc::new(AtomicBool::new(false)),
           fail_on_watch: None,
           panic_on_drop: true,
@@ -603,7 +1005,7 @@ mod tests {
     .await
     .unwrap();
     relay.next_update().await.unwrap();
-    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
     relay.wake_rx = receiver;
     drop(sender);
     append_polling_message(&path);
