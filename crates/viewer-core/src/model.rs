@@ -306,6 +306,20 @@ pub struct SessionSummary {
   pub unread_descendant_count: u64,
   pub is_running: bool,
   pub has_running_descendant: bool,
+  pub question_attention: QuestionAttention,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct QuestionAttention {
+  pub required_count: u64,
+  pub available_count: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OutstandingQuestion {
+  pub event_key: String,
+  pub requires_input: bool,
+  pub unanswered_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -412,6 +426,7 @@ pub struct EventPage {
   /// acknowledges this only after React has committed the page, preventing a
   /// stale request from consuming a newer update.
   pub attention_revision: Option<String>,
+  pub outstanding_questions: Vec<OutstandingQuestion>,
 }
 
 /// Acknowledges the exact attention revision represented by an accepted event

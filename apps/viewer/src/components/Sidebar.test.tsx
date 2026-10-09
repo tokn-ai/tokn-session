@@ -61,6 +61,20 @@ function renderSidebar(
 }
 
 describe("Sidebar session identity", () => {
+  it("keeps async question attention visible beside running state and unread replies", () => {
+    const { rerender } = renderSidebar([session({ is_running: true, question_attention: { required_count: 0, available_count: 2 } })]);
+    expect(screen.getByRole("img", { name: "Question available, 2 unanswered questions" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Running" })).toBeInTheDocument();
+    rerender(<Sidebar enabled_providers={new Set(["codex"])} error={null} has_more={false} is_loading={false} is_loading_more={false}
+      on_children_load={vi.fn()} on_children_load_more={vi.fn()} on_children_retry={vi.fn()} on_load_more={vi.fn()}
+      on_provider_toggle={vi.fn()} on_retry={vi.fn()} on_search_change={vi.fn()} on_session_select={vi.fn()}
+      search="" session_children={new Map()} selected_session_key={null} sessions={[session({
+        is_running: true, has_unread: true, unread_final_count: 1, question_attention: { required_count: 1, available_count: 0 },
+      })]} source_errors={[]} pending_providers={[]} />);
+    expect(screen.getByRole("img", { name: "Input required, 1 unanswered question" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "1 unread final reply" })).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Running" })).not.toBeInTheDocument();
+  });
   it("offers WorkBuddy as a provider filter", () => {
     renderSidebar([]);
 

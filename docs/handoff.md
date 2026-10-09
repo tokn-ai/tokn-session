@@ -4,6 +4,16 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
+The viewer tracks unanswered questions separately from unread final replies.
+Sidebar badges and session notices show **Input required** for explicit blocking
+requests and **Question available** for async/unknown blocking requests. They
+remain visible after read acknowledgement; exact question-ID replies resolve
+individual questions, while turn completion, supersession, final replies, and
+errors retire remaining attention. Clicking a sidebar badge/session notice
+opens and focuses the outstanding question card. Retained windows preserve
+outstanding request context. Compact `session-activity.v3` markers persist counts;
+older final-only markers migrate quietly without resetting unread replies.
+
 `tokn-session` can list and show existing sessions from Pi, Codex, OpenCode,
 ZCode, WorkBuddy, and DSH.
 
@@ -787,7 +797,10 @@ revisions. Older user-plus-assistant markers establish a quiet final-only baseli
 The compact marker also stores running state, derived from turn boundaries and
 work events; final replies, turn completion/interruption, and provider errors
 stop it. Unknown activity is not inferred from file modification alone.
-The sidebar shows exactly one indicator: a running circle takes precedence;
+Question attention is independent of read acknowledgement and is session-local;
+it does not increase final-reply unread counts or propagate to ancestors.
+Outstanding questions have a separate badge and navigable session notices.
+Among activity/unread indicators, a running circle takes precedence;
 otherwise one unread reply is a dot, multiple replies show a count, and read
 sessions have no indicator. Unread counts belong only to the session itself;
 subagent replies never contribute to an ancestor’s unread state or count.

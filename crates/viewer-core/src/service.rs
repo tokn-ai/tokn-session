@@ -352,6 +352,7 @@ struct SessionAttention {
   unread_final_count: u64,
   is_running: bool,
   has_running_descendant: bool,
+  question_attention: crate::model::QuestionAttention,
 }
 
 #[derive(Default)]
@@ -2697,10 +2698,10 @@ impl ViewerService {
     let existing = self.session_index.session(&key).map_err(|e| e.to_string())?;
     let marker = existing
       .as_ref()
-      .filter(|row| !needs_activity_upgrade(row))
-      .and_then(known_attention_marker);
+      .filter(|row| !needs_unread_upgrade(row))
+      .and_then(|row| Activity::from_marker(row.attention_marker.as_deref()).map(|activity| activity.marker()));
     let mut request = SessionBaselineCompletionRequest::new(key, marker);
-    request.reset_attention = existing.as_ref().is_some_and(needs_activity_upgrade);
+    request.reset_attention = existing.as_ref().is_some_and(needs_unread_upgrade);
     let completion = self
       .session_index
       .complete_session_baseline(&job.source, &next_source, request)
@@ -2783,6 +2784,7 @@ impl ViewerService {
       total_events,
       history_status: loaded.history_status.into(),
       attention_revision,
+      outstanding_questions: outstanding_questions(&loaded.events, &identity),
     })
   }
 
@@ -3554,6 +3556,14 @@ fn same_optional_identity(left: Option<&str>, right: Option<&str>) -> bool {
 }
 
 fn needs_activity_upgrade(session: &IndexedSession) -> bool {
+  needs_unread_upgrade(session)
+    || session
+      .attention_marker
+      .as_deref()
+      .is_some_and(|marker| marker.starts_with("final-replies.v2."))
+}
+
+fn needs_unread_upgrade(session: &IndexedSession) -> bool {
   session
     .attention_marker
     .as_deref()
@@ -3611,7 +3621,8 @@ impl SessionAttention {
     Self {
       has_unread: count > 0,
       unread_final_count: count,
-      is_running: activity.is_some_and(|activity| activity.running),
+      is_running: activity.as_ref().is_some_and(|activity| activity.running),
+      question_attention: activity.map(|activity| activity.question_attention).unwrap_or_default(),
       ..Default::default()
     }
   }
@@ -3924,6 +3935,28 @@ fn session_summary(provider: ViewerProvider, header: SessionHeader) -> Result<Se
   session_summary_with_child_count(provider, header, 0, false, SessionAttention::default())
 }
 
+fn outstanding_questions(
+  events: &[AgentEvent],
+  identity: &windows::WindowIdentity,
+) -> Vec<crate::model::OutstandingQuestion> {
+  let mut questions = crate::questions::Questions::default();
+  for (index, event) in events.iter().enumerate() {
+    questions.observe(event, index);
+  }
+  let mut outstanding: Vec<_> = questions.outstanding().collect();
+  outstanding.sort_by_key(|(index, required, _)| (!required, *index));
+  outstanding
+    .into_iter()
+    .map(
+      |(index, requires_input, unanswered_count)| crate::model::OutstandingQuestion {
+        event_key: identity.key(&encode_event_key(index)),
+        requires_input,
+        unanswered_count,
+      },
+    )
+    .collect()
+}
+
 fn session_summary_with_child_count(
   provider: ViewerProvider,
   header: SessionHeader,
@@ -3969,6 +4002,7 @@ fn session_summary_with_child_count(
     unread_descendant_count: 0,
     is_running: attention.is_running,
     has_running_descendant: attention.has_running_descendant,
+    question_attention: attention.question_attention,
   })
 }
 
@@ -7486,7 +7520,7 @@ mod tests {
       .session(&index_session_key(&locator).expect("index key should encode"))
       .expect("indexed session should query")
       .expect("indexed session should exist");
-    assert_eq!(indexed.attention_marker.as_deref(), Some("final-replies.v2.2.0"));
+    assert_eq!(indexed.attention_marker.as_deref(), Some("session-activity.v3.2.0.0.0"));
   }
 
   #[test]
@@ -8033,7 +8067,7 @@ mod tests {
       .session(&index_session_key(&locator).expect("index key should encode"))
       .expect("indexed session should query")
       .expect("indexed session should remain present");
-    assert_eq!(stale.attention_marker.as_deref(), Some("final-replies.v2.0.0"));
+    assert_eq!(stale.attention_marker.as_deref(), Some("session-activity.v3.0.0.0.0"));
     assert!(!stale.attention_baselined);
     assert!(!stale.has_unread());
     assert!(service.index_error_for(ViewerProvider::Codex).is_none());
@@ -8044,7 +8078,10 @@ mod tests {
       .session(&index_session_key(&locator).expect("index key should encode"))
       .expect("indexed session should query")
       .expect("indexed session should remain present");
-    assert_eq!(recovered.attention_marker.as_deref(), Some("final-replies.v2.1.0"));
+    assert_eq!(
+      recovered.attention_marker.as_deref(),
+      Some("session-activity.v3.1.0.0.0")
+    );
     assert!(recovered.has_unread());
   }
 

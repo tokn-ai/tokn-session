@@ -2264,6 +2264,28 @@ describe("useViewerState agent communication detail", () => {
     expect(loadEventDetail).toHaveBeenCalledOnce();
   });
 
+  it("opens an outstanding question from the sidebar without consuming it and clears navigation on session switches", async () => {
+    const page = communicationPage();
+    page.events = [{ ...page.events[0], type: "question_request", agent_activity: null, title: "Questions" }];
+    page.outstanding_questions = [{ event_key: "event.v1.communication", requires_input: false, unanswered_count: 2 }];
+    vi.mocked(loadEventPage).mockResolvedValue(page);
+    vi.mocked(loadEventDetail).mockResolvedValue(communicationDetail());
+    const { result } = renderHook(() => useViewerState());
+    await waitFor(() => expect(result.current.sessions).toHaveLength(2));
+    act(() => result.current.selectQuestionSession("codex:communication"));
+    await waitFor(() => expect(result.current.expandedEventKey).toBe("event.v1.communication"));
+    expect(result.current.outstandingQuestions).toEqual(page.outstanding_questions);
+    expect(result.current.questionNavigation?.event_key).toBe("event.v1.communication");
+    await waitFor(() => expect(result.current.expandedDetail).not.toBeNull());
+    const previous = result.current.questionNavigation?.revision ?? 0;
+    act(() => result.current.selectQuestionSession("codex:communication"));
+    expect(result.current.questionNavigation?.revision).toBeGreaterThan(previous);
+    expect(result.current.outstandingQuestions).toHaveLength(1);
+    act(() => result.current.selectSession("codex:next"));
+    expect(result.current.outstandingQuestions).toEqual([]);
+    expect(result.current.questionNavigation).toBeNull();
+  });
+
   it("loads after expansion, retries failures, and shares detail with Inspector", async () => {
     vi.mocked(loadEventPage).mockResolvedValue(communicationPage());
     vi.mocked(loadEventDetail).mockRejectedValueOnce(new Error("Snapshot changed"))

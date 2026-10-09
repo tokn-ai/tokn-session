@@ -50,6 +50,26 @@ function toggleFilter() {
 }
 
 describe("Conversation quick filter", () => {
+  it("shows separate blocking and available question notices and opens their cards", () => {
+    const on_question_open = vi.fn();
+    const view = render(<Conversation {...props({ on_question_open, outstanding_questions: [
+      { event_key: "blocking", requires_input: true, unanswered_count: 1 },
+      { event_key: "async", requires_input: false, unanswered_count: 2 },
+    ] })} />);
+    fireEvent.click(screen.getByRole("button", { name: /Input required/ }));
+    expect(on_question_open).toHaveBeenCalledWith("blocking");
+    fireEvent.click(screen.getByRole("button", { name: /Question available/ }));
+    expect(on_question_open).toHaveBeenCalledWith("async");
+    view.rerender(<Conversation {...props({ outstanding_questions: [] })} />);
+    expect(screen.queryByRole("status", { name: "Unanswered questions" })).not.toBeInTheDocument();
+  });
+
+  it("focuses the outstanding question when navigation arrives", () => {
+    render(<Conversation {...props({ events: [event("question", { type: "question_request", is_bookkeeping: false })],
+      question_navigation: { event_key: "question", revision: 1 },
+    })} />);
+    expect(screen.getByRole("button", { name: "Questions: question detail" })).toHaveFocus();
+  });
   it("hides intermediate usage and routine lifecycle while keeping final usage, errors, unknowns, and meaningful outcomes", () => {
     render(<Conversation {...props({ events: [
       event("Turn started"), event("Context settings", { type: "metadata" }),

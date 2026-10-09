@@ -166,6 +166,7 @@ export interface SessionSummary {
   unread_descendant_count?: number;
   is_running?: boolean;
   has_running_descendant?: boolean;
+  question_attention?: { required_count: number; available_count: number };
 }
 
 export type SessionOrder = "time" | "project";
@@ -454,6 +455,13 @@ export interface EventPageResponse {
   history_status: SessionHistoryStatus;
   /** Opaque indexed snapshot; absent while connected to an older backend. */
   attention_revision?: string | null;
+  outstanding_questions?: OutstandingQuestion[];
+}
+
+export interface OutstandingQuestion {
+  event_key: string;
+  requires_input: boolean;
+  unanswered_count: number;
 }
 
 export interface LoadTrajectoryEventPageRequest {

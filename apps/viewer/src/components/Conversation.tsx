@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useLayoutEffect, useState } from "react";
 import { readingEventKey } from "../lib/readingPosition";
 import { useTimelineScroll } from "../lib/useTimelineScroll";
 import { isBookkeepingEvent } from "../lib/eventFilter";
 import type {
   EventDetail,
   EventSummary,
+  OutstandingQuestion,
   SessionHistoryStatus,
   SessionSummary,
   TrajectoryEventPageState,
@@ -23,6 +24,9 @@ import { LoadingRows, StateView } from "./StateView";
 import { SessionComposer } from "./SessionComposer";
 
 interface ConversationProps {
+  outstanding_questions?: OutstandingQuestion[];
+  question_navigation?: { event_key: string; revision: number } | null;
+  on_question_open?: (event_key: string) => void;
   pending_live_activity?: boolean;
   on_show_live_activity?: () => void;
   on_follow_change?: (following: boolean) => void;
@@ -67,6 +71,9 @@ interface ConversationProps {
 }
 
 export function Conversation({
+  outstanding_questions = [],
+  question_navigation,
+  on_question_open,
   pending_live_activity = false,
   on_show_live_activity,
   on_follow_change,
@@ -118,6 +125,18 @@ export function Conversation({
     last_event: events.length ? readingEventKey(events[events.length - 1]) : undefined,
     on_follow_change,
   });
+
+  useLayoutEffect(() => {
+    if (!question_navigation) return;
+    const button = document.getElementById(`${eventButtonId(question_navigation.event_key)}-label`)?.closest("button");
+    if (!button || !scroll.timelineRef.current?.contains(button)) return;
+    scroll.pause();
+    button.scrollIntoView?.({ block: "start" });
+    button.focus({ preventScroll: true });
+    // Capture the chosen position so later detail/Markdown layout changes
+    // preserve it instead of restoring the previously visible timeline row.
+    scroll.pause();
+  }, [question_navigation, session?.session_key]);
 
   function loadOlder() {
     scroll.pause();
@@ -206,6 +225,15 @@ export function Conversation({
           <InspectorIcon />
         </button>
       </header>
+
+      {outstanding_questions.length > 0 ? <div className="question-attention" role="status" aria-label="Unanswered questions">
+        {outstanding_questions.map((question) => <button type="button" key={question.event_key}
+          className="question-attention__item" data-blocking={question.requires_input}
+          onClick={() => { scroll.pause(); on_question_open?.(question.event_key); }}>
+          <strong>{question.requires_input ? "Input required" : "Question available"}</strong>
+          <span>{question.unanswered_count} unanswered {question.unanswered_count === 1 ? "question" : "questions"} · View</span>
+        </button>)}
+      </div> : null}
 
       {pending_live_activity || !scroll.isFollowing ? (
         <button className="page-button" type="button" onClick={() => {
