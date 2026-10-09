@@ -1403,6 +1403,17 @@ mod tests {
     )
     .unwrap();
 
+    // Allocate a distinct inode before removing the tracked file. Immediate
+    // recreation can reuse its inode on Linux and look like an append.
+    let replacement = fixture.path().join("replacement");
+    std::fs::write(
+      &replacement,
+      concat!(
+        "{\"type\":\"session\",\"id\":\"new-session\"}\n",
+        "{\"type\":\"message\",\"id\":\"new\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n"
+      ),
+    )
+    .unwrap();
     std::fs::remove_file(&path).unwrap();
     std::os::unix::fs::symlink(&path, &path).unwrap();
     let full = tailer.scan().unwrap();
@@ -1423,14 +1434,7 @@ mod tests {
     assert!(tailer.files.contains_key(&path));
 
     std::fs::remove_file(&path).unwrap();
-    std::fs::write(
-      &path,
-      concat!(
-        "{\"type\":\"session\",\"id\":\"new-session\"}\n",
-        "{\"type\":\"message\",\"id\":\"new\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n"
-      ),
-    )
-    .unwrap();
+    std::fs::rename(replacement, &path).unwrap();
     let recovered = tailer.scan_paths(HashSet::from([path])).unwrap();
     assert!(recovered.warnings.is_empty());
     assert_eq!(recovered.records.len(), 2);
