@@ -8,6 +8,7 @@ pub enum AgentEvent {
   ProviderChanged(ProviderChanged),
   SessionSettingsApplied(SessionSettingsApplied),
   Message(MessageEvent),
+  QuestionRequest(QuestionRequestEvent),
   Reasoning(ReasoningEvent),
   GoalUpdated(GoalUpdated),
   AgentActivity(AgentActivity),
@@ -88,6 +89,38 @@ pub struct MessageEvent {
   pub phase: Phase,
   pub text: String,
   pub timestamp: Option<String>,
+}
+
+/// A recorded request for user input, not evidence that input is still pending.
+#[derive(Debug, Serialize, Clone, Deserialize)]
+pub struct QuestionRequestEvent {
+  pub provider: Provider,
+  pub session_id: Option<String>,
+  pub request_id: Option<String>,
+  pub turn_id: Option<String>,
+  /// None when the historical call lacks the provider's effective mode.
+  pub is_blocking: Option<bool>,
+  pub phase: Phase,
+  pub text: Option<String>,
+  pub questions: Vec<UserQuestion>,
+  pub native: Value,
+  pub timestamp: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone, Deserialize)]
+pub struct UserQuestion {
+  pub id: Option<String>,
+  pub header: Option<String>,
+  pub question: String,
+  pub options: Option<Vec<UserQuestionOption>>,
+  pub allows_free_text: bool,
+  pub is_secret: bool,
+}
+
+#[derive(Debug, Serialize, Clone, Deserialize)]
+pub struct UserQuestionOption {
+  pub label: String,
+  pub description: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone, Deserialize)]

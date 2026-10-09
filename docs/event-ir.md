@@ -126,6 +126,41 @@ readable Markdown through event detail. Sender navigation requires a unique
 identity within the selected session's canonical relation tree. Repeated agent
 paths in unrelated root sessions do not establish a relationship.
 
+## Questions
+
+`question_request` is a recorded request for user input. It contains the
+provider/session, request and turn IDs when available, optional blocking flag,
+recorded phase, optional fallback text, structured questions/options, native payload,
+and timestamp. Questions preserve IDs/headers where supplied, option labels and
+descriptions, free-text allowance, and secret-answer intent. A finished record
+means the request was recorded; it does not mean the user answered it.
+
+Codex paginated history stores `item_completed.AgentMessage` with
+`delivery: "async"` and `questions: [{ title, options? }]`. Its
+`phase: "final_answer"` is not an ordinary final assistant reply. The async tool
+call is a duplicate in this mode. Legacy history instead keeps
+`request_user_input_async` function calls; unpaired canonical question items in
+exports are also readable. Structured `request_user_input` invocations have no
+canonical request item, so their raw calls remain readable in both history
+modes. Explicit `event_msg.request_user_input` records in exports are supported,
+although upstream currently excludes them from persisted rollouts. Missing or
+null `isBlocking` on explicit request events defaults to true. Raw structured
+tool calls lack the effective collaboration mode, so their blocking flag stays
+unknown; the handler supplies their free-form Other choice. Deprecated
+`autoResolutionMs` remains native detail. Unknown fields remain inspectable;
+malformed canonical items stay unknown,
+while malformed legacy tool arguments retain their ordinary tool representation.
+
+The viewer keeps requests outside work trajectories and shows Markdown prompts,
+static choice lists, and free-text/secret markers. It does not infer current
+pending state, selected answers, or submission controls from history. Replies
+retain their original user-message or tool-result representation.
+
+Source of truth: `vendor/codex` at `2351d9e1b6`, particularly
+`protocol/src/items.rs`, `protocol/src/request_user_input.rs`,
+`core/src/tools/handlers/request_user_input_async.rs`, and `rollout/src/policy.rs`
+under `codex-rs/`.
+
 ## Metadata and provenance
 
 `metadata` means a recognized non-conversation record whose required envelope

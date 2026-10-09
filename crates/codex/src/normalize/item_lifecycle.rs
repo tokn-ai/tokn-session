@@ -33,6 +33,20 @@ pub(super) fn normalize_legacy_item_completed(
   let item = payload.get("item").filter(|item| item.is_object());
   let item_type = item.and_then(|item| item.get("type")).and_then(Value::as_str);
   match (item_type, item) {
+    (Some("AgentMessage"), Some(item))
+      if item.get("questions").is_some_and(|value| !value.is_null())
+        || item.get("delivery").is_some_and(|value| !value.is_null()) =>
+    {
+      normalize_canonical_agent_message(
+        session_id.clone(),
+        "item_completed",
+        item,
+        Phase::Finished,
+        payload,
+        timestamp.clone(),
+      )
+      .unwrap_or_else(|| unknown_item_lifecycle(session_id, "item_completed", Some("AgentMessage"), payload, timestamp))
+    }
     (Some("Plan"), Some(item)) if valid_plan_item(item) => vec![item_lifecycle_metadata(
       session_id,
       "item_completed",
@@ -242,6 +256,22 @@ fn normalize_canonical_agent_message(
     text.push_str(entry.get("text")?.as_str()?);
   }
   let delivery = codex_message_delivery(item.get("phase").and_then(Value::as_str));
+  if item.get("questions").is_some_and(|value| !value.is_null())
+    || item.get("delivery").is_some_and(|value| !value.is_null())
+  {
+    let question = super::questions::async_message(session_id.clone(), item, payload, text, phase, timestamp.clone())?;
+    if matches!(phase, Phase::Started) {
+      return Some(vec![item_lifecycle_metadata(
+        session_id,
+        lifecycle_type,
+        "AgentMessage",
+        "question request started",
+        payload,
+        timestamp,
+      )]);
+    }
+    return Some(vec![question]);
+  }
   if text.is_empty() {
     return Some(vec![item_lifecycle_metadata(
       session_id,

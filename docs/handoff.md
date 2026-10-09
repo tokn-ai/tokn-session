@@ -17,6 +17,16 @@ including in paginated history. Cards expose the recorded turn-trigger flag,
 link verified senders within the same task tree, and label encrypted bodies as
 unavailable. See [communication semantics](event-ir.md#agent-communication).
 
+Codex structured questions now have historical `question_request` events and
+expandable viewer cards outside work trajectories. Paginated async message
+items retain questions/choices; legacy tool invocations and recorded
+`request_user_input` events retain structured question descriptions and recorded flags.
+Native payloads stay inspectable, and malformed canonical question items remain
+unknown. Cards show recorded requests, not live pending/answered status; replies
+remain their original user messages or tool results. Live answering is deferred.
+`vendor/codex` is pinned to upstream `2351d9e1b6` (2026-10-09).
+See [question semantics](event-ir.md#questions).
+
 Implemented CLI:
 
 ```sh
@@ -990,6 +1000,7 @@ Current event families include:
 - `provider_changed`
 - `session_settings_applied`
 - `message`
+- `question_request`
 - `reasoning`
 - `goal_updated`
 - `agent_activity`

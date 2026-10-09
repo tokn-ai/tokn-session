@@ -4270,6 +4270,7 @@ fn is_trajectory_boundary(entry: &TimelineEntry, events: &[AgentEvent]) -> bool 
 
   match event {
     AgentEvent::Message(message) => !is_non_final_assistant_message(message.role, message.delivery),
+    AgentEvent::QuestionRequest(_) => true,
     AgentEvent::SessionStarted(_) | AgentEvent::ProviderChanged(_) | AgentEvent::Compaction(_) => true,
     _ => false,
   }
@@ -4470,6 +4471,7 @@ fn trajectory_card_summary(trajectory: &Trajectory, events: &[AgentEvent]) -> Tr
           | AgentEvent::ProviderChanged(_)
           | AgentEvent::SessionSettingsApplied(_)
           | AgentEvent::Message(_)
+          | AgentEvent::QuestionRequest(_)
           | AgentEvent::GoalUpdated(_)
           | AgentEvent::ToolCall(_)
           | AgentEvent::Metadata(_)
@@ -4612,6 +4614,11 @@ fn event_summary_with_delegation_targets(
   } else {
     match event {
       AgentEvent::Message(message) => message.text.clone(),
+      AgentEvent::QuestionRequest(request) => request
+        .questions
+        .first()
+        .map(|question| question.question.clone())
+        .unwrap_or_default(),
       AgentEvent::Reasoning(_) => reasoning
         .as_ref()
         .and_then(|card| {
@@ -4997,6 +5004,7 @@ fn normalized_event_type(event: &AgentEvent) -> &'static str {
     AgentEvent::ProviderChanged(_) => "provider_changed",
     AgentEvent::SessionSettingsApplied(_) => "session_settings_applied",
     AgentEvent::Message(_) => "message",
+    AgentEvent::QuestionRequest(_) => "question_request",
     AgentEvent::Reasoning(_) => "reasoning",
     AgentEvent::GoalUpdated(_) => "goal_updated",
     AgentEvent::AgentActivity(_) => "agent_activity",
@@ -5023,6 +5031,7 @@ fn event_title(event: &AgentEvent) -> String {
       Role::Unknown => "Message".to_string(),
     },
     AgentEvent::Reasoning(_) => "Reasoning".to_string(),
+    AgentEvent::QuestionRequest(_) => "Questions".to_string(),
     AgentEvent::GoalUpdated(_) => "Goal updated".to_string(),
     AgentEvent::AgentActivity(_) => "Agent activity".to_string(),
     AgentEvent::ToolCall(event) => event.tool_name.clone().unwrap_or_else(|| "Tool call".to_string()),
@@ -5041,6 +5050,7 @@ fn provider_for_event(event: &AgentEvent) -> ViewerProvider {
     AgentEvent::ProviderChanged(event) => event.provider,
     AgentEvent::SessionSettingsApplied(event) => event.provider,
     AgentEvent::Message(event) => event.provider,
+    AgentEvent::QuestionRequest(event) => event.provider,
     AgentEvent::Reasoning(event) => event.provider,
     AgentEvent::GoalUpdated(event) => event.provider,
     AgentEvent::AgentActivity(event) => event.provider,
@@ -5072,6 +5082,7 @@ fn timestamp_for_event(event: &AgentEvent) -> Option<&str> {
     AgentEvent::ProviderChanged(event) => event.timestamp.as_deref(),
     AgentEvent::SessionSettingsApplied(event) => event.timestamp.as_deref(),
     AgentEvent::Message(event) => event.timestamp.as_deref(),
+    AgentEvent::QuestionRequest(event) => event.timestamp.as_deref(),
     AgentEvent::Reasoning(event) => event.timestamp.as_deref(),
     AgentEvent::GoalUpdated(event) => event.timestamp.as_deref(),
     AgentEvent::AgentActivity(event) => event.timestamp.as_deref(),
@@ -5088,6 +5099,7 @@ fn timestamp_for_event(event: &AgentEvent) -> Option<&str> {
 fn phase_for_event(event: &AgentEvent) -> Option<String> {
   match event {
     AgentEvent::Message(event) => serialized_label(event.phase),
+    AgentEvent::QuestionRequest(event) => serialized_label(event.phase),
     AgentEvent::Reasoning(event) => serialized_label(event.phase),
     AgentEvent::ToolCall(event) => serialized_label(event.phase),
     AgentEvent::Lifecycle(event) => serialized_label(event.phase),
@@ -5459,6 +5471,7 @@ fn truncate_utf8_head_tail(text: &str, limit: usize) -> String {
 fn native_detail(event: &AgentEvent) -> Option<Value> {
   match event {
     AgentEvent::SessionSettingsApplied(event) => event.native.clone(),
+    AgentEvent::QuestionRequest(event) => Some(event.native.clone()),
     AgentEvent::Message(event) => event.provenance.as_ref().and_then(|value| value.native.clone()),
     AgentEvent::Reasoning(event) => event.provenance.as_ref().and_then(|value| value.native.clone()),
     AgentEvent::AgentActivity(event) => event.native.clone(),
@@ -5526,6 +5539,7 @@ mod tests {
   mod communications;
   mod event_filter;
   mod history_cache;
+  mod questions;
   mod targeted_index;
   mod usage_filter;
   use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -11465,6 +11479,7 @@ mod tests {
       AgentEvent::ProviderChanged(event) => event.timestamp = timestamp,
       AgentEvent::SessionSettingsApplied(event) => event.timestamp = timestamp,
       AgentEvent::Message(event) => event.timestamp = timestamp,
+      AgentEvent::QuestionRequest(event) => event.timestamp = timestamp,
       AgentEvent::Reasoning(event) => event.timestamp = timestamp,
       AgentEvent::GoalUpdated(event) => event.timestamp = timestamp,
       AgentEvent::AgentActivity(event) => event.timestamp = timestamp,
