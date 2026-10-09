@@ -191,10 +191,11 @@ describe("Conversation quick filter", () => {
   });
 
   it("labels last-good history as stale while its live reader retries", () => {
-    const view = render(<Conversation {...props({ events: [event("Previous event")], follow_error: "source read failed" })} />);
+    const events = [event("Previous event", { type: "message", role: "user", is_bookkeeping: false })];
+    const view = render(<Conversation {...props({ events, follow_error: "source read failed" })} />);
     expect(screen.getByRole("alert")).toHaveTextContent("Showing last loaded history while live updates retry: source read failed");
-    expect(screen.getByRole("button", { name: "Previous event" })).toBeInTheDocument();
-    view.rerender(<Conversation {...props({ events: [event("Previous event")], follow_error: null })} />);
+    expect(screen.getByText("Previous event detail")).toBeInTheDocument();
+    view.rerender(<Conversation {...props({ events, follow_error: null })} />);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
