@@ -17,6 +17,7 @@ import {
 } from "../lib/state";
 import {
   ChevronIcon,
+  InspectorIcon,
   ReasoningIcon,
   TechnicalIcon,
   ToolIcon,
@@ -803,6 +804,7 @@ export function EventCard({
       className="technical-event"
       data-selected={is_selected}
       data-tone={eventTone(event)}
+      data-expanded={cardIsExpanded}
     >
       <div className="technical-event__header">
         <button
@@ -867,7 +869,7 @@ export function EventCard({
             onClick={() => on_select(event.event_key)}
             type="button"
           >
-            {event.summary_truncated && !event.is_hidden ? "Full detail" : "Inspect"}
+            {event.summary_truncated && !event.is_hidden ? "Full detail" : <InspectorIcon />}
           </button>
         </div>
       </div>

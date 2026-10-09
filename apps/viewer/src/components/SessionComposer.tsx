@@ -2,6 +2,7 @@ import { useId, useLayoutEffect, useRef, useState } from "react";
 import { SendIcon } from "./Icons";
 import { useSessionInput } from "../lib/useSessionInput";
 import type { SessionSummary } from "../lib/types";
+import { providerLabel } from "../lib/state";
 
 export function SessionComposer({ session, on_accepted }: {
   session: SessionSummary | null;
@@ -66,15 +67,18 @@ export function SessionComposer({ session, on_accepted }: {
             rows={expanded ? 3 : 1}
             value={input.draft}
           />
-          <button
-            aria-label={input.sending ? "Sending…" : "Send"}
-            className="session-composer__send"
-            disabled={!input.can_send}
-            title="Send message (⌘ / Ctrl + Enter)"
-            type="submit"
-          >
-            {input.sending ? <span aria-hidden="true" className="inline-spinner" /> : <SendIcon />}
-          </button>
+          <div className="session-composer__footer">
+            <span className="session-composer__provider">{providerLabel(session.provider)}</span>
+            <button
+              aria-label={input.sending ? "Sending…" : "Send"}
+              className="session-composer__send"
+              disabled={!input.can_send}
+              title="Send message (⌘ / Ctrl + Enter)"
+              type="submit"
+            >
+              {input.sending ? <span aria-hidden="true" className="inline-spinner" /> : <SendIcon />}
+            </button>
+          </div>
         </div>
         <div className={expanded || overLimit ? "session-composer__actions" : "sr-only"}>
           <span id={`${inputId}-hint`} className={overLimit ? "session-composer__limit" : undefined}>

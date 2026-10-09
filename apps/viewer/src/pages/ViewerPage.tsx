@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Conversation } from "../components/Conversation";
 import { RelayConnection } from "../components/RelayConnection";
 import { Inspector } from "../components/Inspector";
@@ -19,23 +19,31 @@ export function ViewerPage({ remote = false, connection }: ViewerPageProps) {
 
 function ViewerContent({ remote, connection }: ViewerPageProps) {
   const viewer = useViewerState();
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   function openSessions() {
     if (window.matchMedia("(max-width: 860px)").matches) {
       viewer.setMobileSidebarOpen(true);
     } else {
-      document.querySelector<HTMLInputElement>('.sidebar input[type="search"]')?.focus();
+      setSidebarCollapsed(false);
+      window.requestAnimationFrame(() => document.querySelector<HTMLInputElement>('.sidebar input[type="search"]')?.focus());
     }
+  }
+
+  function collapseSidebar() {
+    setSidebarCollapsed(true);
+    window.requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('.conversation button[aria-label="Open sessions"]')?.focus());
   }
 
   return (
     <div className="viewer-app" data-remote={remote}>
-      <div className="viewer-shell" data-inspector-open={viewer.inspectorOpen}>
-        <SessionDrawer is_open={viewer.mobileSidebarOpen} on_close={() => viewer.setMobileSidebarOpen(false)}>
+      <div className="viewer-shell" data-inspector-open={viewer.inspectorOpen} data-sidebar-collapsed={sidebarCollapsed}>
+        <SessionDrawer desktop_hidden={sidebarCollapsed} is_open={viewer.mobileSidebarOpen} on_close={() => viewer.setMobileSidebarOpen(false)}>
           <Sidebar
             order={viewer.sessionOrder}
             on_order_change={viewer.setSessionOrder}
             on_close={() => viewer.setMobileSidebarOpen(false)}
+            on_collapse={collapseSidebar}
             enabled_providers={viewer.enabledProviders}
             error={viewer.sessionsError}
             has_more={viewer.sessionsCursor !== null}

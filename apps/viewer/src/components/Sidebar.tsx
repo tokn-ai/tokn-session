@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 import type {
   SessionChildrenState,
   SourceError,
@@ -13,7 +13,7 @@ import {
   sessionDisplayTitle,
   subagentDetail,
 } from "../lib/state";
-import { BranchIcon, ChevronIcon, CloseIcon, SearchIcon, WarningIcon } from "./Icons";
+import { BranchIcon, ChevronIcon, CloseIcon, PanelIcon, SearchIcon, WarningIcon } from "./Icons";
 import { useSidebarGroups } from "../lib/useSidebarGroups";
 import { LoadingRows } from "./StateView";
 
@@ -21,6 +21,7 @@ interface SidebarProps {
   order?: SessionOrder;
   on_order_change?: (order: SessionOrder) => void;
   on_close?: () => void;
+  on_collapse?: () => void;
   sessions: SessionSummary[];
   session_children: ReadonlyMap<string, SessionChildrenState>;
   selected_session_key: string | null;
@@ -86,6 +87,7 @@ function SessionBranch({
   on_children_retry,
   on_children_load_more,
 }: SessionBranchProps) {
+  const metadataId = useId();
   const hasChildren = session.child_count > 0;
   const isExpanded = expanded_session_keys.has(session.session_key);
   const childrenState = session_children.get(session.session_key);
@@ -128,19 +130,21 @@ function SessionBranch({
         )}
         <button
           aria-current={session.session_key === selected_session_key ? "page" : undefined}
+          aria-describedby={metadataId}
           aria-label={`${sessionDescription}, ${providerLabel(session.provider)} session ${session.session_id}${questionCount ? `, ${questionLabel.toLowerCase()}` : ""}${isRunning ? `, ${runningLabel.toLowerCase()}` : hasUnread ? `, ${unreadLabel}` : ""}`}
           className="session-row"
           data-selected={session.session_key === selected_session_key}
           data-subagent={depth > 0}
           data-unread={hasUnread || undefined}
           onClick={() => questionCount && on_question_session_select ? on_question_session_select(session.session_key) : on_session_select(session.session_key)}
-          title={`${title}\n${session.session_id}`}
+          title={`${title}\n${providerLabel(session.provider)} · ${session.project || session.cwd || "Unassigned project"}\n${session.session_id}`}
           type="button"
         >
           <span className="session-row__body">
             <span className="session-row__headline">
               {depth > 0 ? <BranchIcon className="session-row__branch-icon" /> : null}
               <span className="session-row__title">{title}</span>
+              <span className="session-row__time" aria-hidden="true">{formatRelativeTime(session.timestamp, session.updated_at_ms)}</span>
               {questionCount > 0 ? <span className="session-row__question" data-blocking={requiredCount > 0} role="img" aria-label={`${questionLabel}, ${questionCount} unanswered ${questionCount === 1 ? "question" : "questions"}`} title={questionLabel}>?{questionCount > 1 ? questionCount : ""}</span> : null}
               {isRunning ? (
                 <span aria-label={runningLabel} className="session-row__running inline-spinner" role="img" />
@@ -153,8 +157,8 @@ function SessionBranch({
                 >{unreadCount > 1 ? unreadCount : null}</span>
               ) : null}
             </span>
-            {preview && preview !== title ? <span className="session-row__preview">{preview}</span> : null}
-            <span className="session-row__meta">
+            {preview && preview !== title ? <span className="session-row__preview sr-only">{preview}</span> : null}
+            <span className="session-row__meta sr-only" id={metadataId}>
               <span className="session-row__provider" data-provider={session.provider}>{providerLabel(session.provider)}</span>
               {show_project && (session.project || session.cwd) ? <>
                 <span aria-hidden="true">·</span>
@@ -236,6 +240,7 @@ export function Sidebar({
   order = "time",
   on_order_change,
   on_close,
+  on_collapse,
   sessions,
   session_children,
   selected_session_key,
@@ -297,22 +302,15 @@ export function Sidebar({
           <span />
           <span />
         </div>
-        <div>
-          <p className="eyebrow">TOKN</p>
-          <h1>Sessions</h1>
-        </div>
+        <h1>tokn</h1>
+        {on_collapse ? <button aria-label="Collapse sessions" className="icon-button sidebar-collapse" onClick={on_collapse} type="button"><PanelIcon /></button> : null}
         <button aria-label="Close sessions" className="icon-button sidebar-close" onClick={on_close} type="button">
           <CloseIcon />
         </button>
       </header>
 
       <div className="sidebar__controls">
-        <div aria-label="Group sessions" className="sidebar-order" role="group">
-          <button aria-pressed={order === "time"} onClick={() => on_order_change?.("time")} type="button">Time</button>
-          <button aria-pressed={order === "project"} onClick={() => on_order_change?.("project")} type="button">Projects</button>
-        </div>
         <div className="sidebar__filter-heading">
-          <span>Find a conversation</span>
           {search || enabled_providers.size !== PROVIDER_FILTERS.length ? (
             <button className="text-button" type="button" onClick={() => {
               on_search_change("");
@@ -335,20 +333,27 @@ export function Sidebar({
           {is_loading && sessions.length > 0 ? <span className="inline-spinner" /> : null}
         </label>
 
-        <div aria-label="Filter by provider" className="provider-filters">
-          {PROVIDER_FILTERS.map((provider) => (
-            <button
-              aria-pressed={enabled_providers.has(provider)}
-              className="provider-filter"
-              data-provider={provider}
-              key={provider}
-              onClick={() => on_provider_toggle(provider)}
-              type="button"
-            >
-              <span className="provider-dot" />
-              {providerLabel(provider)}
-            </button>
-          ))}
+        <details className="sidebar-providers">
+          <summary>Providers <span>{enabled_providers.size === PROVIDER_FILTERS.length ? "All" : `${enabled_providers.size} selected`}</span><ChevronIcon /></summary>
+          <div aria-label="Filter by provider" className="provider-filters">
+            {PROVIDER_FILTERS.map((provider) => (
+              <button
+                aria-pressed={enabled_providers.has(provider)}
+                className="provider-filter"
+                data-provider={provider}
+                key={provider}
+                onClick={() => on_provider_toggle(provider)}
+                type="button"
+              >
+                <span className="provider-dot" />
+                {providerLabel(provider)}
+              </button>
+            ))}
+          </div>
+        </details>
+        <div aria-label="Group sessions" className="sidebar-order" role="group">
+          <button aria-pressed={order === "time"} onClick={() => on_order_change?.("time")} type="button">Time</button>
+          <button aria-pressed={order === "project"} onClick={() => on_order_change?.("project")} type="button">Projects</button>
         </div>
       </div>
 

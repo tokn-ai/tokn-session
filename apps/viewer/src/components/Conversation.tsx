@@ -18,7 +18,7 @@ import {
   shortSessionId,
   subagentDetail,
 } from "../lib/state";
-import { InspectorIcon, PanelIcon } from "./Icons";
+import { ChevronIcon, FilterIcon, InspectorIcon, PanelIcon, SendIcon } from "./Icons";
 import { EventCard } from "./EventCard";
 import { LoadingRows, StateView } from "./StateView";
 import { SessionComposer } from "./SessionComposer";
@@ -174,26 +174,35 @@ export function Conversation({
                 {providerLabel(session.provider)}
               </span>
             </div>
-            <p title={`${session.cwd ?? "Unassigned project"}\nSession ${session.session_id}`}>
-              {session.is_subagent ? (
-                <>
-                  <span title={childDetail ?? undefined}>
-                    {childDetail ? `Subagent · ${childDetail}` : "Subagent"}
+            <details className="conversation__metadata" key={session.session_key}>
+              <summary>
+                {session.is_subagent ? "Subagent · " : ""}{session.project ?? session.cwd ?? "Unassigned project"}
+                <ChevronIcon />
+              </summary>
+              <div className="conversation__metadata-panel">
+                <p title={`${session.cwd ?? "Unassigned project"}\nSession ${session.session_id}`}>
+                  {session.is_subagent ? (
+                    <>
+                      <span title={childDetail ?? undefined}>
+                        {childDetail ? `Subagent · ${childDetail}` : "Subagent"}
+                      </span>
+                      <span aria-hidden="true"> · </span>
+                    </>
+                  ) : null}
+                  {session.project ?? session.cwd ?? "Unassigned project"}
+                  <span aria-hidden="true"> · </span>
+                  <span
+                    aria-label={`Session ${session.session_id}`}
+                    className="conversation__session-id"
+                  >
+                    {shortSessionId(session.session_id)}
                   </span>
                   <span aria-hidden="true"> · </span>
-                </>
-              ) : null}
-              {session.project ?? session.cwd ?? "Unassigned project"}
-              <span aria-hidden="true"> · </span>
-              <span
-                aria-label={`Session ${session.session_id}`}
-                className="conversation__session-id"
-              >
-                {shortSessionId(session.session_id)}
-              </span>
-              <span aria-hidden="true"> · </span>
-              {countLabel}
-            </p>
+                  {countLabel}
+                </p>
+                <p className="conversation__path">{session.cwd}</p>
+              </div>
+            </details>
           </div>
         ) : (
           <div className="conversation__identity conversation__identity--empty">
@@ -202,6 +211,7 @@ export function Conversation({
           </div>
         )}
         <button
+          aria-label={hideLifecycle ? "Show lifecycle" : "Hide lifecycle"}
           aria-pressed={hideLifecycle}
           className="conversation__filter"
           disabled={!session}
@@ -211,7 +221,8 @@ export function Conversation({
             : "Hide routine lifecycle, session, configuration, and metadata events without content, plus mid-turn usage. Keep end-of-turn usage and meaningful activity."}
           type="button"
         >
-          {hideLifecycle ? "Show lifecycle" : "Hide lifecycle"}
+          <FilterIcon />
+          <span className="conversation__filter-label">{hideLifecycle ? "Show lifecycle" : "Hide lifecycle"}</span>
         </button>
         <button
           aria-label={inspector_open ? "Close event inspector" : "Open event inspector"}
@@ -235,170 +246,181 @@ export function Conversation({
         </button>)}
       </div> : null}
 
-      {pending_live_activity || !scroll.isFollowing ? (
-        <button className="page-button" type="button" onClick={() => {
-          scroll.jumpToLatest();
-          on_show_live_activity?.();
-        }}>{pending_live_activity ? "New activity · Jump to latest" : "Jump to latest"}</button>
-      ) : null}
-      <div
-        className="conversation__timeline"
-        ref={scroll.timelineRef}
-        onScroll={scroll.onScroll}
-        onWheel={(event) => {
-          if (event.deltaY !== 0) scroll.noteUserScroll(event.deltaY < 0);
-        }}
-        onTouchMove={() => scroll.noteUserScroll()}
-        onPointerDown={(event) => {
-          if (event.target === event.currentTarget) scroll.noteUserScroll();
-        }}
-        onKeyDown={(event) => {
-          if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) {
-            scroll.noteUserScroll(["ArrowUp", "PageUp", "Home"].includes(event.key));
-          }
-        }}
-      >
-        {!session ? (
-          <StateView
-            message="Browse your conversations, search by title, or filter by provider to pick up where you left off."
-            action_label="Browse sessions"
-            on_action={on_sidebar_open}
-            title="Select a session"
-          />
-        ) : null}
+      <div className="conversation__history">
+        <div
+          className="conversation__timeline"
+          ref={scroll.timelineRef}
+          onScroll={scroll.onScroll}
+          onWheel={(event) => {
+            if (event.deltaY !== 0) scroll.noteUserScroll(event.deltaY < 0);
+          }}
+          onTouchMove={() => scroll.noteUserScroll()}
+          onPointerDown={(event) => {
+            if (event.target === event.currentTarget) scroll.noteUserScroll();
+          }}
+          onKeyDown={(event) => {
+            if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) {
+              scroll.noteUserScroll(["ArrowUp", "PageUp", "Home"].includes(event.key));
+            }
+          }}
+        >
+          {!session ? (
+            <StateView
+              message="Browse your conversations, search by title, or filter by provider to pick up where you left off."
+              action_label="Browse sessions"
+              on_action={on_sidebar_open}
+              title="Select a session"
+            />
+          ) : null}
 
-        {session && is_loading && events.length === 0 ? (
-          <div className="timeline-loading">
-            <LoadingRows count={5} />
-          </div>
-        ) : null}
+          {session && is_loading && events.length === 0 ? (
+            <div className="timeline-loading">
+              <LoadingRows count={5} />
+            </div>
+          ) : null}
 
-        {session && !is_loading && error && events.length === 0 ? (
-          <StateView
-            action_label="Try again"
-            message={error}
-            on_action={on_retry}
-            title="Conversation unavailable"
-            tone="error"
-          />
-        ) : null}
+          {session && !is_loading && error && events.length === 0 ? (
+            <StateView
+              action_label="Try again"
+              message={error}
+              on_action={on_retry}
+              title="Conversation unavailable"
+              tone="error"
+            />
+          ) : null}
 
-        {session && !is_loading && !error && events.length === 0 ? (
-          <StateView
-            message="The provider returned a valid session with no normalized events."
-            title="No events in this session"
-          />
-        ) : null}
+          {session && !is_loading && !error && events.length === 0 ? (
+            <StateView
+              message="The provider returned a valid session with no normalized events."
+              title="No events in this session"
+            />
+          ) : null}
 
-        {session && events.length > 0 ? (
-          <div className="timeline" aria-label="Session event timeline" ref={scroll.contentRef}>
-            {history_status && history_status !== "complete" ? (
-              <div className="history-notice" role="status">
-                This provider exposes only part of the subagent history.
-              </div>
-            ) : null}
-            {error ? (
-              <div className="pagination-error" role="alert">
-                <span>{error}</span>
-                <button className="text-button" onClick={on_retry} type="button">
-                  Reload
+          {session && events.length > 0 ? (
+            <div className="timeline" aria-label="Session event timeline" ref={scroll.contentRef}>
+              {history_status && history_status !== "complete" ? (
+                <div className="history-notice" role="status">
+                  This provider exposes only part of the subagent history.
+                </div>
+              ) : null}
+              {error ? (
+                <div className="pagination-error" role="alert">
+                  <span>{error}</span>
+                  <button className="text-button" onClick={on_retry} type="button">
+                    Reload
+                  </button>
+                </div>
+              ) : null}
+              {has_older ? (
+                <button
+                  className="page-button"
+                  disabled={is_loading_older}
+                  onClick={loadOlder}
+                  type="button"
+                >
+                  {is_loading_older ? "Loading earlier turns…" : "Load earlier turns"}
                 </button>
-              </div>
-            ) : null}
-            {has_older ? (
-              <button
-                className="page-button"
-                disabled={is_loading_older}
-                onClick={loadOlder}
-                type="button"
-              >
-                {is_loading_older ? "Loading earlier turns…" : "Load earlier turns"}
-              </button>
-            ) : (
-              <div className="timeline-boundary">
-                <span />
-                <span>Session start</span>
-                <span />
-              </div>
-            )}
+              ) : (
+                <div className="timeline-boundary">
+                  <span />
+                  <span>Session start</span>
+                  <span />
+                </div>
+              )}
 
-            {hiddenCount > 0 ? (
-              <p className="event-filter-notice" role="status">
-                {visibleEvents.length === 0 ? "No events match this filter in the loaded range. " : ""}
-                {hiddenCount} {hiddenCount === 1 ? "event hidden" : "events hidden"} in this loaded range.
-              </p>
-            ) : null}
+              {hiddenCount > 0 ? (
+                <p className="event-filter-notice" role="status">
+                  {visibleEvents.length === 0 ? "No events match this filter in the loaded range. " : ""}
+                  {hiddenCount} {hiddenCount === 1 ? "event hidden" : "events hidden"} in this loaded range.
+                </p>
+              ) : null}
 
-            {visibleEvents.map((event) => (
-              <div data-reading-slot={event.slot_key ?? event.event_key} data-reading-type={event.type}
-                data-reading-timestamp={event.timestamp ?? ""}
-                data-event-key={event.event_key} data-scroll-key={event.event_key} key={`${session.session_key}:${event.event_key}`}>
-              <EventCard
-                session_key={session.session_key}
-                hide_lifecycle={hideLifecycle}
-                button_id={eventButtonId(event.event_key)}
-                event={event}
-                detail={event.event_key === expanded_event_key ? expanded_detail : null}
-                detail_error={event.event_key === expanded_event_key ? expanded_detail_error : null}
-                detail_loading={
-                  event.event_key === expanded_event_key && expanded_detail_loading
-                }
-                is_expanded={event.event_key === expanded_event_key}
-                is_selected={event.event_key === selected_event_key}
-                key={`${session.session_key}:${event.event_key}`}
-                on_trajectory_load_newer={on_trajectory_load_newer}
-                on_trajectory_load_older={on_trajectory_load_older}
-                on_trajectory_retry={on_trajectory_retry}
-                on_trajectory_event_toggle={on_trajectory_event_toggle}
-                on_trajectory_retry_expanded_detail={on_trajectory_retry_expanded_detail}
-                on_select={on_event_select}
-                on_toggle={on_event_toggle}
-                on_open_related_session={(target) => {
-                  if (session) {
-                    on_open_related_session(session.session_key, target);
+              {visibleEvents.map((event) => (
+                <div data-reading-slot={event.slot_key ?? event.event_key} data-reading-type={event.type}
+                  data-reading-timestamp={event.timestamp ?? ""}
+                  data-event-key={event.event_key} data-scroll-key={event.event_key} key={`${session.session_key}:${event.event_key}`}>
+                <EventCard
+                  session_key={session.session_key}
+                  hide_lifecycle={hideLifecycle}
+                  button_id={eventButtonId(event.event_key)}
+                  event={event}
+                  detail={event.event_key === expanded_event_key ? expanded_detail : null}
+                  detail_error={event.event_key === expanded_event_key ? expanded_detail_error : null}
+                  detail_loading={
+                    event.event_key === expanded_event_key && expanded_detail_loading
                   }
-                }}
-                on_retry_detail={on_retry_expanded_detail}
-                selected_event_key={selected_event_key}
-                trajectory_page={event.type === "trajectory"
-                  ? trajectory_pages.get(session.session_key)?.get(event.event_key) ?? null
-                  : null}
-                trajectory_expanded_detail={event.type === "trajectory"
-                  && event.event_key === trajectory_expanded_key
-                  ? trajectory_expanded_detail
-                  : null}
-                trajectory_expanded_detail_error={event.type === "trajectory"
-                  && event.event_key === trajectory_expanded_key
-                  ? trajectory_expanded_detail_error
-                  : null}
-                trajectory_expanded_detail_loading={event.type === "trajectory"
-                  && event.event_key === trajectory_expanded_key
-                  && trajectory_expanded_detail_loading}
-                trajectory_expanded_event_key={event.type === "trajectory"
-                  && event.event_key === trajectory_expanded_key
-                  ? trajectory_expanded_event_key
-                  : null}
-              />
-              </div>
-            ))}
+                  is_expanded={event.event_key === expanded_event_key}
+                  is_selected={event.event_key === selected_event_key}
+                  key={`${session.session_key}:${event.event_key}`}
+                  on_trajectory_load_newer={on_trajectory_load_newer}
+                  on_trajectory_load_older={on_trajectory_load_older}
+                  on_trajectory_retry={on_trajectory_retry}
+                  on_trajectory_event_toggle={on_trajectory_event_toggle}
+                  on_trajectory_retry_expanded_detail={on_trajectory_retry_expanded_detail}
+                  on_select={on_event_select}
+                  on_toggle={on_event_toggle}
+                  on_open_related_session={(target) => {
+                    if (session) {
+                      on_open_related_session(session.session_key, target);
+                    }
+                  }}
+                  on_retry_detail={on_retry_expanded_detail}
+                  selected_event_key={selected_event_key}
+                  trajectory_page={event.type === "trajectory"
+                    ? trajectory_pages.get(session.session_key)?.get(event.event_key) ?? null
+                    : null}
+                  trajectory_expanded_detail={event.type === "trajectory"
+                    && event.event_key === trajectory_expanded_key
+                    ? trajectory_expanded_detail
+                    : null}
+                  trajectory_expanded_detail_error={event.type === "trajectory"
+                    && event.event_key === trajectory_expanded_key
+                    ? trajectory_expanded_detail_error
+                    : null}
+                  trajectory_expanded_detail_loading={event.type === "trajectory"
+                    && event.event_key === trajectory_expanded_key
+                    && trajectory_expanded_detail_loading}
+                  trajectory_expanded_event_key={event.type === "trajectory"
+                    && event.event_key === trajectory_expanded_key
+                    ? trajectory_expanded_event_key
+                    : null}
+                />
+                </div>
+              ))}
 
-            {has_newer ? (
-              <button
-                className="page-button"
-                disabled={is_loading_newer}
-                onClick={on_load_newer}
-                type="button"
-              >
-                {is_loading_newer ? "Loading newer events…" : "Load newer events"}
-              </button>
-            ) : (
-              <div className="timeline-boundary timeline-boundary--end">
-                <span />
-                <span>{formatTimestamp(events[events.length - 1]?.timestamp ?? null)}</span>
-                <span />
-              </div>
-            )}
-          </div>
+              {has_newer ? (
+                <button
+                  className="page-button"
+                  disabled={is_loading_newer}
+                  onClick={on_load_newer}
+                  type="button"
+                >
+                  {is_loading_newer ? "Loading newer events…" : "Load newer events"}
+                </button>
+              ) : (
+                <div className="timeline-boundary timeline-boundary--end">
+                  <span />
+                  <span>{formatTimestamp(events[events.length - 1]?.timestamp ?? null)}</span>
+                  <span />
+                </div>
+              )}
+            </div>
+          ) : null}
+        </div>
+        {pending_live_activity || !scroll.isFollowing ? (
+          <button
+            aria-label={pending_live_activity ? "New activity · Jump to latest" : "Jump to latest"}
+            className="conversation__jump"
+            title="Jump to latest"
+            type="button"
+            onClick={() => {
+              scroll.jumpToLatest();
+              on_show_live_activity?.();
+            }}
+          >
+            {pending_live_activity ? <span>New activity</span> : null}
+            <SendIcon />
+          </button>
         ) : null}
       </div>
       <SessionComposer session={session} on_accepted={on_input_accepted} />

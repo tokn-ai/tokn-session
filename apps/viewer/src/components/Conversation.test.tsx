@@ -50,6 +50,18 @@ function toggleFilter() {
 }
 
 describe("Conversation quick filter", () => {
+  it("keeps session metadata behind a disclosure and closes it when switching sessions", () => {
+    const view = props({ session: { ...SESSION, project: "Viewer", cwd: "/work/viewer" } });
+    const { rerender } = render(<Conversation {...view} />);
+    const metadata = screen.getByText("Viewer", { selector: "summary" }).closest("details");
+    expect(metadata).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByText("Viewer", { selector: "summary" }));
+    expect(metadata).toHaveAttribute("open");
+    expect(screen.getByText("/work/viewer")).toBeInTheDocument();
+    expect(screen.getByLabelText("Session root")).toBeInTheDocument();
+    rerender(<Conversation {...view} session={{ ...SESSION, session_key: "codex:next", project: "Next project" }} />);
+    expect(screen.getByText("Next project", { selector: "summary" }).closest("details")).not.toHaveAttribute("open");
+  });
   it("shows separate blocking and available question notices and opens their cards", () => {
     const on_question_open = vi.fn();
     const view = render(<Conversation {...props({ on_question_open, outstanding_questions: [

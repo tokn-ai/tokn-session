@@ -4,6 +4,13 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
+The viewer sidebar and conversation use a compact Codex-style layout with neutral
+light/dark colors, larger message text, inline expandable tool activity, and an
+aligned composer. Provider filters and session metadata live in disclosures.
+Desktop sidebar collapse preserves navigation state and removes hidden controls
+from keyboard focus; mobile retains the modal session drawer. The latest-activity
+button floats inside the history area so it does not shift the reading position.
+
 The viewer tracks unanswered questions separately from unread final replies.
 Sidebar badges and session notices show **Input required** for explicit blocking
 requests and **Question available** for async/unknown blocking requests. They
