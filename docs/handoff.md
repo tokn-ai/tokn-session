@@ -13,6 +13,8 @@ errors retire remaining attention. Clicking a sidebar badge/session notice
 opens and focuses the outstanding question card. Retained windows preserve
 outstanding request context. Compact `session-activity.v3` markers persist counts;
 older final-only markers migrate quietly without resetting unread replies.
+Accepted event pages synchronize sidebar question counts, including cached child
+rows; the selected timeline overrides catalog counts while indexing catches up.
 
 `tokn-session` can list and show existing sessions from Pi, Codex, OpenCode,
 ZCode, WorkBuddy, and DSH.

@@ -206,6 +206,7 @@ export function useViewerState() {
 
   const [events, setEvents] = useState<EventSummary[]>([]);
   const [outstandingQuestions, setOutstandingQuestions] = useState<OutstandingQuestion[]>([]);
+  const [pageQuestionAttention, setPageQuestionAttention] = useState<SessionSummary["question_attention"]>(undefined);
   const [questionNavigation, setQuestionNavigation] = useState<{ event_key: string; revision: number } | null>(null);
   const pendingQuestionSession = useRef<string | null>(null);
   const [eventsOwnerKey, setEventsOwnerKey] = useState<string | null>(null);
@@ -807,6 +808,7 @@ export function useViewerState() {
     setTotalEvents(null);
     setHistoryStatus(null);
     setOutstandingQuestions([]);
+    setPageQuestionAttention(undefined);
     setQuestionNavigation(null);
     setEventsError(null);
     manualExpansion.current = false;
@@ -953,10 +955,59 @@ export function useViewerState() {
     }
   }, [requestSessionChildPage]);
 
+  const applyQuestionPage = useCallback((sessionKey: string, questions: OutstandingQuestion[] | undefined) => {
+    setOutstandingQuestions(questions ?? []);
+    if (questions === undefined) {
+      setPageQuestionAttention(undefined);
+      return;
+    }
+    const question_attention = { required_count: 0, available_count: 0 };
+    for (const question of questions) {
+      if (question.requires_input) question_attention.required_count += question.unanswered_count;
+      else question_attention.available_count += question.unanswered_count;
+    }
+    setPageQuestionAttention(question_attention);
+    const update = (session: SessionSummary) => session.session_key === sessionKey
+      ? { ...session, question_attention }
+      : session;
+    // Event pages are fresher than the background catalog. Keep cached child
+    // rows in sync too, so switching sessions cannot restore their old badge.
+    setSessions((current) => current.map(update));
+    setSelectedSessionMetadata((current) => current ? update(current) : current);
+    const children = new Map(sessionChildrenRef.current);
+    let childrenChanged = false;
+    for (const [parent, state] of children) {
+      if (state.sessions.some((session) => session.session_key === sessionKey)) {
+        children.set(parent, { ...state, sessions: state.sessions.map(update) });
+        childrenChanged = true;
+      }
+    }
+    if (childrenChanged) {
+      sessionChildrenRef.current = children;
+      setSessionChildren(children);
+    }
+  }, []);
+
+  // A catalog refresh may still contain the previous attention counts while
+  // indexing catches up. The accepted page owns the selected session's badge.
+  const displayedSessions = useMemo(() => {
+    if (pageQuestionAttention === undefined) return { sessions, children: sessionChildren };
+    const update = (session: SessionSummary) => pageQuestionAttention !== undefined
+      && session.session_key === selectedSessionKey
+      ? { ...session, question_attention: pageQuestionAttention }
+      : session;
+    return {
+      sessions: sessions.map(update),
+      children: new Map([...sessionChildren].map(([parent, state]) => [
+        parent, { ...state, sessions: state.sessions.map(update) },
+      ])),
+    };
+  }, [pageQuestionAttention, selectedSessionKey, sessionChildren, sessions]);
+
   const selectedSession = useMemo(
-    () => findKnownSession(sessions, sessionChildren, selectedSessionKey)
+    () => findKnownSession(displayedSessions.sessions, displayedSessions.children, selectedSessionKey)
       ?? (selectedSessionMetadata?.session_key === selectedSessionKey ? selectedSessionMetadata : null),
-    [selectedSessionKey, selectedSessionMetadata, sessionChildren, sessions],
+    [selectedSessionKey, selectedSessionMetadata, displayedSessions],
   );
   useSessionView(selectedSessionKey, selectedSession, sessions, sessionChildren);
 
@@ -1117,6 +1168,7 @@ export function useViewerState() {
       setTotalEvents(null);
       setHistoryStatus(null);
       setOutstandingQuestions([]);
+      setPageQuestionAttention(undefined);
       setQuestionNavigation(null);
     }
     setEventsError(null);
@@ -1224,7 +1276,7 @@ export function useViewerState() {
         setNewerCursor(response.next_cursor);
         setTotalEvents(response.total_events);
         setHistoryStatus(response.history_status);
-        setOutstandingQuestions(response.outstanding_questions ?? []);
+        applyQuestionPage(selectedSessionKey, response.outstanding_questions);
         setInitialPageSessionKey(selectedSessionKey);
         if (pendingQuestionSession.current === selectedSessionKey) {
           pendingQuestionSession.current = null;
@@ -1267,6 +1319,7 @@ export function useViewerState() {
   }, [
     applyEventSelection,
     applyExpandedEventKey,
+    applyQuestionPage,
     clearTrajectoryPages,
     eventsAttempt,
     invalidateEventDetails,
@@ -1775,7 +1828,7 @@ export function useViewerState() {
         setNewerCursor(response.next_cursor);
         setTotalEvents(response.total_events);
         setHistoryStatus(response.history_status);
-        setOutstandingQuestions(response.outstanding_questions ?? []);
+        applyQuestionPage(selectedSessionKey, response.outstanding_questions);
       })
       .catch((error: unknown) => {
         if (eventsRequest.current === requestGeneration) {
@@ -1793,7 +1846,7 @@ export function useViewerState() {
           }
         }
       });
-  }, [invalidateEventDetails, olderCursor, olderLoading, selectedSessionKey]);
+  }, [applyQuestionPage, invalidateEventDetails, olderCursor, olderLoading, selectedSessionKey]);
 
   const loadNewerEvents = useCallback(() => {
     if (
@@ -1821,7 +1874,7 @@ export function useViewerState() {
         setEvents((current) => mergeEvents(current, response.events, "after"));
         setNewerCursor(response.next_cursor);
         setTotalEvents(response.total_events);
-        setOutstandingQuestions(response.outstanding_questions ?? []);
+        applyQuestionPage(selectedSessionKey, response.outstanding_questions);
       })
       .catch((error: unknown) => {
         if (eventsRequest.current === requestGeneration) {
@@ -1833,7 +1886,7 @@ export function useViewerState() {
           setNewerLoading(false);
         }
       });
-  }, [invalidateEventDetails, newerCursor, newerLoading, selectedSessionKey]);
+  }, [applyQuestionPage, invalidateEventDetails, newerCursor, newerLoading, selectedSessionKey]);
 
   const retrySessions = useCallback(() => {
     // Preserve the old immediate SQLite reread so a previously committed
@@ -1849,8 +1902,8 @@ export function useViewerState() {
     setSearch: changeSearch,
     enabledProviders,
     toggleProvider,
-    sessions,
-    sessionChildren,
+    sessions: displayedSessions.sessions,
+    sessionChildren: displayedSessions.children,
     loadSessionChildren,
     retrySessionChildren,
     loadMoreSessionChildren,
