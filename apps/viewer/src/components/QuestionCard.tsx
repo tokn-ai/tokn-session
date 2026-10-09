@@ -14,20 +14,41 @@ export function QuestionCard({ event, detail, error, is_loading, on_retry }: {
   on_retry: () => void;
 }) {
   const matches = detail?.event_key === event.event_key;
+  const label = event.type === "question_reply" ? "Answers" : "Questions";
   if (event.is_hidden || (matches && detail?.is_hidden)) {
-    return <p>Questions are hidden by the provider.</p>;
+    return <p>{label} are hidden by the provider.</p>;
   }
   const recorded = matches ? object(detail?.event) : null;
   if (!recorded) {
     return error ? (
       <div role="alert">
-        <p>Questions unavailable: {error}</p>
+        <p>{label} unavailable: {error}</p>
         <button className="text-button" onClick={on_retry} type="button">Try again</button>
       </div>
-    ) : <p role="status">Loading questions…</p>;
+    ) : <p role="status">Loading {label.toLowerCase()}…</p>;
   }
   if (recorded.truncated === true) {
-    return <p role="status">Questions exceed the viewer’s detail size limit.</p>;
+    return <p role="status">{label} exceed the viewer’s detail size limit.</p>;
+  }
+  if (recorded.type === "question_reply" && Array.isArray(recorded.replies)) {
+    return (
+      <div aria-busy={is_loading} className="question-card">
+        <DetailRefreshError error={error} on_retry={on_retry} />
+        <p className="question-card__notice">Recorded user answers</p>
+        {recorded.replies.length === 0 ? <p>No answers recorded</p> : null}
+        {recorded.replies.map((value, index) => {
+          const reply = object(value);
+          if (!reply || !Array.isArray(reply.answers)) return null;
+          return <section className="question-card__question" key={index}>
+            {typeof reply.header === "string" && reply.header ? <h4>{reply.header}</h4> : null}
+            {typeof reply.question === "string" ? <MarkdownContent content={reply.question} />
+              : <h4>{typeof reply.question_id === "string" ? reply.question_id : "Question"}</h4>}
+            {reply.answers.length === 0 ? <p>No answer recorded</p> : reply.answers.map((answer, answer_index) =>
+              typeof answer === "string" ? <MarkdownContent key={answer_index} content={answer} /> : null)}
+          </section>;
+        })}
+      </div>
+    );
   }
   if (recorded.type !== "question_request" || !Array.isArray(recorded.questions)) {
     return <p>No structured questions were recorded.</p>;

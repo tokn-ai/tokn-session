@@ -274,6 +274,22 @@ pub fn render_event_pretty(event: &AgentEvent) -> String {
       write_indented(&mut output, &event.text);
       output.push('\n');
     }
+    AgentEvent::QuestionReply(event) => {
+      output.push_str("user answers\n");
+      for reply in &event.replies {
+        write_indented(&mut output, reply.question.as_deref().unwrap_or(&reply.question_id));
+        for answer in &reply.answers {
+          write_indented(&mut output, &format!("- {answer}"));
+        }
+        if reply.answers.is_empty() {
+          write_indented(&mut output, "No answer recorded");
+        }
+      }
+      if event.replies.is_empty() {
+        write_indented(&mut output, "No answers recorded");
+      }
+      output.push('\n');
+    }
     AgentEvent::QuestionRequest(event) => {
       output.push_str(match event.is_blocking {
         Some(true) => "questions (blocking)\n",
@@ -398,6 +414,16 @@ pub fn render_event_summary(event: &AgentEvent) -> String {
     AgentEvent::Compaction(event) => event.state.label().to_string(),
     AgentEvent::Metadata(event) => format!("[{}] {}", event.native_type, first_line(&event.summary)),
     AgentEvent::Message(event) => format!("{} {}", role_label(event.role), first_line(&event.text)),
+    AgentEvent::QuestionReply(event) => format!(
+      "user answers {}",
+      event
+        .replies
+        .iter()
+        .flat_map(|reply| &reply.answers)
+        .next()
+        .map(|text| first_line(text))
+        .unwrap_or_else(|| "No answers recorded".into())
+    ),
     AgentEvent::QuestionRequest(event) => format!(
       "{} {}",
       match event.is_blocking {
@@ -457,6 +483,7 @@ pub fn event_type(event: &AgentEvent) -> &'static str {
     AgentEvent::Metadata(_) => "metadata",
     AgentEvent::Message(_) => "message",
     AgentEvent::QuestionRequest(_) => "questions",
+    AgentEvent::QuestionReply(_) => "answers",
     AgentEvent::Reasoning(_) => "reasoning",
     AgentEvent::GoalUpdated(_) => "goal",
     AgentEvent::AgentActivity(_) => "agent",

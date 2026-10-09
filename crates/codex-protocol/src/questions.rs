@@ -5,6 +5,20 @@ use serde::{Deserialize, Serialize};
 use crate::rollout::ExtraFields;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RequestUserInputResponse {
+  pub answers: std::collections::BTreeMap<String, RequestUserInputAnswer>,
+  #[serde(flatten)]
+  pub extra: ExtraFields,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RequestUserInputAnswer {
+  pub answers: Vec<String>,
+  #[serde(flatten)]
+  pub extra: ExtraFields,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AsyncUserInputQuestion {
   pub title: String,
   #[serde(default)]

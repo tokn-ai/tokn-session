@@ -34,6 +34,7 @@ pub struct CodexNormalizer {
   pending_code_mode_order: VecDeque<(String, u64)>,
   pending_code_mode_call_count: usize,
   next_pending_code_mode_token: u64,
+  question_replies: questions::RepliesNormalizer,
 }
 
 #[derive(Clone, Debug)]
@@ -118,6 +119,7 @@ impl CodexNormalizer {
       pending_code_mode_order: Default::default(),
       pending_code_mode_call_count: 0,
       next_pending_code_mode_token: 0,
+      question_replies: Default::default(),
     }
   }
 
@@ -132,6 +134,7 @@ impl CodexNormalizer {
       pending_code_mode_order: Default::default(),
       pending_code_mode_call_count: 0,
       next_pending_code_mode_token: 0,
+      question_replies: Default::default(),
     }
   }
 
@@ -152,6 +155,9 @@ impl CodexNormalizer {
       return Vec::new();
     }
 
+    if let Some(events) = self.question_replies.output(&line, self.session_id.clone()) {
+      return events;
+    }
     if let Some(events) = self.records.normalize(
       &line,
       self.session_id.clone(),
@@ -159,7 +165,9 @@ impl CodexNormalizer {
     ) {
       return events;
     }
-    self.normalize_item(line.into_item(), timestamp, communication_trigger)
+    let events = self.normalize_item(line.into_item(), timestamp, communication_trigger);
+    self.question_replies.observe(&events);
+    events
   }
 
   pub fn history_status(&self) -> SessionHistoryStatus {

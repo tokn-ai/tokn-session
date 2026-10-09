@@ -499,6 +499,10 @@ export class PetStore {
           this.#markProgress(activity, nowMs);
         }
         return;
+      case "question_reply":
+        activity.pending_interactions.delete(asString(event.request_id) ?? "question_request");
+        this.#markProgress(activity, nowMs);
+        return;
       case "error":
         if (isInterruptedError(event)) {
           this.#markInterrupted(activity, nowMs);

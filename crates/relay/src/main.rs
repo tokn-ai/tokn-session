@@ -329,6 +329,7 @@ fn event_timestamp(event: &tokn_session_core::AgentEvent) -> Option<&str> {
     AgentEvent::SessionSettingsApplied(event) => event.timestamp.as_deref(),
     AgentEvent::Message(event) => event.timestamp.as_deref(),
     AgentEvent::QuestionRequest(event) => event.timestamp.as_deref(),
+    AgentEvent::QuestionReply(event) => event.timestamp.as_deref(),
     AgentEvent::Reasoning(event) => event.timestamp.as_deref(),
     AgentEvent::GoalUpdated(event) => event.timestamp.as_deref(),
     AgentEvent::AgentActivity(event) => event.timestamp.as_deref(),
@@ -348,6 +349,7 @@ fn event_message_id(event: &tokn_session_core::AgentEvent) -> Option<&str> {
   match event {
     AgentEvent::Message(event) => event.message_id.as_deref(),
     AgentEvent::QuestionRequest(event) => event.request_id.as_deref(),
+    AgentEvent::QuestionReply(event) => Some(event.request_id.as_str()),
     AgentEvent::Reasoning(event) => event.message_id.as_deref(),
     AgentEvent::ToolCall(event) => event.message_id.as_deref(),
     _ => None,
@@ -375,6 +377,7 @@ fn event_color(event: &tokn_session_core::AgentEvent) -> &'static str {
     | AgentEvent::GoalUpdated(_)
     | AgentEvent::AgentActivity(_) => ANSI_BLUE,
     AgentEvent::QuestionRequest(_) => ANSI_BLUE,
+    AgentEvent::QuestionReply(_) => ANSI_BLUE,
     AgentEvent::Message(event) => match event.role {
       Role::User => ANSI_CYAN,
       Role::Assistant => ANSI_GREEN,

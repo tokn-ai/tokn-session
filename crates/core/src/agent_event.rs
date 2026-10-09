@@ -9,6 +9,7 @@ pub enum AgentEvent {
   SessionSettingsApplied(SessionSettingsApplied),
   Message(MessageEvent),
   QuestionRequest(QuestionRequestEvent),
+  QuestionReply(QuestionReplyEvent),
   Reasoning(ReasoningEvent),
   GoalUpdated(GoalUpdated),
   AgentActivity(AgentActivity),
@@ -121,6 +122,26 @@ pub struct UserQuestion {
 pub struct UserQuestionOption {
   pub label: String,
   pub description: Option<String>,
+}
+
+/// Provider-recorded answers correlated by request and question IDs.
+#[derive(Debug, Serialize, Clone, Deserialize)]
+pub struct QuestionReplyEvent {
+  pub provider: Provider,
+  pub session_id: Option<String>,
+  pub request_id: String,
+  pub turn_id: Option<String>,
+  pub replies: Vec<UserQuestionReply>,
+  pub native: Value,
+  pub timestamp: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone, Deserialize)]
+pub struct UserQuestionReply {
+  pub question_id: String,
+  pub question: Option<String>,
+  pub header: Option<String>,
+  pub answers: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Clone, Deserialize)]

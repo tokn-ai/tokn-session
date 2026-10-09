@@ -347,6 +347,9 @@ function eventTone(event: EventSummary): string {
 }
 
 function cardHeading(event: EventSummary): TechnicalCardHeading | null {
+  if (event.type === "question_reply") {
+    return { action: "User answers", primary: event.summary || event.title, secondary: "Recorded question reply", monospace: false };
+  }
   if (event.type === "question_request") {
     return { action: "Questions", primary: event.summary || event.title, secondary: "Recorded question request", monospace: false };
   }
@@ -367,11 +370,11 @@ function cardHeading(event: EventSummary): TechnicalCardHeading | null {
 
 function usesControlledExpansion(event: EventSummary): boolean {
   return event.type === "tool_call" || event.type === "reasoning" || event.type === "compaction"
-    || event.type === "question_request" || isAgentCommunication(event);
+    || event.type === "question_request" || event.type === "question_reply" || isAgentCommunication(event);
 }
 
 function eventStatus(event: EventSummary): { label: string; tone: string } | null {
-  if (event.type === "question_request") return null;
+  if (event.type === "question_request" || event.type === "question_reply") return null;
   if (event.type === "compaction") {
     const state = event.compaction?.state;
     return state ? { label: humanize(state), tone: state === "failed" ? "error" : "neutral" } : null;
@@ -909,7 +912,7 @@ export function EventCard({
               is_loading={detail_loading}
               on_retry={on_retry_detail}
             />
-          ) : event.type === "question_request" ? (
+          ) : event.type === "question_request" || event.type === "question_reply" ? (
             <QuestionCard event={event} detail={detail} error={detail_error} is_loading={detail_loading} on_retry={on_retry_detail} />
           ) : event.type === "agent_activity" ? (
             <AgentActivityBody activity={event.agent_activity} event={event} />

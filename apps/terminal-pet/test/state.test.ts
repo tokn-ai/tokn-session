@@ -25,6 +25,8 @@ describe("PetStore", () => {
     expect(store.snapshot(60).state).toBe("running");
     store.ingest(relayEvent({ type: "question_request", request_id: "call-3", is_blocking: null, phase: "finished" }), 70);
     expect(store.snapshot(80).state).toBe("needs_input");
+    store.ingest(relayEvent({ type: "question_reply", request_id: "call-3", replies: [] }), 90);
+    expect(store.snapshot(100).state).toBe("running");
   });
   test("passive records and hidden messages do not change activity or renew leases", () => {
     const store = new PetStore(policy);

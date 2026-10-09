@@ -2244,11 +2244,13 @@ describe("useViewerState agent communication detail", () => {
     });
   });
 
-  it("loads historical question detail after expansion and shares it with Inspector", async () => {
+  it.each(["question_request", "question_reply"])("loads historical %s detail after expansion and shares it with Inspector", async (type) => {
     const page = communicationPage();
-    page.events = [{ ...page.events[0], type: "question_request", agent_activity: null, title: "Questions" }];
+    page.events = [{ ...page.events[0], type, agent_activity: null, title: "Questions" }];
     const recorded: EventDetail = { ...communicationDetail(), event: {
-      type: "question_request", is_blocking: false, questions: [{ question: "Choose storage", options: null }],
+      ...(type === "question_reply"
+        ? { type, request_id: "call-1", replies: [{ question_id: "storage", question: "Choose storage", answers: ["SQLite"] }] }
+        : { type, is_blocking: false, questions: [{ question: "Choose storage", options: null }] }),
     } };
     vi.mocked(loadEventPage).mockResolvedValue(page);
     vi.mocked(loadEventDetail).mockResolvedValue(recorded);

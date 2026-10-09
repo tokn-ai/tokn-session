@@ -92,6 +92,7 @@ fn event_provider(event: &AgentEvent) -> Provider {
     AgentEvent::SessionSettingsApplied(event) => event.provider,
     AgentEvent::Message(event) => event.provider,
     AgentEvent::QuestionRequest(event) => event.provider,
+    AgentEvent::QuestionReply(event) => event.provider,
     AgentEvent::Reasoning(event) => event.provider,
     AgentEvent::GoalUpdated(event) => event.provider,
     AgentEvent::AgentActivity(event) => event.provider,

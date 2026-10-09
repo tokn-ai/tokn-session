@@ -37,6 +37,28 @@ function card(props: Partial<React.ComponentProps<typeof EventCard>> = {}) {
 }
 
 describe("historical question cards", () => {
+  it("renders parsed answers alongside their question without inferring a selected option", () => {
+    const reply = { ...event, type: "question_reply", title: "Question answers", summary: "SQLite", role: "user" };
+    render(card({ event: reply, detail: detail({ event: {
+      type: "question_reply", request_id: "call-1", replies: [
+        { question_id: "storage", header: "Storage", question: "Which **storage engine**?", answers: ["SQLite", "Keep it **local**."] },
+        { question_id: "extra", header: null, question: null, answers: [] },
+      ],
+    } }) }));
+    expect(screen.getByText("Recorded user answers")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Storage" })).toBeInTheDocument();
+    expect(screen.getByText("storage engine").tagName).toBe("STRONG");
+    expect(screen.getByText("SQLite", { selector: "p" })).toBeInTheDocument();
+    expect(screen.getByText("local").tagName).toBe("STRONG");
+    expect(screen.getByRole("heading", { name: "extra" })).toBeInTheDocument();
+    expect(screen.getByText("No answer recorded")).toBeInTheDocument();
+    expect(screen.queryByRole("radio")).not.toBeInTheDocument();
+  });
+
+  it("shows empty response maps without claiming a choice was made", () => {
+    render(card({ event: { ...event, type: "question_reply" }, detail: detail({ event: { type: "question_reply", replies: [] } }) }));
+    expect(screen.getByText("No answers recorded")).toBeInTheDocument();
+  });
   it("shows questions and choices as recorded content without answer controls or completion status", () => {
     render(card());
     expect(screen.getByText("Recorded asynchronous question request")).toBeInTheDocument();

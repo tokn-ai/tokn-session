@@ -3,7 +3,10 @@
 mod questions;
 mod rollout;
 
-pub use questions::{AsyncUserInputQuestion, RequestUserInputEvent, RequestUserInputOption, RequestUserInputQuestion};
+pub use questions::{
+  AsyncUserInputQuestion, RequestUserInputAnswer, RequestUserInputEvent, RequestUserInputOption,
+  RequestUserInputQuestion, RequestUserInputResponse,
+};
 
 pub use rollout::{
   AdditionalToolsItem, AgentMessageItem, CompactedItem, ContentItem, CustomToolCallItem, CustomToolCallOutputItem,

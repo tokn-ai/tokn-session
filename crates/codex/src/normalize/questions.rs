@@ -4,6 +4,177 @@ use tokn_session_core::{AgentEvent, Phase, Provider, QuestionRequestEvent, UserQ
 
 use super::string_field;
 
+/// Bounded correlation retained across incremental reads. Never identify a
+/// reply from answer-shaped JSON alone: it must belong to a recorded request
+/// or a canonical output explicitly named request_user_input.
+#[derive(Default)]
+pub(super) struct RepliesNormalizer {
+  requests: std::collections::BTreeMap<String, ReplyContext>,
+  order: std::collections::VecDeque<String>,
+  outputs: std::collections::BTreeMap<String, Value>,
+}
+
+struct ReplyContext {
+  turn_id: Option<String>,
+  questions: Vec<UserQuestion>,
+}
+
+impl RepliesNormalizer {
+  pub(super) fn observe(&mut self, events: &[AgentEvent]) {
+    for event in events {
+      let AgentEvent::QuestionRequest(request) = event else {
+        continue;
+      };
+      // Async acceptance is not a user reply. Canonical async questions do
+      // not expose a structured response channel in persisted history.
+      if request.questions.iter().all(|question| question.id.is_none()) {
+        continue;
+      }
+      let Some(id) = request.request_id.as_ref() else {
+        continue;
+      };
+      if !self.requests.contains_key(id) {
+        self.order.push_back(id.clone());
+      }
+      self.requests.insert(
+        id.clone(),
+        ReplyContext {
+          turn_id: request.turn_id.clone(),
+          questions: request.questions.clone(),
+        },
+      );
+      self.evict();
+    }
+  }
+
+  fn evict(&mut self) {
+    while self.order.len() > 256 {
+      if let Some(oldest) = self.order.pop_front() {
+        self.requests.remove(&oldest);
+        self.outputs.remove(&oldest);
+      }
+    }
+  }
+
+  pub(super) fn output(
+    &mut self,
+    line: &tokn_codex_protocol::RolloutLine,
+    session_id: Option<String>,
+  ) -> Option<Vec<AgentEvent>> {
+    let payload = line.native().get("payload")?;
+    let canonical = line.native()["type"] == "event_msg"
+      && payload["type"] == "item_completed"
+      && payload["item"]["type"] == "FunctionCallOutput";
+    let (id, output) = if canonical {
+      let item = &payload["item"];
+      if item["name"].as_str()?.rsplit('.').next()? != "request_user_input" {
+        return None;
+      }
+      (string_field(item, "id")?, &item["output"])
+    } else if line.native()["type"] == "response_item" && payload["type"] == "function_call_output" {
+      let id = string_field(payload, "call_id")?;
+      if !self.requests.contains_key(&id) {
+        return None;
+      }
+      (id, &payload["output"])
+    } else {
+      return None;
+    };
+    let decoded = reply_value(output);
+    let response = decoded
+      .as_ref()
+      .and_then(|value| serde_json::from_value::<tokn_codex_protocol::RequestUserInputResponse>(value.clone()).ok());
+    let Some(response) = response.filter(|response| response.answers.keys().all(|id| !id.trim().is_empty())) else {
+      return Some(vec![super::unknown_event(
+        session_id,
+        Some(
+          if canonical {
+            "event_msg.item_completed.FunctionCallOutput"
+          } else {
+            "response_item.function_call_output"
+          }
+          .into(),
+        ),
+        Some(payload.clone()),
+        line.timestamp().map(str::to_owned),
+      )]);
+    };
+    let decoded = decoded.unwrap();
+    if self.outputs.get(&id) == Some(&decoded) {
+      return Some(Vec::new());
+    }
+    // Orphan canonical outputs remain readable without invented question text.
+    // Cache their identity too so a repeated output cannot duplicate the reply.
+    if !self.requests.contains_key(&id) {
+      self.order.push_back(id.clone());
+      self.requests.insert(
+        id.clone(),
+        ReplyContext {
+          turn_id: string_field(payload, "turn_id"),
+          questions: Vec::new(),
+        },
+      );
+      self.evict();
+    }
+    self.outputs.insert(id.clone(), decoded);
+    let request = self.requests.get(&id);
+    let mut answers = response.answers;
+    let mut replies = Vec::new();
+    if let Some(request) = request {
+      for question in &request.questions {
+        let Some(question_id) = question.id.as_ref() else {
+          continue;
+        };
+        if let Some(answer) = answers.remove(question_id) {
+          replies.push(tokn_session_core::UserQuestionReply {
+            question_id: question_id.clone(),
+            question: Some(question.question.clone()),
+            header: question.header.clone(),
+            answers: answer.answers,
+          });
+        }
+      }
+    }
+    // Unexpected question IDs stay visible rather than silently disappearing.
+    replies.extend(
+      answers
+        .into_iter()
+        .map(|(question_id, answer)| tokn_session_core::UserQuestionReply {
+          question_id,
+          question: None,
+          header: None,
+          answers: answer.answers,
+        }),
+    );
+    Some(vec![AgentEvent::QuestionReply(tokn_session_core::QuestionReplyEvent {
+      provider: Provider::Codex,
+      session_id,
+      request_id: id,
+      turn_id: string_field(payload, "turn_id").or_else(|| request.and_then(|request| request.turn_id.clone())),
+      replies,
+      native: payload.clone(),
+      timestamp: line.timestamp().map(str::to_owned),
+    })])
+  }
+}
+
+fn reply_value(output: &Value) -> Option<Value> {
+  if let Some(text) = output.as_str() {
+    return serde_json::from_str(text).ok();
+  }
+  if let Some(parts) = output.as_array() {
+    let mut text = String::new();
+    for part in parts {
+      if part["type"] != "input_text" {
+        return None;
+      }
+      text.push_str(part.get("text")?.as_str()?);
+    }
+    return serde_json::from_str(&text).ok();
+  }
+  output.is_object().then(|| output.clone())
+}
+
 pub(super) fn async_message(
   session_id: Option<String>,
   item: &Value,
@@ -177,6 +348,120 @@ mod tests {
       .into_iter()
       .flat_map(|value| normalizer.normalize(serde_json::from_value(value).unwrap()))
       .collect()
+  }
+
+  fn structured_call(id: &str) -> Value {
+    json!({"type":"response_item","payload":{"type":"function_call","name":"request_user_input","call_id":id,"arguments":json!({"questions":[
+      {"id":"storage","header":"Storage","question":"Which storage?","options":[{"label":"SQLite","description":"Local"}]},
+      {"id":"notes","header":"Notes","question":"Any constraints?","options":[{"label":"Local","description":"No cloud"}]}
+    ]}).to_string()}})
+  }
+
+  fn structured_output(id: &str, output: Value) -> Value {
+    json!({"timestamp":"2026-10-09T00:00:05Z","type":"response_item","payload":{"type":"function_call_output","call_id":id,"output":output,"future_hint":"kept"}})
+  }
+
+  #[test]
+  fn replies_correlate_by_call_and_question_ids_in_legacy_and_paginated_history() {
+    for mode in ["legacy", "paginated"] {
+      let answers = json!({"answers":{"notes":{"answers":["No cloud", "**Keep it local**"]},"storage":{"answers":["SQLite"]},"future_question":{"answers":["Still visible"]}},"future_reply_flag":true});
+      let raw = structured_output("call-1", Value::String(answers.to_string()));
+      let canonical = json!({"type":"event_msg","payload":{"type":"item_completed","thread_id":"session-1","turn_id":"turn-1","item":{"type":"FunctionCallOutput","name":"request_user_input","id":"call-1","output":answers.to_string()}}});
+      let events = normalize([
+        json!({"type":"session_meta","payload":{"id":"session-1","history_mode":mode}}),
+        structured_call("call-1"),
+        raw.clone(),
+        canonical,
+      ]);
+      let replies: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+          AgentEvent::QuestionReply(reply) => Some(reply),
+          _ => None,
+        })
+        .collect();
+      assert_eq!(replies.len(), 1);
+      let reply = replies[0];
+      assert_eq!(reply.request_id, "call-1");
+      assert_eq!(reply.session_id.as_deref(), Some("session-1"));
+      assert_eq!(reply.replies[0].question_id, "storage");
+      assert_eq!(reply.replies[0].question.as_deref(), Some("Which storage?"));
+      assert_eq!(reply.replies[0].answers, ["SQLite"]);
+      assert_eq!(reply.replies[1].answers, ["No cloud", "**Keep it local**"]);
+      assert!(reply.replies[2].question.is_none());
+      assert_eq!(reply.native, raw["payload"]);
+      assert_eq!(reply.timestamp.as_deref(), Some("2026-10-09T00:00:05Z"));
+      assert!(!events.iter().any(|event| matches!(event, AgentEvent::ToolCall(_))));
+    }
+  }
+
+  #[test]
+  fn answers_work_in_incremental_reads_and_accept_content_items_without_dropping_media() {
+    let mut normalizer = CodexNormalizer::new();
+    normalizer.normalize(serde_json::from_value(structured_call("call-1")).unwrap());
+    let answers = json!({"answers":{"storage":{"answers":["SQLite"]}}});
+    let output = structured_output("call-1", json!([{"type":"input_text","text":answers.to_string()}]));
+    let events = normalizer.normalize(serde_json::from_value(output).unwrap());
+    assert!(matches!(&events[..], [AgentEvent::QuestionReply(reply)] if reply.replies[0].answers == ["SQLite"]));
+    let output = structured_output(
+      "call-1",
+      json!([{"type":"input_text","text":answers.to_string()},{"type":"input_image","image_url":"test"}]),
+    );
+    let events = normalizer.normalize(serde_json::from_value(output).unwrap());
+    assert!(matches!(&events[..], [AgentEvent::Unknown(_)]));
+  }
+
+  #[test]
+  fn malformed_empty_and_unrelated_outputs_do_not_fabricate_answers() {
+    for (output, valid) in [
+      (json!({"answers":{}}), true),
+      (json!({"answers":{"storage":{"answers":[]}}}), true),
+      (json!({"answers":{"storage":{"answers":[42]}}}), false),
+      (json!("cancelled"), false),
+      (json!({"accepted":true}), false),
+      (Value::Null, false),
+    ] {
+      let events = normalize([structured_call("call-1"), structured_output("call-1", output)]);
+      if valid {
+        assert!(matches!(&events[1], AgentEvent::QuestionReply(_)));
+      } else {
+        assert!(matches!(&events[1], AgentEvent::Unknown(_)));
+      }
+    }
+    let events = normalize([
+      structured_call("call-1"),
+      json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"call-1"}}),
+    ]);
+    assert!(matches!(&events[1], AgentEvent::Unknown(_)));
+    let events = normalize([structured_output(
+      "unrelated",
+      json!({"answers":{"storage":{"answers":["SQLite"]}}}),
+    )]);
+    assert!(matches!(&events[..], [AgentEvent::ToolCall(_)]));
+    let async_call = json!({"type":"response_item","payload":{"type":"function_call","name":"request_user_input_async","call_id":"async-1","arguments":"{\"questions\":[{\"title\":\"Storage?\"}]}"}});
+    let events = normalize([async_call, structured_output("async-1", json!("{\"accepted\":true}"))]);
+    assert!(!events.iter().any(|event| matches!(event, AgentEvent::QuestionReply(_))));
+  }
+
+  #[test]
+  fn orphan_canonical_answers_preserve_ids_without_inventing_question_text() {
+    let event = json!({"type":"event_msg","payload":{"type":"item_completed","thread_id":"session-1","turn_id":"turn-1","item":{"type":"FunctionCallOutput","id":"call-1","name":"request_user_input","output":"{\"answers\":{\"q1\":{\"answers\":[\"Yes\"]}}}"}}});
+    let events = normalize([event]);
+    assert!(
+      matches!(&events[..], [AgentEvent::QuestionReply(reply)] if reply.turn_id.as_deref() == Some("turn-1") && reply.replies[0].question.is_none() && reply.replies[0].question_id == "q1")
+    );
+  }
+
+  #[test]
+  fn request_correlation_is_bounded() {
+    let mut normalizer = RepliesNormalizer::default();
+    for index in 0..300 {
+      let events = normalize([structured_call(&format!("call-{index}"))]);
+      normalizer.observe(&events);
+    }
+    assert_eq!(normalizer.requests.len(), 256);
+    assert_eq!(normalizer.order.len(), 256);
+    assert!(!normalizer.requests.contains_key("call-0"));
   }
 
   #[test]

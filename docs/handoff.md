@@ -22,8 +22,11 @@ expandable viewer cards outside work trajectories. Paginated async message
 items retain questions/choices; legacy tool invocations and recorded
 `request_user_input` events retain structured question descriptions and recorded flags.
 Native payloads stay inspectable, and malformed canonical question items remain
-unknown. Cards show recorded requests, not live pending/answered status; replies
-remain their original user messages or tool results. Live answering is deferred.
+unknown. Structured tool results now become `question_reply` user rows, with
+answers linked to question IDs and prompts by call ID across incremental reads.
+Empty answers remain visible; malformed replies retain native unknown records.
+Async replies remain ordinary user messages without inferred pairing. Cards
+show recorded history; live answering is deferred.
 `vendor/codex` is pinned to upstream `2351d9e1b6` (2026-10-09).
 See [question semantics](event-ir.md#questions).
 
@@ -1001,6 +1004,7 @@ Current event families include:
 - `session_settings_applied`
 - `message`
 - `question_request`
+- `question_reply`
 - `reasoning`
 - `goal_updated`
 - `agent_activity`
