@@ -2,9 +2,10 @@
 """Compare two relay binaries on isolated, repeatable I/O workloads.
 
 Build both binaries and the macOS interposer before running this driver. Each
-trial gets fresh provider storage, and only work after startup is counted.
-The counters describe intercepted libc calls and returned bytes, not physical
-disk operations or SQLite statement counts.
+trial gets fresh provider storage. Most trials reset counters after startup;
+codex_startup counts launch through readiness and process shutdown. The
+counters describe intercepted libc calls and returned bytes, not physical disk
+operations or SQLite statement counts.
 """
 
 import argparse
@@ -30,10 +31,14 @@ COUNTER_KEYS = (
   "open_calls", "openat_calls", "stat_calls", "lstat_calls",
   "fstat_calls", "fstatat_calls", "opendir_calls", "readdir_calls",
 )
-SCENARIOS = ("idle", "append", "burst", "opencode_edit", "opencode_inplace_edit")
+SCENARIOS = (
+  "idle", "append", "burst", "opencode_edit", "opencode_inplace_edit",
+  "codex_idle", "codex_append", "codex_burst", "codex_new_file", "codex_startup",
+)
 PI_FILES = 32
 BURST_FILES = 16
 BURST_LINES_PER_FILE = 8
+CODEX_FILES = 128
 OPENCODE_SESSIONS = 100
 STARTUP_TIMEOUT_SECONDS = 30
 DELIVERY_TIMEOUT_SECONDS = 10
@@ -146,6 +151,53 @@ def pi_message(index: int, ordinal: int) -> str:
   }, separators=(",", ":")) + "\n"
 
 
+def codex_rollout_path(sessions: Path, index: int) -> Path:
+  day = index % 8 + 1
+  return sessions / "2026" / "01" / f"{day:02d}" / f"rollout-2026-01-{day:02d}T00-00-00-bench-{index:03d}.jsonl"
+
+
+def codex_session_header(index: int) -> str:
+  return json.dumps({
+    "timestamp": "2026-01-01T00:00:00Z",
+    "type": "session_meta",
+    "payload": {
+      "id": f"bench-{index:03d}",
+      "timestamp": "2026-01-01T00:00:00Z",
+      "cwd": "/tmp/relay-io-bench",
+      "history_mode": "paginated",
+    },
+  }, separators=(",", ":")) + "\n"
+
+
+def codex_message(index: int, ordinal: int) -> str:
+  return json.dumps({
+    "timestamp": "2026-01-01T00:00:01Z",
+    "type": "event_msg",
+    "payload": {"type": "user_message", "message": f"benchmark {index}:{ordinal}"},
+  }, separators=(",", ":")) + "\n"
+
+
+def create_codex_fixture(root: Path, scenario: str) -> Path:
+  codex_home = root / "codex"
+  sessions = codex_home / "sessions"
+  # An existing Desktop catalog avoids measuring repeated missing-file checks.
+  (codex_home / ".codex-global-state.json").parent.mkdir(parents=True)
+  (codex_home / ".codex-global-state.json").write_text("{}\n", encoding="utf-8")
+  for index in range(CODEX_FILES):
+    path = codex_rollout_path(sessions, index)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = codex_session_header(index)
+    if scenario == "codex_startup":
+      # A long complete rollout makes both header seeding and tail reads visible.
+      content += json.dumps({
+        "timestamp": "2026-01-01T00:00:01Z",
+        "type": "event_msg",
+        "payload": {"type": "user_message", "message": "x" * (16 * 1024)},
+      }, separators=(",", ":")) + "\n"
+    path.write_text(content, encoding="utf-8")
+  return sessions
+
+
 def create_opencode_fixture(database: Path) -> sqlite3.Connection:
   connection = sqlite3.connect(database)
   connection.execute("pragma journal_mode = wal")
@@ -190,6 +242,8 @@ def create_fixture(root: Path, scenario: str) -> tuple[Path | None, sqlite3.Conn
   if scenario in ("opencode_edit", "opencode_inplace_edit"):
     database = root / "opencode.db"
     return None, create_opencode_fixture(database)
+  if scenario.startswith("codex_"):
+    return create_codex_fixture(root, scenario), None
   pi_dir = root / "pi"
   pi_dir.mkdir()
   for index in range(PI_FILES):
@@ -197,14 +251,16 @@ def create_fixture(root: Path, scenario: str) -> tuple[Path | None, sqlite3.Conn
   return pi_dir, None
 
 
-def relay_command(binary: Path, root: Path, pi_dir: Path | None, scenario: str) -> list[str]:
+def relay_command(binary: Path, root: Path, jsonl_dir: Path | None, scenario: str) -> list[str]:
   missing = root / "unused"
   opencode_database = root / "opencode.db" if scenario in ("opencode_edit", "opencode_inplace_edit") else missing / "opencode.db"
+  codex_dir = jsonl_dir if scenario.startswith("codex_") else missing / "codex"
+  pi_dir = jsonl_dir if scenario in ("idle", "append", "burst") else missing / "pi"
   return [
     str(binary), "stdout", "--format", "json",
-    "--poll-interval", "200ms" if scenario == "idle" else "30s",
-    "--codex-dir", str(missing / "codex"),
-    "--pi-dir", str(pi_dir if pi_dir is not None else missing / "pi"),
+    "--poll-interval", "200ms" if scenario in ("idle", "codex_idle") else "30s",
+    "--codex-dir", str(codex_dir),
+    "--pi-dir", str(pi_dir),
     "--opencode-dir", str(opencode_database),
     "--zcode-dir", str(missing / "zcode.sqlite"),
     "--workbuddy-dir", str(missing / "workbuddy"),
@@ -228,7 +284,7 @@ def records_since(lines: list[OutputLine], start_index: int) -> list[tuple[Outpu
 
 
 def expected_topics(scenario: str) -> Counter[str]:
-  if scenario == "idle":
+  if scenario in ("idle", "codex_idle", "codex_startup"):
     return Counter()
   if scenario == "append":
     return Counter({"pi.bench-000": 1})
@@ -236,6 +292,12 @@ def expected_topics(scenario: str) -> Counter[str]:
     return Counter({f"pi.bench-{index:03d}": BURST_LINES_PER_FILE for index in range(BURST_FILES)})
   if scenario in ("opencode_edit", "opencode_inplace_edit"):
     return Counter({"opencode.ses_000": 1})
+  if scenario == "codex_append":
+    return Counter({"codex.bench-000": 1})
+  if scenario == "codex_burst":
+    return Counter({f"codex.bench-{index:03d}": BURST_LINES_PER_FILE for index in range(BURST_FILES)})
+  if scenario == "codex_new_file":
+    return Counter({f"codex.bench-{CODEX_FILES:03d}": 2})
   raise ValueError(f"unknown scenario: {scenario}")
 
 
@@ -243,16 +305,65 @@ def observed_topics(lines: list[OutputLine], start_index: int) -> Counter[str]:
   return Counter(record.get("topic") for _, record in records_since(lines, start_index))
 
 
-def perform_workload(scenario: str, pi_dir: Path | None, connection: sqlite3.Connection | None):
+def expected_codex_records(scenario: str) -> Counter[tuple[str, str, str]]:
+  indices = range(BURST_FILES) if scenario == "codex_burst" else (CODEX_FILES if scenario == "codex_new_file" else 0,)
+  ordinals = range(BURST_LINES_PER_FILE) if scenario == "codex_burst" else (0,)
+  expected = Counter()
+  for index in indices:
+    offset = len(codex_session_header(index).encode("utf-8"))
+    for ordinal in ordinals:
+      expected[(f"codex.bench-{index:03d}", f"jsonl:{offset}", f"benchmark {index}:{ordinal}")] += 1
+      offset += len(codex_message(index, ordinal).encode("utf-8"))
+  return expected
+
+
+def verify_codex_records(scenario: str, entries: list[tuple[OutputLine, dict]]):
+  if scenario not in ("codex_append", "codex_burst", "codex_new_file"):
+    return
+  observed = Counter()
+  header_seen = False
+  for _, record in entries:
+    events = record.get("events")
+    if record.get("operation") != "upsert" or not isinstance(events, list) or len(events) != 1:
+      raise RuntimeError(f"unexpected Codex record: {record}")
+    if scenario == "codex_new_file" and events[0].get("type") == "session_started":
+      if header_seen or record["record_id"] != "jsonl:0" or record["topic"] != f"codex.bench-{CODEX_FILES:03d}":
+        raise RuntimeError(f"unexpected Codex session header: {record}")
+      header_seen = True
+      continue
+    if events[0].get("type") != "message" or events[0].get("role") != "user":
+      raise RuntimeError(f"unexpected Codex message: {record}")
+    observed[(record["topic"], record["record_id"], events[0].get("text"))] += 1
+  expected = expected_codex_records(scenario)
+  if observed != expected or (scenario == "codex_new_file" and not header_seen):
+    raise RuntimeError(f"unexpected Codex records: {observed}; expected {expected}")
+
+
+def perform_workload(scenario: str, jsonl_dir: Path | None, connection: sqlite3.Connection | None):
   if scenario == "append":
-    assert pi_dir is not None
-    with (pi_dir / "session_000.jsonl").open("a", encoding="utf-8") as file:
+    assert jsonl_dir is not None
+    with (jsonl_dir / "session_000.jsonl").open("a", encoding="utf-8") as file:
       file.write(pi_message(0, 0))
   elif scenario == "burst":
-    assert pi_dir is not None
+    assert jsonl_dir is not None
     for index in range(BURST_FILES):
-      with (pi_dir / f"session_{index:03d}.jsonl").open("a", encoding="utf-8") as file:
+      with (jsonl_dir / f"session_{index:03d}.jsonl").open("a", encoding="utf-8") as file:
         file.write("".join(pi_message(index, ordinal) for ordinal in range(BURST_LINES_PER_FILE)))
+  elif scenario == "codex_append":
+    assert jsonl_dir is not None
+    with codex_rollout_path(jsonl_dir, 0).open("a", encoding="utf-8") as file:
+      file.write(codex_message(0, 0))
+  elif scenario == "codex_burst":
+    assert jsonl_dir is not None
+    for index in range(BURST_FILES):
+      with codex_rollout_path(jsonl_dir, index).open("a", encoding="utf-8") as file:
+        file.write("".join(codex_message(index, ordinal) for ordinal in range(BURST_LINES_PER_FILE)))
+  elif scenario == "codex_new_file":
+    assert jsonl_dir is not None
+    index = CODEX_FILES
+    codex_rollout_path(jsonl_dir, index).write_text(
+      codex_session_header(index) + codex_message(index, 0), encoding="utf-8",
+    )
   elif scenario in ("opencode_edit", "opencode_inplace_edit"):
     assert connection is not None
     with connection:
@@ -304,13 +415,14 @@ def summarize_counters(counters: dict[str, int]) -> dict[str, int]:
 def run_trial(binary: Path, interposer: Path, scenario: str, repetition: int, version: str) -> dict:
   with tempfile.TemporaryDirectory(prefix="tokn-relay-io-") as directory:
     root = Path(directory)
-    pi_dir, connection = create_fixture(root, scenario)
+    jsonl_dir, connection = create_fixture(root, scenario)
     metrics_path = root / "metrics.json"
     env = os.environ.copy()
     env["DYLD_INSERT_LIBRARIES"] = str(interposer)
     env["TOKN_IO_METRICS_PATH"] = str(metrics_path)
-    command = relay_command(binary, root, pi_dir, scenario)
+    command = relay_command(binary, root, jsonl_dir, scenario)
     before_cpu = resource.getrusage(resource.RUSAGE_CHILDREN)
+    process_start_ns = time.perf_counter_ns()
     process = subprocess.Popen(
       command, env=env, stdin=subprocess.DEVNULL,
       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -318,12 +430,17 @@ def run_trial(binary: Path, interposer: Path, scenario: str, repetition: int, ve
     )
     collector = OutputCollector(process)
     try:
-      collector.wait_until(
+      startup_lines = collector.wait_until(
         lambda lines: any(line.stream == "stderr" and line.text.startswith("following ") for line in lines),
         STARTUP_TIMEOUT_SECONDS, "relay startup banner",
       )
+      startup_banner_ns = next(
+        line.time_ns for line in startup_lines if line.stream == "stderr" and line.text.startswith("following ")
+      )
       # In particular, let SQLite's first SHM callback settle before reset.
-      time.sleep(0.5)
+      # Cold startup only needs time for the CLI's SIGINT handler to install
+      # after it prints the ready banner.
+      time.sleep(0.02 if scenario == "codex_startup" else 0.5)
       startup_lines = collector.snapshot()
       startup_warnings = [line.text for line in startup_lines if line.stream == "stderr" and line.text.startswith("warning:")]
       if startup_warnings:
@@ -331,17 +448,25 @@ def run_trial(binary: Path, interposer: Path, scenario: str, repetition: int, ve
       if records_since(startup_lines, 0):
         raise RuntimeError("existing fixture unexpectedly emitted records during startup")
 
-      process.send_signal(signal.SIGUSR1)
-      time.sleep(0.02)
-      start_index = len(collector.snapshot())
-      measurement_start_ns = time.perf_counter_ns()
+      if scenario == "codex_startup":
+        # No reset: count process launch, recursive watch registration, header
+        # seeding, and tail reads. The banner follows completed initial seeding.
+        start_index = 0
+        measurement_start_ns = process_start_ns
+      else:
+        process.send_signal(signal.SIGUSR1)
+        time.sleep(0.02)
+        start_index = len(collector.snapshot())
+        measurement_start_ns = time.perf_counter_ns()
       write_start_ns = None
       write_end_ns = None
-      if scenario == "idle":
+      if scenario in ("idle", "codex_idle"):
         time.sleep(2)
+      elif scenario == "codex_startup":
+        pass
       else:
         write_start_ns = time.perf_counter_ns()
-        perform_workload(scenario, pi_dir, connection)
+        perform_workload(scenario, jsonl_dir, connection)
         write_end_ns = time.perf_counter_ns()
         expected = expected_topics(scenario)
         observed_lines = collector.wait_until(
@@ -374,6 +499,7 @@ def run_trial(binary: Path, interposer: Path, scenario: str, repetition: int, ve
       record_keys = [(record["topic"], record["record_id"]) for _, record in entries]
       if len(set(record_keys)) != len(record_keys):
         raise RuntimeError(f"duplicate record keys in {scenario}: {record_keys}")
+      verify_codex_records(scenario, entries)
       if scenario in ("opencode_edit", "opencode_inplace_edit") and entries[0][1].get("record_id") != "message:msg_000":
         raise RuntimeError(f"unexpected OpenCode edit record: {entries[0][1].get('record_id')}")
       warnings = [line.text for line in final_lines[start_index:] if line.stream == "stderr" and line.text.startswith("warning:")]
@@ -398,11 +524,13 @@ def run_trial(binary: Path, interposer: Path, scenario: str, repetition: int, ve
         "scenario": scenario,
         "repetition": repetition,
         "version": version,
+        "counter_window": "launch-through-ready-plus-shutdown" if scenario == "codex_startup" else "post-startup-through-shutdown",
         "records": len(entries),
         "warnings": len(warnings),
         "warning_texts": warnings,
         "active_window_s": (stop_ns - measurement_start_ns) / 1e9,
         "measurement_elapsed_s": (exit_ns - measurement_start_ns) / 1e9,
+        "startup_ready_ms": (startup_banner_ns - process_start_ns) / 1e6,
         "first_latency_ms": first_latency_ms,
         "delivery_latency_ms": latency_ms,
         "post_write_latency_ms": post_write_latency_ms,
@@ -425,6 +553,7 @@ def run_trial(binary: Path, interposer: Path, scenario: str, repetition: int, ve
 def print_summary(trials: list[dict], scenarios: list[str] | tuple[str, ...]):
   columns = (
     ("wall_s", lambda row: row["measurement_elapsed_s"]),
+    ("startup_ms", lambda row: row["startup_ready_ms"]),
     ("read_bytes", lambda row: row["totals"]["read_bytes"]),
     ("read_calls", lambda row: row["totals"]["read_calls"]),
     ("opens", lambda row: row["totals"]["open_calls"]),

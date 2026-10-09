@@ -291,9 +291,19 @@ impl SessionTailer {
 
     if !changed_directories.is_empty() {
       self.files.retain(|path, _| {
-        !changed_directories
-          .iter()
-          .any(|directory| path.starts_with(directory) && !path.exists())
+        if candidates.contains_key(path) || !changed_directories.iter().any(|directory| path.starts_with(directory)) {
+          return true;
+        }
+        match std::fs::metadata(path) {
+          Ok(_) => true,
+          Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+          Err(error) => {
+            update
+              .warnings
+              .push(format!("failed to inspect {}: {error}", path.display()));
+            true
+          }
+        }
       });
     }
 
@@ -766,7 +776,8 @@ impl FileState {
     }
 
     self.offset = self.initial_length;
-    self.pending = trailing_partial_line(&self.path, self.offset)?;
+    let mut file = reader.into_inner();
+    self.pending = trailing_partial_line(&mut file, &self.path, self.offset)?;
     Ok(update)
   }
 
@@ -905,17 +916,27 @@ pub(crate) fn apply_replay_policy(events: &mut Vec<RelayRecord>, replay: NewFile
   }
 }
 
-fn trailing_partial_line(path: &Path, length: u64) -> Result<Vec<u8>, String> {
+fn trailing_partial_line(file: &mut File, path: &Path, length: u64) -> Result<Vec<u8>, String> {
   const CHUNK_SIZE: usize = 8 * 1024;
 
   if length == 0 {
     return Ok(Vec::new());
   }
 
-  let mut file = File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
-  let mut position = length;
-  let mut chunks = Vec::new();
-  loop {
+  file
+    .seek(SeekFrom::Start(length - 1))
+    .map_err(|err| format!("failed to seek {}: {err}", path.display()))?;
+  let mut final_byte = [0];
+  file
+    .read_exact(&mut final_byte)
+    .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+  if final_byte[0] == b'\n' {
+    return Ok(Vec::new());
+  }
+
+  let mut position = length - 1;
+  let mut chunks = vec![final_byte.to_vec()];
+  while position > 0 {
     let chunk_length = position.min(CHUNK_SIZE as u64) as usize;
     position -= chunk_length as u64;
     file
@@ -1147,14 +1168,14 @@ fn file_identity(metadata: &std::fs::Metadata) -> FileIdentity {
 #[cfg(test)]
 mod tests {
   use std::collections::HashSet;
-  use std::fs::OpenOptions;
+  use std::fs::{File, OpenOptions};
   use std::io::Write;
 
   use rusqlite::{Connection, params};
   use tempfile::TempDir;
   use tokn_session_core::{AgentEvent, Provider};
 
-  use super::{OpenCodeState, ProviderRoot, SessionTailer};
+  use super::{OpenCodeState, ProviderRoot, SessionTailer, trailing_partial_line};
   use crate::NewFileReplay;
 
   #[test]
@@ -1358,6 +1379,85 @@ mod tests {
     let second_update = tailer.scan_paths(HashSet::from([second])).unwrap();
     assert_eq!(second_update.records.len(), 1);
     assert_eq!(second_update.records[0].topic, "pi.second");
+  }
+
+  #[test]
+  fn codex_directory_event_reads_append_and_removes_deleted_file() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("sessions");
+    let day = root.join("2026/10/09");
+    std::fs::create_dir_all(&day).unwrap();
+    let active = day.join("rollout-active.jsonl");
+    let deleted = day.join("rollout-deleted.jsonl");
+    std::fs::write(&active, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"active\"}}\n").unwrap();
+    std::fs::write(
+      &deleted,
+      "{\"type\":\"session_meta\",\"payload\":{\"id\":\"deleted\"}}\n",
+    )
+    .unwrap();
+    let (mut tailer, initial) = SessionTailer::initialize(
+      vec![ProviderRoot::new(Provider::Codex, root.clone())],
+      NewFileReplay::All,
+    )
+    .unwrap();
+    assert!(initial.records.is_empty());
+
+    append(
+      &active,
+      "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"hello\"}}\n",
+    );
+    std::fs::remove_file(&deleted).unwrap();
+
+    let update = tailer.scan_paths(HashSet::from([day])).unwrap();
+    assert!(update.warnings.is_empty());
+    assert_eq!(update.records.len(), 1);
+    assert_eq!(update.records[0].topic, "codex.active");
+    assert!(tailer.files.contains_key(&active));
+    assert!(!tailer.files.contains_key(&deleted));
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn directory_event_keeps_file_state_after_metadata_error() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join("sessions");
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("rollout-session.jsonl");
+    std::fs::write(&path, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"old\"}}\n").unwrap();
+    let (mut tailer, _) = SessionTailer::initialize(
+      vec![ProviderRoot::new(Provider::Codex, root.clone())],
+      NewFileReplay::All,
+    )
+    .unwrap();
+
+    // Keep the replacement's inode distinct from the tracked file's inode.
+    let replacement = fixture.path().join("replacement");
+    std::fs::write(
+      &replacement,
+      concat!(
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"new\"}}\n",
+        "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"hello\"}}\n"
+      ),
+    )
+    .unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::os::unix::fs::symlink(&path, &path).unwrap();
+
+    let failed = tailer.scan_paths(HashSet::from([root.clone()])).unwrap();
+    assert!(
+      failed
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("failed to inspect"))
+    );
+    assert!(tailer.files.contains_key(&path));
+
+    std::fs::remove_file(&path).unwrap();
+    std::fs::rename(replacement, &path).unwrap();
+    let recovered = tailer.scan_paths(HashSet::from([root])).unwrap();
+    assert!(recovered.warnings.is_empty());
+    assert_eq!(recovered.records.len(), 2);
+    assert!(recovered.records.iter().all(|record| record.topic == "codex.new"));
   }
 
   #[test]
@@ -1610,6 +1710,30 @@ mod tests {
       panic!("expected message");
     };
     assert_eq!(message.text, "hello");
+  }
+
+  #[test]
+  fn trailing_partial_line_handles_complete_and_long_incomplete_lines() {
+    let fixture = TempDir::new().unwrap();
+    let path = fixture.path().join("rollout.jsonl");
+    let mut complete = vec![b'x'; 16 * 1024];
+    complete.push(b'\n');
+    std::fs::write(&path, &complete).unwrap();
+    let mut file = File::open(&path).unwrap();
+    assert!(
+      trailing_partial_line(&mut file, &path, complete.len() as u64)
+        .unwrap()
+        .is_empty()
+    );
+
+    let partial = vec![b'y'; 16 * 1024 + 1];
+    complete.extend_from_slice(&partial);
+    std::fs::write(&path, &complete).unwrap();
+    let mut file = File::open(&path).unwrap();
+    assert_eq!(
+      trailing_partial_line(&mut file, &path, complete.len() as u64).unwrap(),
+      partial
+    );
   }
 
   #[test]

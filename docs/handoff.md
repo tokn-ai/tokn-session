@@ -361,6 +361,10 @@ for an OpenCode/ZCode catalog and its selected sessions, removing repeated
 database opens and page reads, including during the all-session fallback for
 timestamp-free part edits. Full record loads reuse messages for counts and
 untitled previews. JSONL scans now use one metadata lookup per tracked file.
+Codex/Pi directory notifications avoid a second metadata probe for discovered
+rollouts, and startup reuses each header file handle to check only the final
+byte of newline-terminated files before following at EOF. Metadata errors
+retain file state for retry.
 The database is opened read-only with WAL visibility and an immutable fallback;
 the relay never runs provider migrations.
 
