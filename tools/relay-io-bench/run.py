@@ -30,7 +30,7 @@ COUNTER_KEYS = (
   "open_calls", "openat_calls", "stat_calls", "lstat_calls",
   "fstat_calls", "fstatat_calls", "opendir_calls", "readdir_calls",
 )
-SCENARIOS = ("idle", "append", "burst", "opencode_edit")
+SCENARIOS = ("idle", "append", "burst", "opencode_edit", "opencode_inplace_edit")
 PI_FILES = 32
 BURST_FILES = 16
 BURST_LINES_PER_FILE = 8
@@ -105,6 +105,7 @@ def parse_args():
   parser.add_argument("--interposer", type=Path, required=True, help="compiled macOS I/O counter dylib")
   parser.add_argument("--output", type=Path, help="write full JSON results to this path")
   parser.add_argument("--repetitions", type=int, default=3, help="paired repetitions per workload (default: 3)")
+  parser.add_argument("--scenarios", nargs="+", choices=SCENARIOS, default=SCENARIOS, help="workloads to run")
   return parser.parse_args()
 
 
@@ -186,7 +187,7 @@ def create_opencode_fixture(database: Path) -> sqlite3.Connection:
 
 
 def create_fixture(root: Path, scenario: str) -> tuple[Path | None, sqlite3.Connection | None]:
-  if scenario == "opencode_edit":
+  if scenario in ("opencode_edit", "opencode_inplace_edit"):
     database = root / "opencode.db"
     return None, create_opencode_fixture(database)
   pi_dir = root / "pi"
@@ -198,12 +199,13 @@ def create_fixture(root: Path, scenario: str) -> tuple[Path | None, sqlite3.Conn
 
 def relay_command(binary: Path, root: Path, pi_dir: Path | None, scenario: str) -> list[str]:
   missing = root / "unused"
+  opencode_database = root / "opencode.db" if scenario in ("opencode_edit", "opencode_inplace_edit") else missing / "opencode.db"
   return [
     str(binary), "stdout", "--format", "json",
     "--poll-interval", "200ms" if scenario == "idle" else "30s",
     "--codex-dir", str(missing / "codex"),
     "--pi-dir", str(pi_dir if pi_dir is not None else missing / "pi"),
-    "--opencode-dir", str(root / "opencode.db" if scenario == "opencode_edit" else missing / "opencode.db"),
+    "--opencode-dir", str(opencode_database),
     "--zcode-dir", str(missing / "zcode.sqlite"),
     "--workbuddy-dir", str(missing / "workbuddy"),
     "--dsh-dir", str(missing / "dsh"),
@@ -232,7 +234,9 @@ def expected_topics(scenario: str) -> Counter[str]:
     return Counter({"pi.bench-000": 1})
   if scenario == "burst":
     return Counter({f"pi.bench-{index:03d}": BURST_LINES_PER_FILE for index in range(BURST_FILES)})
-  return Counter({"opencode.ses_000": 1})
+  if scenario in ("opencode_edit", "opencode_inplace_edit"):
+    return Counter({"opencode.ses_000": 1})
+  raise ValueError(f"unknown scenario: {scenario}")
 
 
 def observed_topics(lines: list[OutputLine], start_index: int) -> Counter[str]:
@@ -249,20 +253,21 @@ def perform_workload(scenario: str, pi_dir: Path | None, connection: sqlite3.Con
     for index in range(BURST_FILES):
       with (pi_dir / f"session_{index:03d}.jsonl").open("a", encoding="utf-8") as file:
         file.write("".join(pi_message(index, ordinal) for ordinal in range(BURST_LINES_PER_FILE)))
-  elif scenario == "opencode_edit":
+  elif scenario in ("opencode_edit", "opencode_inplace_edit"):
     assert connection is not None
     with connection:
       connection.execute(
         "update part set data = ? where id = 'part_000'",
         ('{"type":"text","text":"after 000"}',),
       )
-      # Move the session summary as OpenCode normally does when a turn changes.
-      # This targets one session rather than triggering the all-session
-      # correctness fallback for an otherwise invisible part edit.
-      connection.execute(
-        "update session set time_updated = ? where id = 'ses_000'",
-        (OPENCODE_SESSIONS + 1,),
-      )
+      if scenario == "opencode_edit":
+        # The session summary identifies the changed session on the usual path.
+        connection.execute(
+          "update session set time_updated = ? where id = 'ses_000'",
+          (OPENCODE_SESSIONS + 1,),
+        )
+      # The in-place variant leaves all session summaries unchanged. Relay
+      # must inspect message/part content to detect this edit.
 
 
 def read_metrics(path: Path) -> dict[str, int]:
@@ -369,7 +374,7 @@ def run_trial(binary: Path, interposer: Path, scenario: str, repetition: int, ve
       record_keys = [(record["topic"], record["record_id"]) for _, record in entries]
       if len(set(record_keys)) != len(record_keys):
         raise RuntimeError(f"duplicate record keys in {scenario}: {record_keys}")
-      if scenario == "opencode_edit" and entries[0][1].get("record_id") != "message:msg_000":
+      if scenario in ("opencode_edit", "opencode_inplace_edit") and entries[0][1].get("record_id") != "message:msg_000":
         raise RuntimeError(f"unexpected OpenCode edit record: {entries[0][1].get('record_id')}")
       warnings = [line.text for line in final_lines[start_index:] if line.stream == "stderr" and line.text.startswith("warning:")]
       if any("filesystem notifications disabled" in warning for warning in warnings):
@@ -417,7 +422,7 @@ def run_trial(binary: Path, interposer: Path, scenario: str, repetition: int, ve
         connection.close()
 
 
-def print_summary(trials: list[dict]):
+def print_summary(trials: list[dict], scenarios: list[str] | tuple[str, ...]):
   columns = (
     ("wall_s", lambda row: row["measurement_elapsed_s"]),
     ("read_bytes", lambda row: row["totals"]["read_bytes"]),
@@ -436,7 +441,7 @@ def print_summary(trials: list[dict]):
     print(f"{row['scenario']} {row['version']} {row['repetition']} {row['records']} {row['warnings']} " + " ".join(values))
   print("\nMedians (paired repetitions):")
   print("scenario version " + " ".join(name for name, _ in columns))
-  for scenario in SCENARIOS:
+  for scenario in scenarios:
     for version in ("before", "after"):
       rows = [row for row in trials if row["scenario"] == scenario and row["version"] == version]
       values = []
@@ -450,7 +455,7 @@ def main():
   args = parse_args()
   validate_inputs(args)
   trials = []
-  for scenario in SCENARIOS:
+  for scenario in args.scenarios:
     for repetition in range(args.repetitions):
       # Alternate run order so background thermal drift does not always favor
       # the same version. The two runs still use identical fresh fixtures.
@@ -466,9 +471,10 @@ def main():
       "after": str(args.after),
       "interposer": str(args.interposer),
       "repetitions": args.repetitions,
+      "scenarios": args.scenarios,
       "trials": trials,
     }, indent=2) + "\n", encoding="utf-8")
-  print_summary(trials)
+  print_summary(trials, args.scenarios)
 
 
 if __name__ == "__main__":

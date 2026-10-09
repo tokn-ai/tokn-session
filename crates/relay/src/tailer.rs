@@ -204,14 +204,23 @@ impl SessionTailer {
 
     let paths = self.files.keys().cloned().collect::<Vec<_>>();
     for path in paths {
+      let metadata = match std::fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+          self.files.remove(&path);
+          continue;
+        }
+        Err(error) => {
+          update
+            .warnings
+            .push(format!("failed to inspect {}: {error}", path.display()));
+          continue;
+        }
+      };
       let Some(state) = self.files.get_mut(&path) else {
         continue;
       };
-      if !path.exists() {
-        self.files.remove(&path);
-        continue;
-      }
-      match state.read_appended(true) {
+      match state.read_appended_with_metadata(metadata, true) {
         Ok((mut appended, restarted)) => {
           if restarted {
             apply_replay_policy(&mut appended.records, self.new_file_replay);
@@ -309,14 +318,24 @@ impl SessionTailer {
   }
 
   fn scan_file(&mut self, path: PathBuf, provider: Provider, update: &mut TailUpdate) -> Result<(), String> {
-    if !path.exists() {
-      self.files.remove(&path);
-      return Ok(());
-    }
-    let Some(state) = self.files.get_mut(&path) else {
-      return self.add_file(path, provider, InitialRead::Replay(self.new_file_replay), update);
+    let metadata = match std::fs::metadata(&path) {
+      Ok(metadata) => metadata,
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        self.files.remove(&path);
+        return Ok(());
+      }
+      Err(error) => return Err(format!("failed to inspect {}: {error}", path.display())),
     };
-    let (mut appended, restarted) = state.read_appended(true)?;
+    let Some(state) = self.files.get_mut(&path) else {
+      return self.add_file_with_metadata(
+        path,
+        provider,
+        InitialRead::Replay(self.new_file_replay),
+        metadata,
+        update,
+      );
+    };
+    let (mut appended, restarted) = state.read_appended_with_metadata(metadata, true)?;
     if restarted {
       apply_replay_policy(&mut appended.records, self.new_file_replay);
     }
@@ -331,7 +350,19 @@ impl SessionTailer {
     mode: InitialRead,
     update: &mut TailUpdate,
   ) -> Result<(), String> {
-    let mut state = FileState::open(path.clone(), provider, Arc::clone(&self.project_catalog))?;
+    let metadata = std::fs::metadata(&path).map_err(|err| format!("failed to inspect {}: {err}", path.display()))?;
+    self.add_file_with_metadata(path, provider, mode, metadata, update)
+  }
+
+  fn add_file_with_metadata(
+    &mut self,
+    path: PathBuf,
+    provider: Provider,
+    mode: InitialRead,
+    metadata: std::fs::Metadata,
+    update: &mut TailUpdate,
+  ) -> Result<(), String> {
+    let mut state = FileState::open_with_metadata(path.clone(), provider, Arc::clone(&self.project_catalog), metadata);
     state.include_native = self.include_native;
     let initial = read_initial(&mut state, mode)?;
     update.append(initial);
@@ -478,7 +509,8 @@ impl OpenCodeState {
       return Ok(TailUpdate::default());
     }
 
-    let references = self.source.list_sessions()?;
+    let mut reader = self.source.scan_reader()?;
+    let references = reader.list_sessions()?;
     let mut seen = HashSet::new();
     let mut update = TailUpdate::default();
     let mut to_load = Vec::new();
@@ -508,7 +540,7 @@ impl OpenCodeState {
     }
 
     for (session_id, summary) in to_load {
-      let loaded = match self.source.load_session_records_exact(&session_id, self.include_native) {
+      let loaded = match reader.load_session_records_exact(&session_id, self.include_native) {
         Ok(loaded) => loaded,
         Err(error) if !publish_new_sessions => return Err(error),
         Err(error) => {
@@ -670,8 +702,17 @@ impl FileState {
 
   fn open(path: PathBuf, provider: Provider, project_catalog: SharedProjectCatalog) -> Result<Self, String> {
     let metadata = std::fs::metadata(&path).map_err(|err| format!("failed to inspect {}: {err}", path.display()))?;
+    Ok(Self::open_with_metadata(path, provider, project_catalog, metadata))
+  }
+
+  fn open_with_metadata(
+    path: PathBuf,
+    provider: Provider,
+    project_catalog: SharedProjectCatalog,
+    metadata: std::fs::Metadata,
+  ) -> Self {
     let context = SessionContext::from_path(provider, &path);
-    Ok(Self {
+    Self {
       path,
       provider,
       identity: file_identity(&metadata),
@@ -682,7 +723,7 @@ impl FileState {
       context,
       project_catalog,
       include_native: false,
-    })
+    }
   }
 
   fn seed_at_eof(&mut self) -> Result<TailUpdate, String> {
@@ -738,6 +779,14 @@ impl FileState {
   fn read_appended(&mut self, publish: bool) -> Result<(TailUpdate, bool), String> {
     let metadata =
       std::fs::metadata(&self.path).map_err(|err| format!("failed to inspect {}: {err}", self.path.display()))?;
+    self.read_appended_with_metadata(metadata, publish)
+  }
+
+  fn read_appended_with_metadata(
+    &mut self,
+    metadata: std::fs::Metadata,
+    publish: bool,
+  ) -> Result<(TailUpdate, bool), String> {
     let identity = file_identity(&metadata);
 
     let mut should_publish = publish;
@@ -1309,6 +1358,83 @@ mod tests {
     let second_update = tailer.scan_paths(HashSet::from([second])).unwrap();
     assert_eq!(second_update.records.len(), 1);
     assert_eq!(second_update.records[0].topic, "pi.second");
+  }
+
+  #[test]
+  fn full_scan_removes_missing_file_and_replays_recreated_path() {
+    let fixture = TempDir::new().unwrap();
+    let path = fixture.path().join("session_test.jsonl");
+    std::fs::write(&path, "{\"type\":\"session\",\"id\":\"old-session\"}\n").unwrap();
+    let (mut tailer, _) = SessionTailer::initialize(
+      vec![ProviderRoot::new(Provider::Pi, fixture.path().to_path_buf())],
+      NewFileReplay::All,
+    )
+    .unwrap();
+
+    std::fs::remove_file(&path).unwrap();
+    let missing = tailer.scan().unwrap();
+    assert!(missing.records.is_empty());
+    assert!(missing.warnings.is_empty());
+    assert!(!tailer.files.contains_key(&path));
+
+    std::fs::write(
+      &path,
+      concat!(
+        "{\"type\":\"session\",\"id\":\"new-session\"}\n",
+        "{\"type\":\"message\",\"id\":\"new\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n"
+      ),
+    )
+    .unwrap();
+    let recreated = tailer.scan().unwrap();
+    assert!(recreated.warnings.is_empty());
+    assert_eq!(recreated.records.len(), 2);
+    assert!(recreated.records.iter().all(|record| record.topic == "pi.new-session"));
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn metadata_error_keeps_existing_file_state_for_retry() {
+    let fixture = TempDir::new().unwrap();
+    let path = fixture.path().join("session_test.jsonl");
+    std::fs::write(&path, "{\"type\":\"session\",\"id\":\"old-session\"}\n").unwrap();
+    let (mut tailer, _) = SessionTailer::initialize(
+      vec![ProviderRoot::new(Provider::Pi, fixture.path().to_path_buf())],
+      NewFileReplay::All,
+    )
+    .unwrap();
+
+    std::fs::remove_file(&path).unwrap();
+    std::os::unix::fs::symlink(&path, &path).unwrap();
+    let full = tailer.scan().unwrap();
+    assert!(
+      full
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("failed to inspect"))
+    );
+    assert!(tailer.files.contains_key(&path));
+    let watcher = tailer.scan_paths(HashSet::from([path.clone()])).unwrap();
+    assert!(
+      watcher
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("failed to inspect"))
+    );
+    assert!(tailer.files.contains_key(&path));
+
+    std::fs::remove_file(&path).unwrap();
+    std::fs::write(
+      &path,
+      concat!(
+        "{\"type\":\"session\",\"id\":\"new-session\"}\n",
+        "{\"type\":\"message\",\"id\":\"new\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n"
+      ),
+    )
+    .unwrap();
+    let recovered = tailer.scan_paths(HashSet::from([path])).unwrap();
+    assert!(recovered.warnings.is_empty());
+    assert_eq!(recovered.records.len(), 2);
+    assert!(recovered.records.iter().all(|record| record.topic == "pi.new-session"));
   }
 
   #[test]

@@ -1,5 +1,9 @@
 # Relay I/O measurements
 
+The follow-up [Relay I/O reduction](relay-io-reduction.md) compares the merged
+implementation with a shared SQLite read snapshot and fewer JSONL metadata
+checks.
+
 This compares the relay before the watcher and error-handling changes
 (`f55b6a0`) with the updated relay. Both were debug builds on macOS, measured
 with three paired runs per workload on 2026-10-09. Each run used fresh synthetic
@@ -59,7 +63,8 @@ python3 tools/relay-io-bench/run.py \
   --before "$baseline_dir/target/debug/tokn-session-relay" \
   --after target/debug/tokn-session-relay \
   --interposer /tmp/libtokn-relay-io.dylib \
-  --output /tmp/tokn-relay-io-results.json --repetitions 3
+  --output /tmp/tokn-relay-io-results.json --repetitions 3 \
+  --scenarios idle append burst opencode_edit
 ```
 
 The driver checks exact output topics and record counts and retains every

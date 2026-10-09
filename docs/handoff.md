@@ -355,8 +355,12 @@ instead of a query per session. The viewer-managed pipe skips an individual
 record above its 8 MiB frame limit and keeps following later records.
 Watcher paths now accumulate in a bounded inbox; overflow requests a complete
 recovery scan. See [Relay I/O measurements](relay-performance.md) for the
-baseline comparison and benchmark driver. The tested updates read the same
-number of bytes; idle discovery performs fewer metadata calls.
+first baseline comparison and benchmark driver. A later
+[I/O reduction pass](relay-io-reduction.md) reuses one SQLite connection
+for an OpenCode/ZCode catalog and its selected sessions, removing repeated
+database opens and page reads, including during the all-session fallback for
+timestamp-free part edits. Full record loads reuse messages for counts and
+untitled previews. JSONL scans now use one metadata lookup per tracked file.
 The database is opened read-only with WAL visibility and an immutable fallback;
 the relay never runs provider migrations.
 
