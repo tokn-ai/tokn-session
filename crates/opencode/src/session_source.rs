@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -123,13 +124,16 @@ impl OpenCodeSessionSource {
     include_message_count: bool,
   ) -> Result<Vec<SessionRef>, String> {
     let database_path = self.database_path()?;
+    let message_counts = include_message_count
+      .then(|| message_counts(connection, self.flavor.name()))
+      .transpose()?;
     let mut sessions = Vec::new();
     for row in list_session_catalog(connection, capabilities, self.flavor.name())? {
-      let message_count = if include_message_count {
-        message_count(connection, &row.id, self.flavor.name())?
-      } else {
-        0
-      };
+      let message_count = message_counts
+        .as_ref()
+        .and_then(|counts| counts.get(&row.id))
+        .copied()
+        .unwrap_or(0);
       sessions.push(SessionRef {
         id: row.id,
         parent_session_id: row.parent_id,
@@ -687,6 +691,23 @@ fn message_count(connection: &Connection, session_id: &str, source_name: &str) -
     .map_err(|err| format!("failed to count {source_name} messages for `{session_id}`: {err}"))
 }
 
+fn message_counts(connection: &Connection, source_name: &str) -> Result<HashMap<String, usize>, String> {
+  let mut statement = connection
+    .prepare("select session_id, count(*) from message group by session_id")
+    .map_err(|err| format!("failed to prepare {source_name} message counts: {err}"))?;
+  let rows = statement
+    .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+    .map_err(|err| format!("failed to query {source_name} message counts: {err}"))?;
+  rows
+    .map(|row| {
+      let (session_id, count) = row.map_err(|err| format!("failed to read {source_name} message count: {err}"))?;
+      let count = usize::try_from(count)
+        .map_err(|err| format!("invalid {source_name} message count for `{session_id}`: {err}"))?;
+      Ok((session_id, count))
+    })
+    .collect()
+}
+
 fn parse_optional_model(value: Option<String>) -> Option<SessionModel> {
   value.and_then(|value| serde_json::from_str(&value).ok())
 }
@@ -801,6 +822,48 @@ mod tests {
 
     assert!(error.contains(":memory:"));
     assert!(error.contains("no persisted sessions"));
+  }
+
+  #[test]
+  fn lists_message_counts_for_multiple_sessions_including_empty_ones() {
+    let directory = tempdir().unwrap();
+    let database_path = directory.path().join("opencode.db");
+    let connection = Connection::open(&database_path).unwrap();
+    connection
+      .execute_batch(
+        r#"create table session (
+             id text primary key, parent_id text, directory text not null,
+             time_created integer not null, time_updated integer not null
+           );
+           create table message (
+             id text primary key, session_id text not null,
+             time_created integer, data text not null
+           );
+           create table part (
+             id text primary key, message_id text not null,
+             session_id text not null, time_created integer, data text not null
+           );
+           insert into session values
+             ('empty', null, '/tmp', 1, 1),
+             ('one', null, '/tmp', 2, 2),
+             ('two', null, '/tmp', 3, 3);
+           insert into message values
+             ('m1', 'one', 1, '{}'),
+             ('m2', 'two', 2, '{}'),
+             ('m3', 'two', 3, '{}');"#,
+      )
+      .unwrap();
+
+    let source = OpenCodeSessionSource::new(Some(database_path));
+    let counts: std::collections::HashMap<_, _> = source
+      .list_sessions()
+      .unwrap()
+      .into_iter()
+      .map(|session| (session.id, session.message_count))
+      .collect();
+    assert_eq!(counts.get("empty"), Some(&0));
+    assert_eq!(counts.get("one"), Some(&1));
+    assert_eq!(counts.get("two"), Some(&2));
   }
 
   #[test]

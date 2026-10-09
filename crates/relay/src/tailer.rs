@@ -182,13 +182,23 @@ impl SessionTailer {
   }
 
   pub fn scan(&mut self) -> Result<TailUpdate, String> {
-    let discovered = self.discover_paths()?;
     let mut update = TailUpdate::default();
     self.refresh_project_catalog(&mut update);
+    let mut discovered = Vec::new();
+    let mut seen = HashSet::new();
+    for root in &self.roots {
+      if matches!(root.provider, Provider::Codex | Provider::Pi)
+        && let Err(error) = collect_jsonl_files(&root.path, root.provider, &mut seen, &mut discovered)
+      {
+        update.warnings.push(error);
+      }
+    }
 
     for (path, provider) in discovered {
       if !self.files.contains_key(&path) {
-        self.add_file(path, provider, InitialRead::Replay(self.new_file_replay), &mut update)?;
+        if let Err(error) = self.add_file(path, provider, InitialRead::Replay(self.new_file_replay), &mut update) {
+          update.warnings.push(error);
+        }
       }
     }
 
@@ -201,19 +211,29 @@ impl SessionTailer {
         self.files.remove(&path);
         continue;
       }
-      let (mut appended, restarted) = state.read_appended(true)?;
-      if restarted {
-        apply_replay_policy(&mut appended.records, self.new_file_replay);
+      match state.read_appended(true) {
+        Ok((mut appended, restarted)) => {
+          if restarted {
+            apply_replay_policy(&mut appended.records, self.new_file_replay);
+          }
+          update.append(appended);
+        }
+        Err(error) => update.warnings.push(error),
       }
-      update.append(appended);
     }
 
     for state in self.opencode.values_mut() {
-      update.append(state.scan(true, self.new_file_replay)?);
+      match state.scan(true, self.new_file_replay) {
+        Ok(scanned) => update.append(scanned),
+        Err(error) => update.warnings.push(error),
+      }
     }
 
     for state in &mut self.snapshots {
-      update.append(state.scan(true, self.include_native, self.new_file_replay)?);
+      match state.scan(true, self.include_native, self.new_file_replay) {
+        Ok(scanned) => update.append(scanned),
+        Err(error) => update.warnings.push(error),
+      }
     }
     Ok(update)
   }
@@ -223,7 +243,10 @@ impl SessionTailer {
     self.refresh_project_catalog(&mut update);
     for state in &mut self.snapshots {
       if changed_paths.iter().any(|path| state.matches_path(path)) {
-        update.append(state.scan(true, self.include_native, self.new_file_replay)?);
+        match state.scan(true, self.include_native, self.new_file_replay) {
+          Ok(scanned) => update.append(scanned),
+          Err(error) => update.warnings.push(error),
+        }
       }
     }
     let mut candidates = HashMap::new();
@@ -246,7 +269,9 @@ impl SessionTailer {
         changed_directories.push(path.clone());
         let mut seen = HashSet::new();
         let mut discovered = Vec::new();
-        collect_jsonl_files(&path, provider, &mut seen, &mut discovered)?;
+        if let Err(error) = collect_jsonl_files(&path, provider, &mut seen, &mut discovered) {
+          update.warnings.push(error);
+        }
         candidates.extend(discovered);
       } else if is_jsonl(&path) {
         candidates.insert(path, provider);
@@ -264,11 +289,16 @@ impl SessionTailer {
     }
 
     for (path, provider) in candidates {
-      self.scan_file(path, provider, &mut update)?;
+      if let Err(error) = self.scan_file(path, provider, &mut update) {
+        update.warnings.push(error);
+      }
     }
     for path in changed_opencode {
       if let Some(state) = self.opencode.get_mut(&path) {
-        update.append(state.scan(true, self.new_file_replay)?);
+        match state.scan(true, self.new_file_replay) {
+          Ok(scanned) => update.append(scanned),
+          Err(error) => update.warnings.push(error),
+        }
       }
     }
     Ok(update)
@@ -452,6 +482,7 @@ impl OpenCodeState {
     let mut seen = HashSet::new();
     let mut update = TailUpdate::default();
     let mut to_load = Vec::new();
+    let mut failed = false;
     for reference in &references {
       let session_id = reference.id.clone();
       seen.insert(session_id.clone());
@@ -477,9 +508,18 @@ impl OpenCodeState {
     }
 
     for (session_id, summary) in to_load {
-      let loaded = self
-        .source
-        .load_session_records_exact(&session_id, self.include_native)?;
+      let loaded = match self.source.load_session_records_exact(&session_id, self.include_native) {
+        Ok(loaded) => loaded,
+        Err(error) if !publish_new_sessions => return Err(error),
+        Err(error) => {
+          update.warnings.push(format!(
+            "failed to load {} session {session_id}: {error}",
+            provider_name(self.provider)
+          ));
+          failed = true;
+          continue;
+        }
+      };
       let fingerprints = loaded
         .records
         .iter()
@@ -488,7 +528,19 @@ impl OpenCodeState {
             .map(|value| (record.record_id.clone(), value))
             .map_err(|err| err.to_string())
         })
-        .collect::<Result<HashMap<_, _>, _>>()?;
+        .collect::<Result<HashMap<_, _>, _>>();
+      let fingerprints = match fingerprints {
+        Ok(fingerprints) => fingerprints,
+        Err(error) if !publish_new_sessions => return Err(error),
+        Err(error) => {
+          update.warnings.push(format!(
+            "failed to fingerprint {} session {session_id}: {error}",
+            provider_name(self.provider)
+          ));
+          failed = true;
+          continue;
+        }
+      };
       let context = SessionContext::from_session_ref(self.provider, &loaded.reference);
       let events = relay_records_from_loaded(loaded, &context, &fingerprints, self.sessions.get(&session_id));
 
@@ -509,7 +561,9 @@ impl OpenCodeState {
         .insert(session_id, OpenCodeSessionState { summary, fingerprints });
     }
     self.sessions.retain(|session_id, _| seen.contains(session_id));
-    self.database_version = Some(database_version);
+    if !failed {
+      self.database_version = Some(database_version);
+    }
     Ok(update)
   }
 
@@ -990,9 +1044,17 @@ fn collect_jsonl_files(
   for entry in std::fs::read_dir(dir).map_err(|err| format!("failed to read {}: {err}", dir.display()))? {
     let entry = entry.map_err(|err| format!("failed to read entry in {}: {err}", dir.display()))?;
     let path = entry.path();
-    if path.is_dir() {
+    let file_type = entry
+      .file_type()
+      .map_err(|err| format!("failed to inspect {}: {err}", path.display()))?;
+    // A configured root may be a symlink, but following nested directory
+    // symlinks can walk an ancestor again without ever reaching an end.
+    if file_type.is_dir() {
       collect_jsonl_files(&path, provider, seen, paths)?;
-    } else if is_jsonl(&path) && seen.insert(path.clone()) {
+    } else if is_jsonl(&path)
+      && (file_type.is_file() || (file_type.is_symlink() && path.is_file()))
+      && seen.insert(path.clone())
+    {
       paths.push((path, provider));
     }
   }
@@ -1247,6 +1309,125 @@ mod tests {
     let second_update = tailer.scan_paths(HashSet::from([second])).unwrap();
     assert_eq!(second_update.records.len(), 1);
     assert_eq!(second_update.records[0].topic, "pi.second");
+  }
+
+  #[test]
+  fn full_scan_keeps_new_file_records_when_an_existing_file_fails() {
+    let fixture = TempDir::new().unwrap();
+    let existing = fixture.path().join("session_existing.jsonl");
+    std::fs::write(&existing, "{\"type\":\"session\",\"id\":\"existing\"}\n").unwrap();
+    let (mut tailer, _) = SessionTailer::initialize(
+      vec![ProviderRoot::new(Provider::Pi, fixture.path().to_path_buf())],
+      NewFileReplay::All,
+    )
+    .unwrap();
+
+    let saved = fixture.path().join("existing.saved");
+    std::fs::rename(&existing, &saved).unwrap();
+    std::fs::create_dir(&existing).unwrap();
+    std::fs::write(existing.join("entry"), b"x").unwrap();
+    let fresh = fixture.path().join("session_fresh.jsonl");
+    std::fs::write(&fresh, "{\"type\":\"session\",\"id\":\"fresh\"}\n").unwrap();
+
+    let update = tailer.scan().unwrap();
+    assert!(update.records.iter().any(|record| record.topic == "pi.fresh"));
+    assert!(
+      update
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("session_existing.jsonl"))
+    );
+
+    std::fs::remove_dir_all(&existing).unwrap();
+    std::fs::rename(saved, existing).unwrap();
+    let retry = tailer.scan().unwrap();
+    assert!(!retry.records.iter().any(|record| record.topic == "pi.fresh"));
+    assert!(retry.warnings.is_empty());
+  }
+
+  #[test]
+  fn watcher_scan_keeps_file_records_when_another_provider_fails() {
+    let fixture = TempDir::new().unwrap();
+    let pi_root = fixture.path().join("pi");
+    std::fs::create_dir(&pi_root).unwrap();
+    let database = fixture.path().join("opencode.db");
+    let (mut tailer, _) = SessionTailer::initialize(
+      vec![
+        ProviderRoot::new(Provider::Pi, pi_root.clone()),
+        ProviderRoot::new(Provider::OpenCode, database.clone()),
+      ],
+      NewFileReplay::All,
+    )
+    .unwrap();
+
+    let fresh = pi_root.join("session_fresh.jsonl");
+    std::fs::write(&fresh, "{\"type\":\"session\",\"id\":\"fresh\"}\n").unwrap();
+    std::fs::write(&database, b"not a database").unwrap();
+
+    let update = tailer
+      .scan_paths(HashSet::from([fresh.clone(), database.clone()]))
+      .unwrap();
+    assert!(update.records.iter().any(|record| record.topic == "pi.fresh"));
+    assert!(update.warnings.iter().any(|warning| warning.contains("database")));
+
+    let retry = tailer.scan_paths(HashSet::from([database])).unwrap();
+    assert!(retry.warnings.iter().any(|warning| warning.contains("database")));
+    assert!(tailer.scan_paths(HashSet::from([fresh])).unwrap().records.is_empty());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn full_scan_continues_after_a_root_traversal_error() {
+    let fixture = TempDir::new().unwrap();
+    let pi_root = fixture.path().join("pi");
+    std::fs::create_dir(&pi_root).unwrap();
+    let invalid_root = fixture.path().join("invalid-root");
+    let (mut tailer, _) = SessionTailer::initialize(
+      vec![
+        ProviderRoot::new(Provider::Pi, pi_root.clone()),
+        ProviderRoot::new(Provider::Pi, invalid_root.clone()),
+      ],
+      NewFileReplay::All,
+    )
+    .unwrap();
+
+    let _socket = std::os::unix::net::UnixListener::bind(&invalid_root).unwrap();
+    std::fs::write(
+      pi_root.join("session_fresh.jsonl"),
+      "{\"type\":\"session\",\"id\":\"fresh\"}\n",
+    )
+    .unwrap();
+
+    let update = tailer.scan().unwrap();
+    assert!(update.records.iter().any(|record| record.topic == "pi.fresh"));
+    assert!(update.warnings.iter().any(|warning| warning.contains("invalid-root")));
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn symlinked_provider_root_does_not_follow_nested_directory_loop() {
+    let fixture = TempDir::new().unwrap();
+    let actual_root = fixture.path().join("sessions");
+    std::fs::create_dir(&actual_root).unwrap();
+    let session = actual_root.join("session_one.jsonl");
+    std::fs::write(&session, "{\"type\":\"session\",\"id\":\"one\"}\n").unwrap();
+    std::os::unix::fs::symlink(&actual_root, actual_root.join("loop")).unwrap();
+    let linked_root = fixture.path().join("linked-sessions");
+    std::os::unix::fs::symlink(&actual_root, &linked_root).unwrap();
+
+    let (mut tailer, initial) =
+      SessionTailer::initialize(vec![ProviderRoot::new(Provider::Pi, linked_root)], NewFileReplay::All).unwrap();
+    assert!(initial.records.is_empty());
+    assert!(initial.warnings.is_empty());
+
+    append(
+      &session,
+      "{\"type\":\"message\",\"id\":\"new\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n",
+    );
+    let update = tailer.scan().unwrap();
+    assert_eq!(update.records.len(), 1);
+    assert_eq!(update.records[0].topic, "pi.one");
+    assert!(update.warnings.is_empty());
   }
 
   #[test]
@@ -1891,6 +2072,86 @@ mod tests {
     assert_eq!(removed.records[0].record.record_id, "message:msg_earlier");
     assert!(removed.records[0].record.events.is_empty());
     assert!(tailer.scan().unwrap().records.is_empty());
+  }
+
+  #[test]
+  fn opencode_retries_a_failed_session_without_losing_other_sessions() {
+    let fixture = TempDir::new().unwrap();
+    let database = fixture.path().join("opencode.db");
+    let connection = Connection::open(&database).unwrap();
+    connection
+      .execute_batch(
+        "pragma journal_mode = wal;
+         create table session (
+           id text primary key,
+           parent_id text,
+           directory text not null,
+           time_created integer not null,
+           time_updated integer not null
+         );
+         create table message (
+           id text primary key,
+           session_id text not null,
+           time_created integer,
+           data text not null
+         );
+         create table part (
+           id text primary key,
+           message_id text not null,
+           session_id text not null,
+           time_created integer,
+           data text not null
+         );",
+      )
+      .unwrap();
+
+    let (mut tailer, _) = SessionTailer::initialize(
+      vec![ProviderRoot::new(Provider::OpenCode, database)],
+      NewFileReplay::All,
+    )
+    .unwrap();
+    for (id, created) in [("good", 2), ("bad", 1)] {
+      connection
+        .execute(
+          "insert into session (id, parent_id, directory, time_created, time_updated) values (?1, null, ?2, ?3, ?3)",
+          params![id, "/tmp/opencode", created],
+        )
+        .unwrap();
+    }
+    insert_opencode_message(&connection, "msg_good", "good", 2, r#"{"role":"user"}"#);
+    insert_opencode_part(
+      &connection,
+      "part_good",
+      "msg_good",
+      "good",
+      2,
+      r#"{"type":"text","text":"good"}"#,
+    );
+    insert_opencode_message(&connection, "msg_bad", "bad", 1, "invalid JSON");
+
+    let first = tailer.scan().unwrap();
+    assert!(first.records.iter().any(|record| record.topic == "opencode.good"));
+    assert!(first.warnings.iter().any(|warning| warning.contains("session bad")));
+
+    let unchanged_retry = tailer.scan().unwrap();
+    assert!(unchanged_retry.records.is_empty());
+    assert!(
+      unchanged_retry
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("session bad"))
+    );
+
+    connection
+      .execute(
+        "update message set data = ?1 where id = 'msg_bad'",
+        params![r#"{"role":"user"}"#],
+      )
+      .unwrap();
+    let repaired = tailer.scan().unwrap();
+    assert!(repaired.warnings.is_empty());
+    assert!(repaired.records.iter().any(|record| record.topic == "opencode.bad"));
+    assert!(!repaired.records.iter().any(|record| record.topic == "opencode.good"));
   }
 
   #[test]
