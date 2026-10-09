@@ -15,8 +15,8 @@ file limit when recursive kqueue watches exceed the available descriptors.
 Watcher callbacks coalesce changed paths in a bounded inbox. A burst that
 exceeds the path limit triggers a full recovery scan. File and provider read
 failures produce warnings without discarding successful records from the same
-scan. See [Relay I/O measurements](relay-performance.md) for a reproducible
-comparison with the previous implementation.
+scan. See [Relay I/O reduction](relay-io-reduction.md) for a reproducible
+comparison with the merged implementation.
 The viewer-managed child uses a five-minute polling interval because the
 viewer has its own index watcher and recovery scheduler.
 

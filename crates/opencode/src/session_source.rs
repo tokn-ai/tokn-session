@@ -44,6 +44,42 @@ pub struct OpenCodeSessionSource {
   flavor: SessionDatabaseFlavor,
 }
 
+/// Reuses SQLite's page cache while listing and loading sessions. Each loaded
+/// session has its own short read transaction, so a large scan does not pin one
+/// WAL snapshot for its entire duration.
+pub struct OpenCodeScanReader<'a> {
+  source: &'a OpenCodeSessionSource,
+  database_path: PathBuf,
+  connection: Connection,
+  capabilities: OpenCodeCapabilities,
+}
+
+impl OpenCodeScanReader<'_> {
+  pub fn list_sessions(&self) -> Result<Vec<SessionRef>, String> {
+    self
+      .source
+      .list_session_refs_at(&self.connection, self.capabilities, true, &self.database_path)
+  }
+
+  pub fn load_session_records_exact(
+    &mut self,
+    session_id: &str,
+    include_native: bool,
+  ) -> Result<LoadedSessionRecords, String> {
+    let transaction = self
+      .connection
+      .transaction()
+      .map_err(|err| format!("failed to start session snapshot: {err}"))?;
+    self.source.load_records_from_connection(
+      &transaction,
+      self.capabilities,
+      self.database_path.clone(),
+      session_id,
+      include_native,
+    )
+  }
+}
+
 impl OpenCodeSessionSource {
   pub fn new(session_dir: Option<PathBuf>) -> Self {
     Self {
@@ -65,6 +101,20 @@ impl OpenCodeSessionSource {
   pub fn list_sessions(&self) -> Result<Vec<SessionRef>, String> {
     let (connection, capabilities) = self.connect()?;
     self.list_session_refs(&connection, capabilities, true)
+  }
+
+  /// Reuse one SQLite connection while reconciling a catalog with selected
+  /// sessions. Each session load keeps its own consistent read transaction.
+  pub fn scan_reader(&self) -> Result<OpenCodeScanReader<'_>, String> {
+    let database_path = self.database_path()?;
+    let connection = connect_database(&database_path)?;
+    let capabilities = OpenCodeCapabilities::detect(&connection)?;
+    Ok(OpenCodeScanReader {
+      source: self,
+      database_path,
+      connection,
+      capabilities,
+    })
   }
 
   /// Lists catalog metadata without counting or reading messages. Callers can
@@ -124,6 +174,16 @@ impl OpenCodeSessionSource {
     include_message_count: bool,
   ) -> Result<Vec<SessionRef>, String> {
     let database_path = self.database_path()?;
+    self.list_session_refs_at(connection, capabilities, include_message_count, &database_path)
+  }
+
+  fn list_session_refs_at(
+    &self,
+    connection: &Connection,
+    capabilities: OpenCodeCapabilities,
+    include_message_count: bool,
+    database_path: &Path,
+  ) -> Result<Vec<SessionRef>, String> {
     let message_counts = include_message_count
       .then(|| message_counts(connection, self.flavor.name()))
       .transpose()?;
@@ -142,7 +202,7 @@ impl OpenCodeSessionSource {
         agent_role: None,
         title: row.title,
         preview: row.preview,
-        path: database_path.clone(),
+        path: database_path.to_path_buf(),
         cwd: row.directory,
         // Preserve legacy counted-list output. The metadata-only SessionHeader
         // API exposes creation and update time separately.
@@ -212,11 +272,23 @@ impl OpenCodeSessionSource {
       .transaction()
       .map_err(|err| format!("failed to start session snapshot: {err}"))?;
     let capabilities = OpenCodeCapabilities::detect(&connection)?;
+    self.load_records_from_connection(&connection, capabilities, database_path, session_id, include_native)
+  }
+
+  fn load_records_from_connection(
+    &self,
+    connection: &Connection,
+    capabilities: OpenCodeCapabilities,
+    database_path: PathBuf,
+    session_id: &str,
+    include_native: bool,
+  ) -> Result<LoadedSessionRecords, String> {
     let session = load_session_row(&connection, capabilities, session_id, self.flavor.name())?
       .ok_or_else(|| format!("no {} session found for `{session_id}`", self.flavor.name()))?;
     let title = native_title(session.title.clone());
+    let messages = load_messages(&connection, &session.id, self.flavor.name())?;
     let preview = if title.is_none() {
-      first_user_preview(&connection, &session.id, self.flavor.name())?
+      first_user_preview_from_messages(&messages)
     } else {
       None
     };
@@ -231,7 +303,7 @@ impl OpenCodeSessionSource {
       path: database_path,
       cwd: session.directory.clone(),
       timestamp: timestamp(session.time_updated.or(session.time_created)),
-      message_count: message_count(&connection, &session.id, self.flavor.name())?,
+      message_count: messages.len(),
     };
 
     let mut normalizer = match self.flavor {
@@ -246,10 +318,7 @@ impl OpenCodeSessionSource {
         .map_err(|err| err.to_string())?,
       events: normalizer.normalize_session(&session),
     }];
-    let mut timeline: Vec<_> = load_messages(&connection, &session.id, self.flavor.name())?
-      .into_iter()
-      .map(SessionTimelineRow::Message)
-      .collect();
+    let mut timeline: Vec<_> = messages.into_iter().map(SessionTimelineRow::Message).collect();
     if matches!(self.flavor, SessionDatabaseFlavor::ZCode) && capabilities.has_session_entry {
       timeline.extend(
         load_session_entries(&connection, &session.id, self.flavor.name())?
@@ -574,6 +643,22 @@ fn first_user_preview(connection: &Connection, session_id: &str, source_name: &s
   Ok(None)
 }
 
+fn first_user_preview_from_messages(messages: &[OpenCodeMessageRow]) -> Option<String> {
+  messages.iter().find_map(|message| {
+    if !matches!(message.data.item(), MessageItem::User(_)) {
+      return None;
+    }
+    message.parts.iter().find_map(|part| {
+      let preview = match part.data.item() {
+        PartItem::Text(part) if part.synthetic != Some(true) && part.ignored != Some(true) => Some(part.text.as_str()),
+        PartItem::Subtask(part) => part.prompt.as_deref(),
+        _ => None,
+      };
+      preview.and_then(non_blank).map(str::to_string)
+    })
+  })
+}
+
 fn load_messages(
   connection: &Connection,
   session_id: &str,
@@ -678,17 +763,6 @@ fn load_session_entries(
     });
   }
   Ok(entries)
-}
-
-fn message_count(connection: &Connection, session_id: &str, source_name: &str) -> Result<usize, String> {
-  connection
-    .query_row(
-      "select count(*) from message where session_id = ?1",
-      params![session_id],
-      |row| row.get::<_, i64>(0),
-    )
-    .map(|count| count as usize)
-    .map_err(|err| format!("failed to count {source_name} messages for `{session_id}`: {err}"))
 }
 
 fn message_counts(connection: &Connection, source_name: &str) -> Result<HashMap<String, usize>, String> {
@@ -864,6 +938,57 @@ mod tests {
     assert_eq!(counts.get("empty"), Some(&0));
     assert_eq!(counts.get("one"), Some(&1));
     assert_eq!(counts.get("two"), Some(&2));
+    for (id, expected) in [("empty", 0), ("one", 1), ("two", 2)] {
+      let loaded = source.load_session_records_exact(id, false).unwrap();
+      assert_eq!(loaded.reference.message_count, expected);
+    }
+  }
+
+  #[test]
+  fn scan_reader_reuses_connection_without_pinning_a_wal_revision() {
+    let directory = tempdir().unwrap();
+    let database_path = directory.path().join("opencode.db");
+    let writer = Connection::open(&database_path).unwrap();
+    writer
+      .execute_batch(
+        r#"pragma journal_mode = wal;
+           create table session (
+             id text primary key, parent_id text, directory text not null,
+             time_created integer not null, time_updated integer not null
+           );
+           create table message (
+             id text primary key, session_id text not null,
+             time_created integer, data text not null
+           );
+           create table part (
+             id text primary key, message_id text not null,
+             session_id text not null, time_created integer, data text not null
+           );
+           insert into session values ('one', null, '/tmp', 1, 1);
+           insert into message values ('message', 'one', 1, '{"role":"user"}');
+           insert into part values ('part', 'message', 'one', 1, '{"type":"text","text":"before"}');"#,
+      )
+      .unwrap();
+
+    let source = OpenCodeSessionSource::new(Some(database_path));
+    let mut reader = source.scan_reader().unwrap();
+    assert_eq!(reader.list_sessions().unwrap()[0].message_count, 1);
+    writer
+      .execute(
+        "update part set data = '{\"type\":\"text\",\"text\":\"after\"}' where id = 'part'",
+        [],
+      )
+      .unwrap();
+    let updated = reader.load_session_records_exact("one", false).unwrap();
+    assert_eq!(updated.reference.preview.as_deref(), Some("after"));
+    writer
+      .execute(
+        "update part set data = '{\"type\":\"text\",\"text\":\"later\"}' where id = 'part'",
+        [],
+      )
+      .unwrap();
+    let later = reader.load_session_records_exact("one", false).unwrap();
+    assert_eq!(later.reference.preview.as_deref(), Some("later"));
   }
 
   #[test]
@@ -1071,6 +1196,7 @@ mod tests {
          insert into part (id, message_id, session_id, time_created, data) values
            ('prt_assistant', 'msg_assistant', 'ses_placeholder', 1, '{"type":"text","text":"not the user"}'),
            ('prt_synthetic', 'msg_user', 'ses_placeholder', 2, '{"type":"text","text":"generated context","synthetic":true}'),
+           ('prt_ignored', 'msg_user', 'ses_placeholder', 2, '{"type":"text","text":"ignored context","ignored":true}'),
            ('prt_user', 'msg_user', 'ses_placeholder', 3, '{"type":"text","text":"  actual request  "}');"#,
       )
       .expect("fixture schema with title should be created");
@@ -1097,6 +1223,16 @@ mod tests {
       .expect("placeholder header should hydrate");
     assert_eq!(hydrated.title, None);
     assert_eq!(hydrated.preview.as_deref(), Some("actual request"));
+    let loaded_placeholder = source.load_session_records_exact("ses_placeholder", false).unwrap();
+    assert_eq!(loaded_placeholder.reference.message_count, 2);
+    assert_eq!(
+      loaded_placeholder.reference.preview.as_deref(),
+      hydrated.preview.as_deref()
+    );
+    let loaded_named = source.load_session_records_exact("ses_named", false).unwrap();
+    assert_eq!(loaded_named.reference.message_count, 0);
+    assert_eq!(loaded_named.reference.title.as_deref(), Some("Generated title"));
+    assert_eq!(loaded_named.reference.preview, None);
   }
 
   #[test]
