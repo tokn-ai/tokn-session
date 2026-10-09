@@ -569,6 +569,21 @@ describe("EventCard whole-turn trajectories", () => {
     expect(onOpenSubagent).toHaveBeenCalledWith(child);
   });
 
+  it("retains exploration disclosure state while folding the enclosing work", () => {
+    const children = [event({event_key: "read", type: "tool_call", tool: tool({kind: "file_read", path: "a.rs"})}),
+      event({event_key: "search", type: "tool_call", tool: tool({kind: "search", query: "state"})})];
+    const props = {button_id: "work", event: trajectoryEvent, is_selected: false, detail: null,
+      detail_error: null, detail_loading: false, on_retry_detail: vi.fn(), on_select: vi.fn(), on_toggle: vi.fn(),
+      trajectory_page: trajectoryPage({events: children})};
+    const {rerender} = render(<EventCard {...props} is_expanded />);
+    fireEvent.click(screen.getByRole("button", {name: "Explored 1 file, 1 search"}));
+    expect(screen.getByRole("button", {name: "Read: a.rs"})).toBeVisible();
+    rerender(<EventCard {...props} is_expanded={false} />);
+    expect(screen.queryByRole("button", {name: "Read: a.rs"})).not.toBeInTheDocument();
+    rerender(<EventCard {...props} is_expanded />);
+    expect(screen.getByRole("button", {name: "Read: a.rs"})).toBeVisible();
+  });
+
   it("retains pagination, errors, and raw counts when every loaded child is filtered", () => {
     const onOlder = vi.fn();
     const onNewer = vi.fn();

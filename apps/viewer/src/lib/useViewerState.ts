@@ -1,3 +1,4 @@
+import type { ExpandedActivityState } from "./types";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { loadReadingWindow, readReadingPosition, readingEventKey } from "./readingPosition";
 import { refreshEventWindow, refreshTrajectoryWindow } from "./liveEvents";
@@ -277,15 +278,8 @@ export function useViewerState() {
   const [expandedTrajectoryEvent, setExpandedTrajectoryEvent] = useState<
     ExpandedTrajectoryEvent | null
   >(null);
-  const [expandedTrajectoryDetail, setExpandedTrajectoryDetail] = useState<EventDetail | null>(null);
-  const [expandedTrajectoryDetailOwnerKey, setExpandedTrajectoryDetailOwnerKey] = useState<
-    string | null
-  >(null);
-  const expandedTrajectoryDetailOwnerKeyRef = useRef<string | null>(null);
-  const [expandedTrajectoryDetailLoading, setExpandedTrajectoryDetailLoading] = useState(false);
-  const [expandedTrajectoryDetailError, setExpandedTrajectoryDetailError] = useState<string | null>(
-    null,
-  );
+  const [expandedActivityKeys, setExpandedActivityKeys] = useState(new Set<string>());
+  const [expandedActivities, setExpandedActivities] = useState(new Map<string, ExpandedActivityState>());
   const [expandedTrajectoryDetailAttempt, setExpandedTrajectoryDetailAttempt] = useState(0);
   const expandedTrajectoryDetailRequest = useRef(0);
 
@@ -475,7 +469,6 @@ export function useViewerState() {
     expandedTrajectoryDetailRequest.current += 1;
     setDetailError(null);
     setExpandedDetailError(null);
-    setExpandedTrajectoryDetailError(null);
     // Appends retain event identities. Keep already displayed content while
     // the cache and requests refresh, so detail cards do not shrink to loaders.
     // Replacement generations can reuse source positions for different events.
@@ -488,10 +481,7 @@ export function useViewerState() {
       setExpandedDetailOwnerKey(null);
       setExpandedDetail(null);
       setExpandedDetailLoading(false);
-      expandedTrajectoryDetailOwnerKeyRef.current = null;
-      setExpandedTrajectoryDetailOwnerKey(null);
-      setExpandedTrajectoryDetail(null);
-      setExpandedTrajectoryDetailLoading(false);
+      setExpandedActivities(new Map());
     }
     setDetailRevision((revision) => revision + 1);
   }, []);
@@ -520,11 +510,8 @@ export function useViewerState() {
     setTrajectoryPages(next);
     expandedTrajectoryDetailRequest.current += 1;
     setExpandedTrajectoryEvent(null);
-    expandedTrajectoryDetailOwnerKeyRef.current = null;
-    setExpandedTrajectoryDetailOwnerKey(null);
-    setExpandedTrajectoryDetail(null);
-    setExpandedTrajectoryDetailLoading(false);
-    setExpandedTrajectoryDetailError(null);
+    setExpandedActivityKeys(new Set());
+    setExpandedActivities(new Map());
   }, []);
 
   const invalidateTrajectoryPages = useCallback((reload: boolean) => {
@@ -1492,72 +1479,31 @@ export function useViewerState() {
 
   useEffect(() => {
     const requestId = ++expandedTrajectoryDetailRequest.current;
-    setExpandedTrajectoryDetailError(null);
-
-    if (!selectedSessionKey || !expandedTrajectoryEvent) {
-      expandedTrajectoryDetailOwnerKeyRef.current = null;
-      setExpandedTrajectoryDetailOwnerKey(null);
-      setExpandedTrajectoryDetail(null);
-      setExpandedTrajectoryDetailLoading(false);
-      return;
-    }
-    const childEvent = trajectoryPages
-      .get(selectedSessionKey)
-      ?.get(expandedTrajectoryEvent.trajectory_key)
-      ?.events.find((event) => event.event_key === expandedTrajectoryEvent.event_key);
-    if (!expandedEventNeedsDetail(childEvent)) {
-      expandedTrajectoryDetailOwnerKeyRef.current = null;
-      setExpandedTrajectoryDetailOwnerKey(null);
-      setExpandedTrajectoryDetail(null);
-      setExpandedTrajectoryDetailLoading(false);
-      return;
-    }
-
-    const cacheKey = `${selectedSessionKey}:${expandedTrajectoryEvent.event_key}`;
-    if (expandedTrajectoryDetailOwnerKeyRef.current !== cacheKey) setExpandedTrajectoryDetail(null);
-    expandedTrajectoryDetailOwnerKeyRef.current = cacheKey;
-    setExpandedTrajectoryDetailOwnerKey(cacheKey);
-    const cached = readCachedDetail(detailCache.current, cacheKey);
-    if (cached) {
-      setExpandedTrajectoryDetail(cached);
-      setExpandedTrajectoryDetailLoading(false);
-      return;
-    }
-
-    setExpandedTrajectoryDetailLoading(true);
-    void requestDetail(selectedSessionKey, expandedTrajectoryEvent.event_key)
-      .then((response) => {
-        if (expandedTrajectoryDetailRequest.current === requestId) {
-          setExpandedTrajectoryDetail(response);
-        }
-      })
-      .catch((error: unknown) => {
-        if (expandedTrajectoryDetailRequest.current === requestId) {
-          setExpandedTrajectoryDetailError(errorMessage(error));
-        }
-      })
-      .finally(() => {
-        if (expandedTrajectoryDetailRequest.current === requestId) {
-          setExpandedTrajectoryDetailLoading(false);
-        }
+    if (!selectedSessionKey || !expandedEventKey) return;
+    const children = trajectoryPages.get(selectedSessionKey)?.get(expandedEventKey)?.events ?? [];
+    for (const child of children) {
+      if (!expandedActivityKeys.has(child.event_key) || !expandedEventNeedsDetail(child)) continue;
+      const cacheKey = `${selectedSessionKey}:${child.event_key}`;
+      const cached = readCachedDetail(detailCache.current, cacheKey);
+      setExpandedActivities((current) => {
+        const next = new Map(current);
+        next.set(child.event_key, { detail: cached ?? current.get(child.event_key)?.detail ?? null,
+          error: null, is_loading: !cached });
+        return next;
       });
-  }, [
-    detailRevision,
-    expandedTrajectoryDetailAttempt,
-    expandedTrajectoryEvent,
-    requestDetail,
-    selectedSessionKey,
-    trajectoryPages,
-  ]);
-
-  useEffect(() => {
-    if (
-      expandedTrajectoryEvent
-      && expandedEventKey !== expandedTrajectoryEvent.trajectory_key
-    ) {
-      setExpandedTrajectoryEvent(null);
+      if (cached) continue;
+      void requestDetail(selectedSessionKey, child.event_key).then((detail) => {
+        if (expandedTrajectoryDetailRequest.current !== requestId) return;
+        setExpandedActivities((current) => new Map(current).set(child.event_key,
+          { detail, error: null, is_loading: false }));
+      }).catch((error: unknown) => {
+        if (expandedTrajectoryDetailRequest.current !== requestId) return;
+        setExpandedActivities((current) => new Map(current).set(child.event_key,
+          { detail: current.get(child.event_key)?.detail ?? null, error: errorMessage(error), is_loading: false }));
+      });
     }
-  }, [expandedEventKey, expandedTrajectoryEvent]);
+  }, [detailRevision, expandedTrajectoryDetailAttempt, expandedActivityKeys,
+    expandedEventKey, requestDetail, selectedSessionKey, trajectoryPages]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -1611,6 +1557,7 @@ export function useViewerState() {
     if (
       !selectedSessionKey
       || !expandedTrajectoryEvent
+      || !expandedActivityKeys.has(expandedTrajectoryEvent.event_key)
       || expandedEventKey !== expandedTrajectoryEvent.trajectory_key
     ) {
       return null;
@@ -1620,14 +1567,13 @@ export function useViewerState() {
       ?.get(expandedTrajectoryEvent.trajectory_key)
       ?.events.find((event) => event.event_key === expandedTrajectoryEvent.event_key)
       ?? null;
-  }, [expandedEventKey, expandedTrajectoryEvent, selectedSessionKey, trajectoryPages]);
-  const expandedTrajectoryDetailTargetKey = selectedSessionKey
-    && expandedTrajectoryChild
-    && expandedEventNeedsDetail(expandedTrajectoryChild)
-    ? `${selectedSessionKey}:${expandedTrajectoryChild.event_key}`
-    : null;
-  const expandedTrajectoryDetailIsOwned = expandedTrajectoryDetailTargetKey !== null
-    && expandedTrajectoryDetailOwnerKey === expandedTrajectoryDetailTargetKey;
+  }, [expandedActivityKeys, expandedEventKey, expandedTrajectoryEvent, selectedSessionKey, trajectoryPages]);
+  const currentActivity = expandedTrajectoryChild
+    ? expandedActivities.get(expandedTrajectoryChild.event_key) : null;
+  const expandedTrajectoryDetail = currentActivity?.detail ?? null;
+  const expandedTrajectoryDetailError = currentActivity?.error ?? null;
+  const expandedTrajectoryDetailLoading = expandedTrajectoryChild !== null
+    && expandedEventNeedsDetail(expandedTrajectoryChild) && (currentActivity?.is_loading ?? true);
 
   const toggleProvider = useCallback((provider: ViewerProvider) => {
     sessionsRequest.current += 1;
@@ -1694,19 +1640,23 @@ export function useViewerState() {
   }, [applyExpandedEventKey]);
 
   const toggleTrajectoryEventExpanded = useCallback((trajectoryKey: string, eventKey: string) => {
-    setExpandedTrajectoryEvent((current) => (
-      current?.trajectory_key === trajectoryKey && current.event_key === eventKey
-        ? null
-        : { trajectory_key: trajectoryKey, event_key: eventKey }
-    ));
+    setExpandedActivityKeys((current) => {
+      const next = new Set(current);
+      if (next.has(eventKey)) next.delete(eventKey);
+      else next.add(eventKey);
+      return next;
+    });
+    setExpandedTrajectoryEvent({ trajectory_key: trajectoryKey, event_key: eventKey });
+    setExpandedActivities((current) => {
+      const next = new Map(current);
+      next.delete(eventKey);
+      return next;
+    });
   }, []);
 
   const retryExpandedTrajectoryDetail = useCallback((trajectoryKey: string, eventKey: string) => {
-    setExpandedTrajectoryEvent((current) => (
-      current?.trajectory_key === trajectoryKey && current.event_key === eventKey
-        ? current
-        : { trajectory_key: trajectoryKey, event_key: eventKey }
-    ));
+    setExpandedTrajectoryEvent({ trajectory_key: trajectoryKey, event_key: eventKey });
+    setExpandedActivityKeys((current) => new Set(current).add(eventKey));
     setExpandedTrajectoryDetailAttempt((attempt) => attempt + 1);
   }, []);
 
@@ -1942,12 +1892,11 @@ export function useViewerState() {
     retryTrajectoryEvents,
     expandedTrajectoryKey: expandedTrajectoryChild ? expandedTrajectoryEvent?.trajectory_key ?? null : null,
     expandedTrajectoryEventKey: expandedTrajectoryChild ? expandedTrajectoryEvent?.event_key ?? null : null,
-    expandedTrajectoryDetail: expandedTrajectoryDetailIsOwned ? expandedTrajectoryDetail : null,
-    expandedTrajectoryDetailLoading: expandedTrajectoryDetailTargetKey !== null
-      && (!expandedTrajectoryDetailIsOwned || expandedTrajectoryDetailLoading),
-    expandedTrajectoryDetailError: expandedTrajectoryDetailIsOwned
-      ? expandedTrajectoryDetailError
-      : null,
+    expandedActivityKeys,
+    expandedActivities,
+    expandedTrajectoryDetail,
+    expandedTrajectoryDetailLoading,
+    expandedTrajectoryDetailError,
     toggleTrajectoryEventExpanded,
     retryExpandedTrajectoryDetail,
     expandedDetail: expandedDetailIsOwned ? expandedDetail : null,

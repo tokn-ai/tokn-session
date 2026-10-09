@@ -873,6 +873,36 @@ describe("useViewerState Relay updates", () => {
     expect(loadTrajectoryEventPage).toHaveBeenCalledOnce();
   });
 
+  it("opens child outputs independently and preserves both through concurrent loading", async () => {
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
+    const page = trajectoryEventPage();
+    page.events[0].trajectory!.status = "working";
+    const key = page.events[0].event_key;
+    const children = trajectoryChildPage();
+    const first = children.events[0].event_key;
+    const second = "event.second";
+    children.events.push({...children.events[0], event_key: second});
+    vi.mocked(loadEventPage).mockResolvedValue(page);
+    vi.mocked(loadTrajectoryEventPage).mockResolvedValue(children);
+    const firstResponse = deferred<EventDetail>();
+    const secondResponse = deferred<EventDetail>();
+    vi.mocked(loadEventDetail).mockImplementation((request) => request.event_key === first ? firstResponse.promise : secondResponse.promise);
+    const {result} = renderHook(() => useViewerState());
+    await selectListedSession(result, "live");
+    await waitFor(() => expect(result.current.trajectoryPages.get("live")?.get(key)?.has_loaded).toBe(true));
+    act(() => result.current.toggleTrajectoryEventExpanded(key, first));
+    await waitFor(() => expect(loadEventDetail).toHaveBeenCalledOnce());
+    act(() => result.current.toggleTrajectoryEventExpanded(key, second));
+    await waitFor(() => expect(loadEventDetail).toHaveBeenCalledTimes(2));
+    await act(async () => firstResponse.resolve({...toolDetail("first output"), event_key: first}));
+    await act(async () => secondResponse.resolve({...toolDetail("second output"), event_key: second}));
+    await waitFor(() => expect(result.current.expandedActivities.get(first)?.detail?.event_key).toBe(first));
+    expect(result.current.expandedActivities.get(second)?.detail?.event_key).toBe(second);
+    expect(result.current.expandedActivityKeys).toEqual(new Set([first, second]));
+    act(() => result.current.toggleTrajectoryEventExpanded(key, first));
+    expect(result.current.expandedActivityKeys).toEqual(new Set([second]));
+  });
+
   it.each(["timeline", "trajectory"])("retains visible %s detail through live refreshes and refresh errors", async (location) => {
     let emit: ((change: RelayChange) => void) | undefined;
     vi.mocked(listenForRelayChanges).mockImplementation((handler) => { emit = handler; return Promise.resolve(vi.fn()); });

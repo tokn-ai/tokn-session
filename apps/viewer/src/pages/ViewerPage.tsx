@@ -81,6 +81,8 @@ function ViewerContent({ remote, connection }: ViewerPageProps) {
           expanded_detail_error={viewer.expandedDetailError}
           expanded_detail_loading={viewer.expandedDetailLoading}
           expanded_event_key={viewer.expandedEventKey}
+          expanded_activity_keys={viewer.expandedActivityKeys}
+          expanded_activities={viewer.expandedActivities}
           has_newer={viewer.newerCursor !== null}
           has_older={viewer.olderCursor !== null}
           history_status={viewer.historyStatus}

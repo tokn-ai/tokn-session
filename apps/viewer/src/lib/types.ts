@@ -517,3 +517,9 @@ export interface AsyncState<T> {
   error: string | null;
   is_loading: boolean;
 }
+
+export interface ExpandedActivityState {
+  detail: EventDetail | null;
+  error: string | null;
+  is_loading: boolean;
+}

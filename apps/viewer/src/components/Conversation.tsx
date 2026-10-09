@@ -1,3 +1,4 @@
+import type { ExpandedActivityState } from "../lib/types";
 import { useLayoutEffect, useState } from "react";
 import { readingEventKey } from "../lib/readingPosition";
 import { useTimelineScroll } from "../lib/useTimelineScroll";
@@ -35,6 +36,8 @@ interface ConversationProps {
   events: EventSummary[];
   selected_event_key: string | null;
   expanded_event_key: string | null;
+  expanded_activity_keys?: Set<string>;
+  expanded_activities?: Map<string, ExpandedActivityState>;
   expanded_detail: EventDetail | null;
   expanded_detail_error: string | null;
   expanded_detail_loading: boolean;
@@ -82,6 +85,8 @@ export function Conversation({
   events,
   selected_event_key,
   expanded_event_key,
+  expanded_activity_keys,
+  expanded_activities,
   expanded_detail,
   expanded_detail_error,
   expanded_detail_loading,
@@ -340,6 +345,8 @@ export function Conversation({
                   data-reading-timestamp={event.timestamp ?? ""}
                   data-event-key={event.event_key} data-scroll-key={event.event_key} key={`${session.session_key}:${event.event_key}`}>
                 <EventCard
+                  expanded_activity_keys={expanded_activity_keys}
+                  expanded_activities={expanded_activities}
                   session_key={session.session_key}
                   hide_lifecycle={hideLifecycle}
                   button_id={eventButtonId(event.event_key)}
