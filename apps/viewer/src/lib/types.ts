@@ -35,6 +35,8 @@ export type EventType =
   | "compaction"
   | "goal_updated"
   | "agent_activity"
+  | "question_request"
+  | "question_reply"
   | "tool_call"
   | "lifecycle"
   | "usage"

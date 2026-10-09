@@ -2244,6 +2244,26 @@ describe("useViewerState agent communication detail", () => {
     });
   });
 
+  it.each(["question_request", "question_reply"])("loads historical %s detail after expansion and shares it with Inspector", async (type) => {
+    const page = communicationPage();
+    page.events = [{ ...page.events[0], type, agent_activity: null, title: "Questions" }];
+    const recorded: EventDetail = { ...communicationDetail(), event: {
+      ...(type === "question_reply"
+        ? { type, request_id: "call-1", replies: [{ question_id: "storage", question: "Choose storage", answers: ["SQLite"] }] }
+        : { type, is_blocking: false, questions: [{ question: "Choose storage", options: null }] }),
+    } };
+    vi.mocked(loadEventPage).mockResolvedValue(page);
+    vi.mocked(loadEventDetail).mockResolvedValue(recorded);
+    const { result } = renderHook(() => useViewerState());
+    await selectListedSession(result, "codex:communication");
+    await waitFor(() => expect(result.current.events).toHaveLength(1));
+    act(() => result.current.toggleEventExpanded("event.v1.communication"));
+    await waitFor(() => expect(result.current.expandedDetail).toEqual(recorded));
+    act(() => result.current.selectEvent("event.v1.communication"));
+    await waitFor(() => expect(result.current.detail).toEqual(recorded));
+    expect(loadEventDetail).toHaveBeenCalledOnce();
+  });
+
   it("loads after expansion, retries failures, and shares detail with Inspector", async () => {
     vi.mocked(loadEventPage).mockResolvedValue(communicationPage());
     vi.mocked(loadEventDetail).mockRejectedValueOnce(new Error("Snapshot changed"))

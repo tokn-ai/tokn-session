@@ -274,6 +274,54 @@ pub fn render_event_pretty(event: &AgentEvent) -> String {
       write_indented(&mut output, &event.text);
       output.push('\n');
     }
+    AgentEvent::QuestionReply(event) => {
+      output.push_str("user answers\n");
+      for reply in &event.replies {
+        write_indented(&mut output, reply.question.as_deref().unwrap_or(&reply.question_id));
+        for answer in &reply.answers {
+          write_indented(&mut output, &format!("- {answer}"));
+        }
+        if reply.answers.is_empty() {
+          write_indented(&mut output, "No answer recorded");
+        }
+      }
+      if event.replies.is_empty() {
+        write_indented(&mut output, "No answers recorded");
+      }
+      output.push('\n');
+    }
+    AgentEvent::QuestionRequest(event) => {
+      output.push_str(match event.is_blocking {
+        Some(true) => "questions (blocking)\n",
+        Some(false) => "questions (async)\n",
+        None => "questions\n",
+      });
+      for question in &event.questions {
+        let heading = question
+          .header
+          .as_deref()
+          .filter(|header| !header.is_empty())
+          .map(|header| format!("{header}: {}", question.question))
+          .unwrap_or_else(|| question.question.clone());
+        write_indented(&mut output, &heading);
+        for option in question.options.iter().flatten() {
+          let description = option.description.as_deref().filter(|text| !text.is_empty());
+          write_indented(
+            &mut output,
+            &description
+              .map(|text| format!("- {}: {text}", option.label))
+              .unwrap_or_else(|| format!("- {}", option.label)),
+          );
+        }
+        if question.allows_free_text {
+          write_indented(&mut output, "Free-text answer allowed");
+        }
+        if question.is_secret {
+          write_indented(&mut output, "Secret answer requested");
+        }
+      }
+      output.push('\n');
+    }
     AgentEvent::Reasoning(event) => {
       if let Some(summary) = &event.summary {
         output.push_str("reasoning summary\n");
@@ -366,6 +414,29 @@ pub fn render_event_summary(event: &AgentEvent) -> String {
     AgentEvent::Compaction(event) => event.state.label().to_string(),
     AgentEvent::Metadata(event) => format!("[{}] {}", event.native_type, first_line(&event.summary)),
     AgentEvent::Message(event) => format!("{} {}", role_label(event.role), first_line(&event.text)),
+    AgentEvent::QuestionReply(event) => format!(
+      "user answers {}",
+      event
+        .replies
+        .iter()
+        .flat_map(|reply| &reply.answers)
+        .next()
+        .map(|text| first_line(text))
+        .unwrap_or_else(|| "No answers recorded".into())
+    ),
+    AgentEvent::QuestionRequest(event) => format!(
+      "{} {}",
+      match event.is_blocking {
+        Some(true) => "questions (blocking)",
+        Some(false) => "questions (async)",
+        None => "questions",
+      },
+      event
+        .questions
+        .first()
+        .map(|question| first_line(&question.question))
+        .unwrap_or_default()
+    ),
     AgentEvent::Reasoning(event) => {
       if let Some(summary) = &event.summary {
         format!("reasoning summary {}", first_line(summary))
@@ -411,6 +482,8 @@ pub fn event_type(event: &AgentEvent) -> &'static str {
     AgentEvent::Compaction(_) => "compaction",
     AgentEvent::Metadata(_) => "metadata",
     AgentEvent::Message(_) => "message",
+    AgentEvent::QuestionRequest(_) => "questions",
+    AgentEvent::QuestionReply(_) => "answers",
     AgentEvent::Reasoning(_) => "reasoning",
     AgentEvent::GoalUpdated(_) => "goal",
     AgentEvent::AgentActivity(_) => "agent",

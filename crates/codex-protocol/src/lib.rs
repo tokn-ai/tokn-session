@@ -1,6 +1,12 @@
 #![doc = include_str!("../README.md")]
 
+mod questions;
 mod rollout;
+
+pub use questions::{
+  AsyncQuestionReply, AsyncUserInputQuestion, RequestUserInputAnswer, RequestUserInputEvent, RequestUserInputOption,
+  RequestUserInputQuestion, RequestUserInputResponse,
+};
 
 pub use rollout::{
   AdditionalToolsItem, AgentMessageItem, CompactedItem, ContentItem, CustomToolCallItem, CustomToolCallOutputItem,

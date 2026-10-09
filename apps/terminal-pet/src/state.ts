@@ -492,6 +492,17 @@ export class PetStore {
       case "tool_call":
         this.#applyToolCall(activity, event, nowMs);
         return;
+      case "question_request":
+        if (event.is_blocking !== false) {
+          this.#markNeedsInput(activity, event, nowMs, "question_request");
+        } else {
+          this.#markProgress(activity, nowMs);
+        }
+        return;
+      case "question_reply":
+        activity.pending_interactions.delete(asString(event.request_id) ?? "question_request");
+        this.#markProgress(activity, nowMs);
+        return;
       case "error":
         if (isInterruptedError(event)) {
           this.#markInterrupted(activity, nowMs);
@@ -654,7 +665,8 @@ export class PetStore {
       native?.call_id,
       native?.id,
       native?.turn_id,
-      event.tool_call_id
+      event.tool_call_id,
+      event.request_id
     ].map(asString).find(Boolean) ?? fallbackKey;
     const autoResolutionMs = asNumber(native?.autoResolutionMs)
       ?? asNumber(native?.auto_resolution_ms);

@@ -1,6 +1,8 @@
+mod async_replies;
 mod code_mode;
 mod communication;
 mod item_lifecycle;
+mod questions;
 mod turn_lifecycle;
 
 use std::collections::{HashMap, VecDeque};
@@ -33,6 +35,7 @@ pub struct CodexNormalizer {
   pending_code_mode_order: VecDeque<(String, u64)>,
   pending_code_mode_call_count: usize,
   next_pending_code_mode_token: u64,
+  question_replies: questions::RepliesNormalizer,
 }
 
 #[derive(Clone, Debug)]
@@ -117,6 +120,7 @@ impl CodexNormalizer {
       pending_code_mode_order: Default::default(),
       pending_code_mode_call_count: 0,
       next_pending_code_mode_token: 0,
+      question_replies: Default::default(),
     }
   }
 
@@ -131,6 +135,7 @@ impl CodexNormalizer {
       pending_code_mode_order: Default::default(),
       pending_code_mode_call_count: 0,
       next_pending_code_mode_token: 0,
+      question_replies: Default::default(),
     }
   }
 
@@ -151,6 +156,12 @@ impl CodexNormalizer {
       return Vec::new();
     }
 
+    if let Some(events) = async_replies::normalize(&line, self.session_id.clone()) {
+      return events;
+    }
+    if let Some(events) = self.question_replies.output(&line, self.session_id.clone()) {
+      return events;
+    }
     if let Some(events) = self.records.normalize(
       &line,
       self.session_id.clone(),
@@ -158,7 +169,9 @@ impl CodexNormalizer {
     ) {
       return events;
     }
-    self.normalize_item(line.into_item(), timestamp, communication_trigger)
+    let events = self.normalize_item(line.into_item(), timestamp, communication_trigger);
+    self.question_replies.observe(&events);
+    events
   }
 
   pub fn history_status(&self) -> SessionHistoryStatus {
@@ -185,6 +198,25 @@ impl CodexNormalizer {
       RolloutItem::ResponseItem(item) => {
         if matches!(self.history_mode, CodexRolloutHistoryMode::Paginated) {
           match item {
+            // Structured requests have no canonical TurnItem equivalent. Their
+            // raw invocation is the historical source of the question text.
+            ResponseItem::FunctionCall(item)
+              if item
+                .name
+                .as_deref()
+                .is_some_and(|name| name.rsplit('.').next() == Some("request_user_input")) =>
+            {
+              vec![
+                questions::function_call(self.session_id.clone(), &item, timestamp.clone()).unwrap_or_else(|| {
+                  unknown_event(
+                    self.session_id.clone(),
+                    Some("response_item.function_call".into()),
+                    Some(json_value(item)),
+                    timestamp,
+                  )
+                }),
+              ]
+            }
             ResponseItem::Reasoning(item) => normalize_reasoning(self.session_id.clone(), item, timestamp),
             ResponseItem::Unknown(item) => {
               vec![unknown_response_event(self.session_id.clone(), item, timestamp)]
@@ -511,6 +543,9 @@ fn normalize_response_item(
     ResponseItem::AgentMessage(item) => normalize_agent_message(session_id, item, timestamp, None),
     ResponseItem::Reasoning(item) => normalize_reasoning(session_id, item, timestamp),
     ResponseItem::FunctionCall(item) => {
+      if let Some(event) = questions::function_call(session_id.clone(), &item, timestamp.clone()) {
+        return vec![event];
+      }
       let name = item
         .name
         .or(item.namespace)
@@ -739,6 +774,16 @@ fn normalize_event_message(
       })
       .unwrap_or_default(),
     Some("agent_message") => Vec::new(),
+    Some("request_user_input") => vec![
+      questions::request(session_id.clone(), &payload, timestamp.clone()).unwrap_or_else(|| {
+        unknown_event(
+          session_id,
+          Some("event_msg.request_user_input".into()),
+          Some(payload),
+          timestamp,
+        )
+      }),
+    ],
     Some("agent_message_delta" | "agent_message_content_delta") => {
       normalize_message_delta(session_id, &payload, timestamp)
     }

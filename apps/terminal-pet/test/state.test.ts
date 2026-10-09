@@ -15,6 +15,19 @@ const policy = {
 };
 
 describe("PetStore", () => {
+  test("normalized blocking questions retain input attention while async questions do not imply completion", () => {
+    const store = new PetStore(policy);
+    store.ingest(relayEvent({ type: "question_request", request_id: "call-1", is_blocking: false, phase: "finished" }), 0);
+    expect(store.snapshot(20).state).toBe("running");
+    store.ingest(relayEvent({ type: "question_request", request_id: "call-2", is_blocking: true, phase: "finished" }), 30);
+    expect(store.snapshot(40).state).toBe("needs_input");
+    store.ingest(relayEvent({ type: "tool_call", tool_call_id: "call-2", phase: "finished", output: { answers: {} } }), 50);
+    expect(store.snapshot(60).state).toBe("running");
+    store.ingest(relayEvent({ type: "question_request", request_id: "call-3", is_blocking: null, phase: "finished" }), 70);
+    expect(store.snapshot(80).state).toBe("needs_input");
+    store.ingest(relayEvent({ type: "question_reply", request_id: "call-3", replies: [] }), 90);
+    expect(store.snapshot(100).state).toBe("running");
+  });
   test("passive records and hidden messages do not change activity or renew leases", () => {
     const store = new PetStore(policy);
     const passive = [

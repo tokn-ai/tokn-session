@@ -126,6 +126,60 @@ readable Markdown through event detail. Sender navigation requires a unique
 identity within the selected session's canonical relation tree. Repeated agent
 paths in unrelated root sessions do not establish a relationship.
 
+## Questions
+
+`question_request` is a recorded request for user input. It contains the
+provider/session, request and turn IDs when available, optional blocking flag,
+recorded phase, optional fallback text, structured questions/options, native payload,
+and timestamp. Questions preserve IDs/headers where supplied, option labels and
+descriptions, free-text allowance, and secret-answer intent. A finished record
+means the request was recorded; it does not mean the user answered it.
+
+Codex paginated history stores `item_completed.AgentMessage` with
+`delivery: "async"` and `questions: [{ title, options? }]`. Its
+`phase: "final_answer"` is not an ordinary final assistant reply. The async tool
+call is a duplicate in this mode. Legacy history instead keeps
+`request_user_input_async` function calls; unpaired canonical question items in
+exports are also readable. Structured `request_user_input` invocations have no
+canonical request item, so their raw calls remain readable in both history
+modes. Explicit `event_msg.request_user_input` records in exports are supported,
+although upstream currently excludes them from persisted rollouts. Missing or
+null `isBlocking` on explicit request events defaults to true. Raw structured
+tool calls lack the effective collaboration mode, so their blocking flag stays
+unknown; the handler supplies their free-form Other choice. Deprecated
+`autoResolutionMs` remains native detail. Unknown fields remain inspectable;
+malformed canonical items stay unknown,
+while malformed legacy tool arguments retain their ordinary tool representation.
+
+`question_reply` contains a recorded structured answer: request/turn IDs,
+question IDs, original prompts/headers when known, answer strings, native payload,
+and timestamp. Request IDs are optional when only an opaque question identity
+is recorded. Codex `request_user_input` tool results are correlated by call ID
+in both legacy and paginated history, including incremental reads. Canonical
+outputs explicitly named `request_user_input` can stand alone without invented
+prompts. Duplicate raw/canonical results produce one reply; correlation retains
+the latest 256 requests. Unknown question IDs and empty answers stay visible,
+and malformed results become unknown events. Async acceptance is not an answer.
+Desktop/TUI user messages containing complete
+`<send_user_message_question_reply>` envelopes normalize as replies in both
+history modes, including single objects, arrays, and IDE context prefixes.
+Their `questionItemId` is preserved; `["request_user_input_async", item_id, index]`
+provides the request ID and matches the normalized async question ID. The
+envelope's recorded prompt and answer remain readable without the request.
+An object-replacement marker at the JSON boundary is tolerated. Quoted,
+malformed, incomplete, and attachment-bearing messages remain ordinary text;
+ordinary messages are not paired by proximity.
+
+The viewer keeps requests outside work trajectories and shows Markdown prompts,
+static choice lists, and free-text/secret markers. It does not infer current
+pending state, selected answers, or submission controls from history. Replies
+retain their original user-message or tool-result representation.
+
+Source of truth: `vendor/codex` at `2351d9e1b6`, particularly
+`protocol/src/items.rs`, `protocol/src/request_user_input.rs`,
+`core/src/tools/handlers/request_user_input_async.rs`, and `rollout/src/policy.rs`
+under `codex-rs/`.
+
 ## Metadata and provenance
 
 `metadata` means a recognized non-conversation record whose required envelope

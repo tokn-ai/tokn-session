@@ -93,7 +93,7 @@ function expandedEventNeedsDetail(event: EventSummary | null | undefined): boole
   if (!event || event.is_hidden) {
     return false;
   }
-  if (event.type === "tool_call") {
+  if (event.type === "tool_call" || event.type === "question_request" || event.type === "question_reply") {
     return true;
   }
   if (event.type === "compaction") {
