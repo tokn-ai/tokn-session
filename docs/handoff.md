@@ -7,8 +7,11 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 The viewer sidebar and conversation use a compact Codex-style layout with neutral
 light/dark colors, larger message text, inline expandable tool activity, and an
 aligned composer. Worked/Working disclosures use wrapping activity summaries and
-an indented activity trail. Adjacent completed reads/searches fold into an
-Explored group; failures and running tools stay separate. Child outputs open
+an indented activity trail. Each turn contains activity groups separated by
+intermediate messages. Inner disclosures summarize actions (commands, reads,
+edits, searches) rather than duration; only the outer turn uses Worked/Working.
+Lifecycle/bookkeeping is hidden by default, with an explicit reveal toggle.
+Running and failed activity automatically opens its inner group. Child outputs open
 independently and retain content during live refreshes. Shell panels expose the
 command, cwd, exit status, and an eight-line output preview with local expansion.
 Collapsed event headings occupy one line; expanded paths wrap. Live work shows a spinner. Provider filters and session metadata live in disclosures.

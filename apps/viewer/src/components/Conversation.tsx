@@ -121,7 +121,7 @@ export function Conversation({
   on_retry,
   on_retry_expanded_detail,
 }: ConversationProps) {
-  const [hideLifecycle, setHideLifecycle] = useState(false);
+  const [hideLifecycle, setHideLifecycle] = useState(true);
   const visibleEvents = hideLifecycle ? events.filter((event) => !isBookkeepingEvent(event)) : events;
   const hiddenCount = events.length - visibleEvents.length;
   const scroll = useTimelineScroll({

@@ -604,7 +604,9 @@ function TrajectorySection({
               {visibleEvents.length > 0 ? (
                 <div aria-label="Events in this turn" className="trajectory-section__events" role="list">
                   {groupActivity(visibleEvents).map((group) => (
-                    <ActivityGroup key={group[0].event_key} events={group} selected_event_key={selected_event_key}>
+                    <ActivityGroup key={group[0].event_key} events={group} selected_event_key={selected_event_key}
+                      reveal={group.some((child) => expanded_activity_keys?.has(child.event_key)
+                        ?? child.event_key === expanded_child_event_key)}>
                       {group.map((childEvent) => (
                         <div
                           className="trajectory-section__item"

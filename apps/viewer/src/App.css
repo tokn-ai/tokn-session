@@ -2406,6 +2406,10 @@ button:disabled {
   background: var(--surface-hover);
 }
 
+.activity-group__failures {
+  color: var(--danger);
+}
+
 .activity-group__events {
   margin-left: 12px;
 }

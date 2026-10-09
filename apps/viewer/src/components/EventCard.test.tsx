@@ -554,6 +554,7 @@ describe("EventCard whole-turn trajectories", () => {
     expect(container.querySelector(".trajectory-section")).toBeInTheDocument();
     expect(container.querySelector(".trajectory-section .message-event")).toBeInTheDocument();
     expect(container.querySelector(".trajectory-section .technical-event")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Ran 1 command, recorded 1 agent activity" }));
     expect(screen.getByRole("button", { name: "Shell: cargo test" })).toBeInTheDocument();
     expect(screen.getByText("Showing 3 of 4 events.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Load earlier events" })).toBeInTheDocument();
@@ -576,7 +577,7 @@ describe("EventCard whole-turn trajectories", () => {
       detail_error: null, detail_loading: false, on_retry_detail: vi.fn(), on_select: vi.fn(), on_toggle: vi.fn(),
       trajectory_page: trajectoryPage({events: children})};
     const {rerender} = render(<EventCard {...props} is_expanded />);
-    fireEvent.click(screen.getByRole("button", {name: "Explored 1 file, 1 search"}));
+    fireEvent.click(screen.getByRole("button", {name: "Read 1 file, performed 1 search"}));
     expect(screen.getByRole("button", {name: "Read: a.rs"})).toBeVisible();
     rerender(<EventCard {...props} is_expanded={false} />);
     expect(screen.queryByRole("button", {name: "Read: a.rs"})).not.toBeInTheDocument();
