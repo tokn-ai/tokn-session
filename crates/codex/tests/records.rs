@@ -62,6 +62,246 @@ fn compaction_checkpoint_and_notice_are_one_operation_without_a_reply() {
   }
 }
 
+fn snapshot_records() -> Vec<Value> {
+  include_str!("../fixtures/compaction_snapshot.jsonl")
+    .lines()
+    .map(|record| serde_json::from_str(record).unwrap())
+    .collect()
+}
+
+fn normalize_records(records: Vec<Value>) -> Vec<AgentEvent> {
+  let mut normalizer = CodexNormalizer::new();
+  records
+    .into_iter()
+    .flat_map(|record| line(&mut normalizer, record))
+    .collect()
+}
+
+#[test]
+fn persisted_snapshot_batch_preserves_one_operation_and_both_observations() {
+  for message in ["", "retained context"] {
+    for canonical in [false, true] {
+      let mut records = snapshot_records();
+      records[2]["payload"]["message"] = json!(message);
+      if !canonical {
+        records[0]["payload"]["history_mode"] = json!("legacy");
+        records.last_mut().unwrap()["payload"] = json!({"type":"context_compacted"});
+      }
+      let events = normalize_records(records);
+      let observations: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+          AgentEvent::Compaction(event) => Some(event),
+          _ => None,
+        })
+        .collect();
+      assert_eq!(observations.len(), 2);
+      assert!(
+        observations
+          .iter()
+          .all(|event| event.compaction_id.as_deref() == Some("window-2"))
+      );
+      let operations = tokn_session_core::compaction_operations(&events);
+      assert_eq!(operations.len(), 1);
+      assert_eq!(operations[0].source_event_indices.len(), 2);
+      assert!(operations[0].event.summary_opaque);
+      assert_eq!(
+        operations[0].event.summary.as_deref(),
+        (!message.is_empty()).then_some(message)
+      );
+      assert_eq!(operations[0].event.context.window_id.as_deref(), Some("window-2"));
+      assert!(!events.iter().any(|event| matches!(event, AgentEvent::Message(_))));
+      assert_eq!(
+        events
+          .iter()
+          .filter(|event| matches!(event, AgentEvent::Lifecycle(_)))
+          .count(),
+        1
+      );
+    }
+  }
+}
+
+#[test]
+fn snapshot_turn_binds_old_checkpoints_without_resume_metadata() {
+  let mut records = snapshot_records();
+  records[2]["payload"].as_object_mut().unwrap().remove("resume_metadata");
+  assert_eq!(
+    tokn_session_core::compaction_operations(&normalize_records(records.clone())).len(),
+    1
+  );
+  records.last_mut().unwrap()["payload"]["turn_id"] = json!("another-turn");
+  assert_eq!(
+    tokn_session_core::compaction_operations(&normalize_records(records)).len(),
+    2
+  );
+}
+
+#[test]
+fn older_settings_snapshots_may_omit_the_thread_identity() {
+  for identity in [None, Some(Value::Null)] {
+    let mut records = snapshot_records();
+    let payload = records[5]["payload"].as_object_mut().unwrap();
+    match identity {
+      Some(identity) => {
+        payload.insert("thread_id".into(), identity);
+      }
+      None => {
+        payload.remove("thread_id");
+      }
+    }
+    assert_eq!(
+      tokn_session_core::compaction_operations(&normalize_records(records)).len(),
+      1
+    );
+  }
+}
+
+#[test]
+fn snapshot_accounting_must_belong_to_the_checkpoint_session_and_turn() {
+  let mut accounting = token_usage_record();
+  accounting["payload"]["thread_id"] = json!("fixture");
+  accounting["payload"]["session_id"] = json!("fixture");
+  let mut records = snapshot_records();
+  records.insert(records.len() - 1, accounting.clone());
+  assert_eq!(
+    tokn_session_core::compaction_operations(&normalize_records(records)).len(),
+    1
+  );
+  for field in ["thread_id", "session_id", "turn_id"] {
+    let mut foreign = accounting.clone();
+    foreign["payload"][field] = json!("another");
+    let mut records = snapshot_records();
+    records.insert(records.len() - 1, foreign);
+    assert_eq!(
+      tokn_session_core::compaction_operations(&normalize_records(records)).len(),
+      2,
+      "{field}"
+    );
+  }
+}
+
+#[test]
+fn repeated_or_out_of_order_context_updates_are_not_checkpoint_snapshot_records() {
+  for index in [3, 4, 5] {
+    let mut records = snapshot_records();
+    records.insert(index + 1, records[index].clone());
+    assert_eq!(
+      tokn_session_core::compaction_operations(&normalize_records(records)).len(),
+      2,
+      "repeated {index}"
+    );
+  }
+  let mut records = snapshot_records();
+  records.swap(3, 4);
+  assert_eq!(
+    tokn_session_core::compaction_operations(&normalize_records(records)).len(),
+    2
+  );
+}
+
+#[test]
+fn unrelated_or_consumed_reply_records_break_snapshot_correlation() {
+  let async_reply = "<send_user_message_question_reply>\n[{\"questionItemId\":\"opaque-id\",\"question\":\"Which?\",\"answer\":\"Local\"}]\n</send_user_message_question_reply>";
+  for record in [
+    json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"another-turn"}}),
+    json!({"type":"event_msg","payload":{"type":"turn_complete","turn_id":"turn-1"}}),
+    json!({"type":"event_msg","payload":{"type":"future_record"}}),
+    json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"reply"}]}}),
+    json!({"type":"response_item","payload":{"type":"function_call","call_id":"call","name":"exec_command","arguments":"{}"}}),
+    json!({"type":"inter_agent_communication_metadata","payload":{"trigger_turn":false}}),
+    json!({"type":"session_meta","payload":{"id":"another-session","history_mode":"paginated"}}),
+    json!({"type":"event_msg","payload":{"type":"user_message","message":async_reply}}),
+    json!({"type":"event_msg","payload":{"type":"item_completed","thread_id":"fixture","turn_id":"turn-1",
+      "item":{"type":"FunctionCallOutput","id":"question-call","name":"request_user_input","output":{"answers":{}}}}}),
+  ] {
+    let mut records = snapshot_records();
+    records.insert(records.len() - 1, record.clone());
+    assert_eq!(
+      tokn_session_core::compaction_operations(&normalize_records(records)).len(),
+      2,
+      "{record}"
+    );
+  }
+}
+
+#[test]
+fn malformed_or_mismatched_snapshot_records_break_correlation() {
+  for (index, pointer, value) in [
+    (2, "/payload/resume_metadata", json!([])),
+    (2, "/payload/resume_metadata/last_started_turn_id", json!(0)),
+    (2, "/payload/resume_metadata/last_started_turn_id", json!(" ")),
+    (3, "/payload/full", json!(false)),
+    (3, "/payload/state", json!(null)),
+    (4, "/payload/turn_id", json!("another-turn")),
+    (4, "/payload/turn_id", json!("")),
+    (5, "/payload/thread_id", json!("another-session")),
+    (5, "/payload/thread_id", json!(0)),
+    (5, "/payload/thread_id", json!(" ")),
+    (5, "/payload/thread_settings", json!(null)),
+    (6, "/payload/info/total_token_usage/total_tokens", json!(-1)),
+    (7, "/payload/thread_id", json!("another-session")),
+    (7, "/payload/turn_id", json!("another-turn")),
+  ] {
+    let mut records = snapshot_records();
+    *records[index].pointer_mut(pointer).unwrap() = value;
+    assert_eq!(
+      tokn_session_core::compaction_operations(&normalize_records(records)).len(),
+      2,
+      "{index} {pointer}"
+    );
+  }
+  for record in [
+    json!({"type":"token_usage_record","payload":{}}),
+    json!({"type":"event_msg","payload":{"type":"token_count"}}),
+  ] {
+    let mut records = snapshot_records();
+    records.insert(records.len() - 1, record.clone());
+    assert_eq!(
+      tokn_session_core::compaction_operations(&normalize_records(records)).len(),
+      2,
+      "{record}"
+    );
+  }
+}
+
+#[test]
+fn malformed_completion_consumes_pending_checkpoint_without_hiding_the_source() {
+  for (pointer, value) in [
+    ("/payload/thread_id", json!(null)),
+    ("/payload/turn_id", json!(" ")),
+    ("/payload/item/id", json!("")),
+  ] {
+    let mut records = snapshot_records();
+    let mut malformed = records.last().unwrap().clone();
+    *malformed.pointer_mut(pointer).unwrap() = value;
+    records.insert(records.len() - 1, malformed);
+    let events = normalize_records(records);
+    assert!(events.iter().any(|event| matches!(event, AgentEvent::Unknown(_))));
+    assert_eq!(tokn_session_core::compaction_operations(&events).len(), 2);
+  }
+}
+
+#[test]
+fn successive_checkpoints_and_blank_window_ids_keep_distinct_operation_keys() {
+  let mut records = snapshot_records();
+  records[2]["payload"]["window_id"] = json!(" ");
+  let mut next = records[2..].to_vec();
+  next[0]["payload"]["window_id"] = json!("");
+  next.last_mut().unwrap()["payload"]["item"]["id"] = json!("compact-2");
+  records.extend(next);
+  let events = normalize_records(records);
+  let operations = tokn_session_core::compaction_operations(&events);
+  assert_eq!(operations.len(), 2);
+  assert_eq!(operations[0].event.compaction_id.as_deref(), Some("checkpoint:1"));
+  assert_eq!(operations[1].event.compaction_id.as_deref(), Some("checkpoint:2"));
+  assert!(
+    operations
+      .iter()
+      .all(|operation| operation.source_event_indices.len() == 2)
+  );
+}
+
 #[test]
 fn unrelated_records_break_codex_compaction_correlation() {
   let mut normalizer = normalizer();

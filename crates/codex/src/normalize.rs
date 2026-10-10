@@ -156,17 +156,19 @@ impl CodexNormalizer {
       return Vec::new();
     }
 
-    if let Some(events) = async_replies::normalize(&line, self.session_id.clone()) {
-      return events;
-    }
-    if let Some(events) = self.question_replies.output(&line, self.session_id.clone()) {
-      return events;
-    }
+    // Observe every source record before reply adapters can consume it. A
+    // substantive reply must break pending checkpoint/notice correlation too.
     if let Some(events) = self.records.normalize(
       &line,
       self.session_id.clone(),
       matches!(self.history_mode, CodexRolloutHistoryMode::Paginated),
     ) {
+      return events;
+    }
+    if let Some(events) = async_replies::normalize(&line, self.session_id.clone()) {
+      return events;
+    }
+    if let Some(events) = self.question_replies.output(&line, self.session_id.clone()) {
       return events;
     }
     let events = self.normalize_item(line.into_item(), timestamp, communication_trigger);
