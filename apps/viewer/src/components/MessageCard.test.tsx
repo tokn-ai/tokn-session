@@ -453,7 +453,62 @@ describe("translation request lifetime", () => {
     expect(vi.mocked(translateText).mock.calls[1][0].texts).toEqual(["Updated response."]);
   });
 
-  it("reloads a refreshed truncated response even when its visible prefix is unchanged", async () => {
+  it("keeps a cached truncated translation across an unchanged page refresh", async () => {
+    const event = message({ summary: "Original…", summary_truncated: true, content_revision: "same-content" });
+    vi.mocked(loadEventDetail).mockResolvedValue(detail("Original response.", { content_revision: "same-content" }));
+    const view = render(card(event));
+    await startTranslation();
+    await screen.findByText("中文译文。");
+    view.rerender(card({ ...event }));
+    expect(screen.getByText("中文译文。")).toBeInTheDocument();
+    expect(loadEventDetail).toHaveBeenCalledTimes(1);
+    expect(translateText).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an in-flight native translation across an unchanged page refresh", async () => {
+    const pending = deferred<TranslateTextResponse>();
+    vi.mocked(translateText).mockReturnValue(pending.promise);
+    const event = message({ summary: "Original…", summary_truncated: true, content_revision: "same-content", phase: "started" });
+    vi.mocked(loadEventDetail).mockResolvedValue(detail("Original response.", { content_revision: "same-content" }));
+    const view = render(card(event));
+    await startTranslation();
+    await waitFor(() => expect(translateText).toHaveBeenCalledTimes(1));
+    view.rerender(card({ ...event, phase: "finished" }));
+    expect(screen.getByRole("status")).toHaveTextContent("Translating");
+    expect(cancelTranslation).not.toHaveBeenCalled();
+    await act(async () => pending.resolve({ texts: ["中文译文。"] }));
+    expect(screen.getByText("中文译文。")).toBeInTheDocument();
+    expect(loadEventDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it("reloads a truncated response when its full-text revision changes but its visible prefix does not", async () => {
+    const event = message({ summary: "Original…", summary_truncated: true, content_revision: "first-content" });
+    vi.mocked(loadEventDetail).mockResolvedValue(detail("Original response.", { content_revision: "first-content" }));
+    const view = render(card(event));
+    await startTranslation();
+    await screen.findByText("中文译文。");
+    vi.mocked(loadEventDetail).mockResolvedValue(detail("Original response with a new ending.", { content_revision: "changed-content" }));
+    view.rerender(card({ ...event, content_revision: "changed-content" }));
+    expect(screen.getByText("Original…")).toBeInTheDocument();
+    expect(screen.queryByText("中文译文。")).not.toBeInTheDocument();
+    await startTranslation();
+    await screen.findByText("中文译文。");
+    expect(loadEventDetail).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(translateText).mock.calls[1][0].texts).toEqual(["Original response with a new ending."]);
+  });
+
+  it("rejects detail from a newer full-text revision before the page refreshes", async () => {
+    vi.mocked(loadEventDetail).mockResolvedValue(detail("Original response with a new ending.", {
+      content_revision: "changed-content",
+    }));
+    render(card(message({ summary: "Original…", summary_truncated: true, content_revision: "first-content" })));
+    await startTranslation();
+    expect(await screen.findByRole("alert")).toHaveTextContent("This response has changed. Refresh the conversation and try again.");
+    expect(screen.getByText("Original…")).toBeInTheDocument();
+    expect(translateText).not.toHaveBeenCalled();
+  });
+
+  it("invalidates a truncated translation on refresh when an older server omits the full-text revision", async () => {
     const event = message({ summary: "Original…", summary_truncated: true });
     const view = render(card(event));
     await startTranslation();
@@ -464,7 +519,6 @@ describe("translation request lifetime", () => {
     expect(screen.queryByText("中文译文。")).not.toBeInTheDocument();
     await startTranslation();
     await screen.findByText("中文译文。");
-    expect(loadEventDetail).toHaveBeenCalledTimes(2);
     expect(vi.mocked(translateText).mock.calls[1][0].texts).toEqual(["Original response with a new ending."]);
   });
 

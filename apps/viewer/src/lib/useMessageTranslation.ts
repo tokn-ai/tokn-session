@@ -9,6 +9,7 @@ interface TranslationSource {
   event_key: string;
   summary: string;
   summary_truncated: boolean;
+  content_revision: string | null;
 }
 
 interface TranslationState {
@@ -23,16 +24,18 @@ interface TranslationState {
 
 /** Results belong to the source text, never just its reusable event index. */
 export function useMessageTranslation(event: EventSummary, sessionKey?: string, engine?: TranslationEngine | null) {
-  // A truncated preview cannot identify changes to the rest of a response.
-  // Invalidate it whenever the timeline supplies a new source observation.
-  const truncatedObservation = event.summary_truncated ? event : null;
+  // Older servers cannot identify changes beyond a truncated preview, so
+  // retain conservative invalidation until they provide a full-text revision.
+  const contentRevision = event.summary_truncated ? event.content_revision ?? null : null;
+  const truncatedObservation = event.summary_truncated && contentRevision === null ? event : null;
   const source = useMemo<TranslationSource>(() => ({
     session_key: sessionKey,
     event_key: event.event_key,
     summary: event.summary,
     summary_truncated: event.summary_truncated,
+    content_revision: contentRevision,
   }), [sessionKey, event.event_key, event.summary, event.summary_truncated,
-    event.is_hidden, event.role, event.phase, truncatedObservation]);
+    event.is_hidden, event.role, contentRevision, truncatedObservation]);
   const currentSource = useRef(source);
   currentSource.current = source;
   const active = useRef<{ source: TranslationSource; job: TranslationJob | null } | null>(null);
@@ -78,7 +81,9 @@ export function useMessageTranslation(event: EventSummary, sessionKey?: string, 
       }
       const original = value.text;
       const expected = source.summary_truncated ? source.summary.replace(/…$/, "") : source.summary;
-      if (source.summary_truncated ? !original.startsWith(expected) : original !== expected) {
+      const revisionChanged = source.content_revision !== null && detail.content_revision != null
+        && detail.content_revision !== source.content_revision;
+      if (revisionChanged || (source.summary_truncated ? !original.startsWith(expected) : original !== expected)) {
         throw new Error("This response has changed. Refresh the conversation and try again.");
       }
       setState((previous) => previous?.source === source ? { ...previous, original } : previous);

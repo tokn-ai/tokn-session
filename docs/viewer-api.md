@@ -64,6 +64,11 @@ reason. Code, links, and Markdown formatting are preserved, and **Show original*
 switches back without another request. The desktop app continues to use Apple
 Translation on supported Macs.
 
+For truncated assistant responses, event page summaries and matching details
+include an optional `content_revision` digest of the complete text. A client
+can use it to keep a translation across unchanged page refreshes and detect a
+response that changed before its detail loaded.
+
 For frontend development, start both servers with one command:
 
 ```sh

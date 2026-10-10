@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 use tokn_session_client::SessionHeader;
 use tokn_session_core::{
@@ -3055,6 +3056,7 @@ fn event_detail(
         "provider": provider_for_event(event).as_str(),
         "redacted": true,
       }),
+      content_revision: None,
       native: None,
       is_hidden: true,
       tool_output: None,
@@ -3068,6 +3070,7 @@ fn event_detail(
         "provider": provider_for_event(event).as_str(),
         "redacted": true,
       }),
+      content_revision: None,
       native: None,
       is_hidden: false,
       tool_output: None,
@@ -3082,9 +3085,18 @@ fn event_detail(
   remove_embedded_native(&mut normalized);
   let normalized = bounded_detail_value(normalized, "normalized_event")?;
   let tool_output = tool_output_preview(events, source_event_index);
+  let content_revision = match event {
+    AgentEvent::Message(message)
+      if message.role == Role::Assistant && message.text.chars().count() > MAX_MESSAGE_SUMMARY_CHARS =>
+    {
+      Some(message_content_revision(&message.text))
+    }
+    _ => None,
+  };
   Ok(EventDetail {
     event_key,
     event: normalized,
+    content_revision,
     native,
     is_hidden: false,
     tool_output,
@@ -3108,6 +3120,7 @@ fn tool_operation_detail(
   Ok(EventDetail {
     event_key,
     event: normalized,
+    content_revision: None,
     native,
     is_hidden: false,
     tool_output,
@@ -3211,6 +3224,7 @@ fn trajectory_detail(event_key: String, trajectory: &Trajectory, events: &[Agent
   Ok(EventDetail {
     event_key,
     event: normalized,
+    content_revision: None,
     native,
     is_hidden: false,
     tool_output: None,
@@ -4437,6 +4451,7 @@ fn trajectory_event_summary(trajectory: &Trajectory, events: &[AgentEvent]) -> E
     title: "Trajectory".to_string(),
     summary,
     summary_truncated: false,
+    content_revision: None,
     is_hidden: false,
     is_bookkeeping: false,
     is_error: (card.error_count > 0).then_some(true),
@@ -4692,6 +4707,16 @@ fn event_summary_with_delegation_targets(
     MAX_TECHNICAL_SUMMARY_CHARS
   };
   let (summary, summary_truncated) = truncate_with_flag(summary, summary_max_chars);
+  let content_revision = if summary_truncated {
+    match event {
+      AgentEvent::Message(message) if !hidden && message.role == Role::Assistant => {
+        Some(message_content_revision(&message.text))
+      }
+      _ => None,
+    }
+  } else {
+    None
+  };
   let tool = (!hidden).then(|| tool_event(event).map(tool_card_summary)).flatten();
   let usage = (!hidden).then(|| usage_card_summary(event)).flatten();
   let agent_activity = (!hidden)
@@ -4711,6 +4736,7 @@ fn event_summary_with_delegation_targets(
     title,
     summary,
     summary_truncated,
+    content_revision,
     is_hidden: hidden,
     is_bookkeeping: !hidden && (event_filter::is_bookkeeping(event) || intermediate_usage.contains(&index)),
     is_error: error_for_event(event),
@@ -4721,6 +4747,10 @@ fn event_summary_with_delegation_targets(
     agent_activity,
     compaction: compaction::card(event),
   }
+}
+
+fn message_content_revision(text: &str) -> String {
+  format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 
 fn tool_operation_event_summary(source_event_index: usize, operation: &ToolOperation) -> EventSummary {
@@ -4753,6 +4783,7 @@ fn tool_operation_event_summary(source_event_index: usize, operation: &ToolOpera
     title,
     summary,
     summary_truncated,
+    content_revision: None,
     is_hidden: false,
     is_bookkeeping: false,
     // Preserve an unspecified provider error state. A failed assembled
@@ -10991,6 +11022,10 @@ mod tests {
     assert!(page.events[0].summary_truncated);
     assert_eq!(page.events[0].summary.chars().count(), MAX_MESSAGE_SUMMARY_CHARS);
     assert!(page.events[0].summary.ends_with('…'));
+    assert_eq!(
+      page.events[0].content_revision,
+      Some(format!("{:x}", Sha256::digest(full_text.as_bytes())))
+    );
 
     let detail = service_with_session(loaded_session(vec![message_event(&full_text)]))
       .load_event_detail(LoadEventDetailRequest {
@@ -10999,6 +11034,23 @@ mod tests {
       })
       .unwrap();
     assert_eq!(detail.event["text"], full_text);
+    assert_eq!(detail.content_revision, page.events[0].content_revision);
+  }
+
+  #[test]
+  fn truncated_message_revision_changes_when_only_the_hidden_suffix_changes() {
+    let prefix = "m".repeat(MAX_MESSAGE_SUMMARY_CHARS);
+    let first = message_event(&format!("{prefix} first"));
+    let second = message_event(&format!("{prefix} second"));
+    let first_summary = event_summary(std::slice::from_ref(&first), 0, &first);
+    let second_summary = event_summary(std::slice::from_ref(&second), 0, &second);
+
+    assert_eq!(first_summary.summary, second_summary.summary);
+    assert_eq!(
+      first_summary.content_revision,
+      event_summary(std::slice::from_ref(&first), 0, &first).content_revision
+    );
+    assert_ne!(first_summary.content_revision, second_summary.content_revision);
   }
 
   #[test]

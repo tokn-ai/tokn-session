@@ -680,6 +680,11 @@ results live only in the mounted card, with source-change invalidation. Both
 engines cancel pending work and release job resources on completion or unmount. Nested
 trajectory responses use the same component. Mac builds require Xcode 16+ and a
 macOS 15+ SDK for the Swift bridge; other platforms skip it.
+Truncated assistant previews include a full-text revision in page and detail
+responses. Translation survives an unchanged page refresh and rejects detail
+from a changed response before starting the engine. Older servers retain
+conservative refresh invalidation. The Markdown translator recovers text spans
+around GFM `www.` autolinks and keeps link destinations out of translation.
 
 Known code-execution, terminal, shell, file, search, web, and task events have
 source-neutral tool cards with compact command, path, query, status, and change
