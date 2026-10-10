@@ -15,7 +15,7 @@ use tokn_session_relay::{RecordOperation, SessionContext};
 use crate::RelayRecord;
 
 pub(crate) const HISTORY_TURNS: usize = 3;
-const INITIAL_HISTORY_TURNS: usize = 1;
+pub(crate) const INITIAL_HISTORY_TURNS: usize = 3;
 const FALLBACK_EVENTS: usize = 300;
 
 struct RecordIndex {
@@ -206,7 +206,7 @@ impl History {
     Ok(())
   }
 
-  /// Open at the latest turn. Earlier requests extend by three user turns.
+  /// Open at the latest three turns. Earlier requests extend by three user turns.
   /// Reconnect offsets are snapped backwards to a complete turn/record.
   pub fn window_start(&self, retain_from: Option<usize>, before_event: Option<usize>) -> usize {
     let journal = self.journal.lock().unwrap_or_else(|e| e.into_inner());
@@ -445,7 +445,7 @@ mod tests {
     let mut history = History::new().unwrap();
     history.append(&(0..10).map(turn).collect::<Vec<_>>()).unwrap();
     let first = history.clone();
-    assert_eq!(history.window_start(None, None), 9 * 4);
+    assert_eq!(history.window_start(None, None), 7 * 4);
     assert_eq!(history.window_start(None, Some(7 * 4)), 4 * 4);
     assert_eq!(history.window_start(None, Some(4 * 4)), 4);
     assert_eq!(history.window_start(None, Some(4)), 0);
@@ -459,7 +459,7 @@ mod tests {
     assert_eq!(first.len(), 10);
     assert_eq!(first.events, 40);
     assert!(first.read(10).is_err(), "old snapshot must not see uncommitted append");
-    assert_eq!(first.window_start(None, None), 36);
+    assert_eq!(first.window_start(None, None), 28);
     assert_eq!(
       history.window_start(Some(16), None),
       16,
@@ -490,8 +490,8 @@ mod tests {
     history.append(&[record(5, json!([
       {"type":"message", "provider":"codex", "message_id":"pending-user", "role":"user", "delivery":"unspecified", "phase":"finished", "text":"next"}
     ]))]).unwrap();
-    assert_eq!(older.window_start(None, None), 12);
-    assert_eq!(history.window_start(None, None), 16);
+    assert_eq!(older.window_start(None, None), 4);
+    assert_eq!(history.window_start(None, None), 8);
   }
 
   #[test]
@@ -674,7 +674,7 @@ mod tests {
     history.append(&additions).unwrap();
     assert_eq!(history.len(), 5);
     assert_eq!(history.events, 20);
-    assert_eq!(history.window_start(None, None), 16);
+    assert_eq!(history.window_start(None, None), 8);
     assert_eq!(history.read(4).unwrap().0.record.record_id, "row:4");
     assert!(initial.read(1).is_err());
     assert_eq!(initial.read(0).unwrap().0.record.record_id, "row:0");

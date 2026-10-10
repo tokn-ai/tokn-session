@@ -697,9 +697,9 @@ fn lazy_codex_prepend_preserves_existing_event_positions_across_pages() {
     result
   };
   let generation = reader.snapshot.generation.clone();
-  assert_eq!(positions(&reader).len(), 1);
+  assert_eq!(positions(&reader).len(), 3);
   assert!(!reader.ensure_history(Some((None, None))).unwrap());
-  for expected in [4, 7, 8] {
+  for expected in [6, 8] {
     let before = positions(&reader);
     assert!(
       reader

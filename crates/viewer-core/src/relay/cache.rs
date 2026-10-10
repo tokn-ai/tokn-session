@@ -675,7 +675,7 @@ mod tests {
       .await
       .unwrap()
       .unwrap();
-    assert_eq!(user_count(&initial), 1);
+    assert_eq!(user_count(&initial), 3);
     let initial_window = manager.window_info(&target, &initial).unwrap();
     assert!(initial_window.has_earlier);
     let loader = manager.clone();
@@ -684,7 +684,7 @@ mod tests {
       .await
       .unwrap()
       .unwrap();
-    assert_eq!(user_count(&expanded), 4);
+    assert_eq!(user_count(&expanded), 6);
     let expanded_window = manager.window_info(&target, &expanded).unwrap();
     assert_eq!(expanded_window.generation, initial_window.generation);
     assert!(expanded_window.event_offset < initial_window.event_offset);
@@ -711,7 +711,7 @@ mod tests {
         if manager.state.lock().unwrap().sessions[&target]
           .loaded
           .as_ref()
-          .is_some_and(|loaded| user_count(loaded) == 5)
+          .is_some_and(|loaded| user_count(loaded) == 7)
         {
           break;
         }
@@ -720,13 +720,13 @@ mod tests {
     .await
     .unwrap();
     let advanced = manager.advance(&target).unwrap();
-    assert_eq!(user_count(&advanced), 5);
+    assert_eq!(user_count(&advanced), 7);
     assert_eq!(
       manager.window_info(&target, &advanced).unwrap().event_offset,
       expanded_window.event_offset
     );
     // Unloading owns cancellation; retained UI snapshots do not keep the reader
-    // or subscription alive. A new admission starts at the latest turn.
+    // or subscription alive. A new admission starts at the latest three turns.
     manager.state.lock().unwrap().evict(&target);
     let loader = manager.clone();
     let key = target.clone();
@@ -734,7 +734,7 @@ mod tests {
       .await
       .unwrap()
       .unwrap();
-    assert_eq!(user_count(&reloaded), 1);
+    assert_eq!(user_count(&reloaded), 3);
     manager.shutdown().await;
   }
 
@@ -761,7 +761,7 @@ mod tests {
       let session = &state.sessions[&target];
       let initial = session.loaded.clone().unwrap();
       let offset = session.window.event_offset;
-      assert_eq!(user_count(&initial), 1);
+      assert_eq!(user_count(&initial), 3);
       assert!(offset > 0);
       assert!(!state.cache.can_prefetch(&target, Instant::now()));
       state.connection_cancel.cancel();
@@ -794,7 +794,7 @@ mod tests {
         changes.recv().await.unwrap();
         let state = manager.state.lock().unwrap();
         let session = &state.sessions[&target];
-        if user_count(session.loaded.as_ref().unwrap()) == 2 {
+        if user_count(session.loaded.as_ref().unwrap()) == 4 {
           assert_eq!(session.window.event_offset, offset);
           assert!(session.displayed.is_none());
           break;
@@ -842,7 +842,7 @@ mod tests {
       let session = &state.sessions[&target];
       assert_eq!(session.priority, SessionPriority::Background);
       assert!(session.displayed.is_none());
-      assert_eq!(user_count(session.loaded.as_ref().unwrap()), 1);
+      assert_eq!(user_count(session.loaded.as_ref().unwrap()), 3);
       assert_eq!(state.cache.versions.len(), 1);
       state.evict(&target);
     }

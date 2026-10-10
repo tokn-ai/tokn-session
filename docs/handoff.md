@@ -8,20 +8,19 @@ Session delivery separates live subscription from loading. Direct browsers use
 connection-scoped WebSocket interests and live diffs, with backward HTTP for
 initial/older screens, details HTTP for complete groups/tool display payloads,
 and dedicated inspection HTTP for source/native records. Tauri exposes the
-same commands through its event bridge. Opening defaults to latest-turn steps
-with collapsed inner groups and never backfills saved reading anchors before
+same commands through its event bridge. Opening defaults to steps for the latest
+three turns with collapsed inner groups and never backfills saved reading anchors before
 first paint. Heartbeats renew identity leases without fetching data.
 Cold source startup runs outside the shared subscription lock, and initial
-source windows now contain one user turn plus dependency/attention context.
+source windows now contain three user turns plus dependency/attention context.
 Codex window readers scan backward to explicit turn starts, normalize only the
-latest turn, and prepend older turns on request. Split tool outputs widen the
-range to their invocation; completed lifecycle snapshots do not. Inherited
+latest three turns, and prepend older turns on request. Split tool outputs widen
+the range to their invocation; completed lifecycle snapshots do not. Inherited
 prefixes retain metadata/version/guard verification without normalizing their
 omitted bodies. Legacy formats without turn starts and thread-spawn filtering
 retain full-reader fallbacks. Other providers still normalize full histories.
 Use `profile_local_codex_open` to compare full decoding with lazy reader startup.
-Snapshot
-baselines and publication share revisions; reconnects and replacements recover
+Snapshot baselines and publication share revisions; reconnects and replacements recover
 through backward reads. Old-socket cleanup cannot remove reclaimed interests.
 
 Frontend replicas retain eight recent sessions. Independent group/tool/inspect

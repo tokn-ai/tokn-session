@@ -571,7 +571,7 @@ export interface SessionUpdate {
   state: Omit<EventPageResponse, "events"> & { is_running?: boolean; error?: string; scope?: SessionUpdateScope };
 }
 export interface SessionUpdateScope {
-  history: "latest_turn" | "retained";
+  history: "latest_turn" | "recent_turns" | "retained";
   turn_key?: string | null;
   group_keys: string[];
 }

@@ -22,7 +22,7 @@ not user settings or a strict process-RSS limit.
 
 ## History windows
 
-An initial window starts at the latest visible user prompt and runs
+An initial window starts at the third most recent visible user prompt and runs
 through the latest record, including the current unfinished turn and usage.
 The reader includes adjacent turn-start records and widens the boundary when
 tool/compaction dependencies require older context. Hidden provider messages do
@@ -31,7 +31,7 @@ aligned to complete source records and their required context.
 
 Load earlier extends the window backward by three user turns. The retained
 start survives live appends and switching away/back while the session remains
-resident. New turns accumulate; this is not a sliding one-turn limit. A
+resident. New turns accumulate; this is not a sliding three-turn limit. A
 source replacement creates new identities and preserves the loaded turn span
 where possible. An evicted session reopens with the initial window.
 

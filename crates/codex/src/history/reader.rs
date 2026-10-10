@@ -106,11 +106,11 @@ impl CodexHistoryReader {
     self.stats
   }
 
-  /// Start at the latest provable turn, retaining omitted history on disk.
+  /// Start at the requested number of latest provable turns, leaving older history on disk.
   /// Formats without checkpoints and dependencies can require a wider range.
-  pub fn new_window(path: PathBuf, include_native: bool, max_bytes: usize) -> Self {
+  pub fn new_window(path: PathBuf, include_native: bool, max_bytes: usize, turns: usize) -> Self {
     let mut reader = Self::new(path, include_native, max_bytes);
-    reader.window_turns = Some(1);
+    reader.window_turns = Some(turns.max(1));
     reader
   }
 

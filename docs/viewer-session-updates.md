@@ -19,8 +19,9 @@ remain on SSE; modern clients exclude session updates from that stream.
 `subscribe_session` returns only identity, generation, and revision. It does
 not read or send session history. Initial registration has revision zero and
 publication waits for its backward baseline. `load_session_backward` returns
-a snapshot at the requested level, defaulting to `steps` with the latest turn
-and collapsed inner groups. History pagination uses a separate `history_cursor`;
+a snapshot at the requested level, defaulting to `steps` with the latest three turns
+and collapsed inner groups (`recent_turns` scope). The older `latest_turn` scope
+remains available for callers explicitly requesting one turn. History pagination uses a separate `history_cursor`;
 explicit earlier loading expands the retained range. Subscribing and publishing
 share the update-store lock with backward loading, so changes cannot escape
 between snapshot capture and baseline registration. Frontend replicas buffer
@@ -119,7 +120,7 @@ contents. Debug timings are diagnostic, not desktop release benchmarks.
 
 Other providers and Codex correctness fallbacks still normalize full history.
 Codex source windows can be broader than the selected projection when dependencies
-require earlier context. Initial delivery covers the latest turn and required context. Earlier
+require earlier context. Initial delivery covers the latest three turns and required context. Earlier
 source-window expansion can resend the retained window between source service
 and viewer-core. Projection still rebuilds retained timelines and tool assembly
 before comparison, under the shared subscription lock; this work has not been

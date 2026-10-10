@@ -129,6 +129,7 @@ impl SessionReader {
           entry.header.path.clone(),
           native,
           crate::service_protocol::MAX_SNAPSHOT_BYTES,
+          crate::service_history::INITIAL_HISTORY_TURNS,
         )
       }),
       window_anchor: None,

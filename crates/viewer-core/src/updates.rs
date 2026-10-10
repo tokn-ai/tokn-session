@@ -501,7 +501,7 @@ impl ViewerService {
         history: if request.history_cursor.is_some() {
           HistoryScope::Retained
         } else {
-          HistoryScope::LatestTurn
+          HistoryScope::RecentTurns
         },
         ..Default::default()
       });

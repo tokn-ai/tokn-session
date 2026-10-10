@@ -138,7 +138,7 @@ catalog, never arbitrary paths.
 The additive `follow_window` action takes the same `session_key`, optional
 `retain_from` generation-scoped event position, and optional `before_event`
 for loading three earlier user turns. With both absent it starts at the latest
-user turn. Each transaction includes one `window` frame after `begin`,
+three user turns. Each transaction includes one `window` frame after `begin`,
 containing `event_offset` and `has_earlier`, before any records. Clients retain
 that start across appends. Lazy Codex ranges use a positive opaque anchor plus
 contiguous event offsets, rather than counting all omitted normalized events.

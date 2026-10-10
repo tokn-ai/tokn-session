@@ -34,7 +34,7 @@ fn latest_turn_does_not_materialize_old_payloads_and_expands_explicitly() {
   let old = turn(0) + &row(json!({"type":"unknown","payload":{"data":"x".repeat(2 * 1024 * 1024)}}));
   let (_directory, path, source) = fixture(&(old + &turn(1) + &turn(2)));
   // The limit applies to loaded content, not the size of omitted history.
-  let mut reader = CodexHistoryReader::new_window(path, false, 64 * 1024);
+  let mut reader = CodexHistoryReader::new_window(path, false, 64 * 1024, 1);
   let latest = reader.poll(&source).unwrap().unwrap();
   assert!(latest.source_start.unwrap() > 2 * 1024 * 1024);
   assert_eq!(latest.records.len(), 3);
@@ -50,7 +50,7 @@ fn latest_turn_does_not_materialize_old_payloads_and_expands_explicitly() {
 #[test]
 fn malformed_omitted_history_is_reported_when_loaded() {
   let (_directory, path, source) = fixture(&("invalid json\n".to_string() + &turn(1)));
-  let mut reader = CodexHistoryReader::new_window(path, false, 64 * 1024);
+  let mut reader = CodexHistoryReader::new_window(path, false, 64 * 1024, 1);
   assert!(reader.poll(&source).unwrap().unwrap().source_start.unwrap() > 0);
   reader.expand(None);
   assert!(reader.poll(&source).err().unwrap().contains("invalid Codex history"));
@@ -63,7 +63,7 @@ fn incomplete_tail_is_retained_until_append_completes_it() {
   );
   let split = partial.len() / 2;
   let (_directory, path, source) = fixture(&(turn(0) + &partial[..split]));
-  let mut reader = CodexHistoryReader::new_window(path.clone(), false, 64 * 1024);
+  let mut reader = CodexHistoryReader::new_window(path.clone(), false, 64 * 1024, 1);
   assert_eq!(reader.poll(&source).unwrap().unwrap().records.len(), 3);
   std::fs::OpenOptions::new()
     .append(true)
@@ -84,7 +84,7 @@ fn tool_result_widens_the_window_to_its_invocation() {
   let result =
     row(json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"call-old","output":"/tmp"}}));
   let (_directory, path, source) = fixture(&(turn(0) + &invocation + &turn(1) + &result));
-  let mut reader = CodexHistoryReader::new_window(path, false, 64 * 1024);
+  let mut reader = CodexHistoryReader::new_window(path, false, 64 * 1024, 1);
   let loaded = reader.poll(&source).unwrap().unwrap();
   assert_eq!(loaded.records.len(), 8);
   assert!(loaded.records.iter().flat_map(|record| &record.events).any(|event| matches!(event, AgentEvent::ToolCall(tool) if tool.record_kind == tokn_session_core::ToolRecordKind::Invocation)));
@@ -95,7 +95,7 @@ fn legacy_without_turn_starts_loads_full_history() {
   let (_directory, path, source) = fixture(&row(
     json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"old format"}]}}),
   ));
-  let mut reader = CodexHistoryReader::new_window(path, false, 64 * 1024);
+  let mut reader = CodexHistoryReader::new_window(path, false, 64 * 1024, 1);
   let loaded = reader.poll(&source).unwrap().unwrap();
   assert_eq!(loaded.source_start, Some(0));
   assert_eq!(loaded.records.len(), 2);
@@ -117,7 +117,7 @@ fn latest_turn_skips_inherited_body_but_keeps_prefix_verification() {
     + &row(json!({"ordinal":5,"type":"event_msg","payload":{"type":"user_message","message":"latest"}}));
   std::fs::write(&head_path, head).unwrap();
   let source = CodexSessionSource::new(Some(directory.path().into()));
-  let mut reader = CodexHistoryReader::new_window(head_path, false, 64 * 1024);
+  let mut reader = CodexHistoryReader::new_window(head_path, false, 64 * 1024, 1);
   let latest = reader.poll(&source).unwrap().unwrap();
   assert_eq!(latest.records.len(), 2);
   assert!(reader.stats().source_bytes_read < 1024);
@@ -134,7 +134,7 @@ fn completed_lifecycle_snapshots_do_not_require_an_invocation() {
     json!({"type":"event_msg","payload":{"type":"item_completed","thread_id":"lazy","turn_id":"turn-1","item":{"type":"CommandExecution","id":"complete-command","command":["pwd"],"cwd":"/tmp","status":"completed","exit_code":0,"stdout":"/tmp"}}}),
   );
   let (_directory, path, source) = fixture(&(turn(0) + &turn(1) + &snapshot));
-  let mut reader = CodexHistoryReader::new_window(path, false, 64 * 1024);
+  let mut reader = CodexHistoryReader::new_window(path, false, 64 * 1024, 1);
   let loaded = reader.poll(&source).unwrap().unwrap();
   assert_eq!(loaded.records.len(), 4);
   assert!(loaded.source_start.unwrap() > 0);
@@ -146,7 +146,7 @@ fn late_result_for_omitted_invocation_widens_during_live_follow() {
     json!({"type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"late-call","arguments":"{\"cmd\":\"pwd\"}"}}),
   );
   let (_directory, path, source) = fixture(&(turn(0) + &invocation + &turn(1)));
-  let mut reader = CodexHistoryReader::new_window(path.clone(), false, 64 * 1024);
+  let mut reader = CodexHistoryReader::new_window(path.clone(), false, 64 * 1024, 1);
   assert_eq!(reader.poll(&source).unwrap().unwrap().records.len(), 3);
   let result = row(
     json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"late-call","output":"/tmp"}}),
@@ -165,7 +165,7 @@ fn late_result_for_omitted_invocation_widens_during_live_follow() {
 #[test]
 fn a_new_turn_without_a_user_message_does_not_slide_the_loaded_range() {
   let (_directory, path, source) = fixture(&(turn(0) + &turn(1)));
-  let mut reader = CodexHistoryReader::new_window(path.clone(), false, 64 * 1024);
+  let mut reader = CodexHistoryReader::new_window(path.clone(), false, 64 * 1024, 1);
   let first = reader.poll(&source).unwrap().unwrap();
   let start = row(json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-2"}}));
   std::fs::OpenOptions::new()
