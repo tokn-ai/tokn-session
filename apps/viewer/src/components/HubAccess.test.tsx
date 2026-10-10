@@ -5,7 +5,7 @@ import { HubAccess } from "./HubAccess";
 import { openHubAccess, type HubAccessService } from "../lib/hubAccess";
 import { machineReference } from "../lib/hubDeviceStore";
 import { RemoteClient, selectMachine, viewerStorageScope } from "../lib/transport";
-vi.mock("./HostSetup", () => ({ HostSetup: () => <div>Host setup</div> }));
+vi.mock("./HostSetup", async (importOriginal) => ({ ...await importOriginal<typeof import("./HostSetup")>(), HostSetup: () => <div>Host setup</div> }));
 vi.mock("../lib/hubAccess", () => ({ openHubAccess: vi.fn() }));
 vi.mock("../pages/ViewerPage", () => ({ ViewerPage: ({ connection }: { connection: ReactNode }) => <><div>Encrypted sessions</div>{connection}</> }));
 const host = { host_id: "550e8400-e29b-41d4-a716-446655440000", host_public_key: "H".repeat(43), machine_address: "alice:workstation", name: "Workstation" };

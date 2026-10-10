@@ -211,6 +211,11 @@ pub struct HostLease {
   _lock: std::fs::File,
 }
 impl HostLease {
+  pub fn is_held(key_file: &Path) -> Result<bool, String> {
+    let mut path = key_file.as_os_str().to_owned();
+    path.push(".connector");
+    crate::onboarding::lock_held(Path::new(&path))
+  }
   pub fn acquire(key_file: &Path) -> Result<Self, String> {
     let mut path = key_file.as_os_str().to_owned();
     path.push(".connector");

@@ -21,3 +21,8 @@ pub async fn local_host_stop(app: AppHandle, state: State<'_, LocalHost>) -> Res
 pub async fn local_host_pairing(state: State<'_, LocalHost>) -> Result<HostPairing, String> {
   state.pairing().await
 }
+
+#[tauri::command]
+pub async fn local_host_stop_external(app: AppHandle, state: State<'_, LocalHost>) -> Result<HostStatus, String> {
+  state.stop_external(&app).await
+}

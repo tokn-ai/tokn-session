@@ -1,4 +1,5 @@
 mod commands;
+mod external_host;
 mod hub_passkey;
 mod local_host;
 mod local_viewer;
@@ -29,6 +30,7 @@ pub fn run() {
       commands::host::local_host_status,
       commands::host::local_host_start,
       commands::host::local_host_stop,
+      commands::host::local_host_stop_external,
       commands::host::local_host_pairing,
       commands::hub::hub_client_status,
       commands::hub::hub_client_resolve,

@@ -27,6 +27,8 @@ use zeroize::Zeroize;
 pub enum HostPhase {
   #[default]
   Stopped,
+  External,
+  Unavailable,
   Connecting,
   Online,
   Reconnecting,
@@ -40,6 +42,7 @@ pub struct HostStatus {
   pub allow_control: bool,
   pub machine_reference: Option<String>,
   pub error: Option<String>,
+  pub external_stop_supported: bool,
 }
 impl Default for HostStatus {
   fn default() -> Self {
@@ -50,6 +53,7 @@ impl Default for HostStatus {
       allow_control: false,
       machine_reference: None,
       error: None,
+      external_stop_supported: false,
     }
   }
 }
@@ -119,11 +123,9 @@ impl LocalHost {
     if running.is_some() {
       return Ok(self.status.lock().unwrap().clone());
     }
-    let path = self.state_dir.clone();
-    tokio::task::spawn_blocking(move || saved_status(&path))
-      .await
-      .map_err(|_| "Host status task failed")?
+    detected_status(self.state_dir.clone()).await
   }
+
   pub async fn start(&self, app: AppHandle, request: StartHostRequest) -> Result<HostStatus, String> {
     let mut running = self.operation.lock().await;
     if self.closed.load(Ordering::Acquire) {
@@ -185,6 +187,7 @@ impl LocalHost {
       allow_control: config.allow_control,
       machine_reference: Some(prepared.reference),
       error: None,
+      external_stop_supported: false,
     };
     publish(&app, &self.status, status);
     let shutdown = CancellationToken::new();
@@ -240,6 +243,37 @@ impl LocalHost {
     publish(app, &self.status, status.clone());
     Ok(status)
   }
+  pub async fn stop_external(&self, app: &AppHandle) -> Result<HostStatus, String> {
+    let running = self.operation.lock().await;
+    if running.is_some() {
+      return Err("Use Stop hosting for the connector owned by this app".into());
+    }
+    let status = detected_status(self.state_dir.clone()).await?;
+    if !matches!(status.phase, HostPhase::External) {
+      return Err("External hosting is no longer detected; refresh its status".into());
+    }
+    let path = self.state_dir.join("host.json");
+    let profile = tokio::task::spawn_blocking(move || HostProfile::load(&path))
+      .await
+      .map_err(|_| "Host configuration task failed")??
+      .ok_or("No saved host configuration")?;
+    crate::external_host::stop(&self.state_dir, &profile).await?;
+    let status = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+      loop {
+        let status = detected_status(self.state_dir.clone()).await?;
+        if matches!(status.phase, HostPhase::Stopped) {
+          break Ok::<_, String>(status);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+      }
+    })
+    .await
+    .map_err(|_| {
+      "Connector service was unloaded, but hosting has not been confirmed offline. Refresh its status.".to_string()
+    })??;
+    publish(app, &self.status, status.clone());
+    Ok(status)
+  }
   pub async fn shutdown(&self, app: &AppHandle) {
     self.closed.store(true, Ordering::Release);
     let _ = self.stop(app).await;
@@ -255,18 +289,54 @@ fn publish(app: &AppHandle, state: &Mutex<HostStatus>, status: HostStatus) {
   *state.lock().unwrap() = status.clone();
   let _ = app.emit("local-host-status", status);
 }
+async fn detected_status(path: PathBuf) -> Result<HostStatus, String> {
+  let read_path = path.clone();
+  let (mut status, profile, held) = tokio::task::spawn_blocking(move || {
+    let path = read_path;
+    let profile = HostProfile::load(&path.join("host.json"))?;
+    let status = profile_status(&path, profile.as_ref())?;
+    let held = HostLease::is_held(&path.join("host-enrollment.key"))?;
+    Ok::<_, String>((status, profile, held))
+  })
+  .await
+  .map_err(|_| "Host status task failed")??;
+  if held {
+    status.phase = HostPhase::External;
+  } else if let Some(profile) = &profile {
+    match host_setup::existing_host_online(&profile).await {
+      Ok(true) => status.phase = HostPhase::External,
+      Ok(false) => {}
+      Err(error) => {
+        status.phase = HostPhase::Unavailable;
+        status.error = Some(error);
+      }
+    }
+  }
+  if matches!(status.phase, HostPhase::External) {
+    if let Some(profile) = &profile {
+      status.external_stop_supported = crate::external_host::available(&path, profile).await;
+    }
+  }
+  Ok(status)
+}
+
+#[cfg(test)]
 fn saved_status(path: &std::path::Path) -> Result<HostStatus, String> {
-  let Some(profile) = HostProfile::load(&path.join("host.json"))? else {
+  profile_status(path, HostProfile::load(&path.join("host.json"))?.as_ref())
+}
+fn profile_status(path: &std::path::Path, profile: Option<&HostProfile>) -> Result<HostStatus, String> {
+  let Some(profile) = profile else {
     return Ok(HostStatus::default());
   };
   let identity = NoiseIdentity::load(&path.join("host-noise.key"))?;
   Ok(HostStatus {
     phase: HostPhase::Stopped,
-    hub_url: profile.hub_url,
-    name: profile.name,
+    hub_url: profile.hub_url.clone(),
+    name: profile.name.clone(),
     allow_control: profile.allow_control,
     machine_reference: Some(format!("{}@{}", profile.host_id, identity.public_key())),
     error: None,
+    external_stop_supported: false,
   })
 }
 fn pairing(path: &std::path::Path) -> Result<HostPairing, String> {
@@ -350,10 +420,80 @@ mod tests {
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
   }
   #[tokio::test]
+  async fn external_lock_is_detected_without_contacting_hub_or_changing_state() {
+    let directory = tempfile::tempdir().unwrap();
+    setup(directory.path());
+    let path = directory.path().join("host.json");
+    let before = std::fs::read(&path).unwrap();
+    let _lease = HostLease::acquire(&directory.path().join("host-enrollment.key")).unwrap();
+    let status = detected_status(directory.path().to_owned()).await.unwrap();
+    assert!(matches!(status.phase, HostPhase::External));
+    assert!(status.error.is_none());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+  }
+  #[tokio::test]
+  async fn legacy_hub_status_distinguishes_external_offline_and_unavailable() {
+    use axum::{Router, extract::WebSocketUpgrade, http::StatusCode, response::IntoResponse, routing::get};
+    use std::sync::atomic::AtomicU8;
+    let directory = tempfile::tempdir().unwrap();
+    setup(directory.path());
+    let path = directory.path().join("host.json");
+    let mut profile = HostProfile::load(&path).unwrap().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    profile.hub_url = format!("http://{}", listener.local_addr().unwrap());
+    profile.insecure_loopback = true;
+    tokn_session_hub::onboarding::save_configuration(&path, &profile).unwrap();
+    let mode = Arc::new(AtomicU8::new(1));
+    let state = mode.clone();
+    let router = Router::new().route(
+      &format!("/hub/v1/secure/{}", profile.host_id),
+      get(move |socket: WebSocketUpgrade| {
+        let mode = state.load(Ordering::Acquire);
+        async move {
+          match mode {
+            1 => socket.on_upgrade(|_socket| async {}).into_response(),
+            0 => (
+              StatusCode::BAD_GATEWAY,
+              axum::Json(serde_json::json!({"error": "Host is offline"})),
+            )
+              .into_response(),
+            _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+          }
+        }
+      }),
+    );
+    let task = tokio::spawn(async move {
+      axum::serve(listener, router).await.unwrap();
+    });
+    assert!(matches!(
+      detected_status(directory.path().to_owned()).await.unwrap().phase,
+      HostPhase::External
+    ));
+    mode.store(0, Ordering::Release);
+    assert!(matches!(
+      detected_status(directory.path().to_owned()).await.unwrap().phase,
+      HostPhase::Stopped
+    ));
+    mode.store(2, Ordering::Release);
+    let unavailable = detected_status(directory.path().to_owned()).await.unwrap();
+    assert!(matches!(unavailable.phase, HostPhase::Unavailable));
+    assert!(unavailable.error.is_some());
+    task.abort();
+  }
+  #[tokio::test]
+  async fn unconfigured_status_inspection_does_not_create_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let status = detected_status(directory.path().to_owned()).await.unwrap();
+    assert!(matches!(status.phase, HostPhase::Stopped));
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+  }
+  #[tokio::test]
   async fn stopping_owned_host_releases_its_port_and_process_lease() {
     let directory = tempfile::tempdir().unwrap();
     let key = directory.path().join("host-enrollment.key");
+    assert!(!HostLease::is_held(&key).unwrap());
     let lease = HostLease::acquire(&key).unwrap();
+    assert!(HostLease::is_held(&key).unwrap());
     assert!(HostLease::acquire(&key).is_err());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -365,6 +505,7 @@ mod tests {
       cancel.cancelled().await;
     });
     RunningHost { shutdown, task }.stop().await;
+    assert!(!HostLease::is_held(&key).unwrap());
     assert!(HostLease::acquire(&key).is_ok());
     assert!(tokio::net::TcpListener::bind(address).await.is_ok());
   }

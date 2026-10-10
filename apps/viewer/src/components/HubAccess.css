@@ -8,7 +8,7 @@
 .hub-this-machine > div { min-width: 0; }
 .hub-this-machine p { margin: 8px 0 0; font-size: 13px; line-height: 1.6; color: var(--text-soft); }
 .hub-this-machine .hub-error { color: var(--danger); }
-.hub-this-machine > button { flex-shrink: 0; }
+.hub-this-machine-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; flex-shrink: 0; }
 .hub-known-hubs { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
 .hub-known-hubs > span { flex-basis: 100%; margin-bottom: 2px; }
 .hub-known-hubs > button { max-width: 100%; overflow-wrap: anywhere; text-align: left; }
@@ -72,3 +72,5 @@
   .hub-saved-host { display: grid; }
   .hub-add-machine { padding: 20px; }
 }
+
+@media (max-width: 600px) { .hub-this-machine { flex-wrap: wrap; } }
