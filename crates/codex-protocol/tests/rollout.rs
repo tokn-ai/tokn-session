@@ -12,11 +12,16 @@ fn history_base_is_typed_and_preserves_extensions() {
   let RolloutItem::SessionMeta(meta) = line.item() else {
     panic!("expected session metadata")
   };
-  let base = meta.history_base.as_ref().unwrap();
+  let base = meta.history_base().unwrap().unwrap();
   assert_eq!(base.thread_id, "thread");
   assert_eq!(base.end_ordinal_exclusive, 42);
   assert_eq!(base.end_byte_offset, 1234);
   assert_eq!(base.extra["future"], true);
+  assert_eq!(meta.extra["history_base"], native["payload"]["history_base"]);
+  assert_eq!(
+    serde_json::to_value(meta).unwrap()["history_base"],
+    native["payload"]["history_base"]
+  );
   assert_eq!(serde_json::to_value(line).unwrap(), native);
 }
 
@@ -54,9 +59,11 @@ fn decodes_token_usage_records_without_losing_extensions() {
   });
   let line: RolloutLine = serde_json::from_value(native.clone()).expect("usage record should decode");
   assert_eq!(line.item().native_type(), Some("token_usage_record"));
-  let RolloutItem::TokenUsageRecord(item) = line.item() else {
-    panic!("expected token usage record");
+  let RolloutItem::Unknown(unknown) = line.item() else {
+    panic!("new accounting retains the published enum's unknown representation");
   };
+  assert!(unknown.parse_error.is_none());
+  let item = line.token_usage_record().expect("typed token usage record");
   assert_eq!(item.thread_id.as_deref(), Some("thread-1"));
   assert_eq!(item.turn_id.as_deref(), Some("turn-1"));
   assert_eq!(item.session_id.as_deref(), Some("process-1"));
@@ -91,9 +98,9 @@ fn accepts_missing_optional_token_usage_fields() {
   ] {
     let native = json!({"type": "token_usage_record", "payload": payload});
     let line: RolloutLine = serde_json::from_value(native.clone()).unwrap();
-    let RolloutItem::TokenUsageRecord(item) = line.item() else {
-      panic!("missing optional fields must remain decodable");
-    };
+    let item = line
+      .token_usage_record()
+      .expect("missing optional fields must remain decodable");
     assert!(item.response_id.is_none());
     assert!(item.turn_token_usage.is_none());
     assert!(item.thread_token_usage.is_none());
@@ -138,6 +145,8 @@ fn assert_unknown_usage(counters: Value) {
       panic!("malformed {field} must remain unknown");
     };
     assert_eq!(item.native_type.as_deref(), Some("token_usage_record"));
+    assert!(item.parse_error.is_some());
+    assert!(line.token_usage_record().is_none());
     assert_eq!(serde_json::to_value(line).unwrap(), native);
   }
 }
@@ -263,7 +272,8 @@ fn session_history_mode_remains_tolerant_of_future_values() {
     let RolloutItem::SessionMeta(item) = line.item() else {
       panic!("expected session metadata");
     };
-    assert_eq!(item.history_mode.as_deref(), Some(history_mode));
+    assert_eq!(item.history_mode().unwrap(), Some(history_mode));
+    assert_eq!(item.extra["history_mode"], history_mode);
   }
 }
 

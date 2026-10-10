@@ -497,7 +497,7 @@ mod tests {
   #[test]
   fn outstanding_questions_retain_navigation_context_without_mutating_old_snapshots() {
     let mut normalizer = tokn_session_codex::normalize::CodexNormalizer::new();
-    let events: Vec<_> = include_str!("../../codex/fixtures/async_question_replies.jsonl")
+    let events: Vec<_> = include_str!("../tests/fixtures/codex/async_question_replies.jsonl")
       .lines()
       .take(5)
       .flat_map(|line| normalizer.normalize(serde_json::from_str(line).unwrap()))
@@ -513,7 +513,7 @@ mod tests {
     let before = history.clone();
     let answer = normalizer.normalize(
       serde_json::from_str(
-        include_str!("../../codex/fixtures/async_question_replies.jsonl")
+        include_str!("../tests/fixtures/codex/async_question_replies.jsonl")
           .lines()
           .nth(5)
           .unwrap(),

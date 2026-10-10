@@ -28,10 +28,10 @@ impl RecordsNormalizer {
       native: line.native(),
     };
     let payload = &line.native()["payload"];
+    if let Some(item) = line.token_usage_record() {
+      return Some(vec![context.token_usage_record(item, line.ordinal())]);
+    }
     let classification = match line.item() {
-      RolloutItem::TokenUsageRecord(item) => {
-        return Some(vec![context.token_usage_record(item, line.ordinal())]);
-      }
       RolloutItem::Unknown(item) if item.native_type.as_deref() == Some("token_usage_record") => {
         return Some(vec![context.unknown()]);
       }

@@ -28,10 +28,11 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
+rust-version = "1.95"
 license = "MIT"
-repository = "https://github.com/agentic-rs/tokn-session"
+repository = "https://github.com/tokn-ai/tokn-session"
 
 [workspace.dependencies]
 chrono = { version = "0.4", default-features = false, features = ["std"] }
@@ -42,23 +43,25 @@ ratatui = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "net", "io-util"] }
-tokn-hub-client-core = { path = "crates/hub-client-core" }
-tokn-hub-transport = { path = "crates/hub-transport" }
-tokn-codex-protocol = { path = "crates/codex-protocol" }
-tokn-dsh-protocol = { path = "crates/dsh-protocol" }
-tokn-opencode-protocol = { path = "crates/opencode-protocol" }
-tokn-pi-protocol = { path = "crates/pi-protocol" }
-tokn-workbuddy-protocol = { path = "crates/workbuddy-protocol" }
-tokn-session-client = { path = "crates/client" }
-tokn-session-codex = { path = "crates/codex" }
-tokn-session-core = { path = "crates/core" }
-tokn-session-dsh = { path = "crates/dsh" }
-tokn-session-opencode = { path = "crates/opencode" }
-tokn-session-pi = { path = "crates/pi" }
-tokn-session-zcode = { path = "crates/zcode" }
-tokn-session-workbuddy = { path = "crates/workbuddy" }
-tokn-session-relay = { path = "crates/relay" }
-tokn-session-render = { path = "crates/render" }
-tokn-session-index = { path = "crates/session-index" }
-tokn-viewer-core = { path = "crates/viewer-core" }
+tokn-hub-client-core = { version = "0.1.1", path = "crates/hub-client-core" }
+tokn-hub-remote = { version = "0.1.1", path = "crates/hub-remote" }
+tokn-hub-transport = { version = "0.1.1", path = "crates/hub-transport" }
+tokn-codex-protocol = { version = "0.1.1", path = "crates/codex-protocol" }
+tokn-dsh-protocol = { version = "0.1.1", path = "crates/dsh-protocol" }
+tokn-opencode-protocol = { version = "0.1.1", path = "crates/opencode-protocol" }
+tokn-pi-protocol = { version = "0.1.1", path = "crates/pi-protocol" }
+tokn-workbuddy-protocol = { version = "0.1.1", path = "crates/workbuddy-protocol" }
+tokn-session-client = { version = "0.1.1", path = "crates/client" }
+tokn-session-hub = { version = "0.1.1", path = "crates/hub" }
+tokn-session-codex = { version = "0.1.1", path = "crates/codex" }
+tokn-session-core = { version = "0.1.1", path = "crates/core" }
+tokn-session-dsh = { version = "0.1.1", path = "crates/dsh" }
+tokn-session-opencode = { version = "0.1.1", path = "crates/opencode" }
+tokn-session-pi = { version = "0.1.1", path = "crates/pi" }
+tokn-session-zcode = { version = "0.1.1", path = "crates/zcode" }
+tokn-session-workbuddy = { version = "0.1.1", path = "crates/workbuddy" }
+tokn-session-relay = { version = "0.1.1", path = "crates/relay" }
+tokn-session-render = { version = "0.1.1", path = "crates/render" }
+tokn-session-index = { version = "0.1.1", path = "crates/session-index" }
+tokn-viewer-core = { version = "0.1.1", path = "crates/viewer-core" }
 zeromq = "0.6.0"

@@ -2,6 +2,10 @@
 name = "tokn-viewer-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+description = "Shared session viewer domain, indexing, history, and live updates."
+repository.workspace = true
+readme = "README.md"
 license.workspace = true
 
 [dependencies]

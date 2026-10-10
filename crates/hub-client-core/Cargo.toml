@@ -2,6 +2,9 @@
 name = "tokn-hub-client-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+description = "Portable pairing and Noise encryption for native and browser clients."
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 

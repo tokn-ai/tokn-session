@@ -201,7 +201,7 @@ mod tests {
     let mut separator = CompactionEvent::new(Provider::Codex, Some("fixture".into()), CompactionState::Completed);
     separator.timestamp = Some("2026-09-03T00:00:02Z".into());
     let mut normalizer = tokn_session_codex::normalize::CodexNormalizer::new();
-    let mut question = include_str!("../../../codex/fixtures/questions.jsonl")
+    let mut question = include_str!("../../tests/fixtures/codex/questions.jsonl")
       .lines()
       .flat_map(|line| normalizer.normalize(serde_json::from_str(line).unwrap()))
       .find(|event| matches!(event, AgentEvent::QuestionRequest(_)))

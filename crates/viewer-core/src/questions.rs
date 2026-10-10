@@ -254,7 +254,7 @@ mod tests {
     assert_eq!(state.first_index(), None);
     state.observe(&request("r2", None), 3);
     let mut normalizer = tokn_session_codex::normalize::CodexNormalizer::new();
-    let events: Vec<AgentEvent> = include_str!("../../codex/fixtures/async_question_replies.jsonl")
+    let events: Vec<AgentEvent> = include_str!("../tests/fixtures/codex/async_question_replies.jsonl")
       .lines()
       .flat_map(|line| normalizer.normalize(serde_json::from_str(line).unwrap()))
       .collect();

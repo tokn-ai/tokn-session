@@ -1,0 +1,2 @@
+{"type":"session","version":3,"id":"pi-tree-root","timestamp":"2026-07-29T00:00:00Z","cwd":"/tmp/project"}
+{"type":"message","id":"parent-message","parentId":null,"timestamp":"2026-07-29T00:00:01Z","message":{"role":"user","content":"delegate"}}

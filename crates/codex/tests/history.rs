@@ -71,6 +71,49 @@ fn standalone_paginated_rollout_accepts_forward_ordinal_gaps() {
 }
 
 #[test]
+fn malformed_history_extensions_fail_closed_and_recover_after_header_repair() {
+  let root = TempDir::new().unwrap();
+  let source = CodexSessionSource::new(Some(root.path().into()));
+  for (field, invalid) in [
+    ("history_mode", json!(false)),
+    ("history_base", json!({"thread_id":"thread"})),
+    (
+      "history_base",
+      json!({
+        "thread_id":"thread","end_ordinal_exclusive":2,"end_byte_offset":"1234"
+      }),
+    ),
+  ] {
+    let mut metadata = meta("thread", 0, None);
+    metadata["payload"][field] = invalid;
+    let path = write(root.path(), "head.jsonl", &[metadata, message("thread", 1, "suffix")]);
+    let mut reader = CodexHistoryReader::new(path.clone(), false, 1024 * 1024);
+    assert!(
+      source
+        .history_segments(&path)
+        .unwrap_err()
+        .contains("invalid Codex history metadata")
+    );
+    assert!(
+      source
+        .load_session_path(&path)
+        .unwrap_err()
+        .contains("invalid Codex history metadata")
+    );
+    assert!(reader.poll(&source).is_err());
+
+    write(
+      root.path(),
+      "head.jsonl",
+      &[meta("thread", 0, None), message("thread", 1, "repaired")],
+    );
+    let update = reader.poll(&source).unwrap().unwrap();
+    assert!(update.reset);
+    assert_eq!(texts(&load(&source, &path)), ["repaired"]);
+  }
+}
+
+#[test]
 fn standalone_paginated_rollout_retains_equal_ordinal_native_records() {
   let root = TempDir::new().unwrap();
   let source = CodexSessionSource::new(Some(root.path().into()));

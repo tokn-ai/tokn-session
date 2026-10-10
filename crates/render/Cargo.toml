@@ -2,6 +2,11 @@
 name = "tokn-session-render"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+description = "Text and JSONL rendering for normalized agent sessions."
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
 
 [dependencies]
 serde_json.workspace = true

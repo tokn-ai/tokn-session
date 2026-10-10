@@ -7,6 +7,12 @@ It models decoded logical records. Reading Zstandard-compressed JSONL,
 discovering session files, and loading the SQLite backend belong in the DSH
 session provider rather than this protocol crate.
 
+```toml
+[dependencies]
+tokn-dsh-protocol = "0.1.1"
+serde_json = "1"
+```
+
 ## Usage
 
 Deserialize one logical JSONL record at a time. `item()` exposes a typed view,

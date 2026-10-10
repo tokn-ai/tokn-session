@@ -2,6 +2,10 @@
 name = "tokn-viewer-api"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+description = "HTTP and WebSocket session viewer server with optional web UI hosting."
+repository.workspace = true
+readme = "README.md"
 license.workspace = true
 
 [dependencies]

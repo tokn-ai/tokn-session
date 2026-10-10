@@ -473,7 +473,7 @@ mod tests {
     use crate::updates::{SessionUpdatesRequest, UpdateLevel};
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("all.jsonl");
-    std::fs::write(&path, include_str!("../../../pi/fixtures/basic_session.jsonl")).unwrap();
+    std::fs::write(&path, include_str!("../../tests/fixtures/pi/basic_session.jsonl")).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("tcp://{}", listener.local_addr().unwrap());
     let mut config = RelayConfig::new(vec![ProviderRoot::new(Provider::Pi, root.path().into())]);

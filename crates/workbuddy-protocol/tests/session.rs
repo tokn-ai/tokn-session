@@ -4,23 +4,23 @@ use tokn_workbuddy_protocol::{ContentBlock, WorkBuddySessionItem, WorkBuddySessi
 const FIXTURES: &[(&str, &str)] = &[
   (
     "wb-chat-basic",
-    include_str!("../../workbuddy/fixtures/projects/fixture-workspace/wb-chat-basic.jsonl"),
+    include_str!("fixtures/workbuddy/projects/fixture-workspace/wb-chat-basic.jsonl"),
   ),
   (
     "wb-file-read-local",
-    include_str!("../../workbuddy/fixtures/projects/fixture-workspace/wb-file-read-local.jsonl"),
+    include_str!("fixtures/workbuddy/projects/fixture-workspace/wb-file-read-local.jsonl"),
   ),
   (
     "wb-file-read",
-    include_str!("../../workbuddy/fixtures/projects/fixture-workspace/wb-file-read.jsonl"),
+    include_str!("fixtures/workbuddy/projects/fixture-workspace/wb-file-read.jsonl"),
   ),
   (
     "wb-multiturn",
-    include_str!("../../workbuddy/fixtures/projects/fixture-workspace/wb-multiturn.jsonl"),
+    include_str!("fixtures/workbuddy/projects/fixture-workspace/wb-multiturn.jsonl"),
   ),
   (
     "wb-shell-command",
-    include_str!("../../workbuddy/fixtures/projects/fixture-workspace/wb-shell-command.jsonl"),
+    include_str!("fixtures/workbuddy/projects/fixture-workspace/wb-shell-command.jsonl"),
   ),
 ];
 

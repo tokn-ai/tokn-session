@@ -74,6 +74,22 @@ impl Compactions {
   ) -> Option<Vec<AgentEvent>> {
     let raw = line.native();
     let payload = &raw["payload"];
+    if let Some(item) = line.token_usage_record() {
+      if item.usage.is_none()
+        || self.pending.as_ref().is_some_and(|pending| {
+          [&item.thread_id, &item.session_id].into_iter().any(|id| {
+            id.as_deref()
+              .is_some_and(|id| Some(id) != pending.session_id.as_deref())
+          }) || item
+            .turn_id
+            .as_deref()
+            .is_some_and(|id| pending.turn_id.as_deref().is_some_and(|expected| expected != id))
+        })
+      {
+        self.clear();
+      }
+      return None;
+    }
     let mut event = CompactionEvent::new(Provider::Codex, session_id, CompactionState::Completed);
     event.timestamp = line.timestamp().map(str::to_owned);
     if let Some(ordinal) = line.ordinal() {
@@ -162,22 +178,6 @@ impl Compactions {
         event.summary_opaque = payload["encrypted_content"].is_string();
       }
       RolloutItem::EventMessage(item) if item.event_type.as_deref() == Some("token_count") => return None,
-      RolloutItem::TokenUsageRecord(item) => {
-        if item.usage.is_none()
-          || self.pending.as_ref().is_some_and(|pending| {
-            [&item.thread_id, &item.session_id].into_iter().any(|id| {
-              id.as_deref()
-                .is_some_and(|id| Some(id) != pending.session_id.as_deref())
-            }) || item
-              .turn_id
-              .as_deref()
-              .is_some_and(|id| pending.turn_id.as_deref().is_some_and(|expected| expected != id))
-          })
-        {
-          self.clear();
-        }
-        return None;
-      }
       _ => {
         if !self
           .pending

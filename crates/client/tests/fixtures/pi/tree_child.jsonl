@@ -1,0 +1,2 @@
+{"type":"session","version":3,"id":"pi-tree-child","timestamp":"2026-07-29T00:01:00Z","cwd":"/tmp/project","parentSession":"tree_parent.jsonl"}
+{"type":"message","id":"child-message","parentId":null,"timestamp":"2026-07-29T00:01:01Z","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}

@@ -1,0 +1,4 @@
+{"timestamp":"2026-07-29T00:04:00Z","type":"session_meta","payload":{"id":"tree-child-no-boundary","parent_thread_id":"unrelated-root","timestamp":"2026-07-29T00:04:00Z","cwd":"/tmp/project","source":{"subagent":{"thread_spawn":{"parent_thread_id":"unrelated-root","depth":1,"agent_path":"/root/unfinished","agent_nickname":"Noether","agent_role":"explorer"}}}}}
+{"timestamp":"2026-07-29T00:03:50Z","type":"session_meta","payload":{"id":"unrelated-root","timestamp":"2026-07-29T00:03:50Z","cwd":"/tmp/project"}}
+{"timestamp":"2026-07-29T00:03:51Z","type":"event_msg","payload":{"type":"user_message","message":"copied request without a boundary"}}
+{"timestamp":"2026-07-29T00:03:52Z","type":"response_item","payload":{"type":"message","id":"copied-answer","role":"assistant","content":[{"type":"output_text","text":"copied answer without a boundary"}],"phase":"final"}}

@@ -4,7 +4,7 @@ use std::process::Command;
 use serde_json::Value;
 
 fn fixture() -> PathBuf {
-  PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../workbuddy/fixtures")
+  PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workbuddy")
 }
 
 fn run(args: &[&str]) -> String {

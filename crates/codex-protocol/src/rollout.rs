@@ -13,6 +13,7 @@ pub struct RolloutLine {
   timestamp: Option<String>,
   ordinal: Option<u64>,
   item: RolloutItem,
+  token_usage_record: Option<Box<TokenUsageRecordItem>>,
   native: Value,
 }
 
@@ -31,6 +32,13 @@ impl RolloutLine {
 
   pub fn into_item(self) -> RolloutItem {
     self.item
+  }
+
+  /// Typed accounting for newer rollouts without extending the published
+  /// exhaustive `RolloutItem` enum. The same record remains `Unknown` in
+  /// `item()`; malformed accounting has no typed view and remains inspectable.
+  pub fn token_usage_record(&self) -> Option<&TokenUsageRecordItem> {
+    self.token_usage_record.as_deref()
   }
 
   pub fn native(&self) -> &Value {
@@ -52,12 +60,27 @@ impl<'de> Deserialize<'de> for RolloutLine {
     let ordinal = native.get("ordinal").and_then(Value::as_u64);
     let native_type = native.get("type").and_then(Value::as_str).map(str::to_string);
     let payload = native.get("payload").unwrap_or(&Value::Null);
-    let item = decode_rollout_item(native_type, payload);
+    let is_token_usage_record = native_type.as_deref() == Some("token_usage_record");
+    let mut item = decode_rollout_item(native_type, payload);
+    let token_usage_record = if is_token_usage_record {
+      match TokenUsageRecordItem::deserialize(payload) {
+        Ok(record) => Some(Box::new(record)),
+        Err(error) => {
+          if let RolloutItem::Unknown(unknown) = &mut item {
+            unknown.parse_error = Some(error.to_string());
+          }
+          None
+        }
+      }
+    } else {
+      None
+    };
 
     Ok(Self {
       timestamp,
       ordinal,
       item,
+      token_usage_record,
       native,
     })
   }
@@ -80,7 +103,6 @@ pub enum RolloutItem {
   InterAgentCommunicationMetadata(InterAgentCommunicationMetadataItem),
   Compacted(CompactedItem),
   TurnContext(Box<TurnContextItem>),
-  TokenUsageRecord(Box<TokenUsageRecordItem>),
   WorldState(WorldStateItem),
   EventMessage(EventMessage),
   Unknown(UnknownItem),
@@ -95,7 +117,6 @@ impl RolloutItem {
       Self::InterAgentCommunicationMetadata(_) => Some("inter_agent_communication_metadata"),
       Self::Compacted(_) => Some("compacted"),
       Self::TurnContext(_) => Some("turn_context"),
-      Self::TokenUsageRecord(_) => Some("token_usage_record"),
       Self::WorldState(_) => Some("world_state"),
       Self::EventMessage(_) => Some("event_msg"),
       Self::Unknown(item) => item.native_type.as_deref(),
@@ -114,10 +135,6 @@ pub struct SessionMetaItem {
   #[serde(default)]
   pub model_provider: Option<String>,
   #[serde(default)]
-  pub history_mode: Option<String>,
-  #[serde(default)]
-  pub history_base: Option<HistoryPosition>,
-  #[serde(default)]
   pub parent_thread_id: Option<String>,
   #[serde(default)]
   pub source: Option<Value>,
@@ -125,6 +142,26 @@ pub struct SessionMetaItem {
   pub git: Option<SessionGitInfo>,
   #[serde(flatten)]
   pub extra: ExtraFields,
+}
+
+impl SessionMetaItem {
+  /// The newer history-mode field stays in `extra` so existing struct
+  /// literals remain valid. Invalid types are errors, never a legacy fallback.
+  pub fn history_mode(&self) -> Result<Option<&str>, serde_json::Error> {
+    match self.extra.get("history_mode") {
+      Some(value) => Option::<&str>::deserialize(value),
+      None => Ok(None),
+    }
+  }
+
+  /// Decode an inherited prefix without silently treating malformed metadata
+  /// as a standalone rollout. Unknown extension fields remain in the result.
+  pub fn history_base(&self) -> Result<Option<HistoryPosition>, serde_json::Error> {
+    match self.extra.get("history_base") {
+      Some(value) => Option::<HistoryPosition>::deserialize(value),
+      None => Ok(None),
+    }
+  }
 }
 
 /// Exclusive physical prefix inherited from another rollout segment.
@@ -654,7 +691,21 @@ pub struct UnknownItem {
 
 fn decode_rollout_item(native_type: Option<String>, payload: &Value) -> RolloutItem {
   match native_type.as_deref() {
-    Some("session_meta") => decode_payload(native_type, payload, RolloutItem::SessionMeta),
+    Some("session_meta") => {
+      let parsed = SessionMetaItem::deserialize(payload).and_then(|item| {
+        item.history_mode()?;
+        item.history_base()?;
+        Ok(item)
+      });
+      match parsed {
+        Ok(item) => RolloutItem::SessionMeta(item),
+        Err(error) => RolloutItem::Unknown(UnknownItem {
+          native_type,
+          payload: payload.clone(),
+          parse_error: Some(error.to_string()),
+        }),
+      }
+    }
     Some("response_item") => RolloutItem::ResponseItem(decode_response_item(payload)),
     Some("inter_agent_communication") => decode_payload(native_type, payload, RolloutItem::InterAgentCommunication),
     Some("inter_agent_communication_metadata") => {
@@ -662,9 +713,6 @@ fn decode_rollout_item(native_type: Option<String>, payload: &Value) -> RolloutI
     }
     Some("compacted") => decode_payload(native_type, payload, RolloutItem::Compacted),
     Some("turn_context") => decode_payload(native_type, payload, |item| RolloutItem::TurnContext(Box::new(item))),
-    Some("token_usage_record") => decode_payload(native_type, payload, |item| {
-      RolloutItem::TokenUsageRecord(Box::new(item))
-    }),
     Some("world_state") => decode_payload(native_type, payload, RolloutItem::WorldState),
     Some("event_msg") => decode_payload(native_type, payload, RolloutItem::EventMessage),
     _ => RolloutItem::Unknown(UnknownItem {

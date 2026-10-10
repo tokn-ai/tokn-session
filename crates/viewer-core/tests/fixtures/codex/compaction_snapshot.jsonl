@@ -1,0 +1,8 @@
+{"ordinal":0,"timestamp":"2026-10-10T12:00:00Z","type":"session_meta","payload":{"id":"fixture","history_mode":"paginated"}}
+{"ordinal":1,"timestamp":"2026-10-10T12:00:01Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"ordinal":2,"timestamp":"2026-10-10T12:00:02Z","type":"compacted","payload":{"message":"","replacement_history":[{"type":"compaction","id":"opaque-1","encrypted_content":"opaque-fixture"}],"window_id":"window-2","previous_window_id":"window-1","window_number":2,"resume_metadata":{"last_started_turn_id":"turn-1"}}}
+{"ordinal":3,"timestamp":"2026-10-10T12:00:02.001Z","type":"world_state","payload":{"full":true,"state":{}}}
+{"ordinal":4,"timestamp":"2026-10-10T12:00:02.002Z","type":"turn_context","payload":{"turn_id":"turn-1","model":"model"}}
+{"ordinal":5,"timestamp":"2026-10-10T12:00:02.003Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":"fixture","thread_settings":{"model":"model"}}}
+{"ordinal":6,"timestamp":"2026-10-10T12:00:02.004Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":30,"cached_input_tokens":10,"output_tokens":5,"reasoning_output_tokens":2,"total_tokens":35},"last_token_usage":{"input_tokens":30,"cached_input_tokens":10,"output_tokens":5,"reasoning_output_tokens":2,"total_tokens":35},"model_context_window":100000},"rate_limits":null}}
+{"ordinal":7,"timestamp":"2026-10-10T12:00:02.005Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"fixture","turn_id":"turn-1","item":{"type":"ContextCompaction","id":"compact-1"},"completed_at_ms":1791633602005}}

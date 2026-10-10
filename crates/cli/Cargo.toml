@@ -2,6 +2,11 @@
 name = "tokn-session-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+description = "List, inspect, and browse sessions across agent providers."
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
 
 [[bin]]
 name = "tokn-session"

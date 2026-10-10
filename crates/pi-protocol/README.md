@@ -13,7 +13,7 @@ session line.
 
 ```toml
 [dependencies]
-tokn-pi-protocol = "0.1"
+tokn-pi-protocol = "0.1.1"
 serde_json = "1"
 ```
 
@@ -96,4 +96,4 @@ Licensed under the [MIT License](LICENSE).
 
 ## Repository
 
-<https://github.com/agentic-rs/tokn-session>
+<https://github.com/tokn-ai/tokn-session>

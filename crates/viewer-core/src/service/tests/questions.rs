@@ -4,7 +4,7 @@ use tokn_session_codex::normalize::CodexNormalizer;
 #[test]
 fn outstanding_questions_have_navigable_keys_and_do_not_become_unread_replies() {
   let mut normalizer = CodexNormalizer::new();
-  let events: Vec<_> = include_str!("../../../../codex/fixtures/async_question_replies.jsonl")
+  let events: Vec<_> = include_str!("../../../tests/fixtures/codex/async_question_replies.jsonl")
     .lines()
     .take(5)
     .flat_map(|line| normalizer.normalize(serde_json::from_str(line).unwrap()))
@@ -55,7 +55,7 @@ fn acknowledging_final_replies_leaves_question_attention_and_marker_upgrade_is_q
 #[test]
 fn questions_stay_outside_work_trajectories_and_keep_structured_native_detail() {
   let mut normalizer = CodexNormalizer::new();
-  let events: Vec<_> = include_str!("../../../../codex/fixtures/questions.jsonl")
+  let events: Vec<_> = include_str!("../../../tests/fixtures/codex/questions.jsonl")
     .lines()
     .flat_map(|line| normalizer.normalize(serde_json::from_str(line).unwrap()))
     .collect();
@@ -93,7 +93,7 @@ fn questions_stay_outside_work_trajectories_and_keep_structured_native_detail() 
 #[test]
 fn parsed_answers_are_visible_user_rows_with_linked_question_and_native_result() {
   let mut normalizer = CodexNormalizer::new();
-  let events: Vec<_> = include_str!("../../../../codex/fixtures/question_replies.jsonl")
+  let events: Vec<_> = include_str!("../../../tests/fixtures/codex/question_replies.jsonl")
     .lines()
     .flat_map(|line| normalizer.normalize(serde_json::from_str(line).unwrap()))
     .collect();

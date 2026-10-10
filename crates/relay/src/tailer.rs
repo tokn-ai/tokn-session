@@ -1984,7 +1984,7 @@ mod tests {
   fn codex_restores_preexisting_code_mode_calls_before_their_results() {
     let fixture = TempDir::new().unwrap();
     let path = fixture.path().join("rollout-code-mode.jsonl");
-    let mut lines = include_str!("../../codex/fixtures/code_mode_wrappers.jsonl").lines();
+    let mut lines = include_str!("../tests/fixtures/codex/code_mode_wrappers.jsonl").lines();
     let header = lines.next().unwrap();
     let invocation = lines.next().unwrap();
     let output = lines.next().unwrap();

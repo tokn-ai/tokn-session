@@ -9,6 +9,7 @@ pub struct Cli {
 
 #[derive(Debug)]
 pub enum Command {
+  Help,
   List {
     source: Source,
     session_dir: Option<PathBuf>,
@@ -60,48 +61,43 @@ pub enum ShowScope {
 }
 
 pub fn parse(args: Vec<String>) -> Result<Cli, String> {
-  if args.is_empty() {
+  let Some((command, args)) = args.split_first() else {
     return Err(help());
-  }
+  };
+  let options = match command.as_str() {
+    "--help" | "-h" | "help" => return Ok(Cli { command: Command::Help }),
+    "list" | "show" | "browse" | "create" | "append" => match parse_options(args)? {
+      ParsedOptions::Help => return Ok(Cli { command: Command::Help }),
+      ParsedOptions::Options(options) => options,
+    },
+    other => return Err(format!("unknown command `{other}`\n\n{}", help())),
+  };
+  let Options {
+    source,
+    format,
+    session_dir,
+    limit,
+    executor,
+    cwd,
+    append_target,
+    scope,
+    mut positionals,
+  } = options;
 
-  match args[0].as_str() {
+  let command = match command.as_str() {
     "list" => {
-      let Options {
-        source,
-        format: _,
-        session_dir,
-        limit,
-        executor: _,
-        cwd: _,
-        append_target,
-        scope,
-        positionals,
-      } = parse_options(&args[1..])?;
       reject_append_target("list", append_target)?;
       reject_show_scope("list", scope)?;
       if !positionals.is_empty() {
         return Err("list does not accept positional arguments".to_string());
       }
-      Ok(Cli {
-        command: Command::List {
-          source,
-          session_dir,
-          limit,
-        },
-      })
+      Command::List {
+        source,
+        session_dir,
+        limit,
+      }
     }
     "show" => {
-      let Options {
-        source,
-        format,
-        session_dir,
-        limit: _,
-        executor: _,
-        cwd: _,
-        append_target,
-        scope,
-        mut positionals,
-      } = parse_options(&args[1..])?;
       reject_append_target("show", append_target)?;
       let scope = scope.unwrap_or(ShowScope::SelfOnly);
       if matches!((scope, format), (ShowScope::Tree, Format::Jsonl)) {
@@ -110,97 +106,56 @@ pub fn parse(args: Vec<String>) -> Result<Cli, String> {
       if positionals.len() != 1 {
         return Err("show requires exactly one session id or path".to_string());
       }
-      Ok(Cli {
-        command: Command::Show {
-          source,
-          session: positionals.remove(0),
-          format,
-          scope,
-          session_dir,
-        },
-      })
+      Command::Show {
+        source,
+        session: positionals.remove(0),
+        format,
+        scope,
+        session_dir,
+      }
     }
     "browse" => {
-      let Options {
-        source,
-        format: _,
-        session_dir,
-        limit: _,
-        executor: _,
-        cwd: _,
-        append_target,
-        scope,
-        mut positionals,
-      } = parse_options(&args[1..])?;
       reject_append_target("browse", append_target)?;
       reject_show_scope("browse", scope)?;
       if positionals.len() > 1 {
         return Err("browse accepts at most one session id or path".to_string());
       }
-      Ok(Cli {
-        command: Command::Browse {
-          source,
-          session: positionals.pop(),
-          session_dir,
-        },
-      })
+      Command::Browse {
+        source,
+        session: positionals.pop(),
+        session_dir,
+      }
     }
     "create" => {
-      let Options {
-        source,
-        format: _,
-        session_dir: _,
-        limit: _,
-        executor,
-        cwd,
-        append_target,
-        scope,
-        mut positionals,
-      } = parse_options(&args[1..])?;
       reject_append_target("create", append_target)?;
       reject_show_scope("create", scope)?;
       if positionals.len() != 1 {
         return Err("create requires exactly one prompt".to_string());
       }
-      Ok(Cli {
-        command: Command::Create {
-          source,
-          prompt: positionals.remove(0),
-          executor,
-          cwd,
-        },
-      })
-    }
-    "append" => {
-      let Options {
+      Command::Create {
         source,
-        format: _,
-        session_dir: _,
-        limit: _,
+        prompt: positionals.remove(0),
         executor,
         cwd,
-        append_target,
-        scope,
-        mut positionals,
-      } = parse_options(&args[1..])?;
+      }
+    }
+    "append" => {
       reject_show_scope("append", scope)?;
       if positionals.len() != 1 {
         return Err("append requires exactly one prompt".to_string());
       }
       let target = append_target.ok_or_else(|| "append requires --continue or --session <id>".to_string())?;
-      Ok(Cli {
-        command: Command::Append {
-          source,
-          target,
-          prompt: positionals.remove(0),
-          executor,
-          cwd,
-        },
-      })
+      Command::Append {
+        source,
+        target,
+        prompt: positionals.remove(0),
+        executor,
+        cwd,
+      }
     }
-    "--help" | "-h" | "help" => Err(help()),
-    other => Err(format!("unknown command `{other}`\n\n{}", help())),
-  }
+    _ => unreachable!("command was validated before parsing options"),
+  };
+  Ok(Cli { command })
 }
 
 struct Options {
@@ -215,7 +170,12 @@ struct Options {
   positionals: Vec<String>,
 }
 
-fn parse_options(args: &[String]) -> Result<Options, String> {
+enum ParsedOptions {
+  Help,
+  Options(Options),
+}
+
+fn parse_options(args: &[String]) -> Result<ParsedOptions, String> {
   let mut source = Source::Pi;
   let mut format = Format::Pretty;
   let mut session_dir = None;
@@ -286,14 +246,14 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         let value = args.get(index).ok_or_else(|| "--scope requires a value".to_string())?;
         scope = Some(parse_show_scope(value)?);
       }
-      "--help" | "-h" => return Err(help()),
+      "--help" | "-h" => return Ok(ParsedOptions::Help),
       value if value.starts_with('-') => return Err(format!("unknown option `{value}`")),
       value => positionals.push(value.to_string()),
     }
     index += 1;
   }
 
-  Ok(Options {
+  Ok(ParsedOptions::Options(Options {
     source,
     format,
     session_dir,
@@ -303,7 +263,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     append_target,
     scope,
     positionals,
-  })
+  }))
 }
 
 fn parse_source(value: &str) -> Result<Source, String> {
@@ -350,7 +310,7 @@ fn reject_show_scope(command: &str, scope: Option<ShowScope>) -> Result<(), Stri
   Ok(())
 }
 
-fn help() -> String {
+pub fn help() -> String {
   "usage:
   tokn-session list [--source pi|codex|opencode|zcode|workbuddy|dsh] [--session-dir <dir>]
   tokn-session list [--source pi|codex|opencode|zcode|workbuddy|dsh] [--limit <n>]

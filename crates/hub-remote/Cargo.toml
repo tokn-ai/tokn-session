@@ -2,6 +2,9 @@
 name = "tokn-hub-remote"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+description = "Native remote session client with remembered device identities."
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 
@@ -14,9 +17,9 @@ serde_json.workspace = true
 tokio.workspace = true
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-tokn-hub-client-core = { path = "../hub-client-core" }
+tokn-hub-client-core.workspace = true
 tokn-hub-transport.workspace = true
-tokn-session-hub = { path = "../hub" }
+tokn-session-hub.workspace = true
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1"

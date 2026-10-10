@@ -3,6 +3,7 @@ name = "tokn-session-viewer"
 version.workspace = true
 description = "Read-only desktop viewer for agent sessions"
 edition.workspace = true
+rust-version.workspace = true
 publish = false
 
 [lib]
@@ -29,8 +30,8 @@ tauri-plugin-opener = "2"
 tokio = { workspace = true, features = ["process"] }
 tokn-viewer-core.workspace = true
 tokn-session-relay.workspace = true
-tokn-hub-client-core = { path = "../../../crates/hub-client-core" }
-tokn-hub-remote = { path = "../../../crates/hub-remote" }
+tokn-hub-client-core.workspace = true
+tokn-hub-remote.workspace = true
 tokio-util = { version = "0.7", features = ["rt"] }
 url = "2"
 
