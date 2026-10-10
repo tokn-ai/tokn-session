@@ -77,9 +77,11 @@ impl RecordsNormalizer {
     let Ok(record) = serde_json::from_value::<TokenCount>(payload.clone()) else {
       self.last_info = None;
       self.last_limits = None;
+      self.compactions.clear();
       return vec![context.unknown()];
     };
     if payload.get("info").is_none() && payload.get("rate_limits").is_none() {
+      self.compactions.clear();
       return vec![context.unknown()];
     }
     let mut events = Vec::new();

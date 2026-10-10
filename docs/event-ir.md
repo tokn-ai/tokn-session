@@ -93,9 +93,12 @@ DSH identifies a model call only with `llmStreamCall: true` and `rawOutput`.
 `compaction_operations` projects observations with the same provider/session/
 operation ID into one card, keeping the first source index stable and retaining
 all contributor indices for inspection. Anonymous observations remain separate.
-Terminal state survives later summary enrichment. Codex's adjacent checkpoint
-and completion notice may be paired across token accounting, using a checkpoint-
-scoped adapter key when no window ID exists; other records break that correlation.
+Terminal state survives later summary enrichment. Codex pairs a checkpoint with
+its completion notice across its validated world-state, turn-context, settings,
+and token-accounting snapshot records. Session and known turn identities must
+match; unrelated or malformed records break correlation. Checkpoints without a
+usable window ID receive an adapter key scoped to that checkpoint. Completion
+notices from a different turn remain separate when no explicit operation link exists.
 This projection never deletes earlier transcript rows
 or reconstructs the compacted model context. Relay native data stays an optional
 sibling; no `native` field is added to this event.
