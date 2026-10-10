@@ -11,4 +11,3 @@ bytes = "1"
 tokio.workspace = true
 tokio-util = { version = "0.7", features = ["rt"] }
 webrtc = "0.14.0"
-
