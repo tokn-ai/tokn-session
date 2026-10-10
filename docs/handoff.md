@@ -167,7 +167,7 @@ callback carrying only the credential. Hub administration lives at `/admin`.
 The administrator manages Hub-local namespaces and permanent `username:host`
 addresses there. Exact public lookup returns routing metadata, never a Noise key;
 UUID/key pins remain authoritative. Addresses survive revocation as reservations
-and cannot move between hosts. Connections now separates saved-machine reconnects
+and cannot move between hosts. Machines separates saved-machine reconnects
 from code/passkey onboarding; its panel shows the machine, Hub, and encryption state.
 Legacy saved UUID pins remain valid. First-device passkey access still requires a
 trusted `UUID@key` or `username:host@key` reference.
@@ -196,6 +196,14 @@ trusted-Hub connections. Encrypted tunnel tests cover forwarding request bodies.
 ## Viewer core and remote API
 
 Desktop Local calls shared Rust `crates/viewer-core` directly through Tauri.
+The desktop app starts in Machines on a new installation, with This machine and
+remembered remote machines. It reopens the last successful Local or Hub selection;
+opening a different Hub only browses its saved machines. Navigation preferences
+store Hub origins and UUIDs, while device identities remain in their existing
+trust stores. Local initialization is lazy, retryable, and independent of Hub
+access; failed or canceled opens keep the last successful selection. Viewer
+requests and events capture their machine transport, including pagination and
+compatibility fallbacks, so delayed local work cannot target a newly opened host.
 Hub mode uses `hub-remote` through async Tauri commands/events; browser Hub mode
 uses direct encrypted WebSockets. Both select one machine and share the same
 viewer command interface, host-scoped caches, cancellation, and live updates.
