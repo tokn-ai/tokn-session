@@ -123,6 +123,11 @@ captured compaction. Upgrade strict `AgentEvent` consumers with the producer.
 
 ## Session Hub
 
+The Hub and browser UI are deployed at `https://ahub.clouds56.top` on ctl host
+`vultr-2`, using nginx HTTPS/WebSocket termination and a dedicated loopback
+systemd service. Persistent state stays outside versioned releases. See
+[deployment](../deploy/vultr-2/README.md) for configuration, checks, and updates.
+
 The default remote path is app/browser → Hub → host. Hub serves the browser UI
 and forwards encrypted records; endpoints run the shared Rust pairing/Noise
 implementation (`hub-client-core`, compiled to WASM for browsers).
