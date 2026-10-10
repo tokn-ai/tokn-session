@@ -5,6 +5,7 @@ use crate::model::{HistoryWindowMode, SessionViewRequest, hex_decode, hex_encode
 
 #[derive(Default)]
 pub(crate) struct UpdatePayloads {
+  pub source_revision: Option<String>,
   pub details: Vec<EventDetail>,
   pub events: Vec<EventDetail>,
 }
@@ -176,7 +177,12 @@ impl ViewerService {
     } else {
       Vec::new()
     };
-    let mut payloads = UpdatePayloads::default();
+    let mut payloads = UpdatePayloads {
+      source_revision: info
+        .as_ref()
+        .map(|info| format!("{}:{}", info.generation, info.revision)),
+      ..Default::default()
+    };
     if include_all {
       // Source rows stay individual even when tools/compaction/work are folded.
       // Keep the same generation and absolute positions as display identities.
@@ -427,6 +433,7 @@ mod tests {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("tcp://{}", listener.local_addr().unwrap());
     let mut config = RelayConfig::new(vec![ProviderRoot::new(Provider::Pi, root.path().into())]);
+    config.include_native = true;
     config.poll_interval = Duration::from_millis(10);
     let server = tokio::spawn(crate::service_server::serve_listener(listener, config));
     let service = ViewerService::new(Arc::new(NativeRepository::default()));
@@ -472,6 +479,91 @@ mod tests {
           .unwrap()
       }
     };
+    let live_request = SessionUpdatesRequest {
+      subscription_id: "live-only-test".into(),
+      level: UpdateLevel::Steps,
+      ..request.clone()
+    };
+    let live_service = service.clone();
+    let subscribe_request = live_request.clone();
+    let ack = tokio::task::spawn_blocking(move || {
+      live_service.subscribe_session_owned(subscribe_request, Some("old-socket".into()))
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(ack["revision"], "0");
+    assert!(ack.get("items").is_none(), "subscribing must not send history");
+    let reclaim_service = service.clone();
+    let reclaim_request = live_request.clone();
+    let reclaimed = tokio::task::spawn_blocking(move || {
+      reclaim_service.subscribe_session_owned(reclaim_request, Some("new-socket".into()))
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(reclaimed["generation"], ack["generation"]);
+    service.release_session_subscriptions("old-socket");
+    let backward_service = service.clone();
+    let backward = tokio::task::spawn_blocking(move || backward_service.load_session_backward(live_request.clone()))
+      .await
+      .unwrap()
+      .unwrap();
+    assert!(backward.snapshot);
+    assert_eq!(backward.generation, ack["generation"]);
+    assert_eq!(backward.state["scope"]["history"], "latest_turn");
+    assert!(
+      backward
+        .items
+        .iter()
+        .filter(|item| item["summary"]["type"] == "activity_group")
+        .all(|group| group["summary"]["child_keys"]
+          .as_array()
+          .unwrap()
+          .iter()
+          .all(|child| !backward.items.iter().any(|item| item["item_id"] == *child))),
+      "default backward delivery keeps inner groups collapsed"
+    );
+    let descriptor = backward
+      .items
+      .iter()
+      .find(|item| item["summary"]["type"] == "activity_group")
+      .unwrap();
+    let group_key = descriptor["item_id"].as_str().unwrap().to_owned();
+    let mut scope: crate::updates::UpdateScope = serde_json::from_value(backward.state["scope"].clone()).unwrap();
+    scope.group_keys.push(group_key);
+    let details_request = SessionUpdatesRequest {
+      subscription_id: "live-only-test".into(),
+      level: UpdateLevel::Steps,
+      cursor: Some(backward.revision.clone()),
+      scope: Some(scope),
+      ..request.clone()
+    };
+    let group_service = service.clone();
+    let group = tokio::task::spawn_blocking(move || {
+      group_service.load_session_details(crate::delivery::SessionDetailsRequest::Group {
+        request: details_request,
+      })
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let crate::delivery::SessionDetails::Group(group) = group else {
+      panic!("Expected complete group rows");
+    };
+    let membership: std::collections::HashSet<_> = backward
+      .items
+      .iter()
+      .chain(&group.items)
+      .filter_map(|item| item["item_id"].as_str())
+      .collect();
+    assert!(
+      descriptor["summary"]["child_keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|key| membership.contains(key.as_str().unwrap()))
+    );
     let first = load(request.clone()).await;
     let records: Vec<_> = first.items.iter().filter(|item| item["kind"] == "event").collect();
     let source_types: Vec<_> = records
@@ -503,6 +595,39 @@ mod tests {
         .items
         .iter()
         .any(|item| item["kind"] == "detail" && item["detail"]["event"]["type"] == "trajectory")
+    );
+    let tool_key = first
+      .items
+      .iter()
+      .find(|item| item["summary"]["type"] == "tool_call")
+      .unwrap()["item_id"]
+      .as_str()
+      .unwrap()
+      .to_owned();
+    let tool_service = service.clone();
+    let tool_request = LoadEventDetailRequest {
+      session_key: request.session_key.clone(),
+      event_key: tool_key,
+    };
+    let inspect_request = tool_request.clone();
+    let tool = tokio::task::spawn_blocking(move || {
+      tool_service.load_session_details(crate::delivery::SessionDetailsRequest::Tool { request: tool_request })
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let crate::delivery::SessionDetails::Tool(tool) = tool else {
+      panic!("Expected tool display payload");
+    };
+    assert!(tool.native.is_none());
+    let inspect_service = service.clone();
+    let inspect = tokio::task::spawn_blocking(move || inspect_service.inspect_session_event(inspect_request))
+      .await
+      .unwrap()
+      .unwrap();
+    assert!(
+      inspect.native.is_some(),
+      "inspection alone exposes opted-in native records"
     );
     let groups: Vec<_> = first
       .groups

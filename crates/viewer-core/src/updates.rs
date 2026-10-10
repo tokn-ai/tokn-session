@@ -72,6 +72,7 @@ pub struct SessionUpdate {
 }
 
 struct Subscription {
+  owner: Option<String>,
   request: SessionUpdatesRequest,
   generation: String,
   revision: u64,
@@ -195,7 +196,13 @@ impl Subscription {
     cursor: Option<&str>,
   ) -> SessionUpdate {
     let (page, semantic, events) = if let Some(scope) = &mut self.request.scope {
-      scope::project(page, semantic, events, scope, self.request.level == UpdateLevel::All)
+      scope::project(
+        page,
+        semantic,
+        events,
+        scope,
+        self.request.level >= UpdateLevel::Details,
+      )
     } else {
       (page, semantic, events)
     };
@@ -272,7 +279,7 @@ impl Subscription {
       || self.event_order != event_order
       || self.semantic_order != semantic_order
       || self.state != state;
-    if reset {
+    if reset && self.revision != 0 {
       self.generation = uuid::Uuid::new_v4().to_string();
     }
     if changed {
@@ -358,8 +365,12 @@ impl ViewerService {
       },
       include_all,
     )?;
+    let mut page = serde_json::to_value(page).map_err(|e| e.to_string())?;
+    if let Some(revision) = payloads.source_revision {
+      page["source_revision"] = json!(revision);
+    }
     Ok(Projection {
-      page: serde_json::to_value(page).map_err(|e| e.to_string())?,
+      page,
       semantic: semantic
         .into_iter()
         .map(serde_json::to_value)
@@ -396,6 +407,106 @@ impl ViewerService {
       }
     }
     Ok(details)
+  }
+
+  pub fn subscribe_session(&self, request: SessionUpdatesRequest) -> Result<Value, String> {
+    self.subscribe_session_owned(request, None)
+  }
+
+  pub fn subscribe_session_owned(
+    &self,
+    request: SessionUpdatesRequest,
+    owner: Option<String>,
+  ) -> Result<Value, String> {
+    self.validate_session_key(&request.session_key)?;
+    if request.subscription_id.is_empty()
+      || request.subscription_id.len() > 128
+      || request.detail_keys.len() > 16
+      || request.scope.as_ref().is_some_and(|scope| scope.group_keys.len() > 128)
+    {
+      return Err("Invalid session subscription".into());
+    }
+    let mut store = self.updates.lock().map_err(|_| "Update store lock poisoned")?;
+    if request.unsubscribe {
+      if store
+        .subscriptions
+        .get(&request.subscription_id)
+        .is_some_and(|subscription| owner.is_none() || subscription.owner == owner)
+      {
+        store.subscriptions.remove(&request.subscription_id);
+      }
+      return Ok(json!({"subscription_id":request.subscription_id,"unsubscribed":true}));
+    }
+    store.subscriptions.retain(|_, value| value.accessed.elapsed() < LEASE);
+    if !store.subscriptions.contains_key(&request.subscription_id) && store.subscriptions.len() >= MAX_SUBSCRIPTIONS {
+      return Err("Too many session subscriptions".into());
+    }
+    let id = request.subscription_id.clone();
+    let subscription = store.subscriptions.entry(id.clone()).or_insert_with(|| Subscription {
+      owner: None,
+      request: request.clone(),
+      generation: uuid::Uuid::new_v4().to_string(),
+      revision: 0,
+      items: BTreeMap::new(),
+      order: Vec::new(),
+      semantic_order: Vec::new(),
+      event_order: Vec::new(),
+      state: Value::Null,
+      accessed: Instant::now(),
+    });
+    if subscription.request.session_key != request.session_key {
+      return Err("Subscription identity changed; use a new subscription id".into());
+    }
+    if subscription.request.level != request.level {
+      subscription.revision = 0;
+      subscription.generation = uuid::Uuid::new_v4().to_string();
+      subscription.items.clear();
+      subscription.order.clear();
+      subscription.semantic_order.clear();
+      subscription.event_order.clear();
+      subscription.state = Value::Null;
+    }
+    if owner.is_some() {
+      subscription.owner = owner;
+    }
+    subscription.request = request;
+    subscription.accessed = Instant::now();
+    Ok(json!({"subscription_id":id,"generation":subscription.generation,"revision":subscription.revision.to_string()}))
+  }
+
+  pub fn renew_session_subscriptions(&self, ids: &[String]) -> Result<(), String> {
+    let mut store = self.updates.lock().map_err(|_| "Update store lock poisoned")?;
+    for id in ids {
+      if let Some(subscription) = store.subscriptions.get_mut(id) {
+        subscription.accessed = Instant::now();
+      }
+    }
+    Ok(())
+  }
+
+  pub fn release_session_subscriptions(&self, owner: &str) {
+    if let Ok(mut store) = self.updates.lock() {
+      store
+        .subscriptions
+        .retain(|_, subscription| subscription.owner.as_deref() != Some(owner));
+    }
+  }
+
+  pub fn load_session_backward(&self, mut request: SessionUpdatesRequest) -> Result<SessionUpdate, String> {
+    // Backward reads always return a complete selected projection. Revision
+    // cursors belong to live diffs, not pagination or cache coverage.
+    request.cursor = None;
+    if request.scope.is_none() {
+      request.scope = Some(UpdateScope {
+        history: if request.history_cursor.is_some() {
+          HistoryScope::Retained
+        } else {
+          HistoryScope::LatestTurn
+        },
+        ..Default::default()
+      });
+    }
+    self.load_session_updates(request)
   }
 
   pub fn load_session_updates(&self, request: SessionUpdatesRequest) -> Result<SessionUpdate, String> {
@@ -460,6 +571,7 @@ impl ViewerService {
       .subscriptions
       .entry(request.subscription_id.clone())
       .or_insert_with(|| Subscription {
+        owner: None,
         request: request.clone(),
         generation: uuid::Uuid::new_v4().to_string(),
         revision: 0,
@@ -506,6 +618,12 @@ impl ViewerService {
         .as_ref()
         .is_some_and(|key| key != &subscription.request.session_key)
       {
+        continue;
+      }
+      // A newly registered live interest has no baseline until its backward
+      // snapshot is accepted. That snapshot reads the latest source under this
+      // same lock; queued publication then diffs against it without a gap.
+      if subscription.revision == 0 {
         continue;
       }
       // Project each changed session once, regardless of how many levels or
@@ -565,6 +683,7 @@ mod tests {
 
   fn subscription(level: UpdateLevel) -> Subscription {
     Subscription {
+      owner: None,
       request: SessionUpdatesRequest {
         subscription_id: "view".into(),
         session_key: "session".into(),

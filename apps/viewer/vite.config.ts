@@ -19,6 +19,7 @@ export default defineConfig(async () => ({
     proxy: {
       "/api": {
         target: "http://127.0.0.1:5558",
+        ws: true,
       },
     },
     hmr: host

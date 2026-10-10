@@ -4,26 +4,24 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
-Session delivery now has final/steps/details/all subscriptions, semantic item
-changes over Tauri/SSE, snapshot recovery on gaps, and frontend replicas for
-eight recent sessions. Reopening renders cached content before catch-up;
-background sessions receive final-level updates without advancing all coverage.
-The opened session subscribes at steps with a latest-turn scope: messages,
-attention context, and inner activity-group summaries. The returned turn anchor
-pins live appends. Each inner group's first expansion requests complete child
-summaries; cached groups remain interested on collapse and receive live updates.
-Inspector and visible expanded tools subscribe to requested details separately;
-closing their inner/outer disclosures stops detail delivery. Older history
-extends the retained window and scope, while omitting scope preserves legacy
-consumers. All remains available for complete source records and display details.
-Legacy transport pages assemble atomically, with retry on incomplete/changed
-responses; there are no within-group load-more controls. Compact attention-only body notifications
-skip catalog reloads; metadata/catalog/warning/shared-index changes still reload.
-Selected semantic subscriptions avoid duplicate index-triggered timeline reads.
-Redaction, native opt-in, and payload bounds still apply. Unrelated detail/work
-caches survive updates. Indexed Automatic and Local share one source-reader path
-without a redundant managed feed child. See [session updates](viewer-session-updates.md)
-for the contract, ownership, limits, compatibility paths, and remaining costs.
+Session delivery separates live subscription from loading. Direct browsers use
+connection-scoped WebSocket interests and live diffs, with backward HTTP for
+initial/older screens, details HTTP for complete groups/tool display payloads,
+and dedicated inspection HTTP for source/native records. Tauri exposes the
+same commands through its event bridge. Opening defaults to latest-turn steps
+with collapsed inner groups and never backfills saved reading anchors before
+first paint. Heartbeats renew identity leases without fetching data. Snapshot
+baselines and publication share revisions; reconnects and replacements recover
+through backward reads. Old-socket cleanup cannot remove reclaimed interests.
+
+Frontend replicas retain eight recent sessions. Independent group/tool/inspect
+coverage tracks missing, loading, complete, stale, and failed resources; loaded
+groups receive live appends after collapse. Display details and inspection are
+separate caches. Legacy servers and the existing Hub HTTP tunnel retain SSE
+compatibility; Hub allows the new loading commands. Shared-session authorization
+continues through its legacy scoped commands. Compact attention notifications
+avoid redundant catalog/timeline reads. See [session delivery](viewer-session-updates.md)
+for ownership, recovery, limits, and remaining source/projection costs.
 
 The viewer sidebar and conversation use a compact Codex-style layout with neutral
 light/dark colors, larger message text, inline expandable tool activity, and an
