@@ -8,6 +8,8 @@ import type { HubMachineSelection } from "../lib/types";
 import { selectMachine } from "../lib/transport";
 
 const selection: HubMachineSelection = { kind: "hub", hub_url: "https://hub.example", host_id: "550e8400-e29b-41d4-a716-446655440000" };
+vi.mock("../components/LocalHostProvider", () => ({ LocalHostProvider: ({ children }: { children: import("react").ReactNode }) => children }));
+
 vi.mock("../lib/tauri", () => ({ initializeLocalViewer: vi.fn() }));
 vi.mock("../components/HubAccess", () => ({ HubAccess: ({ initial_hub_url, startup_host_id, on_local, on_machine_open, on_hub_ready, local_error }: {
   initial_hub_url: string; startup_host_id: string | null; on_local: () => void; local_error?: string;

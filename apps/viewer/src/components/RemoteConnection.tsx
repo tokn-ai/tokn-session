@@ -2,6 +2,7 @@ import { useCallback, useId, useRef, useState, type ReactNode } from "react";
 import type { ConnectionState } from "../lib/transport";
 import type { TransportState } from "../lib/types";
 import { useFloatingPanel } from "../lib/useFloatingPanel";
+import { HostQuickControl } from "./HostSetup";
 import { CloseIcon } from "./Icons";
 import "./ConnectionPanel.css";
 
@@ -52,6 +53,7 @@ export function RemoteConnection({ name, state, hub_url, encrypted = false, tran
           </dl>
           {transport?.kind === "relay" && transport.reason && <p className="connection-state">{transport.reason}</p>}
           <p className="connection-state" role="status">{state === "reconnecting" ? "Reconnecting · showing last received data" : label}</p>
+          <HostQuickControl on_open_settings={close} return_focus={trigger_ref} />
           <div className="remote-connection__actions">{children}</div>
         </div>
       </div>}

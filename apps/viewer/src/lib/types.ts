@@ -618,7 +618,8 @@ export interface SessionNotification {
 }
 
 export interface LocalHostStatus {
-  phase: "stopped" | "connecting" | "online" | "reconnecting" | "error";
+  external_stop_supported?: boolean;
+  phase: "stopped" | "external" | "unavailable" | "connecting" | "online" | "reconnecting" | "error";
   hub_url: string;
   name: string;
   allow_control: boolean;

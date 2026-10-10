@@ -205,7 +205,21 @@ pub async fn existing_host_online(profile: &HostProfile) -> Result<bool, String>
       drop(socket);
       Ok(true)
     }
-    Err(tokio_tungstenite::tungstenite::Error::Http(response)) if response.status().as_u16() == 404 => Ok(false),
+    Err(tokio_tungstenite::tungstenite::Error::Http(response))
+      if response.status().as_u16() == 404
+        || (response.status().as_u16() == 502
+          && response.body().as_ref().is_some_and(|body| {
+            serde_json::from_slice::<serde_json::Value>(body)
+              .ok()
+              .is_some_and(|value| value["error"].as_str() == Some("Host is offline"))
+          })) =>
+    {
+      Ok(false)
+    }
+    Err(tokio_tungstenite::tungstenite::Error::Http(response)) => Err(format!(
+      "Could not check whether another connector is online: Hub returned HTTP {}. Check the saved Hub connection and retry.",
+      response.status().as_u16()
+    )),
     Err(_) => {
       Err("Could not check whether another connector is online. Check the saved Hub connection and retry.".into())
     }
@@ -217,6 +231,49 @@ mod tests {
   use super::*;
   use axum::{Router, extract::WebSocketUpgrade, http::StatusCode, response::IntoResponse, routing::get};
 
+  #[tokio::test]
+  async fn hub_offline_response_is_distinct_from_gateway_failure() {
+    use std::sync::{
+      Arc,
+      atomic::{AtomicBool, Ordering},
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let offline = Arc::new(AtomicBool::new(true));
+    let state = offline.clone();
+    let router = Router::new().fallback(get(move || {
+      let offline = state.load(Ordering::Acquire);
+      async move {
+        if offline {
+          (
+            StatusCode::BAD_GATEWAY,
+            axum::Json(serde_json::json!({"error": "Host is offline"})),
+          )
+            .into_response()
+        } else {
+          (StatusCode::BAD_GATEWAY, "nginx upstream unavailable").into_response()
+        }
+      }
+    }));
+    let task = tokio::spawn(async move {
+      axum::serve(listener, router).await.unwrap();
+    });
+    let profile = HostProfile {
+      version: 1,
+      host_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+      hub_url: format!("http://{address}"),
+      name: "Test".into(),
+      viewer_url: "http://127.0.0.1:5558".into(),
+      allow_control: false,
+      insecure_loopback: true,
+      passkey_origin: None,
+      ice_servers: Vec::new(),
+    };
+    assert!(!existing_host_online(&profile).await.unwrap());
+    offline.store(false, Ordering::Release);
+    assert!(existing_host_online(&profile).await.unwrap_err().contains("HTTP 502"));
+    task.abort();
+  }
   #[tokio::test]
   async fn legacy_online_connector_is_detected_without_replacing_it() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

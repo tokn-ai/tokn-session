@@ -755,6 +755,28 @@ fn validate_private(file: &File) -> Result<(), String> {
   Ok(())
 }
 
+/// Inspect an existing ownership lock without creating state or conflating I/O failures with contention.
+pub(crate) fn lock_held(path: &Path) -> Result<bool, String> {
+  let mut name = path.as_os_str().to_owned();
+  name.push(".lock");
+  let lock_path = PathBuf::from(name);
+  reject_symlink(&lock_path)?;
+  let mut options = OpenOptions::new();
+  options.read(true).write(true);
+  nofollow(&mut options);
+  let file = match options.open(&lock_path) {
+    Ok(file) => file,
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+    Err(error) => return Err(format!("Could not inspect host ownership: {error}")),
+  };
+  validate_private(&file)?;
+  match file.try_lock() {
+    Ok(()) => Ok(false),
+    Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+    Err(std::fs::TryLockError::Error(error)) => Err(format!("Could not inspect host ownership: {error}")),
+  }
+}
+
 pub(crate) fn lock(path: &Path) -> Result<File, String> {
   if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;

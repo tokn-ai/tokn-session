@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { LocalHostProvider } from "../components/LocalHostProvider";
 import { HubAccess } from "../components/HubAccess";
 import { hubErrorMessage } from "../lib/hub";
 import { preferredHub, readMachinePreferences, rememberHub, rememberMachine } from "../lib/machinePreferences";
@@ -11,6 +12,10 @@ type WorkspaceView = { kind: "machines"; hub_url: string; startup_host_id: strin
   | { kind: "opening_local" } | { kind: "local" };
 
 export function DesktopWorkspace() {
+  return <LocalHostProvider><DesktopWorkspaceContent /></LocalHostProvider>;
+}
+
+function DesktopWorkspaceContent() {
   const [preferences, setPreferences] = useState(readMachinePreferences);
   const preferences_ref = useRef(preferences);
   const [view, setView] = useState<WorkspaceView>(() => preferences.selected_machine?.kind === "local"
