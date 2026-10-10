@@ -45,8 +45,8 @@ jobs:
         shell: bash
         run: |
           archive_stage=$(mktemp -d)
-          release_version=$(cargo metadata --no-deps --format-version 1 --locked | \
-            python3 -c 'import json, sys; data = json.load(sys.stdin); print(next(p["version"] for p in data["packages"] if p["id"] in data["workspace_members"] and p["publish"] != []))')
+          cargo metadata --no-deps --format-version 1 --locked > "$archive_stage/source-metadata.json"
+          release_version=$(python3 -c 'import json, sys; data = json.load(open(sys.argv[1])); print(next(p["version"] for p in data["packages"] if p["id"] in data["workspace_members"] and p["publish"] != []))' "$archive_stage/source-metadata.json")
           for archive in target/package/*-"$release_version".crate; do
             tar -xzf "$archive" -C "$archive_stage"
           done
@@ -63,6 +63,29 @@ jobs:
               printf '%s = { path = "%s" }\n' "$package" "$directory"
             done
           } > "$archive_stage/Cargo.toml"
+          cargo metadata --manifest-path "$archive_stage/Cargo.toml" \
+            --format-version 1 > "$archive_stage/archive-metadata.json"
+          python3 - "$archive_stage" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          stage = Path(sys.argv[1]).resolve()
+          source = json.loads((stage / "source-metadata.json").read_text())
+          archived = json.loads((stage / "archive-metadata.json").read_text())
+          expected = {
+            p["name"]: p["version"] for p in source["packages"]
+            if p["id"] in source["workspace_members"] and p["publish"] != []
+          }
+          packages = [p for p in archived["packages"] if p["name"] in expected]
+          assert len(archived["workspace_members"]) == len(expected)
+          assert {p["name"] for p in packages} == set(expected)
+          for package in packages:
+            assert package["source"] is None, package["name"]
+            assert package["version"] == expected[package["name"]]
+            assert Path(package["manifest_path"]).resolve().is_relative_to(stage)
+          print(f"Verified {len(packages)} project crates use extracted archive sources")
+          PY
           cargo test --workspace --manifest-path "$archive_stage/Cargo.toml" \
             --offline --target-dir target/release-archive-tests
 
