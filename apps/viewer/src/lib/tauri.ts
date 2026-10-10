@@ -139,3 +139,14 @@ export function listenForSessionIndexProgress(
 ): Promise<UnlistenFn> {
   return listen<SessionIndexProgress>("session-index-progress", (event) => handler(event.payload));
 }
+
+export function loadSessionUpdates(request: import("./types").SessionUpdatesRequest): Promise<import("./types").SessionUpdate> {
+  return invoke("load_session_updates", { request });
+}
+export function listenForSessionUpdates(handler: (update: import("./types").SessionUpdate) => void): Promise<UnlistenFn> {
+  return listen<import("./types").SessionUpdate>("session-updated", (event) => handler(event.payload));
+}
+
+export function listenForSessionNotifications(handler: (notification: import("./types").SessionNotification) => void): Promise<UnlistenFn> {
+  return listen<import("./types").SessionNotification>("session-notification", (event) => handler(event.payload));
+}

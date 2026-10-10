@@ -1,3 +1,4 @@
+import { SessionDisplayCache } from "./sessionDisplayCache";
 import type { ExpandedActivityState } from "./types";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { loadReadingWindow, readReadingPosition, readingEventKey } from "./readingPosition";
@@ -13,6 +14,9 @@ import {
   listenForSessionIndexProgress,
   listenForRelayChanges,
   listenForTransportReconnect,
+  listenForSessionUpdates,
+  listenForSessionNotifications,
+  loadSessionUpdates,
   loadEventDetail,
   loadEventPage,
   loadTrajectoryEventPage,
@@ -263,6 +267,37 @@ export function useViewerState() {
   const [detailAttempt, setDetailAttempt] = useState(0);
   const detailRequest = useRef(0);
   const detailCache = useRef(new Map<string, EventDetail>());
+  const displayCache = useRef(new SessionDisplayCache());
+  const pushedPage = useRef<import("./types").EventPageResponse | null>(null);
+  const semanticLive = useRef(new Set<string>());
+  const semanticSupported = useRef<boolean | null>(null);
+  const onSessionUpdate = useRef<(update: import("./types").SessionUpdate) => void>(() => {});
+  const loadDisplayPage = useCallback(async (request: import("./types").LoadEventPageRequest) => {
+    if (semanticSupported.current === false) return loadEventPage(request);
+    if (request.window_mode !== "retained") {
+      const page = await loadEventPage(request);
+      // Earlier history changes the retained range; the next subscription
+      // snapshot must include that range before patches can be accepted.
+      displayCache.current.invalidate(request.session_key);
+      semanticLive.current.delete(request.session_key);
+      return page;
+    }
+    let update: import("./types").SessionUpdate;
+    try { update = await loadSessionUpdates(displayCache.current.request(request.session_key)); }
+    catch (error: unknown) {
+      if (/unknown.*command|command.*not found|unavailable for a session share/i.test(errorMessage(error))) {
+        semanticSupported.current = false;
+        return loadEventPage(request);
+      }
+      throw error;
+    }
+    const page = displayCache.current.apply(update);
+    if (!page) throw new Error("Session updates changed; retry the snapshot");
+    semanticSupported.current = true;
+    semanticLive.current.add(request.session_key);
+    return page;
+  }, []);
+
   const detailLoads = useRef(new Map<string, Promise<EventDetail>>());
   const detailGeneration = useRef(0);
   const [detailRevision, setDetailRevision] = useState(0);
@@ -285,6 +320,14 @@ export function useViewerState() {
   const [expandedActivities, setExpandedActivities] = useState(new Map<string, ExpandedActivityState>());
   const [expandedTrajectoryDetailAttempt, setExpandedTrajectoryDetailAttempt] = useState(0);
   const expandedTrajectoryDetailRequest = useRef(0);
+  const sessionDisclosures = useRef(new Map<string, { expanded_event_key: string | null; selected_event_key: string | null; inspector_open: boolean; manual_expansion: boolean }>());
+  const activeDetailKeys = useRef<string[]>([]);
+  activeDetailKeys.current = [...new Set([
+    ...(inspectorOpen && selectedEventKey ? [selectedEventKey] : []),
+    ...(expandedEventKey && expandedEventNeedsDetail(events.find((event) => event.event_key === expandedEventKey)) ? [expandedEventKey] : []),
+    ...expandedActivityKeys,
+  ])].slice(0, 16);
+
 
   const applyExpandedEventKey = useCallback((key: string | null) => {
     expandedEventKeyRef.current = key;
@@ -474,10 +517,16 @@ export function useViewerState() {
     }
     const generation = detailGeneration.current;
     let request: Promise<EventDetail>;
-    request = loadEventDetail({
-      session_key: sessionKey,
-      event_key: eventKey,
-    }).then((response) => {
+    const load = async () => {
+      if (!semanticLive.current.has(sessionKey)) return loadEventDetail({ session_key: sessionKey, event_key: eventKey });
+      const keys = [...new Set([...activeDetailKeys.current, eventKey])].slice(-16);
+      const update = await loadSessionUpdates(displayCache.current.request(sessionKey, "details", keys));
+      displayCache.current.apply(update);
+      const detail = displayCache.current.detail(sessionKey, eventKey);
+      if (!detail) throw new Error("Tool details changed; retry loading them");
+      return detail;
+    };
+    request = load().then((response) => {
       if (detailGeneration.current === generation) {
         writeCachedDetail(detailCache.current, cacheKey, response);
       }
@@ -493,7 +542,8 @@ export function useViewerState() {
 
   const invalidateEventDetails = useCallback((retainVisible: boolean) => {
     detailGeneration.current += 1;
-    detailCache.current.clear();
+    const owner = selectedSessionKeyRef.current;
+    for (const key of detailCache.current.keys()) if (!owner || key.startsWith(`${owner}:`)) detailCache.current.delete(key);
     detailLoads.current.clear();
     detailRequest.current += 1;
     expandedDetailRequest.current += 1;
@@ -545,14 +595,14 @@ export function useViewerState() {
     setExpandedActivities(new Map());
   }, []);
 
-  const invalidateTrajectoryPages = useCallback((reload: boolean) => {
+  const invalidateTrajectoryPages = useCallback((reload: boolean, changed?: ReadonlySet<string>) => {
     trajectoryPageGeneration.current += 1;
     trajectoryPageRequests.current.clear();
     const retained = new Map([...trajectoryPagesRef.current].map(([sessionKey, pages]) => [
       sessionKey,
       new Map([...pages].map(([key, page]) => [key, {
         ...page,
-        has_loaded: reload ? false : page.has_loaded,
+        has_loaded: reload && (!changed || changed.has(key) || page.events.some((event) => changed.has(event.event_key))) ? false : page.has_loaded,
         is_loading: false,
         is_loading_older: false,
         is_loading_newer: false,
@@ -617,6 +667,100 @@ export function useViewerState() {
     setFollowError(null);
   }, [selectedSessionKey]);
 
+
+  useEffect(() => {
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void listenForSessionNotifications((notification) => {
+      if (disposed) return;
+      const update = (session: SessionSummary) => session.session_key === notification.session_key ? { ...session, ...notification } : session;
+      setSessions((current) => current.map(update));
+      setSelectedSessionMetadata((current) => current ? update(current) : current);
+      const children = new Map(sessionChildrenRef.current);
+      for (const [key, page] of children) children.set(key, { ...page, sessions: page.sessions.map(update) });
+      sessionChildrenRef.current = children; setSessionChildren(children);
+    }).then((unlisten) => { if (disposed) unlisten(); else stop = unlisten; }).catch(() => {});
+    return () => { disposed = true; stop?.(); };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    const handle = (update: import("./types").SessionUpdate) => {
+      if (disposed || !displayCache.current.accepts(update) || displayCache.current.stale(update)) return;
+      const previousFinal = update.level === "final" ? displayCache.current.get(update.session_key, "final") : null;
+      const page = displayCache.current.apply(update);
+      if (update.session_key === selectedSessionKeyRef.current) {
+        if (update.level === "details") setExpandedDetailError(update.state.error ?? null);
+        else if (update.state.error) setEventsError(update.state.error);
+      }
+      if (!page) semanticLive.current.delete(update.session_key);
+      if (update.level === "details") {
+        for (const item of update.items) if (item.detail && item.event_key) writeCachedDetail(detailCache.current, `${update.session_key}:${item.event_key}`, item.detail);
+        for (const key of update.removed_items) if (key.startsWith("detail:")) detailCache.current.delete(`${update.session_key}:${key.slice(7)}`);
+        if (update.session_key === selectedSessionKeyRef.current && (update.items.some((item) => item.detail) || update.removed_items.length)) setDetailRevision((revision) => revision + 1);
+        return;
+      }
+      {
+        const questions = update.state.outstanding_questions ?? [];
+        const question_attention = { required_count: 0, available_count: 0 };
+        for (const question of questions) {
+          if (question.requires_input) question_attention.required_count += question.unanswered_count;
+          else question_attention.available_count += question.unanswered_count;
+        }
+        const newFinals = update.snapshot || update.level !== "final" ? 0 : update.items.filter((item) => item.kind === "assistant_message" && item.level === "final"
+          && !previousFinal?.events.some((event) => event.event_key === item.item_id)).length;
+        const updateSummary = (session: SessionSummary) => session.session_key === update.session_key
+          ? { ...session, question_attention, is_running: update.state.is_running ?? session.is_running, has_unread: newFinals > 0 || session.has_unread, unread_final_count: Math.max(session.unread_final_count ?? 0, newFinals) } : session;
+        setSessions((current) => current.map(updateSummary));
+        setSelectedSessionMetadata((current) => current ? updateSummary(current) : current);
+        const children = new Map(sessionChildrenRef.current);
+        for (const [key, child] of children) children.set(key, { ...child, sessions: child.sessions.map(updateSummary) });
+        sessionChildrenRef.current = children; setSessionChildren(children);
+      }
+      if (update.level === "final" || update.session_key !== selectedSessionKeyRef.current) return;
+      pushedPage.current = page;
+      pendingLiveReset.current ||= update.snapshot;
+      liveRefresh.current = true;
+      setPendingLiveActivity(!followingLive.current);
+      if (eventRefreshInFlight.current) liveUpdateQueued.current = true;
+      else setEventsAttempt((attempt) => attempt + 1);
+    };
+    onSessionUpdate.current = handle;
+    void listenForSessionUpdates(handle).then((unlisten) => { if (disposed) unlisten(); else stop = unlisten; })
+      .catch((error: unknown) => setEventsError(errorMessage(error)));
+    return () => { disposed = true; stop?.(); };
+  }, []);
+
+  const detailSubscriptionKey = JSON.stringify([selectedSessionKey, activeDetailKeys.current]);
+  useEffect(() => {
+    const sessionKey = selectedSessionKeyRef.current;
+    if (!sessionKey || !semanticLive.current.has(sessionKey)) return;
+    const keys = [...activeDetailKeys.current];
+    const refresh = () => {
+      void loadSessionUpdates(displayCache.current.request(sessionKey, "details", keys)).then((update) => {
+        displayCache.current.apply(update);
+        for (const item of update.items) if (item.detail && item.event_key) writeCachedDetail(detailCache.current, `${sessionKey}:${item.event_key}`, item.detail);
+        if (selectedSessionKeyRef.current === sessionKey && update.items.some((item) => item.detail)) setDetailRevision((revision) => revision + 1);
+      }).catch(() => {});
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 30_000);
+    return () => window.clearInterval(timer);
+  }, [detailSubscriptionKey, events]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (semanticSupported.current !== true || !selectedSessionKeyRef.current || eventRefreshInFlight.current) return;
+      for (const request of displayCache.current.backgroundRequests()) {
+        void loadSessionUpdates(request).then((update) => onSessionUpdate.current(update)).catch(() => {});
+      }
+      liveRefresh.current = true;
+      setEventsAttempt((attempt) => attempt + 1);
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
@@ -626,6 +770,12 @@ export function useViewerState() {
       if (!selectedSessionKeyRef.current) return;
       if (change.session_key === null && !change.reset) return;
       if (change.session_key !== null && change.session_key !== selectedSessionKeyRef.current) return;
+      if (change.session_key !== null && !change.reset && semanticLive.current.has(change.session_key)) return;
+      if (change.reset) {
+        displayCache.current.invalidate(change.session_key ?? undefined);
+        semanticLive.current.clear();
+        pushedPage.current = null;
+      }
       pendingLiveReset.current ||= change.reset;
       // Follow controls scrolling, not whether already displayed items update.
       // Keep tool/progress cards live while the reader is higher in the page.
@@ -805,12 +955,29 @@ export function useViewerState() {
     if (selectedSessionKeyRef.current === sessionKey) {
       return;
     }
+    const previousKey = selectedSessionKeyRef.current;
+    if (previousKey) {
+      sessionDisclosures.current.delete(previousKey);
+      sessionDisclosures.current.set(previousKey, { expanded_event_key: expandedEventKeyRef.current, selected_event_key: selectedEventKeyRef.current, inspector_open: inspectorOpen, manual_expansion: manualExpansion.current });
+      while (sessionDisclosures.current.size > 8) sessionDisclosures.current.delete(sessionDisclosures.current.keys().next().value!);
+      for (const level of ["steps", "details"] as const) {
+        const release = displayCache.current.release(previousKey, level);
+        if (release) void loadSessionUpdates(release).catch(() => {});
+      }
+      if (semanticLive.current.has(previousKey)) {
+        void loadSessionUpdates(displayCache.current.request(previousKey, "final")).then((update) => onSessionUpdate.current(update)).catch(() => {});
+      }
+    }
+    if (sessionKey) {
+      const release = displayCache.current.release(sessionKey, "final");
+      if (release) void loadSessionUpdates(release).catch(() => {});
+    }
+    displayCache.current.select(sessionKey);
     selectedSessionKeyRef.current = sessionKey;
     inspectorTriggerRef.current = null;
     eventsRequest.current += 1;
     eventsOwnerKeyRef.current = null;
     detailGeneration.current += 1;
-    detailCache.current.clear();
     detailLoads.current.clear();
     expandedDetailRequest.current += 1;
     clearTrajectoryPages();
@@ -818,15 +985,22 @@ export function useViewerState() {
     setSelectedSessionMetadata(metadata?.session_key === sessionKey ? metadata : null);
     setEventsOwnerKey(null);
     setInitialPageSessionKey(null);
-    setEvents([]);
-    setEventsLoading(sessionKey !== null);
-    setOlderCursor(null);
-    setNewerCursor(null);
+    pushedPage.current = null;
+    const cachedPage = sessionKey ? displayCache.current.get(sessionKey) : null;
+    liveRefresh.current = !!cachedPage;
+    if (cachedPage && sessionKey) {
+      eventsOwnerKeyRef.current = sessionKey;
+      setEventsOwnerKey(sessionKey);
+      setEvents(cachedPage.events);
+    } else setEvents([]);
+    setEventsLoading(sessionKey !== null && !cachedPage);
+    setOlderCursor(cachedPage?.previous_cursor ?? null);
+    setNewerCursor(cachedPage?.next_cursor ?? null);
     setOlderLoading(false);
     setNewerLoading(false);
-    setTotalEvents(null);
-    setHistoryStatus(null);
-    setOutstandingQuestions([]);
+    setTotalEvents(cachedPage?.total_events ?? null);
+    setHistoryStatus(cachedPage?.history_status ?? null);
+    setOutstandingQuestions(cachedPage?.outstanding_questions ?? []);
     setPageQuestionAttention(undefined);
     setQuestionNavigation(null);
     setEventsError(null);
@@ -839,7 +1013,13 @@ export function useViewerState() {
     setExpandedDetailLoading(false);
     setExpandedDetailError(null);
     applyEventSelection(null, false);
-  }, [applyEventSelection, applyExpandedEventKey, clearTrajectoryPages]);
+    const disclosure = sessionKey && cachedPage ? sessionDisclosures.current.get(sessionKey) : undefined;
+    if (disclosure) {
+      manualExpansion.current = disclosure.manual_expansion;
+      applyExpandedEventKey(disclosure.expanded_event_key);
+      applyEventSelection(disclosure.selected_event_key, disclosure.inspector_open);
+    }
+  }, [applyEventSelection, applyExpandedEventKey, clearTrajectoryPages, inspectorOpen]);
 
   const closeInspector = useCallback(() => {
     const trigger = inspectorTriggerRef.current;
@@ -1201,9 +1381,11 @@ export function useViewerState() {
     setEventsLoading(true);
     eventRefreshInFlight.current = true;
     const refreshExpansionRevision = expansionRevision.current;
+    const pushed = pushedPage.current;
+    pushedPage.current = null;
     const page = isLiveRefresh
-      ? refreshEventWindow(selectedSessionKey, loadEventPage)
-      : loadReadingWindow(selectedSessionKey, readReadingPosition(selectedSessionKey), loadEventPage,
+      ? pushed ? Promise.resolve(pushed) : refreshEventWindow(selectedSessionKey, loadDisplayPage)
+      : loadReadingWindow(selectedSessionKey, readReadingPosition(selectedSessionKey), loadDisplayPage,
         () => eventsRequest.current === requestId);
     void page
       .then(async (response) => {
@@ -1284,12 +1466,24 @@ export function useViewerState() {
             }));
           }
         }
-        invalidateEventDetails(isLiveRefresh && !reset);
+        const changed = displayCache.current.commit(selectedSessionKey, response);
+        if (isLiveRefresh && !reset && semanticLive.current.has(selectedSessionKey)) {
+          const previousEvents = new Map(events.map((event) => [event.event_key, event]));
+          for (const key of changed ?? []) detailCache.current.delete(`${selectedSessionKey}:${key}`);
+          for (const event of response.events) {
+            if (previousEvents.get(event.event_key) !== event) detailCache.current.delete(`${selectedSessionKey}:${event.event_key}`);
+          }
+          detailGeneration.current += 1;
+          detailLoads.current.clear();
+          setDetailRevision((revision) => revision + 1);
+        } else invalidateEventDetails(isLiveRefresh && !reset);
         if (isLiveRefresh && !reset) {
           // Invalidate in-flight child reads, but retain their displayed rows
           // until a fresh bounded child page arrives (no loading flicker).
-          invalidateTrajectoryPages(true);
+          invalidateTrajectoryPages(true, changed ?? undefined);
         }
+        const sourceError = (response as import("./types").EventPageResponse & { error?: string }).error;
+        if (sourceError) setEventsError(sourceError);
         setEvents(response.events);
         setOlderCursor(response.previous_cursor);
         setNewerCursor(response.next_cursor);
@@ -1344,6 +1538,7 @@ export function useViewerState() {
     eventsAttempt,
     invalidateEventDetails,
     invalidateTrajectoryPages,
+    loadDisplayPage,
     selectedSessionKey,
     updateTrajectoryPage,
   ]);

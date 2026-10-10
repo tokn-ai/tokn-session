@@ -54,3 +54,14 @@ pub async fn update_session_view(state: State<'_, ViewerService>, request: Sessi
     .await
     .map_err(|error| format!("session view update task failed: {error}"))?
 }
+
+#[tauri::command]
+pub async fn load_session_updates(
+  state: State<'_, ViewerService>,
+  request: tokn_viewer_core::updates::SessionUpdatesRequest,
+) -> Result<tokn_viewer_core::updates::SessionUpdate, String> {
+  let service = state.inner().clone();
+  tauri::async_runtime::spawn_blocking(move || service.load_session_updates(request))
+    .await
+    .map_err(|error| error.to_string())?
+}

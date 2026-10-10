@@ -9,26 +9,27 @@ Its composer sends messages to supported live sessions through their owning app.
 
 ## Relay lifetime and data modes
 
-By default the viewer starts **Automatic Relay** for its lifetime. It runs the
-Relay live feed in a headless child of the bundled viewer
-executable, over stdio. Shared `viewer-core` owns authoritative snapshots. Development and packaged
-builds need no separate Relay installation. The child stops when the app exits,
-including parent crashes; external Relay processes are never terminated.
+By default the viewer uses **Automatic Relay**. Indexed Automatic and Local
+modes share authoritative source readers in `viewer-core` and native file watches;
+there is no second child parsing the same session append. Polling recovers missed
+notifications. Development and packaged builds need no separate Relay install.
 
-The Relay panel offers Automatic, External, and Local history only modes.
-Automatic has optional native Inspector records (off by default). External
-connects to an independently configured `tokn-viewer-api snapshot` endpoint.
-Local explicitly clears Relay snapshots and resumes direct provider history.
-Automatic mode covers all six providers. Automatic
-uses the same provider-root environment overrides listed below as local reads.
+The Relay panel offers Automatic, External, and Local modes. Automatic supports
+optional native Inspector records (off by default). External connects to an
+independently configured `tokn-viewer-api snapshot` endpoint; its processes are
+never terminated by the viewer. All six providers use the same provider-root
+environment overrides as local reads.
 
-Startup/status is visible as Starting, Connecting, Live, Retrying, or Failed.
-Each child gets ten seconds to report readiness; up to three launch attempts
-use one-/two-second backoff. Retry starts a new attempt budget. Failures retain
-last-good snapshots without local fallback. Settings persist in app-config
-`relay.json`; legacy enabled connections keep their external endpoint, and
-legacy explicit disabled settings remain Local. Missing settings default to
-Automatic. Relay-backed sessions do not yet have durable unread tracking.
+Conversations receive semantic updates at final, steps, or details level.
+The frontend retains eight recent session displays, renders cached content on
+reopening, and catches up through revisioned snapshots/changes. Tool details
+are requested only when expanded or inspected. See
+[session update delivery](../../docs/viewer-session-updates.md).
+
+Settings persist in app-config `relay.json`; legacy enabled connections keep
+their external endpoint, and explicit disabled settings remain Local. Missing
+settings default to Automatic. External snapshots retain last-good content while
+reconnecting. Unindexed embeddings still support the managed-stdio Relay child.
 
 ## Development
 

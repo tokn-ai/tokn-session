@@ -12,23 +12,19 @@ directly through Tauri commands. In browser mode, the Rust `viewer-api` hosts
 the compiled frontend and exposes the HTTP/SSE adapter over the same origin.
 
 ```text
-Desktop UI → Tauri commands ─┐
-                            ├→ viewer-core → provider history / snapshot readers
-Browser → viewer-api (UI + HTTP/SSE) ──────┘ ↖ Relay live feed (managed stdio)
+Desktop UI → Tauri commands/events ─┐
+                                  ├→ viewer-core → shared source readers
+Browser → viewer-api (HTTP/SSE) ───┘
 ```
 
-`viewer-core` owns index queries, history, paging, trajectories, native Inspector
-detail, live message delivery, and the indexer. Automatic and Local list/search/tree requests read the
-durable SQLite index; conversations load on demand. One indexer holds the
-database lease, while other API/desktop processes read updates and can take over. Relay owns provider live-feed
-normalization and its stdout/ZeroMQ/managed-stdio transports. In automatic mode,
-the viewer host starts its own headless Relay child, reads versioned JSONL from
-stdout, and uses records to wake the indexer and authoritative snapshot readers
-in core. Snapshot reads do not wait for the child to become ready.
-Polling recovers startup gaps and missed records; the live feed is not a history
-store. Stdin EOF stops the child, including after parent death. No private TCP
-listener is needed for this managed connection. This is an architectural
-simplification, not a measured throughput claim.
+`viewer-core` owns index queries, semantic session updates, history, paging,
+trajectories, native Inspector detail, live input, and the indexer. Indexed
+Automatic and Local modes share authoritative readers and native file watches;
+conversations load on demand. One indexer holds the database lease, while other
+API/desktop processes follow its durable index. Polling recovers missed source
+notifications. Relay retains standalone normalization/feed transports and the
+managed child for unindexed embeddings. See [session update delivery](viewer-session-updates.md)
+for levels, frontend caches, revisions, and remaining serialization costs.
 
 ## Run locally
 
@@ -135,7 +131,7 @@ Tauri adapter, normally `{"request":{...}}`. Commands without a request take
 `{}`. Responses use the shared viewer-core models. Supported commands:
 
 - `list_sessions`, `list_session_children`
-- `load_event_page`, `load_trajectory_event_page`, `load_event_detail`
+- `load_session_updates`, `load_event_page`, `load_trajectory_event_page`, `load_event_detail`
 - `acknowledge_session_attention`
 - `update_session_view`
 - `get_session_index_progress`, `retry_session_index`, `get_relay_status`
@@ -147,7 +143,8 @@ does not grant access. The API allows at most 16 concurrent command requests,
 32 SSE clients, and 1 MiB request bodies. Error responses contain `error`;
 invalid JSON/body-limit responses may be plain text.
 
-Modern viewers request `load_event_page` with `window_mode: "retained"` and
+Modern viewers use `load_session_updates` and `session-updated` events for level-based
+semantic delivery. The history compatibility API requests `load_event_page` with `window_mode: "retained"` and
 `direction: "backward"` to receive the complete resident history window,
 initially three user turns. `window_mode: "earlier"` with its `previous_cursor`
 extends that window by three turns and returns the complete expanded window.
@@ -178,16 +175,17 @@ changing its target or text is rejected. A disconnected caller does not cancel
 delivery already in progress. Never automatically retry an unknown outcome.
 
 `GET /api/v1/events` is SSE with a `ready` handshake and 15-second heartbeats.
-Named events match Tauri: `relay-changed`, `relay-status`,
-`session-index-changed`, and `session-index-progress`. Events invalidate data;
-they are not complete transcript payloads. A lagging subscriber disconnects.
-The browser retries, then reloads catalog, selected timeline, index progress,
-and Relay status. Reconnects establish a fresh progress-revision baseline for
-API restarts; stale in-flight responses cannot override new state. Event pages
-include `follow_error` while a follower retries, preserving last-good cards
-with a visible stale-data warning until recovery. The browser shows its
+Named events match Tauri: `session-updated`, `session-notification`,
+`relay-changed`, `relay-status`, `session-index-changed`, and
+`session-index-progress`. Session updates carry changed semantic objects;
+legacy relay/index events retain invalidation/recovery behavior. A lagging subscriber disconnects.
+The browser retries, then reloads the catalog and selected timeline so missed
+notifications cannot leave stale data indefinitely. Reconnects also refresh index progress and Relay status, establish a fresh progress
+revision baseline after restarts, and reject stale in-flight responses. Event pages
+include `follow_error` while followers retry, preserving last-good cards with a
+visible stale-data warning until recovery. The browser shows its
 connection state and preserves last-received data during temporary outages.
-Ctrl-C closes event streams and stops the managed child.
+Ctrl-C closes event streams and stops background readers.
 
 The legacy local snapshot/follow protocol now lives in viewer-core and can be
 started with `tokn-viewer-api snapshot --bind tcp://127.0.0.1:5557 [--native]`.

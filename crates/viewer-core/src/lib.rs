@@ -1,5 +1,6 @@
 //! Shared viewer domain and runtime. Both Tauri and HTTP adapters consume
-//! this crate; Relay provides live-feed hints while core owns snapshots.
+//! this crate; core owns snapshots and semantic delivery, while standalone
+//! Relay supplies provider feeds.
 mod index_queries;
 mod indexer;
 mod input;
@@ -15,6 +16,7 @@ mod service_metadata;
 pub mod service_protocol;
 pub mod service_server;
 mod service_source;
+pub mod updates;
 mod watcher;
 pub use service::ViewerService;
 use tokn_session_relay::{RelayConfig, RelayRecord};

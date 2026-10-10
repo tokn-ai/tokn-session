@@ -50,6 +50,18 @@ impl ViewerService {
   }
 
   pub(super) fn load_retained_event_page(&self, request: EventPageRequest) -> Result<EventPage, String> {
+    self.load_retained_pages(request, false).map(|(page, _)| page)
+  }
+
+  pub(crate) fn load_update_pages(&self, request: EventPageRequest) -> Result<(EventPage, Vec<EventSummary>), String> {
+    self.load_retained_pages(request, true)
+  }
+
+  fn load_retained_pages(
+    &self,
+    request: EventPageRequest,
+    include_semantic: bool,
+  ) -> Result<(EventPage, Vec<EventSummary>), String> {
     if request.offset.is_some() || !matches!(request.direction, PageDirection::Backward) {
       return Err("History windows require backward pagination without an offset".into());
     }
@@ -130,17 +142,38 @@ impl ViewerService {
         ))
       })
       .collect::<Vec<_>>();
-    Ok(EventPage {
-      total_events: events.len(),
-      events,
-      next_cursor: None,
-      previous_cursor: has_earlier
-        .then(|| encode_history_cursor(identity.generation.as_deref(), identity.event_offset + start)),
-      history_status: loaded.history_status.into(),
-      follow_error: self.page_follow_error(&locator),
-      attention_revision,
-      outstanding_questions: outstanding_questions(&loaded.events, &identity),
-    })
+    // Intermediate assistant messages and individual tool operations remain
+    // semantic objects even when the current UI folds them into a trajectory.
+    let semantic = if include_semantic {
+      base_timeline_entries(&loaded.events)
+        .iter()
+        .filter(|entry| timeline_entry_start_source_event_index(entry).is_some_and(|index| index >= start))
+        .map(|entry| {
+          identity.summary(timeline_entry_event_summary(
+            entry,
+            &loaded.events,
+            &targets,
+            &intermediate_usage,
+          ))
+        })
+        .collect()
+    } else {
+      Vec::new()
+    };
+    Ok((
+      EventPage {
+        total_events: events.len(),
+        events,
+        next_cursor: None,
+        previous_cursor: has_earlier
+          .then(|| encode_history_cursor(identity.generation.as_deref(), identity.event_offset + start)),
+        history_status: loaded.history_status.into(),
+        follow_error: self.page_follow_error(&locator),
+        attention_revision,
+        outstanding_questions: outstanding_questions(&loaded.events, &identity),
+      },
+      semantic,
+    ))
   }
 }
 

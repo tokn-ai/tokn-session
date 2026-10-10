@@ -27,6 +27,15 @@ pub(super) async fn command(State(state): State<ApiState>, Json(mut share): Json
   if share.command == "events" {
     return events(state, share.session_keys).await;
   }
+  let subscription_id = (share.command == "load_session_updates")
+    .then(|| {
+      share
+        .payload
+        .get("request")
+        .and_then(|request| request.get("subscription_id"))
+        .cloned()
+    })
+    .flatten();
   if let Err(message) = prepare(&mut share) {
     return error(StatusCode::FORBIDDEN, message).into_response();
   }
@@ -60,7 +69,12 @@ pub(super) async fn command(State(state): State<ApiState>, Json(mut share): Json
   })
   .await;
   match result {
-    Ok(Ok(value)) => Json(value).into_response(),
+    Ok(Ok(mut value)) => {
+      if let Some(id) = subscription_id {
+        value["subscription_id"] = id;
+      }
+      Json(value).into_response()
+    }
     // An index failure can contain paths/provider details outside this share.
     // Do not relay raw diagnostics from shared service internals to guests.
     Ok(Err((status, _))) => error(status, "Shared session request failed or is no longer available").into_response(),
@@ -95,6 +109,32 @@ fn prepare(share: &mut SharedRequest) -> Result<(), &'static str> {
         .and_then(Value::as_str)
         .ok_or("Missing session key")?;
       check(key)
+    }
+    "load_session_updates" => {
+      let request = request
+        .and_then(Value::as_object_mut)
+        .ok_or("Missing subscription request")?;
+      check(
+        request
+          .get("session_key")
+          .and_then(Value::as_str)
+          .ok_or("Missing session key")?,
+      )?;
+      let id = request
+        .get("subscription_id")
+        .and_then(Value::as_str)
+        .ok_or("Missing subscription identity")?;
+      if id.is_empty() || id.len() > 128 {
+        return Err("Invalid subscription identity");
+      }
+      let digest = Sha256::digest(format!("subscription\0{}\0{id}", share.principal).as_bytes());
+      let mut scoped_id = String::from("share_");
+      for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(scoped_id, "{byte:02x}");
+      }
+      request.insert("subscription_id".into(), Value::String(scoped_id));
+      Ok(())
     }
     "update_session_view" => {
       let request = request.and_then(Value::as_object_mut).ok_or("Missing view request")?;
@@ -161,6 +201,27 @@ mod tests {
       command: command.into(),
       payload,
     }
+  }
+
+  #[test]
+  fn subscriptions_are_scoped_to_both_session_and_principal() {
+    let payload = json!({"request":{"session_key":"allowed","subscription_id":"same"}});
+    let mut first = request("load_session_updates", payload.clone());
+    let mut second = request("load_session_updates", payload);
+    second.principal = "another".into();
+    prepare(&mut first).unwrap();
+    prepare(&mut second).unwrap();
+    assert_ne!(
+      first.payload["request"]["subscription_id"],
+      second.payload["request"]["subscription_id"]
+    );
+    assert!(
+      prepare(&mut request(
+        "load_session_updates",
+        json!({"request":{"session_key":"hidden","subscription_id":"same"}})
+      ))
+      .is_err()
+    );
   }
 
   #[test]

@@ -1,0 +1,84 @@
+import { describe, expect, it } from "vitest";
+import { SessionDisplayCache } from "./sessionDisplayCache";
+import type { EventSummary, SessionUpdate } from "./types";
+
+function summary(id: string, text = id): EventSummary {
+  return { event_key: id, type: "message", provider: "codex", timestamp: null, phase: "finished", role: "assistant", title: "Assistant", summary: text, summary_truncated: false, is_hidden: false, is_bookkeeping: false, is_error: null, tool: null, usage: null, reasoning: null, trajectory: null, agent_activity: null, compaction: null };
+}
+function snapshot(cache: SessionDisplayCache, key: string, ids = ["a"]): SessionUpdate {
+  const request = cache.request(key);
+  return { ...request, generation: "source", revision: "1", base_revision: null, snapshot: true,
+    items: ids.map((id) => ({ item_id: id, kind: "assistant_message", level: "final", summary: summary(id) })), groups: [], item_order: ids,
+    removed_items: [], state: { total_events: ids.length, history_status: "complete", previous_cursor: null, next_cursor: null, outstanding_questions: [] } };
+}
+
+describe("session display replicas", () => {
+  it("applies changed items while retaining unchanged references", () => {
+    const cache = new SessionDisplayCache(); const initial = snapshot(cache, "one", ["a", "b"]);
+    const first = cache.apply(initial)!;
+    const next = cache.apply({ ...initial, snapshot: false, base_revision: "1", revision: "2", item_order: null,
+      items: [{ ...initial.items[1], summary: summary("b", "updated") }] })!;
+    expect(next.events[0]).toBe(first.events[0]); expect(next.events[1].summary).toBe("updated");
+  });
+
+  it("requires a snapshot after a revision gap and ignores foreign subscriptions", () => {
+    const cache = new SessionDisplayCache(); const initial = snapshot(cache, "one"); cache.apply(initial);
+    expect(cache.apply({ ...initial, subscription_id: "other" })).toBeNull();
+    expect(cache.get("one")).not.toBeNull();
+    expect(cache.apply({ ...initial, snapshot: false, base_revision: "missing", revision: "3" })).toBeNull();
+    expect(cache.get("one")).toBeNull(); expect(cache.apply({ ...initial, revision: "4" })).not.toBeNull();
+  });
+
+  it("buffers updates that arrive before the initial snapshot response", () => {
+    const cache = new SessionDisplayCache(); const initial = snapshot(cache, "one");
+    cache.apply({ ...initial, snapshot: false, base_revision: "1", revision: "2", item_order: null,
+      items: [{ ...initial.items[0], summary: summary("a", "newest") }] });
+    expect(cache.apply(initial)?.events[0].summary).toBe("newest");
+  });
+
+  it("does not regress a newer push when an older request completes", () => {
+    const cache = new SessionDisplayCache(); const initial = snapshot(cache, "one"); cache.apply(initial);
+    cache.apply({ ...initial, snapshot: false, base_revision: "1", revision: "2", item_order: null,
+      items: [{ ...initial.items[0], summary: summary("a", "newest") }] });
+    expect(cache.apply(initial)?.events[0].summary).toBe("newest");
+  });
+
+  it("keeps final coverage separate from steps coverage", () => {
+    const cache = new SessionDisplayCache(); const initial = snapshot(cache, "one"); cache.apply(initial);
+    const final = cache.request("one", "final");
+    cache.apply({ ...initial, ...final, revision: "9", items: [], item_order: [] });
+    expect(cache.request("one").cursor).toBe("1"); expect(cache.request("one", "final").cursor).toBe("9");
+  });
+
+  it("preserves references when a catch-up snapshot contains identical messages", () => {
+    const cache = new SessionDisplayCache(); const initial = snapshot(cache, "one"); const first = cache.apply(initial)!;
+    const next = cache.apply({ ...initial, items: [{ ...initial.items[0], summary: { ...initial.items[0].summary! } }] })!;
+    expect(next.events[0]).toBe(first.events[0]);
+  });
+
+  it("evicts recent sessions by user access rather than background activity", () => {
+    const cache = new SessionDisplayCache(); cache.select("selected"); cache.apply(snapshot(cache, "selected"));
+    for (let i = 0; i < 7; i++) cache.apply(snapshot(cache, `session-${i}`));
+    const old = snapshot(cache, "session-0"); cache.apply({ ...old, revision: "2" });
+    cache.apply(snapshot(cache, "new"));
+    expect(cache.get("selected")).not.toBeNull(); expect(cache.get("session-0")).toBeNull(); expect(cache.get("new")).not.toBeNull();
+  });
+
+  it("can drop a subscription while retaining display content", () => {
+    const cache = new SessionDisplayCache(); const initial = snapshot(cache, "one"); cache.apply(initial);
+    const release = cache.release("one", "steps"); expect(release?.unsubscribe).toBe(true);
+    expect(cache.accepts(initial)).toBe(false); expect(cache.get("one")).not.toBeNull();
+    expect(cache.request("one").subscription_id).not.toBe(initial.subscription_id);
+  });
+  it("compares committed snapshots correctly across coalesced pushes", () => {
+    const cache = new SessionDisplayCache(); const initial = snapshot(cache, "one", ["a", "b"]);
+    const first = cache.apply(initial)!; cache.commit("one", first);
+    const second = cache.apply({ ...initial, snapshot: false, base_revision: "1", revision: "2", item_order: null,
+      items: [{ ...initial.items[0], summary: summary("a", "updated a") }] })!;
+    const third = cache.apply({ ...initial, snapshot: false, base_revision: "2", revision: "3", item_order: null,
+      items: [{ ...initial.items[1], summary: summary("b", "updated b") }] })!;
+    expect([...cache.commit("one", second)!]).toEqual(["a"]);
+    expect([...cache.commit("one", third)!]).toEqual(["b"]);
+  });
+
+});
