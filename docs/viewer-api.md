@@ -151,7 +151,7 @@ invalid JSON/body-limit responses may be plain text.
 Modern viewers use `load_session_updates` and `session-updated` events for level-based
 semantic delivery. The history compatibility API requests `load_event_page` with `window_mode: "retained"` and
 `direction: "backward"` to receive the complete resident history window,
-initially three user turns. `window_mode: "earlier"` with its `previous_cursor`
+initially the latest user turn. `window_mode: "earlier"` with its `previous_cursor`
 extends that window by three turns and returns the complete expanded window.
 Both window modes require explicit `direction: "backward"` and omit `offset`;
 omitting direction selects the legacy default `forward` and is rejected.

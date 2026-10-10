@@ -511,7 +511,7 @@ mod tests {
       .unwrap();
     assert!(backward.snapshot);
     assert_eq!(backward.generation, ack["generation"]);
-    assert_eq!(backward.state["scope"]["history"], "latest_turn");
+    assert_eq!(backward.state["scope"]["history"], "recent_turns");
     assert!(
       backward
         .items
@@ -861,7 +861,10 @@ mod tests {
       level: crate::updates::UpdateLevel::Steps,
       cursor: None,
       detail_keys: vec![],
-      scope: Some(crate::updates::UpdateScope::default()),
+      scope: Some(crate::updates::UpdateScope {
+        history: crate::updates::HistoryScope::RecentTurns,
+        ..Default::default()
+      }),
       history_cursor: None,
       unsubscribe: false,
     };
@@ -871,7 +874,7 @@ mod tests {
       .await
       .unwrap()
       .unwrap();
-    assert_eq!(first.items.len(), 1, "opening projects only the newest turn");
+    assert_eq!(first.items.len(), 3, "opening projects three recent turns");
     let history_service = service.clone();
     let history_cursor = initial.previous_cursor.clone();
     let history = tokio::task::spawn_blocking(move || {

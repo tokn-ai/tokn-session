@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 pub enum HistoryScope {
   #[default]
   LatestTurn,
+  RecentTurns,
   Retained,
 }
 
@@ -102,7 +103,7 @@ pub(super) fn project(
   scope: &mut UpdateScope,
   include_all: bool,
 ) -> (Value, Vec<Value>, Vec<Value>) {
-  let start = if scope.history == HistoryScope::LatestTurn {
+  let start = if scope.history != HistoryScope::Retained {
     scope
       .turn_key
       .as_ref()
@@ -110,13 +111,21 @@ pub(super) fn project(
       .or_else(|| {
         semantic
           .iter()
-          .rposition(|item| item["type"] == "message" && item["role"] == "user")
+          .enumerate()
+          .rev()
+          .filter(|(_, item)| item["type"] == "message" && item["role"] == "user")
+          .nth(if scope.history == HistoryScope::RecentTurns {
+            crate::service_history::INITIAL_HISTORY_TURNS - 1
+          } else {
+            0
+          })
+          .map(|(index, _)| index)
       })
       .unwrap_or(0)
   } else {
     0
   };
-  if scope.history == HistoryScope::LatestTurn {
+  if scope.history != HistoryScope::Retained {
     scope.turn_key = semantic.get(start).map(|item| key(item).to_owned());
   }
   let selected = &semantic[start..];
@@ -272,6 +281,49 @@ mod tests {
     );
     assert!(!items.iter().any(|item| item["type"] == "tool_call"));
   }
+  #[test]
+  fn recent_turns_include_three_prompts_and_pin_the_start_across_appends() {
+    let semantic = (0..5)
+      .flat_map(|index| {
+        [
+          message(&format!("user-{index}"), "user"),
+          message(&format!("answer-{index}"), "assistant"),
+        ]
+      })
+      .collect::<Vec<_>>();
+    let page = json!({"events":semantic,"outstanding_questions":[]});
+    let mut scope = UpdateScope {
+      history: HistoryScope::RecentTurns,
+      ..Default::default()
+    };
+    let (_, items, _) = project(page.clone(), semantic.clone(), vec![], &mut scope, false);
+    assert_eq!(scope.turn_key.as_deref(), Some("user-2"));
+    assert_eq!(items.len(), 6);
+    let mut appended = semantic;
+    appended.push(message("user-5", "user"));
+    let (_, items, _) = project(
+      json!({"events":appended,"outstanding_questions":[]}),
+      appended,
+      vec![],
+      &mut scope,
+      false,
+    );
+    assert_eq!(items.len(), 7);
+    assert_eq!(scope.turn_key.as_deref(), Some("user-2"));
+    let small = vec![message("only", "user"), message("reply", "assistant")];
+    let (_, items, _) = project(
+      json!({"events":small,"outstanding_questions":[]}),
+      small,
+      vec![],
+      &mut UpdateScope {
+        history: HistoryScope::RecentTurns,
+        ..Default::default()
+      },
+      false,
+    );
+    assert_eq!(items.len(), 2);
+  }
+
   #[test]
   fn interests_deliver_one_whole_group_and_history_can_expand_independently() {
     let (page, semantic) = fixture();

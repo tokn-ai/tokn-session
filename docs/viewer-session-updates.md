@@ -19,8 +19,9 @@ remain on SSE; modern clients exclude session updates from that stream.
 `subscribe_session` returns only identity, generation, and revision. It does
 not read or send session history. Initial registration has revision zero and
 publication waits for its backward baseline. `load_session_backward` returns
-a snapshot at the requested level, defaulting to `steps` with the latest turn
-and collapsed inner groups. History pagination uses a separate `history_cursor`;
+a snapshot at the requested level, defaulting to `steps` with the latest three turns
+and collapsed inner groups (`recent_turns` scope). The older `latest_turn` scope
+remains available for callers explicitly requesting one turn. History pagination uses a separate `history_cursor`;
 explicit earlier loading expands the retained range. Subscribing and publishing
 share the update-store lock with backward loading, so changes cannot escape
 between snapshot capture and baseline registration. Frontend replicas buffer
@@ -88,10 +89,38 @@ position. Each level has independent revision coverage; receiving final events
 does not advance steps coverage. Source events at `all` remain separate from
 folded display objects. Native inspection is independently opt-in.
 
+## Local opening diagnostics
+
+Cold source loading happens before taking the shared subscription lock; snapshot
+capture and publication still share that lock. One slow cold session therefore
+does not hold up unrelated live subscriptions while its source reader starts.
+Codex window readers resolve lineage, scan backward to the latest explicit turn
+start, seed the normalizer from session metadata, and decode only that suffix.
+Earlier requests prepend three turns; ordinary polls retain the loaded range.
+Split tool results widen the source range to their invocation before publication,
+including late live outputs. Completed lifecycle items already contain their
+own display context. Dependency widening is bounded, with a full-reader fallback
+for distant/missing invocations. Missing turn checkpoints and thread-spawn
+filtering also use the full reader. Inherited prefix metadata, cutoffs and file
+guards remain verified; omitted body parsing/validation waits until loading.
+The tolerant decoder avoids temporary payload clones.
+
+For a read-only source timing probe, save a JSON object containing `source_path`
+and `session_id`, then run:
+
+```sh
+TOKN_PROFILE_SOURCE=/path/to/source-metadata.json TOKN_PROFILE_ROOT=/path/to/codex/sessions \
+  cargo test -p tokn-viewer-core profile_local_codex_open -- --ignored --nocapture
+```
+
+It prints lineage/decode/reader timings and source/window counts, never message
+contents. Debug timings are diagnostic, not desktop release benchmarks.
+
 ## Remaining costs
 
-Source readers may still retain/normalize a broader window than the selected
-projection. Initial retained source delivery covers three recent turns. Earlier
+Other providers and Codex correctness fallbacks still normalize full history.
+Codex source windows can be broader than the selected projection when dependencies
+require earlier context. Initial delivery covers the latest three turns and required context. Earlier
 source-window expansion can resend the retained window between source service
 and viewer-core. Projection still rebuilds retained timelines and tool assembly
 before comparison, under the shared subscription lock; this work has not been

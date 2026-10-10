@@ -27,6 +27,9 @@ pub(crate) struct Snapshot {
   pub records: History,
   pub entry: CatalogEntry,
   pub error: Option<String>,
+  /// Opaque generation-scoped anchor, not a count of omitted events.
+  pub event_base: usize,
+  pub has_earlier: bool,
 }
 
 fn generation() -> String {
@@ -52,6 +55,9 @@ pub(crate) struct SessionReader {
   root: PathBuf,
   version: Vec<Option<FileVersion>>,
   codex_history: Option<tokn_session_codex::CodexHistoryReader>,
+  window_anchor: Option<(String, usize)>,
+  window_shapes: Vec<(String, usize)>,
+  preserve_window_anchor: bool,
   cancel: Option<CancellationToken>,
   pub snapshot: Snapshot,
 }
@@ -71,15 +77,36 @@ impl SessionReader {
     Self::new_with_cancel(entry, native, root, Some(cancel))
   }
 
+  pub fn new_window_cancellable(
+    entry: CatalogEntry,
+    native: bool,
+    root: PathBuf,
+    cancel: CancellationToken,
+  ) -> Result<Self, String> {
+    Self::new_with_mode(entry, native, root, Some(cancel), true)
+  }
+
   fn new_with_cancel(
     entry: CatalogEntry,
     native: bool,
     root: PathBuf,
     cancel: Option<CancellationToken>,
   ) -> Result<Self, String> {
+    Self::new_with_mode(entry, native, root, cancel, false)
+  }
+
+  fn new_with_mode(
+    entry: CatalogEntry,
+    native: bool,
+    root: PathBuf,
+    cancel: Option<CancellationToken>,
+    window: bool,
+  ) -> Result<Self, String> {
     check_cancelled(cancel.as_ref())?;
     let mut reader = Self {
-      file: if matches!(entry.provider, Provider::Codex | Provider::Pi) {
+      file: if matches!(entry.provider, Provider::Codex | Provider::Pi)
+        && !(window && entry.provider == Provider::Codex)
+      {
         Some(FileState::for_snapshot(
           entry.header.path.clone(),
           entry.provider,
@@ -97,7 +124,17 @@ impl SessionReader {
       native,
       root,
       version: Vec::new(),
-      codex_history: None,
+      codex_history: (window && entry.provider == Provider::Codex).then(|| {
+        tokn_session_codex::CodexHistoryReader::new_window(
+          entry.header.path.clone(),
+          native,
+          crate::service_protocol::MAX_SNAPSHOT_BYTES,
+          crate::service_history::INITIAL_HISTORY_TURNS,
+        )
+      }),
+      window_anchor: None,
+      window_shapes: Vec::new(),
+      preserve_window_anchor: false,
       cancel,
       snapshot: Snapshot {
         generation: generation(),
@@ -105,6 +142,8 @@ impl SessionReader {
         records: History::new()?,
         entry,
         error: None,
+        event_base: 0,
+        has_earlier: false,
       },
     };
     reader.poll()?;
@@ -115,6 +154,31 @@ impl SessionReader {
     check_cancelled(self.cancel.as_ref())?;
     let result = self.poll_source();
     check_cancelled(self.cancel.as_ref())?;
+    result
+  }
+
+  pub fn ensure_history(&mut self, window: Option<(Option<usize>, Option<usize>)>) -> Result<bool, String> {
+    if !self.snapshot.has_earlier {
+      return Ok(false);
+    }
+    let expand = match window {
+      None => Some(None),
+      Some((_, before)) if before.is_some_and(|before| before <= self.snapshot.event_base) => {
+        Some(Some(crate::service_history::HISTORY_TURNS))
+      }
+      _ => None,
+    };
+    let Some(turns) = expand else {
+      return Ok(false);
+    };
+    self
+      .codex_history
+      .as_mut()
+      .ok_or("Missing lazy Codex reader")?
+      .expand(turns);
+    self.preserve_window_anchor = true;
+    let result = self.poll();
+    self.preserve_window_anchor = false;
     result
   }
 
@@ -142,8 +206,11 @@ impl SessionReader {
       return self.poll_database(version);
     }
     if self.snapshot.entry.provider == Provider::Codex {
-      let source = tokn_session_codex::CodexSessionSource::new(Some(self.root.clone()));
-      if source.history_segments(path)?.len() > 1 {
+      // Detect inherited history from the owning header. The history reader
+      // resolves and validates the lineage itself; doing it here would walk
+      // the provider roots and verify every prefix twice on a cold open.
+      let header = tokn_session_codex::history_header(path)?;
+      if !header.native()["payload"]["history_base"].is_null() {
         self.codex_history = Some(tokn_session_codex::CodexHistoryReader::new(
           path.clone(),
           self.native,
@@ -257,6 +324,33 @@ impl SessionReader {
     if update.reference.id != self.snapshot.entry.header.id {
       return Err("Relay session identity changed; refresh the catalog".into());
     }
+    let shapes = if update.source_start.is_some() || self.window_anchor.is_some() {
+      update
+        .records
+        .iter()
+        .map(|record| (record.record_id.clone(), record.events.len()))
+        .collect::<Vec<_>>()
+    } else {
+      Vec::new()
+    };
+    let mut base = self.snapshot.event_base;
+    let mut anchor = self.window_anchor.clone();
+    let mut preserve = false;
+    if update.reset {
+      if self.preserve_window_anchor
+        && let Some((id, position)) = &anchor
+        && let Some(index) = shapes.iter().position(|(candidate, _)| candidate == id)
+        && shapes[index..] == self.window_shapes
+      {
+        base = position
+          .checked_sub(shapes[..index].iter().map(|(_, events)| events).sum::<usize>())
+          .ok_or("Codex history position overflow")?;
+        preserve = true;
+      } else {
+        base = usize::try_from(update.source_start.unwrap_or(0)).map_err(|_| "Codex history position overflow")?;
+      }
+      anchor = shapes.first().map(|(id, _)| (id.clone(), base));
+    }
     let context = SessionContext::from_session_ref(Provider::Codex, &update.reference);
     let mut records = Vec::with_capacity(update.records.len());
     for record in update.records {
@@ -269,7 +363,19 @@ impl SessionReader {
       };
       records.push(record);
     }
+    let generation = self.snapshot.generation.clone();
     self.commit_records(&records, update.reset)?;
+    if preserve {
+      self.snapshot.generation = generation;
+    }
+    self.snapshot.event_base = base;
+    self.snapshot.has_earlier = update.source_start.is_some_and(|start| start > 0);
+    self.window_anchor = anchor;
+    if update.reset {
+      self.window_shapes = shapes;
+    } else {
+      self.window_shapes.extend(shapes);
+    }
     self.snapshot.entry.header.title = update.reference.title;
     self.snapshot.entry.header.preview = update.reference.preview;
     self.snapshot.entry.header.cwd = update.reference.cwd;
