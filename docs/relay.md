@@ -201,24 +201,20 @@ Any local process can connect; `--native` may expose sensitive provider data.
 
 ### Viewer connection
 
-The viewer defaults to **Automatic Relay**: it launches a headless child of its
-own executable, sending coalesced session hints over stdio to viewer-core snapshot readers. The
-shipped app needs no separate Relay installation or PATH lookup. The child uses
-the same provider-root environment overrides as local history. A readiness record precedes the JSONL live stream. Core owns snapshots
-and wakes only the changed session readers, retaining polling for recovery. Codex roots verified as the active home's `sessions` or
+The indexed viewer defaults to **Automatic Relay**, using viewer-core's shared
+source readers and native index watches directly. Local uses the same readers.
+Polling recovers missed notifications; a second live-feed child no longer parses
+the same append. The shipped app needs no separate Relay installation or PATH
+lookup. Codex roots verified as the active home's `sessions` or
 `archived_sessions` retain that home's title/preview metadata without parsing
 transcript bodies. Unrelated explicit directories do not inherit this metadata.
-The app closes a lifetime pipe and reaps its child on exit/mode changes;
-the child also exits on EOF if its parent crashes. Startup has a ten-second
-timeout. Failures/crashes get at most three launch attempts with one-/two-second
-backoff, then show Failed with an explicit Retry. Other Relay processes are
-never stopped.
-The version-2 managed pipe carries batches of at most 256 provider/path/session
-identities, with an 8 MiB frame limit. Batches split by byte size as well as
-count; an individually oversized identity is skipped with a warning while
-later hints continue. Transcript/native payloads never cross
-that pipe, so large source records still produce refresh hints. Reader wakes
-coalesce for 50 ms of quiet, capped at 200 ms during sustained writes.
+
+Unindexed embeddings retain the managed Relay child: versioned stdout JSONL,
+stdin EOF lifetime, a ten-second readiness timeout, and up to three startup
+attempts. Oversized 8 MiB pipe records are skipped with a stderr warning.
+Standalone Relay stdout/ZeroMQ behavior is unchanged. Other Relay processes are
+never stopped. See [session update delivery](viewer-session-updates.md) for the
+viewer contract and cache ownership.
 
 The panel persists `mode` (`automatic`, `external`, or `local`), external
 `endpoint`, and `include_native` in app config `relay.json`. Native is off by
@@ -236,7 +232,7 @@ received snapshots between timeline, trajectories and Inspector. Covered provide
 bypass local body indexing/reading. Uncovered providers retain local history.
 Connection failures and automatic child restarts retain last-good committed
 data without local fallback. Catalog and session connections are cancelled
-before reattaching the managed feed and core snapshots.
+before reattaching core snapshots (and the feed in unindexed embeddings).
 
 Live updates refresh the loaded event window and expanded trajectory items,
 including while reading older events. Scrolling follows only at the bottom;

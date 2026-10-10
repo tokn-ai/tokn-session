@@ -369,6 +369,7 @@ export interface TrajectoryCardSummary {
 }
 
 export interface EventSummary {
+  delivery?: "commentary" | "final" | "unspecified";
   event_key: string;
   /** Stable source slot, used only to restore disclosure after a generation reset. */
   slot_key?: string | null;
@@ -524,4 +525,48 @@ export interface ExpandedActivityState {
   detail: EventDetail | null;
   error: string | null;
   is_loading: boolean;
+}
+
+export type UpdateLevel = "final" | "steps" | "details" | "all";
+export interface SessionUpdateItem {
+  item_id: string;
+  kind: "user_message" | "assistant_message" | "notification" | "tool_summary" | "detail" | "work_summary" | "event";
+  level: UpdateLevel;
+  summary?: EventSummary;
+  event_key?: string;
+  detail?: EventDetail;
+  event?: EventDetail;
+  notification?: { type: string; message: string };
+}
+export interface SessionUpdate {
+  subscription_id: string;
+  session_key: string;
+  level: UpdateLevel;
+  generation: string;
+  base_revision: string | null;
+  revision: string;
+  snapshot: boolean;
+  items: SessionUpdateItem[];
+  groups?: SessionUpdateItem[];
+  semantic_order?: string[] | null;
+  event_order?: string[] | null;
+  removed_items: string[];
+  item_order: string[] | null;
+  state: Omit<EventPageResponse, "events"> & { is_running?: boolean; error?: string };
+}
+export interface SessionUpdatesRequest {
+  subscription_id: string;
+  session_key: string;
+  level: UpdateLevel;
+  cursor: string | null;
+  detail_keys: string[];
+  unsubscribe?: boolean;
+}
+
+export interface SessionNotification {
+  session_key: string;
+  has_unread: boolean;
+  unread_final_count: number;
+  is_running: boolean;
+  question_attention: SessionSummary["question_attention"];
 }

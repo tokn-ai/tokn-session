@@ -59,8 +59,8 @@ the last committed window.
 
 ## Modes and limits
 
-Automatic and indexed Local mode share the same embedded window reader. Local
-does not start the managed Relay child. External mode uses the additive
+Automatic and indexed Local mode share the same embedded window reader and
+native index watches; neither starts a redundant managed Relay child. External mode uses the additive
 `follow_window` snapshot request and requires an updated snapshot server.
 Legacy `follow` and row-based event-page requests still expose full history.
 
@@ -85,3 +85,5 @@ Monotonic lease revisions prevent a delayed update from reversing a release.
 Multiple views can protect the same session; switching machines releases the
 old machine's lease using its original transport. No view lease changes unread
 state.
+
+Frontend replicas and semantic delivery levels are described in [session updates](viewer-session-updates.md).

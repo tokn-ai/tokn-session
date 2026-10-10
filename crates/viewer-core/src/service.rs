@@ -86,6 +86,7 @@ pub struct ViewerService {
   failed_body_jobs: Arc<Mutex<HashMap<(SourceKey, String), FailedBodyJob>>>,
   loaded_session_cache: Arc<Mutex<Option<CachedSession>>>,
   input_broker: crate::input::InputBroker,
+  pub(crate) updates: Arc<Mutex<crate::updates::UpdateStore>>,
   /// Per-request metadata projection. The adapter still owns grant verification,
   /// command permissions, and stream lifetime; never install this on a worker.
   session_scope: Option<Arc<HashSet<String>>>,
@@ -678,6 +679,7 @@ impl ViewerService {
       observed_index_data_version: Arc::new(Mutex::new(observed_index_data_version)),
       failed_body_jobs: Arc::new(Mutex::new(HashMap::new())),
       loaded_session_cache: Arc::new(Mutex::new(None)),
+      updates: Arc::new(Mutex::new(crate::updates::UpdateStore::default())),
       input_broker: crate::input::InputBroker::default(),
       session_scope: None,
     };
@@ -1302,6 +1304,22 @@ impl ViewerService {
 
   /// Admission check for untrusted remote keys. Decoding alone is insufficient:
   /// keys contain source paths, so only the committed catalog grants access.
+  pub(crate) fn session_notifications(&self, keys: &[String]) -> Vec<serde_json::Value> {
+    keys
+      .iter()
+      .filter_map(|key| {
+        let locator = decode_session_key(key).ok()?;
+        let indexed = self.session_index.session(&index_session_key(&locator).ok()?).ok()??;
+        let attention = SessionAttention::from_index(&indexed);
+        Some(serde_json::json!({
+          "session_key": key, "has_unread": attention.has_unread,
+          "unread_final_count": attention.unread_final_count, "is_running": attention.is_running,
+          "question_attention": attention.question_attention,
+        }))
+      })
+      .collect()
+  }
+
   pub fn validate_session_key(&self, key: &str) -> Result<(), String> {
     self.check_session_scope(key)?;
     let locator = decode_session_key(key)?;
@@ -2926,6 +2944,15 @@ impl ViewerService {
     let entry = base_timeline_entry_for_source(&loaded.events, source_event_index)
       .ok_or_else(|| "event key is outside the session".to_string())?;
 
+    self.timeline_entry_detail(&locator, &loaded, entry)
+  }
+
+  fn timeline_entry_detail(
+    &self,
+    locator: &SessionLocator,
+    loaded: &Arc<LoadedSession>,
+    entry: TimelineEntry,
+  ) -> Result<(EventDetail, bool), String> {
     match entry {
       TimelineEntry::Event { source_event_index } => {
         let event = &loaded.events[source_event_index];
@@ -2936,6 +2963,7 @@ impl ViewerService {
           source_event_index,
         )?;
         if self.relay.covers(locator.provider)
+          && !event.is_hidden()
           && !matches!(event, AgentEvent::Reasoning(reasoning) if reasoning.redacted == Some(true))
         {
           if let Some(native) = self.relay.native(locator, source_event_index, loaded) {
@@ -2954,7 +2982,19 @@ impl ViewerService {
         }
         Ok((detail, true))
       }
-      TimelineEntry::Trajectory { .. } => unreachable!("base timeline never contains trajectories"),
+      TimelineEntry::Trajectory { trajectory } => {
+        let mut detail = trajectory_detail(
+          encode_trajectory_key(trajectory.start_source_event_index),
+          &trajectory,
+          &loaded.events,
+        )?;
+        if let Some(native) =
+          self.relay_native_detail(locator, loaded, &trajectory_source_event_indices(&trajectory))?
+        {
+          detail.native = Some(native);
+        }
+        Ok((detail, true))
+      }
     }
   }
 
@@ -3046,6 +3086,14 @@ fn event_detail(
   events: &[AgentEvent],
   source_event_index: usize,
 ) -> Result<EventDetail, String> {
+  let mut detail = source_event_detail(event_key, event)?;
+  if !detail.is_hidden && detail.event.get("redacted") != Some(&Value::Bool(true)) {
+    detail.tool_output = tool_output_preview(events, source_event_index);
+  }
+  Ok(detail)
+}
+
+fn source_event_detail(event_key: String, event: &AgentEvent) -> Result<EventDetail, String> {
   let is_hidden = event.is_hidden();
   if is_hidden {
     return Ok(EventDetail {
@@ -3081,13 +3129,12 @@ fn event_detail(
     serde_json::to_value(event).map_err(|error| format!("failed to serialize normalized event: {error}"))?;
   remove_embedded_native(&mut normalized);
   let normalized = bounded_detail_value(normalized, "normalized_event")?;
-  let tool_output = tool_output_preview(events, source_event_index);
   Ok(EventDetail {
     event_key,
     event: normalized,
     native,
     is_hidden: false,
-    tool_output,
+    tool_output: None,
   })
 }
 
@@ -4432,6 +4479,7 @@ fn trajectory_event_summary(trajectory: &Trajectory, events: &[AgentEvent]) -> E
     event_type: "trajectory".to_string(),
     provider,
     timestamp: card.ended_at.clone(),
+    delivery: None,
     phase: None,
     role: None,
     title: "Trajectory".to_string(),
@@ -4706,6 +4754,10 @@ fn event_summary_with_delegation_targets(
     event_type: normalized_event_type(event).to_string(),
     provider: provider_for_event(event),
     timestamp: timestamp_for_event(event).map(str::to_string),
+    delivery: match event {
+      AgentEvent::Message(message) => serialized_label(message.delivery),
+      _ => None,
+    },
     phase: phase_for_event(event),
     role: role_for_event(event),
     title,
@@ -4748,6 +4800,7 @@ fn tool_operation_event_summary(source_event_index: usize, operation: &ToolOpera
     },
     // A logical operation has an explicit derived status. Exposing the source
     // record phase here would recreate the old `finished` ambiguity.
+    delivery: None,
     phase: None,
     role: None,
     title,

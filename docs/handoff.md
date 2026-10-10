@@ -4,6 +4,17 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
+Session delivery now has final/steps/details/all subscriptions, semantic item
+changes over Tauri/SSE, snapshot recovery on gaps, and frontend replicas for
+eight recent sessions. Reopening renders cached content before catch-up;
+background sessions receive final-level updates without advancing all coverage.
+The opened session subscribes to all retained source events and display details;
+Inspector/tools use delivered payloads, while older turns remain paginated.
+Redaction, native opt-in, and payload bounds still apply. Unrelated detail/work
+caches survive updates. Indexed Automatic and Local share one source-reader path
+without a redundant managed feed child. See [session updates](viewer-session-updates.md)
+for the contract, ownership, limits, compatibility paths, and remaining costs.
+
 The viewer sidebar and conversation use a compact Codex-style layout with neutral
 light/dark colors, larger message text, inline expandable tool activity, and an
 aligned composer. Worked/Working disclosures use wrapping activity summaries and
@@ -142,23 +153,18 @@ the discovered catalog before history can be read. Browser tokens stay in memory
 switching machines aborts old requests and clears the UI. SSE reconnects trigger
 catalog/timeline refreshes. Desktop does not consume HTTP for local viewing.
 
-Core now owns the old viewer service/model/repository, native index scheduler,
-and snapshot/follow/metadata code formerly in Relay. Automatic mode launches a
-bundled Relay live-feed child over stdio; stdout is bounded versioned JSONL,
-stderr carries diagnostics, and stdin EOF ends the child even after parent death.
-The version-2 pipe carries compact provider/path/session batches rather than
-event/native payloads. Core wakes only those snapshot readers; 50 ms quiet
-batching is capped at 200 ms. Authoritative readers retain polling recovery.
-Unchanged Relay status is not rebroadcast for each session update. Browser
-reconnects refresh progress/status as well as catalog/timeline, and event pages
-expose `follow_error` while retaining last-good cards during follower retries.
-The supervisor keeps the ten-second readiness
-limit and three attempts with one-/two-second backoff. No private TCP port is
-needed. Missing provider roots are empty catalogs; corrupt existing roots remain
-errors. External desktop mode connects to `tokn-viewer-api snapshot --bind
-tcp://127.0.0.1:5557 [--native]`, the unchanged loopback framed protocol.
-`tokn-session-relay serve` now reports migration guidance. Relay remains the
+Core owns the viewer domain, native index scheduler, and authoritative
+snapshot/follow readers. Indexed Automatic and Local modes share those readers
+and native file watches; neither starts a redundant Relay feed child. Polling
+recovers missed notifications. Unindexed Automatic embeddings retain the bounded
+managed-stdio feed and supervisor. External desktop mode connects to
+`tokn-viewer-api snapshot --bind tcp://127.0.0.1:5557 [--native]`.
+`tokn-session-relay serve` reports migration guidance. Relay remains the
 provider-normalization/feed component and never serves a web UI.
+
+Unchanged Relay status is not rebroadcast. Browser reconnects refresh progress/status
+and catalog/timeline, establishing a fresh progress baseline after restarts. Event
+pages expose `follow_error` while retaining last-good cards during follower retries.
 
 ## Session snapshots
 

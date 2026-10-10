@@ -455,6 +455,8 @@ pub struct EventSummary {
   pub event_key: String,
   #[serde(rename = "type")]
   pub event_type: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub delivery: Option<String>,
   pub provider: ViewerProvider,
   pub timestamp: Option<String>,
   pub phase: Option<String>,
