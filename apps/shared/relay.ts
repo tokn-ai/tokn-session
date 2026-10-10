@@ -115,11 +115,11 @@ export function parseRelayRecord(value: unknown): RelayRecord | null {
 }
 
 /** Translate mutable record snapshots to activity without replaying unchanged
- * event slots. The bounded cache is not a durable deduplication guarantee.
+ * event occurrences. The bounded cache is not a durable deduplication guarantee.
  * JSONL records are immutable append observations and need no retained cache.
  */
 export class RelayActivityDispatcher {
-  #snapshots = new Map<string, string[]>();
+  #snapshots = new Map<string, Map<string, number>>();
   #capacity: number;
 
   constructor(capacity = 4096) {
@@ -142,13 +142,20 @@ export class RelayActivityDispatcher {
     const previous = this.#snapshots.get(key);
     this.#snapshots.delete(key);
     if (record.operation === "remove") return;
-    const fingerprints = record.events.map((event) => JSON.stringify(event));
+    const occurrences = new Map<string, number>();
+    // Context events can shift positions; counts retain additional identical events.
+    const events = record.events.filter((event) => {
+      const fingerprint = JSON.stringify(event);
+      const count = (occurrences.get(fingerprint) ?? 0) + 1;
+      occurrences.set(fingerprint, count);
+      return count > (previous?.get(fingerprint) ?? 0);
+    });
     await dispatchRelayRecord({
       ...record,
-      events: record.events.filter((_, index) => previous?.[index] !== fingerprints[index])
+      events
     }, onEvent, signal);
     if (signal?.aborted) return;
-    this.#snapshots.set(key, fingerprints);
+    this.#snapshots.set(key, occurrences);
     if (this.#snapshots.size > this.#capacity) {
       this.#snapshots.delete(this.#snapshots.keys().next().value!);
     }

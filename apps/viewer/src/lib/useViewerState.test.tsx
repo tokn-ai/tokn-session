@@ -12,6 +12,7 @@ import {
   listenForSessionIndexChanges,
   listenForSessionIndexProgress,
   listenForRelayChanges,
+  listenForTransportReconnect,
   loadEventDetail,
   loadEventPage,
   loadTrajectoryEventPage,
@@ -45,6 +46,7 @@ vi.mock("./tauri", () => ({
   listSessions: vi.fn(() => new Promise(() => undefined)),
   listenForSessionIndexChanges: vi.fn(() => Promise.resolve(vi.fn())),
   listenForSessionIndexProgress: vi.fn(() => Promise.resolve(vi.fn())),
+  listenForTransportReconnect: vi.fn(() => Promise.resolve(vi.fn())),
   loadEventDetail: vi.fn(() => new Promise(() => undefined)),
   loadEventPage: vi.fn(() => new Promise(() => undefined)),
   loadTrajectoryEventPage: vi.fn(() => new Promise(() => undefined)),
@@ -65,6 +67,7 @@ beforeEach(() => {
   vi.mocked(listSessions).mockReset().mockImplementation(() => new Promise(() => undefined));
   vi.mocked(listenForSessionIndexChanges).mockReset().mockResolvedValue(vi.fn());
   vi.mocked(listenForSessionIndexProgress).mockReset().mockResolvedValue(vi.fn());
+  vi.mocked(listenForTransportReconnect).mockReset().mockResolvedValue(vi.fn());
   vi.mocked(loadEventPage).mockReset().mockImplementation(() => new Promise(() => undefined));
   vi.mocked(loadEventDetail).mockReset().mockImplementation(() => new Promise(() => undefined));
   vi.mocked(loadTrajectoryEventPage).mockReset().mockImplementation(
@@ -436,6 +439,29 @@ describe("retained session turns", () => {
 });
 
 describe("useViewerState Relay updates", () => {
+  it("keeps the last good page visible while a followed session fails and clears its warning on recovery", async () => {
+    let emit: ((change: RelayChange) => void) | undefined;
+    vi.mocked(listenForRelayChanges).mockImplementation((handler) => { emit = handler; return Promise.resolve(vi.fn()); });
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
+    let followError: string | null = null;
+    vi.mocked(loadEventPage).mockImplementation(async () => ({ ...toolEventPage(), follow_error: followError }));
+    const { result } = renderHook(() => useViewerState());
+    await selectListedSession(result, "live");
+    await waitFor(() => expect(result.current.events).toEqual(toolEventPage().events));
+    const lastGood = result.current.events;
+
+    followError = "invalid UTF-8 in session source";
+    act(() => emit?.({ session_key: "live", reset: false }));
+    await waitFor(() => expect(result.current.followError).toBe(followError));
+    expect(result.current.events).toEqual(lastGood);
+    expect(result.current.eventsError).toBeNull();
+
+    followError = null;
+    act(() => emit?.({ session_key: "live", reset: false }));
+    await waitFor(() => expect(result.current.followError).toBeNull());
+    expect(result.current.events).toEqual(lastGood);
+  });
+
   it("restores disclosure by stable slot while fetching details with the new generation key", async () => {
     let emit: ((change: RelayChange) => void) | undefined;
     vi.mocked(listenForRelayChanges).mockImplementation((handler) => { emit = handler; return Promise.resolve(vi.fn()); });
@@ -1384,6 +1410,41 @@ describe("useViewerState session-index signalling", () => {
 
     expect(result.current.sessionIndexProgress?.revision).toBe("12");
     expect(result.current.sessionIndexProgress?.activity).toBe("body");
+  });
+
+  it("refreshes progress after reconnect and accepts a restarted server revision", async () => {
+    const initial = deferred<SessionIndexProgress>();
+    const resumed = deferred<SessionIndexProgress>();
+    let progressHandler: ((progress: SessionIndexProgress) => void) | undefined;
+    let reconnectHandler: (() => void) | undefined;
+    vi.mocked(listenForSessionIndexProgress).mockImplementation((handler) => {
+      progressHandler = handler;
+      return Promise.resolve(vi.fn());
+    });
+    vi.mocked(listenForTransportReconnect).mockImplementation((handler) => {
+      reconnectHandler = handler;
+      return Promise.resolve(vi.fn());
+    });
+    vi.mocked(getSessionIndexProgress)
+      .mockReturnValueOnce(initial.promise)
+      .mockReturnValueOnce(resumed.promise);
+
+    const { result } = renderHook(() => useViewerState());
+    await waitFor(() => expect(getSessionIndexProgress).toHaveBeenCalledOnce());
+    act(() => progressHandler?.(indexProgress({ revision: "12", activity: "body" })));
+    await waitFor(() => expect(result.current.sessionIndexProgress?.revision).toBe("12"));
+
+    act(() => reconnectHandler?.());
+    await waitFor(() => expect(getSessionIndexProgress).toHaveBeenCalledTimes(2));
+    act(() => progressHandler?.(indexProgress({ revision: "2", activity: "catalog" })));
+    await waitFor(() => expect(result.current.sessionIndexProgress?.revision).toBe("2"));
+    await act(async () => {
+      resumed.resolve(indexProgress({ revision: "1" }));
+      initial.resolve(indexProgress({ revision: "13" }));
+      await Promise.all([resumed.promise, initial.promise]);
+    });
+    expect(result.current.sessionIndexProgress?.revision).toBe("2");
+    expect(result.current.sessionIndexProgress?.activity).toBe("catalog");
   });
 
   it("uses the retry command for both the status action and sidebar retry", async () => {

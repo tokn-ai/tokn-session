@@ -713,6 +713,17 @@ impl ViewerService {
     Ok(())
   }
 
+  fn page_follow_error(&self, locator: &SessionLocator) -> Option<String> {
+    self.relay.follow_error(locator).map(|error| {
+      if self.session_scope.is_some() {
+        // Reader diagnostics can include local paths outside the share.
+        "Live updates are temporarily unavailable; retrying.".into()
+      } else {
+        error
+      }
+    })
+  }
+
   fn scope_inventory(&self, provider: ViewerProvider, mut inventory: SessionHeaderInventory) -> SessionHeaderInventory {
     if let Some(scope) = &self.session_scope {
       inventory.headers.retain(|header| {
@@ -2783,6 +2794,7 @@ impl ViewerService {
       previous_cursor: (start > 0).then(|| encode_event_cursor(start)),
       total_events,
       history_status: loaded.history_status.into(),
+      follow_error: self.page_follow_error(&locator),
       attention_revision,
       outstanding_questions: outstanding_questions(&loaded.events, &identity),
     })

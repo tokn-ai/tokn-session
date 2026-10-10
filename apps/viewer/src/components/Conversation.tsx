@@ -46,6 +46,7 @@ interface ConversationProps {
   is_loading_older: boolean;
   is_loading_newer: boolean;
   error: string | null;
+  follow_error?: string | null;
   has_older: boolean;
   has_newer: boolean;
   total_events: number | null;
@@ -95,6 +96,7 @@ export function Conversation({
   is_loading_older,
   is_loading_newer,
   error,
+  follow_error = null,
   has_older,
   has_newer,
   total_events,
@@ -269,6 +271,11 @@ export function Conversation({
             }
           }}
         >
+          {session && follow_error ? (
+            <div className="pagination-error" role="alert">
+              Showing last loaded history while live updates retry: {follow_error}
+            </div>
+          ) : null}
           {!session ? (
             <StateView
               message="Browse your conversations, search by title, or filter by provider to pick up where you left off."

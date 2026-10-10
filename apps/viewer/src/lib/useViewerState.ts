@@ -12,6 +12,7 @@ import {
   listenForSessionIndexChanges,
   listenForSessionIndexProgress,
   listenForRelayChanges,
+  listenForTransportReconnect,
   loadEventDetail,
   loadEventPage,
   loadTrajectoryEventPage,
@@ -186,6 +187,7 @@ export function useViewerState() {
   const [sessionIndexProgressError, setSessionIndexProgressError] = useState<string | null>(null);
   const [sessionIndexRetrying, setSessionIndexRetrying] = useState(false);
   const sessionIndexProgressRevision = useRef<string | null>(null);
+  const sessionIndexConnectionEpoch = useRef(0);
   const sessionIndexRetryInFlight = useRef(false);
 
   const finishSessionListRequest = useCallback((requestId: number) => {
@@ -219,6 +221,7 @@ export function useViewerState() {
   const [olderLoading, setOlderLoading] = useState(false);
   const [newerLoading, setNewerLoading] = useState(false);
   const [eventsError, setEventsError] = useState<string | null>(null);
+  const [followError, setFollowError] = useState<string | null>(null);
   const [olderCursor, setOlderCursor] = useState<string | null>(null);
   const [newerCursor, setNewerCursor] = useState<string | null>(null);
   const [totalEvents, setTotalEvents] = useState<number | null>(null);
@@ -311,46 +314,69 @@ export function useViewerState() {
 
   useEffect(() => {
     let disposed = false;
-    let unlisten: (() => void) | undefined;
+    let unlistenProgress: (() => void) | undefined;
+    let unlistenReconnect: (() => void) | undefined;
 
-    async function subscribeThenReadSnapshot() {
-      try {
-        unlisten = await listenForSessionIndexProgress((progress) => {
-          if (!disposed) {
-            applySessionIndexProgress(progress, "event");
-          }
-        });
-      } catch {
-        // The static Vite preview and browser-based component tests do not
-        // have Tauri's event bridge. The command snapshot below can still
-        // populate this surface when a caller provides one.
-      }
-
-      if (disposed) {
-        unlisten?.();
-        return;
-      }
-
+    async function readSnapshot(epoch: number) {
       try {
         const progress = await getSessionIndexProgress();
-        if (!disposed) {
+        if (!disposed && epoch === sessionIndexConnectionEpoch.current) {
           applySessionIndexProgress(progress, "snapshot");
         }
       } catch (error: unknown) {
-        if (!disposed) {
+        if (!disposed && epoch === sessionIndexConnectionEpoch.current) {
           setSessionIndexProgressError(errorMessage(error));
         }
       } finally {
-        if (!disposed) {
+        if (!disposed && epoch === sessionIndexConnectionEpoch.current) {
           setSessionIndexProgressLoading(false);
         }
       }
     }
 
+    // Register both listeners before awaiting readiness so the reconnect
+    // signal cannot race the first progress snapshot.
+    const progressSubscription = listenForSessionIndexProgress((progress) => {
+      if (!disposed) {
+        applySessionIndexProgress(progress, "event");
+      }
+    });
+    const reconnectSubscription = listenForTransportReconnect(() => {
+      if (disposed) return;
+      const epoch = ++sessionIndexConnectionEpoch.current;
+      // A restarted API can begin its progress revisions at one again.
+      sessionIndexProgressRevision.current = null;
+      setSessionIndexProgressLoading(true);
+      void readSnapshot(epoch);
+    });
+
+    async function subscribeThenReadSnapshot() {
+      try {
+        unlistenProgress = await progressSubscription;
+      } catch {
+        // The static Vite preview and browser-based component tests do not
+        // have Tauri's event bridge. The command snapshot below can still
+        // populate this surface when a caller provides one.
+      }
+      try {
+        unlistenReconnect = await reconnectSubscription;
+      } catch {
+        // A remote reconnect signal is advisory; the first snapshot still works.
+      }
+
+      if (disposed) {
+        unlistenProgress?.();
+        unlistenReconnect?.();
+        return;
+      }
+      await readSnapshot(sessionIndexConnectionEpoch.current);
+    }
+
     void subscribeThenReadSnapshot();
     return () => {
       disposed = true;
-      unlisten?.();
+      unlistenProgress?.();
+      unlistenReconnect?.();
     };
   }, [applySessionIndexProgress]);
 
@@ -360,11 +386,16 @@ export function useViewerState() {
     }
     sessionIndexRetryInFlight.current = true;
     setSessionIndexRetrying(true);
+    const epoch = sessionIndexConnectionEpoch.current;
     try {
       const progress = await requestSessionIndexRetry();
-      applySessionIndexProgress(progress, "retry");
+      if (epoch === sessionIndexConnectionEpoch.current) {
+        applySessionIndexProgress(progress, "retry");
+      }
     } catch (error: unknown) {
-      setSessionIndexProgressError(errorMessage(error));
+      if (epoch === sessionIndexConnectionEpoch.current) {
+        setSessionIndexProgressError(errorMessage(error));
+      }
     } finally {
       sessionIndexRetryInFlight.current = false;
       setSessionIndexRetrying(false);
@@ -583,6 +614,7 @@ export function useViewerState() {
     pendingLiveReset.current = false;
     uncommittedLiveReset.current = false;
     setPendingLiveActivity(false);
+    setFollowError(null);
   }, [selectedSessionKey]);
 
   useEffect(() => {
@@ -1263,6 +1295,7 @@ export function useViewerState() {
         setNewerCursor(response.next_cursor);
         setTotalEvents(response.total_events);
         setHistoryStatus(response.history_status);
+        setFollowError(response.follow_error ?? null);
         applyQuestionPage(selectedSessionKey, response.outstanding_questions);
         setInitialPageSessionKey(selectedSessionKey);
         if (pendingQuestionSession.current === selectedSessionKey) {
@@ -1908,6 +1941,7 @@ export function useViewerState() {
     olderLoading: eventsAreOwned && olderLoading,
     newerLoading: eventsAreOwned && newerLoading,
     eventsError: eventsAreOwned ? eventsError : null,
+    followError: eventsAreOwned ? followError : null,
     olderCursor: eventsAreOwned ? olderCursor : null,
     newerCursor: eventsAreOwned ? newerCursor : null,
     totalEvents: eventsAreOwned ? totalEvents : null,

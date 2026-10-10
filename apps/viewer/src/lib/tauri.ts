@@ -1,4 +1,4 @@
-import { invoke, listen, type CommandInvoker, type UnlistenFn } from "./transport";
+import { invoke, isDesktop, listen, type CommandInvoker, type UnlistenFn } from "./transport";
 import type {
   RelaySettings, RelayStatus, RelayChange,
   AcknowledgeSessionAttentionRequest,
@@ -56,6 +56,12 @@ export function listenForRelayStatus(handler: (status: RelayStatus) => void): Pr
 }
 export function listenForRelayChanges(handler: (change: RelayChange) => void): Promise<UnlistenFn> {
   return listen<RelayChange>("relay-changed", (event) => handler(event.payload));
+}
+
+/** Browser SSE reconnects require fresh state snapshots; desktop events stay live. */
+export function listenForTransportReconnect(handler: () => void): Promise<UnlistenFn> {
+  if (isDesktop()) return Promise.resolve(() => {});
+  return listen("transport-reconnected", handler);
 }
 
 export function listSessions(request: ListSessionsRequest): Promise<ListSessionsResponse> {

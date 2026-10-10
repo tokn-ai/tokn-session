@@ -23,7 +23,7 @@ use tokn_session_core::{LoadedSession, Provider, SessionHeader};
 
 use crate::model::{SessionLocator, ViewerProvider, encode_session_key};
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RelayStatus {
   pub settings: RelaySettings,
   pub active_endpoint: Option<String>,
@@ -138,10 +138,7 @@ impl ViewerRelay {
 
   pub fn status(&self) -> RelayStatus {
     let state = self.state.lock().unwrap();
-    let error = state
-      .error
-      .clone()
-      .or_else(|| state.sessions.values().find_map(|session| session.error.clone()));
+    let error = state.error.clone();
     RelayStatus {
       settings: state.settings.clone(),
       active_endpoint: state.active_endpoint.clone(),
@@ -555,6 +552,12 @@ impl ViewerRelay {
     })
   }
 
+  /// The last successful snapshot remains readable while its follower retries.
+  /// Expose the current failure with that page so reconnects cannot miss it.
+  pub(crate) fn follow_error(&self, locator: &SessionLocator) -> Option<String> {
+    self.state.lock().ok()?.sessions.get(locator)?.error.clone()
+  }
+
   async fn session_loop(
     self: Arc<Self>,
     connection: Connection,
@@ -589,12 +592,19 @@ impl ViewerRelay {
           self.ready.notify_all();
           return;
         }
-        if let Some(session) = state.sessions.get_mut(&locator) {
+        let changed = if let Some(session) = state.sessions.get_mut(&locator) {
+          let changed = session.error.as_deref() != Some(error.as_str());
           session.error = Some(error);
+          changed
+        } else {
+          false
+        };
+        drop(state);
+        self.ready.notify_all();
+        if changed {
+          self.notify(Some(&locator), false);
         }
       }
-      self.ready.notify_all();
-      self.notify(None, false);
       tokio::select! { _ = cancel.cancelled() => return, _ = tokio::time::sleep(Duration::from_secs(2)) => {} }
     }
   }
@@ -906,6 +916,97 @@ mod tests {
     assert!(
       manager.load(&locator).is_err(),
       "different services never share cached snapshots"
+    );
+    server.abort();
+  }
+
+  #[tokio::test]
+  async fn follow_failure_preserves_last_snapshot_and_notifies_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("session.jsonl");
+    const HEADER: &str = "{\"type\":\"session\",\"id\":\"session-1\",\"timestamp\":\"2026-01-01\",\"cwd\":\"/tmp\"}\n";
+    const MESSAGE: &str =
+      "{\"type\":\"message\",\"id\":\"one\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n";
+    std::fs::write(&path, format!("{HEADER}{MESSAGE}")).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("tcp://{}", listener.local_addr().unwrap());
+    let mut config = RelayConfig::new(vec![ProviderRoot::new(Provider::Pi, root.path().into())]);
+    config.poll_interval = Duration::from_millis(20);
+    let server = tokio::spawn(serve_listener(listener, config));
+    let manager = ViewerRelay::new();
+    let mut changes = manager.changes.subscribe();
+    manager
+      .configure(RelaySettings {
+        endpoint,
+        mode: RelayMode::External,
+        ..Default::default()
+      })
+      .unwrap();
+    tokio::time::timeout(Duration::from_secs(4), async {
+      while !manager.has_catalog() {
+        changes.recv().await.unwrap();
+      }
+    })
+    .await
+    .unwrap();
+    let locator = SessionLocator {
+      version: 1,
+      provider: ViewerProvider::Pi,
+      session_id: "session-1".into(),
+      source_path: path.clone(),
+    };
+    let key = encode_session_key(&locator).unwrap();
+    let load_manager = manager.clone();
+    let load_locator = locator.clone();
+    let initial = tokio::task::spawn_blocking(move || load_manager.load(&load_locator))
+      .await
+      .unwrap()
+      .unwrap();
+    assert_eq!(manager.follow_error(&locator), None);
+
+    OpenOptions::new()
+      .append(true)
+      .open(&path)
+      .unwrap()
+      .write_all(&[0xff, b'\n'])
+      .unwrap();
+    let failure = tokio::time::timeout(Duration::from_secs(4), async {
+      loop {
+        let change = changes.recv().await.unwrap();
+        if change.session_key.as_deref() == Some(key.as_str()) && manager.follow_error(&locator).is_some() {
+          break change;
+        }
+      }
+    })
+    .await
+    .unwrap();
+    assert!(!failure.reset);
+    assert!(manager.follow_error(&locator).unwrap().contains("UTF-8"));
+    assert_eq!(manager.status().phase, "live");
+    assert_eq!(manager.status().error, None);
+    assert!(Arc::ptr_eq(&initial, &manager.advance(&locator).unwrap()));
+
+    std::fs::write(&path, format!("{HEADER}{MESSAGE}{}", MESSAGE.replace("one", "two"))).unwrap();
+    let recovery = tokio::time::timeout(Duration::from_secs(8), async {
+      loop {
+        let change = changes.recv().await.unwrap();
+        if change.session_key.as_deref() == Some(key.as_str())
+          && manager.follow_error(&locator).is_none()
+          && manager.state.lock().unwrap().sessions[&locator]
+            .loaded
+            .as_ref()
+            .is_some_and(|loaded| loaded.events.len() > initial.events.len())
+        {
+          break change;
+        }
+      }
+    })
+    .await
+    .unwrap();
+    assert_eq!(recovery.session_key.as_deref(), Some(key.as_str()));
+    assert_eq!(
+      manager.advance(&locator).unwrap().events.len(),
+      initial.events.len() + 1
     );
     server.abort();
   }

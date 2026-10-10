@@ -422,6 +422,8 @@ pub struct EventPage {
   pub previous_cursor: Option<String>,
   pub total_events: usize,
   pub history_status: HistoryStatus,
+  /// Current follow failure, if the page is showing a last-good snapshot.
+  pub follow_error: Option<String>,
   /// Opaque snapshot of the session's indexed attention state. The frontend
   /// acknowledges this only after React has committed the page, preventing a
   /// stale request from consuming a newer update.

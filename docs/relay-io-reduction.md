@@ -84,3 +84,25 @@ The driver verifies record topics, counts, and unique record keys. Its JSON
 output contains every trial and all raw counters. The provider fixtures use
 only temporary synthetic data. See [counter details](relay-performance.md#what-the-counters-mean)
 for the measurement window and interception limits.
+
+## Event stream follow-up
+
+Managed viewers now exchange version-2 batches of source identities. A
+synthetic 128-record Pi burst with 128-byte assistant messages serialized
+76,562 bytes as full Relay records and 82 bytes as one managed hint batch
+(99.9% fewer pipe bytes). This measures serialized IPC traffic, not disk I/O.
+Reproduce with `cargo test -p tokn-session-relay
+stdio::tests::managed_message_burst_reduces_wire_bytes -- --nocapture`.
+
+A two-session follow regression appends to both sources, then sends 100 hints
+for one source. It observes one poll for that reader and zero for the unrelated
+reader. Quiet batching is 50 ms, bounded at 200 ms for continuous updates;
+500 ms polling still recovers omitted hints. Run `cargo test -p tokn-viewer-core
+service_server::tests` for those checks.
+
+Cold Codex startup still reads only its header and trailing partial line.
+The first append to a preexisting rollout now restores its original prefix
+silently to recover pending question/tool/compaction context and current cwd.
+That first active append costs a prefix read and normalization pass; subsequent
+appends stay incremental. The earlier append byte counts above predate this
+correctness repair and are not the current first-append baseline.

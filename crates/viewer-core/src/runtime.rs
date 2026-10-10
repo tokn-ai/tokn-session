@@ -48,6 +48,7 @@ impl ViewerRuntime {
     let mut changes = relay.changes.subscribe();
     let relay_events = events.clone();
     tasks.push(tokio::spawn(async move {
+      let mut last_status = None;
       loop {
         let change = match changes.recv().await {
           Ok(change) => change,
@@ -58,7 +59,7 @@ impl ViewerRuntime {
           Err(_) => return,
         };
         let _ = emit(&relay_events, "relay-changed", change);
-        let _ = emit(&relay_events, "relay-status", relay.status());
+        emit_changed_relay_status(&relay_events, &mut last_status, relay.status());
       }
     }));
     let (retry_sender, mut retry_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -472,6 +473,17 @@ impl ViewerRuntime {
   }
 }
 
+fn emit_changed_relay_status(
+  events: &broadcast::Sender<ViewerEvent>,
+  previous: &mut Option<crate::relay::RelayStatus>,
+  status: crate::relay::RelayStatus,
+) {
+  if previous.as_ref() != Some(&status) {
+    let _ = emit(events, "relay-status", &status);
+    *previous = Some(status);
+  }
+}
+
 /// A native watcher keeps actively written Codex and Pi files current. This
 /// slow full pass is only a recovery net for missed notifications, session
 /// tree topology changes, and providers that do not have an incremental path
@@ -785,6 +797,43 @@ mod tests {
     wait_for_session_index_work, watcher_wake_after_backend_failure,
   };
   use crate::{model::ViewerProvider, watcher::WatchRequest};
+
+  #[tokio::test]
+  async fn session_updates_do_not_repeat_status_but_errors_and_recovery_do() {
+    let (events, mut receiver) = tokio::sync::broadcast::channel(128);
+    let manager = crate::relay::ViewerRelay::new();
+    let mut previous = None;
+    let mut status = manager.status();
+    for _ in 0..100 {
+      super::emit(
+        &events,
+        "relay-changed",
+        crate::relay::RelayChange {
+          session_key: Some("active".into()),
+          reset: false,
+        },
+      )
+      .unwrap();
+      super::emit_changed_relay_status(&events, &mut previous, status.clone());
+    }
+    status.error = Some("source unavailable".into());
+    super::emit_changed_relay_status(&events, &mut previous, status.clone());
+    status.error = None;
+    super::emit_changed_relay_status(&events, &mut previous, status);
+    let mut changes = 0;
+    let mut statuses = Vec::new();
+    while let Ok(event) = receiver.try_recv() {
+      match event.event.as_str() {
+        "relay-changed" => changes += 1,
+        "relay-status" => statuses.push(event.payload),
+        _ => panic!("unexpected event"),
+      }
+    }
+    assert_eq!(changes, 100);
+    assert_eq!(statuses.len(), 3);
+    assert_eq!(statuses[1]["error"], "source unavailable");
+    assert!(statuses[2]["error"].is_null());
+  }
 
   #[test]
   fn lagged_relay_hints_do_not_force_a_global_catalog() {

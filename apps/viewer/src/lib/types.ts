@@ -453,6 +453,8 @@ export interface EventPageResponse {
   previous_cursor: string | null;
   total_events: number;
   history_status: SessionHistoryStatus;
+  /** Last follow failure while the server keeps its previous good snapshot. */
+  follow_error?: string | null;
   /** Opaque indexed snapshot; absent while connected to an older backend. */
   attention_revision?: string | null;
   outstanding_questions?: OutstandingQuestion[];

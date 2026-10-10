@@ -1,14 +1,21 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { configureRelay, getRelayStatus, listenForRelayStatus } from "../lib/tauri";
+import { configureRelay, getRelayStatus, listenForRelayStatus, listenForTransportReconnect } from "../lib/tauri";
 import type { RelayStatus } from "../lib/types";
 import { RelayConnection } from "./RelayConnection";
 
-vi.mock("../lib/tauri", () => ({ configureRelay: vi.fn(), getRelayStatus: vi.fn(), listenForRelayStatus: vi.fn() }));
+vi.mock("../lib/tauri", () => ({
+  configureRelay: vi.fn(), getRelayStatus: vi.fn(), listenForRelayStatus: vi.fn(),
+  listenForTransportReconnect: vi.fn(),
+}));
 const disconnected: RelayStatus = { settings: { endpoint: "tcp://127.0.0.1:9557", mode: "external", include_native: false }, active_endpoint: null, phase: "connecting", native: false, error: null };
 beforeEach(() => {
+  vi.mocked(getRelayStatus).mockReset();
   vi.mocked(getRelayStatus).mockResolvedValue(disconnected);
+  vi.mocked(listenForRelayStatus).mockReset();
   vi.mocked(listenForRelayStatus).mockResolvedValue(vi.fn());
+  vi.mocked(listenForTransportReconnect).mockReset();
+  vi.mocked(listenForTransportReconnect).mockResolvedValue(vi.fn());
   vi.mocked(configureRelay).mockReset();
 });
 afterEach(cleanup);
@@ -43,6 +50,81 @@ it("keeps a newer live status when an older configuration reply arrives", async 
   expect(screen.getByRole("button", { name: "Live updates. Connection settings" })).toBeInTheDocument();
 });
 
+it("refreshes a settled Relay status after the event stream reconnects", async () => {
+  let reconnect: (() => void) | undefined;
+  vi.mocked(listenForTransportReconnect).mockImplementation((handler) => {
+    reconnect = handler;
+    return Promise.resolve(vi.fn());
+  });
+  vi.mocked(getRelayStatus)
+    .mockResolvedValueOnce(disconnected)
+    .mockResolvedValueOnce({ ...disconnected, phase: "live" });
+  render(<RelayConnection />);
+  await screen.findByRole("button", { name: "Connecting. Connection settings" });
+  act(() => reconnect?.());
+  await screen.findByRole("button", { name: "Live updates. Connection settings" });
+  expect(getRelayStatus).toHaveBeenCalledTimes(2);
+});
+
+it("clears an initial status load error after reconnecting", async () => {
+  let reconnect: (() => void) | undefined;
+  vi.mocked(listenForTransportReconnect).mockImplementation((handler) => {
+    reconnect = handler;
+    return Promise.resolve(vi.fn());
+  });
+  vi.mocked(getRelayStatus)
+    .mockRejectedValueOnce(new Error("offline"))
+    .mockResolvedValueOnce({ ...disconnected, phase: "live" });
+  render(<RelayConnection />);
+  await screen.findByRole("button", { name: "Connection unavailable. Connection settings" });
+  act(() => reconnect?.());
+  await screen.findByRole("button", { name: "Live updates. Connection settings" });
+  await openConnection();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("ignores an old status load failure after a successful reconnect", async () => {
+  let reconnect: (() => void) | undefined;
+  let rejectInitial!: (error: Error) => void;
+  vi.mocked(listenForTransportReconnect).mockImplementation((handler) => {
+    reconnect = handler;
+    return Promise.resolve(vi.fn());
+  });
+  vi.mocked(getRelayStatus)
+    .mockReturnValueOnce(new Promise((_resolve, reject) => { rejectInitial = reject; }))
+    .mockResolvedValueOnce({ ...disconnected, phase: "live" });
+  render(<RelayConnection />);
+  await waitFor(() => expect(getRelayStatus).toHaveBeenCalledTimes(1));
+  act(() => reconnect?.());
+  await screen.findByRole("button", { name: "Live updates. Connection settings" });
+  await act(async () => rejectInitial(new Error("old connection closed")));
+  expect(screen.getByRole("button", { name: "Live updates. Connection settings" })).toBeInTheDocument();
+});
+
+it("keeps a newer streamed status over a reconnect snapshot", async () => {
+  let reconnect: (() => void) | undefined;
+  let emit: ((status: RelayStatus) => void) | undefined;
+  let resolve!: (status: RelayStatus) => void;
+  vi.mocked(listenForTransportReconnect).mockImplementation((handler) => {
+    reconnect = handler;
+    return Promise.resolve(vi.fn());
+  });
+  vi.mocked(listenForRelayStatus).mockImplementation((handler) => {
+    emit = handler;
+    return Promise.resolve(vi.fn());
+  });
+  vi.mocked(getRelayStatus)
+    .mockResolvedValueOnce(disconnected)
+    .mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+  render(<RelayConnection />);
+  await screen.findByRole("button", { name: "Connecting. Connection settings" });
+  act(() => reconnect?.());
+  await waitFor(() => expect(getRelayStatus).toHaveBeenCalledTimes(2));
+  act(() => emit?.({ ...disconnected, phase: "live" }));
+  await act(async () => resolve(disconnected));
+  expect(screen.getByRole("button", { name: "Live updates. Connection settings" })).toBeInTheDocument();
+});
+
 it("shows validation errors without claiming it connected", async () => {
   vi.mocked(configureRelay).mockRejectedValue("Relay endpoint must be loopback");
   render(<RelayConnection />);
@@ -51,6 +133,26 @@ it("shows validation errors without claiming it connected", async () => {
   fireEvent.click(screen.getByText("Apply"));
   await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("loopback"));
   expect(screen.getByRole("button", { name: "Settings need attention. Connection settings" })).toBeInTheDocument();
+});
+
+it("keeps a settings validation error when reconnect refreshes status", async () => {
+  let reconnect: (() => void) | undefined;
+  vi.mocked(listenForTransportReconnect).mockImplementation((handler) => {
+    reconnect = handler;
+    return Promise.resolve(vi.fn());
+  });
+  vi.mocked(getRelayStatus)
+    .mockResolvedValueOnce(disconnected)
+    .mockResolvedValueOnce({ ...disconnected, phase: "live" });
+  vi.mocked(configureRelay).mockRejectedValue("Relay endpoint must be loopback");
+  render(<RelayConnection />);
+  await openConnection();
+  fireEvent.click(screen.getByText("Apply"));
+  await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("loopback"));
+  act(() => reconnect?.());
+  await waitFor(() => expect(getRelayStatus).toHaveBeenCalledTimes(2));
+  expect(screen.getByRole("button", { name: "Settings need attention. Connection settings" })).toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent("loopback");
 });
 
 it("offers native opt-in without exposing managed connection internals", async () => {
