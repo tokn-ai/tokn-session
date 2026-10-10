@@ -852,7 +852,7 @@ mod tests {
         .iter()
         .map(|event| event.summary.as_str())
         .collect::<Vec<_>>(),
-      ["prompt 5", "prompt 6", "prompt 7"]
+      ["prompt 7"]
     );
     let stable = initial.events.last().unwrap().event_key.clone();
     let scoped_request = crate::updates::SessionUpdatesRequest {
@@ -888,9 +888,9 @@ mod tests {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(history.item_order.as_ref().unwrap().len(), 6);
+    assert_eq!(history.item_order.as_ref().unwrap().len(), 4);
     let earlier = window(&service, &key, initial.previous_cursor).await;
-    assert_eq!(earlier.events.len(), 6);
+    assert_eq!(earlier.events.len(), 4);
     assert_eq!(earlier.events.last().unwrap().event_key, stable);
     let detail = service
       .load_event_detail(LoadEventDetailRequest {
@@ -912,7 +912,7 @@ mod tests {
     let reopened = window(&service, &key, None).await;
     assert_eq!(
       reopened.events.len(),
-      6,
+      4,
       "switching away does not evict retained history"
     );
     std::fs::OpenOptions::new()
@@ -924,9 +924,9 @@ mod tests {
     tokio::time::timeout(Duration::from_secs(4), async {
       loop {
         let page = window(&service, &key, None).await;
-        if page.events.len() == 7 {
-          assert_eq!(page.events[0].summary, "prompt 2");
-          assert_eq!(page.events[5].event_key, stable);
+        if page.events.len() == 5 {
+          assert_eq!(page.events[0].summary, "prompt 4");
+          assert_eq!(page.events[3].event_key, stable);
           break;
         }
         changes.recv().await.unwrap();

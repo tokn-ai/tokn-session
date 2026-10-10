@@ -616,7 +616,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn window_follow_loads_three_turns_expands_preserves_appends_and_resets() {
+  async fn window_follow_opens_one_turn_expands_preserves_appends_and_resets() {
     use std::io::Write;
     use tokn_session_relay::{ProviderRoot, RelayConfig};
     let root = tempfile::TempDir::new().unwrap();
@@ -640,17 +640,17 @@ mod tests {
       .await
       .unwrap();
     let first = client.next_snapshot().await.unwrap();
-    assert_eq!(first.event_offset, 6);
+    assert_eq!(first.event_offset, 8);
     assert!(first.has_earlier);
-    assert_eq!(first.loaded.events.len(), 3);
+    assert_eq!(first.loaded.events.len(), 1);
     assert!(first.native.iter().all(Option::is_some));
     let mut earlier =
       RelaySubscription::connect_window_from(&connection, &key, Some(first.event_offset), Some(first.event_offset))
         .await
         .unwrap();
     let expanded = earlier.next_snapshot().await.unwrap();
-    assert_eq!(expanded.event_offset, 3);
-    assert_eq!(expanded.loaded.events.len(), 6);
+    assert_eq!(expanded.event_offset, 5);
+    assert_eq!(expanded.loaded.events.len(), 4);
     assert_eq!(expanded.generation, first.generation);
     assert_eq!(
       serde_json::to_value(&expanded.loaded.events[3..]).unwrap(),
@@ -667,7 +667,7 @@ mod tests {
     let appended = tokio::time::timeout(Duration::from_secs(3), async {
       loop {
         let next = earlier.next_snapshot().await.unwrap();
-        if next.loaded.events.len() == 7 {
+        if next.loaded.events.len() == 5 {
           break next;
         }
       }
@@ -680,8 +680,8 @@ mod tests {
       .await
       .unwrap();
     let retained = reconnect.next_snapshot().await.unwrap();
-    assert_eq!(retained.loaded.events.len(), 7);
-    assert_eq!(retained.event_offset, 3);
+    assert_eq!(retained.loaded.events.len(), 5);
+    assert_eq!(retained.event_offset, 5);
     let replacement = root.path().join("replacement.jsonl");
     std::fs::write(
       &replacement,
@@ -700,10 +700,10 @@ mod tests {
     })
     .await
     .unwrap();
-    assert_eq!(rewritten.event_offset, 4);
+    assert_eq!(rewritten.event_offset, 6);
     assert_eq!(
       rewritten.loaded.events.len(),
-      7,
+      5,
       "rewrite retains expanded/live-grown turn count"
     );
     // A rewrite shorter than the retained range chooses a useful fresh window.

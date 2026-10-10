@@ -51,7 +51,7 @@ impl<'de> Deserialize<'de> for RolloutLine {
     let timestamp = string_field(&native, "timestamp");
     let ordinal = native.get("ordinal").and_then(Value::as_u64);
     let native_type = native.get("type").and_then(Value::as_str).map(str::to_string);
-    let payload = native.get("payload").cloned().unwrap_or(Value::Null);
+    let payload = native.get("payload").unwrap_or(&Value::Null);
     let item = decode_rollout_item(native_type, payload);
 
     Ok(Self {
@@ -376,7 +376,7 @@ impl<'de> Deserialize<'de> for ResponseItem {
     D: Deserializer<'de>,
   {
     let native = Value::deserialize(deserializer)?;
-    Ok(decode_response_item(native))
+    Ok(decode_response_item(&native))
   }
 }
 
@@ -652,7 +652,7 @@ pub struct UnknownItem {
   pub parse_error: Option<String>,
 }
 
-fn decode_rollout_item(native_type: Option<String>, payload: Value) -> RolloutItem {
+fn decode_rollout_item(native_type: Option<String>, payload: &Value) -> RolloutItem {
   match native_type.as_deref() {
     Some("session_meta") => decode_payload(native_type, payload, RolloutItem::SessionMeta),
     Some("response_item") => RolloutItem::ResponseItem(decode_response_item(payload)),
@@ -669,13 +669,13 @@ fn decode_rollout_item(native_type: Option<String>, payload: Value) -> RolloutIt
     Some("event_msg") => decode_payload(native_type, payload, RolloutItem::EventMessage),
     _ => RolloutItem::Unknown(UnknownItem {
       native_type,
-      payload,
+      payload: payload.clone(),
       parse_error: None,
     }),
   }
 }
 
-fn decode_response_item(native: Value) -> ResponseItem {
+fn decode_response_item(native: &Value) -> ResponseItem {
   let native_type = native.get("type").and_then(Value::as_str).map(str::to_string);
   match native_type.as_deref() {
     Some("additional_tools") => decode_response_payload(native_type, native, ResponseItem::AdditionalTools),
@@ -698,21 +698,21 @@ fn decode_response_item(native: Value) -> ResponseItem {
     Some("context_compaction") => decode_response_payload(native_type, native, ResponseItem::ContextCompaction),
     _ => ResponseItem::Unknown(UnknownItem {
       native_type,
-      payload: native,
+      payload: native.clone(),
       parse_error: None,
     }),
   }
 }
 
-fn decode_payload<T>(native_type: Option<String>, payload: Value, wrap: impl FnOnce(T) -> RolloutItem) -> RolloutItem
+fn decode_payload<T>(native_type: Option<String>, payload: &Value, wrap: impl FnOnce(T) -> RolloutItem) -> RolloutItem
 where
   T: DeserializeOwned,
 {
-  match serde_json::from_value(payload.clone()) {
+  match T::deserialize(payload) {
     Ok(item) => wrap(item),
     Err(error) => RolloutItem::Unknown(UnknownItem {
       native_type,
-      payload,
+      payload: payload.clone(),
       parse_error: Some(error.to_string()),
     }),
   }
@@ -720,17 +720,17 @@ where
 
 fn decode_response_payload<T>(
   native_type: Option<String>,
-  payload: Value,
+  payload: &Value,
   wrap: impl FnOnce(T) -> ResponseItem,
 ) -> ResponseItem
 where
   T: DeserializeOwned,
 {
-  match serde_json::from_value(payload.clone()) {
+  match T::deserialize(payload) {
     Ok(item) => wrap(item),
     Err(error) => ResponseItem::Unknown(UnknownItem {
       native_type,
-      payload,
+      payload: payload.clone(),
       parse_error: Some(error.to_string()),
     }),
   }

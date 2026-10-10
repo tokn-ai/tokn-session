@@ -1,6 +1,64 @@
 use super::*;
 use tempfile::TempDir;
 
+/// Read-only local diagnostic; prints timings/counts, never session contents.
+/// TOKN_PROFILE_SOURCE points to JSON containing source_path and session_id.
+#[test]
+#[ignore = "requires an explicitly selected local Codex source"]
+fn profile_local_codex_open() {
+  let metadata = std::env::var("TOKN_PROFILE_SOURCE").expect("Set TOKN_PROFILE_SOURCE");
+  let metadata: serde_json::Value = serde_json::from_slice(&std::fs::read(metadata).unwrap()).unwrap();
+  let path = PathBuf::from(metadata["source_path"].as_str().unwrap());
+  let root = std::env::var_os("TOKN_PROFILE_ROOT")
+    .map(PathBuf::from)
+    .expect("Set TOKN_PROFILE_ROOT");
+  let source = tokn_session_codex::CodexSessionSource::new(Some(root.clone()));
+  let start = std::time::Instant::now();
+  let segments = source.history_segments(&path).unwrap();
+  eprintln!("lineage_ms={} segments={}", start.elapsed().as_millis(), segments.len());
+  let start = std::time::Instant::now();
+  let mut history =
+    tokn_session_codex::CodexHistoryReader::new(path.clone(), false, crate::service_protocol::MAX_SNAPSHOT_BYTES);
+  let decoded = history.poll(&source).unwrap().unwrap();
+  eprintln!(
+    "decode_ms={} records={}",
+    start.elapsed().as_millis(),
+    decoded.records.len()
+  );
+  drop(decoded);
+  drop(history);
+  let start = std::time::Instant::now();
+  let reader = SessionReader::new(
+    CatalogEntry {
+      key: "profile".into(),
+      provider: Provider::Codex,
+      header: serde_json::from_value(serde_json::json!({"id": metadata["session_id"], "path": path})).unwrap(),
+    },
+    false,
+    root,
+  )
+  .unwrap();
+  eprintln!(
+    "reader_ms={} records={} events={}",
+    start.elapsed().as_millis(),
+    reader.snapshot.records.len(),
+    reader.snapshot.records.events
+  );
+  let latest = reader.snapshot.records.window_start(None, None);
+  let previous_three = reader
+    .snapshot
+    .records
+    .window_start(None, Some(reader.snapshot.records.events));
+  eprintln!(
+    "latest_window_events={} three_turn_window_events={}",
+    reader.snapshot.records.events - latest,
+    reader.snapshot.records.events - previous_three
+  );
+  if let Some(history) = &reader.codex_history {
+    eprintln!("read_stats={:?}", history.stats());
+  }
+}
+
 struct CodexHistoryFixture {
   directory: TempDir,
   base_path: PathBuf,

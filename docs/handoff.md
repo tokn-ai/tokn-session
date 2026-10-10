@@ -10,7 +10,13 @@ initial/older screens, details HTTP for complete groups/tool display payloads,
 and dedicated inspection HTTP for source/native records. Tauri exposes the
 same commands through its event bridge. Opening defaults to latest-turn steps
 with collapsed inner groups and never backfills saved reading anchors before
-first paint. Heartbeats renew identity leases without fetching data. Snapshot
+first paint. Heartbeats renew identity leases without fetching data.
+Cold source startup runs outside the shared subscription lock, and initial
+source windows now contain one user turn plus dependency/attention context.
+Codex decoding avoids temporary payload clones and duplicate cold lineage
+resolution. Full historical normalization/journal creation remains the main
+cold cost; use the opt-in `profile_local_codex_open` diagnostic to separate it
+from display projection. Snapshot
 baselines and publication share revisions; reconnects and replacements recover
 through backward reads. Old-socket cleanup cannot remove reclaimed interests.
 
@@ -222,7 +228,7 @@ pages expose `follow_error` while retaining last-good cards during follower retr
 
 ## Session snapshots
 
-The viewer now retains a three-user-turn initial history window in an
+The viewer now retains a one-user-turn initial history window in an
 eight-session LRU, with two lower-priority activity preloads scoped by each
 view's project/filter candidates. Explicit earlier loads and appended turns
 remain until session eviction. View leases protect selected sessions; a 64 MiB

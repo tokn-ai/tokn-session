@@ -88,10 +88,29 @@ position. Each level has independent revision coverage; receiving final events
 does not advance steps coverage. Source events at `all` remain separate from
 folded display objects. Native inspection is independently opt-in.
 
+## Local opening diagnostics
+
+Cold source loading happens before taking the shared subscription lock; snapshot
+capture and publication still share that lock. One slow cold session therefore
+does not hold up unrelated live subscriptions while its source reader starts.
+Inherited Codex history resolves its lineage once, and its tolerant decoder reads
+typed fields from the retained JSON without temporary payload clones.
+
+For a read-only source timing probe, save a JSON object containing `source_path`
+and `session_id`, then run:
+
+```sh
+TOKN_PROFILE_SOURCE=/path/to/source-metadata.json TOKN_PROFILE_ROOT=/path/to/codex/sessions \
+  cargo test -p tokn-viewer-core profile_local_codex_open -- --ignored --nocapture
+```
+
+It prints lineage/decode/reader timings and source/window counts, never message
+contents. Debug timings are diagnostic, not desktop release benchmarks.
+
 ## Remaining costs
 
 Source readers may still retain/normalize a broader window than the selected
-projection. Initial retained source delivery covers three recent turns. Earlier
+projection. Initial retained source delivery covers the latest user turn and required context. Earlier
 source-window expansion can resend the retained window between source service
 and viewer-core. Projection still rebuilds retained timelines and tool assembly
 before comparison, under the shared subscription lock; this work has not been

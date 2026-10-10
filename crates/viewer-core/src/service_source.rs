@@ -142,8 +142,11 @@ impl SessionReader {
       return self.poll_database(version);
     }
     if self.snapshot.entry.provider == Provider::Codex {
-      let source = tokn_session_codex::CodexSessionSource::new(Some(self.root.clone()));
-      if source.history_segments(path)?.len() > 1 {
+      // Detect inherited history from the owning header. The history reader
+      // resolves and validates the lineage itself; doing it here would walk
+      // the provider roots and verify every prefix twice on a cold open.
+      let header = tokn_session_codex::history_header(path)?;
+      if !header.native()["payload"]["history_base"].is_null() {
         self.codex_history = Some(tokn_session_codex::CodexHistoryReader::new(
           path.clone(),
           self.native,
