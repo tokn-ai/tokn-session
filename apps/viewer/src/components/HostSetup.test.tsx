@@ -4,9 +4,9 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { RemoteConnection } from "./RemoteConnection";
 import { LocalHostProvider } from "./LocalHostProvider";
 import { HostSetup, HostQuickControl } from "./HostSetup";
-import { getLocalHostPairing, getLocalHostStatus, listenForLocalHostStatus, startLocalHost, stopLocalHost } from "../lib/tauri";
+import { getLocalHostPairing, getLocalHostStatus, listenForLocalHostStatus, startLocalHost, stopLocalHost, stopExternalLocalHost } from "../lib/tauri";
 import type { LocalHostStatus } from "../lib/types";
-vi.mock("../lib/tauri", () => ({ getLocalHostPairing: vi.fn(), getLocalHostStatus: vi.fn(), listenForLocalHostStatus: vi.fn(), startLocalHost: vi.fn(), stopLocalHost: vi.fn() }));
+vi.mock("../lib/tauri", () => ({ getLocalHostPairing: vi.fn(), getLocalHostStatus: vi.fn(), listenForLocalHostStatus: vi.fn(), startLocalHost: vi.fn(), stopLocalHost: vi.fn(), stopExternalLocalHost: vi.fn() }));
 const stopped: LocalHostStatus = { phase: "stopped", hub_url: "https://hub.example", name: "Workstation", allow_control: false, machine_reference: "machine@key", error: null };
 const online: LocalHostStatus = { ...stopped, phase: "online" };
 let status_event: (status: LocalHostStatus) => void;
@@ -17,6 +17,7 @@ beforeEach(() => {
   vi.mocked(getLocalHostStatus).mockResolvedValue(stopped);
   vi.mocked(startLocalHost).mockResolvedValue(online);
   vi.mocked(stopLocalHost).mockResolvedValue(stopped);
+  vi.mocked(stopExternalLocalHost).mockResolvedValue(stopped);
   vi.mocked(getLocalHostPairing).mockResolvedValue({ machine_reference: "machine@key", qr_data_url: "data:image/svg+xml;base64,test", setup_uri: "otpauth://totp/test?secret=PRIVATE&algorithm=SHA256", current_code: "123456", host_time: 100, expires_at: 130 });
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.clearAllMocks(); localStorage.clear(); });
@@ -102,8 +103,8 @@ it("shares live status with the quick switch and uses saved settings", async () 
   fireEvent.click(toggle);
   await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
   expect(startLocalHost).toHaveBeenCalledWith({ hub_url: stopped.hub_url, name: stopped.name, allow_control: false });
-  fireEvent.click(screen.getByRole("button", { name: "Hosting settings" }));
-  expect(close).toHaveBeenCalledOnce();
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
+  expect(screen.queryByRole("button", { name: "Hosting settings" })).not.toBeInTheDocument();
   expect(screen.getByRole("dialog", { name: "Host this computer" })).toHaveTextContent("Hosting online");
   expect(screen.queryByLabelText("Host name")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Close hosting settings" }));
@@ -142,15 +143,73 @@ it("labels the local host separately while viewing a remote machine", async () =
   await waitFor(() => expect(toggle).toBeEnabled());
   fireEvent.click(toggle);
   await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
-  fireEvent.click(screen.getByRole("button", { name: "Hosting settings" }));
-  expect(screen.getAllByRole("dialog")).toHaveLength(1);
-  expect(screen.getByRole("dialog")).toHaveAccessibleName("Host this computer");
-  fireEvent.click(screen.getByRole("button", { name: "Close hosting settings" }));
-  expect(screen.getByRole("button", { name: /Remote workstation.*Connection settings/ })).toHaveFocus();
+  expect(screen.queryByRole("button", { name: "Hosting settings" })).not.toBeInTheDocument();
 });
 it("does not expose local hosting on a browser connection", () => {
   render(<RemoteConnection name="Browser machine" state="connected"><button>Machines</button></RemoteConnection>);
   fireEvent.click(screen.getByRole("button", { name: /Connection settings/ }));
   expect(screen.queryByRole("switch")).not.toBeInTheDocument();
   expect(getLocalHostStatus).not.toHaveBeenCalled();
+});
+
+it("shows external hosting and disables app controls without trying to stop it", async () => {
+  vi.mocked(getLocalHostStatus).mockResolvedValue({ ...online, phase: "external" });
+  render(<LocalHostProvider><HostSetup /><HostQuickControl on_open_settings={() => {}} /></LocalHostProvider>);
+  const toggle = await screen.findByRole("switch");
+  await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+  expect(toggle).toBeDisabled();
+  expect(screen.getByText("Hosting externally")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
+  expect(screen.queryByRole("button", { name: "Start hosting" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Stop hosting" })).not.toBeInTheDocument();
+  expect(screen.getByRole("dialog")).toHaveTextContent("Stop it outside the app");
+  expect(screen.getByRole("button", { name: "Stop external hosting" })).toBeDisabled();
+  expect(startLocalHost).not.toHaveBeenCalled(); expect(stopLocalHost).not.toHaveBeenCalled();
+});
+it("refreshes external ownership on focus and keeps unavailable status distinct from off", async () => {
+  vi.mocked(getLocalHostStatus).mockResolvedValueOnce({ ...online, phase: "external" }).mockResolvedValue(stopped);
+  render(<LocalHostProvider><HostQuickControl on_open_settings={() => {}} /></LocalHostProvider>);
+  await screen.findByText("Hosting externally");
+  fireEvent(window, new Event("focus"));
+  await screen.findByText("Hosting off");
+  expect(screen.getByRole("switch")).toBeEnabled();
+  vi.mocked(getLocalHostStatus).mockResolvedValue({ ...stopped, phase: "unavailable", error: "Hub check timed out" });
+  fireEvent(window, new Event("focus"));
+  await screen.findByText("Hosting status unavailable");
+  expect(screen.getByRole("switch")).toBeDisabled();
+});
+
+it("updates a rejected start to external ownership instead of retaining the conflict alert", async () => {
+  vi.mocked(getLocalHostStatus).mockResolvedValueOnce(stopped).mockResolvedValue({ ...online, phase: "external" });
+  vi.mocked(startLocalHost).mockRejectedValue(new Error("Another connector is already hosting"));
+  render(<LocalHostProvider><HostQuickControl on_open_settings={() => {}} /></LocalHostProvider>);
+  const toggle = await screen.findByRole("switch");
+  await waitFor(() => expect(toggle).toBeEnabled());
+  fireEvent.click(toggle);
+  await screen.findByText("Hosting externally");
+  expect(toggle).toBeDisabled();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("stops a verified external service only from the floating dialog", async () => {
+  vi.mocked(getLocalHostStatus).mockResolvedValue({ ...online, phase: "external", external_stop_supported: true });
+  render(<LocalHostProvider><HostSetup /><HostQuickControl on_open_settings={() => {}} /></LocalHostProvider>);
+  await screen.findByText("Hosting externally");
+  expect(screen.queryByRole("button", { name: "Stop external hosting" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
+  fireEvent.click(screen.getByRole("button", { name: "Stop external hosting" }));
+  await waitFor(() => expect(stopExternalLocalHost).toHaveBeenCalledOnce());
+  await screen.findByRole("button", { name: "Start hosting" });
+  expect(stopLocalHost).not.toHaveBeenCalled();
+  expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "false");
+});
+it("preserves external hosting status when stopping its service fails", async () => {
+  vi.mocked(getLocalHostStatus).mockResolvedValue({ ...online, phase: "external", external_stop_supported: true });
+  vi.mocked(stopExternalLocalHost).mockRejectedValue(new Error("Service identity changed"));
+  render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
+  await screen.findByText("Hosting externally");
+  fireEvent.click(screen.getByRole("button", { name: "Stop external hosting" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Service identity changed");
+  expect(screen.getByText("Hosting externally")).toBeInTheDocument();
 });

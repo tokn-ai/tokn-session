@@ -111,8 +111,14 @@ and machine name in the floating dialog, choose whether to allow remote agent
 input, and click **Start hosting**. The bottom-left connection panel in local
 and remote views also shows this computer’s hosting status and an on/off switch.
 The switch uses saved settings; without a configured Hub it opens the same
-dialog. **Hosting settings** opens configuration and pairing setup from that
-panel. Viewing is the default for a new host. The dialog reports connecting,
+dialog. Configuration and pairing setup remain on Machines. External
+connectors show **Hosting externally**, with the switch disabled because the app
+cannot stop arbitrary connectors. The floating dialog offers **Stop external
+hosting** for the verified installed macOS connector LaunchAgent. It unloads only
+that connector for the current login session, preserves its configuration/trust,
+and leaves the viewer API service running. It may start again at the next login.
+Unrecognized connectors show a disabled stop button and manual-stop guidance. Status refreshes every 15 seconds while visible and on focus;
+a failed Hub check shows status unavailable rather than hosting off. Viewing is the default for a new host. The dialog reports connecting,
 online, and reconnecting states. **Stop hosting** or quitting the app disconnects
 its connector and closes its private loopback API. Hosting is not started
 again automatically on the next app launch, and no background service is installed.

@@ -25,7 +25,7 @@
 .host-control { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
 .host-dialog .host-control input[type="checkbox"] { width: 16px; height: 16px; min-height: 16px; padding: 0; margin: 0; flex: none; accent-color: var(--text); }
 .host-status { display: flex; align-items: center; gap: 8px; font-weight: 550; }
-.host-status[data-phase="online"] .connection-dot { background: #4c9f70; }
+.host-status:is([data-phase="online"], [data-phase="external"]) .connection-dot { background: #4c9f70; }
 .host-status[data-phase="error"] .connection-dot { background: var(--danger); }
 .host-summary { display: grid; gap: 14px; margin: 0; padding: 16px; border: 1px solid var(--border); border-radius: 10px; }
 .host-summary > div { display: grid; gap: 4px; }

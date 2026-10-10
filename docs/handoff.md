@@ -141,9 +141,17 @@ systemd service. Persistent state stays outside versioned releases. See
 
 Desktop **Machines → This machine → Host this computer** now owns optional
 hosting for the app lifetime. Machines opens a floating hosting dialog; local
-and remote session connection panels share its status and quick on/off switch
+and remote session connection panels show its status and quick on/off switch
 for this computer. One desktop provider retains status across navigation;
-dialog dismissal clears pairing secrets and restores keyboard focus. It reuses `~/.tokn/hub` trust, offers Hub/name and
+dialog dismissal clears pairing secrets and restores keyboard focus. The panels
+keep configuration on Machines and report externally owned connectors with a
+disabled switch. Only the floating dialog offers external stop: a verified
+installed macOS connector LaunchAgent is unloaded for the current login session,
+without affecting the API service or saved trust; unrecognized connectors remain
+manual. Definition, loaded service, and launcher configuration are rechecked
+before stopping. Status checks inspect ownership locks and the saved Hub for
+older connectors; unavailable checks stay distinct from hosting off. Visible
+clients refresh status every 15 seconds and on focus. It reuses `~/.tokn/hub` trust, offers Hub/name and
 remote-input settings, Start/Stop, status events, and an on-demand pairing
 reference/QR/URI/current-code display. Secrets stay in the local command response
 and are cleared from display when hidden. A token-protected ephemeral loopback
