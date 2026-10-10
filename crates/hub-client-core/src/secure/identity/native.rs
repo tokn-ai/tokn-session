@@ -62,7 +62,7 @@ pub(super) fn load_or_create_secret(
   }
 }
 
-fn read_secret(path: &Path, kind: &str) -> Result<Zeroizing<[u8; 32]>, String> {
+pub(super) fn read_secret(path: &Path, kind: &str) -> Result<Zeroizing<[u8; 32]>, String> {
   let metadata = fs::symlink_metadata(path).map_err(|e| format!("Could not inspect private identity: {e}"))?;
   if !metadata.is_file() {
     return Err("Private identity must be a regular file, not a symlink".into());

@@ -1,3 +1,5 @@
+import { LiveSessionSocket } from "./liveSessionSocket";
+import type { SessionUpdatesRequest } from "./types";
 export type UnlistenFn = () => void;
 export type CommandInvoker = <T>(command: string, payload?: Record<string, unknown>) => Promise<T>;
 type Handler = (event: { payload: unknown }) => void;
@@ -28,6 +30,7 @@ export class RemoteClient {
   private lifetime = new AbortController();
   private requests = new Set<AbortController>();
   private started?: Promise<void>;
+  private live?: LiveSessionSocket;
   private closed = false;
   private closeHandlers = new Set<() => void>();
   private onState: (state: ConnectionState) => void = () => {};
@@ -44,8 +47,13 @@ export class RemoteClient {
     if (signal?.aborted) client.close();
     signal?.addEventListener("abort", abort, { once: true });
     try {
-      const health = await client.fetchJson("health") as { version?: number };
+      const health = await client.fetchJson("health") as { version?: number; live_updates?: boolean };
       if (health.version !== 1) throw new Error("This server uses an unsupported viewer API version.");
+      // Existing Hub and paired HTTP tunnels cannot upgrade an upstream WebSocket.
+      if (health.live_updates && !/\/(?:hosts|paired)\//.test(url.pathname)) client.live = new LiveSessionSocket(client.endpoint, token, (event, payload) => {
+        client.emit(event, payload);
+        if (event === "transport-reconnected") client.emit("relay-changed", { session_key: null, reset: true });
+      });
       return client;
     } catch (error) { client.close(); throw error; }
     finally { signal?.removeEventListener("abort", abort); }
@@ -76,7 +84,16 @@ export class RemoteClient {
     } finally { clearTimeout(timeout); this.requests.delete(controller); }
   }
   invoke<T>(command: string, payload: unknown = {}): Promise<T> {
-    return this.fetchJson(command, payload) as Promise<T>;
+    if (command === "subscribe_session" && this.live) return this.live.subscribe((payload as { request: SessionUpdatesRequest }).request) as Promise<T>;
+    if (command === "renew_session_subscriptions" && this.live) return Promise.resolve(undefined as T);
+    return this.fetchJson(command, payload).then((result) => {
+      if (this.live && (command === "load_session_backward" || command === "load_session_details")) {
+        const value = payload as { request: SessionUpdatesRequest | { kind: string; request: SessionUpdatesRequest } };
+        const request = "kind" in value.request ? value.request.request : value.request;
+        if (request.subscription_id) this.live.remember(request);
+      }
+      return result as T;
+    });
   }
   async listen<T>(name: string, handler: (event: { payload: T }) => void): Promise<UnlistenFn> {
     if (this.closed) throw new Error("Machine disconnected");
@@ -85,7 +102,7 @@ export class RemoteClient {
     handlers.add(observer);
     this.listeners.set(name, handlers);
     this.started ??= new Promise<void>((resolve, reject) => { void this.pump(resolve, reject); });
-    try { await this.started; }
+    try { await this.started; if (name === "session-updated" && this.live) await this.live.connect(); }
     catch (error) { handlers.delete(observer); throw error; }
     return () => { handlers.delete(observer); };
   }
@@ -103,7 +120,7 @@ export class RemoteClient {
       this.lifetime.signal.addEventListener("abort", abort, { once: true });
       let watchdog = setTimeout(abort, 20_000);
       try {
-        const response = await fetch(`${this.endpoint}/api/v1/events`, {
+        const response = await fetch(`${this.endpoint}/api/v1/events${this.live ? "?session_updates=false" : ""}`, {
           headers: this.headers(), signal: connection.signal, credentials: "omit", redirect: "error",
         });
         if (!response.ok || !response.body) throw new Error(`Live connection failed (${response.status})`);
@@ -177,6 +194,7 @@ export class RemoteClient {
     for (const handler of this.closeHandlers) handler();
     this.closeHandlers.clear();
     this.closed = true;
+    this.live?.close();
     this.lifetime.abort();
     for (const request of this.requests) request.abort();
     this.listeners.clear();

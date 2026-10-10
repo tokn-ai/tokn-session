@@ -100,7 +100,7 @@ impl HostPasskeys {
     let passkeys = onboarding::host_passkeys(&self.state_file, &self.origin)?;
     let (ceremony, options) = match operation {
       HostAuthOperation::RegisterStart => {
-        if !onboarding::is_authorized(&self.state_file, device_public_key)? {
+        if !onboarding::can_enroll_passkey_at(&self.state_file, device_public_key, now)? {
           return Err("Pair this device with an authenticator before adding a host passkey".into());
         }
         let excluded = passkeys.iter().map(|passkey| passkey.cred_id().clone()).collect();
@@ -172,7 +172,7 @@ impl HostPasskeys {
           .webauthn
           .finish_passkey_registration(&request.credential, &state)
           .map_err(|_| "Host passkey registration could not be verified")?;
-        onboarding::register_host_passkey(&self.state_file, &self.origin, device_public_key, passkey)?;
+        onboarding::register_host_passkey(&self.state_file, &self.origin, device_public_key, passkey, now)?;
         true
       }
       (HostAuthOperation::LoginFinish, Ceremony::Authentication(state)) => {
@@ -182,6 +182,9 @@ impl HostPasskeys {
           .webauthn
           .finish_passkey_authentication(&request.credential, &state)
           .map_err(|_| "Host passkey login could not be verified")?;
+        if !result.user_verified() {
+          return Err("Passkey user verification is required".into());
+        }
         onboarding::authorize_passkey_device(&self.state_file, &self.origin, device_public_key, &result, now)?;
         false
       }

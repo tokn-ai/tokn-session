@@ -145,6 +145,11 @@ pub fn allowed_route(method: &str, path: &str, allow_control: bool) -> bool {
       | "/api/v1/list_session_children"
       | "/api/v1/load_event_page"
       | "/api/v1/load_session_updates"
+      | "/api/v1/subscribe_session"
+      | "/api/v1/load_session_backward"
+      | "/api/v1/load_session_details"
+      | "/api/v1/inspect_session_event"
+      | "/api/v1/renew_session_subscriptions"
       | "/api/v1/update_session_view"
       | "/api/v1/load_event_detail"
       | "/api/v1/load_trajectory_event_page"
@@ -166,12 +171,21 @@ mod tests {
   fn paths_are_exact_and_control_is_explicit() {
     assert!(allowed_route("POST", "/api/v1/list_sessions", false));
     for allow_control in [false, true] {
-      assert!(allowed_route("POST", "/api/v1/load_session_updates", allow_control));
-      for method in ["GET", "PUT", "DELETE"] {
-        assert!(!allowed_route(method, "/api/v1/load_session_updates", allow_control));
-      }
-      for path in ["/api/v1/load_session_updates/", "/api/v1/load_session_updates?x=1"] {
-        assert!(!allowed_route("POST", path, allow_control));
+      for path in [
+        "/api/v1/load_session_updates",
+        "/api/v1/subscribe_session",
+        "/api/v1/load_session_backward",
+        "/api/v1/load_session_details",
+        "/api/v1/inspect_session_event",
+        "/api/v1/renew_session_subscriptions",
+      ] {
+        assert!(allowed_route("POST", path, allow_control));
+        for method in ["GET", "PUT", "DELETE"] {
+          assert!(!allowed_route(method, path, allow_control));
+        }
+        for suffix in ["/", "?x=1"] {
+          assert!(!allowed_route("POST", &format!("{path}{suffix}"), allow_control));
+        }
       }
     }
     assert!(allowed_route("POST", "/api/v1/submit_session_input", true));
