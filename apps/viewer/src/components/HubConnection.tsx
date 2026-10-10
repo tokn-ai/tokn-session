@@ -64,8 +64,9 @@ function HubLogin({ configured, bootstrap_token, notice, on_authenticated }: {
   return <main className="machine-connect hub-login">
     <form onSubmit={(event) => { event.preventDefault(); void authenticate(); }}>
       <p className="hub-eyebrow">Tokn Hub</p>
-      <h1>{configured ? "Your hosts, one place" : "Set up your Hub"}</h1>
-      <p>{configured ? "Sign in with a passkey to access your hosts." : "Create your first passkey to become this Hub’s owner."}</p>
+      <h1>{configured ? "Hub administration" : "Set up your Hub"}</h1>
+      <p>{configured ? "Sign in with an administrator passkey to manage host routes." : "Create your first administrator passkey to manage this Hub."}</p>
+      <a href="/">Open your machines</a>
       {!configured && <>
         <label htmlFor="hub-bootstrap">Setup token</label>
         <input id="hub-bootstrap" type="password" required value={bootstrap} disabled={busy} autoComplete="off"
@@ -213,7 +214,7 @@ function HubHosts({ session, initial_notice, on_authenticated, on_disconnected }
       <ul className="hub-hosts" aria-label="Enrolled hosts">
         {hosts.map((host) => <li key={host.host_id} className="hub-host">
           <div className="hub-host-details"><h2>{host.name}</h2><p><span className={`hub-presence ${host.online ? "is-online" : ""}`}>{host.online ? "Online" : "Offline"}</span> · {host.secure_only ? "End-to-end encrypted" : host.access === "view" ? "View only" : "View and control"}</p><code>{host.host_id}</code>
-            {host.secure_only && <p>Open this host with your installed Tokn client to pair or reconnect securely.</p>}
+            {host.secure_only && <p>Open your machines to pair using this host’s authenticator code or sign in with a machine passkey.</p>}
           </div>
           <div className="hub-actions">
             {!host.secure_only && <button disabled={!host.online || !!busy} onClick={() => { void connectHost(host); }}>{busy === host.host_id ? "Connecting…" : `Open ${host.name}`}</button>}

@@ -34,15 +34,21 @@ export function submitSessionInput(request: SubmitSessionInputRequest): Promise<
 }
 
 export function getTranslationStatus(): Promise<TranslationStatus> {
-  return invoke<TranslationStatus>("get_translation_status");
+  return localTranslation<TranslationStatus>("get_translation_status");
 }
 
 export function translateText(request: TranslateTextRequest): Promise<TranslateTextResponse> {
-  return invoke<TranslateTextResponse>("translate_text", { request });
+  return localTranslation<TranslateTextResponse>("translate_text", { request });
 }
 
 export function cancelTranslation(requestId: string): Promise<void> {
-  return invoke<void>("cancel_translation", { request_id: requestId });
+  return localTranslation<void>("cancel_translation", { request_id: requestId });
+}
+
+async function localTranslation<T>(command: string, payload?: Record<string, unknown>): Promise<T> {
+  // Translation belongs to the viewing device even when session data is remote.
+  if (isDesktop()) return (await import("@tauri-apps/api/core")).invoke<T>(command,payload);
+  return invoke<T>(command,payload);
 }
 
 export function getRelayStatus(): Promise<RelayStatus> {
@@ -60,7 +66,6 @@ export function listenForRelayChanges(handler: (change: RelayChange) => void): P
 
 /** Browser SSE reconnects require fresh state snapshots; desktop events stay live. */
 export function listenForTransportReconnect(handler: () => void): Promise<UnlistenFn> {
-  if (isDesktop()) return Promise.resolve(() => {});
   return listen("transport-reconnected", handler);
 }
 

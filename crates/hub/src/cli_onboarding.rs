@@ -17,6 +17,7 @@ pub struct HostOptions {
   pub hub: Option<Url>,
   pub name: Option<String>,
   pub viewer_url: Option<Url>,
+  pub passkey_origin: Option<String>,
   pub state_dir: PathBuf,
   pub totp_secret_file: Option<PathBuf>,
   pub viewer_token: Option<String>,
@@ -39,6 +40,22 @@ pub fn prepare_host(options: HostOptions) -> Result<ConnectorConfig, String> {
         .and_then(|profile| Url::parse(&profile.viewer_url).ok())
     })
     .unwrap_or_else(|| Url::parse("http://127.0.0.1:5558").unwrap());
+  let passkey_origin = options
+    .passkey_origin
+    .or_else(|| previous.as_ref().and_then(|profile| profile.passkey_origin.clone()));
+  let passkey_origin = match passkey_origin {
+    Some(origin) => Some(
+      tokn_session_hub::host_passkeys::validate_origin(&origin)?
+        .origin()
+        .ascii_serialization(),
+    ),
+    None => {
+      let origin = onboarding::canonical_hub(&hub)?;
+      tokn_session_hub::host_passkeys::validate_origin(&origin)
+        .ok()
+        .map(|origin| origin.origin().ascii_serialization())
+    }
+  };
   let profile = HostProfile {
     version: 1,
     host_id: previous
@@ -55,6 +72,7 @@ pub fn prepare_host(options: HostOptions) -> Result<ConnectorConfig, String> {
       .allow_control
       .unwrap_or_else(|| previous.as_ref().is_some_and(|profile| profile.allow_control)),
     insecure_loopback: options.insecure_loopback || previous.as_ref().is_some_and(|profile| profile.insecure_loopback),
+    passkey_origin,
   };
   let key_file = options.state_dir.join("host-enrollment.key");
   let noise_key_file = options.state_dir.join("host-noise.key");
@@ -98,16 +116,21 @@ pub fn prepare_host(options: HostOptions) -> Result<ConnectorConfig, String> {
     })
   } else {
     onboarding::read_totp_secret(&state_file)?;
+    onboarding::validate_host_passkey_origin(&state_file, profile.passkey_origin.as_deref())?;
     None
   };
   connector::initialize_identity(&key_file)?;
-  NoiseIdentity::load_or_create(&noise_key_file)?;
+  let noise_identity = NoiseIdentity::load_or_create(&noise_key_file)?;
   if let Some(secret) = new_secret {
     onboarding::initialize_host_access(&state_file, &secret)?;
   }
   profile.save(&profile_path)?;
   eprintln!("Host ID: {}", profile.host_id);
-  eprintln!("Pair this ID in your locally installed client using your authenticator code.");
+  eprintln!("Machine reference: {}@{}", profile.host_id, noise_identity.public_key());
+  eprintln!("Open the Hub viewer and connect with this host ID and your authenticator code.");
+  if let Some(origin) = &profile.passkey_origin {
+    eprintln!("Host passkey browser origin: {origin}");
+  }
   if is_new_secret {
     if std::io::stderr().is_terminal() {
       display_authenticator(&onboarding::read_totp_secret(&state_file)?, &profile.name)?;
@@ -270,6 +293,7 @@ mod tests {
       hub,
       name: None,
       viewer_url: None,
+      passkey_origin: None,
       state_dir: directory.path().into(),
       totp_secret_file: None,
       viewer_token: None,
@@ -315,6 +339,7 @@ mod tests {
       hub: Some(Url::parse("https://hub.example").unwrap()),
       name: None,
       viewer_url: None,
+      passkey_origin: None,
       state_dir: directory.path().join("host"),
       totp_secret_file: Some(seed.clone()),
       viewer_token: None,

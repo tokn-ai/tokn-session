@@ -125,12 +125,22 @@ captured compaction. Upgrade strict `AgentEvent` consumers with the producer.
 
 ## Session Hub
 
-`crates/hub` defaults to host-verified authenticator pairing for your own devices.
+The default remote path is app/browser → Hub → host. Hub serves the browser UI
+and forwards encrypted records; endpoints run the shared Rust pairing/Noise
+implementation (`hub-client-core`, compiled to WASM for browsers).
 `connect --hub …` saves UUID/keys/config, displays a local TOTP setup QR, and
-registers an encrypted-only route without Hub passkey approval. `client --hub …`
-serves a local `/connect` UI; UUID + authenticator code establishes pinned Noise
-keys and host-local device authorization. Saved selection/config reconnects
-without OTP. Switching invalidates old routes and cancels streams; host-local
+prints a machine reference `UUID@host_public_key`. Open the Hub URL or choose
+Hub in the app, then enter the machine and authenticator code. The host verifies
+pairing and authorizes the device key. Remembered keys and host pins reconnect
+without OTP: IndexedDB in browsers, owner-only native files in the app.
+Enrolled host-owned passkeys authorize new devices on their original Noise
+channel; a new device needs the full machine reference to pin the host first.
+Native passkey prompts use the Hub browser origin and a one-shot loopback form
+callback carrying only the credential. Hub administration lives at `/admin`.
+Browser code delivery trusts Hub; a malicious code publisher can read decrypted
+content even though the relay cannot decrypt traffic. The old installed
+`client` helper remains optional compatibility, not part of the default path.
+Switching cancels requests and streams; host-local
 revocation is rechecked every second. Agent input requires saved host
 `--allow-control`; `--allow-control=false` disables it. Seed import/export supports
 user-managed synchronization; replay and five-attempt/five-minute limits persist
@@ -139,15 +149,23 @@ SPAKE2/HKDF/HMAC pairing is experimental and unaudited; normal traffic uses Nois
 IK. Hub registrations have bounded capacity/rate and persistent UUID tombstones.
 The default flow defers sharing; earlier owner-signed grants and selected-session
 scoping remain behind explicit CLI options. `connect --trusted-hub` retains the
-older browser-through-Hub mode. See [onboarding](hub-pairing.md),
+older plaintext browser-through-Hub mode. See [onboarding](hub-pairing.md),
 [legacy grants](hub-e2ee.md), and [Hub administration](hub.md). Remote connections
-require HTTPS termination; the host API and installed client stay on loopback.
+require HTTPS termination; the host API stays on loopback. Browser builds need
+the `wasm32-unknown-unknown` Rust target and pinned `wasm-bindgen-cli` 0.2.126;
+`pnpm build` generates bindings before bundling them.
+The Hub viewer-route allowlist includes `load_session_updates`, so semantic
+subscription pulls reach hosts through paired, signed-grant, and trusted-Hub
+connections. Encrypted tunnel tests cover forwarding those request bodies.
 
 ## Viewer core and remote API
 
-Desktop calls shared Rust `crates/viewer-core` directly through Tauri. The
-browser frontend connects to `crates/viewer-api` over HTTP/SSE, one selected
-machine at a time. `viewer-api` serves the compiled `apps/viewer/dist` frontend
+Desktop Local calls shared Rust `crates/viewer-core` directly through Tauri.
+Hub mode uses `hub-remote` through async Tauri commands/events; browser Hub mode
+uses direct encrypted WebSockets. Both select one machine and share the same
+viewer command interface, host-scoped caches, cancellation, and live updates.
+Standalone browser development can still connect directly to
+`crates/viewer-api` over HTTP/SSE. `viewer-api` serves the compiled `apps/viewer/dist` frontend
 with SPA fallback as well as authenticated `/api/v1` data routes. Build with
 `pnpm --dir apps/viewer build`, then run `cargo run -p tokn-viewer-api` and open
 `http://127.0.0.1:5558`. `pnpm --dir apps/viewer dev:web` starts the API on a

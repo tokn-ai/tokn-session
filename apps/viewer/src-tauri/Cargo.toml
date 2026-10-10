@@ -14,12 +14,19 @@ serde_json.workspace = true
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+axum = "0.8"
+rand = "0.8"
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
 tokio = { workspace = true, features = ["process"] }
 tokn-viewer-core.workspace = true
 tokn-session-relay.workspace = true
+tokn-hub-client-core = { path = "../../../crates/hub-client-core" }
+tokn-hub-remote = { path = "../../../crates/hub-remote" }
+tokio-util = { version = "0.7", features = ["rt"] }
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"

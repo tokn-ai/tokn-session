@@ -19,3 +19,11 @@
   margin-top: 6px;
   justify-self: start;
 }
+
+.hub-machine-reference {
+  display: block;
+  margin-top: 8px;
+  max-width: 640px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}

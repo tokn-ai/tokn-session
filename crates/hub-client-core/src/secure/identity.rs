@@ -2,16 +2,17 @@ use super::grant::{Grant, SignedGrant};
 use crate::protocol::{decode, encode};
 use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
-use serde::{Deserialize, Serialize};
 use snow::{
   params::DHChoice,
   resolvers::{CryptoResolver, DefaultResolver},
 };
-use std::{
-  fs::{self, File, OpenOptions},
-  io::{Read, Write},
-  path::Path,
-};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native;
+#[cfg(not(target_arch = "wasm32"))]
+use native::load_or_create_secret;
 use zeroize::Zeroizing;
 
 pub(super) const NOISE_PROTOCOL: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
@@ -41,7 +42,7 @@ impl NoiseIdentity {
     )
   }
 
-  fn from_secret(secret: [u8; 32]) -> Result<Self, String> {
+  pub fn from_secret(secret: [u8; 32]) -> Result<Self, String> {
     let secret = Zeroizing::new(secret);
     let mut dh = DefaultResolver
       .resolve_dh(&DHChoice::Curve25519)
@@ -52,12 +53,30 @@ impl NoiseIdentity {
   }
 
   /// Create a private file once, or load an existing regular, owner-only file.
+  #[cfg(not(target_arch = "wasm32"))]
   pub fn load_or_create(path: &Path) -> Result<Self, String> {
     let secret = load_or_create_secret(path, "noise_x25519", || {
       let identity = Self::generate()?;
       Ok(*identity.secret)
     })?;
     Self::from_secret(*secret)
+  }
+
+  /// Import only canonical unpadded URL-safe base64 containing exactly 32 bytes.
+  pub fn import_secret(value: &str) -> Result<Self, String> {
+    if value.len() != 43 {
+      return Err("Private key must be 32 bytes in unpadded URL-safe base64".into());
+    }
+    let secret = Zeroizing::new(decode(value, 32)?);
+    if encode(&secret) != value {
+      return Err("Private key must use canonical base64".into());
+    }
+    Self::from_secret(secret.as_slice().try_into().map_err(|_| "Invalid private key length")?)
+  }
+
+  /// Export explicitly for endpoint-owned private storage; never send to the Hub.
+  pub fn export_secret(&self) -> String {
+    encode(self.secret.as_ref())
   }
 
   pub fn public_key(&self) -> String {
@@ -78,6 +97,7 @@ impl OwnerIdentity {
     Self(SigningKey::generate(&mut OsRng))
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
   pub fn load_or_create(path: &Path) -> Result<Self, String> {
     let secret = load_or_create_secret(path, "owner_ed25519", || Ok(Self::generate().0.to_bytes()))?;
     Ok(Self(SigningKey::from_bytes(&secret)))
@@ -126,121 +146,22 @@ pub(super) fn decode_noise_public_key(value: &str) -> Result<[u8; 32], String> {
   Ok(bytes)
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SecretFile {
-  version: u8,
-  kind: String,
-  secret_key: String,
-}
-
-impl Drop for SecretFile {
-  fn drop(&mut self) {
-    use zeroize::Zeroize;
-    self.secret_key.zeroize();
-  }
-}
-
-fn load_or_create_secret(
-  path: &Path,
-  kind: &str,
-  generate: impl FnOnce() -> Result<[u8; 32], String>,
-) -> Result<Zeroizing<[u8; 32]>, String> {
-  if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-    fs::create_dir_all(parent).map_err(|e| format!("Could not create identity directory: {e}"))?;
-  }
-  // create_new is exclusive and rejects a pre-existing symlink. On reads,
-  // O_NOFOLLOW closes the final-component symlink inspection/open race.
-  let mut options = OpenOptions::new();
-  options.write(true).create_new(true);
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::OpenOptionsExt;
-    options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-  }
-  match options.open(path) {
-    Ok(mut file) => {
-      let secret = Zeroizing::new(generate()?);
-      let encoded = Zeroizing::new(
-        serde_json::to_vec(&SecretFile {
-          version: 1,
-          kind: kind.into(),
-          secret_key: encode(secret.as_ref()),
-        })
-        .map_err(|e| e.to_string())?,
-      );
-      file
-        .write_all(&encoded)
-        .and_then(|_| file.sync_all())
-        .map_err(|e| format!("Could not save private identity: {e}"))?;
-      Ok(secret)
-    }
-    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => read_secret(path, kind),
-    Err(error) => Err(format!("Could not create private identity: {error}")),
-  }
-}
-
-fn read_secret(path: &Path, kind: &str) -> Result<Zeroizing<[u8; 32]>, String> {
-  let metadata = fs::symlink_metadata(path).map_err(|e| format!("Could not inspect private identity: {e}"))?;
-  if !metadata.is_file() {
-    return Err("Private identity must be a regular file, not a symlink".into());
-  }
-  let mut options = OpenOptions::new();
-  options.read(true);
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::OpenOptionsExt;
-    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-  }
-  let mut file = options
-    .open(path)
-    .map_err(|e| format!("Could not open private identity: {e}"))?;
-  validate_private_file(&file)?;
-  let mut bytes = Zeroizing::new(Vec::new());
-  (&mut file)
-    .take(4097)
-    .read_to_end(&mut bytes)
-    .map_err(|e| format!("Could not read private identity: {e}"))?;
-  if bytes.len() > 4096 {
-    return Err("Private identity file is too large".into());
-  }
-  let stored: SecretFile = serde_json::from_slice(&bytes).map_err(|_| "Invalid private identity file")?;
-  if stored.version != 1 || stored.kind != kind {
-    return Err("Private identity has the wrong version or key kind".into());
-  }
-  let secret = Zeroizing::new(decode(&stored.secret_key, 32)?);
-  Ok(Zeroizing::new(
-    secret
-      .as_slice()
-      .try_into()
-      .map_err(|_| "Invalid private identity key length")?,
-  ))
-}
-
-fn validate_private_file(file: &File) -> Result<(), String> {
-  let metadata = file
-    .metadata()
-    .map_err(|e| format!("Could not inspect opened private identity: {e}"))?;
-  if !metadata.is_file() || metadata.len() > 4096 {
-    return Err("Private identity must be a small regular file".into());
-  }
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::MetadataExt;
-    if metadata.mode() & 0o777 != 0o600 || metadata.nlink() != 1 {
-      return Err("Private identity must have mode 0600 and no hard links".into());
-    }
-    // SAFETY: geteuid has no arguments, allocation, or memory side effects.
-    if metadata.uid() != unsafe { libc::geteuid() } {
-      return Err("Private identity must be owned by the current user".into());
-    }
-  }
-  Ok(())
-}
-
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
   use super::*;
+  use std::fs;
+
+  #[test]
+  fn exported_noise_secrets_restore_identity_and_reject_noncanonical_storage() {
+    let identity = NoiseIdentity::generate().unwrap();
+    let secret = Zeroizing::new(identity.export_secret());
+    let restored = NoiseIdentity::import_secret(&secret).unwrap();
+    assert_eq!(restored.public_key(), identity.public_key());
+    assert_eq!(restored.private_key(), identity.private_key());
+    let padded = Zeroizing::new(format!("{}=", secret.as_str()));
+    assert!(NoiseIdentity::import_secret(&padded).is_err());
+    assert!(NoiseIdentity::import_secret("not-a-private-key").is_err());
+  }
 
   #[test]
   fn identities_round_trip_and_key_kinds_cannot_be_confused() {
