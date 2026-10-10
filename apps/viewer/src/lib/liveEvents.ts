@@ -1,4 +1,4 @@
-import type { EventPageResponse, EventSummary, LoadEventPageRequest, LoadTrajectoryEventPageRequest, TrajectoryEventPageResponse } from "./types";
+import type { EventSummary, EventPageResponse, LoadEventPageRequest, LoadTrajectoryEventPageRequest, TrajectoryEventPageResponse } from "./types";
 
 /** The backend owns the retained turn window, including earlier loaded turns.
  * A refresh returns that whole window from one snapshot in a single request.
@@ -10,30 +10,36 @@ export function refreshEventWindow(
   return load({ session_key, window_mode: "retained", direction: "backward" });
 }
 
-export async function refreshTrajectoryWindow(
+/** Legacy transport pages are assembled atomically. A page boundary is never a
+ * display boundary: commentary and complete inner groups must arrive together.
+ */
+export async function loadCompleteTrajectory(
   request: LoadTrajectoryEventPageRequest,
-  previous: EventSummary[],
   load: (request: LoadTrajectoryEventPageRequest) => Promise<TrajectoryEventPageResponse>,
   current: () => boolean,
-  reset = false,
 ): Promise<TrajectoryEventPageResponse> {
-  let page = await load(request);
-  const backward = request.direction === "backward";
-  // Replacement generations may reuse source offsets for different events.
-  // Preserve the window size across a reset, never its old event identities.
-  const anchor = reset ? undefined
-    : backward ? previous[0]?.event_key : previous[previous.length - 1]?.event_key;
+  const initial = await load(request);
+  const expected_total = initial.total_events;
+  const before: EventSummary[][] = [];
+  const after: EventSummary[][] = [];
   const cursors = new Set<string>();
-  while (current() && previous.length > 0
-    && (anchor ? !page.events.some((e) => e.event_key === anchor) : page.events.length < previous.length)) {
-    const cursor = backward ? page.previous_cursor : page.next_cursor;
-    if (!cursor) break;
-    if (cursors.has(cursor)) throw new Error("Turn refresh returned a repeated cursor");
-    cursors.add(cursor);
-    const more = await load({ ...request, cursor });
-    page = backward
-      ? { ...page, previous_cursor: more.previous_cursor, events: [...more.events, ...page.events] }
-      : { ...page, next_cursor: more.next_cursor, events: [...page.events, ...more.events] };
+  for (const direction of ["backward", "forward"] as const) {
+    let cursor = direction === "backward" ? initial.previous_cursor : initial.next_cursor;
+    while (current() && cursor) {
+      if (cursors.has(cursor)) throw new Error("Work group load returned a repeated cursor");
+      cursors.add(cursor);
+      const more = await load({ ...request, cursor, direction });
+      if (more.total_events !== expected_total) throw new Error("Work group changed while loading; try again");
+      (direction === "backward" ? before : after).push(more.events);
+      cursor = direction === "backward" ? more.previous_cursor : more.next_cursor;
+    }
   }
-  return page;
+  if (!current()) throw new Error("Work group load was superseded");
+  // Flatten once, rather than repeatedly copying all previously loaded rows.
+  const events = [...before.reverse().flat(), ...initial.events, ...after.flat()];
+  const keys = new Set(events.map((event) => event.event_key));
+  if (keys.size !== events.length || events.length !== expected_total) {
+    throw new Error("Work group changed while loading; try again");
+  }
+  return { events, total_events: events.length, previous_cursor: null, next_cursor: null };
 }

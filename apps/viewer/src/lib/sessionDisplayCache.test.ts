@@ -102,4 +102,74 @@ describe("session display replicas", () => {
     expect(cache.sourceEvents("one")).toEqual([]);
   });
 
+  it("loads complete work membership locally and updates children without replacing unchanged rows", () => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one", Array.from({ length: 125 }, (_, i) => `child-${i}`));
+    const group = { ...summary("work"), type: "trajectory", child_keys: initial.items.map((item) => item.item_id) };
+    initial.groups = [{ item_id: "work", kind: "work_summary", level: "steps", summary: group }];
+    initial.item_order = ["work"];
+    cache.apply(initial);
+    const first = cache.trajectoryGroup("one", "work")!;
+    expect(first.events).toHaveLength(125);
+    expect(first.total_events).toBe(125);
+    expect(first.previous_cursor).toBeNull();
+    expect(first.next_cursor).toBeNull();
+    cache.apply({ ...initial, snapshot: false, revision: "2", base_revision: "1", item_order: null, groups: [],
+      items: [{ ...initial.items[0], summary: summary("child-0", "finished") }] });
+    const updated = cache.trajectoryGroup("one", "work")!;
+    expect(updated.events[0].summary).toBe("finished");
+    expect(updated.events[1]).toBe(first.events[1]);
+    cache.apply({ ...initial, snapshot: false, revision: "3", base_revision: "2", item_order: null,
+      items: [{ item_id: "child-125", kind: "tool_summary", level: "steps", summary: summary("child-125") }],
+      groups: [{ ...initial.groups[0], summary: { ...group, child_keys: [...group.child_keys, "child-125"] } }] });
+    const appended = cache.trajectoryGroup("one", "work")!;
+    expect(appended.events).toHaveLength(126);
+    expect(appended.events[125].event_key).toBe("child-125");
+    expect(appended.events[1]).toBe(first.events[1]);
+    cache.apply({ ...initial, generation: "replacement", revision: "4" });
+    expect(cache.trajectoryGroup("one", "work")?.events).toHaveLength(125);
+  });
+
+  it("falls back for legacy groups and requires recovery for incomplete membership", () => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one"); cache.apply(initial);
+    expect(cache.trajectoryGroup("one", "a")).toBeNull();
+    expect(cache.apply({ ...initial, groups: [{ item_id: "work", kind: "work_summary", level: "steps",
+      summary: { ...summary("work"), child_keys: ["missing"] } }], item_order: ["work"] })).toBeNull();
+    expect(cache.get("one")).toBeNull();
+  });
+
+  it("loads scoped groups atomically and keeps other groups deferred across live appends", () => {
+    const cache = new SessionDisplayCache();
+    const request = cache.request("one", "steps");
+    expect(request.scope).toEqual({ history: "latest_turn", group_keys: [] });
+    const a = { ...summary("activity:a"), type: "activity_group", child_keys: ["a", "b"] };
+    const c = { ...summary("activity:c"), type: "activity_group", child_keys: ["c"] };
+    const work = { ...summary("work"), type: "trajectory", child_keys: [a.event_key, c.event_key] };
+    const initial: SessionUpdate = { ...snapshot(cache, "one"), ...request, items: [a, c].map((summary) =>
+      ({ item_id: summary.event_key, kind: "work_summary", level: "steps", summary })),
+      groups: [{ item_id: "work", kind: "work_summary", level: "steps", summary: work }], item_order: ["work"],
+      state: { ...snapshot(cache, "one").state, scope: { history: "latest_turn", turn_key: "user", group_keys: [] } } };
+    cache.apply(initial);
+    expect(cache.trajectoryGroup("one", "work")?.events).toEqual([a, c]);
+    expect(cache.trajectoryGroup("one", a.event_key)).toBeNull();
+    cache.includeGroup("one", a.event_key);
+    expect(cache.request("one", "steps").scope).toEqual({ history: "latest_turn", turn_key: "user", group_keys: [a.event_key] });
+    expect(cache.request("one", "details", ["a"]).scope?.group_keys).toEqual([]);
+    const update = { ...initial, snapshot: false, base_revision: "1", revision: "2", groups: [], item_order: null,
+      items: ["a", "b"].map((id) => ({ item_id: id, kind: "tool_summary" as const, level: "steps" as const, summary: summary(id) })) };
+    cache.apply(update);
+    const complete = cache.trajectoryGroup("one", a.event_key)!;
+    expect(complete.events.map((event) => event.event_key)).toEqual(["a", "b"]);
+    expect(cache.trajectoryGroup("one", c.event_key)).toBeNull();
+    cache.apply({ ...update, base_revision: "2", revision: "3", items: [
+      { item_id: a.event_key, kind: "work_summary", level: "steps", summary: { ...a, child_keys: ["a", "b", "d"] } },
+      { item_id: "d", kind: "tool_summary", level: "steps", summary: summary("d") } ] });
+    const appended = cache.trajectoryGroup("one", a.event_key)!;
+    expect(appended.events.map((event) => event.event_key)).toEqual(["a", "b", "d"]);
+    expect(appended.events[0]).toBe(complete.events[0]);
+    cache.includeHistory("one");
+    expect(cache.request("one", "steps").scope?.history).toBe("retained");
+  });
+
 });

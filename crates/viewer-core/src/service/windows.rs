@@ -301,6 +301,11 @@ impl WindowIdentity {
         translate_key(&summary.event_key, |index| index.checked_add(self.event_offset)).expect("valid source position"),
       );
     }
+    if let Some(keys) = &mut summary.child_keys {
+      for key in keys {
+        *key = self.key(key);
+      }
+    }
     summary.event_key = self.key(&summary.event_key);
     summary
   }
@@ -454,6 +459,8 @@ mod tests {
       level: UpdateLevel::All,
       cursor: None,
       detail_keys: vec![],
+      scope: None,
+      history_cursor: None,
       unsubscribe: false,
     };
     let load = |request| {
@@ -497,6 +504,25 @@ mod tests {
         .iter()
         .any(|item| item["kind"] == "detail" && item["detail"]["event"]["type"] == "trajectory")
     );
+    let groups: Vec<_> = first
+      .groups
+      .iter()
+      .filter(|group| group["summary"]["type"] == "trajectory")
+      .collect();
+    assert!(!groups.is_empty());
+    for group in groups {
+      let keys = group["summary"]["child_keys"].as_array().unwrap();
+      assert!(!keys.is_empty());
+      for key in keys {
+        assert!(key.as_str().unwrap().starts_with("window.v1."));
+        assert!(
+          first
+            .items
+            .iter()
+            .any(|item| item["item_id"] == *key && item["summary"].is_object())
+        );
+      }
+    }
     let unchanged = load(SessionUpdatesRequest {
       cursor: Some(first.revision.clone()),
       ..request.clone()
@@ -704,6 +730,40 @@ mod tests {
       ["prompt 5", "prompt 6", "prompt 7"]
     );
     let stable = initial.events.last().unwrap().event_key.clone();
+    let scoped_request = crate::updates::SessionUpdatesRequest {
+      subscription_id: "scoped-history-test".into(),
+      session_key: key.clone(),
+      level: crate::updates::UpdateLevel::Steps,
+      cursor: None,
+      detail_keys: vec![],
+      scope: Some(crate::updates::UpdateScope::default()),
+      history_cursor: None,
+      unsubscribe: false,
+    };
+    let first_service = service.clone();
+    let first_request = scoped_request.clone();
+    let first = tokio::task::spawn_blocking(move || first_service.load_session_updates(first_request))
+      .await
+      .unwrap()
+      .unwrap();
+    assert_eq!(first.items.len(), 1, "opening projects only the newest turn");
+    let history_service = service.clone();
+    let history_cursor = initial.previous_cursor.clone();
+    let history = tokio::task::spawn_blocking(move || {
+      history_service.load_session_updates(crate::updates::SessionUpdatesRequest {
+        cursor: Some(first.revision),
+        history_cursor,
+        scope: Some(crate::updates::UpdateScope {
+          history: crate::updates::HistoryScope::Retained,
+          ..Default::default()
+        }),
+        ..scoped_request
+      })
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(history.item_order.as_ref().unwrap().len(), 6);
     let earlier = window(&service, &key, initial.previous_cursor).await;
     assert_eq!(earlier.events.len(), 6);
     assert_eq!(earlier.events.last().unwrap().event_key, stable);

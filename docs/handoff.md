@@ -8,8 +8,18 @@ Session delivery now has final/steps/details/all subscriptions, semantic item
 changes over Tauri/SSE, snapshot recovery on gaps, and frontend replicas for
 eight recent sessions. Reopening renders cached content before catch-up;
 background sessions receive final-level updates without advancing all coverage.
-The opened session subscribes to all retained source events and display details;
-Inspector/tools use delivered payloads, while older turns remain paginated.
+The opened session subscribes at steps with a latest-turn scope: messages,
+attention context, and inner activity-group summaries. The returned turn anchor
+pins live appends. Each inner group's first expansion requests complete child
+summaries; cached groups remain interested on collapse and receive live updates.
+Inspector and visible expanded tools subscribe to requested details separately;
+closing their inner/outer disclosures stops detail delivery. Older history
+extends the retained window and scope, while omitting scope preserves legacy
+consumers. All remains available for complete source records and display details.
+Legacy transport pages assemble atomically, with retry on incomplete/changed
+responses; there are no within-group load-more controls. Compact attention-only body notifications
+skip catalog reloads; metadata/catalog/warning/shared-index changes still reload.
+Selected semantic subscriptions avoid duplicate index-triggered timeline reads.
 Redaction, native opt-in, and payload bounds still apply. Unrelated detail/work
 caches survive updates. Indexed Automatic and Local share one source-reader path
 without a redundant managed feed child. See [session updates](viewer-session-updates.md)

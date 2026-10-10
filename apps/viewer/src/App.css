@@ -2418,35 +2418,12 @@ button:disabled {
   display: none;
 }
 
-.trajectory-section__page-button {
-  align-self: center;
-  padding: 5px 8px;
-  color: var(--text-muted);
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  font-size: 9px;
-  font-weight: 630;
-  cursor: pointer;
-}
-
-.trajectory-section__page-button:hover:not(:disabled),
-.trajectory-section__page-button:focus-visible {
-  color: var(--focus);
-  background: var(--surface-hover);
-}
-
-.trajectory-section__empty,
-.trajectory-section__count {
+.trajectory-section__empty {
   align-self: center;
   margin: 0;
   color: var(--text-muted);
   font-size: 10px;
   line-height: 1.45;
-}
-
-.trajectory-section__count {
-  font-size: 9px;
 }
 
 .technical-event__body > .markdown-content {

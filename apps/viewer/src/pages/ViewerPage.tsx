@@ -101,9 +101,9 @@ function ViewerContent({ remote, connection }: ViewerPageProps) {
           on_retry={viewer.retryEvents}
           on_retry_expanded_detail={viewer.retryExpandedDetail}
           on_sidebar_open={openSessions}
-          on_trajectory_load_newer={viewer.loadNewerTrajectoryEvents}
-          on_trajectory_load_older={viewer.loadOlderTrajectoryEvents}
           on_trajectory_retry={viewer.retryTrajectoryEvents}
+          on_activity_load={viewer.loadActivityGroup}
+          on_activity_visibility={viewer.setActivityGroupVisibility}
           on_trajectory_event_toggle={viewer.toggleTrajectoryEventExpanded}
           on_trajectory_retry_expanded_detail={viewer.retryExpandedTrajectoryDetail}
           selected_event_key={viewer.selectedEventKey}

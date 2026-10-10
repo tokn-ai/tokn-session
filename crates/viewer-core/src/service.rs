@@ -386,6 +386,8 @@ pub(crate) struct IndexRefresh {
   /// Whether the sidebar should reread compact index state, including source
   /// warnings that changed without a metadata row changing.
   pub changed: bool,
+  /// False only when compact notifications cover every changed sidebar field.
+  pub catalog_refresh_required: bool,
   /// Opaque session keys whose newly indexed eligible messages should refresh
   /// an already-visible newest event page. This deliberately excludes ordinary
   /// metadata updates so an unrelated source scan cannot reset the timeline a
@@ -437,6 +439,7 @@ pub(crate) enum SessionIndexWake {
 #[derive(Default)]
 struct ProviderIndexRefresh {
   changed: bool,
+  presentation_changed: bool,
   attention_session_keys: Vec<String>,
   retry_catalog_soon: bool,
   retry_changed_file_paths: BTreeSet<PathBuf>,
@@ -1534,6 +1537,7 @@ impl ViewerService {
       let body_refresh = self.refresh_pending_body_jobs(&catalog_refresh.unavailable, true)?;
       let mut refresh = catalog_refresh.refresh;
       refresh.changed |= body_refresh.refresh.changed;
+      refresh.catalog_refresh_required |= body_refresh.refresh.catalog_refresh_required;
       refresh
         .updated_session_keys
         .extend(body_refresh.refresh.updated_session_keys);
@@ -1670,6 +1674,7 @@ impl ViewerService {
       match self.refresh_provider_catalog(provider) {
         Ok(provider_refresh) => {
           refresh.changed |= provider_refresh.changed;
+          refresh.catalog_refresh_required |= provider_refresh.changed;
           refresh.retry_catalog_soon |= provider_refresh.retry_catalog_soon;
           refresh
             .attention_session_keys
@@ -1734,6 +1739,7 @@ impl ViewerService {
           // title, preview, or attention revision. Source-file churn can also
           // reach this path; an extra SQLite-only reread is harmless.
           refresh.changed = true;
+          refresh.catalog_refresh_required = true;
         }
         Ok(BodyJobRefresh::Updated {
           provider_refresh,
@@ -1743,6 +1749,7 @@ impl ViewerService {
           self.clear_failed_body_job(&job);
           self.record_body_progress_completion(&job);
           refresh.changed |= provider_refresh.changed;
+          refresh.catalog_refresh_required |= provider_refresh.presentation_changed;
           refresh.updated_session_keys.push(encode_session_key(&job.locator)?);
           refresh.changed = true;
           attention_session_keys.extend(provider_refresh.attention_session_keys);
@@ -1802,6 +1809,7 @@ impl ViewerService {
     // added, removed, or changes even if no session row happened to change;
     // otherwise a recovered source could leave a stale warning on screen.
     if let Ok(mut current_errors) = self.index_errors.lock() {
+      refresh.catalog_refresh_required |= *current_errors != errors;
       refresh.changed |= *current_errors != errors;
       *current_errors = errors;
     }
@@ -1814,7 +1822,9 @@ impl ViewerService {
     errors: HashMap<ViewerProvider, String>,
   ) -> Result<IndexRefresh, String> {
     let mut refresh = self.finish_index_refresh(refresh, errors);
-    refresh.changed |= self.observe_shared_index_change()?;
+    let shared_change = self.observe_shared_index_change()?;
+    refresh.changed |= shared_change;
+    refresh.catalog_refresh_required |= shared_change;
     Ok(refresh)
   }
 
@@ -2374,6 +2384,7 @@ impl ViewerService {
     match self.session_index.replace_sources(&replacements) {
       Ok(_) => Ok(ProviderIndexRefresh {
         changed: true,
+        presentation_changed: false,
         attention_session_keys: Vec::new(),
         retry_catalog_soon,
         retry_changed_file_paths,
@@ -2426,6 +2437,7 @@ impl ViewerService {
             .expect("targeted provider should retain its changed paths"),
         )?;
         refresh.changed |= provider_refresh.changed;
+        refresh.catalog_refresh_required |= provider_refresh.changed;
         refresh.retry_catalog_soon |= provider_refresh.retry_catalog_soon;
         refresh
           .attention_session_keys
@@ -2643,6 +2655,8 @@ impl ViewerService {
     }
     let activity = self.repository.load_activity(&job.locator)?;
     let presentation = activity.presentation.clone();
+    let presentation_changed = existing.title != existing.catalog_title.clone().or(presentation.title.clone())
+      || existing.preview != existing.catalog_preview.clone().or(presentation.preview.clone());
     let attention_marker = Some(activity.marker());
     if source_cursor(job.provider, &job.locator.source_path)? != job.raw_cursor {
       return Ok(BodyJobRefresh::Stale);
@@ -2707,6 +2721,7 @@ impl ViewerService {
     Ok(BodyJobRefresh::Updated {
       provider_refresh: ProviderIndexRefresh {
         changed: completion.was_applied(),
+        presentation_changed,
         attention_session_keys,
         retry_catalog_soon: false,
         ..Default::default()
@@ -4488,6 +4503,15 @@ fn trajectory_event_summary(trajectory: &Trajectory, events: &[AgentEvent]) -> E
   let summary = trajectory_summary(&card);
 
   EventSummary {
+    child_keys: Some(
+      trajectory
+        .entries
+        .iter()
+        .map(|entry| {
+          encode_event_key(timeline_entry_start_source_event_index(entry).expect("work entry has a source position"))
+        })
+        .collect(),
+    ),
     slot_key: None,
     event_key: encode_trajectory_key(trajectory.start_source_event_index),
     event_type: "trajectory".to_string(),
@@ -4774,6 +4798,7 @@ fn event_summary_with_delegation_targets(
     })
     .flatten();
   EventSummary {
+    child_keys: None,
     slot_key: None,
     event_key: encode_event_key(index),
     event_type: normalized_event_type(event).to_string(),
@@ -4819,6 +4844,7 @@ fn tool_operation_event_summary(source_event_index: usize, operation: &ToolOpera
   let (summary, summary_truncated) =
     truncate_with_flag(tool_operation_summary(operation, &tool), MAX_TECHNICAL_SUMMARY_CHARS);
   EventSummary {
+    child_keys: None,
     slot_key: None,
     event_key: encode_event_key(source_event_index),
     event_type: "tool_call".to_string(),
@@ -6440,6 +6466,10 @@ mod tests {
       .refresh_pending_session_index()
       .expect("targeted source should enter the existing bounded body queue");
     assert_eq!(body_refresh.attention_session_keys.len(), 1);
+    assert!(
+      !body_refresh.catalog_refresh_required,
+      "attention-only completion is covered by notifications"
+    );
     let completed = index
       .session(&session_key)
       .expect("completed session should be readable")
@@ -11269,7 +11299,9 @@ mod tests {
       .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(4), async {
       loop {
-        if updates.recv().await.unwrap().event == "session-index-changed" {
+        let update = updates.recv().await.unwrap();
+        if update.event == "session-index-changed" {
+          assert_eq!(update.payload["catalog_refresh_required"], true);
           break;
         }
       }

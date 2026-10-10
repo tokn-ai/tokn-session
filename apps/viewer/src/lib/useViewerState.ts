@@ -2,7 +2,7 @@ import { SessionDisplayCache } from "./sessionDisplayCache";
 import type { ExpandedActivityState } from "./types";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { loadReadingWindow, readReadingPosition, readingEventKey } from "./readingPosition";
-import { refreshEventWindow, refreshTrajectoryWindow } from "./liveEvents";
+import { refreshEventWindow, loadCompleteTrajectory } from "./liveEvents";
 import { compareProjects, readSessionOrder, saveSessionOrder } from "./sidebarOrder";
 import { useSessionView } from "./useSessionView";
 import {
@@ -46,7 +46,6 @@ import {
   type SourceError,
   type TrajectoryEventPageResponse,
   type TrajectoryEventPageState,
-  type TrajectoryPageLoadDirection,
   type ViewerProvider,
 } from "./types";
 
@@ -60,7 +59,8 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
 }
 
 const DETAIL_CACHE_LIMIT = 50;
-const TRAJECTORY_EVENT_PAGE_SIZE = 40;
+// Legacy transport chunk size; it never limits a displayed activity group.
+const TRAJECTORY_TRANSPORT_PAGE_SIZE = 40;
 const INPUT_REFRESH_DELAYS_MS = [1_000, 3_000, 8_000, 20_000];
 
 function compareDecimalRevisions(left: string, right: string): number {
@@ -118,16 +118,10 @@ function expandedEventNeedsDetail(event: EventSummary | null | undefined): boole
 function emptyTrajectoryEventPageState(): TrajectoryEventPageState {
   return {
     events: [],
-    next_cursor: null,
-    previous_cursor: null,
     total_events: null,
     has_loaded: false,
     is_loading: false,
-    is_loading_older: false,
-    is_loading_newer: false,
     error: null,
-    error_direction: null,
-    error_cursor: null,
   };
 }
 
@@ -270,20 +264,30 @@ export function useViewerState() {
   const displayCache = useRef(new SessionDisplayCache());
   const pushedPage = useRef<import("./types").EventPageResponse | null>(null);
   const semanticLive = useRef(new Set<string>());
+  const notificationsReady = useRef(false);
   const semanticSupported = useRef<boolean | null>(null);
   const onSessionUpdate = useRef<(update: import("./types").SessionUpdate) => void>(() => {});
+  const loadWorkPage = useCallback(async (request: import("./types").LoadTrajectoryEventPageRequest) => {
+    const cached = displayCache.current.trajectoryGroup(request.session_key, request.trajectory_key);
+    if (cached) return cached;
+    if (request.trajectory_key.startsWith("activity:")) {
+      displayCache.current.includeGroup(request.session_key, request.trajectory_key);
+      const update = await loadSessionUpdates(displayCache.current.request(request.session_key, "steps"));
+      if (!displayCache.current.apply(update)) throw new Error("Work group changed; try again");
+      const group = displayCache.current.trajectoryGroup(request.session_key, request.trajectory_key);
+      if (!group) throw new Error("Work group is no longer available");
+      return group;
+    }
+    return loadTrajectoryEventPage(request);
+  }, []);
   const loadDisplayPage = useCallback(async (request: import("./types").LoadEventPageRequest) => {
     if (semanticSupported.current === false) return loadEventPage(request);
     if (request.window_mode !== "retained") {
-      const page = await loadEventPage(request);
-      // Earlier history changes the retained range; the next subscription
-      // snapshot must include that range before patches can be accepted.
-      displayCache.current.invalidate(request.session_key);
-      semanticLive.current.delete(request.session_key);
-      return page;
+      displayCache.current.includeHistory(request.session_key);
     }
     let update: import("./types").SessionUpdate;
-    try { update = await loadSessionUpdates(displayCache.current.request(request.session_key)); }
+    try { update = await loadSessionUpdates({ ...displayCache.current.request(request.session_key, "steps"),
+        ...(request.window_mode === "earlier" ? { history_cursor: request.cursor } : {}) }); }
     catch (error: unknown) {
       if (/unknown.*command|unknown.*variant|command.*not found|unavailable for a session share/i.test(errorMessage(error))) {
         semanticSupported.current = false;
@@ -321,11 +325,25 @@ export function useViewerState() {
   const [expandedTrajectoryDetailAttempt, setExpandedTrajectoryDetailAttempt] = useState(0);
   const expandedTrajectoryDetailRequest = useRef(0);
   const sessionDisclosures = useRef(new Map<string, { expanded_event_key: string | null; selected_event_key: string | null; inspector_open: boolean; manual_expansion: boolean }>());
+  const [visibleActivityGroups, setVisibleActivityGroups] = useState(new Set<string>());
+  const setActivityGroupVisibility = useCallback((groupKey: string, visible: boolean) => {
+    setVisibleActivityGroups((current) => {
+      if (current.has(groupKey) === visible) return current;
+      const next = new Set(current);
+      if (visible) next.add(groupKey); else next.delete(groupKey);
+      return next;
+    });
+  }, []);
   const activeDetailKeys = useRef<string[]>([]);
   activeDetailKeys.current = [...new Set([
     ...(inspectorOpen && selectedEventKey ? [selectedEventKey] : []),
     ...(expandedEventKey && expandedEventNeedsDetail(events.find((event) => event.event_key === expandedEventKey)) ? [expandedEventKey] : []),
-    ...expandedActivityKeys,
+    ...[...expandedActivityKeys].filter((key) => {
+      if (!selectedSessionKey || !expandedEventKey) return false;
+      const group = displayCache.current.activityGroupForEvent(selectedSessionKey, key);
+      if (group) return visibleActivityGroups.has(group);
+      return trajectoryPagesRef.current.get(selectedSessionKey)?.get(expandedEventKey)?.events.some((event) => event.event_key === key);
+    }),
   ])].slice(0, 16);
 
 
@@ -450,9 +468,9 @@ export function useViewerState() {
     let unlisten: (() => void) | undefined;
 
     void listenForSessionIndexChanges((change) => {
-      setSessionsAttempt((attempt) => attempt + 1);
+      if (change.catalog_refresh_required !== false || !notificationsReady.current) setSessionsAttempt((attempt) => attempt + 1);
       const selectedSessionKey = selectedSessionKeyRef.current;
-      if (selectedSessionKey && (
+      if (selectedSessionKey && !semanticLive.current.has(selectedSessionKey) && (
         change.updated_session_keys?.includes(selectedSessionKey)
         || change.attention_session_keys.includes(selectedSessionKey)
       )) {
@@ -606,8 +624,6 @@ export function useViewerState() {
         ...page,
         has_loaded: reload && (!changed || changed.has(key) || page.events.some((event) => changed.has(event.event_key))) ? false : page.has_loaded,
         is_loading: false,
-        is_loading_older: false,
-        is_loading_newer: false,
       }])),
     ]));
     // Cancelled requests cannot clear their own loading flags. Keep rows usable
@@ -681,8 +697,11 @@ export function useViewerState() {
       const children = new Map(sessionChildrenRef.current);
       for (const [key, page] of children) children.set(key, { ...page, sessions: page.sessions.map(update) });
       sessionChildrenRef.current = children; setSessionChildren(children);
-    }).then((unlisten) => { if (disposed) unlisten(); else stop = unlisten; }).catch(() => {});
-    return () => { disposed = true; stop?.(); };
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else { stop = unlisten; notificationsReady.current = true; }
+    }).catch(() => {});
+    return () => { disposed = true; notificationsReady.current = false; stop?.(); };
   }, []);
 
   useEffect(() => {
@@ -739,6 +758,11 @@ export function useViewerState() {
     const sessionKey = selectedSessionKeyRef.current;
     if (!sessionKey || !semanticLive.current.has(sessionKey) || displayCache.current.get(sessionKey, "all")) return;
     const keys = [...activeDetailKeys.current];
+    if (!keys.length) {
+      const release = displayCache.current.release(sessionKey, "details");
+      if (release) void loadSessionUpdates(release).catch(() => {});
+      return;
+    }
     const refresh = () => {
       void loadSessionUpdates(displayCache.current.request(sessionKey, "details", keys)).then((update) => {
         displayCache.current.apply(update);
@@ -749,7 +773,7 @@ export function useViewerState() {
     refresh();
     const timer = window.setInterval(refresh, 30_000);
     return () => window.clearInterval(timer);
-  }, [detailSubscriptionKey, events]);
+  }, [detailSubscriptionKey]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -819,26 +843,13 @@ export function useViewerState() {
     (
       sessionKey: string,
       trajectoryKey: string,
-      cursor: string | null,
-      direction: TrajectoryPageLoadDirection,
       retry: boolean,
     ) => {
       const current = trajectoryPagesRef.current.get(sessionKey)?.get(trajectoryKey);
-      if (current?.is_loading || current?.is_loading_older || current?.is_loading_newer) {
+      if (current?.is_loading) {
         return;
       }
-      if (direction === "initial") {
-        if (cursor !== null || (current?.has_loaded && !retry)) {
-          return;
-        }
-      } else {
-        const expectedCursor = direction === "older"
-          ? current?.previous_cursor
-          : current?.next_cursor;
-        if (!current || cursor === null || expectedCursor !== cursor) {
-          return;
-        }
-      }
+      if (current?.has_loaded && !retry) return;
 
       const generation = trajectoryPageGeneration.current;
       const requestKey = trajectoryRequestKey(sessionKey, trajectoryKey);
@@ -848,12 +859,8 @@ export function useViewerState() {
         const page = existing ?? emptyTrajectoryEventPageState();
         return {
           ...page,
-          is_loading: direction === "initial",
-          is_loading_older: direction === "older",
-          is_loading_newer: direction === "newer",
+          is_loading: true,
           error: null,
-          error_direction: null,
-          error_cursor: null,
         };
       });
 
@@ -861,13 +868,11 @@ export function useViewerState() {
       const request = {
         session_key: sessionKey,
         trajectory_key: trajectoryKey,
-        cursor: cursor ?? undefined,
-        direction: direction === "older" || (direction === "initial" && working) ? "backward" as const : "forward" as const,
-        limit: TRAJECTORY_EVENT_PAGE_SIZE,
+        direction: working ? "backward" as const : "forward" as const,
+        limit: TRAJECTORY_TRANSPORT_PAGE_SIZE,
       };
-      const response = direction === "initial"
-        ? refreshTrajectoryWindow(request, current?.events ?? [], loadTrajectoryEventPage, () => trajectoryPageGeneration.current === generation && trajectoryPageRequests.current.get(requestKey) === requestId)
-        : loadTrajectoryEventPage(request);
+      const response = loadCompleteTrajectory(request, loadWorkPage,
+        () => trajectoryPageGeneration.current === generation && trajectoryPageRequests.current.get(requestKey) === requestId);
       void response
         .then((response) => {
           if (
@@ -880,25 +885,11 @@ export function useViewerState() {
             const page = existing ?? emptyTrajectoryEventPageState();
             return {
               ...page,
-              events: direction === "initial"
-                ? response.events
-                : mergeEvents(
-                  page.events,
-                  response.events,
-                  direction === "older" ? "before" : "after",
-                ),
-              previous_cursor: direction === "newer"
-                ? page.previous_cursor
-                : response.previous_cursor,
-              next_cursor: direction === "older" ? page.next_cursor : response.next_cursor,
+              events: response.events,
               total_events: response.total_events,
               has_loaded: true,
               is_loading: false,
-              is_loading_older: false,
-              is_loading_newer: false,
               error: null,
-              error_direction: null,
-              error_cursor: null,
             };
           });
         })
@@ -914,11 +905,7 @@ export function useViewerState() {
             return {
               ...page,
               is_loading: false,
-              is_loading_older: false,
-              is_loading_newer: false,
               error: errorMessage(error),
-              error_direction: direction,
-              error_cursor: cursor,
             };
           });
         })
@@ -931,7 +918,7 @@ export function useViewerState() {
           }
         });
     },
-    [updateTrajectoryPage],
+    [loadWorkPage, updateTrajectoryPage],
   );
 
   const applyEventSelection = useCallback((eventKey: string | null, openInspector: boolean) => {
@@ -983,12 +970,13 @@ export function useViewerState() {
     detailLoads.current.clear();
     expandedDetailRequest.current += 1;
     clearTrajectoryPages();
+    setVisibleActivityGroups(new Set());
     setSelectedSessionKey(sessionKey);
     setSelectedSessionMetadata(metadata?.session_key === sessionKey ? metadata : null);
     setEventsOwnerKey(null);
     setInitialPageSessionKey(null);
     pushedPage.current = null;
-    const cachedPage = sessionKey ? displayCache.current.get(sessionKey) : null;
+    const cachedPage = sessionKey ? displayCache.current.get(sessionKey, "steps") : null;
     liveRefresh.current = !!cachedPage;
     if (cachedPage && sessionKey) {
       eventsOwnerKeyRef.current = sessionKey;
@@ -1423,22 +1411,18 @@ export function useViewerState() {
           if (!target) break;
           const selectionIsCurrent = () => expansionRevision.current === revision
             && (target === retained || followingLive.current);
-          // Keep the complete old view mounted until the replacement turn is
-          // ready. Clearing it first collapses the conversation, then expands
-          // it again with only the latest 40 rows. Carry the loaded count into
-          // the replacement, without trusting identities from an old generation.
-          const previous = trajectoryPagesRef.current.get(selectedSessionKey)
-            ?.get(expanded?.event_key ?? workingTrajectory.current ?? "");
+          // Publish replacement summaries and complete group contents together;
+          // preserve the last good view until every legacy transport page arrives.
           let refreshed: TrajectoryEventPageResponse;
           try {
-            refreshed = await refreshTrajectoryWindow({
+            refreshed = await loadCompleteTrajectory({
               session_key: selectedSessionKey,
               trajectory_key: target.event_key,
-              direction: target.trajectory?.status === "working" || previous?.next_cursor === null
+              direction: target.trajectory?.status === "working"
                 ? "backward" : "forward",
-              limit: TRAJECTORY_EVENT_PAGE_SIZE,
-            }, previous?.events ?? [], loadTrajectoryEventPage,
-            () => eventsRequest.current === requestId && selectionIsCurrent(), true);
+              limit: TRAJECTORY_TRANSPORT_PAGE_SIZE,
+            }, loadWorkPage,
+            () => eventsRequest.current === requestId && selectionIsCurrent());
           } catch (error: unknown) {
             if (eventsRequest.current !== requestId) return;
             if (!selectionIsCurrent()) continue;
@@ -1463,7 +1447,8 @@ export function useViewerState() {
             const ready = replacement;
             updateTrajectoryPage(selectedSessionKey, ready.trajectory_key, () => ({
               ...emptyTrajectoryEventPageState(),
-              ...ready.page,
+              events: ready.page.events,
+              total_events: ready.page.total_events,
               has_loaded: true,
             }));
           }
@@ -1541,6 +1526,7 @@ export function useViewerState() {
     invalidateEventDetails,
     invalidateTrajectoryPages,
     loadDisplayPage,
+    loadWorkPage,
     selectedSessionKey,
     updateTrajectoryPage,
   ]);
@@ -1701,8 +1687,6 @@ export function useViewerState() {
     requestTrajectoryEventPage(
       selectedSessionKey,
       event.event_key,
-      null,
-      "initial",
       false,
     );
   }, [detailRevision, events, expandedEventKey, requestTrajectoryEventPage, selectedSessionKey]);
@@ -1710,9 +1694,11 @@ export function useViewerState() {
   useEffect(() => {
     const requestId = ++expandedTrajectoryDetailRequest.current;
     if (!selectedSessionKey || !expandedEventKey) return;
-    const children = trajectoryPages.get(selectedSessionKey)?.get(expandedEventKey)?.events ?? [];
+    const pages = trajectoryPages.get(selectedSessionKey);
+    const children = pages?.get(expandedEventKey)?.events.flatMap((child) => child.type === "activity_group"
+      ? pages.get(child.event_key)?.events ?? [] : [child]) ?? [];
     for (const child of children) {
-      if (!expandedActivityKeys.has(child.event_key) || !expandedEventNeedsDetail(child)) continue;
+      if (!activeDetailKeys.current.includes(child.event_key) || !expandedEventNeedsDetail(child)) continue;
       const cacheKey = `${selectedSessionKey}:${child.event_key}`;
       const cached = readCachedDetail(detailCache.current, cacheKey);
       setExpandedActivities((current) => {
@@ -1733,7 +1719,7 @@ export function useViewerState() {
       });
     }
   }, [detailRevision, expandedTrajectoryDetailAttempt, expandedActivityKeys,
-    expandedEventKey, requestDetail, selectedSessionKey, trajectoryPages]);
+    expandedEventKey, requestDetail, selectedSessionKey, trajectoryPages, detailSubscriptionKey]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -1890,36 +1876,16 @@ export function useViewerState() {
     setExpandedTrajectoryDetailAttempt((attempt) => attempt + 1);
   }, []);
 
-  const loadOlderTrajectoryEvents = useCallback((trajectoryKey: string) => {
-    if (!selectedSessionKey) {
-      return;
-    }
-    const page = trajectoryPagesRef.current.get(selectedSessionKey)?.get(trajectoryKey);
-    const cursor = page?.previous_cursor ?? null;
-    if (cursor !== null) {
-      requestTrajectoryEventPage(selectedSessionKey, trajectoryKey, cursor, "older", false);
-    }
-  }, [requestTrajectoryEventPage, selectedSessionKey]);
-
-  const loadNewerTrajectoryEvents = useCallback((trajectoryKey: string) => {
-    if (!selectedSessionKey) {
-      return;
-    }
-    const page = trajectoryPagesRef.current.get(selectedSessionKey)?.get(trajectoryKey);
-    const cursor = page?.next_cursor ?? null;
-    if (cursor !== null) {
-      requestTrajectoryEventPage(selectedSessionKey, trajectoryKey, cursor, "newer", false);
-    }
-  }, [requestTrajectoryEventPage, selectedSessionKey]);
+  const loadActivityGroup = useCallback((groupKey: string) => {
+    const sessionKey = selectedSessionKeyRef.current;
+    if (sessionKey) requestTrajectoryEventPage(sessionKey, groupKey, false);
+  }, [requestTrajectoryEventPage]);
 
   const retryTrajectoryEvents = useCallback((trajectoryKey: string) => {
     if (!selectedSessionKey) {
       return;
     }
-    const page = trajectoryPagesRef.current.get(selectedSessionKey)?.get(trajectoryKey);
-    const direction = page?.error_direction ?? "initial";
-    const cursor = page?.error_cursor ?? null;
-    requestTrajectoryEventPage(selectedSessionKey, trajectoryKey, cursor, direction, true);
+    requestTrajectoryEventPage(selectedSessionKey, trajectoryKey, true);
   }, [requestTrajectoryEventPage, selectedSessionKey]);
 
   const toggleInspector = useCallback(() => {
@@ -1992,7 +1958,7 @@ export function useViewerState() {
     eventRefreshInFlight.current = true;
     setOlderLoading(true);
     setEventsError(null);
-    void loadEventPage({
+    void loadDisplayPage({
       session_key: selectedSessionKey,
       cursor: olderCursor,
       window_mode: "earlier",
@@ -2026,7 +1992,7 @@ export function useViewerState() {
           }
         }
       });
-  }, [applyQuestionPage, invalidateEventDetails, olderCursor, olderLoading, selectedSessionKey]);
+  }, [applyQuestionPage, invalidateEventDetails, olderCursor, olderLoading, selectedSessionKey, loadDisplayPage]);
 
   const loadNewerEvents = useCallback(() => {
     if (
@@ -2117,9 +2083,9 @@ export function useViewerState() {
     expandedEventKey: expandedEventIsVisible ? expandedEventKey : null,
     toggleEventExpanded,
     trajectoryPages,
-    loadOlderTrajectoryEvents,
-    loadNewerTrajectoryEvents,
     retryTrajectoryEvents,
+    loadActivityGroup,
+    setActivityGroupVisibility,
     expandedTrajectoryKey: expandedTrajectoryChild ? expandedTrajectoryEvent?.trajectory_key ?? null : null,
     expandedTrajectoryEventKey: expandedTrajectoryChild ? expandedTrajectoryEvent?.event_key ?? null : null,
     expandedActivityKeys,

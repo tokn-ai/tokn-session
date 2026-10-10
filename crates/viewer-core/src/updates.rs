@@ -13,6 +13,9 @@ use std::{
   time::{Duration, Instant},
 };
 
+mod scope;
+pub use scope::{HistoryScope, UpdateScope};
+
 const MAX_SUBSCRIPTIONS: usize = 24;
 const LEASE: Duration = Duration::from_secs(90);
 const MEMORY_TARGET: usize = 64 * 1024 * 1024;
@@ -34,8 +37,13 @@ pub struct SessionUpdatesRequest {
   #[serde(default)]
   pub level: UpdateLevel,
   pub cursor: Option<String>,
+  /// One-shot retained-history expansion, separate from the revision cursor.
+  #[serde(default)]
+  pub history_cursor: Option<String>,
   #[serde(default)]
   pub detail_keys: Vec<String>,
+  #[serde(default)]
+  pub scope: Option<UpdateScope>,
   #[serde(default)]
   pub unsubscribe: bool,
 }
@@ -96,7 +104,7 @@ fn classify(summary: &Value) -> (&'static str, UpdateLevel) {
     ),
     "question_reply" => ("user_message", UpdateLevel::Final),
     "question_request" | "error" => ("notification", UpdateLevel::Final),
-    "tool_call" | "trajectory" => ("tool_summary", UpdateLevel::Steps),
+    "tool_call" | "trajectory" | "activity_group" => ("tool_summary", UpdateLevel::Steps),
     _ => ("notification", UpdateLevel::Steps),
   }
 }
@@ -186,6 +194,11 @@ impl Subscription {
     reset: bool,
     cursor: Option<&str>,
   ) -> SessionUpdate {
+    let (page, semantic, events) = if let Some(scope) = &mut self.request.scope {
+      scope::project(page, semantic, events, scope, self.request.level == UpdateLevel::All)
+    } else {
+      (page, semantic, events)
+    };
     let mut state = page;
     let summaries = state
       .as_object_mut()
@@ -231,6 +244,9 @@ impl Subscription {
     }
     state["total_events"] = json!(order.len());
     for (key, detail) in details {
+      if self.request.level == UpdateLevel::All && self.request.scope.is_some() && !items.contains_key(&key) {
+        continue;
+      }
       let item_id = format!("detail:{key}");
       items.insert(
         item_id.clone(),
@@ -321,12 +337,21 @@ struct Projection {
 }
 
 impl ViewerService {
-  fn prepare_projection(&self, session_key: &str, include_all: bool) -> Result<Projection, String> {
+  fn prepare_projection(
+    &self,
+    session_key: &str,
+    include_all: bool,
+    history_cursor: Option<&str>,
+  ) -> Result<Projection, String> {
     let (page, semantic, payloads) = self.load_update_pages(
       EventPageRequest {
         session_key: session_key.to_string(),
-        window_mode: Some(HistoryWindowMode::Retained),
-        cursor: None,
+        window_mode: Some(if history_cursor.is_some() {
+          HistoryWindowMode::Earlier
+        } else {
+          HistoryWindowMode::Retained
+        }),
+        cursor: history_cursor.map(str::to_owned),
         offset: None,
         direction: PageDirection::Backward,
         limit: None,
@@ -375,7 +400,11 @@ impl ViewerService {
 
   pub fn load_session_updates(&self, request: SessionUpdatesRequest) -> Result<SessionUpdate, String> {
     self.validate_session_key(&request.session_key)?;
-    if request.subscription_id.is_empty() || request.subscription_id.len() > 128 || request.detail_keys.len() > 16 {
+    if request.subscription_id.is_empty()
+      || request.subscription_id.len() > 128
+      || request.detail_keys.len() > 16
+      || request.scope.as_ref().is_some_and(|scope| scope.group_keys.len() > 128)
+    {
       return Err("Invalid session subscription".into());
     }
     if request.unsubscribe || (request.level == UpdateLevel::Details && request.detail_keys.is_empty()) {
@@ -417,7 +446,11 @@ impl ViewerService {
         .unwrap();
       store.subscriptions.remove(&oldest);
     }
-    let projection = self.prepare_projection(&request.session_key, request.level == UpdateLevel::All)?;
+    let projection = self.prepare_projection(
+      &request.session_key,
+      request.level == UpdateLevel::All,
+      request.history_cursor.as_deref(),
+    )?;
     let details = if request.level == UpdateLevel::All {
       projection.details
     } else {
@@ -484,6 +517,7 @@ impl ViewerService {
             .prepare_projection(
               &subscription.request.session_key,
               all_sessions.contains(&subscription.request.session_key),
+              None,
             )
             .map(Arc::new)
         });
@@ -537,6 +571,8 @@ mod tests {
         level,
         cursor: None,
         detail_keys: Vec::new(),
+        scope: None,
+        history_cursor: None,
         unsubscribe: false,
       },
       generation: "initial".into(),

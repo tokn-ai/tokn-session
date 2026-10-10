@@ -56,14 +56,14 @@ interface ConversationProps {
   on_inspector_toggle: () => void;
   on_event_select: (event_key: string) => void;
   on_event_toggle: (event_key: string) => void;
+  on_activity_load?: (group_key: string) => void;
+  on_activity_visibility?: (group_key: string, visible: boolean) => void;
   trajectory_pages: ReadonlyMap<string, ReadonlyMap<string, TrajectoryEventPageState>>;
   trajectory_expanded_key: string | null;
   trajectory_expanded_event_key: string | null;
   trajectory_expanded_detail: EventDetail | null;
   trajectory_expanded_detail_error: string | null;
   trajectory_expanded_detail_loading: boolean;
-  on_trajectory_load_older: (trajectory_key: string) => void;
-  on_trajectory_load_newer: (trajectory_key: string) => void;
   on_trajectory_retry: (trajectory_key: string) => void;
   on_trajectory_event_toggle: (trajectory_key: string, event_key: string) => void;
   on_trajectory_retry_expanded_detail: (trajectory_key: string, event_key: string) => void;
@@ -107,13 +107,13 @@ export function Conversation({
   on_event_select,
   on_event_toggle,
   trajectory_pages,
+  on_activity_load,
+  on_activity_visibility,
   trajectory_expanded_key,
   trajectory_expanded_event_key,
   trajectory_expanded_detail,
   trajectory_expanded_detail_error,
   trajectory_expanded_detail_loading,
-  on_trajectory_load_older,
-  on_trajectory_load_newer,
   on_trajectory_retry,
   on_trajectory_event_toggle,
   on_trajectory_retry_expanded_detail,
@@ -366,9 +366,10 @@ export function Conversation({
                   is_expanded={event.event_key === expanded_event_key}
                   is_selected={event.event_key === selected_event_key}
                   key={`${session.session_key}:${event.event_key}`}
-                  on_trajectory_load_newer={on_trajectory_load_newer}
-                  on_trajectory_load_older={on_trajectory_load_older}
                   on_trajectory_retry={on_trajectory_retry}
+                  activity_pages={trajectory_pages.get(session.session_key)}
+                  on_activity_load={on_activity_load}
+                  on_activity_visibility={on_activity_visibility}
                   on_trajectory_event_toggle={on_trajectory_event_toggle}
                   on_trajectory_retry_expanded_detail={on_trajectory_retry_expanded_detail}
                   on_select={on_event_select}
