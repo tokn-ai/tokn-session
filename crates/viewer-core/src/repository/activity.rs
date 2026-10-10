@@ -88,7 +88,7 @@ impl Activity {
 
   pub fn marker(&self) -> String {
     format!(
-      "session-activity.v3.{}.{}.{}.{}",
+      "session-activity.v4.{}.{}.{}.{}",
       self.final_count,
       u8::from(self.running),
       self.question_attention.required_count,
@@ -97,7 +97,11 @@ impl Activity {
   }
 
   pub fn from_marker(marker: Option<&str>) -> Option<Self> {
-    if let Some(body) = marker?.strip_prefix("session-activity.v3.") {
+    let marker = marker?;
+    if let Some(body) = marker
+      .strip_prefix("session-activity.v4.")
+      .or_else(|| marker.strip_prefix("session-activity.v3."))
+    {
       let parts: Vec<_> = body.split('.').collect();
       if parts.len() != 4 {
         return None;
@@ -116,7 +120,7 @@ impl Activity {
         ..Default::default()
       });
     }
-    let (count, running) = marker?.strip_prefix("final-replies.v2.")?.split_once('.')?;
+    let (count, running) = marker.strip_prefix("final-replies.v2.")?.split_once('.')?;
     Some(Self {
       final_count: count.parse().ok()?,
       running: match running {
@@ -343,6 +347,18 @@ mod tests {
     }
     activity.observe(&event);
     assert_eq!(activity.final_count, 2);
+  }
+
+  #[test]
+  fn activity_markers_preserve_legacy_counts_while_writing_the_reconciled_version() {
+    for version in [3, 4] {
+      let activity = Activity::from_marker(Some(&format!("session-activity.v{version}.12.1.2.3"))).unwrap();
+      assert_eq!(activity.final_count, 12);
+      assert!(activity.running);
+      assert_eq!(activity.question_attention.required_count, 2);
+      assert_eq!(activity.question_attention.available_count, 3);
+      assert_eq!(activity.marker(), "session-activity.v4.12.1.2.3");
+    }
   }
 
   #[test]
