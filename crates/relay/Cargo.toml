@@ -2,6 +2,11 @@
 name = "tokn-session-relay"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+description = "Live agent session feeds over stdout, ZeroMQ, and managed stdio."
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
 
 [[bin]]
 name = "tokn-session-relay"

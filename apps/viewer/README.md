@@ -39,11 +39,15 @@ Install the platform prerequisites from the
 [Tauri 2 documentation](https://v2.tauri.app/start/prerequisites/), then run:
 
 ```sh
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.126 --locked
 cd apps/viewer
 pnpm install --frozen-lockfile
 pnpm run check
 pnpm tauri dev
 ```
+
+The WASM bindings CLI version must match `wasm-bindgen` in `Cargo.lock`.
 
 `pnpm run dev:web` builds and starts the API, starts Vite with HMR, and prints
 a `#token=…` login link. Open it to connect automatically; the browser removes

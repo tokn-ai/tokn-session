@@ -2,6 +2,11 @@
 name = "tokn-session-opencode"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+description = "OpenCode session discovery, SQLite readers, and event normalization."
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
 
 [dependencies]
 serde.workspace = true

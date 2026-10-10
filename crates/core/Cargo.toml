@@ -2,6 +2,11 @@
 name = "tokn-session-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+description = "Provider-neutral session types and agent event model."
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
 
 [dependencies]
 serde.workspace = true

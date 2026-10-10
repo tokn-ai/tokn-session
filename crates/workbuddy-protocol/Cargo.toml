@@ -2,6 +2,8 @@
 name = "tokn-workbuddy-protocol"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+readme = "README.md"
 description = "Tolerant, lossless wire types for persisted WorkBuddy session JSONL."
 license.workspace = true
 repository.workspace = true

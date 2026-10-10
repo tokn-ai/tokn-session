@@ -4,6 +4,14 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
+Version 0.1.1 is being prepared for all 23 publishable crates; the desktop stays
+`publish = false`. Registry dependency versions, package-local docs/licenses and
+test fixtures, and Rust 1.95 declarations are in place. Codex protocol preserves
+the published 0.1.0 enum/struct shapes through additive metadata accessors.
+Release CI verifies archives and the minimum Rust version. Nothing has been
+uploaded by this preparation. See [releasing](releasing.md) for validation,
+separate frontend assets, and the explicit publication step.
+
 Session delivery separates live subscription from loading. Direct browsers use
 connection-scoped WebSocket interests and live diffs, with backward HTTP for
 initial/older screens, details HTTP for complete groups/tool display payloads,

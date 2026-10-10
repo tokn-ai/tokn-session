@@ -1,0 +1,101 @@
+name: Release check
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  packages:
+    name: Crate archives
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends build-essential libssl-dev pkg-config
+
+      - name: Install release Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-packages
+
+      - name: Package and verify every publishable crate
+        run: cargo package --workspace --exclude tokn-session-viewer --locked
+
+      - name: Test sources extracted from crate archives
+        shell: bash
+        run: |
+          archive_stage=$(mktemp -d)
+          release_version=$(cargo metadata --no-deps --format-version 1 --locked | \
+            python3 -c 'import json, sys; data = json.load(sys.stdin); print(next(p["version"] for p in data["packages"] if p["id"] in data["workspace_members"] and p["publish"] != []))')
+          for archive in target/package/*-"$release_version".crate; do
+            tar -xzf "$archive" -C "$archive_stage"
+          done
+          {
+            printf '[workspace]\nresolver = "2"\nmembers = [\n'
+            for archive in target/package/*-"$release_version".crate; do
+              directory=$(basename "$archive" .crate)
+              printf '  "%s",\n' "$directory"
+            done
+            printf ']\n\n[patch.crates-io]\n'
+            for archive in target/package/*-"$release_version".crate; do
+              directory=$(basename "$archive" .crate)
+              package=${directory%-$release_version}
+              printf '%s = { path = "%s" }\n' "$package" "$directory"
+            done
+          } > "$archive_stage/Cargo.toml"
+          cargo test --workspace --manifest-path "$archive_stage/Cargo.toml" \
+            --offline --target-dir target/release-archive-tests
+
+      - name: Save reviewed crate archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: crate-archives
+          path: target/package/*.crate
+          if-no-files-found: error
+
+  msrv:
+    name: Rust 1.95
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends build-essential libssl-dev pkg-config
+
+      - name: Install minimum Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-msrv
+
+      - name: Check publishable crates and tests
+        run: cargo check --workspace --exclude tokn-session-viewer --all-targets --locked

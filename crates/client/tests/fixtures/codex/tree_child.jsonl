@@ -1,0 +1,7 @@
+{"timestamp":"2026-07-29T00:01:00Z","type":"session_meta","payload":{"id":"tree-child","parent_thread_id":"tree-root","timestamp":"2026-07-29T00:01:00Z","cwd":"/tmp/project","source":{"subagent":{"thread_spawn":{"parent_thread_id":"tree-root","depth":1,"agent_path":"/root/researcher","agent_nickname":"Hubble","agent_role":"explorer"}}}}}
+{"timestamp":"2026-07-29T00:01:00.001Z","type":"session_meta","payload":{"id":"tree-root","timestamp":"2026-07-29T00:00:00Z","cwd":"/tmp/project"}}
+{"timestamp":"2026-07-29T00:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"copied parent request"}}
+{"timestamp":"2026-07-29T00:00:02Z","type":"response_item","payload":{"type":"message","id":"copied-parent-message","role":"assistant","content":[{"type":"output_text","text":"copied parent answer"}],"phase":"final"}}
+{"timestamp":"2026-07-29T00:01:00.500Z","type":"inter_agent_communication_metadata","payload":{"trigger_turn":true}}
+{"timestamp":"2026-07-29T00:01:00.501Z","type":"response_item","payload":{"type":"agent_message","id":"child-trigger","author":"/root","recipient":"/root/researcher","content":[{"type":"input_text","text":"investigate this"}]}}
+{"timestamp":"2026-07-29T00:01:01Z","type":"response_item","payload":{"type":"message","id":"child-message","role":"assistant","content":[{"type":"output_text","text":"child result"}],"phase":"final"}}

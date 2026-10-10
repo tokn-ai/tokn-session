@@ -2,6 +2,7 @@
 name = "tokn-pi-protocol"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Tolerant, lossless wire types for persisted Pi session JSONL."
 license.workspace = true
 repository.workspace = true

@@ -2,6 +2,11 @@
 name = "tokn-session-codex"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+description = "Read-only Codex session discovery and normalization."
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
 
 [dependencies]
 dirs.workspace = true

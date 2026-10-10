@@ -1,0 +1,3 @@
+{"timestamp":"2026-07-30T00:01:00Z","type":"session_meta","payload":{"id":"cross-day-child","parent_thread_id":"cross-day-root","timestamp":"2026-07-30T00:01:00Z","cwd":"/tmp/project","source":{"subagent":{"thread_spawn":{"parent_thread_id":"cross-day-root","depth":1,"agent_path":"/root/night-shift","agent_nickname":"Noether"}}}}}
+{"timestamp":"2026-07-30T00:01:00.001Z","type":"inter_agent_communication_metadata","payload":{"trigger_turn":true}}
+{"timestamp":"2026-07-30T00:01:01Z","type":"response_item","payload":{"type":"message","id":"cross-day-child-message","role":"assistant","content":[{"type":"output_text","text":"finished after midnight"}],"phase":"final"}}

@@ -2,6 +2,7 @@
 name = "tokn-opencode-protocol"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Tolerant, lossless wire types for OpenCode session and run payloads."
 license.workspace = true
 repository.workspace = true

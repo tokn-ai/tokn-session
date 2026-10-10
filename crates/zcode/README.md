@@ -2,6 +2,14 @@
 
 Read-only discovery and normalization for Z.ai ZCode sessions.
 
+```toml
+[dependencies]
+tokn-session-zcode = "0.1.1"
+```
+
+`ZCodeSessionSource` exposes discovery and loaded histories. Use
+`tokn-session-client` for provider-independent dispatch.
+
 ZCode persists its agent history in an extended OpenCode-compatible SQLite
 schema. This crate shares the tolerant V1 message and part decoder while
 retaining ZCode as a distinct provider. ZCode-specific envelope fields remain

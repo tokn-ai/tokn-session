@@ -9,6 +9,44 @@ The Rust CLI currently supports listing, showing, and browsing sessions, plus
 the initial configurable create/append path. A relay provides normalized live
 events to the terminal and Discord pet applications.
 
+## Installation
+
+Version **0.1.1 is being prepared**. After it is published, install the CLI with
+Rust 1.95 or newer and a C/C++ build toolchain:
+
+```sh
+cargo install tokn-session-cli --version 0.1.1 --locked
+tokn-session list --source codex --limit 5
+```
+
+The package is named `tokn-session-cli`; its executable is `tokn-session`.
+Optional services are installed separately:
+
+```sh
+cargo install tokn-session-relay --version 0.1.1 --locked
+cargo install tokn-session-hub --version 0.1.1 --locked
+cargo install tokn-viewer-api --version 0.1.1 --locked
+```
+
+The Hub also needs OpenSSL development libraries and `pkg-config` on Linux
+(`libssl-dev` and `pkg-config` on Debian/Ubuntu). Browser assets are built
+separately. First install their Rust/WASM prerequisites:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.126 --locked
+cd apps/viewer
+pnpm install --frozen-lockfile
+pnpm run build
+```
+
+Pass the resulting `dist` directory through `--web-root`,
+or use `tokn-session-hub serve --api-only` / `tokn-viewer-api --api-only`.
+The desktop viewer is distributed separately from crates.io.
+
+See [release preparation](docs/releasing.md) for package validation and the
+publication procedure. From a source checkout, run:
+
 ```sh
 cargo run -p tokn-session-cli -- list --source codex --limit 5
 cargo run -p tokn-session-cli -- show --source pi <session-id>

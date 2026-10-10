@@ -587,7 +587,7 @@ fn assembled_dsh_output_resets_prior_stream_batches() {
   use tokn_session_client::{AgentClient, Source};
   let root = TempDir::new().unwrap();
   let path = root.path().join("session.jsonl");
-  let fixture = include_str!("../../../dsh/fixtures/basic/session.jsonl");
+  let fixture = include_str!("../../tests/fixtures/dsh/basic/session.jsonl");
   let split = fixture.find("{\"type\":\"assistant/message\"").unwrap();
   std::fs::write(&path, &fixture[..split]).unwrap();
   let header = AgentClient::list_session_headers(Source::Dsh, Some(root.path().into()))
@@ -620,7 +620,7 @@ fn assembled_dsh_output_resets_prior_stream_batches() {
 fn workbuddy_catalog_wal_updates_followed_presentation() {
   use tokn_session_client::{AgentClient, Source};
   let root = TempDir::new().unwrap();
-  let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../workbuddy/fixtures");
+  let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workbuddy");
   let path = root.path().join("projects/fixture-workspace/wb-shell-command.jsonl");
   std::fs::create_dir_all(path.parent().unwrap()).unwrap();
   std::fs::copy(

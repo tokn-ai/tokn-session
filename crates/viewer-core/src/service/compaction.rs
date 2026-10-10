@@ -135,7 +135,7 @@ mod tests {
 
   #[tokio::test]
   async fn codex_snapshot_compaction_keeps_one_card_and_both_sources_across_follow() {
-    let fixture = include_str!("../../../codex/fixtures/compaction_snapshot.jsonl");
+    let fixture = include_str!("../../tests/fixtures/codex/compaction_snapshot.jsonl");
     let records: Vec<_> = fixture.lines().collect();
     let (completion, checkpoint) = records.split_last().unwrap();
     for include_native in [false, true] {
