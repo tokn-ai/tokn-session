@@ -104,6 +104,31 @@ opened local or remote machine. Loading another Hub browses its saved machines
 without changing that startup selection. Local session readers start only when
 requested, so a local database error does not prevent opening a remote machine.
 
+## Host from the desktop app
+
+Under **Machines → This machine → Host this computer**, enter the Hub address
+and machine name, choose whether to allow remote agent input, and click **Start
+hosting**. Viewing is the default for a new host. The panel reports connecting,
+online, and reconnecting states. **Stop hosting** or quitting the app disconnects
+its connector and closes its private loopback API. Hosting is not started
+again automatically on the next app launch, and no background service is installed.
+Opening local or remote sessions leaves an explicitly started host running.
+
+**Show pairing setup** displays the machine reference, SHA-256 authenticator QR,
+full setup URI, and current verification code with a countdown. Codes refresh
+while the disclosure stays open. Hiding it removes the pairing material from
+the display; it is never saved to browser storage or sent through the Hub.
+The QR and URI contain a secret and belong only on the hosting device.
+
+The app and CLI share `~/.tokn/hub` configuration, keys, and paired-device trust.
+An existing online connector or an ownership lock held by another updated
+process blocks app hosting with a clear error. The app does not stop external
+services or replace their connection. A saved host needs a reachable saved Hub
+for the legacy-connector check before starting. Stop your external connector
+first if you want the app to own hosting. The CLI's saved viewer URL remains
+intact; the app uses a separate ephemeral API port and token with its existing
+local reader and event stream.
+
 ## Readable machine addresses
 
 The Hub administrator can create a namespace such as `clouds` at `/admin`, then

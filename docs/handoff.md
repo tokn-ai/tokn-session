@@ -139,6 +139,19 @@ The Hub and browser UI are deployed at `https://ahub.clouds56.top` on ctl host
 systemd service. Persistent state stays outside versioned releases. See
 [deployment](../deploy/vultr-2/README.md) for configuration, checks, and updates.
 
+Desktop **Machines → This machine → Host this computer** now owns optional
+hosting for the app lifetime. It reuses `~/.tokn/hub` trust, offers Hub/name and
+remote-input settings, Start/Stop, status events, and an on-demand pairing
+reference/QR/URI/current-code display. Secrets stay in the local command response
+and are cleared from display when hidden. A token-protected ephemeral loopback
+API shares the existing LocalViewer service/events; it does not persist its port
+or install a daemon. App exit stops hosting before stopping local readers.
+Shared `host_setup` prepares CLI/app profiles; connector ownership locks prevent
+updated processes from competing. The app also probes the saved Hub's secure
+route for older online connectors before modifying configuration, and refuses
+silent takeover. Saved-host startup requires that check to succeed. Hosting
+starts explicitly on each app launch. See [desktop hosting](hub-pairing.md#host-from-the-desktop-app).
+
 Remote app/browser clients use the Hub for discovery, pairing and encrypted
 WebRTC negotiation, then prefer direct connections with encrypted Hub relay
 fallback. `hub-transport` supplies a bounded record interface for future native

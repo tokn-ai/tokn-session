@@ -267,20 +267,22 @@ async fn run(args: Args) -> Result<(), String> {
         if identity_file.is_some() {
           return Err("Paired mode manages its own keys; use --state-dir to choose their location".into());
         }
+        let state_dir = state_dir.unwrap_or(default_path("")?);
+        let lease = connector::HostLease::acquire(&state_dir.join("host-enrollment.key"))?;
         let config = cli_onboarding::prepare_host(cli_onboarding::HostOptions {
           hub,
           name,
           viewer_url,
           passkey_origin,
           ice_servers,
-          state_dir: state_dir.unwrap_or(default_path("")?),
+          state_dir,
           totp_secret_file,
           viewer_token,
           allow_control,
           insecure_loopback,
         })?;
         let signal = shutdown_signal(shutdown.clone());
-        let result = connector::run(config, shutdown).await;
+        let result = connector::run_owned(config, shutdown, lease, None).await;
         signal.abort();
         return result;
       }

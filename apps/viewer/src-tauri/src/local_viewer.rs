@@ -37,6 +37,12 @@ impl LocalViewer {
     Ok(started.service.clone())
   }
 
+  pub async fn api(&self, app: &AppHandle) -> Result<(ViewerService, broadcast::Sender<ViewerEvent>), String> {
+    let service = self.service(app).await?;
+    let started = self.initialized.get().ok_or("Local viewer did not initialize")?;
+    Ok((service, started.events.clone()))
+  }
+
   pub async fn shutdown(&self) {
     let mut stopped = self.stopped.write().await;
     if *stopped {
@@ -50,6 +56,7 @@ impl LocalViewer {
 }
 
 struct StartedViewer {
+  events: broadcast::Sender<ViewerEvent>,
   service: ViewerService,
   background: Mutex<Option<Background>>,
 }
@@ -112,6 +119,7 @@ async fn start(app: AppHandle) -> Result<StartedViewer, String> {
   let runtime = ViewerRuntime::start(service.clone());
   let forwarding = tokio::spawn(forward_events(runtime.events.subscribe(), app));
   Ok(StartedViewer {
+    events: runtime.events.clone(),
     service,
     background: Mutex::new(Some(Background {
       runtime: Some(runtime),
@@ -161,6 +169,7 @@ mod tests {
     // Exercise real SQLite creation without installing watchers on the test
     // runner's own provider history. The initializer owns the runtime in use.
     Ok(StartedViewer {
+      events: broadcast::channel(16).0,
       service,
       background: Mutex::new(None),
     })

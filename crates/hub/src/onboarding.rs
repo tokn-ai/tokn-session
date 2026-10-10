@@ -755,7 +755,7 @@ fn validate_private(file: &File) -> Result<(), String> {
   Ok(())
 }
 
-fn lock(path: &Path) -> Result<File, String> {
+pub(crate) fn lock(path: &Path) -> Result<File, String> {
   if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
   }

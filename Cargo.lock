@@ -6119,6 +6119,9 @@ name = "tokn-session-viewer"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
+ "dirs 6.0.0",
+ "qrcode",
  "rand 0.8.8",
  "serde",
  "serde_json",
@@ -6130,9 +6133,12 @@ dependencies = [
  "tokio-util",
  "tokn-hub-client-core",
  "tokn-hub-remote",
+ "tokn-session-hub",
  "tokn-session-relay",
+ "tokn-viewer-api",
  "tokn-viewer-core",
  "url",
+ "zeroize",
 ]
 
 [[package]]

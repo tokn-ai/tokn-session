@@ -1,4 +1,5 @@
 pub(crate) mod events;
+pub(crate) mod host;
 pub(crate) mod hub;
 pub(crate) mod indexing;
 pub(crate) mod input;

@@ -616,3 +616,25 @@ export interface SessionNotification {
   has_running_descendant?: boolean;
   question_attention: SessionSummary["question_attention"];
 }
+
+export interface LocalHostStatus {
+  phase: "stopped" | "connecting" | "online" | "reconnecting" | "error";
+  hub_url: string;
+  name: string;
+  allow_control: boolean;
+  machine_reference: string | null;
+  error: string | null;
+}
+export interface StartLocalHostRequest {
+  hub_url: string;
+  name: string;
+  allow_control: boolean;
+}
+export interface LocalHostPairing {
+  machine_reference: string;
+  qr_data_url: string;
+  setup_uri: string;
+  current_code: string;
+  host_time: number;
+  expires_at: number;
+}
