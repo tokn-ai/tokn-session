@@ -20,6 +20,10 @@ fn message(id: &str, ordinal: u64, text: &str) -> Value {
   }})
 }
 
+fn event_msg(ordinal: u64, payload: Value) -> Value {
+  json!({"type":"event_msg","ordinal":ordinal,"payload":payload})
+}
+
 fn write(root: &Path, name: &str, rows: &[Value]) -> PathBuf {
   let path = root.join(name);
   fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -46,6 +50,212 @@ fn texts(loaded: &LoadedSessionRecords) -> Vec<String> {
       _ => None,
     })
     .collect()
+}
+
+#[test]
+fn standalone_paginated_rollout_accepts_forward_ordinal_gaps() {
+  let root = TempDir::new().unwrap();
+  let source = CodexSessionSource::new(Some(root.path().into()));
+  let head = write(
+    root.path(),
+    "head.jsonl",
+    &[
+      meta("thread", 0, None),
+      message("thread", 4, "after gap"),
+      message("thread", 5, "next"),
+    ],
+  );
+  let loaded = load(&source, &head);
+  assert_eq!(texts(&loaded), ["after gap", "next"]);
+  assert_eq!(loaded.reference.message_count, 2);
+}
+
+#[test]
+fn standalone_paginated_rollout_retains_equal_ordinal_native_records() {
+  let root = TempDir::new().unwrap();
+  let source = CodexSessionSource::new(Some(root.path().into()));
+  let head = write(
+    root.path(),
+    "head.jsonl",
+    &[
+      meta("thread", 0, None),
+      event_msg(78, json!({"type":"token_count","info":null})),
+      event_msg(78, json!({"type":"task_started"})),
+      message("thread", 79, "after equal ordinals"),
+      event_msg(3287, json!({"type":"token_count","info":null})),
+      event_msg(
+        3287,
+        json!({"type":"thread_settings_applied","thread_settings":{"cwd":"/test"}}),
+      ),
+    ],
+  );
+  let loaded = load(&source, &head);
+  assert_eq!(loaded.records.len(), 6);
+  let native_types = loaded.records[1..]
+    .iter()
+    .map(|record| record.native.as_ref().unwrap()["payload"]["type"].as_str().unwrap())
+    .collect::<Vec<_>>();
+  assert_eq!(
+    native_types,
+    [
+      "token_count",
+      "task_started",
+      "item_completed",
+      "token_count",
+      "thread_settings_applied"
+    ]
+  );
+}
+
+#[test]
+fn incremental_paginated_reader_accepts_equal_ordinal_native_records() {
+  let root = TempDir::new().unwrap();
+  let source = CodexSessionSource::new(Some(root.path().into()));
+  let head = write(
+    root.path(),
+    "head.jsonl",
+    &[
+      meta("thread", 0, None),
+      event_msg(78, json!({"type":"token_count","info":null})),
+    ],
+  );
+  let mut reader = CodexHistoryReader::new(head.clone(), true, 1024 * 1024);
+  assert!(reader.poll(&source).unwrap().unwrap().reset);
+  for row in [
+    event_msg(78, json!({"type":"task_started"})),
+    message("thread", 79, "after equal ordinals"),
+    event_msg(3287, json!({"type":"token_count","info":null})),
+    event_msg(
+      3287,
+      json!({"type":"thread_settings_applied","thread_settings":{"cwd":"/test"}}),
+    ),
+  ] {
+    append(&head, format!("{row}\n").as_bytes());
+    let update = reader.poll(&source).unwrap().unwrap();
+    assert!(!update.reset);
+    assert_eq!(update.records.len(), 1);
+    assert_eq!(
+      update.records[0].native.as_ref().unwrap()["payload"]["type"],
+      row["payload"]["type"]
+    );
+  }
+  assert_eq!(load(&source, &head).records.len(), 6);
+}
+
+#[test]
+fn copied_paginated_metadata_does_not_enable_ordinals_in_a_legacy_rollout() {
+  let root = TempDir::new().unwrap();
+  let source = CodexSessionSource::new(Some(root.path().into()));
+  let owner = json!({"type":"session_meta","payload":{
+    "id":"legacy","timestamp":"2026-09-18T00:00:00Z","cwd":"/test"
+  }});
+  let mut message_without_ordinal = message("legacy", 1, "legacy message");
+  message_without_ordinal.as_object_mut().unwrap().remove("ordinal");
+  let head = write(
+    root.path(),
+    "legacy.jsonl",
+    &[owner, meta("copied", 0, None), message_without_ordinal],
+  );
+  assert_eq!(load(&source, &head).records.len(), 2);
+
+  let mut reader = CodexHistoryReader::new(head.clone(), false, 1024 * 1024);
+  assert!(reader.poll(&source).unwrap().unwrap().reset);
+  let mut next = message("legacy", 2, "another legacy message");
+  next.as_object_mut().unwrap().remove("ordinal");
+  append(&head, format!("{next}\n").as_bytes());
+  let update = reader.poll(&source).unwrap().unwrap();
+  assert!(!update.reset);
+  assert_eq!(update.records.len(), 1);
+  assert_eq!(load(&source, &head).records.len(), 3);
+}
+
+#[test]
+fn inherited_gaps_and_before_turn_cutoff_keep_only_retained_prefix() {
+  let root = TempDir::new().unwrap();
+  let source = CodexSessionSource::new(Some(root.path().into()));
+  let retained = vec![meta("thread", 0, None), message("thread", 4, "retained")];
+  let mut previous = retained.clone();
+  previous.push(message("thread", 9, "excluded turn"));
+  let old = write(root.path(), "old.jsonl", &previous);
+  let mut decoy = retained.clone();
+  decoy.push(message("thread", 8, "wrong excluded turn"));
+  write(root.path(), "decoy.jsonl", &decoy);
+  let mut cutoff = base("thread", &retained);
+  // A BeforeTurn cutoff names the excluded turn's ordinal. The retained
+  // bytes end after ordinal 4, while the excluded turn begins at ordinal 9.
+  cutoff["end_ordinal_exclusive"] = json!(9);
+  let current_rows = vec![
+    meta("thread", 9, Some(cutoff.clone())),
+    message("thread", 15, "current"),
+  ];
+  let head = write(root.path(), "head.jsonl", &current_rows);
+  assert_eq!(source.history_segments(&head).unwrap()[0].path, old);
+  assert_eq!(texts(&load(&source, &head)), ["retained", "current"]);
+
+  let mut reader = CodexHistoryReader::new(head.clone(), false, 1024 * 1024);
+  assert!(reader.poll(&source).unwrap().unwrap().reset);
+  append(
+    &head,
+    format!("{}\n", message("thread", 20, "appended after gap")).as_bytes(),
+  );
+  let update = reader.poll(&source).unwrap().unwrap();
+  assert!(!update.reset);
+  assert_eq!(update.records.len(), 1);
+  assert_eq!(
+    texts(&load(&source, &head)),
+    ["retained", "current", "appended after gap"]
+  );
+
+  // Bytes must still end on the requested record, and the exclusive ordinal
+  // must be greater than the last retained ordinal.
+  let mut wrong_ordinal = cutoff.clone();
+  wrong_ordinal["end_ordinal_exclusive"] = json!(4);
+  write(root.path(), "head.jsonl", &[meta("thread", 4, Some(wrong_ordinal))]);
+  assert!(source.history_segments(&head).unwrap_err().contains("unavailable"));
+  let mut wrong_bytes = cutoff;
+  wrong_bytes["end_byte_offset"] = json!(wrong_bytes["end_byte_offset"].as_u64().unwrap() - 1);
+  write(root.path(), "head.jsonl", &[meta("thread", 9, Some(wrong_bytes))]);
+  assert!(source.history_segments(&head).unwrap_err().contains("unavailable"));
+}
+
+#[test]
+fn paginated_rollout_reports_missing_and_backward_ordinals() {
+  let root = TempDir::new().unwrap();
+  let source = CodexSessionSource::new(Some(root.path().into()));
+  let first = meta("thread", 0, None);
+  let previous = message("thread", 4, "previous");
+  let mut missing = message("thread", 5, "missing ordinal");
+  missing.as_object_mut().unwrap().remove("ordinal");
+  let missing_path = write(
+    root.path(),
+    "missing.jsonl",
+    &[first.clone(), previous.clone(), missing],
+  );
+  let missing_error = source
+    .load_session_records_path(&missing_path, false, 1024 * 1024)
+    .unwrap_err();
+  assert!(missing_error.contains("missing ordinal"), "{missing_error}");
+  assert!(
+    missing_error.contains(&missing_path.display().to_string()),
+    "{missing_error}"
+  );
+  assert!(
+    missing_error.contains(&format!("byte {}", format!("{first}\n{previous}\n").len())),
+    "{missing_error}"
+  );
+
+  let path = write(
+    root.path(),
+    "backward.jsonl",
+    &[first.clone(), previous.clone(), message("thread", 3, "invalid")],
+  );
+  let error = source.load_session_records_path(&path, false, 1024 * 1024).unwrap_err();
+  assert!(error.contains("out-of-order ordinal 3 after previous 4"), "{error}");
+  assert!(error.contains(&path.display().to_string()), "{error}");
+  assert!(
+    error.contains(&format!("byte {}", format!("{first}\n{previous}\n").len())),
+    "{error}"
+  );
 }
 
 #[test]
@@ -387,6 +597,112 @@ fn incremental_reader_buffers_utf8_and_rebuilds_after_a_rejected_batch() {
       .iter()
       .flat_map(|record| &record.events)
       .any(|event| { matches!(event, AgentEvent::Message(message) if message.text == "must survive retry") })
+  );
+}
+
+#[test]
+fn incremental_ordinal_error_discards_cursor_and_repairs_with_a_reset() {
+  let root = TempDir::new().unwrap();
+  let source = CodexSessionSource::new(Some(root.path().into()));
+  let first = meta("thread", 0, None);
+  let previous = message("thread", 4, "previous");
+  let head = write(root.path(), "head.jsonl", &[first.clone(), previous.clone()]);
+  let mut reader = CodexHistoryReader::new(head.clone(), false, 1024 * 1024);
+  assert!(reader.poll(&source).unwrap().unwrap().reset);
+
+  let accepted = message("thread", 7, "first in rejected batch");
+  append(
+    &head,
+    format!("{accepted}\n{}\n", message("thread", 6, "backward")).as_bytes(),
+  );
+  let error = reader
+    .poll(&source)
+    .err()
+    .expect("backward ordinal must reject the batch");
+  assert!(error.contains("out-of-order ordinal 6 after previous 7"), "{error}");
+  assert!(error.contains(&head.display().to_string()), "{error}");
+  assert!(
+    error.contains(&format!("byte {}", format!("{first}\n{previous}\n{accepted}\n").len())),
+    "{error}"
+  );
+  assert!(
+    reader.poll(&source).is_err(),
+    "a failed batch must not advance the cursor"
+  );
+
+  write(
+    root.path(),
+    "head.jsonl",
+    &[first, previous, accepted, message("thread", 8, "repaired")],
+  );
+  let update = reader.poll(&source).unwrap().unwrap();
+  assert!(update.reset);
+  let messages = update
+    .records
+    .iter()
+    .flat_map(|record| &record.events)
+    .filter_map(|event| match event {
+      AgentEvent::Message(message) => Some(message.text.as_str()),
+      _ => None,
+    })
+    .collect::<Vec<_>>();
+  assert_eq!(messages, ["previous", "first in rejected batch", "repaired"]);
+}
+
+#[test]
+fn maximum_ordinal_keeps_incremental_validation_active() {
+  let root = TempDir::new().unwrap();
+  let source = CodexSessionSource::new(Some(root.path().into()));
+  let head = write(
+    root.path(),
+    "head.jsonl",
+    &[meta("thread", 0, None), message("thread", u64::MAX, "maximum")],
+  );
+  let mut reader = CodexHistoryReader::new(head.clone(), false, 1024 * 1024);
+  assert!(reader.poll(&source).unwrap().unwrap().reset);
+  let mut missing = message("thread", 1, "missing");
+  missing.as_object_mut().unwrap().remove("ordinal");
+  append(&head, format!("{missing}\n").as_bytes());
+  let error = reader
+    .poll(&source)
+    .err()
+    .expect("missing ordinal after u64::MAX must fail");
+  assert!(error.contains("missing ordinal"), "{error}");
+  assert!(error.contains(&head.display().to_string()), "{error}");
+  assert!(error.contains("byte "), "{error}");
+
+  fs::write(
+    &head,
+    format!(
+      "{}\n{}\n{}\n",
+      meta("thread", 0, None),
+      message("thread", u64::MAX, "maximum"),
+      message("thread", u64::MAX, "duplicate maximum")
+    ),
+  )
+  .unwrap();
+  let update = reader.poll(&source).unwrap().unwrap();
+  assert!(update.reset);
+  assert_eq!(
+    update.records.len(),
+    3,
+    "equal maximum ordinals must remain separate records"
+  );
+  append(
+    &head,
+    format!("{}\n", message("thread", u64::MAX - 1, "backward after maximum")).as_bytes(),
+  );
+  let error = reader
+    .poll(&source)
+    .err()
+    .expect("backward ordinal after u64::MAX must fail");
+  assert!(
+    error.contains(&format!(
+      "out-of-order ordinal {} after previous {}",
+      u64::MAX - 1,
+      u64::MAX
+    )),
+    "{error}"
   );
 }
 

@@ -45,7 +45,7 @@ struct ReaderState {
   prefix_bytes: u64,
   offset: u64,
   pending: Vec<u8>,
-  expected_ordinal: Option<u64>,
+  ordinals: HistoryOrdinals,
   header_guard: Vec<u8>,
   tail_guard: Vec<u8>,
   prefix_guards: Vec<PrefixGuard>,
@@ -179,9 +179,7 @@ impl CodexHistoryReader {
         continue;
       }
       let line = parse_row(row, &self.path, row_offset, &mut self.stats)?;
-      if segments_are_paginated(&line, state.expected_ordinal, None)? {
-        state.expected_ordinal = line.ordinal().and_then(|ordinal| ordinal.checked_add(1));
-      }
+      state.ordinals.accept(&line, &self.path, row_offset)?;
       if matches!(line.item(), RolloutItem::SessionMeta(_)) {
         continue;
       }
@@ -252,7 +250,7 @@ impl CodexHistoryReader {
         return Err("invalid Codex history lineage: cutoff is not a complete record".into());
       }
       let mut offset = 0u64;
-      let mut expected_ordinal = None;
+      let mut ordinals = HistoryOrdinals::new(segment.header_key["history_mode"].as_str() == Some("paginated"));
       let mut inherited_parent = false;
       let mut header_end = None;
       for row in bytes[..complete].split_inclusive(|byte| *byte == b'\n') {
@@ -262,9 +260,7 @@ impl CodexHistoryReader {
           continue;
         }
         let line = parse_row(row, &segment.path, row_offset, &mut self.stats)?;
-        if segments_are_paginated(&line, expected_ordinal, segment.end_ordinal_exclusive)? {
-          expected_ordinal = line.ordinal().and_then(|ordinal| ordinal.checked_add(1));
-        }
+        ordinals.accept(&line, &segment.path, row_offset)?;
         if let RolloutItem::SessionMeta(meta) = line.item() {
           if header_end.is_none() {
             if header_key(&line) != segment.header_key {
@@ -286,7 +282,10 @@ impl CodexHistoryReader {
         ));
       }
       let header_end = header_end.ok_or("Codex history metadata is not yet complete")?;
-      if segment.end_ordinal_exclusive.is_some() && expected_ordinal != segment.end_ordinal_exclusive {
+      if segment
+        .end_ordinal_exclusive
+        .is_some_and(|end| !ordinals.ends_before(end))
+      {
         return Err("invalid Codex history lineage: cutoff ordinal disagrees with its bytes".into());
       }
       if segment.end_byte_offset.is_none() {
@@ -294,7 +293,7 @@ impl CodexHistoryReader {
           consumed,
           length,
           bytes[complete..].to_vec(),
-          expected_ordinal,
+          ordinals,
           bytes[..header_end].to_vec(),
           bytes[bytes.len().saturating_sub(TAIL_GUARD_BYTES)..].to_vec(),
         ));
@@ -314,7 +313,7 @@ impl CodexHistoryReader {
       history_status: normalizer.history_status(),
       reset: true,
     };
-    let (prefix_bytes, offset, pending, expected_ordinal, header_guard, tail_guard) = head_state.unwrap();
+    let (prefix_bytes, offset, pending, ordinals, header_guard, tail_guard) = head_state.unwrap();
     self.state = Some(ReaderState {
       roots,
       segments,
@@ -324,7 +323,7 @@ impl CodexHistoryReader {
       prefix_bytes,
       offset,
       pending,
-      expected_ordinal,
+      ordinals,
       header_guard,
       tail_guard,
       prefix_guards,
