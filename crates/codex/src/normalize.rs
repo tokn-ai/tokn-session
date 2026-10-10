@@ -235,7 +235,6 @@ impl CodexNormalizer {
       RolloutItem::InterAgentCommunicationMetadata(_)
       | RolloutItem::TurnContext(_)
       | RolloutItem::WorldState(_)
-      | RolloutItem::TokenUsageRecord(_)
       | RolloutItem::Compacted(_) => unreachable!("context records handled before consuming native envelope"),
       RolloutItem::EventMessage(item) => normalize_event_message(
         self.session_id.clone(),
@@ -261,7 +260,15 @@ impl CodexNormalizer {
       )];
     };
 
-    self.history_mode = if item.history_mode.as_deref() == Some("paginated") {
+    let (Ok(history_mode), Ok(_)) = (item.history_mode(), item.history_base()) else {
+      return vec![unknown_event(
+        None,
+        Some("session_meta".to_string()),
+        Some(json_value(item)),
+        line_timestamp,
+      )];
+    };
+    self.history_mode = if history_mode == Some("paginated") {
       CodexRolloutHistoryMode::Paginated
     } else {
       CodexRolloutHistoryMode::Legacy

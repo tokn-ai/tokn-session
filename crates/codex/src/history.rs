@@ -66,10 +66,16 @@ impl CodexSessionSource {
       let RolloutItem::SessionMeta(meta) = header.item() else {
         unreachable!()
       };
-      if (end.is_some() || meta.history_base.is_some()) && meta.history_mode.as_deref() != Some("paginated") {
+      let history_mode = meta
+        .history_mode()
+        .map_err(|err| format!("invalid Codex history mode: {err}"))?;
+      let history_base = meta
+        .history_base()
+        .map_err(|err| format!("invalid Codex history base: {err}"))?;
+      if (end.is_some() || history_base.is_some()) && history_mode != Some("paginated") {
         return Err("invalid Codex history lineage: inherited rollouts must be paginated".into());
       }
-      if end.is_some() && meta.history_base.is_none() && header.ordinal() != Some(0) {
+      if end.is_some() && history_base.is_none() && header.ordinal() != Some(0) {
         return Err("invalid Codex history lineage: initial segment does not begin at ordinal zero".into());
       }
       segments.push(CodexHistorySegment {
@@ -78,7 +84,7 @@ impl CodexSessionSource {
         end_ordinal_exclusive: end.as_ref().map(|end| end.end_ordinal_exclusive),
         header_key: header_key(&header),
       });
-      let Some(base) = meta.history_base.clone() else { break };
+      let Some(base) = history_base else { break };
       if header.ordinal() != Some(base.end_ordinal_exclusive) {
         return Err("invalid Codex history lineage: metadata ordinal disagrees with its base".into());
       }
@@ -206,7 +212,7 @@ fn resolve_prefix(paths: &[PathBuf], current: &Path, base: &HistoryPosition) -> 
     let identity_matches = meta.id.as_deref() == Some(base.thread_id.as_str())
       || crate::rollout_path::rollout_segment_matches(path, meta.id.as_deref(), &base.thread_id);
     if !identity_matches
-      || meta.history_mode.as_deref() != Some("paginated")
+      || meta.history_mode().ok().flatten() != Some("paginated")
       || !header
         .ordinal()
         .is_some_and(|ordinal| ordinal < base.end_ordinal_exclusive)
