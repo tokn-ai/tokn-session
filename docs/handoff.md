@@ -8,9 +8,12 @@ Version 0.1.1 is being prepared for all 23 publishable crates; the desktop stays
 `publish = false`. Registry dependency versions, package-local docs/licenses and
 test fixtures, and Rust 1.95 declarations are in place. Codex protocol preserves
 the published 0.1.0 enum/struct shapes through additive metadata accessors.
-Release CI verifies archives and the minimum Rust version. Nothing has been
-uploaded by this preparation. See [releasing](releasing.md) for validation,
-separate frontend assets, and the explicit publication step.
+Release CI verifies archives and the minimum Rust version. See
+[releasing](releasing.md) for validation, separate frontend assets, and the
+explicit publication step.
+`scripts/publish-crates.py` resumes partial publication by skipping current
+versions already on crates.io. `--list` checks only; `--dry-run` verifies without
+uploading; the default publishes pending crates through Cargo.
 
 Session delivery separates live subscription from loading. Direct browsers use
 connection-scoped WebSocket interests and live diffs, with backward HTTP for
@@ -1341,7 +1344,7 @@ Current browser keys:
 - Codex `event_msg.thread_settings_applied` is a full effective snapshot, not a
   diff. Repeated applications remain visible in the event stream.
 - Timestamps are provider-native strings/numbers today; there is no unified timestamp type yet.
-- The CLI help path currently exits through the same error-printing path as other parser errors.
+- CLI help prints usage to stdout and exits successfully; parser errors exit nonzero.
 
 ## Print Invocation Status
 

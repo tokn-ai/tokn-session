@@ -2,9 +2,10 @@
 
 ## Version 0.1.1
 
-This release is prepared but has not been uploaded. The 23 publishable workspace
-crates share version `0.1.1`; the desktop viewer has `publish = false`.
-Only the Codex, Pi, and OpenCode protocol crates previously shipped as `0.1.0`.
+The 23 publishable workspace crates share version `0.1.1`; the desktop viewer
+has `publish = false`. Before this release, only the Codex, Pi, and OpenCode
+protocol crates shipped as `0.1.0`. Use the publish script's `--list` mode below
+to check which current versions are already available on crates.io.
 The Codex protocol retains those published enum and struct shapes; newer token
 usage and history metadata are exposed through additive accessors.
 
@@ -51,20 +52,31 @@ Pi live input uses Unix sockets and is only supported on Unix.
 
 Publishing is a separate, explicit action after the release PR is merged and
 CI passes. Run it from a clean checkout of that reviewed commit with a crates.io
-owner credential configured through Cargo; never commit the credential:
+owner credential configured through Cargo; never commit the credential. The
+script requires Python 3 and Cargo 1.99 or newer:
 
 ```sh
-cargo publish --workspace --exclude tokn-session-viewer --dry-run --locked
-cargo publish --workspace --exclude tokn-session-viewer --locked
+./scripts/publish-crates.py --list
+./scripts/publish-crates.py --dry-run
+./scripts/publish-crates.py
 ```
 
-The publish dry run repeats verification and aborts every upload. Its temporary
-archives remain under `target/package/tmp-crate`; use `cargo package` for the
-reviewable `target/package/*.crate` files.
+The script discovers publishable workspace crates from Cargo metadata and
+checks each current version on crates.io. It skips versions already uploaded,
+including yanked versions, and excludes private or other-registry-only crates.
+An older published version does not skip the current release. Registry errors
+stop the script before any upload. `--list` only displays the remaining versions;
+`--dry-run` verifies them; running without either flag publishes them.
+
+Publication builds use a separate `release-publish` directory inside Cargo's
+configured target directory. The publish dry run repeats verification and
+aborts every upload. Its temporary archives remain under
+`target/release-publish/package/tmp-crate` with the default target directory;
+use `cargo package` for the reviewable `target/package/*.crate` files.
 
 Cargo uploads dependency crates before their consumers and waits for registry
-availability. If a run stops after some uploads, confirm their versions on
-crates.io and publish only the remaining packages with repeated `-p` selections.
+availability. If a run stops after some uploads, rerun the script: it checks
+crates.io again and passes only the remaining versions to Cargo.
 Published versions are immutable: fix any shipped mistake with a new version.
 After confirming all packages are available, tag the same commit `v0.1.1` and
 record the release on GitHub. Install the four executable packages into a fresh
