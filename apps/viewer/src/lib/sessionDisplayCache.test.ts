@@ -43,7 +43,7 @@ describe("session display replicas", () => {
     expect(cache.apply(initial)?.events[0].summary).toBe("newest");
   });
 
-  it("keeps final coverage separate from steps coverage", () => {
+  it("keeps final coverage separate from all coverage", () => {
     const cache = new SessionDisplayCache(); const initial = snapshot(cache, "one"); cache.apply(initial);
     const final = cache.request("one", "final");
     cache.apply({ ...initial, ...final, revision: "9", items: [], item_order: [] });
@@ -66,7 +66,7 @@ describe("session display replicas", () => {
 
   it("can drop a subscription while retaining display content", () => {
     const cache = new SessionDisplayCache(); const initial = snapshot(cache, "one"); cache.apply(initial);
-    const release = cache.release("one", "steps"); expect(release?.unsubscribe).toBe(true);
+    const release = cache.release("one", "all"); expect(release?.unsubscribe).toBe(true);
     expect(cache.accepts(initial)).toBe(false); expect(cache.get("one")).not.toBeNull();
     expect(cache.request("one").subscription_id).not.toBe(initial.subscription_id);
   });
@@ -79,6 +79,27 @@ describe("session display replicas", () => {
       items: [{ ...initial.items[1], summary: summary("b", "updated b") }] })!;
     expect([...cache.commit("one", second)!]).toEqual(["a"]);
     expect([...cache.commit("one", third)!]).toEqual(["b"]);
+  });
+
+  it("retains full source records separately from display groups and invalidates detail-only changes", () => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one");
+    const detail = { event_key: "a", event: { output: "first" }, native: null, is_hidden: false, tool_output: null };
+    initial.items.push({ item_id: "detail:a", kind: "detail", level: "details", event_key: "a", detail },
+      { item_id: "event:result", kind: "event", level: "all", event_key: "result", event: { ...detail, event_key: "result", event: { type: "tool_result", text: "full output" } } });
+    initial.event_order = ["event:result"];
+    const first = cache.apply(initial)!; cache.commit("one", first);
+    expect(first.events).toHaveLength(1);
+    expect(cache.sourceEvents("one")[0].event).toEqual({ type: "tool_result", text: "full output" });
+    const next = cache.apply({ ...initial, snapshot: false, revision: "2", base_revision: "1", item_order: null, event_order: null,
+      items: [{ item_id: "detail:a", kind: "detail", level: "details", event_key: "a", detail: { ...detail, event: { output: "updated" } } }] })!;
+    expect(next.events[0]).toBe(first.events[0]);
+    expect(cache.detail("one", "a")?.event).toEqual({ output: "updated" });
+    expect([...cache.commit("one", next)!]).toEqual(["a"]);
+    const removed = cache.apply({ ...initial, snapshot: false, revision: "3", base_revision: "2", item_order: null,
+      event_order: [], items: [], removed_items: ["event:result"] })!;
+    expect(removed.events).toHaveLength(1);
+    expect(cache.sourceEvents("one")).toEqual([]);
   });
 
 });

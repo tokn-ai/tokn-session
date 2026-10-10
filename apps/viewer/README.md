@@ -20,10 +20,12 @@ independently configured `tokn-viewer-api snapshot` endpoint; its processes are
 never terminated by the viewer. All six providers use the same provider-root
 environment overrides as local reads.
 
-Conversations receive semantic updates at final, steps, or details level.
+Conversations receive updates at final, steps, details, or all level.
+The opened session receives all retained source events and display details;
+recent inactive sessions receive final updates.
 The frontend retains eight recent session displays, renders cached content on
-reopening, and catches up through revisioned snapshots/changes. Tool details
-are requested only when expanded or inspected. See
+reopening, and catches up through revisioned snapshots/changes. Tool and Inspector details
+come from the active all-level replica. See
 [session update delivery](../../docs/viewer-session-updates.md).
 
 Settings persist in app-config `relay.json`; legacy enabled connections keep

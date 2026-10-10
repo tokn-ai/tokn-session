@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
   collections::{BTreeMap, HashMap},
+  sync::Arc,
   time::{Duration, Instant},
 };
 
@@ -23,6 +24,7 @@ pub enum UpdateLevel {
   #[default]
   Steps,
   Details,
+  All,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -54,6 +56,8 @@ pub struct SessionUpdate {
   /// consumers use items and semantic_order without knowing about folds.
   pub groups: Vec<Value>,
   pub semantic_order: Option<Vec<String>>,
+  /// Individual source records, including lifecycle and tool-result fragments.
+  pub event_order: Option<Vec<String>>,
   pub removed_items: Vec<String>,
   pub item_order: Option<Vec<String>>,
   pub state: Value,
@@ -66,6 +70,7 @@ struct Subscription {
   items: BTreeMap<String, Value>,
   order: Vec<String>,
   semantic_order: Vec<String>,
+  event_order: Vec<String>,
   state: Value,
   accessed: Instant,
 }
@@ -153,17 +158,31 @@ impl Subscription {
       items: vec![item],
       groups: Vec::new(),
       semantic_order: None,
+      event_order: None,
       removed_items: Vec::new(),
       item_order: None,
       state: self.state.clone(),
     })
   }
 
+  #[cfg(test)]
   fn update(
     &mut self,
     page: Value,
     semantic: Vec<Value>,
     details: Vec<(String, Value)>,
+    reset: bool,
+    cursor: Option<&str>,
+  ) -> SessionUpdate {
+    self.update_with_events(page, semantic, details, Vec::new(), reset, cursor)
+  }
+
+  fn update_with_events(
+    &mut self,
+    page: Value,
+    semantic: Vec<Value>,
+    details: Vec<(String, Value)>,
+    events: Vec<Value>,
     reset: bool,
     cursor: Option<&str>,
   ) -> SessionUpdate {
@@ -218,10 +237,23 @@ impl Subscription {
         json!({"item_id":item_id,"kind":"detail","level":"details","event_key":key,"detail":detail}),
       );
     }
+    let mut event_order = Vec::new();
+    if self.request.level == UpdateLevel::All {
+      for event in events {
+        let event_key = event["event_key"].as_str().unwrap().to_owned();
+        let item_id = format!("event:{event_key}");
+        event_order.push(item_id.clone());
+        items.insert(
+          item_id.clone(),
+          json!({"item_id":item_id,"kind":"event","level":"all","event_key":event_key,"event":event}),
+        );
+      }
+    }
     let old_revision = self.revision.to_string();
     let changed = reset
       || self.items != items
       || self.order != order
+      || self.event_order != event_order
       || self.semantic_order != semantic_order
       || self.state != state;
     if reset {
@@ -248,6 +280,8 @@ impl Subscription {
     };
     let item_order = (snapshot || self.order != order).then(|| order.clone());
     let semantic_order_update = (snapshot || self.semantic_order != semantic_order).then(|| semantic_order.clone());
+    let event_order_update = (snapshot || self.event_order != event_order).then(|| event_order.clone());
+    self.event_order = event_order;
     self.semantic_order = semantic_order;
     self.items = items;
     self.order = order;
@@ -270,6 +304,7 @@ impl Subscription {
         .filter(|item| item["kind"] != "work_summary")
         .collect(),
       semantic_order: semantic_order_update,
+      event_order: event_order_update,
       removed_items: removed,
       item_order,
       state: self.state.clone(),
@@ -277,24 +312,51 @@ impl Subscription {
   }
 }
 
+#[derive(Clone)]
+struct Projection {
+  page: Value,
+  semantic: Vec<Value>,
+  details: Vec<(String, Value)>,
+  events: Vec<Value>,
+}
+
 impl ViewerService {
-  fn prepare_projection(&self, session_key: &str) -> Result<(Value, Vec<Value>), String> {
-    let (page, semantic) = self.load_update_pages(EventPageRequest {
-      session_key: session_key.to_string(),
-      window_mode: Some(HistoryWindowMode::Retained),
-      cursor: None,
-      offset: None,
-      direction: PageDirection::Backward,
-      limit: None,
-    })?;
-    Ok((
-      serde_json::to_value(page).map_err(|e| e.to_string())?,
-      semantic
+  fn prepare_projection(&self, session_key: &str, include_all: bool) -> Result<Projection, String> {
+    let (page, semantic, payloads) = self.load_update_pages(
+      EventPageRequest {
+        session_key: session_key.to_string(),
+        window_mode: Some(HistoryWindowMode::Retained),
+        cursor: None,
+        offset: None,
+        direction: PageDirection::Backward,
+        limit: None,
+      },
+      include_all,
+    )?;
+    Ok(Projection {
+      page: serde_json::to_value(page).map_err(|e| e.to_string())?,
+      semantic: semantic
         .into_iter()
         .map(serde_json::to_value)
         .collect::<Result<_, _>>()
         .map_err(|e| e.to_string())?,
-    ))
+      details: payloads
+        .details
+        .into_iter()
+        .map(|detail| {
+          let key = detail.event_key.clone();
+          serde_json::to_value(detail)
+            .map(|detail| (key, detail))
+            .map_err(|e| e.to_string())
+        })
+        .collect::<Result<_, _>>()?,
+      events: payloads
+        .events
+        .into_iter()
+        .map(serde_json::to_value)
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?,
+    })
   }
 
   fn prepare_details(&self, request: &SessionUpdatesRequest) -> Result<Vec<(String, Value)>, String> {
@@ -336,6 +398,7 @@ impl ViewerService {
         items: Vec::new(),
         groups: Vec::new(),
         semantic_order: Some(Vec::new()),
+        event_order: Some(Vec::new()),
         removed_items: Vec::new(),
         item_order: Some(Vec::new()),
         state: json!({"total_events":0,"previous_cursor":null,"next_cursor":null,"history_status":"complete","attention_revision":null,"outstanding_questions":[]}),
@@ -354,8 +417,12 @@ impl ViewerService {
         .unwrap();
       store.subscriptions.remove(&oldest);
     }
-    let (page, semantic) = self.prepare_projection(&request.session_key)?;
-    let details = self.prepare_details(&request)?;
+    let projection = self.prepare_projection(&request.session_key, request.level == UpdateLevel::All)?;
+    let details = if request.level == UpdateLevel::All {
+      projection.details
+    } else {
+      self.prepare_details(&request)?
+    };
     let subscription = store
       .subscriptions
       .entry(request.subscription_id.clone())
@@ -366,6 +433,7 @@ impl ViewerService {
         items: BTreeMap::new(),
         order: Vec::new(),
         semantic_order: Vec::new(),
+        event_order: Vec::new(),
         state: Value::Null,
         accessed: Instant::now(),
       });
@@ -374,7 +442,14 @@ impl ViewerService {
       || subscription.request.level != request.level;
     subscription.request = request.clone();
     subscription.accessed = Instant::now();
-    let update = subscription.update(page, semantic, details, reset, request.cursor.as_deref());
+    let update = subscription.update_with_events(
+      projection.page,
+      projection.semantic,
+      details,
+      projection.events,
+      reset,
+      request.cursor.as_deref(),
+    );
     store.enforce_budget();
     Ok(update)
   }
@@ -385,6 +460,12 @@ impl ViewerService {
     };
     store.subscriptions.retain(|_, value| value.accessed.elapsed() < LEASE);
     let mut result = Vec::new();
+    let all_sessions: std::collections::HashSet<_> = store
+      .subscriptions
+      .values()
+      .filter(|subscription| subscription.request.level == UpdateLevel::All)
+      .map(|subscription| subscription.request.session_key.clone())
+      .collect();
     let mut projections = HashMap::new();
     for subscription in store.subscriptions.values_mut() {
       if change
@@ -395,16 +476,26 @@ impl ViewerService {
         continue;
       }
       // Project each changed session once, regardless of how many levels or
-      // clients subscribe to it. Detailed bodies remain item-scoped.
+      // clients subscribe to it. Full payloads are built only when an all-level subscriber needs them.
       let projection = projections
         .entry(subscription.request.session_key.clone())
-        .or_insert_with(|| self.prepare_projection(&subscription.request.session_key));
-      let (page, semantic, details) = match projection.clone().and_then(|(page, semantic)| {
-        self
-          .prepare_details(&subscription.request)
-          .map(|details| (page, semantic, details))
+        .or_insert_with(|| {
+          self
+            .prepare_projection(
+              &subscription.request.session_key,
+              all_sessions.contains(&subscription.request.session_key),
+            )
+            .map(Arc::new)
+        });
+      let (projection, details) = match projection.clone().and_then(|projection| {
+        let details = if subscription.request.level == UpdateLevel::All {
+          Ok(projection.details.clone())
+        } else {
+          self.prepare_details(&subscription.request)
+        }?;
+        Ok((projection, details))
       }) {
-        Ok(page) => page,
+        Ok(value) => value,
         Err(error) => {
           if let Some(update) = subscription.failure(error) {
             result.push(update);
@@ -413,7 +504,18 @@ impl ViewerService {
         }
       };
       let cursor = subscription.revision.to_string();
-      let update = subscription.update(page, semantic, details, change.reset, Some(&cursor));
+      let update = subscription.update_with_events(
+        projection.page.clone(),
+        projection.semantic.clone(),
+        details,
+        if subscription.request.level == UpdateLevel::All {
+          projection.events.clone()
+        } else {
+          Vec::new()
+        },
+        change.reset,
+        Some(&cursor),
+      );
       if update.snapshot || update.revision != cursor {
         result.push(update);
       }
@@ -442,6 +544,7 @@ mod tests {
       items: BTreeMap::new(),
       order: Vec::new(),
       semantic_order: Vec::new(),
+      event_order: Vec::new(),
       state: Value::Null,
       accessed: Instant::now(),
     }
@@ -471,6 +574,45 @@ mod tests {
     assert!(final_update.items.iter().all(|item| item["level"] == "final"));
     let steps = subscription(UpdateLevel::Steps).update(page(events.clone(), vec![]), events, vec![], true, None);
     assert_eq!(steps.items.len(), 6);
+  }
+
+  #[test]
+  fn all_tracks_every_source_record_independently_of_semantic_folding_and_detail_keys() {
+    let events: Vec<_> = (0..24)
+      .map(|index| json!({"event_key":format!("event.v1.{index}"),"event":{"type":"lifecycle","sequence":index}}))
+      .collect();
+    let mut state = subscription(UpdateLevel::All);
+    let first = state.update_with_events(page(vec![], vec![]), vec![], vec![], events.clone(), true, None);
+    assert_eq!(first.items.len(), 24);
+    assert_eq!(first.event_order.as_ref().unwrap().len(), 24);
+    assert_eq!(first.item_order, Some(vec![]));
+    let mut changed = events.clone();
+    changed[3]["event"]["sequence"] = json!(99);
+    let next = state.update_with_events(
+      page(vec![], vec![]),
+      vec![],
+      vec![],
+      changed,
+      false,
+      Some(&first.revision),
+    );
+    assert_eq!(next.items.len(), 1);
+    assert_eq!(next.items[0]["item_id"], "event:event.v1.3");
+    assert!(next.event_order.is_none());
+    let removed = state.update_with_events(
+      page(vec![], vec![]),
+      vec![],
+      vec![],
+      events[..3].to_vec(),
+      false,
+      Some(&next.revision),
+    );
+    assert_eq!(removed.removed_items.len(), 21);
+    assert_eq!(removed.event_order.unwrap().len(), 3);
+    let steps =
+      subscription(UpdateLevel::Steps).update_with_events(page(vec![], vec![]), vec![], vec![], events, true, None);
+    assert!(steps.items.is_empty());
+    assert_eq!(steps.event_order, Some(vec![]));
   }
 
   #[test]

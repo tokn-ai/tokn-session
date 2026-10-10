@@ -3,6 +3,12 @@
 use super::*;
 use crate::model::{HistoryWindowMode, SessionViewRequest, hex_decode, hex_encode};
 
+#[derive(Default)]
+pub(crate) struct UpdatePayloads {
+  pub details: Vec<EventDetail>,
+  pub events: Vec<EventDetail>,
+}
+
 impl ViewerService {
   pub fn update_session_view(&self, request: SessionViewRequest) -> Result<(), String> {
     if request.view_id.is_empty() || request.view_id.len() > 128 {
@@ -50,18 +56,23 @@ impl ViewerService {
   }
 
   pub(super) fn load_retained_event_page(&self, request: EventPageRequest) -> Result<EventPage, String> {
-    self.load_retained_pages(request, false).map(|(page, _)| page)
+    self.load_retained_pages(request, false, false).map(|(page, _, _)| page)
   }
 
-  pub(crate) fn load_update_pages(&self, request: EventPageRequest) -> Result<(EventPage, Vec<EventSummary>), String> {
-    self.load_retained_pages(request, true)
+  pub(crate) fn load_update_pages(
+    &self,
+    request: EventPageRequest,
+    include_all: bool,
+  ) -> Result<(EventPage, Vec<EventSummary>, UpdatePayloads), String> {
+    self.load_retained_pages(request, true, include_all)
   }
 
   fn load_retained_pages(
     &self,
     request: EventPageRequest,
     include_semantic: bool,
-  ) -> Result<(EventPage, Vec<EventSummary>), String> {
+    include_all: bool,
+  ) -> Result<(EventPage, Vec<EventSummary>, UpdatePayloads), String> {
     if request.offset.is_some() || !matches!(request.direction, PageDirection::Backward) {
       return Err("History windows require backward pagination without an offset".into());
     }
@@ -132,7 +143,7 @@ impl ViewerService {
       .unwrap_or_default();
     let intermediate_usage = usage_filter::intermediate_usage(&loaded.events);
     let events = entries
-      .into_iter()
+      .iter()
       .map(|entry| {
         identity.summary(timeline_entry_event_summary(
           entry,
@@ -144,8 +155,13 @@ impl ViewerService {
       .collect::<Vec<_>>();
     // Intermediate assistant messages and individual tool operations remain
     // semantic objects even when the current UI folds them into a trajectory.
-    let semantic = if include_semantic {
+    let base = if include_semantic {
       base_timeline_entries(&loaded.events)
+    } else {
+      Vec::new()
+    };
+    let semantic = if include_semantic {
+      base
         .iter()
         .filter(|entry| timeline_entry_start_source_event_index(entry).is_some_and(|index| index >= start))
         .map(|entry| {
@@ -160,6 +176,39 @@ impl ViewerService {
     } else {
       Vec::new()
     };
+    let mut payloads = UpdatePayloads::default();
+    if include_all {
+      // Source rows stay individual even when tools/compaction/work are folded.
+      // Keep the same generation and absolute positions as display identities.
+      for (index, event) in loaded.events.iter().enumerate().skip(start) {
+        let mut detail = source_event_detail(encode_event_key(index), event)?;
+        if !detail.is_hidden && detail.event.get("redacted") != Some(&Value::Bool(true)) {
+          if let Some(native) = self.relay.native(&locator, index, &loaded) {
+            detail.native = Some(bounded_detail_value(native, "native")?);
+          }
+        }
+        payloads.events.push(identity.detail(detail, false));
+      }
+      for entry in base
+        .into_iter()
+        .filter(|entry| timeline_entry_start_source_event_index(entry).is_some_and(|index| index >= start))
+      {
+        let (detail, envelope) = if let TimelineEntry::Event { source_event_index } = &entry
+          && matches!(loaded.events[*source_event_index], AgentEvent::Compaction(_))
+        {
+          self.load_event_detail_local(&locator, &loaded, encode_event_key(*source_event_index))?
+        } else {
+          self.timeline_entry_detail(&locator, &loaded, entry)?
+        };
+        payloads.details.push(identity.detail(detail, envelope));
+      }
+      for entry in entries {
+        if let TimelineEntry::Trajectory { .. } = entry {
+          let (detail, envelope) = self.timeline_entry_detail(&locator, &loaded, entry.clone())?;
+          payloads.details.push(identity.detail(detail, envelope));
+        }
+      }
+    }
     Ok((
       EventPage {
         total_events: events.len(),
@@ -173,6 +222,7 @@ impl ViewerService {
         outstanding_questions: outstanding_questions(&loaded.events, &identity),
       },
       semantic,
+      payloads,
     ))
   }
 }
@@ -361,6 +411,149 @@ mod tests {
     .await
     .unwrap()
     .unwrap()
+  }
+
+  #[tokio::test]
+  async fn all_delivery_keeps_source_fragments_and_eager_details_without_resending_unchanged_records() {
+    use crate::updates::{SessionUpdatesRequest, UpdateLevel};
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("all.jsonl");
+    std::fs::write(&path, include_str!("../../../pi/fixtures/basic_session.jsonl")).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("tcp://{}", listener.local_addr().unwrap());
+    let mut config = RelayConfig::new(vec![ProviderRoot::new(Provider::Pi, root.path().into())]);
+    config.poll_interval = Duration::from_millis(10);
+    let server = tokio::spawn(crate::service_server::serve_listener(listener, config));
+    let service = ViewerService::new(Arc::new(NativeRepository::default()));
+    let mut changes = service.relay.changes.subscribe();
+    service
+      .relay
+      .configure(RelaySettings {
+        mode: RelayMode::External,
+        endpoint,
+        ..Default::default()
+      })
+      .unwrap();
+    tokio::time::timeout(Duration::from_secs(4), async {
+      while !service.relay.has_catalog() {
+        changes.recv().await.unwrap();
+      }
+    })
+    .await
+    .unwrap();
+    let key = encode_session_key(&SessionLocator {
+      version: 1,
+      provider: ViewerProvider::Pi,
+      session_id: "pi-session".into(),
+      source_path: path.clone(),
+    })
+    .unwrap();
+    let request = SessionUpdatesRequest {
+      subscription_id: "all-test".into(),
+      session_key: key,
+      level: UpdateLevel::All,
+      cursor: None,
+      detail_keys: vec![],
+      unsubscribe: false,
+    };
+    let load = |request| {
+      let service = service.clone();
+      async move {
+        tokio::task::spawn_blocking(move || service.load_session_updates(request))
+          .await
+          .unwrap()
+          .unwrap()
+      }
+    };
+    let first = load(request.clone()).await;
+    let records: Vec<_> = first.items.iter().filter(|item| item["kind"] == "event").collect();
+    let source_types: Vec<_> = records
+      .iter()
+      .map(|item| item["event"]["event"]["type"].as_str().unwrap())
+      .collect();
+    assert!(source_types.contains(&"tool_call"));
+    assert!(
+      records
+        .iter()
+        .any(|item| item["event"]["event"]["record_kind"] == "invocation")
+    );
+    assert!(
+      records
+        .iter()
+        .any(|item| item["event"]["event"]["record_kind"] == "result")
+    );
+    assert!(source_types.contains(&"session_started"));
+    assert!(source_types.contains(&"provider_changed"));
+    assert!(source_types.contains(&"unknown"));
+    assert_eq!(first.event_order.as_ref().unwrap().len(), records.len());
+    assert!(
+      first.items.iter().any(
+        |item| item["kind"] == "detail" && item["detail"]["tool_output"]["sections"][0]["text"] == "project readme"
+      )
+    );
+    assert!(
+      first
+        .items
+        .iter()
+        .any(|item| item["kind"] == "detail" && item["detail"]["event"]["type"] == "trajectory")
+    );
+    let unchanged = load(SessionUpdatesRequest {
+      cursor: Some(first.revision.clone()),
+      ..request.clone()
+    })
+    .await;
+    assert!(unchanged.items.is_empty());
+    assert!(unchanged.event_order.is_none());
+    assert_eq!(unchanged.revision, first.revision);
+    let steps = load(SessionUpdatesRequest {
+      subscription_id: "steps-test".into(),
+      level: UpdateLevel::Steps,
+      ..request.clone()
+    })
+    .await;
+    assert!(
+      steps
+        .items
+        .iter()
+        .all(|item| item["kind"] != "event" && item["kind"] != "detail")
+    );
+    let appended = json!({"type":"message", "id":"appended", "parentId":"future-1", "message":{"role":"user", "content":"new prompt"}});
+    std::fs::OpenOptions::new()
+      .append(true)
+      .open(&path)
+      .unwrap()
+      .write_all(format!("{appended}\n").as_bytes())
+      .unwrap();
+    let next = tokio::time::timeout(Duration::from_secs(4), async {
+      loop {
+        let update = load(SessionUpdatesRequest {
+          cursor: Some(first.revision.clone()),
+          ..request.clone()
+        })
+        .await;
+        if update
+          .items
+          .iter()
+          .any(|item| item["kind"] == "event" && item["event"]["event"]["text"] == "new prompt")
+        {
+          break update;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+      }
+    })
+    .await
+    .unwrap();
+    assert!(!next.snapshot);
+    assert_eq!(next.items.iter().filter(|item| item["kind"] == "event").count(), 1);
+    assert_eq!(next.event_order.unwrap().len(), records.len() + 1);
+    service
+      .relay
+      .configure(RelaySettings {
+        mode: RelayMode::Local,
+        ..Default::default()
+      })
+      .unwrap();
+    server.abort();
   }
 
   #[tokio::test]

@@ -7,6 +7,7 @@ interface Replica {
   revision: string;
   items: Map<string, SessionUpdateItem>;
   order: string[];
+  event_order: string[];
   page: EventPageResponse;
   bytes: number;
 }
@@ -40,7 +41,7 @@ export class SessionDisplayCache {
   private acceptedItems = new Map<string, Map<string, SessionUpdateItem>>();
   private key(session_key: string, level: UpdateLevel) { return JSON.stringify([session_key, level]); }
 
-  request(session_key: string, level: UpdateLevel = "steps", detail_keys: string[] = []): SessionUpdatesRequest {
+  request(session_key: string, level: UpdateLevel = "all", detail_keys: string[] = []): SessionUpdatesRequest {
     const key = this.key(session_key, level);
     if (!this.access.has(session_key)) this.access.set(session_key, ++this.clock);
     let subscription_id = this.subscriptions.get(key);
@@ -64,7 +65,7 @@ export class SessionDisplayCache {
     return request;
   }
 
-  get(session_key: string, level: UpdateLevel = "steps"): EventPageResponse | null {
+  get(session_key: string, level: UpdateLevel = "all"): EventPageResponse | null {
     const key = this.key(session_key, level);
     const replica = this.replicas.get(key);
     if (!replica) return null;
@@ -73,7 +74,13 @@ export class SessionDisplayCache {
   }
 
   detail(session_key: string, event_key: string) {
-    return this.replicas.get(this.key(session_key, "details"))?.items.get(`detail:${event_key}`)?.detail ?? null;
+    return this.replicas.get(this.key(session_key, "all"))?.items.get(`detail:${event_key}`)?.detail
+      ?? this.replicas.get(this.key(session_key, "details"))?.items.get(`detail:${event_key}`)?.detail ?? null;
+  }
+
+  sourceEvents(session_key: string) {
+    const replica = this.replicas.get(this.key(session_key, "all"));
+    return replica?.event_order.map((id) => replica.items.get(id)?.event).filter((event) => event !== undefined) ?? [];
   }
 
   invalidate(session_key?: string) {
@@ -93,8 +100,15 @@ export class SessionDisplayCache {
     if (!items) return null;
     const previous = this.acceptedItems.get(session_key);
     const changed = new Set<string>();
-    for (const [key, item] of items) if (previous?.get(key) !== item) changed.add(key);
-    for (const key of previous?.keys() ?? []) if (!items.has(key)) changed.add(key);
+    const changedKey = (key: string, item: SessionUpdateItem) => item.kind === "event" ? null : item.event_key ?? key;
+    for (const [key, item] of items) {
+      const eventKey = changedKey(key, item);
+      if (eventKey && previous?.get(key) !== item) changed.add(eventKey);
+    }
+    for (const [key, item] of previous ?? []) {
+      const eventKey = changedKey(key, item);
+      if (eventKey && !items.has(key)) changed.add(eventKey);
+    }
     this.acceptedItems.set(session_key, items);
     return changed;
   }
@@ -140,12 +154,14 @@ export class SessionDisplayCache {
       items.set(item.item_id, retained); bytes += weight(retained);
     }
     const order = update.item_order ?? previous?.order ?? [];
+    const event_order = update.event_order ?? previous?.event_order ?? [];
+    if (event_order.some((id) => !items.get(id)?.event)) { this.replicas.delete(key); return null; }
     const events = order.map((id) => items.get(id)?.summary).filter((event) => event !== undefined);
     if (events.length !== order.length) { this.replicas.delete(key); return null; }
     const page: EventPageResponse = { ...update.state, events };
     this.pageItems.set(page, items);
     this.replicas.delete(key);
-    this.replicas.set(key, { subscription_id: update.subscription_id, generation: update.generation, revision: update.revision, items, order, page, bytes });
+    this.replicas.set(key, { subscription_id: update.subscription_id, generation: update.generation, revision: update.revision, items, order, event_order, page, bytes });
     if (update.snapshot && this.pending.has(key)) {
       const queued = this.pending.get(key)!;
       this.pending.delete(key);

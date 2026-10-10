@@ -4,11 +4,13 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
-Session delivery now has final/steps/details subscriptions, semantic item
+Session delivery now has final/steps/details/all subscriptions, semantic item
 changes over Tauri/SSE, snapshot recovery on gaps, and frontend replicas for
 eight recent sessions. Reopening renders cached content before catch-up;
-background sessions receive final-level updates without advancing steps coverage.
-Tool details are subscribed only while requested, and unrelated detail/work
+background sessions receive final-level updates without advancing all coverage.
+The opened session subscribes to all retained source events and display details;
+Inspector/tools use delivered payloads, while older turns remain paginated.
+Redaction, native opt-in, and payload bounds still apply. Unrelated detail/work
 caches survive updates. Indexed Automatic and Local share one source-reader path
 without a redundant managed feed child. See [session updates](viewer-session-updates.md)
 for the contract, ownership, limits, compatibility paths, and remaining costs.

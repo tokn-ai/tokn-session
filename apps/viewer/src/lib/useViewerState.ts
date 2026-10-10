@@ -285,7 +285,7 @@ export function useViewerState() {
     let update: import("./types").SessionUpdate;
     try { update = await loadSessionUpdates(displayCache.current.request(request.session_key)); }
     catch (error: unknown) {
-      if (/unknown.*command|command.*not found|unavailable for a session share/i.test(errorMessage(error))) {
+      if (/unknown.*command|unknown.*variant|command.*not found|unavailable for a session share/i.test(errorMessage(error))) {
         semanticSupported.current = false;
         return loadEventPage(request);
       }
@@ -518,6 +518,8 @@ export function useViewerState() {
     const generation = detailGeneration.current;
     let request: Promise<EventDetail>;
     const load = async () => {
+      const delivered = displayCache.current.detail(sessionKey, eventKey);
+      if (delivered) return delivered;
       if (!semanticLive.current.has(sessionKey)) return loadEventDetail({ session_key: sessionKey, event_key: eventKey });
       const keys = [...new Set([...activeDetailKeys.current, eventKey])].slice(-16);
       const update = await loadSessionUpdates(displayCache.current.request(sessionKey, "details", keys));
@@ -735,7 +737,7 @@ export function useViewerState() {
   const detailSubscriptionKey = JSON.stringify([selectedSessionKey, activeDetailKeys.current]);
   useEffect(() => {
     const sessionKey = selectedSessionKeyRef.current;
-    if (!sessionKey || !semanticLive.current.has(sessionKey)) return;
+    if (!sessionKey || !semanticLive.current.has(sessionKey) || displayCache.current.get(sessionKey, "all")) return;
     const keys = [...activeDetailKeys.current];
     const refresh = () => {
       void loadSessionUpdates(displayCache.current.request(sessionKey, "details", keys)).then((update) => {
@@ -960,7 +962,7 @@ export function useViewerState() {
       sessionDisclosures.current.delete(previousKey);
       sessionDisclosures.current.set(previousKey, { expanded_event_key: expandedEventKeyRef.current, selected_event_key: selectedEventKeyRef.current, inspector_open: inspectorOpen, manual_expansion: manualExpansion.current });
       while (sessionDisclosures.current.size > 8) sessionDisclosures.current.delete(sessionDisclosures.current.keys().next().value!);
-      for (const level of ["steps", "details"] as const) {
+      for (const level of ["all", "steps", "details"] as const) {
         const release = displayCache.current.release(previousKey, level);
         if (release) void loadSessionUpdates(release).catch(() => {});
       }
