@@ -104,6 +104,23 @@ describe("remote viewer transport", () => {
     expect(fetcher).toHaveBeenCalledOnce();
     stop(); remote.close(); feed.end();
   });
+  it("accepts all-level session payloads above the notification limit across chunks", async () => {
+    const feed = stream();
+    const fetcher = vi.fn().mockResolvedValue(feed.response);
+    vi.stubGlobal("fetch", fetcher);
+    const remote = client();
+    const changed = vi.fn();
+    const listening = remote.listen("session-updated", changed);
+    feed.send("event: ready\ndata: {}\n\n");
+    const stop = await listening;
+    const payload = { level: "all", items: [{ kind: "event", event: "x".repeat(2 * 1024 * 1024 + 1) }] };
+    const frame = `event: session-updated\ndata: ${JSON.stringify(payload)}\n\n`;
+    feed.send(frame.slice(0, -2));
+    feed.send("\n\n");
+    await vi.waitFor(() => expect(changed).toHaveBeenCalledWith({ payload }));
+    expect(fetcher).toHaveBeenCalledOnce();
+    stop(); remote.close(); feed.end();
+  });
   it("reconnects when one SSE frame exceeds the size limit", async () => {
     vi.useFakeTimers();
     const first = stream(); const second = stream();

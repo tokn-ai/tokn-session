@@ -192,6 +192,7 @@ impl ViewerRelay {
       state.native = state.connection.is_some() && settings.include_native;
       state.settings = settings.clone();
       state.phase = match settings.mode {
+        RelayMode::Automatic if state.connection.is_some() => "live",
         RelayMode::Automatic => "starting",
         RelayMode::External => "connecting",
         RelayMode::Local => "local",
@@ -208,6 +209,7 @@ impl ViewerRelay {
       maintenance.cache_loop(epoch, maintenance_cancel).await;
     });
     match settings.mode {
+      RelayMode::Automatic if self.index.is_some() => {}
       RelayMode::Automatic => {
         let manager = self.clone();
         tokio::task::spawn(async move {
@@ -218,6 +220,21 @@ impl ViewerRelay {
       RelayMode::Local => {}
     }
     Ok(())
+  }
+
+  /// The indexed viewer already owns source readers and native file watches.
+  /// Wake those readers directly rather than parsing a second live-feed copy.
+  pub(crate) async fn wake_sources(&self) {
+    let service = {
+      let state = self.state.lock().unwrap();
+      match &state.connection {
+        Some(Connection::Embedded(service)) => Some(service.clone()),
+        _ => None,
+      }
+    };
+    if let Some(service) = service {
+      service.invalidate().await;
+    }
   }
 
   pub fn configuration_failed(&self, error: String) {

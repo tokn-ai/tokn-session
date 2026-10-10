@@ -168,6 +168,7 @@ fn dispatch(service: &ViewerService, command: &str, payload: Value) -> Result<Va
     command,
     "list_session_children"
       | "load_event_page"
+      | "load_session_updates"
       | "load_event_detail"
       | "load_trajectory_event_page"
       | "acknowledge_session_attention"
@@ -201,6 +202,7 @@ fn dispatch(service: &ViewerService, command: &str, payload: Value) -> Result<Va
     "list_sessions" => call!(list_sessions),
     "list_session_children" => call!(list_session_children),
     "load_event_page" => call!(load_event_page),
+    "load_session_updates" => call!(load_session_updates),
     "update_session_view" => call!(update_session_view),
     "load_event_detail" => call!(load_event_detail),
     "load_trajectory_event_page" => call!(load_trajectory_event_page),

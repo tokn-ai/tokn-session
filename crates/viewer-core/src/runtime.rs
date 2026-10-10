@@ -47,6 +47,7 @@ impl ViewerRuntime {
     let relay = service.relay.clone();
     let mut changes = relay.changes.subscribe();
     let relay_events = events.clone();
+    let update_service = service.clone();
     tasks.push(tokio::spawn(async move {
       let mut last_status = None;
       loop {
@@ -58,6 +59,14 @@ impl ViewerRuntime {
           },
           Err(_) => return,
         };
+        let service = update_service.clone();
+        let source_change = change.clone();
+        if let Ok(updates) = tokio::task::spawn_blocking(move || service.publish_session_updates(&source_change)).await
+        {
+          for update in updates {
+            let _ = emit(&relay_events, "session-updated", update);
+          }
+        }
         let _ = emit(&relay_events, "relay-changed", change);
         emit_changed_relay_status(&relay_events, &mut last_status, relay.status());
       }
@@ -348,6 +357,17 @@ impl ViewerRuntime {
             }
             let needs_retry = session_index_needs_retry(&refresh);
             if refresh.changed {
+              let mut keys = refresh.updated_session_keys.clone();
+              keys.extend(refresh.attention_session_keys.iter().cloned());
+              keys.sort();
+              keys.dedup();
+              let service = refresh_service.clone();
+              if let Ok(notifications) = tokio::task::spawn_blocking(move || service.session_notifications(&keys)).await
+              {
+                for notification in notifications {
+                  let _ = emit(&scheduler_events, "session-notification", notification);
+                }
+              }
               let _ = emit(&scheduler_events, "session-index-changed", refresh);
             }
             let until_full_catalog = next_full_catalog_refresh.saturating_duration_since(Instant::now());
@@ -376,6 +396,7 @@ impl ViewerRuntime {
             )
             .await
             {
+              refresh_service.relay.wake_sources().await;
               merge_session_index_wake(&mut pending_wake, wake);
             }
           }
@@ -420,6 +441,7 @@ impl ViewerRuntime {
             )
             .await
             {
+              refresh_service.relay.wake_sources().await;
               merge_session_index_wake(&mut pending_wake, wake);
             }
           }
@@ -462,6 +484,7 @@ impl ViewerRuntime {
             )
             .await
             {
+              refresh_service.relay.wake_sources().await;
               merge_session_index_wake(&mut pending_wake, wake);
             }
           }
