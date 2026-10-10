@@ -58,7 +58,10 @@ First setup generates a UUID, dedicated keys, and an authenticator seed. Scan
 the terminal QR, then copy the printed machine ID or full machine reference
 (`UUID@host_public_key`). Manual authenticator setup uses SHA-256, six digits, and
 a 30-second period. Secrets print only to an interactive terminal. To display
-them later over a trusted terminal or SSH:
+them later over a trusted terminal or SSH. The display includes the machine
+reference and current SHA-256 TOTP with its remaining validity, so you can
+compare it with the authenticator app. Rerun for a fresh code; displaying a code
+does not consume it:
 
 ```sh
 tokn-session-hub authenticator

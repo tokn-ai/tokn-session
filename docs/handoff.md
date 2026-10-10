@@ -144,7 +144,10 @@ v2 distinguishes native, browser enrollment, and browser session grants. Legacy
 state fails closed; explicit `authenticator --upgrade-sha256` rotates OTP, clears
 unclassified grants, preserves host keys/passkeys/limits, and requires rescanning
 and app re-pairing. Protocol v2 and clients must upgrade together. Release `eb86123` is deployed to `ahub.clouds56.top` and this machine’s
-connector/API. Local SHA-256 migration preserved identities/passkeys and retired
+connector/API. The authenticator CLI also shows its saved machine reference and current TOTP
+with seconds remaining in trusted-terminal output; exports stay Base32-only.
+Reference lookup reads existing keys without generating replacements.
+Local SHA-256 migration preserved identities/passkeys and retired
 two legacy grants; the authenticator must be rescanned. Private pre-upgrade
 backups exist on each endpoint.
 Enrolled host-owned passkeys authorize tab keys on their original Noise
