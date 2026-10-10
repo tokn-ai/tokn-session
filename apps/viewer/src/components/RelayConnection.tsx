@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { configureRelay, getRelayStatus, listenForRelayStatus, listenForTransportReconnect } from "../lib/tauri";
 import { useFloatingPanel } from "../lib/useFloatingPanel";
-import { CloseIcon } from "./Icons";
+import { ChevronIcon, CloseIcon } from "./Icons";
 import type { RelayMode, RelaySettings, RelayStatus } from "../lib/types";
+import "./ConnectionPanel.css";
 
 const PHASE_LABELS: Record<RelayStatus["phase"], string> = {
   local: "Local history",
@@ -15,7 +16,7 @@ const PHASE_LABELS: Record<RelayStatus["phase"], string> = {
 };
 const STATUS_LOAD_ERROR = "Relay connection status is unavailable.";
 
-export function RelayConnection() {
+export function RelayConnection({ on_open_machines }: { on_open_machines?: () => void }) {
   const [status, setStatus] = useState<RelayStatus | null>(null);
   const [settings, setSettings] = useState<RelaySettings>({ mode: "automatic", endpoint: "tcp://127.0.0.1:5557", include_native: false });
   const [busy, setBusy] = useState(false);
@@ -133,7 +134,7 @@ export function RelayConnection() {
         aria-controls={panel_id}
         aria-expanded={is_open}
         aria-haspopup="dialog"
-        aria-label={`${label}. Connection settings`}
+        aria-label={`${on_open_machines ? "This machine. " : ""}${label}. Connection settings`}
         className="status-bar__connection"
         data-phase={error ? "failed" : phase}
         onClick={() => {
@@ -145,7 +146,7 @@ export function RelayConnection() {
         type="button"
       >
         <span aria-hidden="true" className="connection-dot" />
-        <span>{label}</span>
+        <span>{on_open_machines ? `This machine · ${label}` : label}</span>
       </button>
       {is_open && <div
         aria-labelledby={`${panel_id}-title`}
@@ -156,29 +157,38 @@ export function RelayConnection() {
         role="dialog"
         tabIndex={-1}
       >
-        <header className="notification-center__header">
+        <header className="connection-panel__header">
           <div>
             <h2 id={`${panel_id}-title`}>Connection</h2>
             <p className="connection-panel__summary">{label} · {mode === "automatic" ? "Automatic" : mode === "external" ? "External" : "Local"}</p>
           </div>
           <button aria-label="Close connection settings" className="icon-button" onClick={close} type="button"><CloseIcon /></button>
         </header>
+        {on_open_machines && <div className="connection-panel__machine">
+          <dl className="connection-summary"><div><dt>Machine</dt><dd>This machine</dd></div></dl>
+          <button className="connection-panel__primary" onClick={on_open_machines} type="button">Machines<ChevronIcon className="connection-panel__navigate" /></button>
+        </div>}
         <form className="relay-settings" onSubmit={(event) => { event.preventDefault(); void save(); }}>
-          <label htmlFor={`${panel_id}-mode`}>Data source</label>
-          <select id={`${panel_id}-mode`} value={settings.mode} disabled={busy || !status} onChange={(event) => setSettings({ ...settings, mode: event.target.value as RelayMode })}>
-            <option value="automatic">Automatic (recommended)</option>
-            <option value="external">External Relay</option>
-            <option value="local">Local history only</option>
-          </select>
-          {settings.mode === "external" && <>
+          <div className="relay-field">
+            <label htmlFor={`${panel_id}-mode`}>Data source</label>
+            <div className="relay-select">
+              <select aria-describedby={`${panel_id}-description`} id={`${panel_id}-mode`} value={settings.mode} disabled={busy || !status} onChange={(event) => setSettings({ ...settings, mode: event.target.value as RelayMode })}>
+                <option value="automatic">Automatic (recommended)</option>
+                <option value="external">External Relay</option>
+                <option value="local">Local history only</option>
+              </select>
+              <ChevronIcon />
+            </div>
+          </div>
+          {settings.mode === "external" && <div className="relay-field">
             <label htmlFor={`${panel_id}-endpoint`}>Relay endpoint</label>
             <input id={`${panel_id}-endpoint`} value={settings.endpoint} onChange={(event) => setSettings({ ...settings, endpoint: event.target.value })} disabled={busy} spellCheck={false} />
-          </>}
+          </div>}
           {settings.mode === "automatic" && <label className="relay-native">
             <input type="checkbox" checked={settings.include_native} disabled={busy || !status} onChange={(event) => setSettings({ ...settings, include_native: event.target.checked })} />
             Include native records
           </label>}
-          <p>{settings.mode === "automatic"
+          <p id={`${panel_id}-description`}>{settings.mode === "automatic"
             ? "Read saved sessions and receive live updates automatically. Native records add provider-specific details to the inspector."
             : settings.mode === "external"
               ? "Connect to a Relay snapshot service running on this machine. You manage that service separately."
@@ -190,7 +200,7 @@ export function RelayConnection() {
               : "Live updates are reconnecting. Saved history remains available."
             : "Showing the last received data while the connection is unavailable."}</p>}
           {(error || status?.error) && <p role="alert">{error ?? status?.error}</p>}
-          <button className="connection-panel__apply" type="submit" disabled={busy || !status}>{busy ? "Saving…" : phase === "failed" && settings.mode === "automatic" ? "Retry" : "Apply"}</button>
+          <div className="connection-panel__footer"><button className="connection-panel__apply" type="submit" disabled={busy || !status}>{busy ? "Saving…" : phase === "failed" && settings.mode === "automatic" ? "Retry" : "Apply"}</button></div>
         </form>
       </div>}
     </div>

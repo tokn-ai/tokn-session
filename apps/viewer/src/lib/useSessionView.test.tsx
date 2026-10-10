@@ -17,7 +17,7 @@ beforeEach(() => {
   release.mockReset().mockResolvedValue(undefined);
   close = undefined;
   vi.mocked(captureTransport).mockReturnValue({
-    invoke, release, on_close: (handler) => { close = handler; return () => { close = undefined; }; },
+    invoke, listen: vi.fn(), release, on_close: (handler) => { close = handler; return () => { close = undefined; }; },
   });
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); });

@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { parseEvent, RemoteClient, selectMachine, invoke, listen, viewerStorageScope, captureTransport } from "./transport";
+import { parseEvent, RemoteClient, selectMachine, deselectMachine, invoke, listen, viewerStorageScope, captureTransport } from "./transport";
+import { invoke as nativeInvoke } from "@tauri-apps/api/core";
+import { listen as nativeListen } from "@tauri-apps/api/event";
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
 const clients: RemoteClient[] = [];
 afterEach(() => { for (const client of clients) client.close(); clients.length = 0; selectMachine(); vi.unstubAllGlobals(); vi.useRealTimers(); });
@@ -11,6 +16,44 @@ function stream() {
 }
 
 describe("remote viewer transport", () => {
+  it("keeps captured local requests and listeners local after selecting a remote machine", async () => {
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    vi.mocked(nativeInvoke).mockResolvedValue({ local: true });
+    vi.mocked(nativeListen).mockResolvedValue(() => {});
+    const local = captureTransport();
+    const remote = client();
+    const send = vi.spyOn(remote, "invoke").mockResolvedValue({ remote: true });
+    const subscribe = vi.spyOn(remote, "listen").mockResolvedValue(() => {});
+    selectMachine(remote);
+    expect(await local.invoke("list_sessions")).toEqual({ local: true });
+    const handler = vi.fn();
+    await local.listen("session-updated", handler);
+    expect(nativeListen).toHaveBeenCalledWith("session-updated", handler);
+    expect(send).not.toHaveBeenCalled();
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(await invoke("list_sessions")).toEqual({ remote: true });
+  });
+  it("does not let a captured disconnected reader subscribe to a later machine", async () => {
+    const disconnected = captureTransport();
+    const remote = client();
+    const subscribe = vi.spyOn(remote, "listen").mockResolvedValue(() => {});
+    selectMachine(remote);
+    await expect(disconnected.invoke("list_sessions")).rejects.toThrow("Connect to a machine first");
+    await expect(disconnected.listen("session-updated", vi.fn())).rejects.toThrow("Connect to a machine first");
+    expect(subscribe).not.toHaveBeenCalled();
+  });
+  it("does not let an old owner's cleanup deselect its successor", async () => {
+    const old = client(); const next = client();
+    const send = vi.spyOn(next, "invoke").mockResolvedValue({ selected: true });
+    const close = vi.spyOn(next, "close");
+    selectMachine(old); selectMachine(next); deselectMachine(old);
+    expect(close).not.toHaveBeenCalled();
+    expect(await invoke("list_sessions")).toEqual({ selected: true });
+    expect(send).toHaveBeenCalledOnce();
+    deselectMachine(next);
+    expect(close).toHaveBeenCalledOnce();
+    await expect(invoke("list_sessions")).rejects.toThrow("Connect to a machine first");
+  });
   it("routes a selected Hub machine before desktop local commands and partitions its viewer state", async () => {
     vi.stubGlobal("__TAURI_INTERNALS__", {});
     const remote = client();

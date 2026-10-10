@@ -4,12 +4,22 @@
 .hub-header .hub-actions a { color: var(--text-soft); text-decoration: none; font-size: 13px; }
 .hub-header .hub-actions a:hover { color: var(--text); text-decoration: underline; }
 .hub-access h2 { margin: 0; font-size: 17px; }
+.hub-this-machine { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 20px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); margin-bottom: 28px; }
+.hub-this-machine > div { min-width: 0; }
+.hub-this-machine p { margin: 8px 0 0; font-size: 13px; line-height: 1.6; color: var(--text-soft); }
+.hub-this-machine .hub-error { color: var(--danger); }
+.hub-this-machine > button { flex-shrink: 0; }
+.hub-known-hubs { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
+.hub-known-hubs > span { flex-basis: 100%; margin-bottom: 2px; }
+.hub-known-hubs > button { max-width: 100%; overflow-wrap: anywhere; text-align: left; }
+.hub-known-hubs > button[aria-pressed="true"] { color: var(--app-bg); background: var(--text); }
 .hub-origin { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 16px 0; border-block: 1px solid var(--border); margin-bottom: 24px; }
 .hub-origin > div { display: grid; gap: 4px; min-width: 0; }
 .hub-origin strong { font-size: 14px; overflow-wrap: anywhere; }
 .hub-field-label { color: var(--text-muted); font-size: 12px; }
 .hub-origin-form, .hub-machine-form { display: grid; gap: 12px; }
 .hub-origin-form { max-width: 560px; margin-bottom: 24px; }
+.hub-origin-form > p { margin: 0; font-size: 13px; line-height: 1.6; }
 .hub-access input:not([type="radio"]), .hub-admin-address input, .hub-admin-address select, .hub-namespace-form input {
   width: 100%; min-height: 42px; box-sizing: border-box; border: 1px solid var(--border-strong); border-radius: 8px; padding: 10px 12px; color: var(--text); background: var(--surface-raised); font: inherit;
 }
@@ -20,7 +30,7 @@
 .hub-saved-host { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 16px; padding: 18px; }
 .hub-saved-host > button { max-width: 100%; white-space: nowrap; }
 .hub-machine-settings { grid-column: 1 / -1; padding-top: 12px; border-top: 1px solid var(--border); font-size: 12px; }
-.hub-machine-settings summary, .hub-input-help summary, .connection-secondary-settings summary { cursor: pointer; color: var(--text-soft); }
+.hub-machine-settings summary, .hub-input-help summary { cursor: pointer; color: var(--text-soft); }
 .hub-machine-settings > div { display: grid; gap: 12px; padding-top: 14px; }
 .hub-machine-settings button { justify-self: start; }
 .hub-machine-settings p { margin: 0; }
@@ -35,22 +45,12 @@
 .hub-auth-method label { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .hub-auth-method input { margin: 0; accent-color: var(--text); }
 .hub-machine-form .machine-hint { margin: 0; line-height: 1.6; opacity: 1; color: var(--text-soft); }
-.hub-home .hub-connect-primary, .remote-connection__actions .connection-panel__primary { color: var(--app-bg); background: var(--text); }
+.hub-home .hub-connect-primary { color: var(--app-bg); background: var(--text); }
 .hub-home .hub-connect-primary:hover:not(:disabled) { background: var(--text-soft); }
 .hub-input-help { font-size: 12px; line-height: 1.6; }
 .hub-input-help p { color: var(--text-soft); margin-bottom: 0; }
 .hub-progress { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 16px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 20px; font-size: 13px; background: var(--surface); }
 .hub-feedback { margin: 0 0 20px; font-size: 13px; line-height: 1.6; }
-.connection-summary { display: grid; gap: 12px; margin: 0 0 16px; }
-.connection-summary > div { display: grid; gap: 3px; }
-.connection-summary dt { color: var(--text-muted); font-size: 11px; }
-.connection-summary dd { margin: 0; overflow-wrap: anywhere; }
-.connection-state { color: var(--text-soft); }
-.connection-primary-actions { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; }
-.connection-secondary-settings { display: grid; gap: 14px; width: 100%; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
-.connection-secondary-settings > button { justify-self: start; }
-.connection-secondary-settings p { margin: 0; }
-.connection-secondary-settings .hub-progress { margin: 0; padding: 8px; }
 .hub-admin-address { flex-basis: 100%; width: 100%; }
 .hub-admin-address form, .hub-namespace-form { display: grid; gap: 10px; max-width: 440px; }
 .hub-admin-address form { margin-top: 14px; }

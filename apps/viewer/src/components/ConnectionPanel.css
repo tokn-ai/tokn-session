@@ -1,0 +1,280 @@
+/* Local and remote panels share spacing, controls, and responsive behavior. */
+.connection-panel {
+  position: absolute;
+  left: 8px;
+  bottom: calc(100% + 8px);
+  width: min(400px, calc(100vw - 16px));
+  max-height: calc(100dvh - 64px);
+  overflow: auto;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  color-scheme: light;
+  font-size: 13px;
+}
+
+.connection-panel__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.connection-panel__header h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+}
+
+.connection-panel__header .icon-button {
+  flex-shrink: 0;
+  margin: -4px -6px -4px 0;
+}
+
+.connection-panel__summary {
+  margin: 6px 0 0;
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.connection-panel__machine {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 20px 20px 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.connection-summary {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  margin: 0;
+}
+
+.connection-summary > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.connection-summary dt {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.connection-summary dd {
+  margin: 0;
+  font-weight: 550;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.connection-panel :where(button:not(.icon-button)) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  max-width: 100%;
+  padding: 8px 12px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.connection-panel :where(button:hover:not(:disabled):not(.icon-button)) {
+  background: var(--surface-hover);
+}
+
+.connection-panel button:disabled,
+.relay-settings select:disabled {
+  cursor: default;
+}
+
+.connection-panel__machine .connection-panel__primary {
+  flex-shrink: 0;
+  background: var(--surface-raised);
+}
+
+.connection-panel__navigate {
+  width: 14px;
+  height: 14px;
+  transform: rotate(-90deg);
+}
+
+.relay-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  font-size: 12px;
+}
+
+.relay-field {
+  display: grid;
+  gap: 8px;
+}
+
+.relay-field > label {
+  font-weight: 550;
+}
+
+.relay-settings input:not([type="checkbox"]),
+.relay-settings select {
+  appearance: none;
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 10px 12px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  font: inherit;
+}
+
+.relay-select {
+  position: relative;
+}
+
+.relay-select select {
+  padding-right: 36px;
+  cursor: pointer;
+}
+
+.relay-select > svg {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  color: var(--text-muted);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.relay-native {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 24px;
+  cursor: pointer;
+}
+
+.relay-native input {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--text);
+}
+
+.relay-settings p {
+  margin: 0;
+  color: var(--text-soft);
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.relay-settings [role="alert"] {
+  color: var(--danger);
+}
+
+.connection-panel__footer {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.connection-panel .connection-panel__apply {
+  min-width: 82px;
+  color: var(--app-bg);
+  background: var(--text);
+  border-color: transparent;
+}
+
+.connection-panel .connection-panel__apply:hover:not(:disabled) {
+  background: var(--text-soft);
+}
+
+.remote-connection__body {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.remote-connection__body p {
+  margin: 0;
+  color: var(--text-soft);
+}
+
+.remote-connection__body [role="alert"] {
+  color: var(--danger);
+}
+
+.remote-connection__actions,
+.connection-primary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.connection-primary-actions,
+.connection-secondary-settings {
+  width: 100%;
+}
+
+.connection-secondary-settings {
+  display: grid;
+  gap: 14px;
+  margin-top: 8px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.connection-secondary-settings > button {
+  justify-self: start;
+}
+
+.connection-secondary-settings summary {
+  cursor: pointer;
+  color: var(--text-soft);
+}
+
+.connection-secondary-settings .hub-progress {
+  margin: 0;
+  padding: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .connection-panel { color-scheme: dark; }
+}
+
+@media (max-width: 860px) {
+  .connection-panel button:not(.icon-button), .relay-native { min-height: 40px; }
+  .relay-settings input:not([type="checkbox"]), .relay-settings select { font-size: 16px; }
+}
+
+@media (max-width: 380px) {
+  .connection-panel__header, .relay-settings, .remote-connection__body { padding: 16px; }
+  .connection-panel__machine { margin: 16px 16px 0; flex-wrap: wrap; }
+}

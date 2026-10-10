@@ -2,6 +2,7 @@ import { useCallback, useId, useRef, useState, type ReactNode } from "react";
 import type { ConnectionState } from "../lib/transport";
 import { useFloatingPanel } from "../lib/useFloatingPanel";
 import { CloseIcon } from "./Icons";
+import "./ConnectionPanel.css";
 
 /** The same compact connection entry point for direct, Hub, and paired viewers. */
 export function RemoteConnection({ name, state, hub_url, encrypted = false, children }: {
@@ -35,7 +36,7 @@ export function RemoteConnection({ name, state, hub_url, encrypted = false, chil
         <span>{label} · {name}</span>
       </button>
       {is_open && <div aria-labelledby={`${id}-title`} className="connection-panel" id={id} ref={panel_ref} role="dialog" tabIndex={-1}>
-        <header className="notification-center__header">
+        <header className="connection-panel__header">
           <h2 id={`${id}-title`}>Connection</h2>
           <button aria-label="Close connection settings" className="icon-button" onClick={close} type="button"><CloseIcon /></button>
         </header>
