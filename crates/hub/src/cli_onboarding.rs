@@ -243,7 +243,7 @@ fn display_authenticator(secret: &TotpSecret, label: &str) -> Result<(), String>
   eprintln!("Scan this QR with your authenticator. It contains a secret; keep it off the Hub.");
   eprintln!("{}", qr.render::<qrcode::render::unicode::Dense1x2>().build());
   eprintln!("Manual setup key: {}", secret.to_base32());
-  eprintln!("Time based · SHA1 · 6 digits · 30 seconds");
+  eprintln!("Time based · SHA256 · 6 digits · 30 seconds");
   Ok(())
 }
 

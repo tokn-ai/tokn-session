@@ -20,13 +20,12 @@ use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 use zeroize::Zeroizing;
 
-const MAGIC: &[u8] = b"tokn-hub-pairing-v1\0";
-const DOMAIN: &[u8] = b"tokn-hub-authenticator-pairing-v1";
+const MAGIC: &[u8] = b"tokn-hub-pairing-v2\0";
+const DOMAIN: &[u8] = b"tokn-hub-authenticator-pairing-v2";
 pub const MAX_PAIRING_RECORD: usize = 4096;
 pub const TOTP_PERIOD: u64 = 30;
 const AUTH_FAILED: &str = "Authenticator pairing failed; wait for a new code and check device clocks";
@@ -36,7 +35,7 @@ pub struct TotpSecret(Zeroizing<Vec<u8>>);
 
 impl TotpSecret {
   pub fn generate() -> Self {
-    let mut bytes = Zeroizing::new(vec![0; 20]);
+    let mut bytes = Zeroizing::new(vec![0; 32]);
     OsRng.fill_bytes(&mut bytes);
     Self(bytes)
   }
@@ -81,7 +80,7 @@ impl TotpSecret {
       .query_pairs_mut()
       .append_pair("secret", &self.to_base32())
       .append_pair("issuer", "Tokn Hub")
-      .append_pair("algorithm", "SHA1")
+      .append_pair("algorithm", "SHA256")
       .append_pair("digits", "6")
       .append_pair("period", "30");
     Ok(uri.into())
@@ -96,16 +95,24 @@ impl TotpSecret {
   }
 
   fn hotp(&self, step: u64) -> u32 {
-    let mut hmac = Hmac::<Sha1>::new_from_slice(&self.0).expect("HMAC accepts any key length");
+    let mut hmac = Hmac::<Sha256>::new_from_slice(&self.0).expect("HMAC accepts any key length");
     hmac.update(&step.to_be_bytes());
     let output = hmac.finalize().into_bytes();
-    let offset = (output[19] & 0x0f) as usize;
+    let offset = (output[output.len() - 1] & 0x0f) as usize;
     u32::from_be_bytes(
       output[offset..offset + 4]
         .try_into()
-        .expect("SHA1 truncation is in bounds"),
+        .expect("SHA256 truncation is in bounds"),
     ) & 0x7fff_ffff
   }
+}
+
+/// Authorization purpose is authenticated by the complete PAKE transcript.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientKind {
+  Native,
+  Browser,
 }
 
 /// Public identities authenticated by the completed exchange, never by the Hub.
@@ -115,6 +122,7 @@ pub struct AuthenticatedPairing {
   pub host_public_key: String,
   pub client_public_key: String,
   pub step: u64,
+  pub client_kind: ClientKind,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -123,6 +131,7 @@ struct ClientHello {
   host_id: String,
   client_public_key: String,
   step: u64,
+  client_kind: ClientKind,
   pake: String,
 }
 
@@ -176,6 +185,16 @@ pub fn peek_step(bytes: &[u8]) -> Result<u64, String> {
 
 impl ClientPairing {
   pub fn start(host_id: &str, identity: &NoiseIdentity, code: &str, now: u64) -> Result<(Self, Vec<u8>), String> {
+    Self::start_for(host_id, identity, code, now, ClientKind::Native)
+  }
+
+  pub fn start_for(
+    host_id: &str,
+    identity: &NoiseIdentity,
+    code: &str,
+    now: u64,
+    client_kind: ClientKind,
+  ) -> Result<(Self, Vec<u8>), String> {
     validate_host_id(host_id)?;
     if code.len() != 6 || !code.bytes().all(|value| value.is_ascii_digit()) {
       return Err("Enter the six digits shown by your authenticator".into());
@@ -184,6 +203,7 @@ impl ClientPairing {
       host_id: host_id.into(),
       client_public_key: identity.public_key(),
       step: now / TOTP_PERIOD,
+      client_kind,
       pake: String::new(),
     };
     let (client_id, host_id) = identities(&hello);
@@ -219,6 +239,7 @@ impl ClientPairing {
       host_public_key: reply.hello.host_public_key,
       client_public_key: self.hello.client_public_key,
       step: self.hello.step,
+      client_kind: self.hello.client_kind,
     };
     Ok((ClientAwaitingAck { keys, identities }, confirmation))
   }
@@ -263,6 +284,7 @@ impl HostPairing {
       host_public_key: reply_hello.host_public_key.clone(),
       client_public_key: hello.client_public_key,
       step: hello.step,
+      client_kind: hello.client_kind,
     };
     let reply = write_record(&HostReply {
       hello: reply_hello,
@@ -330,8 +352,8 @@ impl ConfirmationKeys {
 }
 
 fn identities(hello: &ClientHello) -> (Identity, Identity) {
-  let client = format!("tokn-hub-pairing-v1/client/{}", hello.client_public_key);
-  let host = format!("tokn-hub-pairing-v1/host/{}/{}", hello.host_id, hello.step);
+  let client = format!("tokn-hub-pairing-v2/client/{}", hello.client_public_key);
+  let host = format!("tokn-hub-pairing-v2/host/{}/{}", hello.host_id, hello.step);
   (Identity::new(client.as_bytes()), Identity::new(host.as_bytes()))
 }
 

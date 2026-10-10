@@ -2,8 +2,9 @@
 
 Open the Hub in a browser, or choose **Hub** in the Tokn app. Both connect
 directly to a host through the Hub; a viewing-device daemon is not required.
-The host verifies an authenticator code or its own passkey, then remembers the
-device's encryption key. Remembered devices reconnect without another prompt.
+The native app pairs with an authenticator code and retains its device authorization.
+Browsers use that code to enroll a machine passkey, then require a passkey to sign
+in. Each new tab, reload, or reopened window requires another browser sign-in.
 Guest sharing is outside this flow.
 
 ```text
@@ -55,7 +56,7 @@ tokn-session-hub connect --hub https://hub.example.com --name "Workstation"
 
 First setup generates a UUID, dedicated keys, and an authenticator seed. Scan
 the terminal QR, then copy the printed machine ID or full machine reference
-(`UUID@host_public_key`). Manual authenticator setup uses SHA1, six digits, and
+(`UUID@host_public_key`). Manual authenticator setup uses SHA-256, six digits, and
 a 30-second period. Secrets print only to an interactive terminal. To display
 them later over a trusted terminal or SSH:
 
@@ -76,9 +77,13 @@ The connector saves its configuration, so later starts need only:
 tokn-session-hub connect
 ```
 
-The host's viewer API must still be running. Browsers remember device keys and
-host pins in IndexedDB, scoped to their Hub origin; the native app keeps private
-files. Clearing that storage makes it a new device. **Forget** removes a local
+The host's viewer API must still be running. Browsers save only machine metadata
+and verified host pins in IndexedDB. A tab holds its private encryption key in
+memory and destroys it on navigation or close; restored back/forward-cache pages
+reload before sign-in. Backgrounding a tab does not lock it. A live tab can
+reconnect without another prompt until its eight-hour authorization expires.
+The native app keeps its persistent private key in owner-only files. Clearing
+that storage makes it a new device. **Forget** removes a local
 saved machine; it does not revoke that device on the host. **Manage connections**
 cancels requests and streams before selecting another machine.
 
@@ -109,8 +114,11 @@ setting permits HTTP only on loopback. From a checkout, use the binaries under
 
 ## Machine passkeys
 
-After authenticator pairing, choose **Add a passkey**. The host stores and verifies
-this credential, independently of Hub administrator passkeys. On another device,
+Browser pairing automatically enrolls a passkey and then performs a separate
+passkey sign-in. A TOTP-paired browser key can only enroll credentials, for five
+minutes; it cannot read sessions. In the app, **Add a passkey** is optional.
+The host stores and verifies credentials independently of Hub administrator
+passkeys. On another device,
 choose **Passkey**, enter the complete machine reference, and sign in.
 The reference supplies the host key needed to authenticate the encrypted channel
 before passkey login; a bare UUID or readable address does not establish that trust.
@@ -164,7 +172,31 @@ tokn-session-hub forget-device --public-key CLIENT_PUBLIC_KEY
 
 Removal denies new requests and closes live streams when the host checks its
 state, every second. It cannot recall delivered content or undo accepted input.
-An authenticator code or enrolled machine passkey can authorize a device again.
+An authenticator code can pair an app again or bootstrap browser enrollment.
+An enrolled machine passkey can issue another expiring session authorization.
+Native keys already paired with TOTP retain persistent access after passkey use.
+Passkey-only sign-in on an unpaired app issues an expiring grant too; use
+authenticator pairing to establish persistent app authorization.
+
+## Upgrading existing hosts
+
+Pairing protocol v2 uses HMAC-SHA-256 and explicit authorization purposes. Upgrade
+both host and clients together. Legacy host state fails closed because its
+unclassified keys could belong to a browser. From a trusted local terminal:
+
+```sh
+tokn-session-hub authenticator --upgrade-sha256
+```
+
+Use the same `--state-dir` as the connector. This rotates the authenticator seed
+and removes all legacy device grants. Rescan the new SHA-256 QR and pair app
+devices again. Host UUID/keys, enrolled passkeys, their origin, and attempt limits
+are preserved; existing passkeys can sign in browsers. Repeating the upgrade on
+v2 state does not rotate it again. For noninteractive setup, supply
+`--export-file NEW_PRIVATE_FILE`, then import it with SHA-256 explicitly selected.
+Browser storage migration deletes old persisted private keys but retains host
+pins and machine names. Bare Base32 seeds do not encode the algorithm; setup QR
+URIs include `algorithm=SHA256`.
 
 ## One authenticator for several hosts
 
@@ -194,7 +226,10 @@ revocation ledger; reconnects bypass the new-host limit. An exposed Hub still
 needs admission and availability controls at its reverse proxy.
 
 Pairing uses RustCrypto `spake2` 0.4 and HKDF/HMAC confirmations binding the
-machine ID, both Noise keys, time step, and handshake. Hosts persist five OTP
+machine ID, both Noise keys, client authorization purpose, time step, and handshake.
+Purpose is authenticated enrollment intent, not platform attestation: possessing
+a TOTP code permits persistent app enrollment. Passkey login cannot promote a
+browser/session grant into persistent app trust. Hosts persist five OTP
 attempts per five minutes and consume successful time steps atomically. Passkey
 ceremonies have a separate persisted limit of 20 starts per five minutes, expire
 after five minutes, and bind a single-use challenge to the machine, device key,

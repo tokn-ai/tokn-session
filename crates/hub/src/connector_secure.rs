@@ -141,11 +141,12 @@ impl Host {
     let (authenticated, ack) = pending.finish(&receive(incoming).await?, now()?)?;
     // Persist consumption and authorization together before letting the client
     // save its pin. Concurrent completions with the same TOTP step lose here.
-    crate::onboarding::authorize_device(
+    crate::onboarding::authorize_pairing(
       &config.state_file,
       &authenticated.client_public_key,
       authenticated.step,
       now()?,
+      authenticated.client_kind,
     )?;
     send_record(outgoing, channel_id, ack).await
   }

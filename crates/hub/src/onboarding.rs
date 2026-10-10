@@ -58,12 +58,33 @@ impl HostProfile {
   }
 }
 
+/// Browser enrollment grants cannot read sessions. Browser login grants expire
+/// and never become persistent app authorization.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DeviceAuthorization {
+  Native { paired_at: u64 },
+  BrowserEnrollment { paired_at: u64, expires_at: u64 },
+  BrowserSession { paired_at: u64, expires_at: u64 },
+}
+impl DeviceAuthorization {
+  fn active(&self, now: u64, enrollment: bool) -> bool {
+    match self {
+      Self::Native { .. } => true,
+      Self::BrowserEnrollment { paired_at, expires_at } => enrollment && now >= *paired_at && now < *expires_at,
+      Self::BrowserSession { paired_at, expires_at } => now >= *paired_at && now < *expires_at,
+    }
+  }
+}
+const BROWSER_ENROLLMENT_SECONDS: u64 = 300;
+const BROWSER_SESSION_SECONDS: u64 = 8 * 60 * 60;
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HostAccess {
   version: u8,
   totp_secret: String,
-  devices: BTreeMap<String, u64>,
+  devices: BTreeMap<String, DeviceAuthorization>,
   last_used_step: Option<u64>,
   attempt_window_start: u64,
   attempts: u32,
@@ -84,8 +105,17 @@ impl Drop for HostAccess {
 }
 
 fn host_access(path: &Path) -> Result<HostAccess, String> {
-  let state: HostAccess = read_required(path)?;
-  if state.version != 1 || state.devices.len() > MAX_DEVICES || state.passkeys.len() > MAX_PASSKEYS {
+  let value: serde_json::Value = read_required(path)?;
+  if value["version"] == 1 {
+    return Err("Legacy pairing state requires `tokn-session-hub authenticator --upgrade-sha256`; rescan its QR and pair app devices again".into());
+  }
+  let state: HostAccess = serde_json::from_value(value).map_err(|_| "Invalid host pairing state")?;
+  validate_host_access(&state)?;
+  Ok(state)
+}
+
+fn validate_host_access(state: &HostAccess) -> Result<(), String> {
+  if state.version != 2 || state.devices.len() > MAX_DEVICES || state.passkeys.len() > MAX_PASSKEYS {
     return Err("Invalid host pairing state".into());
   }
   TotpSecret::from_base32(&state.totp_secret)?;
@@ -101,19 +131,19 @@ fn host_access(path: &Path) -> Result<HostAccess, String> {
       return Err("Duplicate registered host passkey".into());
     }
   }
-  Ok(state)
+  Ok(())
 }
 
 /// Setup only; importing a seed never overwrites existing trust or replay state.
 pub fn initialize_host_access(path: &Path, secret: &TotpSecret) -> Result<(), String> {
   let _lock = lock(path)?;
-  if read_optional::<HostAccess>(path)?.is_some() {
+  if read_optional::<serde_json::Value>(path)?.is_some() {
     return Err("Authenticator is already configured; existing pairing state was preserved".into());
   }
   write_atomic(
     path,
     &HostAccess {
-      version: 1,
+      version: 2,
       totp_secret: secret.to_base32(),
       devices: BTreeMap::new(),
       last_used_step: None,
@@ -125,6 +155,36 @@ pub fn initialize_host_access(path: &Path, secret: &TotpSecret) -> Result<(), St
       passkey_attempts: 0,
     },
   )
+}
+
+/// Explicit local migration preserves host identities/passkeys, rotates the OTP
+/// seed, and removes legacy device grants whose client type cannot be proven.
+pub fn upgrade_authenticator(path: &Path) -> Result<(), String> {
+  let _lock = lock(path)?;
+  let mut value: serde_json::Value = read_required(path)?;
+  if value["version"] == 2 {
+    host_access(path)?;
+    return Ok(());
+  }
+  if value["version"] != 1 {
+    return Err("Unsupported host pairing state".into());
+  }
+  TotpSecret::from_base32(value["totp_secret"].as_str().ok_or("Invalid legacy authenticator")?)?;
+  let devices: BTreeMap<String, u64> =
+    serde_json::from_value(value["devices"].clone()).map_err(|_| "Invalid legacy devices")?;
+  if devices.len() > MAX_DEVICES {
+    return Err("Invalid legacy devices".into());
+  }
+  for key in devices.keys() {
+    decode_public_key(key)?;
+  }
+  value["version"] = serde_json::json!(2);
+  value["devices"] = serde_json::json!({});
+  value["totp_secret"] = serde_json::json!(TotpSecret::generate().to_base32());
+  value["last_used_step"] = serde_json::Value::Null;
+  let state: HostAccess = serde_json::from_value(value).map_err(|_| "Invalid legacy host pairing state")?;
+  validate_host_access(&state)?;
+  write_atomic(path, &state)
 }
 
 pub fn read_totp_secret(path: &Path) -> Result<TotpSecret, String> {
@@ -164,23 +224,61 @@ pub fn begin_pairing(path: &Path, now: u64, step: u64) -> Result<(), String> {
 /// Called only after PAKE key confirmation. Consume the time step and record
 /// the verified client atomically before sending the authenticated success ack.
 pub fn authorize_device(path: &Path, client_public_key: &str, step: u64, now: u64) -> Result<(), String> {
+  authorize_pairing(path, client_public_key, step, now, crate::pairing::ClientKind::Native)
+}
+
+pub fn authorize_pairing(
+  path: &Path,
+  client_public_key: &str,
+  step: u64,
+  now: u64,
+  client_kind: crate::pairing::ClientKind,
+) -> Result<(), String> {
   decode_public_key(client_public_key)?;
   let _lock = lock(path)?;
   let mut state = host_access(path)?;
   validate_step(&state, now, step)?;
+  state.devices.retain(|_, grant| grant.active(now, true));
   if !state.devices.contains_key(client_public_key) && state.devices.len() >= MAX_DEVICES {
     return Err("Host paired-device limit reached; remove an unused device first".into());
   }
-  state.devices.insert(client_public_key.into(), now);
+  let grant = match client_kind {
+    crate::pairing::ClientKind::Native => DeviceAuthorization::Native { paired_at: now },
+    crate::pairing::ClientKind::Browser => DeviceAuthorization::BrowserEnrollment {
+      paired_at: now,
+      expires_at: now.saturating_add(BROWSER_ENROLLMENT_SECONDS),
+    },
+  };
+  state.devices.insert(client_public_key.into(), grant);
   state.last_used_step = Some(step);
   write_atomic(path, &state)
 }
 
 pub fn is_authorized(path: &Path, public_key: &str) -> Result<bool, String> {
-  Ok(host_access(path)?.devices.contains_key(public_key))
+  let now = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map_err(|_| "Invalid host clock")?
+    .as_secs();
+  is_authorized_at(path, public_key, now)
+}
+pub(crate) fn is_authorized_at(path: &Path, public_key: &str, now: u64) -> Result<bool, String> {
+  Ok(
+    host_access(path)?
+      .devices
+      .get(public_key)
+      .is_some_and(|grant| grant.active(now, false)),
+  )
+}
+pub(crate) fn can_enroll_passkey_at(path: &Path, public_key: &str, now: u64) -> Result<bool, String> {
+  Ok(
+    host_access(path)?
+      .devices
+      .get(public_key)
+      .is_some_and(|grant| grant.active(now, true)),
+  )
 }
 
-pub fn devices(path: &Path) -> Result<BTreeMap<String, u64>, String> {
+pub fn devices(path: &Path) -> Result<BTreeMap<String, DeviceAuthorization>, String> {
   Ok(host_access(path)?.devices.clone())
 }
 
@@ -247,11 +345,16 @@ pub(crate) fn register_host_passkey(
   origin: &str,
   device_public_key: &str,
   passkey: Passkey,
+  now: u64,
 ) -> Result<(), String> {
   let _lock = lock(path)?;
   let mut state = host_access(path)?;
   check_passkey_origin(&state, origin)?;
-  if !state.devices.contains_key(device_public_key) {
+  if !state
+    .devices
+    .get(device_public_key)
+    .is_some_and(|grant| grant.active(now, true))
+  {
     return Err("Device authorization was revoked during passkey enrollment".into());
   }
   if state.passkeys.len() >= MAX_PASSKEYS {
@@ -284,10 +387,22 @@ pub(crate) fn authorize_passkey_device(
     .find(|passkey| passkey.cred_id() == authentication.cred_id())
     .ok_or("Passkey is no longer registered with this host")?;
   passkey.update_credential(authentication);
+  state.devices.retain(|_, grant| grant.active(now, true));
   if !state.devices.contains_key(device_public_key) && state.devices.len() >= MAX_DEVICES {
     return Err("Host paired-device limit reached; remove an unused device first".into());
   }
-  state.devices.insert(device_public_key.into(), now);
+  if !matches!(
+    state.devices.get(device_public_key),
+    Some(DeviceAuthorization::Native { .. })
+  ) {
+    state.devices.insert(
+      device_public_key.into(),
+      DeviceAuthorization::BrowserSession {
+        paired_at: now,
+        expires_at: now.saturating_add(BROWSER_SESSION_SECONDS),
+      },
+    );
+  }
   write_atomic(path, &state)
 }
 
@@ -754,6 +869,71 @@ mod tests {
     assert!(host_passkeys(&path, "https://hub.example.com").unwrap().is_empty());
     begin_passkey(&path, 900).unwrap();
     begin_pairing(&path, 900, 30).unwrap();
+  }
+
+  #[test]
+  fn browser_pairing_only_enrolls_while_native_pairing_is_persistent() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("host-access.json");
+    initialize_host_access(&path, &TotpSecret::generate()).unwrap();
+    let browser = NoiseIdentity::generate().unwrap().public_key();
+    authorize_pairing(&path, &browser, 30, 900, crate::pairing::ClientKind::Browser).unwrap();
+    assert!(!is_authorized_at(&path, &browser, 901).unwrap());
+    assert!(can_enroll_passkey_at(&path, &browser, 901).unwrap());
+    assert!(!can_enroll_passkey_at(&path, &browser, 899).unwrap());
+    assert!(!can_enroll_passkey_at(&path, &browser, 1200).unwrap());
+    let native = NoiseIdentity::generate().unwrap().public_key();
+    authorize_device(&path, &native, 31, 930).unwrap();
+    assert!(is_authorized_at(&path, &native, 930 + 365 * 86400).unwrap());
+  }
+
+  #[test]
+  fn expired_browser_grants_do_not_exhaust_device_capacity() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("host-access.json");
+    initialize_host_access(&path, &TotpSecret::generate()).unwrap();
+    let mut state = host_access(&path).unwrap();
+    for _ in 0..MAX_DEVICES {
+      state.devices.insert(
+        NoiseIdentity::generate().unwrap().public_key(),
+        DeviceAuthorization::BrowserSession {
+          paired_at: 0,
+          expires_at: 100,
+        },
+      );
+    }
+    write_atomic(&path, &state).unwrap();
+    let native = NoiseIdentity::generate().unwrap().public_key();
+    authorize_device(&path, &native, 30, 900).unwrap();
+    assert_eq!(devices(&path).unwrap().len(), 1);
+  }
+
+  #[test]
+  fn legacy_upgrade_is_explicit_rotates_seed_and_retires_unclassified_devices() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("host-access.json");
+    let seed = TotpSecret::generate();
+    let key = NoiseIdentity::generate().unwrap().public_key();
+    let legacy = serde_json::json!({
+      "version": 1, "totp_secret": seed.to_base32(), "devices": { key.clone(): 900 },
+      "last_used_step": 30, "attempt_window_start": 900, "attempts": 3,
+      "passkey_origin": "https://hub.example.com", "passkeys": [],
+      "passkey_attempt_window_start": 901, "passkey_attempts": 4,
+    });
+    write_atomic(&path, &legacy).unwrap();
+    assert!(is_authorized(&path, &key).unwrap_err().contains("upgrade-sha256"));
+    assert_eq!(read_required::<serde_json::Value>(&path).unwrap(), legacy);
+    upgrade_authenticator(&path).unwrap();
+    let state = host_access(&path).unwrap();
+    assert_ne!(state.totp_secret, seed.to_base32());
+    assert!(state.devices.is_empty());
+    assert_eq!(state.last_used_step, None);
+    assert_eq!(state.attempts, 3);
+    assert_eq!(state.passkey_attempts, 4);
+    assert_eq!(state.passkey_origin.as_deref(), Some("https://hub.example.com"));
+    let upgraded = read_required::<serde_json::Value>(&path).unwrap();
+    upgrade_authenticator(&path).unwrap();
+    assert_eq!(read_required::<serde_json::Value>(&path).unwrap(), upgraded);
   }
 
   #[test]

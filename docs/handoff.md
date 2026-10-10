@@ -134,9 +134,18 @@ implementation (`hub-client-core`, compiled to WASM for browsers).
 `connect --hub …` saves UUID/keys/config, displays a local TOTP setup QR, and
 prints a machine reference `UUID@host_public_key`. Open the Hub URL or choose
 Hub in the app, then enter the machine and authenticator code. The host verifies
-pairing and authorizes the device key. Remembered keys and host pins reconnect
-without OTP: IndexedDB in browsers, owner-only native files in the app.
-Enrolled host-owned passkeys authorize new devices on their original Noise
+pairing with HMAC-SHA-256. App pairing grants persistent access using owner-only
+native key files. Browser TOTP pairing only grants five-minute passkey enrollment;
+passkey sign-in grants at most eight hours to a fresh in-memory tab key. New tabs,
+reloads, and reopened windows require sign-in; live-tab network reconnects retain
+authorization. IndexedDB v2 holds metadata/pins only and deletes legacy secrets.
+Pagehide clears active content and keys; BFCache restoration reloads. Host state
+v2 distinguishes native, browser enrollment, and browser session grants. Legacy
+state fails closed; explicit `authenticator --upgrade-sha256` rotates OTP, clears
+unclassified grants, preserves host keys/passkeys/limits, and requires rescanning
+and app re-pairing. Protocol v2 and clients must upgrade together. These changes
+are not yet deployed to the configured production/local services.
+Enrolled host-owned passkeys authorize tab keys on their original Noise
 channel; a new device needs the full machine reference to pin the host first.
 Native passkey prompts use the Hub browser origin and a one-shot loopback form
 callback carrying only the credential. Hub administration lives at `/admin`.
