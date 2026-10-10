@@ -222,3 +222,25 @@ export function listenForSessionUpdates(handler: (update: import("./types").Sess
 export function listenForSessionNotifications(handler: (notification: import("./types").SessionNotification) => void, subscribe: EventSubscriber = listen): Promise<UnlistenFn> {
   return subscribe<import("./types").SessionNotification>("session-notification", (event) => handler(event.payload));
 }
+
+// Hosting belongs to this app, independent of the currently selected machine.
+async function localHostCommand<T>(command: string, payload?: Record<string, unknown>): Promise<T> {
+  if (!isDesktop()) throw new Error("Host setup is available in the desktop app.");
+  return (await import("@tauri-apps/api/core")).invoke<T>(command, payload);
+}
+export function getLocalHostStatus(): Promise<import("./types").LocalHostStatus> {
+  return localHostCommand("local_host_status");
+}
+export function startLocalHost(request: import("./types").StartLocalHostRequest): Promise<import("./types").LocalHostStatus> {
+  return localHostCommand("local_host_start", { request });
+}
+export function stopLocalHost(): Promise<import("./types").LocalHostStatus> {
+  return localHostCommand("local_host_stop");
+}
+export function getLocalHostPairing(): Promise<import("./types").LocalHostPairing> {
+  return localHostCommand("local_host_pairing");
+}
+export async function listenForLocalHostStatus(handler: (status: import("./types").LocalHostStatus) => void): Promise<UnlistenFn> {
+  if (!isDesktop()) throw new Error("Host setup is available in the desktop app.");
+  return (await import("@tauri-apps/api/event")).listen<import("./types").LocalHostStatus>("local-host-status", (event) => handler(event.payload));
+}

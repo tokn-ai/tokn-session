@@ -205,7 +205,55 @@ pub fn initialize_identity(path: &Path) -> Result<(), String> {
   load_key(path).map(|_| ())
 }
 
+/// Holds one connector's ownership for a saved enrollment key across CLI/app processes.
+pub struct HostLease {
+  key_file: PathBuf,
+  _lock: std::fs::File,
+}
+impl HostLease {
+  pub fn acquire(key_file: &Path) -> Result<Self, String> {
+    let mut path = key_file.as_os_str().to_owned();
+    path.push(".connector");
+    let lock = crate::onboarding::lock(Path::new(&path)).map_err(|error| {
+      format!("Could not acquire host ownership: {error}. Stop any other connector before hosting in the app.")
+    })?;
+    Ok(Self {
+      key_file: key_file.to_owned(),
+      _lock: lock,
+    })
+  }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum ConnectorStatus {
+  Connecting,
+  Online,
+  Reconnecting { error: String },
+}
+pub type StatusSink = Arc<dyn Fn(ConnectorStatus) + Send + Sync>;
+fn notify(sink: &Option<StatusSink>, status: ConnectorStatus) {
+  if let Some(sink) = sink {
+    sink(status);
+  }
+}
+
 pub async fn run(config: ConnectorConfig, shutdown: CancellationToken) -> Result<(), String> {
+  let lease = HostLease::acquire(&config.key_file)?;
+  run_owned(config, shutdown, lease, None).await
+}
+
+/// Setup callers acquire ownership before changing saved configuration.
+pub async fn run_owned(
+  config: ConnectorConfig,
+  shutdown: CancellationToken,
+  lease: HostLease,
+  status: Option<StatusSink>,
+) -> Result<(), String> {
+  if lease.key_file != config.key_file {
+    return Err("Host ownership does not match the connector identity".into());
+  }
+  let _lease = lease;
   let endpoint = config.validate()?;
   let key = load_key(&config.key_file)?;
   let secure = secure_transport::Host::load(&config)?.map(Arc::new);
@@ -232,12 +280,14 @@ pub async fn run(config: ConnectorConfig, shutdown: CancellationToken) -> Result
   }
   let mut backoff = 1u64;
   loop {
+    notify(&status, ConnectorStatus::Connecting);
     let started = Instant::now();
     let result = tokio::select! {
       _ = shutdown.cancelled() => return Ok(()),
-      result = connect_once(&config, &endpoint, &key, &client, secure.clone(), direct.clone()) => result,
+      result = connect_once(&config, &endpoint, &key, &client, secure.clone(), direct.clone(), &status) => result,
     };
     if let Err(error) = result {
+      notify(&status, ConnectorStatus::Reconnecting { error: error.clone() });
       eprintln!("Hub connection ended: {error}");
     }
     if started.elapsed() > Duration::from_secs(60) {
@@ -259,6 +309,7 @@ async fn connect_once(
   client: &reqwest::Client,
   secure: Option<Arc<secure_transport::Host>>,
   direct: Option<Arc<secure_transport::DirectManager>>,
+  status: &Option<StatusSink>,
 ) -> Result<(), String> {
   let ws_config = WebSocketConfig::default()
     .max_message_size(Some(protocol::MAX_FRAME))
@@ -300,6 +351,7 @@ async fn connect_once(
               Frame::Ready { host_id, allow_control } if !ready => {
                 if host_id != routing_id(config, key) { return Err("Hub returned an incorrect host identity".into()); }
                 ready = true;
+                notify(status, ConnectorStatus::Online);
                 if secure.is_some() { enqueue(&outgoing, Frame::SecureOnly {}).await?; }
                 eprintln!("Connected to Hub as {host_id} ({})", if config.allow_control && allow_control { "control enabled" } else { "view access" });
               }
