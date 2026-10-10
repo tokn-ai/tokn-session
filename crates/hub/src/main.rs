@@ -62,6 +62,10 @@ enum Command {
     /// Stable Hub browser origin for host passkeys; defaults to --hub when it uses a hostname.
     #[arg(long, conflicts_with_all = ["trusted_hub", "owner_public_key"])]
     passkey_origin: Option<String>,
+    /// STUN URLs for direct WebRTC (comma-separated). Omit to keep saved settings;
+    /// specify the flag without URLs to clear them. No public service is enabled by default.
+    #[arg(long = "stun-server", value_delimiter = ',', num_args = 0.., conflicts_with_all = ["trusted_hub", "owner_public_key"])]
+    ice_servers: Option<Vec<String>>,
     /// Local configuration, keys, authenticator, and trusted-device state.
     #[arg(long)]
     state_dir: Option<PathBuf>,
@@ -247,6 +251,7 @@ async fn run(args: Args) -> Result<(), String> {
       name,
       viewer_url,
       passkey_origin,
+      ice_servers,
       state_dir,
       totp_secret_file,
       viewer_token,
@@ -267,6 +272,7 @@ async fn run(args: Args) -> Result<(), String> {
           name,
           viewer_url,
           passkey_origin,
+          ice_servers,
           state_dir: state_dir.unwrap_or(default_path("")?),
           totp_secret_file,
           viewer_token,
@@ -306,6 +312,7 @@ async fn run(args: Args) -> Result<(), String> {
         local_token: viewer_token,
         allow_control: allow_control.unwrap_or(false),
         insecure_loopback,
+        ice_servers: Vec::new(),
         secure,
         paired: None,
       };

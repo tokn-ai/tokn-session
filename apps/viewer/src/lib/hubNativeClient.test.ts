@@ -23,12 +23,26 @@ it("registers native event listeners before starting the pump and ignores retire
   await client.listen("session-updated", changed);
   expect(handlers.has("hub-client-event")).toBe(true);
   expect(handlers.has("hub-client-state")).toBe(true);
+  expect(handlers.has("hub-client-transport")).toBe(true);
   expect(invoke).toHaveBeenCalledWith("hub_client_listen", { connection_id: descriptor.connection_id });
   handlers.get("hub-client-event")!({ payload: { connection_id: "old", event: "session-updated", payload: { revision: "old" } } });
   expect(changed).not.toHaveBeenCalled();
   handlers.get("hub-client-event")!({ payload: { connection_id: descriptor.connection_id, event: "session-updated", payload: { revision: "1" } } });
   expect(changed).toHaveBeenCalledWith({ payload: { revision: "1" } });
   client.close(); expect(handlers.size).toBe(0);
+});
+it("tracks native path changes separately and ignores another machine's transport", async () => {
+  const client = await NativeHubClient.connect("https://hub.example", host);
+  const path = vi.fn(); client.setTransportListener(path);
+  expect(path).toHaveBeenLastCalledWith({ kind: "relay" });
+  await client.listen("session-updated", vi.fn());
+  const event = handlers.get("hub-client-transport")!;
+  event({ payload: { connection_id: "old", transport: { kind: "direct" } } });
+  expect(path).toHaveBeenCalledOnce();
+  event({ payload: { connection_id: descriptor.connection_id, transport: { kind: "direct" } } });
+  expect(path).toHaveBeenLastCalledWith({ kind: "direct" });
+  client.close(); event({ payload: { connection_id: descriptor.connection_id, transport: { kind: "relay" } } });
+  expect(path).toHaveBeenCalledTimes(2);
 });
 it("drops late native responses after machine switch", async () => {
   const client = await NativeHubClient.connect("https://hub.example", host);

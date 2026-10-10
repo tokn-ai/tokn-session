@@ -53,12 +53,15 @@ pub struct ConnectorConfig {
   pub local_token: Option<String>,
   pub allow_control: bool,
   pub insecure_loopback: bool,
+  /// Explicit STUN discovery servers; relay fallback needs no third-party service.
+  pub ice_servers: Vec<String>,
   pub secure: Option<SecureHostConfig>,
   pub paired: Option<PairedHostConfig>,
 }
 
 impl ConnectorConfig {
   pub fn validate(&self) -> Result<Url, String> {
+    crate::secure::validate_ice_servers(&self.ice_servers)?;
     if self.secure.is_some() && self.paired.is_some() {
       return Err("Choose paired-device access or legacy signed grants, not both".into());
     }
@@ -214,6 +217,15 @@ pub async fn run(config: ConnectorConfig, shutdown: CancellationToken) -> Result
     .read_timeout(Duration::from_secs(90))
     .build()
     .map_err(|e| e.to_string())?;
+  let direct = secure.as_ref().map(|host| {
+    secure_transport::DirectManager::new(
+      host.clone(),
+      routing_id(&config, &key),
+      config.clone(),
+      client.clone(),
+      shutdown.clone(),
+    )
+  });
   eprintln!("Host identity: {}", routing_id(&config, &key));
   if let Some(secure) = &secure {
     eprintln!("Host encryption public key: {}", secure.public_key());
@@ -223,7 +235,7 @@ pub async fn run(config: ConnectorConfig, shutdown: CancellationToken) -> Result
     let started = Instant::now();
     let result = tokio::select! {
       _ = shutdown.cancelled() => return Ok(()),
-      result = connect_once(&config, &endpoint, &key, &client, secure.clone()) => result,
+      result = connect_once(&config, &endpoint, &key, &client, secure.clone(), direct.clone()) => result,
     };
     if let Err(error) = result {
       eprintln!("Hub connection ended: {error}");
@@ -246,6 +258,7 @@ async fn connect_once(
   key: &SigningKey,
   client: &reqwest::Client,
   secure: Option<Arc<secure_transport::Host>>,
+  direct: Option<Arc<secure_transport::DirectManager>>,
 ) -> Result<(), String> {
   let ws_config = WebSocketConfig::default()
     .max_message_size(Some(protocol::MAX_FRAME))
@@ -327,8 +340,9 @@ async fn connect_once(
                 let config = config.clone();
                 let client = client.clone();
                 let host_id = routing_id(&config, key);
+                let direct = direct.clone();
                 let abort = tasks.spawn(async move {
-                  let _ = secure_transport::run(&secure, &host_id, &config, &client, &outgoing, channel_id, received).await;
+                  let _ = secure_transport::run(&secure, &host_id, &config, &client, &outgoing, channel_id, received, direct.as_ref()).await;
                   let _ = enqueue(&outgoing, Frame::SecureClose { channel_id }).await;
                   (channel_id, true)
                 });
@@ -563,6 +577,7 @@ mod tests {
       local_token: None,
       allow_control: false,
       insecure_loopback: false,
+      ice_servers: Vec::new(),
       secure: None,
       paired: None,
     }

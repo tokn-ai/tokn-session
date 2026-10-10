@@ -1,5 +1,5 @@
 import { LiveSessionSocket } from "./liveSessionSocket";
-import type { SessionUpdatesRequest } from "./types";
+import type { SessionUpdatesRequest, TransportState } from "./types";
 export type UnlistenFn = () => void;
 export type CommandInvoker = <T>(command: string, payload?: Record<string, unknown>) => Promise<T>;
 export type EventSubscriber = <T>(event: string, handler: (event: { payload: T }) => void) => Promise<UnlistenFn>;
@@ -19,6 +19,7 @@ export interface ViewerClient {
   invoke<T>(command: string, payload?: unknown): Promise<T>;
   listen<T>(name: string, handler: (event: { payload: T }) => void): Promise<UnlistenFn>;
   setStateListener(handler: (state: ConnectionState) => void): void;
+  setTransportListener?(handler: (transport: TransportState) => void): void;
   onClose(handler: () => void): UnlistenFn;
   release(command: string, payload?: Record<string, unknown>): Promise<void>;
   close(): void;

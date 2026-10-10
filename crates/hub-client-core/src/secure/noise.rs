@@ -11,6 +11,8 @@ pub const MAX_PLAINTEXT: usize = MAX_RECORD - 16;
 pub const MAX_CHUNK: usize = 32 * 1024;
 pub const MAX_REQUEST_BODY: usize = crate::protocol::MAX_BODY;
 pub const MAX_AUTH_PAYLOAD: usize = 32 * 1024;
+pub const MAX_DIRECT_SDP: usize = 32 * 1024;
+pub const MAX_ICE_SERVERS: usize = 8;
 const PROLOGUE: &[u8] = b"tokn-hub-e2ee-v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +38,17 @@ pub enum InnerMessage {
   },
   AuthResponse {
     payload: serde_json::Value,
+  },
+  /// Direct negotiation is authenticated and encrypted before any peer is created.
+  DirectConfigRequest {},
+  DirectConfig {
+    ice_servers: Vec<String>,
+  },
+  DirectOffer {
+    sdp: String,
+  },
+  DirectAnswer {
+    sdp: String,
   },
   Request {
     method: String,
@@ -80,6 +93,20 @@ impl InnerMessage {
           return Err("Host authentication requires a bounded object payload".into());
         }
       }
+      Self::DirectConfig { ice_servers } => {
+        validate_ice_servers(ice_servers)?;
+      }
+      Self::DirectOffer { sdp } | Self::DirectAnswer { sdp } => {
+        if sdp.is_empty()
+          || sdp.len() > MAX_DIRECT_SDP
+          || !sdp.starts_with("v=0\r\n")
+          || sdp
+            .chars()
+            .any(|value| value.is_control() && !matches!(value, '\r' | '\n' | '\t'))
+        {
+          return Err("Direct negotiation requires bounded SDP".into());
+        }
+      }
       Self::Request { method, path, .. } | Self::DeviceRequest { method, path } => {
         if !matches!(method.as_str(), "GET" | "POST") {
           return Err("Unsupported secure request method".into());
@@ -118,10 +145,40 @@ impl InnerMessage {
           return Err("Invalid encrypted response window".into());
         }
       }
-      Self::RequestEnd {} | Self::End {} => {}
+      Self::DirectConfigRequest {} | Self::RequestEnd {} | Self::End {} => {}
     }
     Ok(())
   }
+}
+
+/// Only explicitly configured STUN discovery servers are supported. TURN would
+/// add another relay and credentials; encrypted Hub fallback already exists.
+pub fn validate_ice_servers(servers: &[String]) -> Result<(), String> {
+  if servers.len() > MAX_ICE_SERVERS {
+    return Err("Configure at most eight STUN URLs without credentials".into());
+  }
+  for server in servers {
+    let authority = server
+      .strip_prefix("stun:")
+      .ok_or("Direct discovery requires a STUN URL")?;
+    if server.len() > 512
+      || authority.is_empty()
+      || authority.contains(['@', '/', '\\', '?', '#'])
+      || authority.ends_with(':')
+      || authority
+        .chars()
+        .any(|value| value.is_whitespace() || value.is_control())
+    {
+      return Err("STUN URLs must contain a host and optional port without credentials or paths".into());
+    }
+    // STUN uses an opaque URI, so validate its authority with the existing
+    // portable URL parser rather than accepting malformed host/port strings.
+    let parsed = url::Url::parse(&format!("http://{authority}")).map_err(|_| "Invalid STUN host or port")?;
+    if parsed.host_str().is_none() || parsed.port() == Some(0) || parsed.path() != "/" {
+      return Err("Invalid STUN host or port".into());
+    }
+  }
+  Ok(())
 }
 
 /// An IK initiator must already know the authentic host public key. Obtain it
@@ -436,6 +493,46 @@ mod tests {
     assert!(
       serde_json::from_str::<InnerMessage>(r#"{"type":"auth_request","operation":"approve_anything","payload":{}}"#)
         .is_err()
+    );
+  }
+
+  #[test]
+  fn direct_signaling_is_encrypted_bounded_and_rejects_relay_credentials() {
+    let (mut client, mut host) = pair();
+    let offer = InnerMessage::DirectOffer {
+      sdp: "v=0\r\na=ice-ufrag:private\r\n".into(),
+    };
+    let record = client.encrypt(&offer).unwrap();
+    assert!(!record.windows(7).any(|bytes| bytes == b"private"));
+    assert_eq!(host.decrypt(&record).unwrap(), offer);
+    let config = InnerMessage::DirectConfig {
+      ice_servers: vec!["stun:stun.example.test:3478".into()],
+    };
+    assert_eq!(client.decrypt(&host.encrypt(&config).unwrap()).unwrap(), config);
+    for sdp in [
+      "".into(),
+      "v=0\r\n\0".into(),
+      format!("v=0\r\n{}", "x".repeat(MAX_DIRECT_SDP)),
+    ] {
+      assert!(InnerMessage::DirectAnswer { sdp }.validate().is_err());
+    }
+    for servers in [
+      vec!["turn:relay.example.test:3478".into()],
+      vec!["stuns:stun.example.test:5349".into()],
+      vec![format!("stun:{}", "x".repeat(512))],
+      vec!["stun:user@stun.example.test".into()],
+      vec!["stun:example.test\n".into()],
+      vec!["stun://example.test".into()],
+      vec!["stun:example.test:0".into()],
+      vec!["stun:example.test:65536".into()],
+      vec!["stun:example.test/path".into()],
+      vec!["stun:example.test".into(); MAX_ICE_SERVERS + 1],
+    ] {
+      assert!(InnerMessage::DirectConfig { ice_servers: servers }.validate().is_err());
+    }
+    assert!(validate_ice_servers(&["stun:[::1]:3478".into()]).is_ok());
+    assert!(
+      serde_json::from_str::<InnerMessage>(r#"{"type":"direct_offer","sdp":"v=0\r\n","grant_device":true}"#).is_err()
     );
   }
 

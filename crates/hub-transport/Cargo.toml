@@ -1,0 +1,13 @@
+[package]
+name = "tokn-hub-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = "0.1"
+bytes = "1"
+tokio.workspace = true
+tokio-util = { version = "0.7", features = ["rt"] }
+webrtc = "0.14.0"

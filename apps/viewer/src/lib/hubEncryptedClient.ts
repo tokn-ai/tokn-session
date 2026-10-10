@@ -2,16 +2,17 @@ import { credentialJson, creationOptions, decodeBase64Url, encodeBase64Url, requ
 import type { CryptoApi, DeviceIdentity, NoiseChannel } from "./hubCrypto";
 import { canonicalHubUrl, validateHost, type SavedHubHost } from "./hubDeviceStore";
 import { eventFrameLimit, parseEvent, type ConnectionState, type UnlistenFn, type ViewerClient } from "./transport";
+import { browserDirectPeer, browserSocket, disconnected, PeerRetiredError, RelayCarrier, type DirectPeer, type DirectPeerFactory, type RecordCarrier, type RecordTransport } from "./hubTransport";
+import type { TransportState } from "./types";
+import type { SocketFactory } from "./hubTransport";
+export type { SocketFactory } from "./hubTransport";
 
-const MAX_RECORD = 65_535;
 const MAX_BODY = 1024 * 1024;
 const MAX_CHUNK = 32 * 1024;
 const MAX_RESPONSE = 128 * 1024 * 1024;
-const MAX_QUEUE = 16;
 const REQUEST_TIMEOUT = 120_000;
 type Message = { type: string; [field: string]: unknown };
 type Handler = (event: { payload: unknown }) => void;
-export type SocketFactory = (url: string) => WebSocket;
 export interface PasskeyProvider {
   create(options: Parameters<typeof creationOptions>[0], signal: AbortSignal): Promise<Record<string, unknown>>;
   get(options: Parameters<typeof requestOptions>[0], signal: AbortSignal): Promise<Record<string, unknown>>;
@@ -31,7 +32,7 @@ export const browserPasskeys: PasskeyProvider = {
   },
 };
 
-function aborted(): Error { return new Error("Machine disconnected"); }
+const aborted = disconnected;
 function socketUrl(hub_url: string, host_id: string): string {
   const url = new URL(canonicalHubUrl(hub_url));
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -39,83 +40,8 @@ function socketUrl(hub_url: string, host_id: string): string {
   return url.toString();
 }
 
-/** One ordered record reader. Bounded queues stop a relay from spooling bytes. */
-class RecordSocket {
-  private queue: Uint8Array[] = [];
-  private pending?: { resolve: (record: Uint8Array) => void; reject: (error: Error) => void };
-  private failure?: Error;
-  private timer?: ReturnType<typeof setTimeout>;
-  private abort: () => void;
-  private constructor(private socket: WebSocket, private signal: AbortSignal) {
-    this.abort = () => this.close(aborted());
-    signal.addEventListener("abort", this.abort, { once: true });
-    socket.binaryType = "arraybuffer";
-    socket.onmessage = (event) => {
-      if (!(event.data instanceof ArrayBuffer) || event.data.byteLength === 0 || event.data.byteLength > MAX_RECORD) {
-        this.close(new Error("Hub sent an invalid encrypted record.")); return;
-      }
-      const record = new Uint8Array(event.data);
-      if (this.pending) {
-        const { resolve } = this.pending;
-        this.pending = undefined;
-        clearTimeout(this.timer);
-        resolve(record);
-      } else if (this.queue.length >= MAX_QUEUE) this.close(new Error("Encrypted response queue exceeds its limit."));
-      else this.queue.push(record);
-    };
-    socket.onerror = () => this.close(new Error("Could not reach this machine through the Hub."));
-    socket.onclose = () => this.close(new Error("Encrypted connection closed; request delivery may be uncertain."));
-  }
-  static async open(url: string, signal: AbortSignal, factory: SocketFactory): Promise<RecordSocket> {
-    if (signal.aborted) throw aborted();
-    const socket = factory(url);
-    const stream = new RecordSocket(socket, signal);
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => { const error = new Error("Hub connection timed out."); stream.close(error); fail(error); }, 15_000);
-      const abort = () => { clearTimeout(timer); reject(aborted()); };
-      signal.addEventListener("abort", abort, { once: true });
-      socket.onopen = () => { clearTimeout(timer); signal.removeEventListener("abort", abort); resolve(); };
-      const fail = (error: Error) => { clearTimeout(timer); signal.removeEventListener("abort", abort); reject(error); };
-      socket.onerror = () => { const error = new Error("Could not reach this machine through the Hub."); stream.close(error); fail(error); };
-      socket.onclose = () => { const error = new Error("The Hub closed the encrypted connection."); stream.close(error); fail(error); };
-    });
-    socket.onerror = () => stream.close(new Error("Encrypted connection failed; request delivery may be uncertain."));
-    socket.onclose = () => stream.close(new Error("Encrypted connection closed; request delivery may be uncertain."));
-    return stream;
-  }
-  send(record: Uint8Array): void {
-    if (this.failure || this.signal.aborted) throw this.failure ?? aborted();
-    if (!record.length || record.length > MAX_RECORD || this.socket.bufferedAmount + record.length > 2 * MAX_BODY) {
-      this.close(new Error("Encrypted write exceeds its buffer limit.")); throw this.failure!;
-    }
-    this.socket.send(record);
-  }
-  read(timeout = 90_000): Promise<Uint8Array> {
-    const next = this.queue.shift();
-    if (next) return Promise.resolve(next);
-    if (this.failure) return Promise.reject(this.failure);
-    if (this.pending) return Promise.reject(new Error("Concurrent encrypted record reads are forbidden."));
-    return new Promise((resolve, reject) => {
-      this.pending = { resolve, reject };
-      this.timer = setTimeout(() => this.close(new Error("Encrypted response timed out; requests are not retried.")), timeout);
-    });
-  }
-  close(error = aborted()): void {
-    if (this.failure) return;
-    this.failure = error;
-    clearTimeout(this.timer);
-    this.signal.removeEventListener("abort", this.abort);
-    this.pending?.reject(error);
-    this.pending = undefined;
-    this.queue = [];
-    this.socket.onmessage = this.socket.onerror = this.socket.onclose = this.socket.onopen = null;
-    this.socket.close();
-  }
-}
-const browserSocket: SocketFactory = (url) => new WebSocket(url);
-
 export async function pairHubHost(hub_url: string, host_id: string, code: string, identity: DeviceIdentity, crypto: CryptoApi, signal: AbortSignal, factory: SocketFactory = browserSocket): Promise<SavedHubHost> {
-  const socket = await RecordSocket.open(socketUrl(hub_url, host_id), signal, factory);
+  const socket = await new RelayCarrier(socketUrl(hub_url, host_id), factory).open(signal);
   let pairing: ReturnType<CryptoApi["ClientPairing"]["start"]> | undefined;
   let confirmation: ReturnType<NonNullable<typeof pairing>["confirm"]> | undefined;
   try {
@@ -133,9 +59,9 @@ export async function pairHubHost(hub_url: string, host_id: string, code: string
   } finally { socket.close(); pairing?.free(); confirmation?.free(); }
 }
 
-async function openChannel(hub_url: string, host: SavedHubHost, identity: DeviceIdentity, crypto: CryptoApi, signal: AbortSignal, factory: SocketFactory): Promise<{ socket: RecordSocket; channel: NoiseChannel }> {
+async function openChannel(host: SavedHubHost, identity: DeviceIdentity, crypto: CryptoApi, signal: AbortSignal, carrier: RecordCarrier): Promise<{ socket: RecordTransport; channel: NoiseChannel }> {
   validateHost(host);
-  const socket = await RecordSocket.open(socketUrl(hub_url, host.host_id), signal, factory);
+  const socket = await carrier.open(signal);
   let initiator: ReturnType<CryptoApi["NoiseInitiator"]["start"]> | undefined;
   try {
     initiator = crypto.NoiseInitiator.start(identity, host.host_public_key);
@@ -156,7 +82,7 @@ function receiveMessage(channel: NoiseChannel, record: Uint8Array): Message {
 
 /** Passkey ceremonies remain inside one host-authenticated Noise channel. */
 export async function authenticateHubHost(hub_url: string, host: SavedHubHost, identity: DeviceIdentity, crypto: CryptoApi, register: boolean, signal: AbortSignal, provider: PasskeyProvider = browserPasskeys, factory: SocketFactory = browserSocket): Promise<void> {
-  const { socket, channel } = await openChannel(hub_url, host, identity, crypto, signal, factory);
+  const { socket, channel } = await openChannel(host, identity, crypto, signal, new RelayCarrier(socketUrl(hub_url, host.host_id), factory));
   try {
     const flow = register ? "register" : "login";
     socket.send(channel.encrypt_json(JSON.stringify({ type: "auth_request", operation: `${flow}_start`, payload: {} })));
@@ -185,23 +111,98 @@ export class EncryptedHubClient implements ViewerClient {
   private close_handlers = new Set<() => void>();
   private started?: Promise<void>;
   private on_state: (state: ConnectionState) => void = () => {};
-  constructor(private hub_url: string, readonly host: SavedHubHost, private identity: DeviceIdentity, private crypto: CryptoApi, private factory: SocketFactory = browserSocket) {
+  private relay: RecordCarrier;
+  private direct?: DirectPeer;
+  private negotiating = false;
+  private direct_retry?: ReturnType<typeof setTimeout>;
+  private event_request?: { close: () => void };
+  private transport: TransportState = { kind: "relay" };
+  private on_transport: (transport: TransportState) => void = () => {};
+  constructor(private hub_url: string, readonly host: SavedHubHost, private identity: DeviceIdentity, private crypto: CryptoApi, factory: SocketFactory = browserSocket, private direct_factory: DirectPeerFactory | undefined = browserDirectPeer) {
     this.hub_url = canonicalHubUrl(hub_url);
     this.endpoint = `${this.hub_url}/encrypted/${host.host_id}`;
+    this.relay = new RelayCarrier(socketUrl(this.hub_url, host.host_id), factory);
   }
-  static async connect(hub_url: string, host: SavedHubHost, identity: DeviceIdentity, crypto: CryptoApi, signal?: AbortSignal, factory: SocketFactory = browserSocket): Promise<EncryptedHubClient> {
-    const client = new EncryptedHubClient(hub_url, host, identity, crypto, factory);
+  static async connect(hub_url: string, host: SavedHubHost, identity: DeviceIdentity, crypto: CryptoApi, signal?: AbortSignal, factory: SocketFactory = browserSocket, direct_factory: DirectPeerFactory | undefined = browserDirectPeer): Promise<EncryptedHubClient> {
+    const client = new EncryptedHubClient(hub_url, host, identity, crypto, factory, direct_factory);
     const abort = () => client.close();
     if (signal?.aborted) throw aborted();
     signal?.addEventListener("abort", abort, { once: true });
     try {
       const health = await client.exchange("GET", "health");
       if ((health as { version?: number }).version !== 1) throw new Error("Machine uses an unsupported viewer API version.");
+      void client.preferDirect();
       return client;
     } catch (error) { client.close(); throw error; }
     finally { signal?.removeEventListener("abort", abort); }
   }
-  private async request(method: string, command: string, payload?: unknown) {
+  private async negotiate(message: Message): Promise<Message> {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    this.lifetime.signal.addEventListener("abort", abort, { once: true });
+    const timer = setTimeout(abort, 15_000);
+    let connection: Awaited<ReturnType<typeof openChannel>> | undefined;
+    try {
+      if (this.lifetime.signal.aborted) throw aborted();
+      connection = await openChannel(this.host, this.identity, this.crypto, controller.signal, this.relay);
+      connection.socket.send(connection.channel.encrypt_json(JSON.stringify(message)));
+      return receiveMessage(connection.channel, await connection.socket.read(15_000));
+    } finally {
+      clearTimeout(timer); this.lifetime.signal.removeEventListener("abort", abort);
+      controller.abort(); connection?.socket.close(); connection?.channel.free();
+    }
+  }
+  private setTransport(transport: TransportState): void {
+    this.transport = transport; this.on_transport(transport);
+  }
+  private fallback(error: unknown): void {
+    if (this.lifetime.signal.aborted || !this.direct) return;
+    const peer = this.direct; this.direct = undefined;
+    if (error instanceof PeerRetiredError) peer.retire(); else peer.close();
+    this.setTransport({ kind: "relay", reason: error instanceof Error ? error.message : "Direct connection was interrupted." });
+    this.event_request?.close();
+    this.scheduleDirect();
+  }
+  private scheduleDirect(): void {
+    if (!this.direct_factory || this.direct || this.negotiating || this.direct_retry || this.lifetime.signal.aborted) return;
+    this.direct_retry = setTimeout(() => {
+      this.direct_retry = undefined; void this.preferDirect();
+    }, 30_000);
+  }
+  private async preferDirect(): Promise<void> {
+    if (this.direct || this.negotiating || this.lifetime.signal.aborted) return;
+    if (!this.direct_factory) {
+      this.setTransport({ kind: "relay", reason: "WebRTC is unavailable in this browser." }); return;
+    }
+    clearTimeout(this.direct_retry); this.direct_retry = undefined; this.negotiating = true;
+    let peer: DirectPeer | undefined;
+    try {
+      const config = await this.negotiate({ type: "direct_config_request" });
+      if (config.type !== "direct_config" || !Array.isArray(config.ice_servers) || config.ice_servers.length > 8
+        || !config.ice_servers.every((url) => typeof url === "string" && /^stun:[^\s@\u0000-\u001f\u007f]+$/.test(url) && new TextEncoder().encode(url).length <= 512)) {
+        throw new Error("Machine returned invalid direct connection settings.");
+      }
+      peer = this.direct_factory(config.ice_servers as string[], this.lifetime.signal, (error) => {
+        if (this.direct === peer) this.fallback(error);
+      });
+      const offer = await peer.offer();
+      const answer = await this.negotiate({ type: "direct_offer", sdp: offer });
+      if (answer.type !== "direct_answer" || typeof answer.sdp !== "string") throw new Error("Machine returned an invalid direct connection answer.");
+      await peer.accept(answer.sdp);
+      // An ICE connection alone grants no trust: authenticate the host/device again.
+      const health = await this.exchange("GET", "health", undefined, peer);
+      if ((health as { version?: number }).version !== 1) throw new Error("Direct machine uses an unsupported viewer API version.");
+      if (this.lifetime.signal.aborted) throw aborted();
+      this.direct = peer; this.setTransport({ kind: "direct" });
+      this.event_request?.close();
+    } catch (error) {
+      peer?.close();
+      if (!this.lifetime.signal.aborted) this.setTransport({ kind: "relay", reason: error instanceof Error ? error.message : "Direct connection could not be established." });
+    } finally {
+      this.negotiating = false; this.scheduleDirect();
+    }
+  }
+  private async request(method: string, command: string, payload?: unknown, carrier: RecordCarrier = this.direct ?? this.relay) {
     if (this.lifetime.signal.aborted) throw aborted();
     const body = payload === undefined ? new Uint8Array() : new TextEncoder().encode(JSON.stringify(payload));
     if (body.length > MAX_BODY) throw new Error("Viewer request exceeds 1 MiB.");
@@ -211,11 +212,23 @@ export class EncryptedHubClient implements ViewerClient {
     this.sockets.add(controller);
     const abort = () => controller.abort();
     this.lifetime.signal.addEventListener("abort", abort, { once: true });
-    let socket: RecordSocket | undefined;
+    let socket: RecordTransport | undefined;
     let channel: NoiseChannel | undefined;
-    const close = () => { controller.abort(); socket?.close(); channel?.free(); channel = undefined; this.sockets.delete(controller); this.lifetime.signal.removeEventListener("abort", abort); };
+    let selected_carrier = carrier;
+    const timer = command === "events" ? undefined : setTimeout(() => {
+      socket?.close(new Error("Viewer request timed out; delivery may be uncertain.")); controller.abort();
+    }, REQUEST_TIMEOUT);
+    const close = () => { clearTimeout(timer); controller.abort(); socket?.close(); channel?.free(); channel = undefined; this.sockets.delete(controller); this.lifetime.signal.removeEventListener("abort", abort); };
     try {
-      ({ socket, channel } = await openChannel(this.hub_url, this.host, this.identity, this.crypto, controller.signal, this.factory));
+      try {
+        ({ socket, channel } = await openChannel(this.host, this.identity, this.crypto, controller.signal, selected_carrier));
+      } catch (error) {
+        if (!(error instanceof PeerRetiredError)) throw error;
+        if (selected_carrier === this.direct) this.fallback(error);
+        // Retirement fails before a channel exists, so no request was sent.
+        selected_carrier = this.relay;
+        ({ socket, channel } = await openChannel(this.host, this.identity, this.crypto, controller.signal, selected_carrier));
+      }
       socket.send(channel.encrypt_json(JSON.stringify({ type: "device_request", method, path: `/api/v1/${command}` })));
       for (let offset = 0; offset < body.length; offset += MAX_CHUNK) {
         socket.send(channel.encrypt_json(JSON.stringify({ type: "request_body", data: encodeBase64Url(body.slice(offset, offset + MAX_CHUNK).buffer) })));
@@ -225,18 +238,17 @@ export class EncryptedHubClient implements ViewerClient {
       if (response.type !== "response" || typeof response.status !== "number") throw new Error("Machine returned an invalid response.");
       const type = typeof response.content_type === "string" ? response.content_type.split(";")[0].trim() : "";
       if (!(response.status === 204 && !type) && type !== (command === "events" ? "text/event-stream" : "application/json")) throw new Error("Machine returned an unsupported response type.");
-      return { socket, channel, response, close };
-    } catch (error) { close(); throw error; }
+      return { socket, channel, response, close, carrier: selected_carrier };
+    } catch (error) { close(); if (selected_carrier === this.direct) this.fallback(error); throw error; }
   }
-  private async exchange(method: string, command: string, payload?: unknown): Promise<unknown> {
-    const request = await this.request(method, command, payload);
-    const timer = setTimeout(request.close, REQUEST_TIMEOUT);
+  private async exchange(method: string, command: string, payload?: unknown, carrier?: RecordCarrier): Promise<unknown> {
+    const request = await this.request(method, command, payload, carrier);
     const decoder = new TextDecoder();
     let body = "";
     let total = 0;
     try {
       while (true) {
-        const message = receiveMessage(request.channel, await request.socket.read());
+        const message = await this.receive(request);
         if (message.type === "end") break;
         if (message.type !== "chunk" || typeof message.data !== "string") throw new Error("Machine returned an unexpected encrypted message.");
         const bytes = new Uint8Array(decodeBase64Url(message.data));
@@ -249,10 +261,15 @@ export class EncryptedHubClient implements ViewerClient {
       const result: unknown = request.response.status === 204 && !body ? undefined : JSON.parse(body);
       if (Number(request.response.status) < 200 || Number(request.response.status) >= 300) throw new Error((result as { error?: string }).error ?? `Viewer returned ${request.response.status}`);
       return result;
-    } finally { clearTimeout(timer); request.close(); }
+    } finally { request.close(); }
+  }
+  private async receive(request: Awaited<ReturnType<EncryptedHubClient["request"]>>, timeout?: number): Promise<Message> {
+    try { return receiveMessage(request.channel, await request.socket.read(timeout)); }
+    catch (error) { if (request.carrier === this.direct) this.fallback(error); throw error; }
   }
   invoke<T>(command: string, payload: unknown = {}): Promise<T> { return this.exchange("POST", command, payload) as Promise<T>; }
   setStateListener(handler: (state: ConnectionState) => void): void { this.on_state = handler; }
+  setTransportListener(handler: (transport: TransportState) => void): void { this.on_transport = handler; handler(this.transport); }
   private emit(name: string, payload: unknown): void { for (const handler of this.listeners.get(name) ?? []) handler({ payload }); }
   async listen<T>(name: string, handler: (event: { payload: T }) => void): Promise<UnlistenFn> {
     if (this.lifetime.signal.aborted) throw aborted();
@@ -273,11 +290,12 @@ export class EncryptedHubClient implements ViewerClient {
           let request: Awaited<ReturnType<EncryptedHubClient["request"]>> | undefined;
           try {
             request = await this.request("GET", "events");
+            this.event_request = request;
             if (request.response.status !== 200) throw new Error("Live viewer connection was rejected.");
             const decoder = new TextDecoder();
             let buffer = "";
             while (!this.lifetime.signal.aborted) {
-              const message = receiveMessage(request.channel, await request.socket.read(45_000));
+              const message = await this.receive(request, 45_000);
               if (message.type === "end") break;
               if (message.type !== "chunk" || typeof message.data !== "string") throw new Error("Unexpected live response message.");
               const bytes = new Uint8Array(decodeBase64Url(message.data));
@@ -297,8 +315,11 @@ export class EncryptedHubClient implements ViewerClient {
               if (buffer.length > eventFrameLimit(buffer)) throw new Error("Live event exceeds its size limit.");
               request.socket.send(request.channel.encrypt_json(JSON.stringify({ type: "window", credits: 1 })));
             }
-          } catch { /* Only this read-only stream reconnects; requests are never replayed. */ }
-          finally { request?.close(); }
+          } catch (error) {
+            if (request?.carrier === this.direct) this.fallback(error);
+            // Only this read-only stream reconnects; requests are never replayed.
+          }
+          finally { if (this.event_request === request) this.event_request = undefined; request?.close(); }
           if (!this.lifetime.signal.aborted) {
             this.on_state("reconnecting");
             await new Promise<void>((resolve) => {
@@ -317,6 +338,7 @@ export class EncryptedHubClient implements ViewerClient {
   close(): void {
     if (this.lifetime.signal.aborted) return;
     for (const handler of this.close_handlers) handler();
-    this.close_handlers.clear(); this.lifetime.abort(); this.listeners.clear();
+    clearTimeout(this.direct_retry); this.direct_retry = undefined;
+    this.close_handlers.clear(); this.lifetime.abort(); this.direct?.close(); this.direct = undefined; this.relay.close(); this.listeners.clear();
   }
 }

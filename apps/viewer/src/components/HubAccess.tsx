@@ -3,7 +3,7 @@ import { hubErrorMessage } from "../lib/hub";
 import { openHubAccess, type HubAccessService } from "../lib/hubAccess";
 import { canonicalHubUrl, machineReference, type SavedHubHost } from "../lib/hubDeviceStore";
 import { deselectMachine, isDesktop, selectMachine, type ConnectionState, type ViewerClient } from "../lib/transport";
-import type { HubMachineSelection } from "../lib/types";
+import type { HubMachineSelection, TransportState } from "../lib/types";
 import { ViewerPage } from "../pages/ViewerPage";
 import { RemoteConnection } from "./RemoteConnection";
 import "./HubAccess.css";
@@ -38,6 +38,7 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
   const [editing_hub, setEditingHub] = useState(false);
   const [active, setActive] = useState<{ host: SavedHubHost; client: ViewerClient }>();
   const [connection_state, setConnectionState] = useState<ConnectionState>("connecting");
+  const [transport, setTransport] = useState<TransportState>({ kind: "relay" });
   const [pending, setPending] = useState<{ kind: Operation; host_id?: string }>();
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
@@ -56,11 +57,12 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
 
   async function openHost(current: HubAccessService, host: SavedHubHost, signal: AbortSignal) {
     if (signal.aborted) return;
-    setConnectionState("connecting");
+    setConnectionState("connecting"); setTransport({ kind: "relay" });
     const client = await current.connect(host, signal);
     if (signal.aborted) { client.close(); return; }
     active_client.current = client;
     client.setStateListener((state) => { if (active_client.current === client) setConnectionState(state); });
+    client.setTransportListener?.((next) => { if (active_client.current === client) setTransport(next); });
     selectMachine(client); setActive({ host, client });
     callbacks.current.on_machine_open?.({ kind: "hub", hub_url: current.hub_url, host_id: host.host_id });
   }
@@ -152,7 +154,7 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
   const progress = pending && <div className="hub-progress" role="status"><span>{OPERATION_LABELS[pending.kind]}</span>
     {pending.kind !== "forgetting" && <button type="button" onClick={cancel}>Cancel</button>}</div>;
   if (active) return <ViewerPage key={`${service?.hub_url}/${active.host.host_id}`} remote connection={
-    <RemoteConnection name={hostLabel(active.host)} hub_url={service?.hub_url} encrypted state={connection_state}>
+    <RemoteConnection name={hostLabel(active.host)} hub_url={service?.hub_url} encrypted state={connection_state} transport={transport}>
       <div className="connection-primary-actions"><button className="connection-panel__primary" onClick={changeHost}>Machines</button></div>
       <div className="connection-secondary-settings">
         {progress}{notice && <p role="status">{notice}</p>}{error && <p className="hub-error" role="alert">{error}</p>}

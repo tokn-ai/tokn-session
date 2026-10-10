@@ -15,6 +15,12 @@ export interface HubMachineSelection {
 
 export type MachineSelection = { kind: "local" } | HubMachineSelection;
 
+/** Network path is independent of viewer lifecycle and always carries Noise E2EE. */
+export interface TransportState {
+  kind: "direct" | "relay";
+  reason?: string;
+}
+
 /** Navigation metadata only. Encryption identities stay in device storage. */
 export interface MachinePreferences {
   version: 1;

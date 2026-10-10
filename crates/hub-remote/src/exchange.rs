@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::time::Duration;
@@ -10,6 +11,7 @@ use tokn_hub_client_core::{
   protocol,
   secure::{InnerMessage, MAX_CHUNK, MAX_RECORD, NoiseIdentity, NoiseInitiator, SecureChannel},
 };
+use tokn_hub_transport::{BoxTransport, RecordTransport};
 use url::Url;
 
 pub(crate) type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -54,8 +56,37 @@ pub(crate) async fn receive(socket: &mut Socket) -> Result<Vec<u8>, String> {
   .map_err(|_| "Encrypted response timed out; requests are not retried")?
 }
 
+/// A carrier only transports ordered encrypted records. Noise owns identity,
+/// authorization and message framing independently of the physical path.
+struct RelayTransport(Socket);
+
+#[async_trait]
+impl RecordTransport for RelayTransport {
+  async fn send(&mut self, record: Vec<u8>) -> Result<(), String> {
+    send(&mut self.0, record).await
+  }
+  async fn receive(&mut self) -> Result<Option<Vec<u8>>, String> {
+    receive(&mut self.0).await.map(Some)
+  }
+  async fn close(&mut self) {
+    let _ = self.0.close(None).await;
+  }
+}
+
+pub(crate) async fn relay_transport(endpoint: &Url) -> Result<BoxTransport, String> {
+  Ok(Box::new(RelayTransport(connect(endpoint).await?)))
+}
+
+pub(crate) async fn read_record(transport: &mut BoxTransport) -> Result<Vec<u8>, String> {
+  tokio::time::timeout(Duration::from_secs(90), transport.receive())
+    .await
+    .map_err(|_| "Encrypted response timed out; requests are not retried")??
+    .filter(|record| record.len() <= MAX_RECORD)
+    .ok_or_else(|| "Encrypted connection ended unexpectedly".into())
+}
+
 pub(crate) struct Exchange {
-  pub socket: Socket,
+  pub transport: BoxTransport,
   pub channel: SecureChannel,
   pub status: u16,
   pub content_type: Option<String>,
@@ -63,36 +94,31 @@ pub(crate) struct Exchange {
 
 impl Exchange {
   pub async fn open(
-    endpoint: &Url,
+    mut transport: BoxTransport,
     identity: &NoiseIdentity,
     host_key: &str,
     method: &str,
     path: &str,
     body: &[u8],
   ) -> Result<Self, String> {
-    let mut socket = connect(endpoint).await?;
     let mut initiator = NoiseInitiator::new(identity, host_key)?;
-    send(&mut socket, initiator.start()?).await?;
-    let mut channel = initiator.finish(&receive(&mut socket).await?)?;
-    send(
-      &mut socket,
-      channel.encrypt(&InnerMessage::DeviceRequest {
+    transport.send(initiator.start()?).await?;
+    let mut channel = initiator.finish(&read_record(&mut transport).await?)?;
+    transport
+      .send(channel.encrypt(&InnerMessage::DeviceRequest {
         method: method.into(),
         path: path.into(),
-      })?,
-    )
-    .await?;
-    for chunk in body.chunks(MAX_CHUNK) {
-      send(
-        &mut socket,
-        channel.encrypt(&InnerMessage::RequestBody {
-          data: protocol::encode(chunk),
-        })?,
-      )
+      })?)
       .await?;
+    for chunk in body.chunks(MAX_CHUNK) {
+      transport
+        .send(channel.encrypt(&InnerMessage::RequestBody {
+          data: protocol::encode(chunk),
+        })?)
+        .await?;
     }
-    send(&mut socket, channel.encrypt(&InnerMessage::RequestEnd {})?).await?;
-    match channel.decrypt(&receive(&mut socket).await?)? {
+    transport.send(channel.encrypt(&InnerMessage::RequestEnd {})?).await?;
+    match channel.decrypt(&read_record(&mut transport).await?)? {
       InnerMessage::Response { status, content_type } if (200..=599).contains(&status) => {
         if !matches!(
           content_type
@@ -104,7 +130,7 @@ impl Exchange {
           return Err("Host returned an unsupported response type".into());
         }
         Ok(Self {
-          socket,
+          transport,
           channel,
           status,
           content_type,
@@ -116,7 +142,7 @@ impl Exchange {
   }
 
   pub async fn next(&mut self) -> Result<Option<Vec<u8>>, String> {
-    match self.channel.decrypt(&receive(&mut self.socket).await?)? {
+    match self.channel.decrypt(&read_record(&mut self.transport).await?)? {
       InnerMessage::Chunk { data } => Ok(Some(protocol::decode(&data, MAX_CHUNK)?)),
       InnerMessage::End {} => Ok(None),
       InnerMessage::Error { message } => Err(message),
@@ -125,11 +151,10 @@ impl Exchange {
   }
 
   pub async fn acknowledge(&mut self) -> Result<(), String> {
-    send(
-      &mut self.socket,
-      self.channel.encrypt(&InnerMessage::Window { credits: 1 })?,
-    )
-    .await
+    self
+      .transport
+      .send(self.channel.encrypt(&InnerMessage::Window { credits: 1 })?)
+      .await
   }
 
   pub async fn json(mut self) -> Result<Value, String> {

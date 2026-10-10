@@ -12,6 +12,6 @@ mod noise;
 pub use grant::{GRANT_VERSION, Grant, GrantScope, MAX_GRANT_BYTES, SignedGrant};
 pub use identity::{NoiseIdentity, OwnerIdentity, decode_public_key};
 pub use noise::{
-  HostAuthOperation, InnerMessage, MAX_AUTH_PAYLOAD, MAX_CHUNK, MAX_PLAINTEXT, MAX_RECORD, MAX_REQUEST_BODY,
-  NoiseInitiator, NoiseResponder, SecureChannel,
+  HostAuthOperation, InnerMessage, MAX_AUTH_PAYLOAD, MAX_CHUNK, MAX_DIRECT_SDP, MAX_ICE_SERVERS, MAX_PLAINTEXT,
+  MAX_RECORD, MAX_REQUEST_BODY, NoiseInitiator, NoiseResponder, SecureChannel, validate_ice_servers,
 };

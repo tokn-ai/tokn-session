@@ -23,6 +23,7 @@ pub struct HostOptions {
   pub viewer_token: Option<String>,
   pub allow_control: Option<bool>,
   pub insecure_loopback: bool,
+  pub ice_servers: Option<Vec<String>>,
 }
 
 pub fn prepare_host(options: HostOptions) -> Result<ConnectorConfig, String> {
@@ -73,6 +74,12 @@ pub fn prepare_host(options: HostOptions) -> Result<ConnectorConfig, String> {
       .unwrap_or_else(|| previous.as_ref().is_some_and(|profile| profile.allow_control)),
     insecure_loopback: options.insecure_loopback || previous.as_ref().is_some_and(|profile| profile.insecure_loopback),
     passkey_origin,
+    ice_servers: options.ice_servers.unwrap_or_else(|| {
+      previous
+        .as_ref()
+        .map(|profile| profile.ice_servers.clone())
+        .unwrap_or_default()
+    }),
   };
   let key_file = options.state_dir.join("host-enrollment.key");
   let noise_key_file = options.state_dir.join("host-noise.key");
@@ -88,6 +95,7 @@ pub fn prepare_host(options: HostOptions) -> Result<ConnectorConfig, String> {
     local_token: options.viewer_token,
     allow_control: profile.allow_control,
     insecure_loopback: profile.insecure_loopback,
+    ice_servers: profile.ice_servers.clone(),
     secure: None,
     paired: Some(PairedHostConfig {
       host_id: profile.host_id.clone(),
@@ -396,6 +404,7 @@ mod tests {
       name: None,
       viewer_url: None,
       passkey_origin: None,
+      ice_servers: None,
       state_dir: directory.path().into(),
       totp_secret_file: None,
       viewer_token: None,
@@ -409,6 +418,21 @@ mod tests {
       second.paired.as_ref().unwrap().host_id
     );
     assert_eq!(first.hub_url, second.hub_url);
+    let mut direct = setup(None);
+    direct.ice_servers = Some(vec!["stun:stun.example:3478".into()]);
+    assert_eq!(
+      prepare_host(direct).unwrap().ice_servers,
+      vec!["stun:stun.example:3478"]
+    );
+    assert_eq!(
+      prepare_host(setup(None)).unwrap().ice_servers,
+      vec!["stun:stun.example:3478"]
+    );
+    let mut clear = setup(None);
+    clear.ice_servers = Some(Vec::new());
+    assert!(prepare_host(clear).unwrap().ice_servers.is_empty());
+    assert!(prepare_host(setup(None)).unwrap().ice_servers.is_empty());
+
     let mut enable = setup(None);
     enable.allow_control = Some(true);
     assert!(prepare_host(enable).unwrap().allow_control);
@@ -442,6 +466,7 @@ mod tests {
       name: None,
       viewer_url: None,
       passkey_origin: None,
+      ice_servers: None,
       state_dir: directory.path().join("host"),
       totp_secret_file: Some(seed.clone()),
       viewer_token: None,

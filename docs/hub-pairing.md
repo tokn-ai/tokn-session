@@ -1,7 +1,9 @@
 # Connect your own machines
 
-Open the Hub in a browser, or choose **Hub** in the Tokn app. Both connect
-directly to a host through the Hub; a viewing-device daemon is not required.
+Open the Hub in a browser, or choose **Hub** in the Tokn app. Both negotiate
+through the Hub, then prefer direct WebRTC with encrypted Hub relay fallback;
+a viewing-device daemon is not required. See [transports](hub-transports.md)
+for STUN configuration and the carrier abstraction.
 The native app pairs with an authenticator code and retains its device authorization.
 Browsers use that code to enroll a machine passkey, then require a passkey to sign
 in. Each new tab, reload, or reopened window requires another browser sign-in.
@@ -11,7 +13,8 @@ Guest sharing is outside this flow.
 Browser (Rust/WASM) ─┐
                     ├⇄ Hub ⇄ outbound host connector → loopback viewer-api
 App (Rust) ─────────┘
-       └──────── end-to-end encrypted payloads ────────┘
+       └──── direct WebRTC after encrypted negotiation ─────┘
+       └──────── end-to-end encrypted payloads on both paths ─┘
 ```
 
 The Hub routes encrypted records. Device private keys, authenticator seeds,

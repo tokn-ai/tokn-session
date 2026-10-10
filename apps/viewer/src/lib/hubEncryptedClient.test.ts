@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { EncryptedHubClient, authenticateHubHost, pairHubHost, type SocketFactory } from "./hubEncryptedClient";
 import type { CryptoApi, DeviceIdentity } from "./hubCrypto";
 import { encodeBase64Url } from "./hub";
+import { PeerRetiredError, RelayCarrier, type DirectPeer, type DirectPeerFactory } from "./hubTransport";
 
 const host = { host_id: "550e8400-e29b-41d4-a716-446655440000", host_public_key: "H".repeat(43) };
 const identity: DeviceIdentity = { public_key: () => "D".repeat(43), export_secret: () => "S".repeat(43), free: () => {} };
@@ -54,6 +55,36 @@ function harness(respond: (socket: TestSocket, message: Record<string, unknown>)
   const sockets: TestSocket[] = [];
   const factory: SocketFactory = (url) => { const socket = new TestSocket(url, respond); sockets.push(socket); return socket as unknown as WebSocket; };
   return { sockets, factory };
+}
+function viewerReply(socket: TestSocket): void {
+  const events = socket.request?.path === "/api/v1/events";
+  socket.push({ type: "response", status: 200, content_type: events ? "text/event-stream" : "application/json" });
+  socket.push({ type: "chunk", data: bytes(events ? "event: ready\ndata: {}\n\n" : '{"version":1}') });
+  if (!events) socket.push({ type: "end" });
+}
+function directHarness(options: { reject_input?: boolean; wrong_pin?: boolean; hold_health?: boolean } = {}) {
+  const relay = harness((socket, message) => {
+    if (message.type === "direct_config_request") socket.push({ type: "direct_config", ice_servers: ["stun:stun.example:3478"] });
+    else if (message.type === "direct_offer") socket.push({ type: "direct_answer", sdp: "answer" });
+    else if (message.type === "request_end") viewerReply(socket);
+  });
+  const direct = harness((socket, message) => {
+    if (message.type !== "request_end") return;
+    if (options.reject_input && socket.request?.path === "/api/v1/submit_session_input") socket.fail();
+    else if (!options.hold_health || socket.request?.path !== "/api/v1/health") viewerReply(socket);
+  });
+  let fail!: (error: Error) => void;
+  const carrier = new RelayCarrier("direct://machine", direct.factory);
+  const peer: DirectPeer = {
+    offer: vi.fn().mockResolvedValue("offer"), accept: vi.fn().mockResolvedValue(undefined), close: vi.fn(), retire: vi.fn(),
+    open: async (signal) => {
+      const records = await carrier.open(signal);
+      if (!options.wrong_pin) return records;
+      return { ...records, send: (record) => records.send(record), close: (error) => records.close(error), read: async () => encode("wrong-noise-reply") };
+    },
+  };
+  const factory: DirectPeerFactory = vi.fn((_servers, _signal, failed) => { fail = failed; return peer; });
+  return { relay, direct, factory, peer, interrupt: () => fail(new Error("Direct connection was interrupted.")) };
 }
 afterEach(() => { vi.useRealTimers(); });
 
@@ -124,4 +155,95 @@ it("rejects relay record floods instead of retaining an unbounded response", asy
   const client = new EncryptedHubClient("https://hub.example", host, identity, crypto(), factory);
   await expect(client.invoke("list_sessions")).rejects.toThrow("queue exceeds");
   client.close();
+});
+
+it("authenticates direct health before upgrading, then captures the direct carrier for new exchanges", async () => {
+  const links = directHarness({ hold_health: true });
+  const client = await EncryptedHubClient.connect("https://hub.example", host, identity, crypto(), undefined, links.relay.factory, links.factory);
+  const path = vi.fn(); client.setTransportListener(path);
+  await vi.waitFor(() => expect(links.direct.sockets).toHaveLength(1));
+  expect(path).toHaveBeenLastCalledWith({ kind: "relay" });
+  await client.invoke("list_sessions");
+  expect(links.relay.sockets.filter((socket) => socket.request?.path === "/api/v1/list_sessions")).toHaveLength(1);
+  viewerReply(links.direct.sockets[0]);
+  await vi.waitFor(() => expect(path).toHaveBeenLastCalledWith({ kind: "direct" }));
+  await client.invoke("list_sessions");
+  expect(links.direct.sockets[1].request?.path).toBe("/api/v1/list_sessions");
+  expect(links.relay.sockets.filter((socket) => socket.request?.path === "/api/v1/list_sessions")).toHaveLength(1);
+  expect(links.factory).toHaveBeenCalledWith(["stun:stun.example:3478"], expect.any(AbortSignal), expect.any(Function));
+  expect(links.peer.accept).toHaveBeenCalledWith("answer");
+  client.close(); expect(links.peer.close).toHaveBeenCalled();
+});
+
+it("keeps encrypted relay access when the direct host pin cannot authenticate", async () => {
+  const links = directHarness({ wrong_pin: true });
+  const client = await EncryptedHubClient.connect("https://hub.example", host, identity, crypto(), undefined, links.relay.factory, links.factory);
+  const path = vi.fn(); client.setTransportListener(path);
+  await vi.waitFor(() => expect(path).toHaveBeenLastCalledWith({ kind: "relay", reason: "bad pin" }));
+  await client.invoke("list_sessions");
+  expect(links.relay.sockets[links.relay.sockets.length - 1]?.request?.path).toBe("/api/v1/list_sessions");
+  expect(links.peer.close).toHaveBeenCalled(); client.close();
+});
+
+it("falls back for subsequent requests without replaying uncertain direct input", async () => {
+  const links = directHarness({ reject_input: true });
+  const client = await EncryptedHubClient.connect("https://hub.example", host, identity, crypto(), undefined, links.relay.factory, links.factory);
+  const path = vi.fn(); client.setTransportListener(path);
+  await vi.waitFor(() => expect(path).toHaveBeenLastCalledWith({ kind: "direct" }));
+  await expect(client.invoke("submit_session_input", { text: "send once" })).rejects.toThrow("delivery may be uncertain");
+  expect(links.relay.sockets.some((socket) => socket.request?.path === "/api/v1/submit_session_input")).toBe(false);
+  expect(path).toHaveBeenLastCalledWith({ kind: "relay", reason: expect.stringContaining("delivery may be uncertain") });
+  await client.invoke("list_sessions");
+  expect(links.relay.sockets[links.relay.sockets.length - 1]?.request?.path).toBe("/api/v1/list_sessions"); client.close();
+});
+
+it("restarts only the read-only live stream and emits recovery after a direct path fails", async () => {
+  const links = directHarness();
+  const client = await EncryptedHubClient.connect("https://hub.example", host, identity, crypto(), undefined, links.relay.factory, links.factory);
+  const path = vi.fn(); client.setTransportListener(path);
+  await vi.waitFor(() => expect(path).toHaveBeenLastCalledWith({ kind: "direct" }));
+  const recovered = vi.fn(); await client.listen("transport-reconnected", recovered);
+  links.interrupt();
+  await vi.waitFor(() => expect(recovered).toHaveBeenCalledOnce(), { timeout: 3000 });
+  expect(path).toHaveBeenLastCalledWith({ kind: "relay", reason: "Direct connection was interrupted." });
+  expect(links.relay.sockets[links.relay.sockets.length - 1]?.request?.path).toBe("/api/v1/events"); client.close();
+});
+
+it("retries direct negotiation in the background and cancels scheduled retries when the machine closes", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const links = directHarness();
+  vi.mocked(links.peer.offer).mockRejectedValueOnce(new Error("ICE attempt failed"));
+  const client = await EncryptedHubClient.connect("https://hub.example", host, identity, crypto(), undefined, links.relay.factory, links.factory);
+  const path = vi.fn(); client.setTransportListener(path);
+  await vi.waitFor(() => expect(path).toHaveBeenLastCalledWith({ kind: "relay", reason: "ICE attempt failed" }));
+  await client.invoke("list_sessions");
+  expect(links.relay.sockets[links.relay.sockets.length - 1]?.request?.path).toBe("/api/v1/list_sessions");
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(path).toHaveBeenLastCalledWith({ kind: "direct" }); expect(links.factory).toHaveBeenCalledTimes(2);
+  links.interrupt(); client.close(); await vi.advanceTimersByTimeAsync(60_000);
+  expect(links.factory).toHaveBeenCalledTimes(2);
+});
+
+it("routes an unsent request through relay when its direct peer retires", async () => {
+  const links = directHarness();
+  const client = await EncryptedHubClient.connect("https://hub.example", host, identity, crypto(), undefined, links.relay.factory, links.factory);
+  const path = vi.fn(); client.setTransportListener(path);
+  await vi.waitFor(() => expect(path).toHaveBeenLastCalledWith({ kind: "direct" }));
+  vi.spyOn(links.peer, "open").mockRejectedValueOnce(new PeerRetiredError());
+  await client.invoke("submit_session_input", { text: "send once" });
+  expect(links.direct.sockets.some((socket) => socket.request?.path === "/api/v1/submit_session_input")).toBe(false);
+  expect(links.relay.sockets.filter((socket) => socket.request?.path === "/api/v1/submit_session_input")).toHaveLength(1);
+  expect(links.peer.retire).toHaveBeenCalledOnce(); expect(links.peer.close).not.toHaveBeenCalled();
+  expect(path).toHaveBeenLastCalledWith({ kind: "relay", reason: "Direct connection is renewing." }); client.close();
+});
+
+it("applies one request deadline including the wait for response headers", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const { factory, sockets } = harness(() => {});
+  const client = new EncryptedHubClient("https://hub.example", host, identity, crypto(), factory);
+  const result = client.invoke("submit_session_input", { text: "send once" });
+  const rejected = expect(result).rejects.toThrow("timed out; delivery may be uncertain");
+  await vi.waitFor(() => expect(sockets[0].messages).toContainEqual({ type: "request_end" }));
+  await vi.advanceTimersByTimeAsync(120_000); await rejected;
+  expect(sockets).toHaveLength(1); expect(sockets[0].closed).toBe(true); client.close();
 });
