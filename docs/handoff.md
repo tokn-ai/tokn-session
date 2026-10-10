@@ -57,7 +57,7 @@ remain visible after read acknowledgement; exact question-ID replies resolve
 individual questions, while turn completion, supersession, final replies, and
 errors retire remaining attention. Clicking a sidebar badge/session notice
 opens and focuses the outstanding question card. Retained windows preserve
-outstanding request context. Compact `session-activity.v3` markers persist counts;
+outstanding request context. Compact `session-activity.v4` markers persist counts;
 older final-only markers migrate quietly without resetting unread replies.
 Accepted event pages synchronize sidebar question counts, including cached child
 rows; the selected timeline overrides catalog counts while indexing catches up.
@@ -931,7 +931,14 @@ count once. History reductions retire removed unread replies without rewinding
 revisions. Older user-plus-assistant markers establish a quiet final-only baseline.
 The compact marker also stores running state, derived from turn boundaries and
 work events; final replies, turn completion/interruption, and provider errors
-stop it. Unknown activity is not inferred from file modification alone.
+stop it. Known running rows reconcile even when a cold JSONL body would normally
+be deferred or catalog-only; v3 running markers receive a one-time body recheck
+when upgrading to v4, including already-matching source cursors. Unrelated cold
+histories retain their lazy body policy. Semantic updates use this same
+session-wide activity projection, independent of visible groups or history
+windows. Compact notifications include canonical ancestors so collapsed running
+indicators clear when the last active descendant stops. Unknown activity is not
+inferred from file modification alone.
 Question attention is independent of read acknowledgement and is session-local;
 it does not increase final-reply unread counts or propagate to ancestors.
 Outstanding questions have a separate badge and navigable session notices.

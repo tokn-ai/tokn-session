@@ -215,11 +215,6 @@ impl Subscription {
       .as_array()
       .unwrap()
       .clone();
-    state["is_running"] = json!(
-      summaries
-        .iter()
-        .any(|summary| summary["trajectory"]["status"] == "working")
-    );
     let mut items = BTreeMap::new();
     let mut order = Vec::new();
     let mut semantic_order = Vec::new();
@@ -366,6 +361,7 @@ impl ViewerService {
       include_all,
     )?;
     let mut page = serde_json::to_value(page).map_err(|e| e.to_string())?;
+    page["is_running"] = json!(payloads.is_running);
     if let Some(revision) = payloads.source_revision {
       page["source_revision"] = json!(revision);
     }
@@ -718,7 +714,7 @@ mod tests {
   }
 
   fn page(events: Vec<Value>, questions: Vec<Value>) -> Value {
-    json!({"events":events,"total_events":0,"outstanding_questions":questions,"previous_cursor":null,"next_cursor":null,"history_status":"complete","attention_revision":null})
+    json!({"events":events,"total_events":0,"outstanding_questions":questions,"previous_cursor":null,"next_cursor":null,"history_status":"complete","attention_revision":null,"is_running":false})
   }
 
   #[test]
@@ -837,12 +833,30 @@ mod tests {
       message("comment", "assistant", "commentary", "checking"),
       json!({"event_key":"tool","type":"tool_call"}),
     ];
-    let update = state.update(page(grouped, vec![]), semantic, vec![], true, None);
+    let mut current = page(grouped, vec![]);
+    current["is_running"] = json!(true);
+    let update = state.update(current, semantic, vec![], true, None);
     assert_eq!(update.items.len(), 2);
     assert_eq!(update.groups.len(), 1);
     assert_eq!(update.item_order, Some(vec!["work".into()]));
     assert_eq!(update.semantic_order, Some(vec!["comment".into(), "tool".into()]));
     assert_eq!(update.state["is_running"], true);
+  }
+
+  #[test]
+  fn session_running_state_does_not_follow_historical_or_scoped_work_groups() {
+    for (is_running, display_status) in [(false, "working"), (true, "unknown")] {
+      let mut state = subscription(UpdateLevel::Steps);
+      state.request.scope = Some(UpdateScope::default());
+      let grouped = vec![
+        json!({"event_key":"work","type":"trajectory","child_keys":["tool"],"trajectory":{"status":display_status}}),
+      ];
+      let semantic = vec![json!({"event_key":"tool","type":"tool_call"})];
+      let mut current = page(grouped, vec![]);
+      current["is_running"] = json!(is_running);
+      let update = state.update(current, semantic, vec![], true, None);
+      assert_eq!(update.state["is_running"], is_running);
+    }
   }
 
   #[test]

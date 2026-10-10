@@ -6,6 +6,7 @@ use crate::model::{HistoryWindowMode, SessionViewRequest, hex_decode, hex_encode
 #[derive(Default)]
 pub(crate) struct UpdatePayloads {
   pub source_revision: Option<String>,
+  pub is_running: bool,
   pub details: Vec<EventDetail>,
   pub events: Vec<EventDetail>,
 }
@@ -177,10 +178,17 @@ impl ViewerService {
     } else {
       Vec::new()
     };
+    // Session state follows normalized source chronology, independently of
+    // retained history, visible work groups, and subscription detail levels.
+    let mut activity = Activity::default();
+    for event in &loaded.events {
+      activity.observe(event);
+    }
     let mut payloads = UpdatePayloads {
       source_revision: info
         .as_ref()
         .map(|info| format!("{}:{}", info.generation, info.revision)),
+      is_running: activity.running,
       ..Default::default()
     };
     if include_all {
@@ -399,6 +407,42 @@ mod tests {
   use crate::relay::{RelayMode, RelaySettings};
   use std::{io::Write, time::Duration};
   use tokn_session_relay::{ProviderRoot, RelayConfig};
+
+  #[test]
+  fn update_payload_running_follows_source_events_without_turn_lifecycle_records() {
+    use crate::service::tests::{key_for, loaded_session, message_event_with_role, service_with_session};
+    for completed in [false, true] {
+      let mut events = vec![message_event_with_role(
+        "working",
+        Role::Assistant,
+        MessageDelivery::Commentary,
+      )];
+      if completed {
+        events.push(message_event_with_role("done", Role::Assistant, MessageDelivery::Final));
+      }
+      let service = service_with_session(loaded_session(events));
+      let (page, _, payloads) = service
+        .load_update_pages(
+          EventPageRequest {
+            session_key: key_for("fixture"),
+            window_mode: Some(HistoryWindowMode::Retained),
+            cursor: None,
+            offset: None,
+            direction: PageDirection::Backward,
+            limit: None,
+          },
+          false,
+        )
+        .unwrap();
+      assert_eq!(payloads.is_running, !completed);
+      assert!(
+        page
+          .events
+          .iter()
+          .all(|event| event.trajectory.as_ref().is_none_or(|group| group.status != "working"))
+      );
+    }
+  }
 
   async fn window(service: &ViewerService, key: &str, cursor: Option<String>) -> EventPage {
     let service = service.clone();
