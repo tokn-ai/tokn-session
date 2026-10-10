@@ -459,6 +459,8 @@ mod tests {
       level: UpdateLevel::All,
       cursor: None,
       detail_keys: vec![],
+      scope: None,
+      history_cursor: None,
       unsubscribe: false,
     };
     let load = |request| {
@@ -728,6 +730,40 @@ mod tests {
       ["prompt 5", "prompt 6", "prompt 7"]
     );
     let stable = initial.events.last().unwrap().event_key.clone();
+    let scoped_request = crate::updates::SessionUpdatesRequest {
+      subscription_id: "scoped-history-test".into(),
+      session_key: key.clone(),
+      level: crate::updates::UpdateLevel::Steps,
+      cursor: None,
+      detail_keys: vec![],
+      scope: Some(crate::updates::UpdateScope::default()),
+      history_cursor: None,
+      unsubscribe: false,
+    };
+    let first_service = service.clone();
+    let first_request = scoped_request.clone();
+    let first = tokio::task::spawn_blocking(move || first_service.load_session_updates(first_request))
+      .await
+      .unwrap()
+      .unwrap();
+    assert_eq!(first.items.len(), 1, "opening projects only the newest turn");
+    let history_service = service.clone();
+    let history_cursor = initial.previous_cursor.clone();
+    let history = tokio::task::spawn_blocking(move || {
+      history_service.load_session_updates(crate::updates::SessionUpdatesRequest {
+        cursor: Some(first.revision),
+        history_cursor,
+        scope: Some(crate::updates::UpdateScope {
+          history: crate::updates::HistoryScope::Retained,
+          ..Default::default()
+        }),
+        ..scoped_request
+      })
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(history.item_order.as_ref().unwrap().len(), 6);
     let earlier = window(&service, &key, initial.previous_cursor).await;
     assert_eq!(earlier.events.len(), 6);
     assert_eq!(earlier.events.last().unwrap().event_key, stable);

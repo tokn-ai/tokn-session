@@ -7,7 +7,7 @@ export function groupActivity(events: EventSummary[]): EventSummary[][] {
   const groups: EventSummary[][] = [];
   for (const event of events) {
     const previous = groups[groups.length - 1];
-    if (event.type !== "message" && previous && previous[0].type !== "message") previous.push(event);
+    if (event.type !== "message" && event.type !== "activity_group" && previous && previous[0].type !== "message" && previous[0].type !== "activity_group") previous.push(event);
     else groups.push([event]);
   }
   return groups;

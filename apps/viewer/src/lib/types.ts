@@ -543,7 +543,12 @@ export interface SessionUpdate {
   event_order?: string[] | null;
   removed_items: string[];
   item_order: string[] | null;
-  state: Omit<EventPageResponse, "events"> & { is_running?: boolean; error?: string };
+  state: Omit<EventPageResponse, "events"> & { is_running?: boolean; error?: string; scope?: SessionUpdateScope };
+}
+export interface SessionUpdateScope {
+  history: "latest_turn" | "retained";
+  turn_key?: string | null;
+  group_keys: string[];
 }
 export interface SessionUpdatesRequest {
   subscription_id: string;
@@ -551,6 +556,8 @@ export interface SessionUpdatesRequest {
   level: UpdateLevel;
   cursor: string | null;
   detail_keys: string[];
+  scope?: SessionUpdateScope;
+  history_cursor?: string | null;
   unsubscribe?: boolean;
 }
 

@@ -2670,17 +2670,17 @@ describe("semantic session delivery", () => {
     vi.mocked(listenForSessionUpdates).mockImplementation((handler) => { emit = handler; return Promise.resolve(vi.fn()); });
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
     const page = toolEventPage();
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, request.level === "all" ? page : { ...page, events: [], total_events: 0 }));
+    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, request.level === "steps" ? page : { ...page, events: [], total_events: 0 }));
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "live");
     await waitFor(() => expect(result.current.events).toEqual(page.events));
-    const request = vi.mocked(loadSessionUpdates).mock.calls.find(([request]) => request.level === "all")![0];
+    const request = vi.mocked(loadSessionUpdates).mock.calls.find(([request]) => request.level === "steps")![0];
     const update = semanticSnapshot(request, page);
     act(() => emit?.({ ...update, snapshot: false, base_revision: "1", revision: "2", item_order: null,
       items: [{ ...update.items[0], summary: { ...page.events[0], summary: "pushed progress" } }] }));
     await waitFor(() => expect(result.current.events[0].summary).toBe("pushed progress"));
     expect(loadEventPage).not.toHaveBeenCalled();
-    expect(vi.mocked(loadSessionUpdates).mock.calls.filter(([request]) => request.level === "all")).toHaveLength(1);
+    expect(vi.mocked(loadSessionUpdates).mock.calls.filter(([request]) => request.level === "steps")).toHaveLength(1);
   });
 
   it("expands and refreshes work children from all delivery without child RPCs", async () => {
@@ -2699,7 +2699,7 @@ describe("semantic session delivery", () => {
     await waitFor(() => expect(result.current.events).toEqual(page.events));
     act(() => result.current.toggleEventExpanded(page.events[0].event_key));
     await waitFor(() => expect(result.current.trajectoryPages.get("live")?.get(page.events[0].event_key)?.events).toEqual([child]));
-    const request = vi.mocked(loadSessionUpdates).mock.calls.find(([request]) => request.level === "all")![0];
+    const request = vi.mocked(loadSessionUpdates).mock.calls.find(([request]) => request.level === "steps")![0];
     act(() => emit?.({ ...makeUpdate(request), snapshot: false, base_revision: "1", revision: "2", item_order: null, groups: [],
       items: [{ item_id: child.event_key, kind: "tool_summary", level: "steps", summary: { ...child, summary: "cached progress" } }] }));
     await waitFor(() => expect(result.current.trajectoryPages.get("live")?.get(page.events[0].event_key)?.events[0].summary).toBe("cached progress"));
@@ -2733,8 +2733,8 @@ describe("semantic session delivery", () => {
     const catchup = deferred<import("./types").SessionUpdate>();
     let firstRequests = 0;
     vi.mocked(loadSessionUpdates).mockImplementation(async (request) => {
-      if (request.level === "all" && !request.unsubscribe && request.session_key === "one" && ++firstRequests > 1) return catchup.promise;
-      return semanticSnapshot(request, request.level === "all" && !request.unsubscribe
+      if (request.level === "steps" && !request.unsubscribe && request.session_key === "one" && ++firstRequests > 1) return catchup.promise;
+      return semanticSnapshot(request, request.level === "steps" && !request.unsubscribe
         ? { ...page, events: [{ ...page.events[0], summary: request.session_key }] } : { ...page, events: [], total_events: 0 });
     });
     const { result } = renderHook(() => useViewerState());
@@ -2744,37 +2744,70 @@ describe("semantic session delivery", () => {
     expect(result.current.events[0].summary).toBe("one");
     expect(loadEventPage).not.toHaveBeenCalled();
   });
-  it("uses delivered all-level details and refreshes Inspector on detail-only pushes", async () => {
+  it("requests details only for Inspector and refreshes it on detail-only pushes", async () => {
     let emit: ((update: import("./types").SessionUpdate) => void) | undefined;
     vi.mocked(listenForSessionUpdates).mockImplementation((handler) => { emit = handler; return Promise.resolve(vi.fn()); });
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
     const page = toolEventPage();
     vi.mocked(loadSessionUpdates).mockImplementation(async (request) => ({ ...semanticSnapshot(request, page),
-      items: [...semanticSnapshot(request, page).items, { item_id: `detail:${page.events[0].event_key}`, kind: "detail", level: "details", event_key: page.events[0].event_key, detail: toolDetail("delivered") }] }));
+      items: [...semanticSnapshot(request, page).items, ...(request.level === "details" && !request.unsubscribe
+        ? [{ item_id: `detail:${page.events[0].event_key}`, kind: "detail" as const, level: "details" as const, event_key: page.events[0].event_key, detail: toolDetail("delivered") }] : [])] }));
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "live");
     await waitFor(() => expect(result.current.events).toEqual(page.events));
+    expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) => request.level === "details")).toBe(false);
     act(() => result.current.selectEvent(page.events[0].event_key));
     await waitFor(() => expect(result.current.detail?.tool_output?.sections[0].text).toBe("delivered"));
-    const request = vi.mocked(loadSessionUpdates).mock.calls.find(([request]) => request.level === "all")![0];
+    const request = vi.mocked(loadSessionUpdates).mock.calls.find(([request]) => request.level === "details")![0];
     act(() => emit?.({ ...semanticSnapshot(request, page), snapshot: false, base_revision: "1", revision: "2", item_order: null,
       items: [{ item_id: `detail:${page.events[0].event_key}`, kind: "detail", level: "details", event_key: page.events[0].event_key, detail: toolDetail("pushed") }] }));
     await waitFor(() => expect(result.current.detail?.tool_output?.sections[0].text).toBe("pushed"));
     expect(loadEventDetail).not.toHaveBeenCalled();
-    expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) => request.level === "details")).toBe(false);
+    expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) => request.level === "details")).toBe(true);
   });
 
-  it("downgrades the previous session to final and opens the next at all", async () => {
+  it("loads one complete inner group on demand without fetching its details", async () => {
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
+    const base = { ...toolEventPage(), previous_cursor: "older-turn" };
+    const tool = base.events[0];
+    const group = { ...tool, event_key: "activity:child", type: "activity_group", child_keys: [tool.event_key] };
+    const other = { ...group, event_key: "activity:other", child_keys: ["other"] };
+    const work = { ...tool, event_key: "work", type: "trajectory", child_keys: [group.event_key, other.event_key] };
+    let revision = 0;
+    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => ({
+      ...semanticSnapshot(request, { ...base, events: [work] }), revision: String(++revision),
+      items: [group, other, ...(request.scope?.group_keys.includes(group.event_key) ? [tool] : [])]
+        .map((summary) => ({ item_id: summary.event_key, kind: "tool_summary", level: "steps", summary })),
+      groups: [{ item_id: "work", kind: "work_summary", level: "steps", summary: work }],
+      state: { ...semanticSnapshot(request, base).state, scope: { ...request.scope!, turn_key: "user" } },
+    }));
+    const { result } = renderHook(() => useViewerState());
+    await selectListedSession(result, "live");
+    await waitFor(() => expect(result.current.events).toEqual([work]));
+    expect(vi.mocked(loadSessionUpdates).mock.calls[0][0].scope?.group_keys).toEqual([]);
+    act(() => result.current.loadActivityGroup(group.event_key));
+    await waitFor(() => expect(result.current.trajectoryPages.get("live")?.get(group.event_key)?.events).toEqual([tool]));
+    expect(result.current.trajectoryPages.get("live")?.get(other.event_key)).toBeUndefined();
+    act(() => result.current.loadOlderEvents());
+    await waitFor(() => expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) =>
+      request.history_cursor === "older-turn" && request.scope?.history === "retained")).toBe(true));
+    expect(loadEventPage).not.toHaveBeenCalled();
+    expect(loadTrajectoryEventPage).not.toHaveBeenCalled();
+    expect(loadEventDetail).not.toHaveBeenCalled();
+    expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) => request.level === "all")).toBe(false);
+  });
+
+  it("downgrades the previous session to final and opens the next at steps", async () => {
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("one"), session("two")], next_cursor: null, source_errors: [], pending_providers: [] });
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, request.level === "all" && !request.unsubscribe
+    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, request.level === "steps" && !request.unsubscribe
       ? toolEventPage() : { ...toolEventPage(), events: [], total_events: 0 }));
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "one");
     await waitFor(() => expect(result.current.events).toEqual(toolEventPage().events));
     act(() => result.current.selectSession("two"));
-    await waitFor(() => expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) => request.session_key === "two" && request.level === "all")).toBe(true));
+    await waitFor(() => expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) => request.session_key === "two" && request.level === "steps")).toBe(true));
     const requests = vi.mocked(loadSessionUpdates).mock.calls.map(([request]) => request);
-    expect(requests.some((request) => request.session_key === "one" && request.level === "all" && request.unsubscribe)).toBe(true);
+    expect(requests.some((request) => request.session_key === "one" && request.level === "steps" && request.unsubscribe)).toBe(true);
     expect(requests.some((request) => request.session_key === "one" && request.level === "final" && !request.unsubscribe)).toBe(true);
   });
 

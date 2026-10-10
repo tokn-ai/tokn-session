@@ -49,17 +49,34 @@ and missing notifications still require a catalog read. Older backends omit
 the flag and retain that read. A selected semantic subscription consumes pushes
 instead of also reloading its timeline on index invalidations.
 
-Selected conversations subscribe at `all`. Expanded tools and Inspector use
-the delivered display details from that replica, without separate detail
-subscriptions. Work groups read their complete semantic membership from the replica. Each
-inner activity group between messages mounts all rows on first expansion and
-keeps them mounted on collapse; opening the outer Worked/Working disclosure
-does not mount every inner group. Live updates append to loaded groups.
+Selected conversations subscribe at `steps` with an optional `scope`: `history`
+(`latest_turn` or `retained`), a `turn_key` anchor, and up to 128 `group_keys`.
+Selection is orthogonal to delivery richness; it does not add a level. Opening a
+session requests the latest turn's messages, attention context, and inner
+activity-group summaries. Viewer-core returns the anchor so live appends extend
+that view instead of dropping its starting turn. Outstanding older questions
+remain available. Expanding older history changes the scope to `retained` after
+extending the source window with a one-shot `history_cursor` on the same update
+request. This cursor is separate from the subscription revision cursor; no
+legacy full event page is sent and discarded first.
+
+Each inner group between assistant messages has a stable `activity:` key and
+ordered child membership. Uninterested groups deliver only their aggregate
+summary; expanding one adds its interest and delivers all child summaries in
+one update. Loaded groups stay interested after collapse and receive live
+appends. Inspector and expanded visible tools use a separate `details`
+subscription with at most 16 keys; closing the tool, inner group, or outer work
+disclosure removes its detail interest. Empty interests unsubscribe while
+retaining cached payloads. Details requests omit group interests to avoid
+resending loaded child summaries. `all` continues to deliver every selected
+source record and complete child membership, regardless of group interests.
+Omitting scope preserves the previous retained-window contract.
+
 Legacy groups without membership assemble trajectory transport pages before
 publishing any rows, rejecting incomplete or changed responses. Transport
 chunks never create a partial display group or a within-group load-more control.
-Recently opened conversations retain their all-level display
-while receiving final-level updates, which do not advance their all cursor. Reopening renders cached
+Recently opened conversations retain their steps-level display
+while receiving final-level updates, which do not advance their steps cursor. Reopening renders cached
 content immediately, then catches up. The frontend buffers pushes arriving
 before the initial response, rejects revision gaps and stale responses, and
 keeps unchanged object references. It preserves disclosure/Inspector selection
@@ -74,6 +91,9 @@ not promote sessions in the frontend LRU.
 Older servers use the retained-page fallback. Read-only shared-session SSE
 continues its scoped fixed-cadence invalidations; guests obtain catch-up changes
 through the authorized command rather than the host-wide event stream.
+
+Scoped delivery narrows projected and serialized data. The source reader may
+still retain and normalize a broader history window.
 
 Remaining costs: the source snapshot subscription still clones retained IR and
 uses JSON framing even in embedded mode. Display projection (including full payloads when an all-level subscriber exists)

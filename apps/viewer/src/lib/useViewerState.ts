@@ -270,20 +270,24 @@ export function useViewerState() {
   const loadWorkPage = useCallback(async (request: import("./types").LoadTrajectoryEventPageRequest) => {
     const cached = displayCache.current.trajectoryGroup(request.session_key, request.trajectory_key);
     if (cached) return cached;
+    if (request.trajectory_key.startsWith("activity:")) {
+      displayCache.current.includeGroup(request.session_key, request.trajectory_key);
+      const update = await loadSessionUpdates(displayCache.current.request(request.session_key, "steps"));
+      if (!displayCache.current.apply(update)) throw new Error("Work group changed; try again");
+      const group = displayCache.current.trajectoryGroup(request.session_key, request.trajectory_key);
+      if (!group) throw new Error("Work group is no longer available");
+      return group;
+    }
     return loadTrajectoryEventPage(request);
   }, []);
   const loadDisplayPage = useCallback(async (request: import("./types").LoadEventPageRequest) => {
     if (semanticSupported.current === false) return loadEventPage(request);
     if (request.window_mode !== "retained") {
-      const page = await loadEventPage(request);
-      // Earlier history changes the retained range; the next subscription
-      // snapshot must include that range before patches can be accepted.
-      displayCache.current.invalidate(request.session_key);
-      semanticLive.current.delete(request.session_key);
-      return page;
+      displayCache.current.includeHistory(request.session_key);
     }
     let update: import("./types").SessionUpdate;
-    try { update = await loadSessionUpdates(displayCache.current.request(request.session_key)); }
+    try { update = await loadSessionUpdates({ ...displayCache.current.request(request.session_key, "steps"),
+        ...(request.window_mode === "earlier" ? { history_cursor: request.cursor } : {}) }); }
     catch (error: unknown) {
       if (/unknown.*command|unknown.*variant|command.*not found|unavailable for a session share/i.test(errorMessage(error))) {
         semanticSupported.current = false;
@@ -321,11 +325,25 @@ export function useViewerState() {
   const [expandedTrajectoryDetailAttempt, setExpandedTrajectoryDetailAttempt] = useState(0);
   const expandedTrajectoryDetailRequest = useRef(0);
   const sessionDisclosures = useRef(new Map<string, { expanded_event_key: string | null; selected_event_key: string | null; inspector_open: boolean; manual_expansion: boolean }>());
+  const [visibleActivityGroups, setVisibleActivityGroups] = useState(new Set<string>());
+  const setActivityGroupVisibility = useCallback((groupKey: string, visible: boolean) => {
+    setVisibleActivityGroups((current) => {
+      if (current.has(groupKey) === visible) return current;
+      const next = new Set(current);
+      if (visible) next.add(groupKey); else next.delete(groupKey);
+      return next;
+    });
+  }, []);
   const activeDetailKeys = useRef<string[]>([]);
   activeDetailKeys.current = [...new Set([
     ...(inspectorOpen && selectedEventKey ? [selectedEventKey] : []),
     ...(expandedEventKey && expandedEventNeedsDetail(events.find((event) => event.event_key === expandedEventKey)) ? [expandedEventKey] : []),
-    ...expandedActivityKeys,
+    ...[...expandedActivityKeys].filter((key) => {
+      if (!selectedSessionKey || !expandedEventKey) return false;
+      const group = displayCache.current.activityGroupForEvent(selectedSessionKey, key);
+      if (group) return visibleActivityGroups.has(group);
+      return trajectoryPagesRef.current.get(selectedSessionKey)?.get(expandedEventKey)?.events.some((event) => event.event_key === key);
+    }),
   ])].slice(0, 16);
 
 
@@ -740,6 +758,11 @@ export function useViewerState() {
     const sessionKey = selectedSessionKeyRef.current;
     if (!sessionKey || !semanticLive.current.has(sessionKey) || displayCache.current.get(sessionKey, "all")) return;
     const keys = [...activeDetailKeys.current];
+    if (!keys.length) {
+      const release = displayCache.current.release(sessionKey, "details");
+      if (release) void loadSessionUpdates(release).catch(() => {});
+      return;
+    }
     const refresh = () => {
       void loadSessionUpdates(displayCache.current.request(sessionKey, "details", keys)).then((update) => {
         displayCache.current.apply(update);
@@ -750,7 +773,7 @@ export function useViewerState() {
     refresh();
     const timer = window.setInterval(refresh, 30_000);
     return () => window.clearInterval(timer);
-  }, [detailSubscriptionKey, events]);
+  }, [detailSubscriptionKey]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -947,12 +970,13 @@ export function useViewerState() {
     detailLoads.current.clear();
     expandedDetailRequest.current += 1;
     clearTrajectoryPages();
+    setVisibleActivityGroups(new Set());
     setSelectedSessionKey(sessionKey);
     setSelectedSessionMetadata(metadata?.session_key === sessionKey ? metadata : null);
     setEventsOwnerKey(null);
     setInitialPageSessionKey(null);
     pushedPage.current = null;
-    const cachedPage = sessionKey ? displayCache.current.get(sessionKey) : null;
+    const cachedPage = sessionKey ? displayCache.current.get(sessionKey, "steps") : null;
     liveRefresh.current = !!cachedPage;
     if (cachedPage && sessionKey) {
       eventsOwnerKeyRef.current = sessionKey;
@@ -1670,9 +1694,11 @@ export function useViewerState() {
   useEffect(() => {
     const requestId = ++expandedTrajectoryDetailRequest.current;
     if (!selectedSessionKey || !expandedEventKey) return;
-    const children = trajectoryPages.get(selectedSessionKey)?.get(expandedEventKey)?.events ?? [];
+    const pages = trajectoryPages.get(selectedSessionKey);
+    const children = pages?.get(expandedEventKey)?.events.flatMap((child) => child.type === "activity_group"
+      ? pages.get(child.event_key)?.events ?? [] : [child]) ?? [];
     for (const child of children) {
-      if (!expandedActivityKeys.has(child.event_key) || !expandedEventNeedsDetail(child)) continue;
+      if (!activeDetailKeys.current.includes(child.event_key) || !expandedEventNeedsDetail(child)) continue;
       const cacheKey = `${selectedSessionKey}:${child.event_key}`;
       const cached = readCachedDetail(detailCache.current, cacheKey);
       setExpandedActivities((current) => {
@@ -1693,7 +1719,7 @@ export function useViewerState() {
       });
     }
   }, [detailRevision, expandedTrajectoryDetailAttempt, expandedActivityKeys,
-    expandedEventKey, requestDetail, selectedSessionKey, trajectoryPages]);
+    expandedEventKey, requestDetail, selectedSessionKey, trajectoryPages, detailSubscriptionKey]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -1850,6 +1876,11 @@ export function useViewerState() {
     setExpandedTrajectoryDetailAttempt((attempt) => attempt + 1);
   }, []);
 
+  const loadActivityGroup = useCallback((groupKey: string) => {
+    const sessionKey = selectedSessionKeyRef.current;
+    if (sessionKey) requestTrajectoryEventPage(sessionKey, groupKey, false);
+  }, [requestTrajectoryEventPage]);
+
   const retryTrajectoryEvents = useCallback((trajectoryKey: string) => {
     if (!selectedSessionKey) {
       return;
@@ -1927,7 +1958,7 @@ export function useViewerState() {
     eventRefreshInFlight.current = true;
     setOlderLoading(true);
     setEventsError(null);
-    void loadEventPage({
+    void loadDisplayPage({
       session_key: selectedSessionKey,
       cursor: olderCursor,
       window_mode: "earlier",
@@ -1961,7 +1992,7 @@ export function useViewerState() {
           }
         }
       });
-  }, [applyQuestionPage, invalidateEventDetails, olderCursor, olderLoading, selectedSessionKey]);
+  }, [applyQuestionPage, invalidateEventDetails, olderCursor, olderLoading, selectedSessionKey, loadDisplayPage]);
 
   const loadNewerEvents = useCallback(() => {
     if (
@@ -2053,6 +2084,8 @@ export function useViewerState() {
     toggleEventExpanded,
     trajectoryPages,
     retryTrajectoryEvents,
+    loadActivityGroup,
+    setActivityGroupVisibility,
     expandedTrajectoryKey: expandedTrajectoryChild ? expandedTrajectoryEvent?.trajectory_key ?? null : null,
     expandedTrajectoryEventKey: expandedTrajectoryChild ? expandedTrajectoryEvent?.event_key ?? null : null,
     expandedActivityKeys,

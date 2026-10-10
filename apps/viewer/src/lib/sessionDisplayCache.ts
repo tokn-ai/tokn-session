@@ -1,5 +1,5 @@
 import { createUuid } from "./id";
-import type { EventPageResponse, TrajectoryEventPageResponse, SessionUpdate, SessionUpdateItem, SessionUpdatesRequest, UpdateLevel } from "./types";
+import type { EventPageResponse, TrajectoryEventPageResponse, SessionUpdate, SessionUpdateItem, SessionUpdatesRequest, SessionUpdateScope, UpdateLevel } from "./types";
 
 interface Replica {
   subscription_id: string;
@@ -36,6 +36,7 @@ export class SessionDisplayCache {
   private access = new Map<string, number>();
   private clock = 0;
   private selected: string | null = null;
+  private scopes = new Map<string, SessionUpdateScope>();
   private pending = new Map<string, SessionUpdate[]>();
   private pageItems = new WeakMap<EventPageResponse, Map<string, SessionUpdateItem>>();
   private acceptedItems = new Map<string, Map<string, SessionUpdateItem>>();
@@ -49,7 +50,20 @@ export class SessionDisplayCache {
       subscription_id = `${this.prefix}:${createUuid()}`;
       this.subscriptions.set(key, subscription_id);
     }
-    return { session_key, level, subscription_id, cursor: this.replicas.get(key)?.revision ?? null, detail_keys };
+    const scope = level === "steps" || level === "details"
+      ? this.scopes.get(session_key) ?? { history: "latest_turn" as const, group_keys: [] } : undefined;
+    return { session_key, level, subscription_id, cursor: this.replicas.get(key)?.revision ?? null, detail_keys,
+      ...(scope ? { scope: level === "details" ? { ...scope, group_keys: [] } : scope } : {}) };
+  }
+
+  includeGroup(session_key: string, group_key: string) {
+    const scope = this.scopes.get(session_key) ?? { history: "latest_turn" as const, group_keys: [] };
+    this.scopes.set(session_key, { ...scope, group_keys: [...new Set([...scope.group_keys, group_key])] });
+  }
+
+  includeHistory(session_key: string) {
+    const scope = this.scopes.get(session_key) ?? { history: "latest_turn" as const, group_keys: [] };
+    this.scopes.set(session_key, { ...scope, history: "retained" });
   }
 
   select(session_key: string | null) {
@@ -74,13 +88,14 @@ export class SessionDisplayCache {
   }
 
   detail(session_key: string, event_key: string) {
-    return this.replicas.get(this.key(session_key, "all"))?.items.get(`detail:${event_key}`)?.detail
+    return this.replicas.get(this.key(session_key, "steps"))?.items.get(`detail:${event_key}`)?.detail
+      ?? this.replicas.get(this.key(session_key, "all"))?.items.get(`detail:${event_key}`)?.detail
       ?? this.replicas.get(this.key(session_key, "details"))?.items.get(`detail:${event_key}`)?.detail ?? null;
   }
 
   /** Complete semantic membership; activity disclosures decide which rows to mount. */
   trajectoryGroup(session_key: string, trajectory_key: string): TrajectoryEventPageResponse | null {
-    const replica = this.replicas.get(this.key(session_key, "all"));
+    const replica = this.replicas.get(this.key(session_key, "steps")) ?? this.replicas.get(this.key(session_key, "all"));
     const keys = replica?.items.get(trajectory_key)?.summary?.child_keys;
     if (!replica || !keys) return null;
     const events = keys.map((key) => replica.items.get(key)?.summary);
@@ -91,6 +106,14 @@ export class SessionDisplayCache {
       next_cursor: null,
       total_events: keys.length,
     };
+  }
+
+  activityGroupForEvent(session_key: string, event_key: string): string | null {
+    const replica = this.replicas.get(this.key(session_key, "steps"));
+    for (const item of replica?.items.values() ?? []) {
+      if (item.summary?.type === "activity_group" && item.summary.child_keys?.includes(event_key)) return item.item_id;
+    }
+    return null;
   }
 
   sourceEvents(session_key: string) {
@@ -124,6 +147,8 @@ export class SessionDisplayCache {
       const eventKey = changedKey(key, item);
       if (eventKey && !items.has(key)) changed.add(eventKey);
     }
+    const details = this.replicas.get(this.key(session_key, "details"));
+    for (const key of changed) details?.items.delete(`detail:${key}`);
     this.acceptedItems.set(session_key, items);
     return changed;
   }
@@ -178,6 +203,14 @@ export class SessionDisplayCache {
     }
     if (events.length !== order.length) { this.replicas.delete(key); return null; }
     const page: EventPageResponse = { ...update.state, events };
+    if (update.level === "steps" && update.state.scope) {
+      const pendingScope = this.scopes.get(update.session_key);
+      this.scopes.set(update.session_key, { ...update.state.scope,
+        history: pendingScope?.history === "retained" ? "retained" : update.state.scope.history,
+        group_keys: update.snapshot && previous && previous.generation !== update.generation
+          ? update.state.scope.group_keys : [...new Set([...update.state.scope.group_keys, ...(pendingScope?.group_keys ?? [])])],
+      });
+    }
     this.pageItems.set(page, items);
     this.replicas.delete(key);
     this.replicas.set(key, { subscription_id: update.subscription_id, generation: update.generation, revision: update.revision, items, order, event_order, page, bytes });
@@ -196,6 +229,7 @@ export class SessionDisplayCache {
         this.replicas.delete(key); this.subscriptions.delete(key);
       }
       this.access.delete(oldest);
+      this.scopes.delete(oldest);
       this.acceptedItems.delete(oldest);
     }
     return page;

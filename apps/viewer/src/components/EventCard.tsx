@@ -25,6 +25,7 @@ import {
   UsageIcon,
   WarningIcon,
 } from "./Icons";
+import { DeferredActivityGroup } from "./DeferredActivityGroup";
 import { ActivityGroup, groupActivity } from "./ActivityGroup";
 import { ShellOutputSection } from "./ShellOutputSection";
 import { MessageCard } from "./MessageCard";
@@ -53,6 +54,9 @@ interface EventCardProps {
   on_open_related_session?: (target: SessionSummary) => void;
   on_retry_detail: () => void;
   trajectory_page?: TrajectoryEventPageState | null;
+  activity_pages?: ReadonlyMap<string, TrajectoryEventPageState>;
+  on_activity_load?: (group_key: string) => void;
+  on_activity_visibility?: (group_key: string, visible: boolean) => void;
   on_trajectory_retry?: (trajectory_key: string) => void;
   expanded_activity_keys?: Set<string>;
   expanded_activities?: Map<string, ExpandedActivityState>;
@@ -474,6 +478,9 @@ function TrajectorySection({
   on_toggle,
   on_toggle_child,
   page,
+  activity_pages,
+  on_activity_load,
+  on_activity_visibility,
   selected_event_key,
   expanded_child_detail,
   expanded_child_detail_error,
@@ -495,6 +502,9 @@ function TrajectorySection({
   on_toggle: (event_key: string) => void;
   on_toggle_child?: (trajectory_key: string, event_key: string) => void;
   page: TrajectoryEventPageState | null | undefined;
+  activity_pages?: ReadonlyMap<string, TrajectoryEventPageState>;
+  on_activity_load?: (group_key: string) => void;
+  on_activity_visibility?: (group_key: string, visible: boolean) => void;
   selected_event_key: string | null | undefined;
   expanded_child_detail: EventDetail | null;
   expanded_child_detail_error: string | null;
@@ -516,6 +526,39 @@ function TrajectorySection({
     group_key: group[0].event_key,
     events: hide_lifecycle ? group.filter((child) => !isBookkeepingEvent(child)) : group,
   })).filter((group) => group.events.length > 0);
+  const renderChild = (childEvent: EventSummary) => (
+    <div
+      className="trajectory-section__item"
+      data-error={childEvent.is_error || childEvent.type === "error"}
+      data-scroll-key={`${event.event_key}/${childEvent.event_key}`}
+      key={childEvent.event_key}
+      role="listitem"
+    >
+      <EventCard
+        session_key={session_key}
+        hide_lifecycle={hide_lifecycle}
+        button_id={eventButtonId(childEvent.event_key)}
+        detail={expanded_activities?.get(childEvent.event_key)?.detail ?? (childEvent.event_key === expanded_child_event_key
+          ? expanded_child_detail
+          : null)}
+        detail_error={expanded_activities?.get(childEvent.event_key)?.error ?? (childEvent.event_key === expanded_child_event_key
+          ? expanded_child_detail_error
+          : null)}
+        detail_loading={expanded_activities?.get(childEvent.event_key)?.is_loading
+          ?? (childEvent.event_key === expanded_child_event_key && expanded_child_detail_loading)}
+        event={childEvent}
+        is_expanded={expanded_activity_keys?.has(childEvent.event_key) ?? (childEvent.event_key === expanded_child_event_key)}
+        is_selected={childEvent.event_key === selected_event_key}
+        on_open_related_session={on_open_related_session}
+        on_retry_detail={() => {
+          on_retry_child_detail?.(event.event_key, childEvent.event_key);
+        }}
+        on_select={on_select}
+        on_toggle={(eventKey) => on_toggle_child?.(event.event_key, eventKey)}
+        selected_event_key={selected_event_key}
+      />
+    </div>
+  );
   return (
     <section className="trajectory-section" data-selected={is_selected}>
       <div className="trajectory-section__header">
@@ -590,43 +633,17 @@ function TrajectorySection({
 
               {visibleEvents.length > 0 ? (
                 <div aria-label="Events in this turn" className="trajectory-section__events" role="list">
-                  {activityGroups.map(({ group_key, events: group }) => (
+                  {activityGroups.map(({ group_key, events: group }) => group[0].type === "activity_group" ? (
+                    <DeferredActivityGroup key={group_key} event={group[0]} page={activity_pages?.get(group_key)}
+                      selected_event_key={selected_event_key} on_load={on_activity_load} on_retry={on_retry} parent_visible={is_expanded}
+                      on_visibility={on_activity_visibility}>
+                      {(children) => children.filter((child) => !hide_lifecycle || !isBookkeepingEvent(child)).map(renderChild)}
+                    </DeferredActivityGroup>
+                  ) : (
                     <ActivityGroup key={group_key} events={group} selected_event_key={selected_event_key}
                       reveal={group.some((child) => expanded_activity_keys?.has(child.event_key)
                         ?? child.event_key === expanded_child_event_key)}>
-                      {() => group.map((childEvent) => (
-                        <div
-                          className="trajectory-section__item"
-                          data-error={childEvent.is_error || childEvent.type === "error"}
-                          data-scroll-key={`${event.event_key}/${childEvent.event_key}`}
-                          key={childEvent.event_key}
-                          role="listitem"
-                        >
-                          <EventCard
-                            session_key={session_key}
-                            hide_lifecycle={hide_lifecycle}
-                            button_id={eventButtonId(childEvent.event_key)}
-                            detail={expanded_activities?.get(childEvent.event_key)?.detail ?? (childEvent.event_key === expanded_child_event_key
-                              ? expanded_child_detail
-                              : null)}
-                            detail_error={expanded_activities?.get(childEvent.event_key)?.error ?? (childEvent.event_key === expanded_child_event_key
-                              ? expanded_child_detail_error
-                              : null)}
-                            detail_loading={expanded_activities?.get(childEvent.event_key)?.is_loading
-                              ?? (childEvent.event_key === expanded_child_event_key && expanded_child_detail_loading)}
-                            event={childEvent}
-                            is_expanded={expanded_activity_keys?.has(childEvent.event_key) ?? (childEvent.event_key === expanded_child_event_key)}
-                            is_selected={childEvent.event_key === selected_event_key}
-                            on_open_related_session={on_open_related_session}
-                            on_retry_detail={() => {
-                              on_retry_child_detail?.(event.event_key, childEvent.event_key);
-                            }}
-                            on_select={on_select}
-                            on_toggle={(eventKey) => on_toggle_child?.(event.event_key, eventKey)}
-                            selected_event_key={selected_event_key}
-                          />
-                        </div>
-                      ))}
+                      {() => group.map(renderChild)}
                     </ActivityGroup>
                   ))}
                 </div>
@@ -750,6 +767,9 @@ export function EventCard({
   on_open_related_session,
   on_retry_detail,
   trajectory_page,
+  activity_pages,
+  on_activity_load,
+  on_activity_visibility,
   on_trajectory_retry,
   expanded_activity_keys,
   expanded_activities,
@@ -787,6 +807,9 @@ export function EventCard({
         on_toggle={on_toggle}
         on_toggle_child={on_trajectory_event_toggle}
         page={trajectory_page}
+        activity_pages={activity_pages}
+        on_activity_load={on_activity_load}
+        on_activity_visibility={on_activity_visibility}
         selected_event_key={selected_event_key}
       />
     );
