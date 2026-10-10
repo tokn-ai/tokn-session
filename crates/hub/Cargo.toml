@@ -24,6 +24,7 @@ serde_json.workspace = true
 sha2 = "0.10"
 subtle = "2"
 tokn-hub-client-core.workspace = true
+tokn-hub-transport.workspace = true
 tokio.workspace = true
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7", features = ["rt"] }

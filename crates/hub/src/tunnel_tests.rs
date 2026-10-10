@@ -113,6 +113,7 @@ async fn enrollment_streaming_cancellation_reconnect_and_revocation() {
     local_token: None,
     allow_control: false,
     insecure_loopback: true,
+    ice_servers: Vec::new(),
     secure: None,
     paired: None,
   };
@@ -513,6 +514,7 @@ async fn accepted_agent_input_is_not_replayed_after_tunnel_reconnect() {
     local_token: None,
     allow_control: true,
     insecure_loopback: true,
+    ice_servers: Vec::new(),
     secure: None,
     paired: None,
   };
@@ -767,6 +769,7 @@ async fn authenticator_pairing_registers_only_encrypted_hosts_and_persists_trust
     local_token: None,
     allow_control: false,
     insecure_loopback: true,
+    ice_servers: Vec::new(),
     secure: None,
     paired: Some(PairedHostConfig {
       host_id: host_id.clone(),
@@ -1014,6 +1017,7 @@ async fn encrypted_transport_authenticates_grants_bounds_streams_and_rejects_pla
     local_token: None,
     allow_control: false,
     insecure_loopback: true,
+    ice_servers: Vec::new(),
     secure: Some(SecureHostConfig {
       noise_key_file: noise_file,
       owner_public_key: owner.public_key(),

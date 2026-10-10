@@ -44,6 +44,7 @@ struct Harness {
   tasks: Vec<tokio::task::JoinHandle<()>>,
   event_attempts: Arc<AtomicUsize>,
   pairing_directory: PairingDirectory,
+  hub_state: HubState,
 }
 
 #[derive(Clone)]
@@ -85,7 +86,9 @@ impl Harness {
       .route("/api/v1/health", get(|| async { Json(json!({"version":1})) }))
       .route(
         "/api/v1/list_sessions",
-        post(|| async { Json(json!({"sessions":[{"text":"private native history"}]})) }),
+        post(|Json(payload): Json<serde_json::Value>| async move {
+          Json(json!({"sessions":[{"text":"private native history"}],"received":payload}))
+        }),
       )
       .route(
         "/api/v1/events",
@@ -147,6 +150,7 @@ impl Harness {
       viewer_url: viewer_url.to_string(),
       allow_control: false,
       insecure_loopback: true,
+      ice_servers: Vec::new(),
       passkey_origin: Some(hub_url.clone()),
     }
     .save(&host_dir.join("host.json"))
@@ -159,6 +163,7 @@ impl Harness {
       local_token: None,
       allow_control: false,
       insecure_loopback: true,
+      ice_servers: Vec::new(),
       secure: None,
       paired: Some(PairedHostConfig {
         host_id: host_id.clone(),
@@ -188,6 +193,7 @@ impl Harness {
       tasks: vec![viewer_task, hub_task, connector_task],
       event_attempts,
       pairing_directory,
+      hub_state: state,
     }
   }
   fn manager(&self, name: &str) -> RemoteManager {
@@ -654,4 +660,91 @@ fn remote_origins_require_tls_and_reject_credentials_paths_and_queries() {
   assert!(tokn_hub_remote::canonical_hub("http://127.0.0.1:8080").is_ok());
   assert!(tokn_hub_remote::canonical_hub("http://[::1]:8080").is_ok());
   assert!(tokn_hub_remote::canonical_hub("http://[0:0:0:0:0:0:0:1]:8080").is_ok());
+}
+
+async fn authorize_native(harness: &Harness, manager: &RemoteManager, name: &str) {
+  let key = manager.status(&harness.hub_url).await.unwrap().device_public_key;
+  let now = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .unwrap()
+    .as_secs();
+  onboarding::authorize_device(
+    &harness.directory.path().join("host/host-access.json"),
+    &key,
+    now / 30,
+    now,
+  )
+  .unwrap();
+  onboarding::ClientStore::load_or_create(
+    &harness.directory.path().join(name),
+    &Url::parse(&harness.hub_url).unwrap(),
+  )
+  .unwrap()
+  .save_host(SavedHost {
+    host_id: harness.host_id.clone(),
+    host_public_key: harness.host_key.clone(),
+    machine_address: None,
+    name: None,
+  })
+  .unwrap();
+}
+
+#[tokio::test]
+async fn native_direct_records_survive_hub_shutdown_and_keep_host_authorization() {
+  let harness = Harness::start().await;
+  let manager = harness.manager("direct");
+  authorize_native(&harness, &manager, "direct").await;
+  let (sender, mut received) = tokio::sync::mpsc::unbounded_channel();
+  let sink = Arc::new(move |event: &str, value: serde_json::Value| {
+    let _ = sender.send((event.to_owned(), value));
+  });
+  let info = manager
+    .open(&harness.hub_url, &harness.host_id, None, sink)
+    .await
+    .unwrap();
+  tokio::time::timeout(Duration::from_secs(25), async {
+    loop {
+      let (event, payload) = received.recv().await.unwrap();
+      if event == "hub-client-transport" && payload["transport"]["kind"] == "direct" {
+        break;
+      }
+      if event == "hub-client-transport" && payload["transport"]["reason"].is_string() {
+        panic!("Direct upgrade failed: {payload}");
+      }
+    }
+  })
+  .await
+  .unwrap();
+  manager.listen(&info.connection_id).await.unwrap();
+  // A complete request larger than a single RTC message exercises bounded
+  // chunking and independent channel ordering, not just ICE connectivity.
+  let payload = json!({"large":"x".repeat(900_000)});
+  let response = manager
+    .request(&info.connection_id, "list_sessions", payload.clone())
+    .await
+    .unwrap();
+  assert_eq!(response["received"], payload);
+  assert!(
+    manager
+      .request(&info.connection_id, "submit_session_input", json!({"text":"deny"}))
+      .await
+      .unwrap_err()
+      .contains("control")
+  );
+  harness.hub_state.tunnels.shutdown();
+  harness.tasks[1].abort();
+  let response = manager
+    .request(&info.connection_id, "list_sessions", json!({}))
+    .await
+    .unwrap();
+  assert_eq!(response["sessions"][0]["text"], "private native history");
+  let key = manager.status(&harness.hub_url).await.unwrap().device_public_key;
+  onboarding::remove_device(&harness.directory.path().join("host/host-access.json"), &key).unwrap();
+  assert!(
+    manager
+      .request(&info.connection_id, "list_sessions", json!({}))
+      .await
+      .is_err()
+  );
+  manager.close_all().await;
 }

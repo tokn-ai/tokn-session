@@ -55,6 +55,7 @@ The core abstraction is `AgentEvent`: provider-native historical sessions and li
 - `crates/relay`: provider live feeds and stdout/ZeroMQ/managed-stdio transports.
 - `crates/hub`: host-verified authenticator pairing, saved device trust, encrypted client/host tunnels, and optional passkey administration; legacy signed grants remain available.
 - `crates/hub-client-core`: shared native/WASM pairing and Noise encryption without networking.
+- `crates/hub-transport`: bounded ordered record interface and native WebRTC carrier.
 - `crates/hub-remote`: native direct-to-Hub client, remembered identities, requests, and live events.
 - `crates/viewer-core`: shared viewer domain, index scheduler, snapshot/follow readers, and Relay supervision.
 - `crates/viewer-api`: HTTP/SSE adapter and optional static web UI host for browser clients.

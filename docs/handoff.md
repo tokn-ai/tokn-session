@@ -137,8 +137,15 @@ The Hub and browser UI are deployed at `https://ahub.clouds56.top` on ctl host
 systemd service. Persistent state stays outside versioned releases. See
 [deployment](../deploy/vultr-2/README.md) for configuration, checks, and updates.
 
-The default remote path is app/browser → Hub → host. Hub serves the browser UI
-and forwards encrypted records; endpoints run the shared Rust pairing/Noise
+Remote app/browser clients use the Hub for discovery, pairing and encrypted
+WebRTC negotiation, then prefer direct connections with encrypted Hub relay
+fallback. `hub-transport` supplies a bounded record interface for future native
+tunnels; each WebRTC DataChannel retains fresh Noise IK and existing host/device
+authorization. Direct peers survive Hub reconnects; path changes migrate live
+streams without replaying commands. No public STUN service is enabled by default;
+host `--stun-server` settings persist and reach authenticated clients. The panel
+shows Direct/Relayed separately from encryption. See [transports](hub-transports.md).
+Hub serves the browser UI and forwards encrypted records when needed; endpoints run the shared Rust pairing/Noise
 implementation (`hub-client-core`, compiled to WASM for browsers).
 `connect --hub …` saves UUID/keys/config, displays a local TOTP setup QR, and
 prints a machine reference `UUID@host_public_key`. Open the Hub URL or choose
@@ -205,7 +212,7 @@ access; failed or canceled opens keep the last successful selection. Viewer
 requests and events capture their machine transport, including pagination and
 compatibility fallbacks, so delayed local work cannot target a newly opened host.
 Hub mode uses `hub-remote` through async Tauri commands/events; browser Hub mode
-uses direct encrypted WebSockets. Both select one machine and share the same
+uses WebRTC with encrypted WebSocket fallback. Both select one machine and share the same
 viewer command interface, host-scoped caches, cancellation, and live updates.
 Standalone browser development can still connect directly to
 `crates/viewer-api` over HTTP/SSE. `viewer-api` serves the compiled `apps/viewer/dist` frontend

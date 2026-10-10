@@ -1,4 +1,4 @@
-use crate::{Connection, exchange::Exchange};
+use crate::Connection;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::oneshot;
@@ -21,14 +21,22 @@ async fn pump_with_startup_timeout(
   let mut attempted = false;
   let deadline = tokio::time::Instant::now() + startup_timeout;
   let mut failure = "Machine disconnected".to_owned();
+  let mut path = connection.direct.changes.subscribe();
   while !connection.cancellation.is_cancelled() {
+    let current_path = path.borrow_and_update().kind;
     connection.state(if attempted { "reconnecting" } else { "connecting" });
     attempted = true;
     let result = tokio::select! {
       biased;
       _ = connection.cancellation.cancelled() => {failure = "Machine disconnected".into();break;},
+      _ = async {
+        loop {
+          if path.changed().await.is_err() { std::future::pending::<()>().await; }
+          if path.borrow_and_update().kind != current_path { break; }
+        }
+      } => { continue; },
       result = async {
-        let opening = Exchange::open(&connection.endpoint,&connection.identity,&connection.info.host_public_key,"GET","/api/v1/events",&[]);
+        let opening = connection.exchange("GET","/api/v1/events",&[]);
         let mut exchange = if connected {opening.await?} else {
           tokio::time::timeout_at(deadline, opening).await.map_err(|_|"Live connection timed out")??
         };
@@ -142,6 +150,7 @@ mod tests {
         endpoint: endpoint.to_string(),
         host_id: uuid::Uuid::new_v4().to_string(),
         host_public_key: identity.public_key(),
+        transport: crate::TransportState::default(),
       },
       endpoint,
       identity,
@@ -149,6 +158,7 @@ mod tests {
       requests: Arc::new(Semaphore::new(1)),
       listening: AtomicBool::new(true),
       sink: Arc::new(|_, _| {}),
+      direct: crate::direct::DirectRoute::default(),
     })
   }
 

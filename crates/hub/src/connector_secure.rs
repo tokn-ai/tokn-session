@@ -11,10 +11,201 @@ use std::{
   fs::OpenOptions,
   io::Read,
   path::Path,
-  sync::Mutex,
+  sync::{Arc, Mutex},
   time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{Semaphore, mpsc};
+use tokio_util::sync::CancellationToken;
+use tokn_hub_transport::{BoxTransport, WebRtcPeer};
+
+#[derive(Clone)]
+enum RecordOutput {
+  Relay {
+    sender: mpsc::Sender<Frame>,
+    channel_id: u64,
+  },
+  Direct(mpsc::Sender<Vec<u8>>),
+}
+
+impl RecordOutput {
+  async fn send(&self, record: Vec<u8>) -> Result<(), String> {
+    match self {
+      Self::Relay { sender, channel_id } => {
+        enqueue(
+          sender,
+          Frame::SecureData {
+            channel_id: *channel_id,
+            data: protocol::encode(&record),
+          },
+        )
+        .await
+      }
+      Self::Direct(sender) => tokio::time::timeout(Duration::from_secs(10), sender.send(record))
+        .await
+        .map_err(|_| "Direct encrypted record send timed out; delivery may be uncertain")?
+        .map_err(|_| "Direct encrypted transport closed".into()),
+    }
+  }
+}
+
+/// Peers outlive individual Hub tunnel connections. Only connector shutdown,
+/// peer failure, or host-owned authorization expiry/revocation retires them.
+pub(super) struct DirectManager {
+  host: Arc<Host>,
+  host_id: String,
+  config: ConnectorConfig,
+  client: reqwest::Client,
+  shutdown: CancellationToken,
+  peers: Arc<Semaphore>,
+  channels: Arc<Semaphore>,
+}
+
+impl DirectManager {
+  pub(super) fn new(
+    host: Arc<Host>,
+    host_id: String,
+    config: ConnectorConfig,
+    client: reqwest::Client,
+    shutdown: CancellationToken,
+  ) -> Arc<Self> {
+    Arc::new(Self {
+      host,
+      host_id,
+      config,
+      client,
+      shutdown,
+      peers: Arc::new(Semaphore::new(16)),
+      channels: Arc::new(Semaphore::new(128)),
+    })
+  }
+
+  // Erasing this future also breaks the type cycle between signaling and the
+  // independently spawned peer's reusable secure exchange state machine.
+  fn negotiate<'a>(
+    self: &'a Arc<Self>,
+    recipient: String,
+    sdp: &'a str,
+    outgoing: &'a RecordOutput,
+    channel: &'a mut SecureChannel,
+  ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+    Box::pin(async move {
+      let permit = self
+        .peers
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| "Direct peer capacity reached; use encrypted Hub relay")?;
+      let (peer, answer) = tokio::select! {
+        _ = self.shutdown.cancelled() => return Err("Host connector is shutting down".into()),
+        result = tokio::time::timeout(Duration::from_secs(20), WebRtcPeer::answer(self.config.ice_servers.clone(), sdp)) => {
+          result.map_err(|_| "Direct negotiation timed out; use encrypted Hub relay")??
+        }
+      };
+      let result = self.host.verify(None, &self.host_id, &recipient);
+      if let Err(error) = result {
+        peer.close().await;
+        return Err(error);
+      }
+      let result = send_record(outgoing, channel.encrypt(&InnerMessage::DirectAnswer { sdp: answer })?).await;
+      if let Err(error) = result {
+        peer.close().await;
+        return Err(error);
+      }
+      let manager = self.clone();
+      tokio::spawn(async move {
+        let _permit = permit;
+        manager.serve_peer(peer, recipient).await;
+      });
+      Ok(())
+    })
+  }
+
+  async fn serve_peer(self: &Arc<Self>, peer: WebRtcPeer, recipient: String) {
+    let mut tasks = tokio::task::JoinSet::new();
+    let closed = peer.closed();
+    let mut policy_check = tokio::time::interval(Duration::from_secs(1));
+    let mut revoked = false;
+    loop {
+      tokio::select! {
+        biased;
+        _ = self.shutdown.cancelled() => break,
+        _ = closed.cancelled() => break,
+        _ = policy_check.tick() => {
+          if self.host.verify(None, &self.host_id, &recipient).is_err() {
+            revoked = true;
+            break;
+          }
+        }
+        accepted = peer.accept_record() => {
+          let Ok(Some(mut transport)) = accepted else { break; };
+          let Ok(permit) = self.channels.clone().try_acquire_owned() else {
+            transport.close().await;
+            continue;
+          };
+          let manager = self.clone();
+          let recipient = recipient.clone();
+          tasks.spawn(async move {
+            let _permit = permit;
+            manager.serve_record(transport, &recipient).await;
+          });
+        }
+        _ = tasks.join_next(), if !tasks.is_empty() => {},
+      }
+    }
+    if revoked {
+      // Every running exchange checks trust each second. Let it send its
+      // authenticated terminal error before shutting down SCTP/UDP, so a quiet
+      // recipient does not have to wait for ICE failure to observe revocation.
+      // Incomplete handshakes/bodies remain bounded and are cancelled below.
+      let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        while tasks.join_next().await.is_some() {}
+      })
+      .await;
+    }
+    tasks.abort_all();
+    peer.close().await;
+  }
+
+  async fn serve_record(self: &Arc<Self>, mut transport: BoxTransport, recipient: &str) {
+    let (incoming, received) = mpsc::channel(16);
+    let (outgoing, mut records) = mpsc::channel(16);
+    let output = RecordOutput::Direct(outgoing);
+    let exchange = run_records(
+      &self.host,
+      &self.host_id,
+      &self.config,
+      &self.client,
+      &output,
+      received,
+      Some(recipient),
+      None,
+    );
+    tokio::pin!(exchange);
+    loop {
+      tokio::select! {
+        biased;
+        _ = self.shutdown.cancelled() => break,
+        _ = &mut exchange => {
+          // A terminal record may have just been enqueued by the exchange.
+          while let Ok(record) = records.try_recv() {
+            if transport.send(record).await.is_err() { break; }
+          }
+          break;
+        }
+        record = records.recv() => {
+          let Some(record) = record else { break; };
+          if transport.send(record).await.is_err() { break; }
+        }
+        result = transport.receive() => {
+          let Ok(Some(record)) = result else { break; };
+          // Excess records fail closed rather than buffering unbounded input
+          // while a local API request waits for authenticated response credits.
+          if incoming.try_send(record).is_err() { break; }
+        }
+      }
+    }
+    transport.close().await;
+  }
+}
 
 pub(super) struct Host {
   identity: NoiseIdentity,
@@ -124,8 +315,7 @@ impl Host {
     host_id: &str,
     first: &[u8],
     incoming: &mut mpsc::Receiver<Vec<u8>>,
-    outgoing: &mpsc::Sender<Frame>,
-    channel_id: u64,
+    outgoing: &RecordOutput,
   ) -> Result<(), String> {
     let HostTrust::PairedDevices(config) = &self.trust else {
       return Err("Authenticator pairing is unavailable".into());
@@ -137,7 +327,7 @@ impl Host {
     let secret = crate::onboarding::read_totp_secret(&config.state_file)?;
     crate::onboarding::begin_pairing(&config.state_file, now()?, step)?;
     let (pending, reply) = crate::pairing::HostPairing::respond(&secret, host_id, &self.identity, first, now()?)?;
-    send_record(outgoing, channel_id, reply).await?;
+    send_record(outgoing, reply).await?;
     let (authenticated, ack) = pending.finish(&receive(incoming).await?, now()?)?;
     // Persist consumption and authorization together before letting the client
     // save its pin. Concurrent completions with the same TOTP step lose here.
@@ -148,7 +338,7 @@ impl Host {
       now()?,
       authenticated.client_kind,
     )?;
-    send_record(outgoing, channel_id, ack).await
+    send_record(outgoing, ack).await
   }
 
   async fn authenticate(
@@ -158,8 +348,7 @@ impl Host {
     payload: serde_json::Value,
     channel: &mut SecureChannel,
     incoming: &mut mpsc::Receiver<Vec<u8>>,
-    outgoing: &mpsc::Sender<Frame>,
-    channel_id: u64,
+    outgoing: &RecordOutput,
   ) -> Result<(), String> {
     let HostTrust::PairedDevices(config) = &self.trust else {
       return Err("This host does not support passkey device authorization".into());
@@ -174,12 +363,7 @@ impl Host {
     let peer = channel.remote_public_key().to_owned();
     let binding = channel.channel_binding().to_owned();
     let (pending, payload) = passkeys.start(operation, payload, &peer, &binding, now()?)?;
-    send_record(
-      outgoing,
-      channel_id,
-      channel.encrypt(&InnerMessage::AuthResponse { payload })?,
-    )
-    .await?;
+    send_record(outgoing, channel.encrypt(&InnerMessage::AuthResponse { payload })?).await?;
     let finish = tokio::time::timeout(Duration::from_secs(CEREMONY_SECONDS), incoming.recv())
       .await
       .map_err(|_| "Host passkey ceremony expired; start again")?
@@ -188,12 +372,7 @@ impl Host {
       return Err("Finish the host passkey ceremony on its original encrypted channel".into());
     };
     let payload = passkeys.finish(pending, operation, payload, &peer, &binding, now()?)?;
-    send_record(
-      outgoing,
-      channel_id,
-      channel.encrypt(&InnerMessage::AuthResponse { payload })?,
-    )
-    .await
+    send_record(outgoing, channel.encrypt(&InnerMessage::AuthResponse { payload })?).await
   }
 }
 
@@ -204,15 +383,8 @@ fn now() -> Result<u64, String> {
     .map_err(|_| "Invalid host clock".into())
 }
 
-async fn send_record(outgoing: &mpsc::Sender<Frame>, channel_id: u64, record: Vec<u8>) -> Result<(), String> {
-  enqueue(
-    outgoing,
-    Frame::SecureData {
-      channel_id,
-      data: protocol::encode(&record),
-    },
-  )
-  .await
+async fn send_record(outgoing: &RecordOutput, record: Vec<u8>) -> Result<(), String> {
+  outgoing.send(record).await
 }
 
 fn read_revocations(path: &Path) -> Result<HashSet<String>, String> {
@@ -263,6 +435,7 @@ async fn receive(incoming: &mut mpsc::Receiver<Vec<u8>>) -> Result<Vec<u8>, Stri
     .ok_or_else(|| "Encrypted channel closed".into())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run(
   host: &Host,
   host_id: &str,
@@ -270,39 +443,93 @@ pub(super) async fn run(
   client: &reqwest::Client,
   outgoing: &mpsc::Sender<Frame>,
   channel_id: u64,
+  incoming: mpsc::Receiver<Vec<u8>>,
+  direct: Option<&Arc<DirectManager>>,
+) -> Result<(), String> {
+  let output = RecordOutput::Relay {
+    sender: outgoing.clone(),
+    channel_id,
+  };
+  run_records(host, host_id, config, client, &output, incoming, None, direct).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_records(
+  host: &Host,
+  host_id: &str,
+  config: &ConnectorConfig,
+  client: &reqwest::Client,
+  outgoing: &RecordOutput,
   mut incoming: mpsc::Receiver<Vec<u8>>,
+  expected_device: Option<&str>,
+  direct: Option<&Arc<DirectManager>>,
 ) -> Result<(), String> {
   let first = receive(&mut incoming).await?;
   if crate::pairing::is_pairing_record(&first) {
-    return host.pair(host_id, &first, &mut incoming, outgoing, channel_id).await;
+    if expected_device.is_some() {
+      return Err("Pair this device through the encrypted Hub channel first".into());
+    }
+    return host.pair(host_id, &first, &mut incoming, outgoing).await;
   }
   let (reply, mut channel) = NoiseResponder::new(&host.identity)?.accept(&first)?;
-  enqueue(
-    outgoing,
-    Frame::SecureData {
-      channel_id,
-      data: protocol::encode(&reply),
-    },
-  )
-  .await?;
+  // A peer is created only for the device that authenticated its signaling.
+  // A fresh Noise IK on each DataChannel still checks the host pin and key.
+  if expected_device.is_some_and(|expected| expected != channel.remote_public_key()) {
+    return Err("Direct channel identity differs from its authenticated signaling device".into());
+  }
+  send_record(outgoing, reply).await?;
   let header = channel.decrypt(&receive(&mut incoming).await?)?;
   if let InnerMessage::AuthRequest { operation, payload } = header {
+    if expected_device.is_some() {
+      return Err("Authenticate this device through the encrypted Hub channel first".into());
+    }
     let result = host
-      .authenticate(
-        host_id,
-        operation,
-        payload,
-        &mut channel,
-        &mut incoming,
-        outgoing,
-        channel_id,
-      )
+      .authenticate(host_id, operation, payload, &mut channel, &mut incoming, outgoing)
       .await;
     if let Err(message) = &result {
       if let Ok(record) = channel.encrypt(&InnerMessage::Error {
         message: message.clone(),
       }) {
-        let _ = send_record(outgoing, channel_id, record).await;
+        let _ = send_record(outgoing, record).await;
+      }
+    }
+    return result;
+  }
+  if matches!(
+    &header,
+    InnerMessage::DirectConfigRequest {} | InnerMessage::DirectOffer { .. }
+  ) {
+    let result = async {
+      if expected_device.is_some() {
+        return Err("Negotiate direct connections through the encrypted Hub channel".into());
+      }
+      let recipient = channel.remote_public_key().to_owned();
+      host.verify(None, host_id, &recipient)?;
+      match header {
+        InnerMessage::DirectConfigRequest {} => {
+          send_record(
+            outgoing,
+            channel.encrypt(&InnerMessage::DirectConfig {
+              ice_servers: config.ice_servers.clone(),
+            })?,
+          )
+          .await
+        }
+        InnerMessage::DirectOffer { sdp } => {
+          direct
+            .ok_or("Direct connections are unavailable on this host")?
+            .negotiate(recipient, &sdp, outgoing, &mut channel)
+            .await
+        }
+        _ => unreachable!(),
+      }
+    }
+    .await;
+    if let Err(message) = &result {
+      if let Ok(record) = channel.encrypt(&InnerMessage::Error {
+        message: message.clone(),
+      }) {
+        let _ = send_record(outgoing, record).await;
       }
     }
     return result;
@@ -317,7 +544,7 @@ pub(super) async fn run(
     if let Ok(record) = channel.encrypt(&InnerMessage::Error {
       message: message.clone(),
     }) {
-      let _ = send_record(outgoing, channel_id, record).await;
+      let _ = send_record(outgoing, record).await;
     }
     return Err(message);
   }
@@ -356,7 +583,6 @@ pub(super) async fn run(
       &path,
       body,
       outgoing,
-      channel_id,
       &channel,
       &window,
     );
@@ -385,7 +611,6 @@ pub(super) async fn run(
   if let Err(message) = &result {
     let _ = send_inner(
       outgoing,
-      channel_id,
       &channel,
       &InnerMessage::Error {
         message: message.clone(),
@@ -416,20 +641,12 @@ pub(super) async fn run(
 }
 
 async fn send_inner(
-  outgoing: &mpsc::Sender<Frame>,
-  channel_id: u64,
+  outgoing: &RecordOutput,
   channel: &Mutex<SecureChannel>,
   message: &InnerMessage,
 ) -> Result<(), String> {
   let bytes = channel.lock().unwrap().encrypt(message)?;
-  enqueue(
-    outgoing,
-    Frame::SecureData {
-      channel_id,
-      data: protocol::encode(&bytes),
-    },
-  )
-  .await
+  send_record(outgoing, bytes).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -440,8 +657,7 @@ async fn forward(
   method: &str,
   path: &str,
   body: Vec<u8>,
-  outgoing: &mpsc::Sender<Frame>,
-  channel_id: u64,
+  outgoing: &RecordOutput,
   channel: &Mutex<SecureChannel>,
   window: &Semaphore,
 ) -> Result<(), String> {
@@ -455,7 +671,6 @@ async fn forward(
   }
   send_inner(
     outgoing,
-    channel_id,
     channel,
     &InnerMessage::Response {
       status: response.status().as_u16(),
@@ -488,7 +703,6 @@ async fn forward(
         .forget();
       send_inner(
         outgoing,
-        channel_id,
         channel,
         &InnerMessage::Chunk {
           data: protocol::encode(part),
@@ -497,7 +711,7 @@ async fn forward(
       .await?;
     }
   }
-  send_inner(outgoing, channel_id, channel, &InnerMessage::End {}).await
+  send_inner(outgoing, channel, &InnerMessage::End {}).await
 }
 
 async fn forward_device(
@@ -558,6 +772,7 @@ mod tests {
       local_token: None,
       allow_control: false,
       insecure_loopback: false,
+      ice_servers: Vec::new(),
       secure: None,
       paired: Some(PairedHostConfig {
         host_id: "11111111-1111-4111-8111-111111111111".into(),
@@ -570,6 +785,19 @@ mod tests {
   async fn open_host(
     config: &ConnectorConfig,
     device: &NoiseIdentity,
+  ) -> (
+    tokio::task::JoinHandle<Result<(), String>>,
+    mpsc::Sender<Vec<u8>>,
+    mpsc::Receiver<Frame>,
+    SecureChannel,
+  ) {
+    open_host_with_direct(config, device, None).await
+  }
+
+  async fn open_host_with_direct(
+    config: &ConnectorConfig,
+    device: &NoiseIdentity,
+    direct: Option<Arc<DirectManager>>,
   ) -> (
     tokio::task::JoinHandle<Result<(), String>>,
     mpsc::Sender<Vec<u8>>,
@@ -591,6 +819,7 @@ mod tests {
         &outgoing,
         1,
         received,
+        direct.as_ref(),
       )
       .await
     });
@@ -683,6 +912,8 @@ mod tests {
         method: "GET".into(),
         path: "/api/v1/health".into(),
       },
+      InnerMessage::DirectConfigRequest {},
+      InnerMessage::DirectOffer { sdp: "v=0\r\n".into() },
       InnerMessage::AuthRequest {
         operation: HostAuthOperation::RegisterStart,
         payload: json!({}),
@@ -723,6 +954,7 @@ mod tests {
       allow_control: config.allow_control,
       insecure_loopback: config.insecure_loopback,
       passkey_origin: Some(config.hub_url.to_string()),
+      ice_servers: Vec::new(),
     };
     let profile_path = directory.path().join("host.json");
     profile.save(&profile_path).unwrap();
@@ -736,6 +968,206 @@ mod tests {
         .verify(None, &config.paired.as_ref().unwrap().host_id, &device.public_key())
         .is_err()
     );
+  }
+
+  #[tokio::test]
+  async fn direct_channel_cannot_substitute_a_different_noise_device() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = paired_host(directory.path());
+    let host = Arc::new(Host::load(&config).unwrap().unwrap());
+    let expected = NoiseIdentity::generate().unwrap().public_key();
+    let impostor = NoiseIdentity::generate().unwrap();
+    let mut initiator = NoiseInitiator::new(&impostor, &host.public_key()).unwrap();
+    let (incoming, received) = mpsc::channel(16);
+    let (outgoing, mut sent) = mpsc::channel(16);
+    let output = RecordOutput::Direct(outgoing);
+    let task = tokio::spawn(async move {
+      run_records(
+        &host,
+        &config.paired.as_ref().unwrap().host_id,
+        &config,
+        &reqwest::Client::new(),
+        &output,
+        received,
+        Some(&expected),
+        None,
+      )
+      .await
+    });
+    incoming.send(initiator.start().unwrap()).await.unwrap();
+    let error = task.await.unwrap().unwrap_err();
+    assert!(error.contains("signaling device"));
+    assert!(
+      sent.recv().await.is_none(),
+      "Do not complete a substituted direct handshake"
+    );
+  }
+
+  #[tokio::test]
+  async fn authenticated_direct_peer_survives_signaling_close_and_revocation_stops_stream() {
+    use axum::{
+      Router,
+      response::sse::{Event, Sse},
+      routing::{get, post},
+    };
+    use futures_util::stream;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
+    let app = Router::new()
+      .route(
+        "/api/v1/health",
+        get(|| async { axum::Json(json!({"api_version": 1})) }),
+      )
+      .route(
+        "/api/v1/list_sessions",
+        post(|body: axum::body::Bytes| async move { axum::Json(json!({"length": body.len()})) }),
+      )
+      .route(
+        "/api/v1/events",
+        get(|| async {
+          Sse::new(
+            stream::once(async { Ok::<_, std::convert::Infallible>(Event::default().event("ready").data("{}")) })
+              .chain(stream::pending()),
+          )
+        }),
+      );
+    let api = tokio::spawn(async move {
+      axum::serve(listener, app).await.unwrap();
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = paired_host(directory.path());
+    config.local_url = local_url;
+    let device = NoiseIdentity::generate().unwrap();
+    let state_file = config.paired.as_ref().unwrap().state_file.clone();
+    let current = now().unwrap();
+    crate::onboarding::authorize_device(&state_file, &device.public_key(), current / 30, current).unwrap();
+    let host = Arc::new(Host::load(&config).unwrap().unwrap());
+    let host_id = config.paired.as_ref().unwrap().host_id.clone();
+    let shutdown = CancellationToken::new();
+    let manager = DirectManager::new(
+      host.clone(),
+      host_id,
+      config.clone(),
+      reqwest::Client::new(),
+      shutdown.clone(),
+    );
+    let (peer, offer) = WebRtcPeer::offer(Vec::new()).await.unwrap();
+    let (task, incoming, mut frames, mut signal) = open_host_with_direct(&config, &device, Some(manager)).await;
+    incoming
+      .send(signal.encrypt(&InnerMessage::DirectOffer { sdp: offer }).unwrap())
+      .await
+      .unwrap();
+    let InnerMessage::DirectAnswer { sdp } = read_inner(&mut frames, &mut signal).await else {
+      panic!("Expected authenticated direct answer");
+    };
+    drop(incoming);
+    task.await.unwrap().unwrap();
+    drop(frames); // Simulates a Hub tunnel failure after negotiation.
+    peer.accept_answer(&sdp).await.unwrap();
+    // The direct pump must accept the complete supported upload size without
+    // overflowing its small queue when the sender can deliver records quickly.
+    let mut upload = peer.open_record().await.unwrap();
+    let mut initiator = NoiseInitiator::new(&device, &host.public_key()).unwrap();
+    upload.send(initiator.start().unwrap()).await.unwrap();
+    let mut upload_channel = initiator.finish(&upload.receive().await.unwrap().unwrap()).unwrap();
+    upload
+      .send(
+        upload_channel
+          .encrypt(&InnerMessage::DeviceRequest {
+            method: "POST".into(),
+            path: "/api/v1/list_sessions".into(),
+          })
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+    for chunk in vec![42; protocol::MAX_BODY].chunks(protocol::CHUNK_SIZE) {
+      upload
+        .send(
+          upload_channel
+            .encrypt(&InnerMessage::RequestBody {
+              data: protocol::encode(chunk),
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+    upload
+      .send(upload_channel.encrypt(&InnerMessage::RequestEnd {}).unwrap())
+      .await
+      .unwrap();
+    assert!(matches!(
+      upload_channel
+        .decrypt(&upload.receive().await.unwrap().unwrap())
+        .unwrap(),
+      InnerMessage::Response { status: 200, .. }
+    ));
+    let InnerMessage::Chunk { data } = upload_channel
+      .decrypt(&upload.receive().await.unwrap().unwrap())
+      .unwrap()
+    else {
+      panic!("Expected upload response");
+    };
+    let received: Value = serde_json::from_slice(&protocol::decode(&data, protocol::CHUNK_SIZE).unwrap()).unwrap();
+    assert_eq!(received["length"], protocol::MAX_BODY);
+    upload
+      .send(upload_channel.encrypt(&InnerMessage::Window { credits: 1 }).unwrap())
+      .await
+      .unwrap();
+    assert!(matches!(
+      upload_channel
+        .decrypt(&upload.receive().await.unwrap().unwrap())
+        .unwrap(),
+      InnerMessage::End {}
+    ));
+    upload.close().await;
+    let mut transport = peer.open_record().await.unwrap();
+    let mut initiator = NoiseInitiator::new(&device, &host.public_key()).unwrap();
+    transport.send(initiator.start().unwrap()).await.unwrap();
+    let mut channel = initiator.finish(&transport.receive().await.unwrap().unwrap()).unwrap();
+    transport
+      .send(
+        channel
+          .encrypt(&InnerMessage::DeviceRequest {
+            method: "GET".into(),
+            path: "/api/v1/events".into(),
+          })
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+    transport
+      .send(channel.encrypt(&InnerMessage::RequestEnd {}).unwrap())
+      .await
+      .unwrap();
+    assert!(matches!(
+      channel.decrypt(&transport.receive().await.unwrap().unwrap()).unwrap(),
+      InnerMessage::Response { status: 200, .. }
+    ));
+    let InnerMessage::Chunk { data } = channel.decrypt(&transport.receive().await.unwrap().unwrap()).unwrap() else {
+      panic!("Expected direct SSE");
+    };
+    assert!(
+      String::from_utf8(protocol::decode(&data, protocol::CHUNK_SIZE).unwrap())
+        .unwrap()
+        .contains("event: ready")
+    );
+    transport
+      .send(channel.encrypt(&InnerMessage::Window { credits: 1 }).unwrap())
+      .await
+      .unwrap();
+    crate::onboarding::remove_device(&state_file, &device.public_key()).unwrap();
+    let terminal = tokio::time::timeout(Duration::from_secs(5), transport.receive())
+      .await
+      .expect("Revocation must terminate an existing direct stream");
+    match terminal {
+      Ok(Some(record)) => assert!(matches!(channel.decrypt(&record).unwrap(), InnerMessage::Error { .. })),
+      Ok(None) | Err(_) => {}
+    }
+    shutdown.cancel();
+    peer.close().await;
+    api.abort();
   }
 
   #[test]

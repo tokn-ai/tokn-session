@@ -21,6 +21,7 @@ members = [
   "crates/hub",
   "crates/hub-remote",
   "crates/hub-client-core",
+  "crates/hub-transport",
   "crates/viewer-core",
   "crates/viewer-api",
 ]
@@ -42,6 +43,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "net", "io-util"] }
 tokn-hub-client-core = { path = "crates/hub-client-core" }
+tokn-hub-transport = { path = "crates/hub-transport" }
 tokn-codex-protocol = { path = "crates/codex-protocol" }
 tokn-dsh-protocol = { path = "crates/dsh-protocol" }
 tokn-opencode-protocol = { path = "crates/opencode-protocol" }
