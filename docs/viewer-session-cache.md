@@ -35,7 +35,7 @@ resident. New turns accumulate; this is not a sliding one-turn limit. A
 source replacement creates new identities and preserves the loaded turn span
 where possible. An evicted session reopens with the initial window.
 
-Normalized source records outside the retained window live in an anonymous
+Loaded normalized source records outside the delivered window live in an anonymous
 temporary disk journal, with compact offsets, fingerprints, turn boundaries and
 dependency positions in memory. Concurrent subscribers share the reader and
 journal. Appends write only new records; old snapshots see their committed
@@ -50,8 +50,11 @@ the last subscriber cancels the reader. Cancellation is cooperative around
 provider decoding and between journal records. Journal bytes also supply size
 accounting, and only mutable-source reconciliation computes eager fingerprints.
 
-Generation-scoped event keys use absolute source positions, so prepending
-history cannot renumber existing cards, details or translations. A separate
+Generation-scoped event keys use stable source positions. Lazy Codex ranges
+start at an opaque positive anchor, so prepending unchanged normalized history
+does not renumber existing cards, details or translations. If earlier context
+changes the suffix shape, a new generation clears affected caches. The explicit
+`has_earlier` flag controls loading; positive positions do not imply missing history. A separate
 presentation slot can restore trajectory disclosure after a replacement; it
 must never identify cached content. Inspector/native requests remain tied to
 the same displayed snapshot. Malformed or interrupted updates cannot replace

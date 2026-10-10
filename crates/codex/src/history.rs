@@ -13,6 +13,7 @@ use crate::normalize::CodexNormalizer;
 use crate::session_source::inspect_session_header;
 
 mod reader;
+mod window;
 pub use reader::{CodexHistoryReadStats, CodexHistoryReader, CodexHistoryUpdate};
 
 const MAX_SEGMENTS: usize = 64;
@@ -290,3 +291,6 @@ fn cutoff_matches(path: &Path, base: &HistoryPosition) -> Result<bool, String> {
     );
   }
 }
+
+#[cfg(test)]
+mod window_tests;

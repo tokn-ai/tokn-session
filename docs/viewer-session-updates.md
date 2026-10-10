@@ -93,8 +93,16 @@ folded display objects. Native inspection is independently opt-in.
 Cold source loading happens before taking the shared subscription lock; snapshot
 capture and publication still share that lock. One slow cold session therefore
 does not hold up unrelated live subscriptions while its source reader starts.
-Inherited Codex history resolves its lineage once, and its tolerant decoder reads
-typed fields from the retained JSON without temporary payload clones.
+Codex window readers resolve lineage, scan backward to the latest explicit turn
+start, seed the normalizer from session metadata, and decode only that suffix.
+Earlier requests prepend three turns; ordinary polls retain the loaded range.
+Split tool results widen the source range to their invocation before publication,
+including late live outputs. Completed lifecycle items already contain their
+own display context. Dependency widening is bounded, with a full-reader fallback
+for distant/missing invocations. Missing turn checkpoints and thread-spawn
+filtering also use the full reader. Inherited prefix metadata, cutoffs and file
+guards remain verified; omitted body parsing/validation waits until loading.
+The tolerant decoder avoids temporary payload clones.
 
 For a read-only source timing probe, save a JSON object containing `source_path`
 and `session_id`, then run:
@@ -109,8 +117,9 @@ contents. Debug timings are diagnostic, not desktop release benchmarks.
 
 ## Remaining costs
 
-Source readers may still retain/normalize a broader window than the selected
-projection. Initial retained source delivery covers the latest user turn and required context. Earlier
+Other providers and Codex correctness fallbacks still normalize full history.
+Codex source windows can be broader than the selected projection when dependencies
+require earlier context. Initial delivery covers the latest turn and required context. Earlier
 source-window expansion can resend the retained window between source service
 and viewer-core. Projection still rebuilds retained timelines and tool assembly
 before comparison, under the shared subscription lock; this work has not been

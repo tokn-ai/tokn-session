@@ -13,10 +13,14 @@ with collapsed inner groups and never backfills saved reading anchors before
 first paint. Heartbeats renew identity leases without fetching data.
 Cold source startup runs outside the shared subscription lock, and initial
 source windows now contain one user turn plus dependency/attention context.
-Codex decoding avoids temporary payload clones and duplicate cold lineage
-resolution. Full historical normalization/journal creation remains the main
-cold cost; use the opt-in `profile_local_codex_open` diagnostic to separate it
-from display projection. Snapshot
+Codex window readers scan backward to explicit turn starts, normalize only the
+latest turn, and prepend older turns on request. Split tool outputs widen the
+range to their invocation; completed lifecycle snapshots do not. Inherited
+prefixes retain metadata/version/guard verification without normalizing their
+omitted bodies. Legacy formats without turn starts and thread-spawn filtering
+retain full-reader fallbacks. Other providers still normalize full histories.
+Use `profile_local_codex_open` to compare full decoding with lazy reader startup.
+Snapshot
 baselines and publication share revisions; reconnects and replacements recover
 through backward reads. Old-socket cleanup cannot remove reclaimed interests.
 

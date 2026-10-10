@@ -28,7 +28,7 @@ fn profile_local_codex_open() {
   drop(decoded);
   drop(history);
   let start = std::time::Instant::now();
-  let reader = SessionReader::new(
+  let reader = SessionReader::new_with_mode(
     CatalogEntry {
       key: "profile".into(),
       provider: Provider::Codex,
@@ -36,24 +36,18 @@ fn profile_local_codex_open() {
     },
     false,
     root,
+    None,
+    true,
   )
   .unwrap();
   eprintln!(
-    "reader_ms={} records={} events={}",
+    "lazy_reader_ms={} records={} events={}",
     start.elapsed().as_millis(),
     reader.snapshot.records.len(),
     reader.snapshot.records.events
   );
   let latest = reader.snapshot.records.window_start(None, None);
-  let previous_three = reader
-    .snapshot
-    .records
-    .window_start(None, Some(reader.snapshot.records.events));
-  eprintln!(
-    "latest_window_events={} three_turn_window_events={}",
-    reader.snapshot.records.events - latest,
-    reader.snapshot.records.events - previous_three
-  );
+  eprintln!("initial_delivery_events={}", reader.snapshot.records.events - latest);
   if let Some(history) = &reader.codex_history {
     eprintln!("read_stats={:?}", history.stats());
   }
@@ -655,4 +649,83 @@ fn workbuddy_catalog_wal_updates_followed_presentation() {
     Some("Changed catalog title")
   );
   assert_eq!(reader.snapshot.generation, initial);
+}
+
+#[test]
+fn lazy_codex_prepend_preserves_existing_event_positions_across_pages() {
+  use std::collections::BTreeMap;
+  use std::io::Write;
+  let directory = TempDir::new().unwrap();
+  let path = directory.path().join("rollout-lazy.jsonl");
+  let turn = |index| {
+    format!(
+      "{}\n{}\n",
+      serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_id":format!("turn-{index}")}}),
+      serde_json::json!({"type":"event_msg","payload":{"type":"user_message","message":format!("prompt-{index}")}})
+    )
+  };
+  let mut body = format!(
+    "{}\n",
+    serde_json::json!({"type":"session_meta","payload":{"id":"lazy","cwd":"/tmp"}})
+  );
+  for index in 0..8 {
+    body.push_str(&turn(index));
+  }
+  std::fs::write(&path, body).unwrap();
+  let mut reader = SessionReader::new_with_mode(
+    CatalogEntry {
+      key: "lazy".into(),
+      provider: Provider::Codex,
+      header: serde_json::from_value(serde_json::json!({"id":"lazy","path":path})).unwrap(),
+    },
+    false,
+    directory.path().into(),
+    None,
+    true,
+  )
+  .unwrap();
+  let positions = |reader: &SessionReader| {
+    let mut result = BTreeMap::new();
+    for index in 0..reader.snapshot.records.len() {
+      let (record, start) = reader.snapshot.records.read(index).unwrap();
+      for (offset, event) in record.record.events.into_iter().enumerate() {
+        if let tokn_session_core::AgentEvent::Message(message) = event {
+          result.insert(message.text, reader.snapshot.event_base + start + offset);
+        }
+      }
+    }
+    result
+  };
+  let generation = reader.snapshot.generation.clone();
+  assert_eq!(positions(&reader).len(), 1);
+  assert!(!reader.ensure_history(Some((None, None))).unwrap());
+  for expected in [4, 7, 8] {
+    let before = positions(&reader);
+    assert!(
+      reader
+        .ensure_history(Some((None, Some(reader.snapshot.event_base))))
+        .unwrap()
+    );
+    let after = positions(&reader);
+    assert_eq!(after.len(), expected);
+    assert_eq!(reader.snapshot.generation, generation);
+    for (message, position) in before {
+      assert_eq!(after[&message], position);
+    }
+  }
+  assert!(!reader.snapshot.has_earlier);
+  assert!(reader.snapshot.event_base > 0);
+  std::fs::OpenOptions::new()
+    .append(true)
+    .open(path)
+    .unwrap()
+    .write_all(turn(8).as_bytes())
+    .unwrap();
+  let before = positions(&reader);
+  assert!(reader.poll().unwrap());
+  let after = positions(&reader);
+  assert_eq!(after.len(), 9);
+  for (message, position) in before {
+    assert_eq!(after[&message], position);
+  }
 }

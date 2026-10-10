@@ -136,11 +136,17 @@ discovery warnings. Follow requests accept only keys from the discovered
 catalog, never arbitrary paths.
 
 The additive `follow_window` action takes the same `session_key`, optional
-`retain_from` absolute normalized-event position, and optional `before_event`
+`retain_from` generation-scoped event position, and optional `before_event`
 for loading three earlier user turns. With both absent it starts at the latest
-three user turns. Each transaction includes one `window` frame after `begin`,
+user turn. Each transaction includes one `window` frame after `begin`,
 containing `event_offset` and `has_earlier`, before any records. Clients retain
-that start across appends. A late tool/compaction dependency can widen the
+that start across appends. Lazy Codex ranges use a positive opaque anchor plus
+contiguous event offsets, rather than counting all omitted normalized events.
+A fully loaded range can therefore retain a positive `event_offset`:
+`has_earlier` is authoritative. Prepending preserves positions when the previous
+normalized suffix is unchanged; context that changes its shape starts a new
+generation. Upgrade source service and clients together for this window contract.
+A late tool/compaction dependency can widen the
 window with an atomic reset within the same source generation. An older
 server that does not support this action fails explicitly; it does not silently
 fall back to loading full history. See [session cache](viewer-session-cache.md).

@@ -11,6 +11,8 @@ pub struct CodexHistoryReadStats {
   pub rows_parsed: u64,
   pub guard_bytes_read: u64,
   pub lineage_resolutions: u64,
+  pub boundary_bytes_read: u64,
+  pub boundary_rows_scanned: u64,
 }
 
 /// Atomic normalized delta. A reset replaces the previous logical transcript.
@@ -19,6 +21,8 @@ pub struct CodexHistoryUpdate {
   pub records: Vec<NormalizedRecord>,
   pub history_status: SessionHistoryStatus,
   pub reset: bool,
+  /// Logical source byte anchor of a lazy range; None for full history.
+  pub source_start: Option<u64>,
 }
 
 /// A verified lineage plus a cursor into its growing active JSONL segment.
@@ -34,6 +38,7 @@ pub struct CodexHistoryReader {
   max_bytes: usize,
   state: Option<ReaderState>,
   stats: CodexHistoryReadStats,
+  window_turns: Option<usize>,
 }
 
 struct ReaderState {
@@ -49,6 +54,8 @@ struct ReaderState {
   header_guard: Vec<u8>,
   tail_guard: Vec<u8>,
   prefix_guards: Vec<PrefixGuard>,
+  source_start: u64,
+  dependencies: super::window::Dependencies,
 }
 
 struct PrefixGuard {
@@ -91,11 +98,26 @@ impl CodexHistoryReader {
       max_bytes,
       state: None,
       stats: CodexHistoryReadStats::default(),
+      window_turns: None,
     }
   }
 
   pub fn stats(&self) -> CodexHistoryReadStats {
     self.stats
+  }
+
+  /// Start at the latest provable turn, retaining omitted history on disk.
+  /// Formats without checkpoints and dependencies can require a wider range.
+  pub fn new_window(path: PathBuf, include_native: bool, max_bytes: usize) -> Self {
+    let mut reader = Self::new(path, include_native, max_bytes);
+    reader.window_turns = Some(1);
+    reader
+  }
+
+  /// Older ranges are explicit; ordinary polls never slide an open window.
+  pub fn expand(&mut self, turns: Option<usize>) {
+    self.window_turns = turns.map(|turns| self.window_turns.unwrap_or(0).saturating_add(turns));
+    self.invalidate();
   }
 
   /// Forces the next successful read to replace the current snapshot.
@@ -143,7 +165,12 @@ impl CodexHistoryReader {
     if head.identity != previous.identity || head.length <= state.offset {
       return self.rebuild(source).map(Some);
     }
-    if state.prefix_bytes.saturating_add(head.length) > self.max_bytes as u64 {
+    if state
+      .prefix_bytes
+      .saturating_add(head.length)
+      .saturating_sub(state.source_start)
+      > self.max_bytes as u64
+    {
       return Err("Codex history exceeds the snapshot size limit".into());
     }
     let mut file = File::open(&self.path).map_err(|err| err.to_string())?;
@@ -183,6 +210,12 @@ impl CodexHistoryReader {
       if matches!(line.item(), RolloutItem::SessionMeta(_)) {
         continue;
       }
+      if super::window::is_turn_start(&line)
+        && let Some(turns) = &mut self.window_turns
+      {
+        *turns = turns.saturating_add(1);
+      }
+      state.dependencies.observe(&line);
       records.push(normalize_record(
         line,
         &self.path,
@@ -193,6 +226,10 @@ impl CodexHistoryReader {
         &mut state.reference,
       ));
     }
+    if state.source_start > 0 && state.dependencies.missing {
+      self.widen_dependencies();
+      return self.rebuild(source).map(Some);
+    }
     state.pending.drain(..complete);
     validate_versions(&state.segments, &versions, &state.prefix_guards, &mut self.stats)?;
     state.versions = versions;
@@ -201,6 +238,7 @@ impl CodexHistoryReader {
       records,
       history_status: state.normalizer.history_status(),
       reset: false,
+      source_start: self.window_turns.map(|_| state.source_start),
     });
     self.state = Some(state);
     Ok(update)
@@ -228,31 +266,64 @@ impl CodexHistoryReader {
       return Err("Codex history owner changed while reading its metadata".into());
     }
     source.apply_indexed_metadata(std::slice::from_mut(&mut reference));
+    let lengths = segments
+      .iter()
+      .zip(&versions)
+      .map(|(segment, version)| segment.end_byte_offset.unwrap_or(version.length))
+      .collect::<Vec<_>>();
+    // Thread-spawn filtering requires an earlier trigger; keep its proven full
+    // reader until a provider checkpoint can seed that boundary safely.
+    let source_start = if !thread_spawn {
+      match self.window_turns {
+        Some(turns) => super::window::start(&segments, &lengths, turns, &mut self.stats)?,
+        None => 0,
+      }
+    } else {
+      0
+    };
     let mut normalizer = CodexNormalizer::new_historical();
-    let mut records = vec![NormalizedRecord {
-      record_id: format!("session:{}", reference.id),
-      native: self.include_native.then(|| owner.native().clone()),
-      events: normalizer.normalize(owner),
-    }];
+    let owner_events = normalizer.normalize(owner.clone());
+    let mut records = if source_start == 0 {
+      vec![NormalizedRecord {
+        record_id: format!("session:{}", reference.id),
+        native: self.include_native.then(|| owner.native().clone()),
+        events: owner_events,
+      }]
+    } else {
+      Vec::new()
+    };
+    let mut dependencies = super::window::Dependencies::default();
     let mut consumed = 0u64;
+    let mut selected_bytes = 0u64;
     let mut head_state = None;
     let mut prefix_guards = Vec::new();
-    for (segment, version) in segments.iter().zip(&versions) {
-      let length = segment.end_byte_offset.unwrap_or(version.length);
-      if consumed.saturating_add(length) > self.max_bytes as u64 {
+    for (segment, length) in segments.iter().zip(&lengths) {
+      let length = *length;
+      let start = source_start.saturating_sub(consumed).min(length);
+      let mut file = File::open(&segment.path).map_err(|err| err.to_string())?;
+      let header_guard = read_header_guard(&mut file)?;
+      let header = history_header(&segment.path)?;
+      if header_key(&header) != segment.header_key {
+        return Err("Codex history changed while reading its prefix".into());
+      }
+      let tail_guard = read_range(
+        &mut file,
+        length.saturating_sub(TAIL_GUARD_BYTES as u64),
+        length.min(TAIL_GUARD_BYTES as u64),
+      )?;
+      if selected_bytes.saturating_add(length - start) > self.max_bytes as u64 {
         return Err("Codex history exceeds the snapshot size limit".into());
       }
-      let mut file = File::open(&segment.path).map_err(|err| err.to_string())?;
-      let bytes = read_range(&mut file, 0, length)?;
+      let bytes = read_range(&mut file, start, length - start)?;
+      selected_bytes += bytes.len() as u64;
       self.stats.source_bytes_read += bytes.len() as u64;
       let complete = complete_length(&bytes);
       if segment.end_byte_offset.is_some() && complete != bytes.len() {
         return Err("invalid Codex history lineage: cutoff is not a complete record".into());
       }
-      let mut offset = 0u64;
+      let mut offset = start;
       let mut ordinals = HistoryOrdinals::new(segment.header_key["history_mode"].as_str() == Some("paginated"));
-      let mut inherited_parent = false;
-      let mut header_end = None;
+      let inherited_parent = thread_spawn && header.native()["payload"]["id"].as_str() != Some(reference.id.as_str());
       for row in bytes[..complete].split_inclusive(|byte| *byte == b'\n') {
         let row_offset = offset;
         offset += row.len() as u64;
@@ -261,16 +332,10 @@ impl CodexHistoryReader {
         }
         let line = parse_row(row, &segment.path, row_offset, &mut self.stats)?;
         ordinals.accept(&line, &segment.path, row_offset)?;
-        if let RolloutItem::SessionMeta(meta) = line.item() {
-          if header_end.is_none() {
-            if header_key(&line) != segment.header_key {
-              return Err("Codex history changed while reading its prefix".into());
-            }
-            header_end = Some(offset as usize);
-            inherited_parent = thread_spawn && meta.id.as_deref() != Some(reference.id.as_str());
-          }
+        if matches!(line.item(), RolloutItem::SessionMeta(_)) {
           continue;
         }
+        dependencies.observe(&line);
         records.push(normalize_record(
           line,
           &segment.path,
@@ -281,10 +346,10 @@ impl CodexHistoryReader {
           &mut reference,
         ));
       }
-      let header_end = header_end.ok_or("Codex history metadata is not yet complete")?;
-      if segment
-        .end_ordinal_exclusive
-        .is_some_and(|end| !ordinals.ends_before(end))
+      if start < length
+        && segment
+          .end_ordinal_exclusive
+          .is_some_and(|end| !ordinals.ends_before(end))
       {
         return Err("invalid Codex history lineage: cutoff ordinal disagrees with its bytes".into());
       }
@@ -294,17 +359,23 @@ impl CodexHistoryReader {
           length,
           bytes[complete..].to_vec(),
           ordinals,
-          bytes[..header_end].to_vec(),
-          bytes[bytes.len().saturating_sub(TAIL_GUARD_BYTES)..].to_vec(),
+          header_guard,
+          tail_guard,
         ));
       } else {
         prefix_guards.push(PrefixGuard {
-          header: bytes[..header_end].to_vec(),
-          tail: bytes[bytes.len().saturating_sub(TAIL_GUARD_BYTES)..].to_vec(),
+          header: header_guard,
+          tail: tail_guard,
           cutoff: length,
         });
       }
       consumed += length;
+    }
+    // A result can arrive after its invocation's turn. Widen only when that
+    // dependency is actually needed, before publishing a partial operation.
+    if source_start > 0 && dependencies.missing {
+      self.widen_dependencies();
+      return self.rebuild(source);
     }
     validate_versions(&segments, &versions, &prefix_guards, &mut self.stats)?;
     let update = CodexHistoryUpdate {
@@ -312,6 +383,7 @@ impl CodexHistoryReader {
       records,
       history_status: normalizer.history_status(),
       reset: true,
+      source_start: self.window_turns.map(|_| source_start),
     };
     let (prefix_bytes, offset, pending, ordinals, header_guard, tail_guard) = head_state.unwrap();
     self.state = Some(ReaderState {
@@ -327,8 +399,36 @@ impl CodexHistoryReader {
       header_guard,
       tail_guard,
       prefix_guards,
+      source_start,
+      dependencies,
     });
     Ok(update)
+  }
+
+  fn widen_dependencies(&mut self) {
+    // Bound repeated parsing for distant or absent invocations.
+    self.window_turns = self
+      .window_turns
+      .and_then(|turns| (turns < 32).then_some((turns * 2).min(32)));
+  }
+}
+
+fn read_header_guard(file: &mut File) -> Result<Vec<u8>, String> {
+  file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+  let mut reader = BufReader::new(Read::by_ref(file).take(MAX_HEADER_BYTES));
+  let mut bytes = Vec::new();
+  loop {
+    let mut row = Vec::new();
+    if reader.read_until(b'\n', &mut row).map_err(|e| e.to_string())? == 0 {
+      return Err("Codex history metadata is not yet complete".into());
+    }
+    bytes.extend_from_slice(&row);
+    if !row.iter().all(u8::is_ascii_whitespace) {
+      let line: CodexLine = serde_json::from_slice(&row).map_err(|e| e.to_string())?;
+      if matches!(line.item(), RolloutItem::SessionMeta(_)) {
+        return Ok(bytes);
+      }
+    }
   }
 }
 

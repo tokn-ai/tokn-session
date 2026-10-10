@@ -62,6 +62,7 @@ pub enum Frame {
     header: SessionHeader,
   },
   Window {
+    /// Generation-scoped anchor; positive values need not imply older history.
     event_offset: usize,
     has_earlier: bool,
   },

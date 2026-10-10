@@ -245,7 +245,9 @@ impl RelaySubscription {
           if !self.windowed || saw_window || saw_record {
             return Err("Unexpected Relay history window metadata".into());
           }
-          if earlier != (offset > 0) {
+          // Lazy readers use an opaque positive anchor even after all earlier
+          // ranges have loaded. Only the explicit flag describes coverage.
+          if earlier && offset == 0 {
             return Err("Invalid Relay history window boundary".into());
           }
           if !reset && offset != self.event_offset {
@@ -403,6 +405,33 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn fully_loaded_history_can_keep_a_positive_anchor() {
+    let mut subscription = scripted_subscription(
+      true,
+      vec![
+        Frame::Begin {
+          generation: "first".into(),
+          revision: "1".into(),
+          reset: true,
+          header: fixture_header(),
+        },
+        Frame::Window {
+          event_offset: 4,
+          has_earlier: false,
+        },
+        fixture_record(),
+        Frame::Commit {
+          generation: "first".into(),
+          revision: "1".into(),
+        },
+      ],
+    );
+    subscription.next_snapshot().await.unwrap();
+    assert_eq!(subscription.event_offset, 4);
+    assert!(!subscription.has_earlier);
+  }
+
+  #[tokio::test]
   async fn malformed_window_transactions_preserve_the_last_committed_snapshot() {
     let begin = |reset| Frame::Begin {
       generation: if reset { "replacement" } else { "first" }.into(),
@@ -443,10 +472,6 @@ mod tests {
         ],
       ),
       ("earlier at zero", vec![begin(true), window(0, true), commit(true)]),
-      (
-        "no earlier above zero",
-        vec![begin(true), window(4, false), commit(true)],
-      ),
       (
         "offset overflow",
         vec![begin(true), window(usize::MAX, true), fixture_record(), commit(true)],
@@ -613,6 +638,70 @@ mod tests {
     );
     assert_eq!(subscription.events.len(), 1);
     assert_eq!(subscription.revision, 1);
+  }
+
+  #[tokio::test]
+  async fn lazy_codex_expansion_keeps_live_subscribers_and_legacy_full_reads_consistent() {
+    use tokn_session_relay::{ProviderRoot, RelayConfig};
+    let root = tempfile::TempDir::new().unwrap();
+    let path = root.path().join("rollout-fixture.jsonl");
+    let mut body = format!(
+      "{}\n",
+      json!({"type":"session_meta","payload":{"id":"fixture","cwd":"/tmp"}})
+    );
+    for index in 0..5 {
+      body.push_str(&format!(
+        "{}\n{}\n",
+        json!({"type":"event_msg","payload":{"type":"task_started","turn_id":format!("turn-{index}")}}),
+        json!({"type":"event_msg","payload":{"type":"user_message","message":format!("prompt-{index}")}})
+      ));
+    }
+    std::fs::write(path, body).unwrap();
+    let service = crate::service_server::Service::new(RelayConfig::new(vec![ProviderRoot::new(
+      Provider::Codex,
+      root.path().into(),
+    )]))
+    .unwrap();
+    let connection = Connection::Embedded(service);
+    let key = load_catalog_from(&connection).await.unwrap().entries.remove(0).key;
+    let mut live = RelaySubscription::connect_window_from(&connection, &key, None, None)
+      .await
+      .unwrap();
+    let initial = live.next_snapshot().await.unwrap();
+    assert!(initial.has_earlier);
+    assert!(initial.event_offset > 0);
+    let mut older = RelaySubscription::connect_window_from(&connection, &key, None, Some(initial.event_offset))
+      .await
+      .unwrap();
+    let expanded = older.next_snapshot().await.unwrap();
+    assert_eq!(expanded.generation, initial.generation);
+    assert!(expanded.event_offset < initial.event_offset);
+    let refreshed = live.next_snapshot().await.unwrap();
+    assert_eq!(refreshed.event_offset, initial.event_offset);
+    assert_eq!(
+      serde_json::to_value(refreshed.loaded.events).unwrap(),
+      serde_json::to_value(initial.loaded.events).unwrap()
+    );
+    let mut full = RelaySubscription::connect_from(&connection, &key).await.unwrap();
+    let complete = full.next_snapshot().await.unwrap();
+    let messages = complete
+      .loaded
+      .events
+      .iter()
+      .filter(|event| matches!(event, AgentEvent::Message(_)))
+      .count();
+    assert_eq!(messages, 5);
+    let mut all = RelaySubscription::connect_window_from(
+      &connection,
+      &key,
+      Some(expanded.event_offset),
+      Some(expanded.event_offset),
+    )
+    .await
+    .unwrap();
+    let complete_window = all.next_snapshot().await.unwrap();
+    assert!(!complete_window.has_earlier);
+    assert!(complete_window.event_offset > 0);
   }
 
   #[tokio::test]
