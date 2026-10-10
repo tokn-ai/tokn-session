@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { configureRelay, getRelayStatus, listenForRelayStatus, listenForTransportReconnect } from "../lib/tauri";
 import { useFloatingPanel } from "../lib/useFloatingPanel";
+import { HostQuickControl } from "./HostSetup";
 import { ChevronIcon, CloseIcon } from "./Icons";
 import type { RelayMode, RelaySettings, RelayStatus } from "../lib/types";
 import "./ConnectionPanel.css";
@@ -168,6 +169,7 @@ export function RelayConnection({ on_open_machines }: { on_open_machines?: () =>
           <dl className="connection-summary"><div><dt>Machine</dt><dd>This machine</dd></div></dl>
           <button className="connection-panel__primary" onClick={on_open_machines} type="button">Machines<ChevronIcon className="connection-panel__navigate" /></button>
         </div>}
+        {on_open_machines && <HostQuickControl on_open_settings={close} return_focus={trigger_ref} />}
         <form className="relay-settings" onSubmit={(event) => { event.preventDefault(); void save(); }}>
           <div className="relay-field">
             <label htmlFor={`${panel_id}-mode`}>Data source</label>

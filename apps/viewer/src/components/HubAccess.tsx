@@ -171,8 +171,8 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
     </header>
     {desktop && <section className="hub-this-machine" aria-labelledby="this-machine-title">
       <div><h2 id="this-machine-title">This machine</h2><p>Open sessions saved on this computer.</p>{local_error && <p className="hub-error" role="alert">{local_error}</p>}</div>
-      <button aria-label="Open This machine" disabled={!on_local} onClick={() => { changeHost(); on_local?.(); }}>{local_error ? "Retry" : "Open"}</button>
-      <HostSetup />
+      <div className="hub-this-machine-actions"><button aria-label="Open This machine" disabled={!on_local} onClick={() => { changeHost(); on_local?.(); }}>{local_error ? "Retry" : "Open"}</button>
+      <HostSetup /></div>
     </section>}
     {desktop && known_hubs.length > 0 && <nav className="hub-known-hubs" aria-label="Saved Hubs"><span className="hub-field-label">Remote machines through</span>
       {known_hubs.map((url) => <button key={url} aria-pressed={service?.hub_url === url} disabled={busy} onClick={() => { changeHost(); setDraftHubUrl(url); void action("loading_hub", (signal) => loadService(url, signal, null)); }}>{url}</button>)}

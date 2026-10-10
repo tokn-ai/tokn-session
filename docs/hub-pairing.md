@@ -107,8 +107,12 @@ requested, so a local database error does not prevent opening a remote machine.
 ## Host from the desktop app
 
 Under **Machines → This machine → Host this computer**, enter the Hub address
-and machine name, choose whether to allow remote agent input, and click **Start
-hosting**. Viewing is the default for a new host. The panel reports connecting,
+and machine name in the floating dialog, choose whether to allow remote agent
+input, and click **Start hosting**. The bottom-left connection panel in local
+and remote views also shows this computer’s hosting status and an on/off switch.
+The switch uses saved settings; without a configured Hub it opens the same
+dialog. **Hosting settings** opens configuration and pairing setup from that
+panel. Viewing is the default for a new host. The dialog reports connecting,
 online, and reconnecting states. **Stop hosting** or quitting the app disconnects
 its connector and closes its private loopback API. Hosting is not started
 again automatically on the next app launch, and no background service is installed.
@@ -116,7 +120,7 @@ Opening local or remote sessions leaves an explicitly started host running.
 
 **Show pairing setup** displays the machine reference, SHA-256 authenticator QR,
 full setup URI, and current verification code with a countdown. Codes refresh
-while the disclosure stays open. Hiding it removes the pairing material from
+while the disclosure stays open. Hiding it or closing the dialog removes the pairing material from
 the display; it is never saved to browser storage or sent through the Hub.
 The QR and URI contain a secret and belong only on the hosting device.
 

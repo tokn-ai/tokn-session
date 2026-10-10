@@ -1,7 +1,9 @@
 import { StrictMode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { HostSetup } from "./HostSetup";
+import { RemoteConnection } from "./RemoteConnection";
+import { LocalHostProvider } from "./LocalHostProvider";
+import { HostSetup, HostQuickControl } from "./HostSetup";
 import { getLocalHostPairing, getLocalHostStatus, listenForLocalHostStatus, startLocalHost, stopLocalHost } from "../lib/tauri";
 import type { LocalHostStatus } from "../lib/types";
 vi.mock("../lib/tauri", () => ({ getLocalHostPairing: vi.fn(), getLocalHostStatus: vi.fn(), listenForLocalHostStatus: vi.fn(), startLocalHost: vi.fn(), stopLocalHost: vi.fn() }));
@@ -20,19 +22,21 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.clearAllMocks(); localStorage.clear(); });
 
 it("starts and stops hosting without loading or persisting pairing secrets", async () => {
-  render(<HostSetup />);
-  await screen.findByText("Not hosting from this app");
+  render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
+  await screen.findByText("Hosting off");
   expect(getLocalHostPairing).not.toHaveBeenCalled();
   expect(screen.getByLabelText("Allow remote agent input")).not.toBeChecked();
   fireEvent.click(screen.getByRole("button", { name: "Start hosting", hidden: true }));
   await waitFor(() => expect(startLocalHost).toHaveBeenCalledWith({ hub_url: "https://hub.example", name: "Workstation", allow_control: false }));
-  await screen.findByText("Hosting through Hub");
+  await screen.findByText("Hosting online");
   fireEvent.click(screen.getByRole("button", { name: "Stop hosting", hidden: true }));
-  await screen.findByText("Not hosting from this app");
+  await screen.findByText("Hosting off");
   expect(stopLocalHost).toHaveBeenCalledOnce(); expect(localStorage.length).toBe(0);
 });
 it("loads QR and current code on disclosure and clears them when hidden", async () => {
-  render(<HostSetup />); await screen.findByText("Not hosting from this app");
+  render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" })); await screen.findByText("Hosting off");
   fireEvent.click(screen.getByRole("button", { name: "Show pairing setup", hidden: true }));
   await screen.findByText("123456");
   expect(screen.getByAltText("SHA-256 authenticator setup QR")).toHaveAttribute("src", "data:image/svg+xml;base64,test");
@@ -44,16 +48,18 @@ it("loads QR and current code on disclosure and clears them when hidden", async 
 it("preserves newer connection events over a late start response", async () => {
   let finish!: (status: LocalHostStatus) => void;
   vi.mocked(startLocalHost).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
-  render(<HostSetup />); await screen.findByText("Not hosting from this app");
+  render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" })); await screen.findByText("Hosting off");
   fireEvent.click(screen.getByRole("button", { name: "Start hosting", hidden: true }));
   await waitFor(() => expect(startLocalHost).toHaveBeenCalled());
   status_event(online); finish({ ...stopped, phase: "connecting" });
-  await screen.findByText("Hosting through Hub");
+  await screen.findByText("Hosting online");
   expect(screen.queryByText("Connecting to Hub…")).not.toBeInTheDocument();
 });
 it("reports external-connector conflicts without starting another flow", async () => {
   vi.mocked(startLocalHost).mockRejectedValue(new Error("Another connector is already hosting this machine"));
-  render(<HostSetup />); await screen.findByText("Not hosting from this app");
+  render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" })); await screen.findByText("Hosting off");
   fireEvent.click(screen.getByRole("button", { name: "Start hosting", hidden: true }));
   expect(await screen.findByRole("alert", { hidden: true })).toHaveTextContent("Another connector");
   expect(stopLocalHost).not.toHaveBeenCalled(); expect(getLocalHostPairing).not.toHaveBeenCalled();
@@ -61,8 +67,9 @@ it("reports external-connector conflicts without starting another flow", async (
 it("unsubscribes in StrictMode and ignores pairing responses after the disclosure closes", async () => {
   let finish!: (pairing: Awaited<ReturnType<typeof getLocalHostPairing>>) => void;
   vi.mocked(getLocalHostPairing).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
-  const { unmount } = render(<StrictMode><HostSetup /></StrictMode>);
-  await screen.findByText("Not hosting from this app");
+  const { unmount } = render(<StrictMode><LocalHostProvider><HostSetup /></LocalHostProvider></StrictMode>);
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
+  await screen.findByText("Hosting off");
   fireEvent.click(screen.getByRole("button", { name: "Show pairing setup", hidden: true }));
   await waitFor(() => expect(getLocalHostPairing).toHaveBeenCalled());
   fireEvent.click(screen.getByRole("button", { name: "Hide pairing setup", hidden: true }));
@@ -75,7 +82,8 @@ it("refreshes verification codes at the host boundary without relying on the cli
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "performance"] });
   const initial = { machine_reference: "machine@key", qr_data_url: "data:image/svg+xml;base64,test", setup_uri: "private", current_code: "123456", host_time: 100, expires_at: 130 };
   vi.mocked(getLocalHostPairing).mockResolvedValueOnce(initial).mockResolvedValue({ ...initial, current_code: "654321", host_time: 130, expires_at: 160 });
-  render(<HostSetup />); await screen.findByText("Not hosting from this app");
+  render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" })); await screen.findByText("Hosting off");
   fireEvent.click(screen.getByRole("button", { name: "Show pairing setup", hidden: true }));
   await screen.findByText("123456");
   await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
@@ -84,4 +92,65 @@ it("refreshes verification codes at the host boundary without relying on the cli
   fireEvent.click(screen.getByRole("button", { name: "Hide pairing setup", hidden: true }));
   await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
   expect(getLocalHostPairing).toHaveBeenCalledTimes(2);
+});
+
+it("shares live status with the quick switch and uses saved settings", async () => {
+  const close = vi.fn();
+  render(<LocalHostProvider><HostSetup /><HostQuickControl on_open_settings={close} /></LocalHostProvider>);
+  const toggle = await screen.findByRole("switch", { name: "Host this computer" });
+  await waitFor(() => expect(toggle).toBeEnabled());
+  fireEvent.click(toggle);
+  await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+  expect(startLocalHost).toHaveBeenCalledWith({ hub_url: stopped.hub_url, name: stopped.name, allow_control: false });
+  fireEvent.click(screen.getByRole("button", { name: "Hosting settings" }));
+  expect(close).toHaveBeenCalledOnce();
+  expect(screen.getByRole("dialog", { name: "Host this computer" })).toHaveTextContent("Hosting online");
+  expect(screen.queryByLabelText("Host name")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Close hosting settings" }));
+  fireEvent.click(toggle);
+  await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "false"));
+});
+it("opens setup from the switch when configuration is missing", async () => {
+  vi.mocked(getLocalHostStatus).mockResolvedValue({ ...stopped, hub_url: "", machine_reference: null });
+  render(<LocalHostProvider><HostQuickControl on_open_settings={() => {}} /></LocalHostProvider>);
+  const toggle = await screen.findByRole("switch");
+  await waitFor(() => expect(toggle).toBeEnabled());
+  fireEvent.click(toggle);
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
+  expect(startLocalHost).not.toHaveBeenCalled();
+});
+it("clears pairing secrets on dialog dismissal and restores focus", async () => {
+  render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
+  const trigger = screen.getByRole("button", { name: "Host this computer" });
+  trigger.focus(); fireEvent.click(trigger);
+  await screen.findByText("Hosting off");
+  fireEvent.click(screen.getByRole("button", { name: "Show pairing setup" }));
+  await screen.findByText("123456");
+  fireEvent(screen.getByRole("dialog"), new Event("cancel", { bubbles: true, cancelable: true }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(screen.queryByText("123456")).not.toBeInTheDocument();
+  expect(trigger).toHaveFocus();
+  fireEvent.click(trigger);
+  expect(screen.queryByText("123456")).not.toBeInTheDocument();
+});
+
+it("labels the local host separately while viewing a remote machine", async () => {
+  render(<LocalHostProvider><RemoteConnection name="Remote workstation" state="connected"><button>Machines</button></RemoteConnection></LocalHostProvider>);
+  fireEvent.click(screen.getByRole("button", { name: /Remote workstation.*Connection settings/ }));
+  expect(screen.getByRole("region", { name: "This computer hosting" })).toHaveTextContent("This computer");
+  const toggle = screen.getByRole("switch");
+  await waitFor(() => expect(toggle).toBeEnabled());
+  fireEvent.click(toggle);
+  await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+  fireEvent.click(screen.getByRole("button", { name: "Hosting settings" }));
+  expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  expect(screen.getByRole("dialog")).toHaveAccessibleName("Host this computer");
+  fireEvent.click(screen.getByRole("button", { name: "Close hosting settings" }));
+  expect(screen.getByRole("button", { name: /Remote workstation.*Connection settings/ })).toHaveFocus();
+});
+it("does not expose local hosting on a browser connection", () => {
+  render(<RemoteConnection name="Browser machine" state="connected"><button>Machines</button></RemoteConnection>);
+  fireEvent.click(screen.getByRole("button", { name: /Connection settings/ }));
+  expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+  expect(getLocalHostStatus).not.toHaveBeenCalled();
 });
