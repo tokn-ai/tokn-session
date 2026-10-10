@@ -105,13 +105,21 @@ async fn not_found() -> ApiError {
 }
 
 async fn response_headers(request: Request, next: Next) -> Response {
+  // Native passkey completion is a cross-origin form navigation to the app's
+  // one-shot loopback callback. Preserve the document Origin for its exact
+  // origin check without disclosing paths or the fragment-held ceremony.
+  let referrer_policy = if request.uri().path() == "/passkey" {
+    "origin"
+  } else {
+    "no-referrer"
+  };
   let mut response = next.run(request).await;
   response
     .headers_mut()
     .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
   response
     .headers_mut()
-    .insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    .insert(header::REFERRER_POLICY, HeaderValue::from_static(referrer_policy));
   response
     .headers_mut()
     .insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
@@ -211,10 +219,12 @@ async fn secure_tunnel(
   headers: HeaderMap,
   websocket: WebSocketUpgrade,
 ) -> Response {
-  // The native client owns the pinned host key and owner-signed grant. Browser
-  // JavaScript served by this Hub is not a trusted endpoint for encrypted hosts.
-  if headers.contains_key(header::ORIGIN) {
-    return error(StatusCode::FORBIDDEN, "Secure channels require the native client").into_response();
+  // The configured UI is a trusted code publisher. Browsers authenticate and
+  // decrypt at their endpoint; this relay receives only opaque binary records.
+  // Native clients omit Origin. Browser admission is exact-origin only and does
+  // not confer host authorization, which remains enforced inside the channel.
+  if let Err(error) = state.auth.check_optional_origin(&headers) {
+    return error.into_response();
   }
   if !state.tunnels.online(&host_id) {
     return error(StatusCode::BAD_GATEWAY, "Host is offline").into_response();

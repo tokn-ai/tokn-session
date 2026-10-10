@@ -6,10 +6,20 @@ const MAX_EVENT_FRAME_LENGTH = 2 * 1024 * 1024;
 // Full session updates can include multiple bounded tool/native payloads.
 // Other notifications retain the smaller frame limit.
 const MAX_SESSION_UPDATE_FRAME_LENGTH = 64 * 1024 * 1024;
-function eventFrameLimit(frame: string): number {
+export function eventFrameLimit(frame: string): number {
   return /^event: ?session-updated\n/.test(frame) ? MAX_SESSION_UPDATE_FRAME_LENGTH : MAX_EVENT_FRAME_LENGTH;
 }
 export const isDesktop = () => "__TAURI_INTERNALS__" in window;
+
+export interface ViewerClient {
+  readonly endpoint: string;
+  invoke<T>(command: string, payload?: unknown): Promise<T>;
+  listen<T>(name: string, handler: (event: { payload: T }) => void): Promise<UnlistenFn>;
+  setStateListener(handler: (state: ConnectionState) => void): void;
+  onClose(handler: () => void): UnlistenFn;
+  release(command: string, payload?: Record<string, unknown>): Promise<void>;
+  close(): void;
+}
 
 // One selected machine owns requests and subscriptions. Closing it aborts both,
 // so late responses from an old machine cannot enter the next viewer instance.
@@ -184,24 +194,24 @@ export function parseEvent(frame: string): { event: string; payload: unknown } |
   return data.length ? { event, payload: JSON.parse(data.join("\n")) } : null;
 }
 
-let selected: RemoteClient | undefined;
+let selected: ViewerClient | undefined;
 export function viewerStorageScope(): string {
-  return isDesktop() ? "desktop" : selected?.endpoint ?? window.location.origin;
+  return selected?.endpoint ?? (isDesktop() ? "desktop" : window.location.origin);
 }
 
-export function selectMachine(client?: RemoteClient) {
+export function selectMachine(client?: ViewerClient) {
   selected?.close();
   selected = client;
 }
 export async function invoke<T>(command: string, payload?: Record<string, unknown>): Promise<T> {
+  if (selected) return selected.invoke<T>(command, payload);
   if (isDesktop()) return (await import("@tauri-apps/api/core")).invoke<T>(command, payload);
-  if (!selected) throw new Error("Connect to a machine first");
-  return selected.invoke<T>(command, payload);
+  throw new Error("Connect to a machine first");
 }
 export async function listen<T>(event: string, handler: (event: { payload: T }) => void): Promise<UnlistenFn> {
+  if (selected) return selected.listen<T>(event, handler);
   if (isDesktop()) return (await import("@tauri-apps/api/event")).listen<T>(event, handler);
-  if (!selected) throw new Error("Connect to a machine first");
-  return selected.listen<T>(event, handler);
+  throw new Error("Connect to a machine first");
 }
 
 /** Capture one machine so deferred updates and cleanup cannot target its successor. */
@@ -210,7 +220,7 @@ export function captureTransport(): {
   release: (command: string, payload?: Record<string, unknown>) => Promise<void>;
   on_close: (handler: () => void) => UnlistenFn;
 } {
-  if (isDesktop()) {
+  if (!selected && isDesktop()) {
     const local: CommandInvoker = async <T>(command: string, payload?: Record<string, unknown>) =>
       (await import("@tauri-apps/api/core")).invoke<T>(command, payload);
     return { invoke: local, release: local, on_close: () => () => {} };

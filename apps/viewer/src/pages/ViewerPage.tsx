@@ -11,13 +11,14 @@ import { useViewerState } from "../lib/useViewerState";
 interface ViewerPageProps {
   remote?: boolean;
   connection?: ReactNode;
+  on_open_hub?: () => void;
 }
 
-export function ViewerPage({ remote = false, connection }: ViewerPageProps) {
-  return <TranslationProvider><ViewerContent remote={remote} connection={connection} /></TranslationProvider>;
+export function ViewerPage({ remote = false, connection, on_open_hub }: ViewerPageProps) {
+  return <TranslationProvider><ViewerContent remote={remote} connection={connection} on_open_hub={on_open_hub} /></TranslationProvider>;
 }
 
-function ViewerContent({ remote, connection }: ViewerPageProps) {
+function ViewerContent({ remote, connection, on_open_hub }: ViewerPageProps) {
   const viewer = useViewerState();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
@@ -129,7 +130,7 @@ function ViewerContent({ remote, connection }: ViewerPageProps) {
       </div>
 
       <StatusBar
-        connection={remote ? connection : <RelayConnection />}
+        connection={remote ? connection : <><RelayConnection />{on_open_hub && <button onClick={on_open_hub}>Connect to Hub</button>}</>}
         error={viewer.sessionIndexProgressError}
         is_loading={viewer.sessionIndexProgressLoading}
         is_retrying={viewer.sessionIndexRetrying}

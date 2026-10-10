@@ -4,12 +4,23 @@ use super::{
 };
 use crate::protocol::{decode, encode};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 pub const MAX_RECORD: usize = 65_535;
 pub const MAX_PLAINTEXT: usize = MAX_RECORD - 16;
 pub const MAX_CHUNK: usize = 32 * 1024;
 pub const MAX_REQUEST_BODY: usize = crate::protocol::MAX_BODY;
+pub const MAX_AUTH_PAYLOAD: usize = 32 * 1024;
 const PROLOGUE: &[u8] = b"tokn-hub-e2ee-v1";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostAuthOperation {
+  RegisterStart,
+  RegisterFinish,
+  LoginStart,
+  LoginFinish,
+}
 
 /// One HTTP exchange per Noise channel. Requests are authenticated before body
 /// assembly; aggregate body size, ordering, response credit, and route/scope
@@ -18,6 +29,14 @@ const PROLOGUE: &[u8] = b"tokn-hub-e2ee-v1";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InnerMessage {
+  /// Host-owned passkey authentication, carried only inside a fresh Noise channel.
+  AuthRequest {
+    operation: HostAuthOperation,
+    payload: serde_json::Value,
+  },
+  AuthResponse {
+    payload: serde_json::Value,
+  },
   Request {
     method: String,
     path: String,
@@ -51,6 +70,16 @@ pub enum InnerMessage {
 impl InnerMessage {
   pub fn validate(&self) -> Result<(), String> {
     match self {
+      Self::AuthRequest { payload, .. } | Self::AuthResponse { payload } => {
+        if !payload.is_object()
+          || serde_json::to_vec(payload)
+            .map_err(|_| "Invalid host authentication payload")?
+            .len()
+            > MAX_AUTH_PAYLOAD
+        {
+          return Err("Host authentication requires a bounded object payload".into());
+        }
+      }
       Self::Request { method, path, .. } | Self::DeviceRequest { method, path } => {
         if !matches!(method.as_str(), "GET" | "POST") {
           return Err("Unsupported secure request method".into());
@@ -174,14 +203,17 @@ impl NoiseResponder {
 pub struct SecureChannel {
   state: snow::TransportState,
   remote_public_key: String,
+  channel_binding: String,
   failed: bool,
 }
 
 impl SecureChannel {
   fn from_handshake(state: snow::HandshakeState, remote_public_key: String) -> Result<Self, String> {
+    let channel_binding = encode(state.get_handshake_hash());
     Ok(Self {
       state: state.into_transport_mode().map_err(noise_error)?,
       remote_public_key,
+      channel_binding,
       failed: false,
     })
   }
@@ -190,12 +222,25 @@ impl SecureChannel {
     &self.remote_public_key
   }
 
+  /// Bind endpoint authentication ceremonies to this completed Noise handshake.
+  pub fn channel_binding(&self) -> &str {
+    &self.channel_binding
+  }
+
   pub fn encrypt(&mut self, message: &InnerMessage) -> Result<Vec<u8>, String> {
     if self.failed {
       return Err("Secure channel is closed".into());
     }
     message.validate()?;
-    let plaintext = serde_json::to_vec(message).map_err(|e| e.to_string())?;
+    let plaintext = Zeroizing::new(serde_json::to_vec(message).map_err(|e| e.to_string())?);
+    self.encrypt_bytes(&plaintext)
+  }
+
+  /// Authenticate one bounded byte record using this channel's next send nonce.
+  pub fn encrypt_bytes(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    if self.failed {
+      return Err("Secure channel is closed".into());
+    }
     if plaintext.len() > MAX_PLAINTEXT {
       return Err("Secure message exceeds the Noise record limit".into());
     }
@@ -216,6 +261,24 @@ impl SecureChannel {
     if self.failed {
       return Err("Secure channel is closed".into());
     }
+    let result = self.decrypt_bytes(encrypted).and_then(|plaintext| {
+      let plaintext = Zeroizing::new(plaintext);
+      let message: InnerMessage =
+        serde_json::from_slice(&plaintext).map_err(|_| "Invalid encrypted protocol message")?;
+      message.validate()?;
+      Ok(message)
+    });
+    if result.is_err() {
+      self.failed = true;
+    }
+    result
+  }
+
+  /// Authenticate one bounded byte record. Any malformed record closes the channel.
+  pub fn decrypt_bytes(&mut self, encrypted: &[u8]) -> Result<Vec<u8>, String> {
+    if self.failed {
+      return Err("Secure channel is closed".into());
+    }
     let result = self.decrypt_record(encrypted);
     if result.is_err() {
       self.failed = true;
@@ -223,7 +286,7 @@ impl SecureChannel {
     result
   }
 
-  fn decrypt_record(&mut self, encrypted: &[u8]) -> Result<InnerMessage, String> {
+  fn decrypt_record(&mut self, encrypted: &[u8]) -> Result<Vec<u8>, String> {
     if !(16..=MAX_RECORD).contains(&encrypted.len()) {
       return Err("Invalid Noise record length".into());
     }
@@ -232,10 +295,8 @@ impl SecureChannel {
       .state
       .read_message(encrypted, &mut plaintext)
       .map_err(noise_error)?;
-    let message: InnerMessage =
-      serde_json::from_slice(&plaintext[..length]).map_err(|_| "Invalid encrypted protocol message")?;
-    message.validate()?;
-    Ok(message)
+    plaintext.truncate(length);
+    Ok(plaintext)
   }
 }
 
@@ -298,6 +359,83 @@ mod tests {
       InnerMessage::Chunk {
         data: encode(b"private session contents")
       }
+    );
+  }
+
+  #[test]
+  fn handshake_bindings_are_shared_by_peers_and_unique_per_channel() {
+    let client = NoiseIdentity::generate().unwrap();
+    let host = NoiseIdentity::generate().unwrap();
+    let handshake = || {
+      let mut initiator = NoiseInitiator::new(&client, &host.public_key()).unwrap();
+      let (reply, responder) = NoiseResponder::new(&host)
+        .unwrap()
+        .accept(&initiator.start().unwrap())
+        .unwrap();
+      (initiator.finish(&reply).unwrap(), responder)
+    };
+    let (first_client, first_host) = handshake();
+    let (second_client, second_host) = handshake();
+    assert_eq!(first_client.channel_binding(), first_host.channel_binding());
+    assert_eq!(second_client.channel_binding(), second_host.channel_binding());
+    assert_ne!(first_client.channel_binding(), second_client.channel_binding());
+    assert_eq!(decode(first_client.channel_binding(), 32).unwrap().len(), 32);
+  }
+
+  #[test]
+  fn byte_records_preserve_bounds_order_and_fail_closed_protocol_decoding() {
+    let (mut client, mut host) = pair();
+    let plaintext = vec![42; MAX_PLAINTEXT];
+    let record = client.encrypt_bytes(&plaintext).unwrap();
+    assert_eq!(record.len(), MAX_RECORD);
+    assert_eq!(host.decrypt_bytes(&record).unwrap(), plaintext);
+    assert!(client.encrypt_bytes(&vec![42; MAX_PLAINTEXT + 1]).is_err());
+    let malformed = client
+      .encrypt_bytes(br#"{"type":"end","unsigned_permission":true}"#)
+      .unwrap();
+    assert!(host.decrypt(&malformed).is_err());
+    let next = client.encrypt(&InnerMessage::End {}).unwrap();
+    assert!(host.decrypt_bytes(&next).is_err());
+    assert!(host.encrypt_bytes(b"closed").is_err());
+  }
+
+  #[test]
+  fn host_auth_messages_are_typed_bounded_and_authenticated() {
+    let (mut client, mut host) = pair();
+    for operation in [
+      HostAuthOperation::RegisterStart,
+      HostAuthOperation::RegisterFinish,
+      HostAuthOperation::LoginStart,
+      HostAuthOperation::LoginFinish,
+    ] {
+      let message = InnerMessage::AuthRequest {
+        operation,
+        payload: serde_json::json!({ "credential": {} }),
+      };
+      assert_eq!(host.decrypt(&client.encrypt(&message).unwrap()).unwrap(), message);
+    }
+    let response = InnerMessage::AuthResponse {
+      payload: serde_json::json!({ "authorized": true, "registered": false }),
+    };
+    assert_eq!(client.decrypt(&host.encrypt(&response).unwrap()).unwrap(), response);
+    assert!(
+      client
+        .encrypt(&InnerMessage::AuthRequest {
+          operation: HostAuthOperation::LoginStart,
+          payload: serde_json::json!([]),
+        })
+        .is_err()
+    );
+    assert!(
+      host
+        .encrypt(&InnerMessage::AuthResponse {
+          payload: serde_json::json!({ "oversized": "x".repeat(MAX_AUTH_PAYLOAD) }),
+        })
+        .is_err()
+    );
+    assert!(
+      serde_json::from_str::<InnerMessage>(r#"{"type":"auth_request","operation":"approve_anything","payload":{}}"#)
+        .is_err()
     );
   }
 

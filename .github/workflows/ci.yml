@@ -60,6 +60,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install browser Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache browser Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install WASM bindings CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
+
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:

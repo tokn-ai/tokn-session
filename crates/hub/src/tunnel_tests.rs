@@ -803,6 +803,10 @@ async fn authenticator_pairing_registers_only_encrypted_hosts_and_persists_trust
     },
   )
   .await;
+  assert!(matches!(
+    channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
+    InnerMessage::Error { .. }
+  ));
   assert!(
     next_binary(&mut socket).await.is_none(),
     "knowing a host's public key does not authorize an unpaired device"
@@ -1097,6 +1101,10 @@ async fn encrypted_transport_authenticates_grants_bounds_streams_and_rejects_pla
     },
   )
   .await;
+  assert!(matches!(
+    channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
+    InnerMessage::Error { .. }
+  ));
   assert!(
     next_binary(&mut socket).await.is_none(),
     "a stolen grant needs its recipient's private key"
@@ -1265,6 +1273,10 @@ async fn encrypted_transport_authenticates_grants_bounds_streams_and_rejects_pla
     },
   )
   .await;
+  assert!(matches!(
+    channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
+    InnerMessage::Error { message } if message.contains("revoked")
+  ));
   assert!(next_binary(&mut socket).await.is_none());
   assert_eq!(calls.load(Ordering::SeqCst), 0);
 

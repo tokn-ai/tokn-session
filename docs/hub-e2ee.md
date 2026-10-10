@@ -1,26 +1,34 @@
 # Encrypted Hub access and sharing
 
-For normal setup, use [authenticator pairing](hub-pairing.md): UUID/key creation,
-host registration, local code verification, and remembered client trust are
-automatic. Sharing is deferred from that flow. This page documents the earlier
-explicit owner-key and signed-grant interface, retained for compatibility.
-
-The installed Rust client and host encrypt session traffic through the Hub.
-The host verifies an owner-signed grant bound to the recipient's device key.
-Passkeys administer the Hub and enroll host connections; they cannot authorize
-protected content. Start the Hub and set up its owner using [hub.md](hub.md).
+For normal setup, use [machine pairing](hub-pairing.md). A browser or native app
+connects directly through the Hub; shared Rust crypto runs in browser WASM or
+the native app. The host verifies an authenticator code or a host-owned passkey
+and remembers the device key. New-device passkey login requires a trusted
+machine reference containing the host's encryption public key. Hub administrator
+passkeys at `/admin` remain separate from host content authorization.
 
 ```text
-Browser → local installed client ⇄ Hub ⇄ outbound host connector → viewer-api
-                   └──────── end-to-end encryption ────────┘            ↓
-                                                               viewer-core / Relay
+Browser or app ⇄ Hub ⇄ outbound host connector → loopback viewer-api
+       └──── end-to-end encrypted payloads ────┘           ↓
+                                                 viewer-core / Relay
 ```
 
 The Hub sees enrollment metadata, IP addresses, connection timing, and
-ciphertext sizes. It cannot decrypt protected requests, responses, grants,
-or session content, or create owner signatures. It can deny service. The
-browser UI comes from the client's local `--web-root`, not the VPS. Keep the
-executable and UI build trusted; E2EE cannot protect a compromised endpoint.
+ciphertext sizes. The relay cannot decrypt protected requests, responses,
+credentials, or session content. Browser code is served by the Hub and is a
+trusted endpoint dependency: a malicious UI publisher could access browser
+plaintext. The app encrypts and decrypts its own traffic. Its passkey ceremony
+uses the trusted Hub browser origin and a one-shot loopback form callback;
+session traffic remains on the app's encrypted host connection. Neither path
+requires a viewing-device proxy. The Hub can deny service.
+
+Sharing is deferred from normal pairing. The remainder of this page documents
+the earlier explicit owner-key and signed-grant interface, retained for
+compatibility. This interface uses the optional installed Rust `client` helper
+as its encryption endpoint; a locally served browser UI talks to that helper
+using a loopback bearer credential. The host verifies an owner-signed grant
+bound to the recipient's device key. Start the Hub and set up its administrator
+using [hub.md](hub.md) for this legacy enrollment workflow.
 
 ## Establish trust
 
@@ -112,7 +120,8 @@ tokn-session-hub client --hub https://hub.example.com \
 ```
 
 Open the local URL it prints. Its generated bearer token stays in browser
-memory; the Rust process holds the encryption key. The server binds only to
+memory; the Rust process holds the encryption key and serves the UI
+from its local `--web-root`. The server binds only to
 numeric loopback and checks Host, Origin, and bearer credentials. One process
 opens one host grant; multiple hosts share the same Hub endpoint. Recipients
 do not need the owner's Hub passkey. Key/grant management currently uses the CLI.
@@ -164,15 +173,18 @@ a lost response can mean delivery is uncertain.
 
 Protected connectors reject plaintext frames even from a malicious Hub.
 There is no downgrade. The explicit `connect --trusted-hub` option preserves
-the original browser-through-Hub mode; that Hub can read content and authorize
-requests. Existing scripts must choose this flag or `--owner-public-key`.
+the original plaintext browser-through-Hub mode; that Hub can read content and
+authorize requests. `--owner-public-key` selects the legacy grant mode; without
+either compatibility option, `connect` uses host-verified machine pairing.
 Upgrade Hub and connectors together for the new encrypted frame types.
 
 Keep HTTPS termination for remote operation. Proxy WebSocket upgrades on
 `/hub/v1/tunnel` and `/hub/v1/secure/*`, and apply upgrade rate limits. Secure
 channels have host-side cryptographic admission instead of Hub bearer login;
-the Hub bounds anonymous channels globally and per host. It stores public
-passkey credentials and enrollment identities, not encryption private keys,
-owner signing keys, or revocation state. `/api/v1/shared` is a host-local
+the Hub bounds anonymous channels globally and per host. Browser channels accept
+only the configured public UI Origin; native channels omit Origin. The Hub stores
+its administrator passkey credentials and host registration identities. Machine
+passkey credentials, device authorization, encryption private keys, owner signing
+keys, and grant revocations stay on endpoints. `/api/v1/shared` is a host-local
 adapter with the existing local API authentication; it is excluded from
 remote route allowlists and receives only connector-verified scope.

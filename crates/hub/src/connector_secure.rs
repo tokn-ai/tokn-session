@@ -1,8 +1,9 @@
 //! Host-owned trust boundary for encrypted requests. The Hub is only a carrier.
 use super::{ConnectorConfig, PairedHostConfig, SecureHostConfig, enqueue};
 use crate::{
+  host_passkeys::{CEREMONY_SECONDS, HostPasskeys},
   protocol::{self, Frame},
-  secure::{InnerMessage, NoiseIdentity, NoiseResponder, SecureChannel, SignedGrant},
+  secure::{HostAuthOperation, InnerMessage, NoiseIdentity, NoiseResponder, SecureChannel, SignedGrant},
 };
 use futures_util::StreamExt;
 use std::{
@@ -18,6 +19,7 @@ use tokio::sync::{Semaphore, mpsc};
 pub(super) struct Host {
   identity: NoiseIdentity,
   trust: HostTrust,
+  passkeys: Option<HostPasskeys>,
 }
 
 enum HostTrust {
@@ -27,11 +29,41 @@ enum HostTrust {
 
 impl Host {
   pub(super) fn load(config: &ConnectorConfig) -> Result<Option<Self>, String> {
-    let host = if let Some(config) = &config.paired {
-      crate::onboarding::read_totp_secret(&config.state_file)?;
+    let host = if let Some(paired) = &config.paired {
+      crate::onboarding::read_totp_secret(&paired.state_file)?;
+      let profile = paired
+        .state_file
+        .parent()
+        .map(|directory| crate::onboarding::HostProfile::load(&directory.join("host.json")))
+        .transpose()?
+        .flatten();
+      if profile
+        .as_ref()
+        .is_some_and(|profile| profile.host_id != paired.host_id)
+      {
+        return Err("Saved passkey host configuration does not match this connector".into());
+      }
+      let origin = match profile.and_then(|profile| profile.passkey_origin) {
+        Some(origin) => Some(
+          crate::host_passkeys::validate_origin(&origin)?
+            .origin()
+            .ascii_serialization(),
+        ),
+        None => {
+          let origin = crate::onboarding::canonical_hub(&config.hub_url)?;
+          crate::host_passkeys::validate_origin(&origin)
+            .ok()
+            .map(|origin| origin.origin().ascii_serialization())
+        }
+      };
+      crate::onboarding::validate_host_passkey_origin(&paired.state_file, origin.as_deref())?;
+      let passkeys = origin
+        .map(|origin| HostPasskeys::new(paired.state_file.clone(), &paired.host_id, &config.name, &origin))
+        .transpose()?;
       Self {
-        identity: NoiseIdentity::load_or_create(&config.noise_key_file)?,
-        trust: HostTrust::PairedDevices(config.clone()),
+        identity: NoiseIdentity::load_or_create(&paired.noise_key_file)?,
+        trust: HostTrust::PairedDevices(paired.clone()),
+        passkeys,
       }
     } else if let Some(config) = &config.secure {
       let bytes: [u8; 32] = protocol::decode(&config.owner_public_key, 32)?
@@ -41,6 +73,7 @@ impl Host {
       Self {
         identity: NoiseIdentity::load_or_create(&config.noise_key_file)?,
         trust: HostTrust::SignedGrants(config.clone()),
+        passkeys: None,
       }
     } else {
       return Ok(None);
@@ -115,6 +148,51 @@ impl Host {
       now()?,
     )?;
     send_record(outgoing, channel_id, ack).await
+  }
+
+  async fn authenticate(
+    &self,
+    host_id: &str,
+    operation: HostAuthOperation,
+    payload: serde_json::Value,
+    channel: &mut SecureChannel,
+    incoming: &mut mpsc::Receiver<Vec<u8>>,
+    outgoing: &mpsc::Sender<Frame>,
+    channel_id: u64,
+  ) -> Result<(), String> {
+    let HostTrust::PairedDevices(config) = &self.trust else {
+      return Err("This host does not support passkey device authorization".into());
+    };
+    if config.host_id != host_id {
+      return Err("Incorrect passkey authentication target".into());
+    }
+    let passkeys = self
+      .passkeys
+      .as_ref()
+      .ok_or("Configure --passkey-origin with the Hub's stable browser origin to use host passkeys")?;
+    let peer = channel.remote_public_key().to_owned();
+    let binding = channel.channel_binding().to_owned();
+    let (pending, payload) = passkeys.start(operation, payload, &peer, &binding, now()?)?;
+    send_record(
+      outgoing,
+      channel_id,
+      channel.encrypt(&InnerMessage::AuthResponse { payload })?,
+    )
+    .await?;
+    let finish = tokio::time::timeout(Duration::from_secs(CEREMONY_SECONDS), incoming.recv())
+      .await
+      .map_err(|_| "Host passkey ceremony expired; start again")?
+      .ok_or("Host passkey channel closed")?;
+    let InnerMessage::AuthRequest { operation, payload } = channel.decrypt(&finish)? else {
+      return Err("Finish the host passkey ceremony on its original encrypted channel".into());
+    };
+    let payload = passkeys.finish(pending, operation, payload, &peer, &binding, now()?)?;
+    send_record(
+      outgoing,
+      channel_id,
+      channel.encrypt(&InnerMessage::AuthResponse { payload })?,
+    )
+    .await
   }
 }
 
@@ -207,13 +285,41 @@ pub(super) async fn run(
   )
   .await?;
   let header = channel.decrypt(&receive(&mut incoming).await?)?;
+  if let InnerMessage::AuthRequest { operation, payload } = header {
+    let result = host
+      .authenticate(
+        host_id,
+        operation,
+        payload,
+        &mut channel,
+        &mut incoming,
+        outgoing,
+        channel_id,
+      )
+      .await;
+    if let Err(message) = &result {
+      if let Ok(record) = channel.encrypt(&InnerMessage::Error {
+        message: message.clone(),
+      }) {
+        let _ = send_record(outgoing, channel_id, record).await;
+      }
+    }
+    return result;
+  }
   let (method, path, grant) = match header {
     InnerMessage::Request { method, path, grant } => (method, path, Some(grant)),
     InnerMessage::DeviceRequest { method, path } => (method, path, None),
     _ => return Err("Expected encrypted request".into()),
   };
   let recipient = channel.remote_public_key().to_owned();
-  host.verify(grant.as_ref(), host_id, &recipient)?;
+  if let Err(message) = host.verify(grant.as_ref(), host_id, &recipient) {
+    if let Ok(record) = channel.encrypt(&InnerMessage::Error {
+      message: message.clone(),
+    }) {
+      let _ = send_record(outgoing, channel_id, record).await;
+    }
+    return Err(message);
+  }
   let body = tokio::time::timeout(Duration::from_secs(10), async {
     let mut body = Vec::new();
     let mut records = 0;
@@ -435,7 +541,201 @@ async fn forward_device(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::fs;
+  use crate::secure::NoiseInitiator;
+  use serde_json::{Value, json};
+  use std::{fs, sync::Arc};
+  use webauthn_authenticator_rs::{WebauthnAuthenticator, softpasskey::SoftPasskey};
+
+  fn paired_host(directory: &Path) -> ConnectorConfig {
+    let state_file = directory.join("host-access.json");
+    crate::onboarding::initialize_host_access(&state_file, &crate::pairing::TotpSecret::generate()).unwrap();
+    ConnectorConfig {
+      hub_url: "https://hub.example.com".parse().unwrap(),
+      local_url: "http://127.0.0.1:5558".parse().unwrap(),
+      key_file: directory.join("host-enrollment.key"),
+      name: "Workstation".into(),
+      local_token: None,
+      allow_control: false,
+      insecure_loopback: false,
+      secure: None,
+      paired: Some(PairedHostConfig {
+        host_id: "11111111-1111-4111-8111-111111111111".into(),
+        noise_key_file: directory.join("host-noise.key"),
+        state_file,
+      }),
+    }
+  }
+
+  async fn open_host(
+    config: &ConnectorConfig,
+    device: &NoiseIdentity,
+  ) -> (
+    tokio::task::JoinHandle<Result<(), String>>,
+    mpsc::Sender<Vec<u8>>,
+    mpsc::Receiver<Frame>,
+    SecureChannel,
+  ) {
+    let host = Arc::new(Host::load(config).unwrap().unwrap());
+    let mut initiator = NoiseInitiator::new(device, &host.public_key()).unwrap();
+    let config = config.clone();
+    let host_id = config.paired.as_ref().unwrap().host_id.clone();
+    let (incoming, received) = mpsc::channel(16);
+    let (outgoing, mut frames) = mpsc::channel(16);
+    let task = tokio::spawn(async move {
+      run(
+        &host,
+        &host_id,
+        &config,
+        &reqwest::Client::new(),
+        &outgoing,
+        1,
+        received,
+      )
+      .await
+    });
+    incoming.send(initiator.start().unwrap()).await.unwrap();
+    let Frame::SecureData { data, .. } = frames.recv().await.unwrap() else {
+      panic!("Expected Noise handshake response");
+    };
+    let channel = initiator
+      .finish(&protocol::decode(&data, protocol::MAX_SECURE_RECORD).unwrap())
+      .unwrap();
+    (task, incoming, frames, channel)
+  }
+
+  async fn read_inner(frames: &mut mpsc::Receiver<Frame>, channel: &mut SecureChannel) -> InnerMessage {
+    let Frame::SecureData { data, .. } = frames.recv().await.unwrap() else {
+      panic!("Expected encrypted response");
+    };
+    channel
+      .decrypt(&protocol::decode(&data, protocol::MAX_SECURE_RECORD).unwrap())
+      .unwrap()
+  }
+
+  async fn authenticate_wire(
+    config: &ConnectorConfig,
+    device: &NoiseIdentity,
+    authenticator: &mut WebauthnAuthenticator<SoftPasskey>,
+    register: bool,
+  ) -> Value {
+    let (task, incoming, mut frames, mut channel) = open_host(config, device).await;
+    let (start, finish) = if register {
+      (HostAuthOperation::RegisterStart, HostAuthOperation::RegisterFinish)
+    } else {
+      (HostAuthOperation::LoginStart, HostAuthOperation::LoginFinish)
+    };
+    incoming
+      .send(
+        channel
+          .encrypt(&InnerMessage::AuthRequest {
+            operation: start,
+            payload: json!({}),
+          })
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+    let InnerMessage::AuthResponse { payload } = read_inner(&mut frames, &mut channel).await else {
+      panic!("Expected host passkey challenge");
+    };
+    let origin = config.hub_url.clone();
+    let credential = if register {
+      serde_json::to_value(
+        authenticator
+          .do_registration(origin, serde_json::from_value(payload["options"].clone()).unwrap())
+          .unwrap(),
+      )
+      .unwrap()
+    } else {
+      serde_json::to_value(
+        authenticator
+          .do_authentication(origin, serde_json::from_value(payload["options"].clone()).unwrap())
+          .unwrap(),
+      )
+      .unwrap()
+    };
+    incoming
+      .send(
+        channel
+          .encrypt(&InnerMessage::AuthRequest {
+            operation: finish,
+            payload: json!({"credential": credential}),
+          })
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+    let InnerMessage::AuthResponse { payload } = read_inner(&mut frames, &mut channel).await else {
+      panic!("Expected host passkey confirmation");
+    };
+    task.await.unwrap().unwrap();
+    payload
+  }
+
+  #[tokio::test]
+  async fn passkey_commands_are_constrained_before_authorization_and_remember_verified_device_keys() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = paired_host(directory.path());
+    let device = NoiseIdentity::generate().unwrap();
+    for header in [
+      InnerMessage::DeviceRequest {
+        method: "GET".into(),
+        path: "/api/v1/health".into(),
+      },
+      InnerMessage::AuthRequest {
+        operation: HostAuthOperation::RegisterStart,
+        payload: json!({}),
+      },
+    ] {
+      let (task, incoming, mut frames, mut channel) = open_host(&config, &device).await;
+      incoming.send(channel.encrypt(&header).unwrap()).await.unwrap();
+      assert!(matches!(
+        read_inner(&mut frames, &mut channel).await,
+        InnerMessage::Error { .. }
+      ));
+      assert!(task.await.unwrap().is_err());
+    }
+    let state_file = &config.paired.as_ref().unwrap().state_file;
+    let paired = NoiseIdentity::generate().unwrap();
+    let now = now().unwrap();
+    crate::onboarding::authorize_device(state_file, &paired.public_key(), now / 30, now).unwrap();
+    let mut authenticator = WebauthnAuthenticator::new(SoftPasskey::new(true));
+    assert_eq!(
+      authenticate_wire(&config, &paired, &mut authenticator, true).await["registered"],
+      true
+    );
+    assert!(!crate::onboarding::is_authorized(state_file, &device.public_key()).unwrap());
+    let accepted = authenticate_wire(&config, &device, &mut authenticator, false).await;
+    assert_eq!(accepted["device_public_key"], device.public_key());
+    let reopened = Host::load(&config).unwrap().unwrap();
+    reopened
+      .verify(None, &config.paired.as_ref().unwrap().host_id, &device.public_key())
+      .unwrap();
+    // Saved explicit origins and a URL-derived origin must have the same
+    // canonical representation before checking the persisted credential RP.
+    let mut profile = crate::onboarding::HostProfile {
+      version: 1,
+      host_id: config.paired.as_ref().unwrap().host_id.clone(),
+      hub_url: config.hub_url.to_string(),
+      name: config.name.clone(),
+      viewer_url: config.local_url.to_string(),
+      allow_control: config.allow_control,
+      insecure_loopback: config.insecure_loopback,
+      passkey_origin: Some(config.hub_url.to_string()),
+    };
+    let profile_path = directory.path().join("host.json");
+    profile.save(&profile_path).unwrap();
+    assert!(Host::load(&config).is_ok());
+    profile.passkey_origin = Some("https://other.example.com".into());
+    profile.save(&profile_path).unwrap();
+    assert!(Host::load(&config).is_err());
+    crate::onboarding::remove_device(state_file, &device.public_key()).unwrap();
+    assert!(
+      reopened
+        .verify(None, &config.paired.as_ref().unwrap().host_id, &device.public_key())
+        .is_err()
+    );
+  }
 
   #[test]
   fn revocations_are_reloaded_and_invalid_files_fail_closed() {

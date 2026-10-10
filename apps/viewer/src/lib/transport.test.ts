@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { parseEvent, RemoteClient, selectMachine, invoke, captureTransport } from "./transport";
+import { parseEvent, RemoteClient, selectMachine, invoke, listen, viewerStorageScope, captureTransport } from "./transport";
 
 const clients: RemoteClient[] = [];
 afterEach(() => { for (const client of clients) client.close(); clients.length = 0; selectMachine(); vi.unstubAllGlobals(); vi.useRealTimers(); });
@@ -11,6 +11,19 @@ function stream() {
 }
 
 describe("remote viewer transport", () => {
+  it("routes a selected Hub machine before desktop local commands and partitions its viewer state", async () => {
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    const remote = client();
+    const send = vi.spyOn(remote, "invoke").mockResolvedValue({ sessions: [] });
+    const subscribe = vi.spyOn(remote, "listen").mockResolvedValue(() => {});
+    selectMachine(remote);
+    expect(await invoke("list_sessions", { request: {} })).toEqual({ sessions: [] });
+    await listen("session-updated", () => {});
+    expect(send).toHaveBeenCalledWith("list_sessions", { request: {} });
+    expect(subscribe).toHaveBeenCalledWith("session-updated", expect.any(Function));
+    expect(viewerStorageScope()).toBe(remote.endpoint);
+    expect(await captureTransport().invoke("list_sessions")).toEqual({ sessions: [] });
+  });
   it("parses named multiline events and ignores heartbeats", () => {
     expect(parseEvent(": keep-alive")).toBeNull();
     expect(parseEvent('event: relay-changed\ndata: {"session_key":null,\ndata: "reset":true}')).toEqual({ event: "relay-changed", payload: { session_key: null, reset: true } });

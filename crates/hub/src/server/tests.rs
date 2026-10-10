@@ -95,6 +95,67 @@ async fn unauthenticated_routes_and_unknown_api_paths_never_serve_the_spa() {
 }
 
 #[tokio::test]
+async fn only_the_native_passkey_page_preserves_the_origin_for_its_form_callback() {
+  let directory = tempfile::tempdir().unwrap();
+  let web = directory.path().join("web");
+  std::fs::create_dir(&web).unwrap();
+  std::fs::write(web.join("index.html"), "<main>Hub</main>").unwrap();
+  let app = with_web_ui(router(state(directory.path())), web).unwrap();
+  for (path, policy) in [
+    ("/passkey", "origin"),
+    ("/passkey?request=ignored", "origin"),
+    ("/", "no-referrer"),
+    ("/admin", "no-referrer"),
+    ("/connect", "no-referrer"),
+    ("/passkey/", "no-referrer"),
+    ("/passkey-other", "no-referrer"),
+    ("/hub/v1/auth/status", "no-referrer"),
+  ] {
+    let response = get(app.clone(), path, None).await;
+    assert_eq!(response.status(), StatusCode::OK, "{path}");
+    assert_eq!(response.headers()[header::REFERRER_POLICY], policy, "{path}");
+  }
+}
+
+#[tokio::test]
+async fn browser_secure_channels_require_the_exact_ui_origin_and_connectors_remain_native_only() {
+  use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{Error, client::IntoClientRequest},
+  };
+  let directory = tempfile::tempdir().unwrap();
+  let (hub_url, task) = listen(router(state(directory.path()))).await;
+  let websocket_origin = hub_url.replacen("http://", "ws://", 1);
+  let cases = [
+    ("/hub/v1/secure/offline", None, StatusCode::BAD_GATEWAY),
+    ("/hub/v1/secure/offline", Some(ORIGIN), StatusCode::BAD_GATEWAY),
+    (
+      "/hub/v1/secure/offline",
+      Some("http://localhost:5560"),
+      StatusCode::FORBIDDEN,
+    ),
+    (
+      "/hub/v1/secure/offline",
+      Some("https://untrusted.example"),
+      StatusCode::FORBIDDEN,
+    ),
+    ("/hub/v1/secure/offline", Some("null"), StatusCode::FORBIDDEN),
+    ("/hub/v1/tunnel", Some(ORIGIN), StatusCode::FORBIDDEN),
+  ];
+  for (path, origin, status) in cases {
+    let mut request = format!("{websocket_origin}{path}").into_client_request().unwrap();
+    if let Some(origin) = origin {
+      request.headers_mut().insert(header::ORIGIN, origin.parse().unwrap());
+    }
+    let Err(Error::Http(response)) = connect_async(request).await else {
+      panic!("Expected boundary rejection for {path} from {origin:?}");
+    };
+    assert_eq!(response.status(), status, "{path}, {origin:?}");
+  }
+  task.abort();
+}
+
+#[tokio::test]
 async fn passkey_owner_routes_multiple_hosts_and_logout_stops_live_streams() {
   let directory = tempfile::tempdir().unwrap();
   let state = state(directory.path());

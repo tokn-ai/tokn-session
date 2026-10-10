@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "./App";
 import { RemoteClient } from "./lib/transport";
 import { StrictMode, type ReactNode } from "react";
+vi.mock("./components/HubAccess", () => ({ HubAccess: () => <div>Machine access</div> }));
 vi.mock("./pages/ViewerPage", () => ({ ViewerPage: ({ remote, connection }: { remote?: boolean; connection?: ReactNode }) => <><div>{remote ? "Remote sessions" : "Desktop sessions"}</div>{connection}</> }));
 beforeEach(() => { vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 404 })); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
@@ -46,11 +47,20 @@ it("reports connection failures, retries, and disconnects before switching machi
   expect(screen.queryByText("Remote sessions")).not.toBeInTheDocument();
 });
 
-it("detects Hub login and offers retry for failed discovery without exposing direct login", async () => {
+it("detects Hub machine access and retries failed discovery without exposing direct login", async () => {
   vi.mocked(fetch).mockRejectedValueOnce(new Error("Network unavailable")).mockResolvedValueOnce(Response.json({ configured: true, authenticated: false }));
   render(<App />);
   expect(await screen.findByRole("alert")).toHaveTextContent("Network unavailable");
   expect(screen.queryByLabelText("Access token")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Retry connection" }));
-  expect(await screen.findByRole("button", { name: "Sign in with passkey" })).toBeInTheDocument();
+  expect(await screen.findByText("Machine access")).toBeInTheDocument();
+});
+
+it("keeps Hub administrator login separate from machine access", async () => {
+  window.history.replaceState(null, "", "/admin");
+  vi.mocked(fetch).mockResolvedValue(Response.json({ configured: true, authenticated: false }));
+  render(<App />);
+  expect(await screen.findByRole("heading", { name: "Hub administration" })).toBeInTheDocument();
+  expect(screen.queryByText("Machine access")).not.toBeInTheDocument();
+  window.history.replaceState(null, "", "/");
 });

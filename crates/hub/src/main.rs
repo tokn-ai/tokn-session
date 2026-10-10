@@ -59,6 +59,9 @@ enum Command {
     name: Option<String>,
     #[arg(long)]
     viewer_url: Option<Url>,
+    /// Stable Hub browser origin for host passkeys; defaults to --hub when it uses a hostname.
+    #[arg(long, conflicts_with_all = ["trusted_hub", "owner_public_key"])]
+    passkey_origin: Option<String>,
     /// Local configuration, keys, authenticator, and trusted-device state.
     #[arg(long)]
     state_dir: Option<PathBuf>,
@@ -221,6 +224,7 @@ async fn run(args: Args) -> Result<(), String> {
       );
       if let Some(token) = state.auth.bootstrap_token()? {
         let mut setup = origin;
+        setup.set_path("/admin");
         setup.set_fragment(Some(&format!("bootstrap_token={token}")));
         eprintln!("Optional Hub administration: create the first passkey at {setup}");
       }
@@ -239,6 +243,7 @@ async fn run(args: Args) -> Result<(), String> {
       hub,
       name,
       viewer_url,
+      passkey_origin,
       state_dir,
       totp_secret_file,
       viewer_token,
@@ -258,6 +263,7 @@ async fn run(args: Args) -> Result<(), String> {
           hub,
           name,
           viewer_url,
+          passkey_origin,
           state_dir: state_dir.unwrap_or(default_path("")?),
           totp_secret_file,
           viewer_token,

@@ -1,0 +1,37 @@
+[package]
+name = "tokn-hub-client-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+base64 = "0.22"
+data-encoding = "2"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+hkdf = "0.12"
+hmac = "0.12"
+rand = "0.8"
+serde.workspace = true
+serde_json.workspace = true
+sha1 = "0.10"
+sha2 = "0.10"
+snow = { version = "0.10", default-features = false, features = ["use-chacha20poly1305", "use-blake2", "use-curve25519", "use-getrandom"] }
+spake2 = "0.4"
+url = "2"
+uuid = "1"
+zeroize = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+wasm-bindgen = "=0.2.126"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tempfile = "3"
