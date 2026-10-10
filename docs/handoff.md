@@ -137,6 +137,13 @@ Enrolled host-owned passkeys authorize new devices on their original Noise
 channel; a new device needs the full machine reference to pin the host first.
 Native passkey prompts use the Hub browser origin and a one-shot loopback form
 callback carrying only the credential. Hub administration lives at `/admin`.
+The administrator manages Hub-local namespaces and permanent `username:host`
+addresses there. Exact public lookup returns routing metadata, never a Noise key;
+UUID/key pins remain authoritative. Addresses survive revocation as reservations
+and cannot move between hosts. Connections now separates saved-machine reconnects
+from code/passkey onboarding; its panel shows the machine, Hub, and encryption state.
+Legacy saved UUID pins remain valid. First-device passkey access still requires a
+trusted `UUID@key` or `username:host@key` reference.
 Browser code delivery trusts Hub; a malicious code publisher can read decrypted
 content even though the relay cannot decrypt traffic. The old installed
 `client` helper remains optional compatibility, not part of the default path.

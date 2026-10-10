@@ -1,3 +1,5 @@
+export type { HubNamespace } from "./types";
+
 export interface HubStatus {
   configured: boolean;
   authenticated: boolean;
@@ -9,6 +11,7 @@ export interface HubHost {
   online: boolean;
   access: "view" | "control";
   secure_only?: boolean;
+  machine_address?: string;
 }
 
 export interface HubEnrollment {

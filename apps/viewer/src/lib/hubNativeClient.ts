@@ -1,6 +1,7 @@
 import { type SavedHubHost } from "./hubDeviceStore";
 import type { ConnectionState, UnlistenFn, ViewerClient } from "./transport";
 import type { PasskeyProvider } from "./hubEncryptedClient";
+import type { ResolvedMachine } from "./types";
 
 export interface NativeHubStatus {
   hub_url: string;
@@ -13,8 +14,14 @@ async function command<T>(name: string, request: Record<string, unknown>): Promi
   return (await import("@tauri-apps/api/core")).invoke<T>(name, request);
 }
 export function nativeHubStatus(hub_url: string): Promise<NativeHubStatus> { return command("hub_client_status", { hub_url }); }
-export function nativeHubPair(hub_url: string, host_id: string, code: string, expected_host_public_key?: string): Promise<SavedHubHost> { return command("hub_client_pair", { hub_url, host_id, code, expected_host_public_key }); }
+export function nativeHubPair(hub_url: string, host_id: string, code: string, expected_host_public_key?: string, machine_address?: string): Promise<SavedHubHost> { return command("hub_client_pair", { hub_url, host_id, code, expected_host_public_key, ...(machine_address ? { machine_address } : {}) }); }
 export function nativeHubForget(hub_url: string, host_id: string): Promise<void> { return command("hub_client_forget", { hub_url, host_id }); }
+export function nativeHubResolve(hub_url: string, machine_address: string): Promise<ResolvedMachine> {
+  return command("hub_client_resolve", { hub_url, machine_address });
+}
+export function nativeHubRememberMetadata(hub_url: string, machine: ResolvedMachine): Promise<SavedHubHost> {
+  return command("hub_client_remember_metadata", { hub_url, host_id: machine.host_id, machine_address: machine.machine_address, name: machine.name });
+}
 export function nativePasskeys(hub_url: string, auth_id?: string): PasskeyProvider {
   return {
     create: (options) => command("hub_client_passkey_credential", { hub_url, auth_id, options: { publicKey: options }, register: true }),
@@ -22,7 +29,7 @@ export function nativePasskeys(hub_url: string, auth_id?: string): PasskeyProvid
   };
 }
 export async function nativeHubAuthenticate(hub_url: string, host: SavedHubHost, register: boolean, signal: AbortSignal, provider?: PasskeyProvider): Promise<SavedHubHost> {
-  const start = await command<{ auth_id: string; options: { publicKey: Parameters<PasskeyProvider["create"]>[0] } }>("hub_client_auth_start", { hub_url, ...host, register });
+  const start = await command<{ auth_id: string; options: { publicKey: Parameters<PasskeyProvider["create"]>[0] } }>("hub_client_auth_start", { hub_url, host_id: host.host_id, host_public_key: host.host_public_key, register });
   const cancel = () => { void command("hub_client_auth_cancel", { auth_id: start.auth_id }).catch(() => {}); };
   signal.addEventListener("abort", cancel, { once: true });
   try {
@@ -46,7 +53,7 @@ export class NativeHubClient implements ViewerClient {
   private constructor(private descriptor: Descriptor) { this.endpoint = descriptor.endpoint; }
   static async connect(hub_url: string, host: SavedHubHost, signal?: AbortSignal): Promise<NativeHubClient> {
     if (signal?.aborted) throw new Error("Machine disconnected");
-    const descriptor = await command<Descriptor>("hub_client_open", { hub_url, ...host });
+    const descriptor = await command<Descriptor>("hub_client_open", { hub_url, host_id: host.host_id, host_public_key: host.host_public_key });
     const client = new NativeHubClient(descriptor);
     if (signal?.aborted) { client.close(); throw new Error("Machine disconnected"); }
     return client;

@@ -1,11 +1,33 @@
 //! Thin app bridge. The native client connects directly to Hub ciphertext routes.
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
-use tokn_hub_remote::{AuthOptions, ClientStatus, ConnectionInfo, RemoteManager};
+use tokn_hub_remote::{AuthOptions, ClientStatus, ConnectionInfo, RemoteManager, ResolvedMachine};
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn hub_client_status(state: State<'_, RemoteManager>, hub_url: String) -> Result<ClientStatus, String> {
   state.status(&hub_url).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn hub_client_resolve(
+  state: State<'_, RemoteManager>,
+  hub_url: String,
+  machine_address: String,
+) -> Result<ResolvedMachine, String> {
+  state.resolve(&hub_url, &machine_address).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn hub_client_remember_metadata(
+  state: State<'_, RemoteManager>,
+  hub_url: String,
+  host_id: String,
+  machine_address: String,
+  name: String,
+) -> Result<tokn_hub_remote::SavedHost, String> {
+  state
+    .remember_metadata(&hub_url, &host_id, &machine_address, &name)
+    .await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -15,9 +37,16 @@ pub async fn hub_client_pair(
   host_id: String,
   code: String,
   expected_host_public_key: Option<String>,
+  machine_address: Option<String>,
 ) -> Result<tokn_hub_remote::SavedHost, String> {
   state
-    .pair(&hub_url, &host_id, code, expected_host_public_key.as_deref())
+    .pair_with_address(
+      &hub_url,
+      &host_id,
+      code,
+      expected_host_public_key.as_deref(),
+      machine_address.as_deref(),
+    )
     .await
 }
 

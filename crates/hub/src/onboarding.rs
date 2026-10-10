@@ -296,6 +296,10 @@ pub(crate) fn authorize_passkey_device(
 pub struct SavedHost {
   pub host_id: String,
   pub host_public_key: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub machine_address: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub name: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -383,6 +387,7 @@ impl ClientStore {
   pub fn save_host(&self, host: SavedHost) -> Result<(), String> {
     validate_uuid(&host.host_id)?;
     decode_public_key(&host.host_public_key)?;
+    validate_host_metadata(&host)?;
     let path = self.path();
     let _lock = lock(&path)?;
     let mut state = self.read()?;
@@ -391,7 +396,7 @@ impl ClientStore {
     }
     let hub = state.hubs.entry(self.hub.clone()).or_default();
     if let Some(existing) = hub.hosts.iter().find(|value| value.host_id == host.host_id) {
-      if existing != &host {
+      if existing.host_public_key != host.host_public_key {
         return Err(
           "Host identity changed; the saved key was preserved. Restore the host key before reconnecting".into(),
         );
@@ -402,7 +407,48 @@ impl ClientStore {
       return Err("Saved host limit reached".into());
     }
     hub.hosts.push(host);
+    validate_client_state(&state)?;
     write_atomic(&path, &state)
+  }
+
+  /// Remember display metadata for an already-pinned host. The caller verifies
+  /// the directory mapping before entering this atomic local transaction.
+  pub fn remember_metadata(&self, host_id: &str, machine_address: &str, name: &str) -> Result<SavedHost, String> {
+    validate_uuid(host_id)?;
+    tokn_hub_client_core::address::parse_machine_address(machine_address)?;
+    tokn_hub_client_core::address::validate_machine_name(name)?;
+    let path = self.path();
+    let _lock = lock(&path)?;
+    let mut state = self.read()?;
+    let hub = state
+      .hubs
+      .get_mut(&self.hub)
+      .ok_or("Pair this machine before remembering its address")?;
+    if hub
+      .hosts
+      .iter()
+      .any(|host| host.host_id != host_id && host.machine_address.as_deref() == Some(machine_address))
+    {
+      return Err("This saved machine address belongs to a different UUID; its original identity was preserved".into());
+    }
+    let host = hub
+      .hosts
+      .iter_mut()
+      .find(|host| host.host_id == host_id)
+      .ok_or("Pair this machine before remembering its address")?;
+    if host
+      .machine_address
+      .as_deref()
+      .is_some_and(|address| address != machine_address)
+    {
+      return Err("This host already has a different saved machine address".into());
+    }
+    host.machine_address = Some(machine_address.into());
+    host.name = Some(name.into());
+    let remembered = host.clone();
+    validate_client_state(&state)?;
+    write_atomic(&path, &state)?;
+    Ok(remembered)
   }
 
   pub fn selected_host(&self) -> Result<Option<String>, String> {
@@ -461,9 +507,18 @@ fn validate_client_state(state: &ClientHosts) -> Result<(), String> {
       return Err("Too many saved hosts".into());
     }
     let mut ids = std::collections::HashSet::new();
+    let mut addresses = std::collections::HashSet::new();
     for host in &hub.hosts {
       validate_uuid(&host.host_id)?;
       decode_public_key(&host.host_public_key)?;
+      validate_host_metadata(host)?;
+      if host
+        .machine_address
+        .as_ref()
+        .is_some_and(|address| !addresses.insert(address))
+      {
+        return Err("Duplicate saved machine address".into());
+      }
       if !ids.insert(&host.host_id) {
         return Err("Duplicate saved host identity".into());
       }
@@ -475,6 +530,16 @@ fn validate_client_state(state: &ClientHosts) -> Result<(), String> {
     {
       return Err("Selected host has no saved identity".into());
     }
+  }
+  Ok(())
+}
+
+fn validate_host_metadata(host: &SavedHost) -> Result<(), String> {
+  if let Some(address) = &host.machine_address {
+    tokn_hub_client_core::address::parse_machine_address(address)?;
+  }
+  if let Some(name) = &host.name {
+    tokn_hub_client_core::address::validate_machine_name(name)?;
   }
   Ok(())
 }
@@ -699,6 +764,8 @@ mod tests {
     let mut host = SavedHost {
       host_id: Uuid::new_v4().to_string(),
       host_public_key: NoiseIdentity::generate().unwrap().public_key(),
+      machine_address: None,
+      name: None,
     };
     store.save_host(host.clone()).unwrap();
     store.select_host(&host.host_id).unwrap();
@@ -717,6 +784,66 @@ mod tests {
     let second = ClientStore::load_or_create(second_dir.path(), &hub).unwrap();
     fs::remove_file(second.identity_file()).unwrap();
     assert!(ClientStore::load_or_create(second_dir.path(), &hub).is_err());
+  }
+
+  #[test]
+  fn client_metadata_preserves_legacy_pins_selection_and_alias_ownership() {
+    let directory = tempfile::tempdir().unwrap();
+    let hub = Url::parse("https://hub.example").unwrap();
+    let store = ClientStore::load_or_create(directory.path(), &hub).unwrap();
+    let host: SavedHost = serde_json::from_value(serde_json::json!({
+      "host_id": Uuid::new_v4().to_string(), "host_public_key": NoiseIdentity::generate().unwrap().public_key(),
+    }))
+    .unwrap();
+    assert_eq!(host.machine_address, None);
+    assert_eq!(host.name, None);
+    store.save_host(host.clone()).unwrap();
+    store.select_host(&host.host_id).unwrap();
+    let remembered = store
+      .remember_metadata(&host.host_id, "alice:workstation", "Workstation")
+      .unwrap();
+    assert_eq!(remembered.host_public_key, host.host_public_key);
+    assert_eq!(remembered.machine_address.as_deref(), Some("alice:workstation"));
+    // The same UUID/key with no metadata is an ordinary authenticated reconnect,
+    // not an identity change and not a request to erase remembered labels.
+    store.save_host(host.clone()).unwrap();
+    let reopened = ClientStore::load_or_create(directory.path(), &hub).unwrap();
+    assert_eq!(reopened.hosts().unwrap(), vec![remembered.clone()]);
+    assert_eq!(reopened.selected_host().unwrap(), Some(host.host_id.clone()));
+    let renamed = reopened
+      .remember_metadata(&host.host_id, "alice:workstation", "Workstation display")
+      .unwrap();
+    assert_eq!(renamed.name.as_deref(), Some("Workstation display"));
+    assert!(
+      reopened
+        .remember_metadata(&host.host_id, "alice:other", "Workstation")
+        .is_err()
+    );
+    let second = SavedHost {
+      host_id: Uuid::new_v4().to_string(),
+      host_public_key: NoiseIdentity::generate().unwrap().public_key(),
+      machine_address: None,
+      name: None,
+    };
+    reopened.save_host(second.clone()).unwrap();
+    assert!(
+      reopened
+        .remember_metadata(&second.host_id, "alice:workstation", "Another host")
+        .is_err()
+    );
+    assert!(
+      reopened
+        .remember_metadata(&second.host_id, "Alice:second", "Another host")
+        .is_err()
+    );
+    let other_hub =
+      ClientStore::load_or_create(directory.path(), &Url::parse("https://other.example").unwrap()).unwrap();
+    other_hub.save_host(second.clone()).unwrap();
+    other_hub
+      .remember_metadata(&second.host_id, "alice:workstation", "Other Hub")
+      .unwrap();
+    assert_eq!(reopened.hosts().unwrap()[0], renamed);
+    assert_eq!(reopened.selected_host().unwrap(), Some(host.host_id));
   }
 
   #[cfg(unix)]

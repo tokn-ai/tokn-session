@@ -20,6 +20,7 @@ beforeEach(() => {
     if (url.endsWith("/enrollments/approve")) return new Response(null, { status: 204 });
     if (url.endsWith("/enrollments")) return Response.json({ enrollments: [enrollment] });
     if (url.endsWith("/hosts")) return Response.json({ hosts });
+    if (url.endsWith("/namespaces")) return Response.json({ namespaces: [{ username: "alice" }] });
     if (init?.method === "DELETE" || url.endsWith("/auth/logout")) return new Response(null, { status: 204 });
     throw new Error(`Unexpected request ${url}`);
   });
@@ -125,4 +126,52 @@ it("cancels an unfinished host connection when signing out", async () => {
   resolve_connection(stale);
   await waitFor(() => expect(close).toHaveBeenCalledOnce());
   expect(screen.queryByText("Remote sessions")).not.toBeInTheDocument();
+});
+
+it("creates administrator-managed usernames without creating sign-in accounts", async () => {
+  const original = vi.mocked(fetch).getMockImplementation()!;
+  const namespaces = [{ username: "alice" }];
+  vi.mocked(fetch).mockImplementation(async (input, init) => {
+    if (String(input).endsWith("/namespaces")) {
+      if (init?.method === "POST") { namespaces.push({ username: "bob" }); return new Response(null, { status: 204 }); }
+      return Response.json({ namespaces });
+    }
+    return original(input, init);
+  });
+  render(<HubConnection initial_status={{ configured: true, authenticated: false }} />); await signIn();
+  expect(screen.getByText(/do not create sign-in accounts/)).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("New username"), { target: { value: "bob" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create username namespace" }));
+  expect(await screen.findByText("Username namespace bob created.")).toBeInTheDocument();
+  expect(fetch).toHaveBeenCalledWith(`${window.location.origin}/hub/v1/namespaces`, expect.objectContaining({ method: "POST", body: JSON.stringify({ username: "bob" }) }));
+  await waitFor(() => expect(screen.getByRole("list", { name: "Username namespaces" })).toHaveTextContent("bob"));
+});
+
+it("assigns an address only to an encrypted host and then displays it as permanent", async () => {
+  const original = vi.mocked(fetch).getMockImplementation()!;
+  let machine_address: string | undefined;
+  const host_id = "550e8400-e29b-41d4-a716-446655440000";
+  vi.mocked(fetch).mockImplementation(async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/hosts")) return Response.json({ hosts: [...hosts, { host_id, name: "Protected host", online: false, access: "view", secure_only: true, machine_address }] });
+    if (url.endsWith("/namespaces/alice/machines/laptop")) { machine_address = "alice:laptop"; return new Response(null, { status: 204 }); }
+    return original(input, init);
+  });
+  render(<HubConnection initial_status={{ configured: true, authenticated: false }} />); await signIn();
+  expect(screen.queryByLabelText("Machine name for Workstation")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByText("Assign a machine address"));
+  fireEvent.change(screen.getByLabelText("Machine name for Protected host"), { target: { value: "laptop" } });
+  fireEvent.click(screen.getByRole("button", { name: "Assign alice:laptop" }));
+  expect(await screen.findByText("Machine address alice:laptop assigned. It is permanent.")).toBeInTheDocument();
+  expect(fetch).toHaveBeenCalledWith(`${window.location.origin}/hub/v1/namespaces/alice/machines/laptop`, expect.objectContaining({ method: "POST", body: JSON.stringify({ host_id }) }));
+  expect(await screen.findByRole("heading", { name: "alice:laptop" })).toBeInTheDocument();
+  expect(screen.queryByLabelText("Machine name for Protected host")).not.toBeInTheDocument();
+});
+
+it("rejects a noncanonical username before sending an administrative mutation", async () => {
+  render(<HubConnection initial_status={{ configured: true, authenticated: false }} />); await signIn();
+  fireEvent.change(screen.getByLabelText("New username"), { target: { value: "Alice" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create username namespace" }));
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
+  expect(vi.mocked(fetch).mock.calls.some(([, options]) => options?.method === "POST")).toBe(false);
 });

@@ -1,9 +1,7 @@
 import type { DeviceIdentity, CryptoApi } from "./hubCrypto";
-
-export interface SavedHubHost {
-  host_id: string;
-  host_public_key: string;
-}
+import type { SavedHubHost } from "./types";
+import { parseMachineAddress } from "./hubAddress";
+export type { SavedHubHost } from "./types";
 export interface HubDeviceRecord {
   version: 1;
   hub_url: string;
@@ -31,10 +29,18 @@ export function canonicalHubUrl(value: string): string {
 }
 export function validateHost(host: SavedHubHost): SavedHubHost {
   if (!UUID.test(host.host_id) || !KEY.test(host.host_public_key)) throw new Error("Invalid machine reference.");
-  return { host_id: host.host_id, host_public_key: host.host_public_key };
+  if (host.machine_address !== undefined) parseMachineAddress(host.machine_address);
+  if (host.name !== undefined && (typeof host.name !== "string" || !host.name.trim() || new TextEncoder().encode(host.name).length > 128 || /[\u0000-\u001f\u007f-\u009f]/.test(host.name))) {
+    throw new Error("Invalid saved machine name.");
+  }
+  return {
+    host_id: host.host_id, host_public_key: host.host_public_key,
+    ...(host.machine_address === undefined ? {} : { machine_address: host.machine_address }),
+    ...(host.name === undefined ? {} : { name: host.name }),
+  };
 }
 export function machineReference(host: SavedHubHost): string {
-  return `${host.host_id}@${host.host_public_key}`;
+  return `${host.machine_address ?? host.host_id}@${host.host_public_key}`;
 }
 export function parseMachineReference(value: string): SavedHubHost {
   const match = /^([^@]+)@([^@]+)$/.exec(value.trim());
@@ -46,10 +52,25 @@ function validateRecord(record: HubDeviceRecord, hub_url: string): HubDeviceReco
     || !Array.isArray(record.hosts) || record.hosts.length > 64) throw new Error("Saved device state is invalid. Restore it before reconnecting.");
   const hosts = record.hosts.map(validateHost);
   if (new Set(hosts.map((host) => host.host_id)).size !== hosts.length
+    || new Set(hosts.flatMap((host) => host.machine_address ? [host.machine_address] : [])).size !== hosts.filter((host) => host.machine_address).length
     || (record.selected_host_id !== null && !hosts.some((host) => host.host_id === record.selected_host_id))) {
     throw new Error("Saved device state is invalid. Restore it before reconnecting.");
   }
   return { ...record, hosts };
+}
+
+function mergeHost(hosts: SavedHubHost[], host: SavedHubHost, require_existing = false): SavedHubHost[] {
+  const previous = hosts.find((entry) => entry.host_id === host.host_id);
+  if (!previous && require_existing) throw new Error("This machine was forgotten. Pair it again before saving its address.");
+  if (previous && previous.host_public_key !== host.host_public_key) throw new Error("This machine's saved encryption key changed. Verify its identity before pairing again.");
+  if (host.machine_address && hosts.some((entry) => entry.host_id !== host.host_id && entry.machine_address === host.machine_address)) {
+    throw new Error("This address belongs to another remembered machine. Its saved identity was preserved.");
+  }
+  if (previous?.machine_address && host.machine_address && previous.machine_address !== host.machine_address) {
+    throw new Error("This machine's saved address changed. Its saved identity was preserved.");
+  }
+  if (!previous && hosts.length >= 64) throw new Error("Remove a saved machine before adding another.");
+  return previous ? hosts.map((entry) => entry.host_id === host.host_id ? { ...entry, ...host } : entry) : [...hosts, host];
 }
 
 export class IndexedDeviceStorage implements DeviceStorage {
@@ -100,14 +121,28 @@ export class HubDeviceStore {
   }
   get hosts(): SavedHubHost[] { return this.record.hosts.map((host) => ({ ...host })); }
   get selected_host_id(): string | null { return this.record.selected_host_id; }
-  async saveHost(host: SavedHubHost): Promise<void> {
-    validateHost(host);
+  async refresh(): Promise<void> {
     this.record = await this.storage.update(this.hub_url, (stored) => {
       const current = validateRecord(stored!, this.hub_url);
-      const previous = current.hosts.find((entry) => entry.host_id === host.host_id);
-      if (previous && previous.host_public_key !== host.host_public_key) throw new Error("This machine's saved encryption key changed. Verify its identity before pairing again.");
-      if (!previous && current.hosts.length >= 64) throw new Error("Remove a saved machine before adding another.");
-      return { ...current, hosts: previous ? current.hosts : [...current.hosts, host], selected_host_id: host.host_id };
+      if (current.device_secret !== this.identity.export_secret()) throw new Error("This device's saved identity changed. Reload before reconnecting.");
+      return current;
+    });
+  }
+  async saveHost(host: SavedHubHost): Promise<void> {
+    host = validateHost(host);
+    this.record = await this.storage.update(this.hub_url, (stored) => {
+      const current = validateRecord(stored!, this.hub_url);
+      return { ...current, hosts: mergeHost(current.hosts, host) };
+    });
+  }
+  async rememberMetadata(host: SavedHubHost): Promise<void> {
+    host = validateHost(host);
+    if (!host.machine_address || !host.name) throw new Error("Machine address and name are required.");
+    this.record = await this.storage.update(this.hub_url, (stored) => {
+      const current = validateRecord(stored!, this.hub_url);
+      // Metadata cannot recreate a pin forgotten in another tab, or change
+      // which machine the user selected while directory lookup was pending.
+      return { ...current, hosts: mergeHost(current.hosts, host, true) };
     });
   }
   async selectHost(host_id: string | null): Promise<void> {

@@ -13,7 +13,7 @@ use serde_json::json;
 use std::{
   convert::Infallible,
   sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
   },
   time::Duration,
@@ -24,7 +24,7 @@ use tokn_hub_client_core::{
   pairing::TotpSecret,
   secure::{HostAuthOperation, InnerMessage, NoiseIdentity, NoiseResponder},
 };
-use tokn_hub_remote::RemoteManager;
+use tokn_hub_remote::{RemoteManager, ResolvedMachine, SavedHost};
 use tokn_session_hub::{
   connector::{self, ConnectorConfig, PairedHostConfig},
   onboarding::{self, HostProfile},
@@ -43,6 +43,25 @@ struct Harness {
   stop: CancellationToken,
   tasks: Vec<tokio::task::JoinHandle<()>>,
   event_attempts: Arc<AtomicUsize>,
+  pairing_directory: PairingDirectory,
+}
+
+#[derive(Clone)]
+struct PairingDirectory {
+  current: Arc<Mutex<ResolvedMachine>>,
+  followup: Arc<Mutex<Option<ResolvedMachine>>>,
+  lookups: Arc<AtomicUsize>,
+}
+
+impl PairingDirectory {
+  fn resolve(&self) -> ResolvedMachine {
+    if self.lookups.fetch_add(1, Ordering::SeqCst) > 0 {
+      if let Some(resolved) = self.followup.lock().unwrap().clone() {
+        return resolved;
+      }
+    }
+    self.current.lock().unwrap().clone()
+  }
 }
 
 impl Drop for Harness {
@@ -91,15 +110,32 @@ impl Harness {
     });
     let hub_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let hub_url = format!("http://localhost:{}", hub_listener.local_addr().unwrap().port());
+    let host_id = uuid::Uuid::new_v4().to_string();
+    let pairing_directory = PairingDirectory {
+      current: Arc::new(Mutex::new(ResolvedMachine {
+        host_id: host_id.clone(),
+        machine_address: "alice:workstation".into(),
+        name: "Native smoke host".into(),
+        online: true,
+      })),
+      followup: Arc::new(Mutex::new(None)),
+      lookups: Arc::new(AtomicUsize::new(0)),
+    };
+    let directory_lookup = pairing_directory.clone();
     let state = HubState::new(Store::open(directory.path().join("hub.sqlite")).unwrap(), &hub_url).unwrap();
-    let hub = server::router(state.clone());
+    let hub = server::router(state.clone()).route(
+      "/hub/v1/resolve/alice/workstation",
+      get(move || {
+        let directory_lookup = directory_lookup.clone();
+        async move { Json(directory_lookup.resolve()) }
+      }),
+    );
     let hub_task = tokio::spawn(async move {
       axum::serve(hub_listener, hub).await.unwrap();
     });
     let host_dir = directory.path().join("host");
     std::fs::create_dir(&host_dir).unwrap();
     let secret = TotpSecret::generate();
-    let host_id = uuid::Uuid::new_v4().to_string();
     let noise_key = host_dir.join("host-noise.key");
     let host_key = NoiseIdentity::load_or_create(&noise_key).unwrap().public_key();
     onboarding::initialize_host_access(&host_dir.join("host-access.json"), &secret).unwrap();
@@ -151,6 +187,7 @@ impl Harness {
       stop,
       tasks: vec![viewer_task, hub_task, connector_task],
       event_attempts,
+      pairing_directory,
     }
   }
   fn manager(&self, name: &str) -> RemoteManager {
@@ -177,6 +214,7 @@ async fn native_pairs_reconnects_reads_streams_and_obeys_revocation() {
     .await
     .unwrap();
   assert_eq!(host.host_public_key, harness.host_key);
+  assert_eq!(manager.status(&harness.hub_url).await.unwrap().selected_host_id, None);
   let sink = Arc::new(|_: &str, _: serde_json::Value| {});
   let first = manager
     .open(&harness.hub_url, &harness.host_id, None, sink.clone())
@@ -234,6 +272,138 @@ async fn native_pairs_reconnects_reads_streams_and_obeys_revocation() {
 }
 
 #[tokio::test]
+async fn named_native_pairing_saves_verified_current_metadata_and_selects_only_on_open() {
+  let harness = Harness::start().await;
+  let manager = harness.manager("app");
+  let mut latest = harness.pairing_directory.current.lock().unwrap().clone();
+  latest.name = "Renamed native host".into();
+  *harness.pairing_directory.followup.lock().unwrap() = Some(latest.clone());
+  let now = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .unwrap()
+    .as_secs();
+  let host = manager
+    .pair_with_address(
+      &harness.hub_url,
+      &harness.host_id,
+      harness.secret.code_at(now),
+      Some(&harness.host_key),
+      Some("alice:workstation"),
+    )
+    .await
+    .unwrap();
+  assert_eq!(host.machine_address.as_deref(), Some("alice:workstation"));
+  assert_eq!(host.name.as_deref(), Some("Renamed native host"));
+  assert_eq!(host.host_public_key, harness.host_key);
+  assert_eq!(harness.pairing_directory.lookups.load(Ordering::SeqCst), 2);
+  let restarted = harness.manager("app");
+  let status = restarted.status(&harness.hub_url).await.unwrap();
+  assert_eq!(status.hosts, vec![host]);
+  assert_eq!(status.selected_host_id, None);
+  latest.host_id = uuid::Uuid::new_v4().to_string();
+  *harness.pairing_directory.followup.lock().unwrap() = Some(latest);
+  restarted
+    .open(&harness.hub_url, &harness.host_id, None, Arc::new(|_, _| {}))
+    .await
+    .unwrap();
+  assert_eq!(
+    restarted
+      .status(&harness.hub_url)
+      .await
+      .unwrap()
+      .selected_host_id
+      .as_deref(),
+    Some(harness.host_id.as_str())
+  );
+  assert_eq!(
+    harness.pairing_directory.lookups.load(Ordering::SeqCst),
+    2,
+    "remembered open uses its UUID and pin directly"
+  );
+}
+
+#[tokio::test]
+async fn named_native_pairing_rejects_uuid_remapping_before_or_after_pake_without_saving_a_pin() {
+  let harness = Harness::start().await;
+  let manager = harness.manager("app");
+  let mut replacement = harness.pairing_directory.current.lock().unwrap().clone();
+  replacement.host_id = uuid::Uuid::new_v4().to_string();
+  *harness.pairing_directory.current.lock().unwrap() = replacement.clone();
+  let now = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .unwrap()
+    .as_secs();
+  let error = manager
+    .pair_with_address(
+      &harness.hub_url,
+      &harness.host_id,
+      harness.secret.code_at(now),
+      None,
+      Some("alice:workstation"),
+    )
+    .await
+    .unwrap_err();
+  assert!(error.contains("requested UUID"), "{error}");
+  assert_eq!(harness.pairing_directory.lookups.load(Ordering::SeqCst), 1);
+  harness.pairing_directory.current.lock().unwrap().host_id = harness.host_id.clone();
+  *harness.pairing_directory.followup.lock().unwrap() = Some(replacement);
+  harness.pairing_directory.lookups.store(0, Ordering::SeqCst);
+  let error = manager
+    .pair_with_address(
+      &harness.hub_url,
+      &harness.host_id,
+      harness.secret.code_at(now),
+      None,
+      Some("alice:workstation"),
+    )
+    .await
+    .unwrap_err();
+  assert!(error.contains("changed UUID during pairing"), "{error}");
+  let status = harness.manager("app").status(&harness.hub_url).await.unwrap();
+  assert!(status.hosts.is_empty());
+  assert_eq!(status.selected_host_id, None);
+  assert_eq!(harness.pairing_directory.lookups.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn named_native_pairing_alias_collision_preserves_the_previous_pin_and_selection() {
+  let harness = Harness::start().await;
+  let manager = harness.manager("app");
+  let store = onboarding::ClientStore::load_or_create(
+    &harness.directory.path().join("app"),
+    &Url::parse(&harness.hub_url).unwrap(),
+  )
+  .unwrap();
+  let original = SavedHost {
+    host_id: uuid::Uuid::new_v4().to_string(),
+    host_public_key: NoiseIdentity::generate().unwrap().public_key(),
+    machine_address: Some("alice:workstation".into()),
+    name: Some("Original remembered host".into()),
+  };
+  store.save_host(original.clone()).unwrap();
+  store.select_host(&original.host_id).unwrap();
+  let now = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .unwrap()
+    .as_secs();
+  let error = manager
+    .pair_with_address(
+      &harness.hub_url,
+      &harness.host_id,
+      harness.secret.code_at(now),
+      Some(&harness.host_key),
+      Some("alice:workstation"),
+    )
+    .await
+    .unwrap_err();
+  assert!(error.contains("Duplicate saved machine address"), "{error}");
+  let status = harness.manager("app").status(&harness.hub_url).await.unwrap();
+  assert_eq!(status.hosts, vec![original.clone()]);
+  assert_eq!(status.selected_host_id.as_deref(), Some(original.host_id.as_str()));
+  assert_eq!(harness.pairing_directory.lookups.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn native_passkey_ceremony_authorizes_a_new_device_on_its_original_channel() {
   let harness = Harness::start().await;
   let owner = harness.manager("owner");
@@ -259,6 +429,8 @@ async fn native_passkey_ceremony_authorizes_a_new_device_on_its_original_channel
     .save_host(tokn_hub_remote::SavedHost {
       host_id: harness.host_id.clone(),
       host_public_key: harness.host_key.clone(),
+      machine_address: None,
+      name: None,
     })
     .unwrap();
   let mut authenticator = WebauthnAuthenticator::new(SoftPasskey::new(true));
@@ -343,6 +515,8 @@ async fn native_stream_retries_transient_failures_before_its_first_ready_event()
     .save_host(tokn_hub_remote::SavedHost {
       host_id: harness.host_id.clone(),
       host_public_key: harness.host_key.clone(),
+      machine_address: None,
+      name: None,
     })
     .unwrap();
   let info = manager
