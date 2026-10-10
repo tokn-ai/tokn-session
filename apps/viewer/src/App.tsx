@@ -8,6 +8,7 @@ import { HubConnection } from "./components/HubConnection";
 import { detectHub, hubErrorMessage, type HubStatus } from "./lib/hub";
 import { HubAccess } from "./components/HubAccess";
 import { NativePasskey } from "./components/NativePasskey";
+import { DesktopWorkspace } from "./pages/DesktopWorkspace";
 
 function BrowserViewer({ initial_token }: { initial_token?: string }) {
   const [endpoint, setEndpoint] = useState(() => window.location.origin);
@@ -87,10 +88,7 @@ function BrowserGateway({ bootstrap_token }: { bootstrap_token?: string }) {
 }
 
 function App({ initial_token, bootstrap_token }: { initial_token?: string; bootstrap_token?: string }) {
-  const [desktop_hub, setDesktopHub] = useState(false);
-  if (isDesktop()) return desktop_hub
-    ? <HubAccess initial_hub_url="https://" on_local={() => setDesktopHub(false)} />
-    : <ViewerPage on_open_hub={() => setDesktopHub(true)} />;
+  if (isDesktop()) return <DesktopWorkspace />;
   if (window.location.pathname === "/passkey") return <NativePasskey />;
   if (window.location.pathname === "/connect") return <PairedConnection initial_token={initial_token} />;
   return initial_token ? <BrowserViewer initial_token={initial_token} /> : <BrowserGateway bootstrap_token={bootstrap_token} />;

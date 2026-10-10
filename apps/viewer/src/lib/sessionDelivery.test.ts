@@ -1,5 +1,5 @@
 import { beforeEach, expect, it, vi } from "vitest";
-import { invoke } from "./transport";
+import { invoke, type CommandInvoker } from "./transport";
 import { inspectSessionEvent, loadGroupDetails, loadSessionUpdates, loadToolDetails, renewSessionSubscriptions } from "./tauri";
 import type { SessionUpdatesRequest, SessionUpdate } from "./types";
 
@@ -43,4 +43,64 @@ it("renews legacy leases with their revision and returns recovery changes", asyn
   const changes = await renewSessionSubscriptions(["legacy"]);
   expect(changes[0].revision).toBe("2");
   expect(invoke).toHaveBeenLastCalledWith("load_session_updates", { request: { ...legacy, cursor: "1" } });
+});
+
+function machineInvoker() {
+  const calls = vi.fn<(command: string, payload?: Record<string, unknown>) => Promise<unknown>>();
+  const send: CommandInvoker = <T,>(command: string, payload?: Record<string, unknown>) => calls(command, payload) as Promise<T>;
+  return { send, calls };
+}
+
+it("keeps subscription and deferred backward loading on the captured machine", async () => {
+  let completeSubscription!: (value: unknown) => void;
+  const { send, calls } = machineInvoker();
+  calls.mockReturnValueOnce(new Promise((resolve) => { completeSubscription = resolve; }))
+    .mockResolvedValueOnce(update);
+  const loading = loadSessionUpdates(request, send);
+  expect(calls).toHaveBeenCalledExactlyOnceWith("subscribe_session", { request });
+  expect(invoke).not.toHaveBeenCalled();
+  completeSubscription(null);
+  expect(await loading).toBe(update);
+  expect(calls.mock.calls.map(([command]) => command)).toEqual(["subscribe_session", "load_session_backward"]);
+  expect(invoke).not.toHaveBeenCalled();
+});
+
+it("keeps details and inspection compatibility fallbacks on the captured machine", async () => {
+  const { send, calls } = machineInvoker();
+  const event = { session_key: "one", event_key: "tool" };
+  for (const load of [
+    () => loadGroupDetails(request, send),
+    () => loadToolDetails(event, send),
+    () => inspectSessionEvent(event, send),
+  ]) {
+    calls.mockRejectedValueOnce(new Error("Unknown viewer API route")).mockResolvedValueOnce(update);
+    await load();
+  }
+  expect(calls.mock.calls.map(([command]) => command)).toEqual([
+    "load_session_details", "load_session_updates",
+    "load_session_details", "load_event_detail",
+    "inspect_session_event", "load_event_detail",
+  ]);
+  expect(invoke).not.toHaveBeenCalled();
+});
+
+it("isolates legacy lease renewal when different machines use the same subscription ID", async () => {
+  const first = machineInvoker();
+  const second = machineInvoker();
+  const firstRequest = { ...request, subscription_id: "shared", session_key: "first" };
+  const secondRequest = { ...request, subscription_id: "shared", session_key: "second" };
+  for (const [machine, subscription, revision] of [[first, firstRequest, "11"], [second, secondRequest, "22"]] as const) {
+    machine.calls.mockRejectedValueOnce(new Error("Unknown viewer API route"))
+      .mockResolvedValueOnce({ ...update, ...subscription, revision });
+    await loadSessionUpdates(subscription, machine.send);
+  }
+  first.calls.mockRejectedValueOnce(new Error("Unknown viewer API route"))
+    .mockResolvedValueOnce({ ...update, ...firstRequest, revision: "12" });
+  await renewSessionSubscriptions(["shared"], first.send);
+  expect(first.calls).toHaveBeenLastCalledWith("load_session_updates", { request: { ...firstRequest, cursor: "11" } });
+  second.calls.mockRejectedValueOnce(new Error("Unknown viewer API route"))
+    .mockResolvedValueOnce({ ...update, ...secondRequest, revision: "23" });
+  await renewSessionSubscriptions(["shared"], second.send);
+  expect(second.calls).toHaveBeenLastCalledWith("load_session_updates", { request: { ...secondRequest, cursor: "22" } });
+  expect(invoke).not.toHaveBeenCalled();
 });
