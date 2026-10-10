@@ -513,10 +513,10 @@ async fn workbuddy_and_dsh_catalog_follow_and_live_feed_preserve_history() {
     (
       Provider::WorkBuddy,
       Source::WorkBuddy,
-      "../workbuddy/fixtures",
+      "tests/fixtures/workbuddy",
       "wb-shell-command",
     ),
-    (Provider::Dsh, Source::Dsh, "../dsh/fixtures", "dsh-fixture"),
+    (Provider::Dsh, Source::Dsh, "tests/fixtures/dsh", "dsh-fixture"),
   ] {
     let fixtures = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(fixture);
     let header = AgentClient::list_session_headers(source, Some(fixtures.clone()))

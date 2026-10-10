@@ -1,0 +1,133 @@
+name: Release check
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  packages:
+    name: Crate archives
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Test resumable publish script
+        run: python3 -m unittest discover -s scripts -p 'test_publish_crates.py' -v
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends build-essential libssl-dev pkg-config
+
+      - name: Install release Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-packages
+
+      - name: Package and verify every publishable crate
+        run: cargo package --workspace --exclude tokn-session-viewer --locked
+
+      - name: Test sources extracted from crate archives
+        shell: bash
+        run: |
+          archive_stage=$(mktemp -d)
+          cargo metadata --no-deps --format-version 1 --locked > "$archive_stage/source-metadata.json"
+          release_version=$(python3 -c 'import json, sys; data = json.load(open(sys.argv[1])); print(next(p["version"] for p in data["packages"] if p["id"] in data["workspace_members"] and p["publish"] != []))' "$archive_stage/source-metadata.json")
+          for archive in target/package/*-"$release_version".crate; do
+            tar -xzf "$archive" -C "$archive_stage"
+          done
+          {
+            printf '[workspace]\nresolver = "2"\nmembers = [\n'
+            for archive in target/package/*-"$release_version".crate; do
+              directory=$(basename "$archive" .crate)
+              printf '  "%s",\n' "$directory"
+            done
+            printf ']\n\n[patch.crates-io]\n'
+            for archive in target/package/*-"$release_version".crate; do
+              directory=$(basename "$archive" .crate)
+              package=${directory%-$release_version}
+              printf '%s = { path = "%s" }\n' "$package" "$directory"
+            done
+          } > "$archive_stage/Cargo.toml"
+          cargo metadata --manifest-path "$archive_stage/Cargo.toml" \
+            --format-version 1 > "$archive_stage/archive-metadata.json"
+          python3 - "$archive_stage" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          stage = Path(sys.argv[1]).resolve()
+          source = json.loads((stage / "source-metadata.json").read_text())
+          archived = json.loads((stage / "archive-metadata.json").read_text())
+          expected = {
+            p["name"]: p["version"] for p in source["packages"]
+            if p["id"] in source["workspace_members"] and p["publish"] != []
+          }
+          packages = [p for p in archived["packages"] if p["name"] in expected]
+          assert len(archived["workspace_members"]) == len(expected)
+          assert {p["name"] for p in packages} == set(expected)
+          for package in packages:
+            assert package["source"] is None, package["name"]
+            assert package["version"] == expected[package["name"]]
+            manifest = Path(package["manifest_path"]).resolve()
+            assert manifest.is_relative_to(stage)
+            # Archives normalize mtimes; cached project binaries must rebuild
+            # from these extracted sources even when their version is unchanged.
+            for path in manifest.parent.rglob("*"):
+              if path.is_file():
+                path.touch()
+          print(f"Verified {len(packages)} project crates use extracted archive sources")
+          PY
+          cargo test --workspace --manifest-path "$archive_stage/Cargo.toml" \
+            --offline --target-dir target/release-archive-tests
+
+      - name: Save reviewed crate archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: crate-archives
+          path: target/package/*.crate
+          if-no-files-found: error
+
+  msrv:
+    name: Rust 1.95
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends build-essential libssl-dev pkg-config
+
+      - name: Install minimum Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-msrv
+
+      - name: Check publishable crates and tests
+        run: cargo check --workspace --exclude tokn-session-viewer --all-targets --locked

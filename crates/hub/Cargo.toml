@@ -2,6 +2,9 @@
 name = "tokn-session-hub"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+description = "Host pairing, encrypted session tunnels, and Hub administration."
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 

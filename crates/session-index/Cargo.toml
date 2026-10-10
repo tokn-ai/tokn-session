@@ -2,6 +2,9 @@
 name = "tokn-session-index"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+description = "SQLite metadata index for agent session catalogs."
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 

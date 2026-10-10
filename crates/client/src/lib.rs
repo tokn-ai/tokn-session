@@ -155,6 +155,12 @@ fn tree_discovery_plan(source: Source, session_dir: Option<PathBuf>, session: &s
 mod tests {
   use super::*;
 
+  fn fixture_path(relative: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+      .join("tests/fixtures")
+      .join(relative)
+  }
+
   #[test]
   fn header_listing_stops_before_an_invalid_conversation_body() {
     let directory = tempfile::tempdir().unwrap();
@@ -253,7 +259,7 @@ mod tests {
   #[test]
   fn loads_dsh_tree_without_forks_or_inherited_parent_messages() {
     let dir = tempfile::tempdir().unwrap();
-    let fixture = include_str!("../../dsh/fixtures/basic/session.jsonl");
+    let fixture = include_str!("../tests/fixtures/dsh/basic/session.jsonl");
     for (id, metadata) in [
       ("root", ""),
       (
@@ -279,7 +285,7 @@ mod tests {
 
   #[test]
   fn loads_codex_session_tree_recursively() {
-    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../codex/fixtures");
+    let fixtures = fixture_path("codex");
     let tree =
       AgentClient::load_session_tree(Source::Codex, Some(fixtures), "tree-root").expect("fixture tree should load");
 
@@ -301,7 +307,7 @@ mod tests {
 
   #[test]
   fn discovers_codex_siblings_for_an_explicit_session_path() {
-    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../codex/fixtures");
+    let fixtures = fixture_path("codex");
     let root = fixtures.join("tree_root.jsonl");
     let tree = AgentClient::load_session_tree(
       Source::Codex,
@@ -317,7 +323,7 @@ mod tests {
 
   #[test]
   fn loads_pi_session_tree_from_parent_paths() {
-    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../pi/fixtures");
+    let fixtures = fixture_path("pi");
     let tree =
       AgentClient::load_session_tree(Source::Pi, Some(fixtures), "pi-tree-root").expect("fixture tree should load");
 
@@ -328,7 +334,7 @@ mod tests {
 
   #[test]
   fn discovers_pi_siblings_for_an_explicit_session_path() {
-    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../pi/fixtures");
+    let fixtures = fixture_path("pi");
     let root = fixtures.join("tree_parent.jsonl");
     let tree = AgentClient::load_session_tree(
       Source::Pi,
@@ -344,7 +350,7 @@ mod tests {
 
   #[test]
   fn explicit_file_keeps_default_discovery_and_adds_its_directory() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../codex/fixtures/tree_root.jsonl");
+    let root = fixture_path("codex/tree_root.jsonl");
     let plan = tree_discovery_plan(
       Source::Codex,
       None,
@@ -358,7 +364,7 @@ mod tests {
 
   #[test]
   fn explicit_codex_path_finds_descendants_in_other_discovery_subdirectories() {
-    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../codex/fixtures/tree_cross_day");
+    let fixtures = fixture_path("codex/tree_cross_day");
     let root = fixtures.join("day_one/root.jsonl");
     let tree = AgentClient::load_session_tree(
       Source::Codex,

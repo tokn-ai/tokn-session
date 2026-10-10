@@ -147,7 +147,14 @@ impl CodexSessionSource {
   }
 
   pub fn load_session_path(&self, path: &Path) -> Result<LoadedSession, String> {
-    if matches!(crate::history::history_header(path)?.item(), RolloutItem::SessionMeta(meta) if meta.history_base.is_some())
+    let header = crate::history::history_header(path)?;
+    let RolloutItem::SessionMeta(meta) = header.item() else {
+      unreachable!("history header validates session metadata")
+    };
+    if meta
+      .history_base()
+      .map_err(|err| format!("invalid Codex history base: {err}"))?
+      .is_some()
     {
       return self
         .load_session_records_path(path, false, 128 * 1024 * 1024)

@@ -10,7 +10,7 @@ that session readers need; it does not mirror Codex's internal Rust API.
 
 ```toml
 [dependencies]
-tokn-codex-protocol = "0.1"
+tokn-codex-protocol = "0.1.1"
 serde_json = "1"
 ```
 
@@ -19,10 +19,15 @@ serde_json = "1"
 Deserialize one JSONL record at a time. The typed view is available through
 `item()`, while `native()` retains the complete decoded JSON value.
 
-`SessionMeta.history_base` exposes a paginated rollout's inherited history
-position: the owning thread ID, exclusive ordinal, and exclusive byte offset.
-The wire crate preserves this reference; `tokn-session-codex` resolves it into
-bounded physical history segments.
+`SessionMetaItem::history_mode()` and `history_base()` validate newer metadata
+stored in `extra`. The inherited history position contains the owning thread
+ID, exclusive ordinal, and exclusive byte offset. The wire crate preserves
+this reference; `tokn-session-codex` resolves it into bounded physical segments.
+
+`RolloutLine::token_usage_record()` exposes typed response accounting and its
+turn/thread aggregates. These newer rows also remain `RolloutItem::Unknown`
+through `item()`, preserving exhaustive matches written against version 0.1.0.
+Malformed accounting remains inspectable with a parse error and no typed view.
 
 ## Design
 
@@ -106,6 +111,9 @@ enum.
 
 ## Compatibility
 
+Version 0.1.1 preserves the published 0.1.0 `RolloutItem` variants and
+`SessionMetaItem` fields; new typed access is additive.
+
 This crate follows persisted rollout files, not a stable upstream Codex API.
 Codex can add fields and record types independently. Unknown tags and added
 fields remain available through the typed unknown values and the original
@@ -146,4 +154,4 @@ Licensed under the [MIT License](LICENSE).
 
 ## Repository
 
-<https://github.com/agentic-rs/tokn-session>
+<https://github.com/tokn-ai/tokn-session>

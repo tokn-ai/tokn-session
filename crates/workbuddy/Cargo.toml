@@ -2,6 +2,11 @@
 name = "tokn-session-workbuddy"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+description = "Read-only WorkBuddy session catalog and JSONL normalization."
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
 
 [dependencies]
 rusqlite = { version = "0.40", features = ["bundled"] }

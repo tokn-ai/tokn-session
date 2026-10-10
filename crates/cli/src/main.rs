@@ -17,6 +17,10 @@ fn run() -> Result<(), String> {
   let cli = args::parse(std::env::args().skip(1).collect())?;
 
   match cli.command {
+    Command::Help => {
+      println!("{}", args::help());
+      Ok(())
+    }
     Command::List {
       source,
       session_dir,

@@ -5864,7 +5864,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-codex-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5872,7 +5872,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-dsh-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5880,7 +5880,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-hub-client-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "data-encoding",
@@ -5905,7 +5905,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-hub-remote"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -5930,7 +5930,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-hub-transport"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -5941,7 +5941,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-opencode-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5949,7 +5949,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-pi-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5957,7 +5957,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-session-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "crossterm",
  "ratatui",
@@ -5969,7 +5969,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-session-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "tempfile",
  "tokn-session-codex",
@@ -5983,7 +5983,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-session-codex"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dirs 6.0.0",
  "rusqlite",
@@ -5997,7 +5997,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-session-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -6005,7 +6005,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-session-dsh"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -6017,7 +6017,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-session-hub"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-stream",
  "axum",
@@ -6054,7 +6054,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-session-index"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rusqlite",
  "tempfile",
@@ -6062,7 +6062,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-session-opencode"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rusqlite",
  "serde",
@@ -6075,7 +6075,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-session-pi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dirs 6.0.0",
  "serde",
@@ -6087,7 +6087,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-session-relay"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "notify 8.2.0",
  "rusqlite",
@@ -6108,7 +6108,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-session-render"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
  "tokn-session-core",
@@ -6116,7 +6116,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-session-viewer"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -6143,7 +6143,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-session-workbuddy"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rusqlite",
  "serde_json",
@@ -6154,7 +6154,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-session-zcode"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rusqlite",
  "serde_json",
@@ -6165,7 +6165,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-viewer-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-stream",
  "axum",
@@ -6187,7 +6187,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-viewer-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -6216,7 +6216,7 @@ dependencies = [
 
 [[package]]
 name = "tokn-workbuddy-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
