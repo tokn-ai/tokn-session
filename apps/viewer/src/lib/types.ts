@@ -7,6 +7,21 @@ export type JsonValue =
   | { [key: string]: JsonValue };
 
 /** A remembered encryption identity; readable names never replace its pin. */
+export interface HubMachineSelection {
+  kind: "hub";
+  hub_url: string;
+  host_id: string;
+}
+
+export type MachineSelection = { kind: "local" } | HubMachineSelection;
+
+/** Navigation metadata only. Encryption identities stay in device storage. */
+export interface MachinePreferences {
+  version: 1;
+  selected_machine: MachineSelection | null;
+  hub_urls: string[];
+}
+
 export interface SavedHubHost {
   host_id: string;
   host_public_key: string;

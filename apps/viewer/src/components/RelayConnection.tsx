@@ -15,7 +15,7 @@ const PHASE_LABELS: Record<RelayStatus["phase"], string> = {
 };
 const STATUS_LOAD_ERROR = "Relay connection status is unavailable.";
 
-export function RelayConnection() {
+export function RelayConnection({ on_open_machines }: { on_open_machines?: () => void }) {
   const [status, setStatus] = useState<RelayStatus | null>(null);
   const [settings, setSettings] = useState<RelaySettings>({ mode: "automatic", endpoint: "tcp://127.0.0.1:5557", include_native: false });
   const [busy, setBusy] = useState(false);
@@ -133,7 +133,7 @@ export function RelayConnection() {
         aria-controls={panel_id}
         aria-expanded={is_open}
         aria-haspopup="dialog"
-        aria-label={`${label}. Connection settings`}
+        aria-label={`${on_open_machines ? "This machine. " : ""}${label}. Connection settings`}
         className="status-bar__connection"
         data-phase={error ? "failed" : phase}
         onClick={() => {
@@ -145,7 +145,7 @@ export function RelayConnection() {
         type="button"
       >
         <span aria-hidden="true" className="connection-dot" />
-        <span>{label}</span>
+        <span>{on_open_machines ? `This machine · ${label}` : label}</span>
       </button>
       {is_open && <div
         aria-labelledby={`${panel_id}-title`}
@@ -163,6 +163,8 @@ export function RelayConnection() {
           </div>
           <button aria-label="Close connection settings" className="icon-button" onClick={close} type="button"><CloseIcon /></button>
         </header>
+        {on_open_machines && <div className="connection-summary"><div><span className="hub-field-label">Machine</span><strong>This machine</strong></div>
+          <button className="connection-panel__primary" onClick={on_open_machines} type="button">Machines</button></div>}
         <form className="relay-settings" onSubmit={(event) => { event.preventDefault(); void save(); }}>
           <label htmlFor={`${panel_id}-mode`}>Data source</label>
           <select id={`${panel_id}-mode`} value={settings.mode} disabled={busy || !status} onChange={(event) => setSettings({ ...settings, mode: event.target.value as RelayMode })}>

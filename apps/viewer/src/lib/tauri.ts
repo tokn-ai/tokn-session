@@ -1,4 +1,4 @@
-import { invoke, isDesktop, listen, type CommandInvoker, type UnlistenFn } from "./transport";
+import { invoke, isDesktop, listen, type CommandInvoker, type EventSubscriber, type UnlistenFn } from "./transport";
 import type {
   RelaySettings, RelayStatus, RelayChange,
   AcknowledgeSessionAttentionRequest,
@@ -27,6 +27,12 @@ import type {
 
 export function getSessionInputStatus(request: SessionInputStatusRequest): Promise<SessionInputStatus> {
   return invoke<SessionInputStatus>("get_session_input_status", { request });
+}
+
+/** Prepare this device's viewer independently of the selected remote transport. */
+export async function initializeLocalViewer(): Promise<void> {
+  if (!isDesktop()) throw new Error("This machine is available in the desktop app.");
+  await (await import("@tauri-apps/api/core")).invoke<void>("initialize_local_viewer");
 }
 
 export function submitSessionInput(request: SubmitSessionInputRequest): Promise<SubmitSessionInputResponse> {
@@ -60,41 +66,43 @@ export function configureRelay(settings: RelaySettings): Promise<RelayStatus> {
 export function listenForRelayStatus(handler: (status: RelayStatus) => void): Promise<UnlistenFn> {
   return listen<RelayStatus>("relay-status", (event) => handler(event.payload));
 }
-export function listenForRelayChanges(handler: (change: RelayChange) => void): Promise<UnlistenFn> {
-  return listen<RelayChange>("relay-changed", (event) => handler(event.payload));
+export function listenForRelayChanges(handler: (change: RelayChange) => void, subscribe: EventSubscriber = listen): Promise<UnlistenFn> {
+  return subscribe<RelayChange>("relay-changed", (event) => handler(event.payload));
 }
 
 /** Browser SSE reconnects require fresh state snapshots; desktop events stay live. */
-export function listenForTransportReconnect(handler: () => void): Promise<UnlistenFn> {
-  return listen("transport-reconnected", handler);
+export function listenForTransportReconnect(handler: () => void, subscribe: EventSubscriber = listen): Promise<UnlistenFn> {
+  return subscribe("transport-reconnected", handler);
 }
 
-export function listSessions(request: ListSessionsRequest): Promise<ListSessionsResponse> {
-  return invoke<ListSessionsResponse>("list_sessions", { request });
+export function listSessions(request: ListSessionsRequest, send: CommandInvoker = invoke): Promise<ListSessionsResponse> {
+  return send<ListSessionsResponse>("list_sessions", { request });
 }
 
 export function listSessionChildren(
   request: ListSessionChildrenRequest,
+  send: CommandInvoker = invoke,
 ): Promise<ListSessionChildrenResponse> {
-  return invoke<ListSessionChildrenResponse>("list_session_children", { request });
+  return send<ListSessionChildrenResponse>("list_session_children", { request });
 }
 
 export function updateSessionView(request: SessionViewRequest, send: CommandInvoker = invoke): Promise<void> {
   return send<void>("update_session_view", { request });
 }
 
-export function loadEventPage(request: LoadEventPageRequest): Promise<EventPageResponse> {
-  return invoke<EventPageResponse>("load_event_page", { request });
+export function loadEventPage(request: LoadEventPageRequest, send: CommandInvoker = invoke): Promise<EventPageResponse> {
+  return send<EventPageResponse>("load_event_page", { request });
 }
 
 export function loadTrajectoryEventPage(
   request: LoadTrajectoryEventPageRequest,
+  send: CommandInvoker = invoke,
 ): Promise<TrajectoryEventPageResponse> {
-  return invoke<TrajectoryEventPageResponse>("load_trajectory_event_page", { request });
+  return send<TrajectoryEventPageResponse>("load_trajectory_event_page", { request });
 }
 
-export function loadEventDetail(request: LoadEventDetailRequest): Promise<EventDetail> {
-  return invoke<EventDetail>("load_event_detail", { request });
+export function loadEventDetail(request: LoadEventDetailRequest, send: CommandInvoker = invoke): Promise<EventDetail> {
+  return send<EventDetail>("load_event_detail", { request });
 }
 
 /**
@@ -103,8 +111,9 @@ export function loadEventDetail(request: LoadEventDetailRequest): Promise<EventD
  */
 export function acknowledgeSessionAttention(
   request: AcknowledgeSessionAttentionRequest,
+  send: CommandInvoker = invoke,
 ): Promise<AcknowledgeSessionAttentionResponse> {
-  return invoke<AcknowledgeSessionAttentionResponse>("acknowledge_session_attention", { request });
+  return send<AcknowledgeSessionAttentionResponse>("acknowledge_session_attention", { request });
 }
 
 /**
@@ -114,24 +123,25 @@ export function acknowledgeSessionAttention(
  */
 export function listenForSessionIndexChanges(
   handler: (change: SessionIndexChangedEvent) => void,
+  subscribe: EventSubscriber = listen,
 ): Promise<UnlistenFn> {
-  return listen<SessionIndexChangedEvent>("session-index-changed", (event) => handler(event.payload));
+  return subscribe<SessionIndexChangedEvent>("session-index-changed", (event) => handler(event.payload));
 }
 
 /**
  * Reads the lightweight in-memory operational state for the background index
  * scheduler. It never reads a provider session body.
  */
-export function getSessionIndexProgress(): Promise<SessionIndexProgress> {
-  return invoke<SessionIndexProgress>("get_session_index_progress");
+export function getSessionIndexProgress(send: CommandInvoker = invoke): Promise<SessionIndexProgress> {
+  return send<SessionIndexProgress>("get_session_index_progress");
 }
 
 /**
  * Requests an immediate scheduler wake and returns the progress state after it
  * was queued. A later event can still supersede this response.
  */
-export function retrySessionIndex(): Promise<SessionIndexProgress> {
-  return invoke<SessionIndexProgress>("retry_session_index");
+export function retrySessionIndex(send: CommandInvoker = invoke): Promise<SessionIndexProgress> {
+  return send<SessionIndexProgress>("retry_session_index");
 }
 
 /**
@@ -141,17 +151,18 @@ export function retrySessionIndex(): Promise<SessionIndexProgress> {
  */
 export function listenForSessionIndexProgress(
   handler: (progress: SessionIndexProgress) => void,
+  subscribe: EventSubscriber = listen,
 ): Promise<UnlistenFn> {
-  return listen<SessionIndexProgress>("session-index-progress", (event) => handler(event.payload));
+  return subscribe<SessionIndexProgress>("session-index-progress", (event) => handler(event.payload));
 }
 
-export function loadSessionUpdates(request: import("./types").SessionUpdatesRequest): Promise<import("./types").SessionUpdate> {
-  return invoke("load_session_updates", { request });
+export function loadSessionUpdates(request: import("./types").SessionUpdatesRequest, send: CommandInvoker = invoke): Promise<import("./types").SessionUpdate> {
+  return send("load_session_updates", { request });
 }
-export function listenForSessionUpdates(handler: (update: import("./types").SessionUpdate) => void): Promise<UnlistenFn> {
-  return listen<import("./types").SessionUpdate>("session-updated", (event) => handler(event.payload));
+export function listenForSessionUpdates(handler: (update: import("./types").SessionUpdate) => void, subscribe: EventSubscriber = listen): Promise<UnlistenFn> {
+  return subscribe<import("./types").SessionUpdate>("session-updated", (event) => handler(event.payload));
 }
 
-export function listenForSessionNotifications(handler: (notification: import("./types").SessionNotification) => void): Promise<UnlistenFn> {
-  return listen<import("./types").SessionNotification>("session-notification", (event) => handler(event.payload));
+export function listenForSessionNotifications(handler: (notification: import("./types").SessionNotification) => void, subscribe: EventSubscriber = listen): Promise<UnlistenFn> {
+  return subscribe<import("./types").SessionNotification>("session-notification", (event) => handler(event.payload));
 }

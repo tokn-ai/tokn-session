@@ -63,7 +63,7 @@ them later over a trusted terminal or SSH:
 tokn-session-hub authenticator
 ```
 
-Open the Hub URL, or enter it in the app's Hub mode. On **Connections**, choose
+Open the Hub URL, or enter it in the app's **Machines** screen. On **Machines**, choose
 **Authenticator code** and enter the machine address or UUID and current code. The host verifies the code
 through password-authenticated key exchange; the relay does not receive the raw
 code. The device saves the verified host encryption key only after authenticated
@@ -79,8 +79,14 @@ tokn-session-hub connect
 The host's viewer API must still be running. Browsers remember device keys and
 host pins in IndexedDB, scoped to their Hub origin; the native app keeps private
 files. Clearing that storage makes it a new device. **Forget** removes a local
-saved machine; it does not revoke that device on the host. **Manage connections**
+saved machine; it does not revoke that device on the host. **Machines**
 cancels requests and streams before selecting another machine.
+
+The desktop Machines screen also offers **This machine** for local sessions.
+A new installation opens the picker; later starts reopen the last successfully
+opened local or remote machine. Loading another Hub browses its saved machines
+without changing that startup selection. Local session readers start only when
+requested, so a local database error does not prevent opening a remote machine.
 
 ## Readable machine addresses
 

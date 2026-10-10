@@ -399,12 +399,12 @@ describe("retained session turns", () => {
     await waitFor(() => expect(result.current.events).toEqual(recent.events));
     act(() => result.current.loadOlderEvents());
     await waitFor(() => expect(result.current.events).toEqual(expanded.events));
-    expect(loadEventPage).toHaveBeenLastCalledWith({ session_key: "a", cursor: "earlier", window_mode: "earlier", direction: "backward" });
+    expect(loadEventPage).toHaveBeenLastCalledWith({ session_key: "a", cursor: "earlier", window_mode: "earlier", direction: "backward" }, expect.any(Function));
     await selectListedSession(result, "b");
     await waitFor(() => expect(result.current.events).toEqual(toolEventPage().events));
     await selectListedSession(result, "a");
     await waitFor(() => expect(result.current.events).toEqual(expanded.events));
-    expect(loadEventPage).toHaveBeenLastCalledWith({ session_key: "a", window_mode: "retained", direction: "backward" });
+    expect(loadEventPage).toHaveBeenLastCalledWith({ session_key: "a", window_mode: "retained", direction: "backward" }, expect.any(Function));
     expect(result.current.olderCursor).toBeNull();
   });
 
@@ -425,7 +425,7 @@ describe("retained session turns", () => {
     await waitFor(() => expect(loadEventPage).toHaveBeenCalledTimes(2));
     await act(async () => { earlier.resolve(expanded); });
     await waitFor(() => expect(result.current.events).toEqual(refreshed.events));
-    expect(loadEventPage).toHaveBeenLastCalledWith({ session_key: "a", window_mode: "retained", direction: "backward" });
+    expect(loadEventPage).toHaveBeenLastCalledWith({ session_key: "a", window_mode: "retained", direction: "backward" }, expect.any(Function));
     expect(result.current.olderLoading).toBe(false);
   });
 
@@ -488,7 +488,7 @@ describe("useViewerState Relay updates", () => {
     vi.mocked(loadEventPage).mockResolvedValueOnce(replacement);
     act(() => emit?.({ session_key: "live", reset: true }));
     await waitFor(() => expect(result.current.expandedEventKey).toBe(replacement.events[0].event_key));
-    expect(loadTrajectoryEventPage).toHaveBeenLastCalledWith(expect.objectContaining({ trajectory_key: replacement.events[0].event_key }));
+    expect(loadTrajectoryEventPage).toHaveBeenLastCalledWith(expect.objectContaining({ trajectory_key: replacement.events[0].event_key }), expect.any(Function));
     expect(result.current.trajectoryPages.get("live")?.has(original.events[0].event_key)).toBe(false);
   });
 
@@ -538,14 +538,14 @@ describe("useViewerState Relay updates", () => {
     expectOriginalVisible();
     expect(loadTrajectoryEventPage).toHaveBeenNthCalledWith(3, {
       session_key: "live", trajectory_key: newKey, direction: "backward", limit: 40,
-    });
+    }, expect.any(Function));
     const newLatest = trajectoryChildren("fresh", 50, 40, "fresh-earlier");
     await act(async () => latest.resolve(newLatest));
     await waitFor(() => expect(loadTrajectoryEventPage).toHaveBeenCalledTimes(4));
     expectOriginalVisible();
     expect(loadTrajectoryEventPage).toHaveBeenNthCalledWith(4, {
       session_key: "live", trajectory_key: newKey, direction: "backward", limit: 40, cursor: "fresh-earlier",
-    });
+    }, expect.any(Function));
     const newEarlier = trajectoryChildren("fresh", 0, 50, null, 90);
     await act(async () => earlier.resolve(newEarlier));
     await waitFor(() => expect(result.current.events).toEqual(replacement.events));
@@ -1002,25 +1002,37 @@ describe("useViewerState Relay updates", () => {
     vi.mocked(loadEventPage).mockResolvedValue(active);
     vi.mocked(loadTrajectoryEventPage).mockResolvedValue(trajectoryChildPage());
     const { container } = await act(async () => render(<ViewerPage />));
-    fireEvent.click(await screen.findByRole("button", { name: /session live/ }));
+    const sessionButton = screen.getByRole("button", { name: /session live/ });
+    await act(async () => fireEvent.click(sessionButton));
     await waitFor(() => expect(screen.getByRole("button", { name: /^Working for/ })).toHaveAttribute("aria-expanded", "true"));
-    fireEvent.click(await screen.findByRole("button", { name: "Ran 1 command" }));
-    expect(await screen.findByText("cargo test")).toBeInTheDocument();
+    const commandsButton = await screen.findByRole("button", { name: "Ran 1 command" });
+    await act(async () => fireEvent.click(commandsButton));
+    expect(screen.getByText("cargo test")).toBeInTheDocument();
     const timeline = container.querySelector<HTMLElement>(".conversation__timeline")!;
     Object.defineProperties(timeline, { scrollHeight: { configurable: true, value: 1000 }, clientHeight: { configurable: true, value: 300 } });
     timeline.scrollTop = 120;
-    fireEvent.wheel(timeline, { deltaY: -1 });
-    fireEvent.scroll(timeline);
+    await act(async () => {
+      fireEvent.wheel(timeline, { deltaY: -1 });
+      fireEvent.scroll(timeline);
+    });
+    expect(screen.getByRole("button", { name: "Jump to latest" })).toBeInTheDocument();
     const updated = trajectoryChildPage();
     updated.events[0].tool!.command = "cargo check";
     vi.mocked(loadTrajectoryEventPage).mockResolvedValue(updated);
-    act(() => emit?.({ session_key: "live", reset: false }));
-    expect(await screen.findByText("cargo check")).toBeInTheDocument();
+    const refresh = deferred<EventPageResponse>();
+    vi.mocked(loadEventPage).mockReturnValueOnce(refresh.promise);
+    await act(async () => emit?.({ session_key: "live", reset: false }));
+    expect(loadEventPage).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("cargo test")).toBeInTheDocument();
+    // Resolve the parent refresh and its child read before checking the visible
+    // update, rather than racing the default DOM polling timeout under load.
+    await act(async () => refresh.resolve(active));
+    expect(screen.getByText("cargo check")).toBeInTheDocument();
     expect(timeline.scrollTop).toBe(120);
     const finished = trajectoryEventPage();
     finished.events[0].trajectory!.status = "complete";
     vi.mocked(loadEventPage).mockResolvedValue(finished);
-    act(() => emit?.({ session_key: "live", reset: false }));
+    await act(async () => emit?.({ session_key: "live", reset: false }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Worked for 1h" })).toHaveAttribute("aria-expanded", "true"));
     expect(screen.getByText("cargo check")).toBeInTheDocument();
   });
@@ -1071,8 +1083,10 @@ describe("useViewerState Relay updates", () => {
     completed.events[0].trajectory!.status = "complete";
     vi.mocked(loadEventPage).mockResolvedValueOnce(completed);
     act(() => emit?.({ session_key: "live", reset: false }));
-    await waitFor(() => expect(result.current.events[0].trajectory?.status).toBe("complete"));
-    expect(result.current.expandedEventKey).toBeNull();
+    await waitFor(() => {
+      expect(result.current.events[0].trajectory?.status).toBe("complete");
+      expect(result.current.expandedEventKey).toBeNull();
+    });
     act(() => result.current.toggleEventExpanded(key));
     expect(result.current.expandedEventKey).toBe(key);
 
@@ -1098,24 +1112,30 @@ describe("useViewerState Relay updates", () => {
     await selectListedSession(result, "live");
     const key = active.events[0].event_key;
     await waitFor(() => expect(result.current.expandedEventKey).toBe(key));
-    await waitFor(() => expect(loadTrajectoryEventPage).toHaveBeenCalledOnce());
+    await waitFor(() => expect(result.current.trajectoryPages.get("live")?.get(key)?.has_loaded).toBe(true));
+    expect(loadTrajectoryEventPage).toHaveBeenCalledOnce();
     expect(vi.mocked(loadTrajectoryEventPage).mock.calls[0][0].direction).toBe("backward");
     const children = trajectoryChildPage();
     children.events[0].summary = "new progress";
     vi.mocked(loadTrajectoryEventPage).mockResolvedValue(children);
-    act(() => emit?.({ session_key: "live", reset: false }));
+    await act(async () => emit?.({ session_key: "live", reset: false }));
     await waitFor(() => expect(result.current.trajectoryPages.get("live")?.get(key)?.events[0].summary).toBe("new progress"));
     act(() => result.current.toggleEventExpanded(key));
-    act(() => emit?.({ session_key: "live", reset: false }));
-    await waitFor(() => expect(loadEventPage).toHaveBeenCalledTimes(3));
-    expect(result.current.expandedEventKey).toBeNull();
+    await act(async () => emit?.({ session_key: "live", reset: false }));
+    await waitFor(() => {
+      expect(loadEventPage).toHaveBeenCalledTimes(3);
+      expect(result.current.eventsLoading).toBe(false);
+      expect(result.current.expandedEventKey).toBeNull();
+    });
     act(() => result.current.toggleEventExpanded(key));
     const finished = trajectoryEventPage();
     finished.events[0].trajectory!.status = "complete";
     vi.mocked(loadEventPage).mockResolvedValue(finished);
-    act(() => emit?.({ session_key: "live", reset: false }));
-    await waitFor(() => expect(result.current.events[0].trajectory?.status).toBe("complete"));
-    expect(result.current.expandedEventKey).toBeNull();
+    await act(async () => emit?.({ session_key: "live", reset: false }));
+    await waitFor(() => {
+      expect(result.current.events[0].trajectory?.status).toBe("complete");
+      expect(result.current.expandedEventKey).toBeNull();
+    });
     act(() => result.current.toggleEventExpanded(key));
     expect(result.current.expandedEventKey).toBe(key);
   });
@@ -1207,16 +1227,18 @@ describe("useViewerState refresh after message input", () => {
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
     const original = toolEventPage();
     vi.mocked(loadEventPage).mockResolvedValue(original);
-    const { container } = render(<ViewerPage />);
-    fireEvent.click(await screen.findByRole("button", { name: /session live/ }));
-    const input = await screen.findByRole("textbox", { name: "Message this session" });
-    await waitFor(() => expect(input).toBeEnabled());
-    await screen.findByText("cargo test");
+    const { container } = await act(async () => render(<ViewerPage />));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: /session live/ })));
+    const input = screen.getByRole("textbox", { name: "Message this session" });
+    expect(input).toBeEnabled();
+    expect(screen.getByText("cargo test")).toBeInTheDocument();
     const timeline = container.querySelector<HTMLElement>(".conversation__timeline")!;
     Object.defineProperties(timeline, { scrollHeight: { configurable: true, value: 1000 }, clientHeight: { configurable: true, value: 300 } });
     timeline.scrollTop = 120;
-    fireEvent.wheel(timeline, { deltaY: -1 });
-    fireEvent.scroll(timeline);
+    await act(async () => {
+      fireEvent.wheel(timeline, { deltaY: -1 });
+      fireEvent.scroll(timeline);
+    });
     vi.useFakeTimers();
     fireEvent.change(input, { target: { value: "hello" } });
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Send" })));
@@ -1258,7 +1280,7 @@ describe("useViewerState refresh after message input", () => {
     expect(result.current.expandedEventKey).toBe(turn.event_key);
     expect(result.current.pendingLiveActivity).toBe(true);
     expect(result.current.trajectoryPages.get("live")?.get(turn.event_key)?.events).toEqual(trajectoryChildPage().events);
-    expect(loadEventPage).toHaveBeenNthCalledWith(2, { session_key: "live", window_mode: "retained", direction: "backward" });
+    expect(loadEventPage).toHaveBeenNthCalledWith(2, { session_key: "live", window_mode: "retained", direction: "backward" }, expect.any(Function));
     expect(loadEventPage).toHaveBeenCalledTimes(2);
   });
 
@@ -1334,7 +1356,7 @@ describe("useViewerState session-index signalling", () => {
       expect(loadEventPage).toHaveBeenCalledWith({
         session_key: indexedSession.session_key,
         window_mode: "retained", direction: "backward",
-      });
+      }, expect.any(Function));
     });
   });
 
@@ -1490,12 +1512,14 @@ describe("useViewerState session-index signalling", () => {
     });
     vi.mocked(loadEventPage).mockImplementationOnce(() => page.promise);
 
-    render(<ViewerPageCommitProbe />);
+    await act(async () => render(<ViewerPageCommitProbe />));
 
-    await waitFor(() => expect(listSessions).toHaveBeenCalledOnce());
+    expect(listSessions).toHaveBeenCalledOnce();
     expect(loadEventPage).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Select indexed session" }));
-    await waitFor(() => expect(loadEventPage).toHaveBeenCalledOnce());
+    const selectionButton = screen.getByRole("button", { name: "Select indexed session" });
+    expect(selectionButton).toBeEnabled();
+    await act(async () => fireEvent.click(selectionButton));
+    expect(loadEventPage).toHaveBeenCalledOnce();
     vi.mocked(acknowledgeSessionAttention).mockImplementation(() => {
       const pageState = screen.getByTestId("viewer-page-commit-state");
       pageStateAtAcknowledgement.push({
@@ -1517,7 +1541,7 @@ describe("useViewerState session-index signalling", () => {
       expect(acknowledgeSessionAttention).toHaveBeenCalledWith({
         session_key: indexedSession.session_key,
         attention_revision: "7",
-      });
+      }, expect.any(Function));
     });
     expect(pageStateAtAcknowledgement).toEqual([{
       eventsOwnerKey: indexedSession.session_key,
@@ -1534,7 +1558,7 @@ describe("useViewerState session-index signalling", () => {
     vi.mocked(loadEventPage).mockResolvedValue({ ...toolEventPage(), attention_revision: "1" });
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "live");
-    await waitFor(() => expect(acknowledgeSessionAttention).toHaveBeenCalledWith({ session_key: "live", attention_revision: "1" }));
+    await waitFor(() => expect(acknowledgeSessionAttention).toHaveBeenCalledWith({ session_key: "live", attention_revision: "1" }, expect.any(Function)));
     vi.mocked(acknowledgeSessionAttention).mockClear();
     act(() => result.current.setFollowingLive(false));
     vi.mocked(loadEventPage).mockResolvedValue({ ...toolEventPage(), attention_revision: "4" });
@@ -1544,7 +1568,7 @@ describe("useViewerState session-index signalling", () => {
     expect(acknowledgeSessionAttention).not.toHaveBeenCalled();
     act(() => result.current.setFollowingLive(true));
     expect(result.current.pendingLiveActivity).toBe(false);
-    await waitFor(() => expect(acknowledgeSessionAttention).toHaveBeenCalledWith({ session_key: "live", attention_revision: "4" }));
+    await waitFor(() => expect(acknowledgeSessionAttention).toHaveBeenCalledWith({ session_key: "live", attention_revision: "4" }, expect.any(Function)));
   });
 
   it("hides the jump button and acknowledges replies after manually scrolling to the end", async () => {
@@ -1552,9 +1576,9 @@ describe("useViewerState session-index signalling", () => {
     vi.mocked(listenForRelayChanges).mockImplementation((handler) => { emit = handler; return Promise.resolve(vi.fn()); });
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
     vi.mocked(loadEventPage).mockResolvedValue({ ...toolEventPage(), attention_revision: "1" });
-    const { container } = render(<ViewerPage />);
-    fireEvent.click(await screen.findByRole("button", { name: /session live/ }));
-    await waitFor(() => expect(acknowledgeSessionAttention).toHaveBeenCalledWith({ session_key: "live", attention_revision: "1" }));
+    const { container } = await act(async () => render(<ViewerPage />));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: /session live/ })));
+    await waitFor(() => expect(acknowledgeSessionAttention).toHaveBeenCalledWith({ session_key: "live", attention_revision: "1" }, expect.any(Function)));
     vi.mocked(acknowledgeSessionAttention).mockClear();
     const timeline = container.querySelector<HTMLElement>(".conversation__timeline")!;
     Object.defineProperties(timeline, {
@@ -1562,16 +1586,20 @@ describe("useViewerState session-index signalling", () => {
       clientHeight: { configurable: true, value: 300 },
     });
     timeline.scrollTop = 300;
-    fireEvent.wheel(timeline, { deltaY: -80 });
-    fireEvent.scroll(timeline);
+    await act(async () => {
+      fireEvent.wheel(timeline, { deltaY: -80 });
+      fireEvent.scroll(timeline);
+    });
     vi.mocked(loadEventPage).mockResolvedValue({ ...toolEventPage(), attention_revision: "4" });
-    act(() => emit?.({ session_key: "live", reset: false }));
-    await screen.findByRole("button", { name: "New activity · Jump to latest" });
+    await act(async () => emit?.({ session_key: "live", reset: false }));
+    expect(screen.getByRole("button", { name: "New activity · Jump to latest" })).toBeInTheDocument();
     timeline.scrollTop = 700;
-    fireEvent.wheel(timeline, { deltaY: 80 });
-    fireEvent.scroll(timeline);
+    await act(async () => {
+      fireEvent.wheel(timeline, { deltaY: 80 });
+      fireEvent.scroll(timeline);
+    });
     await waitFor(() => expect(screen.queryByRole("button", { name: /Jump to latest/ })).not.toBeInTheDocument());
-    await waitFor(() => expect(acknowledgeSessionAttention).toHaveBeenCalledWith({ session_key: "live", attention_revision: "4" }));
+    await waitFor(() => expect(acknowledgeSessionAttention).toHaveBeenCalledWith({ session_key: "live", attention_revision: "4" }, expect.any(Function)));
   });
 
   it("reopens at last read without acknowledgement, then marks the committed end read on jump", async () => {
@@ -1588,7 +1616,7 @@ describe("useViewerState session-index signalling", () => {
     await waitFor(() => expect(result.current.initialPageLoaded).toBe(true));
     expect(acknowledgeSessionAttention).not.toHaveBeenCalled();
     act(() => result.current.showLiveActivity());
-    await waitFor(() => expect(acknowledgeSessionAttention).toHaveBeenCalledWith({ session_key: "saved", attention_revision: "9" }));
+    await waitFor(() => expect(acknowledgeSessionAttention).toHaveBeenCalledWith({ session_key: "saved", attention_revision: "9" }, expect.any(Function)));
   });
 
   it("does not acknowledge a page invalidated by a selection change before commit", async () => {
@@ -1893,7 +1921,7 @@ describe("useViewerState session-index signalling", () => {
       expect(acknowledgeSessionAttention).toHaveBeenCalledWith({
         session_key: selected.session_key,
         attention_revision: "12",
-      });
+      }, expect.any(Function));
     });
   });
 });
@@ -2244,7 +2272,7 @@ describe("useViewerState related-session navigation", () => {
     expect(result.current.sessionChildren).toBe(initialTree);
     expect(result.current.sessionChildren.has(source.session_key)).toBe(false);
     expect(listSessionChildren).toHaveBeenCalledOnce();
-    await waitFor(() => expect(loadEventPage).toHaveBeenLastCalledWith(expect.objectContaining({ session_key: target.session_key })));
+    await waitFor(() => expect(loadEventPage).toHaveBeenLastCalledWith(expect.objectContaining({ session_key: target.session_key }), expect.any(Function)));
 
     // Background root refreshes must not erase a selected sender whose
     // metadata never belonged to the currently loaded child page.
@@ -2437,7 +2465,7 @@ describe("useViewerState agent communication detail", () => {
     await waitFor(() => expect(result.current.expandedTrajectoryDetail).toEqual(communicationDetail()));
     expect(loadEventDetail).toHaveBeenCalledWith({
       session_key: "codex:communication", event_key: "event.v1.communication",
-    });
+    }, expect.any(Function));
   });
 
   it("discards communication detail after switching sessions", async () => {
@@ -2497,7 +2525,7 @@ describe("useViewerState whole-turn trajectories", () => {
       cursor: undefined,
       direction: "forward",
       limit: 40,
-    });
+    }, expect.any(Function));
     expect(loadEventDetail).not.toHaveBeenCalled();
 
     act(() => result.current.toggleTrajectoryEventExpanded(
@@ -2513,7 +2541,7 @@ describe("useViewerState whole-turn trajectories", () => {
     expect(loadEventDetail).toHaveBeenCalledWith({
       session_key: root.session_key,
       event_key: "event.v1.trajectory-tool",
-    });
+    }, expect.any(Function));
 
     act(() => result.current.selectEvent("event.v1.trajectory-tool"));
     await waitFor(() => {
@@ -2606,7 +2634,7 @@ describe("useViewerState subagent discovery", () => {
       parent_session_key: root.session_key,
       cursor: undefined,
       limit: 60,
-    });
+    }, expect.any(Function));
 
     act(() => result.current.selectSession(child.session_key));
     await waitFor(() => expect(result.current.selectedSession?.session_key).toBe(child.session_key));
@@ -2643,7 +2671,7 @@ describe("useViewerState subagent discovery", () => {
       parent_session_key: root.session_key,
       cursor: undefined,
       limit: 60,
-    });
+    }, expect.any(Function));
 
     await act(async () => {
       childPage.resolve({ sessions: [], next_cursor: null });

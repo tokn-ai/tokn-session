@@ -1,3 +1,4 @@
+import { captureTransport, type CommandInvoker, type EventSubscriber } from "./transport";
 import { SessionDisplayCache } from "./sessionDisplayCache";
 import type { ExpandedActivityState } from "./types";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -6,21 +7,21 @@ import { refreshEventWindow, loadCompleteTrajectory } from "./liveEvents";
 import { compareProjects, readSessionOrder, saveSessionOrder } from "./sidebarOrder";
 import { useSessionView } from "./useSessionView";
 import {
-  acknowledgeSessionAttention,
-  getSessionIndexProgress,
-  listSessionChildren,
-  listSessions,
-  listenForSessionIndexChanges,
-  listenForSessionIndexProgress,
-  listenForRelayChanges,
-  listenForTransportReconnect,
-  listenForSessionUpdates,
-  listenForSessionNotifications,
-  loadSessionUpdates,
-  loadEventDetail,
-  loadEventPage,
-  loadTrajectoryEventPage,
-  retrySessionIndex as requestSessionIndexRetry,
+  acknowledgeSessionAttention as apiAcknowledgeSessionAttention,
+  getSessionIndexProgress as apiGetSessionIndexProgress,
+  listSessionChildren as apiListSessionChildren,
+  listSessions as apiListSessions,
+  listenForSessionIndexChanges as apiListenForSessionIndexChanges,
+  listenForSessionIndexProgress as apiListenForSessionIndexProgress,
+  listenForRelayChanges as apiListenForRelayChanges,
+  listenForTransportReconnect as apiListenForTransportReconnect,
+  listenForSessionUpdates as apiListenForSessionUpdates,
+  listenForSessionNotifications as apiListenForSessionNotifications,
+  loadSessionUpdates as apiLoadSessionUpdates,
+  loadEventDetail as apiLoadEventDetail,
+  loadEventPage as apiLoadEventPage,
+  loadTrajectoryEventPage as apiLoadTrajectoryEventPage,
+  retrySessionIndex as apiRequestSessionIndexRetry,
 } from "./tauri";
 import {
   EVENT_PAGE_SIZE,
@@ -146,6 +147,55 @@ interface AcceptedInitialEventPage {
 }
 
 export function useViewerState() {
+  const [transport] = useState(captureTransport);
+  const mounted = useRef(true);
+  const readerLifetime = useRef(0);
+  const ensureReaderCurrent = useCallback((epoch: number) => {
+    if (!mounted.current || readerLifetime.current !== epoch) throw new Error("Machine disconnected");
+  }, []);
+  const send: CommandInvoker = useCallback(async <T,>(command: string, payload?: Record<string, unknown>) => {
+    const epoch = readerLifetime.current;
+    ensureReaderCurrent(epoch);
+    const response = await transport.invoke<T>(command, payload);
+    ensureReaderCurrent(epoch);
+    return response;
+  }, [ensureReaderCurrent, transport]);
+  const subscribe: EventSubscriber = useCallback(async <T,>(event: string, handler: (event: { payload: T }) => void) => {
+    const epoch = readerLifetime.current;
+    ensureReaderCurrent(epoch);
+    const stop = await transport.listen<T>(event, (event) => {
+      if (mounted.current && readerLifetime.current === epoch) handler(event);
+    });
+    if (!mounted.current || readerLifetime.current !== epoch) {
+      stop();
+      throw new Error("Machine disconnected");
+    }
+    return stop;
+  }, [ensureReaderCurrent, transport]);
+  // Bind both IPC and event subscriptions once. Deferred compatibility reads
+  // must never use the transport selected by a later viewer instance.
+  const {
+    acknowledgeSessionAttention, getSessionIndexProgress, listSessionChildren, listSessions,
+    loadSessionUpdates, loadEventDetail, loadEventPage, loadTrajectoryEventPage, requestSessionIndexRetry,
+    listenForSessionIndexChanges, listenForSessionIndexProgress, listenForRelayChanges,
+    listenForTransportReconnect, listenForSessionUpdates, listenForSessionNotifications,
+  } = useMemo(() => ({
+    acknowledgeSessionAttention: (request: Parameters<typeof apiAcknowledgeSessionAttention>[0]) => apiAcknowledgeSessionAttention(request, send),
+    getSessionIndexProgress: () => apiGetSessionIndexProgress(send),
+    listSessionChildren: (request: Parameters<typeof apiListSessionChildren>[0]) => apiListSessionChildren(request, send),
+    listSessions: (request: Parameters<typeof apiListSessions>[0]) => apiListSessions(request, send),
+    loadSessionUpdates: (request: Parameters<typeof apiLoadSessionUpdates>[0]) => apiLoadSessionUpdates(request, send),
+    loadEventDetail: (request: Parameters<typeof apiLoadEventDetail>[0]) => apiLoadEventDetail(request, send),
+    loadEventPage: (request: Parameters<typeof apiLoadEventPage>[0]) => apiLoadEventPage(request, send),
+    loadTrajectoryEventPage: (request: Parameters<typeof apiLoadTrajectoryEventPage>[0]) => apiLoadTrajectoryEventPage(request, send),
+    requestSessionIndexRetry: () => apiRequestSessionIndexRetry(send),
+    listenForSessionIndexChanges: (handler: Parameters<typeof apiListenForSessionIndexChanges>[0]) => apiListenForSessionIndexChanges(handler, subscribe),
+    listenForSessionIndexProgress: (handler: Parameters<typeof apiListenForSessionIndexProgress>[0]) => apiListenForSessionIndexProgress(handler, subscribe),
+    listenForRelayChanges: (handler: Parameters<typeof apiListenForRelayChanges>[0]) => apiListenForRelayChanges(handler, subscribe),
+    listenForTransportReconnect: (handler: Parameters<typeof apiListenForTransportReconnect>[0]) => apiListenForTransportReconnect(handler, subscribe),
+    listenForSessionUpdates: (handler: Parameters<typeof apiListenForSessionUpdates>[0]) => apiListenForSessionUpdates(handler, subscribe),
+    listenForSessionNotifications: (handler: Parameters<typeof apiListenForSessionNotifications>[0]) => apiListenForSessionNotifications(handler, subscribe),
+  }), [send, subscribe]);
   const [sessionOrder, setSessionOrder] = useState(readSessionOrder);
   const [search, setSearchValue] = useState("");
   const debouncedSearch = useDebouncedValue(search.trim(), 180);
@@ -195,14 +245,6 @@ export function useViewerState() {
       sessionListRefreshQueued.current = false;
       setSessionsAttempt((attempt) => attempt + 1);
     }
-  }, []);
-
-  useEffect(() => () => {
-    // Switching machines unmounts this hook. An old request must not start a
-    // queued catalog read against the newly selected transport.
-    sessionsRequest.current += 1;
-    sessionListInFlight.current = null;
-    sessionListRefreshQueued.current = false;
   }, []);
 
   const [events, setEvents] = useState<EventSummary[]>([]);
@@ -268,11 +310,14 @@ export function useViewerState() {
   const semanticSupported = useRef<boolean | null>(null);
   const onSessionUpdate = useRef<(update: import("./types").SessionUpdate) => void>(() => {});
   const loadWorkPage = useCallback(async (request: import("./types").LoadTrajectoryEventPageRequest) => {
+    const epoch = readerLifetime.current;
+    ensureReaderCurrent(epoch);
     const cached = displayCache.current.trajectoryGroup(request.session_key, request.trajectory_key);
     if (cached) return cached;
     if (request.trajectory_key.startsWith("activity:")) {
       displayCache.current.includeGroup(request.session_key, request.trajectory_key);
       const update = await loadSessionUpdates(displayCache.current.request(request.session_key, "steps"));
+      ensureReaderCurrent(epoch);
       if (!displayCache.current.apply(update)) throw new Error("Work group changed; try again");
       const group = displayCache.current.trajectoryGroup(request.session_key, request.trajectory_key);
       if (!group) throw new Error("Work group is no longer available");
@@ -281,6 +326,8 @@ export function useViewerState() {
     return loadTrajectoryEventPage(request);
   }, []);
   const loadDisplayPage = useCallback(async (request: import("./types").LoadEventPageRequest) => {
+    const epoch = readerLifetime.current;
+    ensureReaderCurrent(epoch);
     if (semanticSupported.current === false) return loadEventPage(request);
     if (request.window_mode !== "retained") {
       displayCache.current.includeHistory(request.session_key);
@@ -289,12 +336,14 @@ export function useViewerState() {
     try { update = await loadSessionUpdates({ ...displayCache.current.request(request.session_key, "steps"),
         ...(request.window_mode === "earlier" ? { history_cursor: request.cursor } : {}) }); }
     catch (error: unknown) {
+      ensureReaderCurrent(epoch);
       if (/unknown.*command|unknown.*variant|command.*not found|unavailable for a session share/i.test(errorMessage(error))) {
         semanticSupported.current = false;
         return loadEventPage(request);
       }
       throw error;
     }
+    ensureReaderCurrent(epoch);
     const page = displayCache.current.apply(update);
     if (!page) throw new Error("Session updates changed; retry the snapshot");
     semanticSupported.current = true;
@@ -346,6 +395,35 @@ export function useViewerState() {
     }),
   ])].slice(0, 16);
 
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      readerLifetime.current += 1;
+      // Native IPC can finish after unmount. Retire every request generation
+      // before a response can load another cursor page or update the old view.
+      sessionsRequest.current += 1;
+      eventsRequest.current += 1;
+      detailRequest.current += 1;
+      expandedDetailRequest.current += 1;
+      expandedTrajectoryDetailRequest.current += 1;
+      detailGeneration.current += 1;
+      detailLoads.current.clear();
+      sessionChildrenGeneration.current += 1;
+      sessionChildRequests.current.clear();
+      trajectoryPageGeneration.current += 1;
+      trajectoryPageRequests.current.clear();
+      sessionIndexConnectionEpoch.current += 1;
+      sessionIndexRetryInFlight.current = false;
+      sessionListInFlight.current = null;
+      sessionListRefreshQueued.current = false;
+      eventRefreshInFlight.current = false;
+      liveUpdateQueued.current = false;
+      for (const timer of inputRefreshTimers.current) window.clearTimeout(timer);
+      inputRefreshTimers.current = [];
+    };
+  }, []);
 
   const applyExpandedEventKey = useCallback((key: string | null) => {
     expandedEventKeyRef.current = key;
@@ -442,12 +520,13 @@ export function useViewerState() {
   }, [applySessionIndexProgress]);
 
   const retrySessionIndex = useCallback(async () => {
-    if (sessionIndexRetryInFlight.current) {
+    if (!mounted.current || sessionIndexRetryInFlight.current) {
       return;
     }
     sessionIndexRetryInFlight.current = true;
     setSessionIndexRetrying(true);
     const epoch = sessionIndexConnectionEpoch.current;
+    const lifetime = readerLifetime.current;
     try {
       const progress = await requestSessionIndexRetry();
       if (epoch === sessionIndexConnectionEpoch.current) {
@@ -458,8 +537,10 @@ export function useViewerState() {
         setSessionIndexProgressError(errorMessage(error));
       }
     } finally {
-      sessionIndexRetryInFlight.current = false;
-      setSessionIndexRetrying(false);
+      if (mounted.current && lifetime === readerLifetime.current) {
+        sessionIndexRetryInFlight.current = false;
+        setSessionIndexRetrying(false);
+      }
     }
   }, [applySessionIndexProgress]);
 
@@ -749,7 +830,7 @@ export function useViewerState() {
     };
     onSessionUpdate.current = handle;
     void listenForSessionUpdates(handle).then((unlisten) => { if (disposed) unlisten(); else stop = unlisten; })
-      .catch((error: unknown) => setEventsError(errorMessage(error)));
+      .catch((error: unknown) => { if (!disposed) setEventsError(errorMessage(error)); });
     return () => { disposed = true; stop?.(); };
   }, []);
 

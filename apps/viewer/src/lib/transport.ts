@@ -1,5 +1,6 @@
 export type UnlistenFn = () => void;
 export type CommandInvoker = <T>(command: string, payload?: Record<string, unknown>) => Promise<T>;
+export type EventSubscriber = <T>(event: string, handler: (event: { payload: T }) => void) => Promise<UnlistenFn>;
 type Handler = (event: { payload: unknown }) => void;
 export type ConnectionState = "connecting" | "connected" | "reconnecting";
 const MAX_EVENT_FRAME_LENGTH = 2 * 1024 * 1024;
@@ -203,6 +204,10 @@ export function selectMachine(client?: ViewerClient) {
   selected?.close();
   selected = client;
 }
+/** Cleanup may retire its own client without clearing a successor's selection. */
+export function deselectMachine(client: ViewerClient) {
+  if (selected === client) selectMachine();
+}
 export async function invoke<T>(command: string, payload?: Record<string, unknown>): Promise<T> {
   if (selected) return selected.invoke<T>(command, payload);
   if (isDesktop()) return (await import("@tauri-apps/api/core")).invoke<T>(command, payload);
@@ -217,19 +222,23 @@ export async function listen<T>(event: string, handler: (event: { payload: T }) 
 /** Capture one machine so deferred updates and cleanup cannot target its successor. */
 export function captureTransport(): {
   invoke: CommandInvoker;
+  listen: EventSubscriber;
   release: (command: string, payload?: Record<string, unknown>) => Promise<void>;
   on_close: (handler: () => void) => UnlistenFn;
 } {
   if (!selected && isDesktop()) {
     const local: CommandInvoker = async <T>(command: string, payload?: Record<string, unknown>) =>
       (await import("@tauri-apps/api/core")).invoke<T>(command, payload);
-    return { invoke: local, release: local, on_close: () => () => {} };
+    const subscribe: EventSubscriber = async <T>(event: string, handler: (event: { payload: T }) => void) =>
+      (await import("@tauri-apps/api/event")).listen<T>(event, handler);
+    return { invoke: local, listen: subscribe, release: local, on_close: () => () => {} };
   }
   const client = selected;
   const send: CommandInvoker = <T>(command: string, payload?: Record<string, unknown>) =>
     client ? client.invoke<T>(command, payload) : Promise.reject(new Error("Connect to a machine first"));
   return {
     invoke: send,
+    listen: (event, handler) => client ? client.listen(event, handler) : Promise.reject(new Error("Connect to a machine first")),
     release: (command, payload) => client?.release(command, payload) ?? Promise.resolve(),
     on_close: (handler) => client?.onClose(handler) ?? (() => {}),
   };

@@ -25,6 +25,17 @@ async function openConnection() {
   await waitFor(() => expect(screen.getByLabelText("Data source")).toBeEnabled());
 }
 
+it("identifies this machine and returns to the shared Machines picker from its panel", async () => {
+  const open_machines = vi.fn();
+  render(<RelayConnection on_open_machines={open_machines} />);
+  await screen.findByRole("button", { name: "This machine. Connecting. Connection settings" });
+  await openConnection();
+  expect(screen.getByRole("dialog")).toHaveTextContent("This machine");
+  fireEvent.click(screen.getByRole("button", { name: "Machines" }));
+  expect(open_machines).toHaveBeenCalledOnce();
+  expect(configureRelay).not.toHaveBeenCalled();
+});
+
 it("loads saved endpoint and saves trimmed connection settings", async () => {
   vi.mocked(configureRelay).mockResolvedValue(disconnected);
   render(<RelayConnection />);
