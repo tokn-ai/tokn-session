@@ -1,5 +1,7 @@
 //! Direct native app connections: the app owns keys and decrypts host content.
+mod direct;
 mod directory;
+pub use direct::{TransportKind, TransportState};
 mod exchange;
 mod stream;
 
@@ -38,6 +40,7 @@ pub struct ConnectionInfo {
   pub endpoint: String,
   pub host_id: String,
   pub host_public_key: String,
+  pub transport: TransportState,
 }
 
 #[derive(Serialize)]
@@ -71,6 +74,7 @@ struct Connection {
   requests: Arc<Semaphore>,
   listening: std::sync::atomic::AtomicBool,
   sink: EventSink,
+  direct: direct::DirectRoute,
 }
 
 #[derive(Clone)]
@@ -233,6 +237,7 @@ impl RemoteManager {
       endpoint: format!("{}/machines/{}", hub.origin().ascii_serialization(), host_id),
       host_id: host.host_id,
       host_public_key: host.host_public_key,
+      transport: TransportState::default(),
     };
     let connection = Arc::new(Connection {
       endpoint: secure_endpoint(&hub, host_id)?,
@@ -242,6 +247,7 @@ impl RemoteManager {
       requests: Arc::new(Semaphore::new(protocol::MAX_REQUESTS)),
       listening: std::sync::atomic::AtomicBool::new(false),
       sink,
+      direct: direct::DirectRoute::default(),
     });
     let health = connection.request("health", json!({})).await?;
     if health.get("version").and_then(Value::as_u64) != Some(1) {
@@ -252,7 +258,9 @@ impl RemoteManager {
     if connections.len() >= 16 {
       return Err("Too many open machine connections".into());
     }
-    connections.insert(info.connection_id.clone(), connection);
+    connections.insert(info.connection_id.clone(), connection.clone());
+    drop(connections);
+    tokio::spawn(direct::upgrade(connection));
     Ok(info)
   }
 
@@ -272,6 +280,7 @@ impl RemoteManager {
 
   pub async fn listen(&self, connection_id: &str) -> Result<(), String> {
     let connection = self.connection(connection_id).await?;
+    connection.transport_event(connection.direct.changes.borrow().clone());
     if connection.listening.swap(true, std::sync::atomic::Ordering::AcqRel) {
       return Ok(());
     }
@@ -281,14 +290,24 @@ impl RemoteManager {
   }
 
   pub async fn close(&self, connection_id: &str) {
-    if let Some(connection) = self.connections.lock().await.remove(connection_id) {
+    let connection = { self.connections.lock().await.remove(connection_id) };
+    if let Some(connection) = connection {
       connection.cancellation.cancel();
+      connection.direct.close().await;
     }
   }
 
   pub async fn close_all(&self) {
-    for (_, connection) in self.connections.lock().await.drain() {
+    let connections: Vec<_> = self
+      .connections
+      .lock()
+      .await
+      .drain()
+      .map(|(_, connection)| connection)
+      .collect();
+    for connection in connections {
       connection.cancellation.cancel();
+      connection.direct.close().await;
     }
     let authentications: Vec<_> = self
       .authentications
@@ -464,6 +483,26 @@ impl Authentication {
 }
 
 impl Connection {
+  fn transport_event(&self, transport: TransportState) {
+    (self.sink)(
+      "hub-client-transport",
+      json!({"connection_id":self.info.connection_id,"transport":transport}),
+    );
+  }
+
+  async fn exchange(&self, method: &str, path: &str, body: &[u8]) -> Result<Exchange, String> {
+    let transport = self.direct.open(self).await?;
+    Exchange::open(
+      transport,
+      &self.identity,
+      &self.info.host_public_key,
+      method,
+      path,
+      body,
+    )
+    .await
+  }
+
   fn state(&self, state: &str) {
     (self.sink)(
       "hub-client-state",
@@ -501,10 +540,10 @@ impl Connection {
       .map_err(|_| "Too many concurrent viewer requests")?;
     let response = tokio::select! {
       _ = self.cancellation.cancelled() => return Err("Machine disconnected".into()),
-      response = async {
-        let exchange = Exchange::open(&self.endpoint, &self.identity, &self.info.host_public_key, method, &path, &body).await?;
+      response = tokio::time::timeout(Duration::from_secs(120), async {
+        let exchange = self.exchange(method, &path, &body).await?;
         exchange.json().await
-      } => response,
+      }) => response.map_err(|_| "Machine request timed out; delivery may be uncertain and requests are not retried")?,
     }?;
     Ok(response)
   }

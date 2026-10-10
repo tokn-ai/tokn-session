@@ -1,7 +1,7 @@
 import { type SavedHubHost } from "./hubDeviceStore";
 import type { ConnectionState, UnlistenFn, ViewerClient } from "./transport";
 import type { PasskeyProvider } from "./hubEncryptedClient";
-import type { ResolvedMachine } from "./types";
+import type { ResolvedMachine, TransportState } from "./types";
 
 export interface NativeHubStatus {
   hub_url: string;
@@ -9,7 +9,7 @@ export interface NativeHubStatus {
   hosts: SavedHubHost[];
   selected_host_id: string | null;
 }
-interface Descriptor extends SavedHubHost { connection_id: string; endpoint: string; }
+interface Descriptor extends SavedHubHost { connection_id: string; endpoint: string; transport?: TransportState; }
 async function command<T>(name: string, request: Record<string, unknown>): Promise<T> {
   return (await import("@tauri-apps/api/core")).invoke<T>(name, request);
 }
@@ -50,7 +50,11 @@ export class NativeHubClient implements ViewerClient {
   private stops: UnlistenFn[] = [];
   private started?: Promise<void>;
   private on_state: (state: ConnectionState) => void = () => {};
-  private constructor(private descriptor: Descriptor) { this.endpoint = descriptor.endpoint; }
+  private on_transport: (transport: TransportState) => void = () => {};
+  private transport: TransportState;
+  private constructor(private descriptor: Descriptor) {
+    this.endpoint = descriptor.endpoint; this.transport = descriptor.transport ?? { kind: "relay" };
+  }
   static async connect(hub_url: string, host: SavedHubHost, signal?: AbortSignal): Promise<NativeHubClient> {
     if (signal?.aborted) throw new Error("Machine disconnected");
     const descriptor = await command<Descriptor>("hub_client_open", { hub_url, host_id: host.host_id, host_public_key: host.host_public_key });
@@ -65,6 +69,7 @@ export class NativeHubClient implements ViewerClient {
     return result;
   }
   setStateListener(handler: (state: ConnectionState) => void): void { this.on_state = handler; }
+  setTransportListener(handler: (transport: TransportState) => void): void { this.on_transport = handler; handler(this.transport); }
   private async start(): Promise<void> {
     try {
       const { listen } = await import("@tauri-apps/api/event");
@@ -77,6 +82,12 @@ export class NativeHubClient implements ViewerClient {
         if (!this.closed && payload.connection_id === this.descriptor.connection_id) this.on_state(payload.state);
       });
       this.stops.push(stop_state);
+      const stop_transport = await listen<{ connection_id: string; transport: TransportState }>("hub-client-transport", ({ payload }) => {
+        if (!this.closed && payload.connection_id === this.descriptor.connection_id) {
+          this.transport = payload.transport; this.on_transport(this.transport);
+        }
+      });
+      this.stops.push(stop_transport);
       if (this.closed) throw new Error("Machine disconnected");
       await command("hub_client_listen", { connection_id: this.descriptor.connection_id });
       if (this.closed) throw new Error("Machine disconnected");

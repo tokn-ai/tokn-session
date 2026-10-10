@@ -496,6 +496,7 @@ async fn passkey_owner_routes_multiple_hosts_and_logout_stops_live_streams() {
       local_token: Some("local-only-token".into()),
       allow_control,
       insecure_loopback: true,
+      ice_servers: Vec::new(),
       secure: None,
       paired: None,
     };

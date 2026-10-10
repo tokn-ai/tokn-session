@@ -24,3 +24,17 @@ it("keeps host identity visible and shows current recovery state and actions on 
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: /connection settings/i })).toHaveFocus();
 });
+
+it("shows the encrypted traffic path and the relay fallback reason", () => {
+  const view = (kind: "direct" | "relay", reason?: string) => <RemoteConnection name="alice:workstation" hub_url="https://hub.example" encrypted state="connected" transport={{ kind, reason }}>
+    <button>Machines</button>
+  </RemoteConnection>;
+  const { rerender } = render(view("direct"));
+  expect(screen.getByText("Direct · alice:workstation")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /connection settings/i }));
+  expect(screen.getByRole("dialog")).toHaveTextContent("Direct · encrypted");
+  rerender(view("relay", "Direct connection was interrupted."));
+  expect(screen.getByText("Relayed · alice:workstation")).toBeInTheDocument();
+  expect(screen.getByRole("dialog")).toHaveTextContent("Relayed · encrypted");
+  expect(screen.getByRole("dialog")).toHaveTextContent("Direct connection was interrupted.");
+});
