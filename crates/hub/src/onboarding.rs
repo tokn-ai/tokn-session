@@ -9,12 +9,15 @@ use std::{
 };
 use url::Url;
 use uuid::Uuid;
+use webauthn_rs::prelude::{AuthenticationResult, Passkey};
 use zeroize::{Zeroize, Zeroizing};
 
 const MAX_STATE: u64 = 256 * 1024;
 const MAX_DEVICES: usize = 64;
 const ATTEMPT_WINDOW: u64 = 300;
 const MAX_ATTEMPTS: u32 = 5;
+const MAX_PASSKEYS: usize = 32;
+const MAX_PASSKEY_ATTEMPTS: u32 = 20;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,6 +29,9 @@ pub struct HostProfile {
   pub viewer_url: String,
   pub allow_control: bool,
   pub insecure_loopback: bool,
+  /// Stable browser UI origin. Older profiles derive it from the Hub URL.
+  #[serde(default)]
+  pub passkey_origin: Option<String>,
 }
 
 impl HostProfile {
@@ -61,6 +67,14 @@ struct HostAccess {
   last_used_step: Option<u64>,
   attempt_window_start: u64,
   attempts: u32,
+  #[serde(default)]
+  passkey_origin: Option<String>,
+  #[serde(default)]
+  passkeys: Vec<Passkey>,
+  #[serde(default)]
+  passkey_attempt_window_start: u64,
+  #[serde(default)]
+  passkey_attempts: u32,
 }
 
 impl Drop for HostAccess {
@@ -71,12 +85,21 @@ impl Drop for HostAccess {
 
 fn host_access(path: &Path) -> Result<HostAccess, String> {
   let state: HostAccess = read_required(path)?;
-  if state.version != 1 || state.devices.len() > MAX_DEVICES {
+  if state.version != 1 || state.devices.len() > MAX_DEVICES || state.passkeys.len() > MAX_PASSKEYS {
     return Err("Invalid host pairing state".into());
   }
   TotpSecret::from_base32(&state.totp_secret)?;
   for key in state.devices.keys() {
     decode_public_key(key)?;
+  }
+  if !state.passkeys.is_empty() && state.passkey_origin.is_none() {
+    return Err("Registered host passkeys have no saved browser origin".into());
+  }
+  let mut credentials = std::collections::HashSet::new();
+  for passkey in &state.passkeys {
+    if !credentials.insert(passkey.cred_id()) {
+      return Err("Duplicate registered host passkey".into());
+    }
   }
   Ok(state)
 }
@@ -96,6 +119,10 @@ pub fn initialize_host_access(path: &Path, secret: &TotpSecret) -> Result<(), St
       last_used_step: None,
       attempt_window_start: 0,
       attempts: 0,
+      passkey_origin: None,
+      passkeys: Vec::new(),
+      passkey_attempt_window_start: 0,
+      passkey_attempts: 0,
     },
   )
 }
@@ -167,11 +194,112 @@ pub fn remove_device(path: &Path, public_key: &str) -> Result<(), String> {
   write_atomic(path, &state)
 }
 
+/// WebAuthn challenges are high-entropy, but unauthenticated starts still have
+/// a bounded, persisted host-wide budget across channels and restarts.
+pub(crate) fn begin_passkey(path: &Path, now: u64) -> Result<(), String> {
+  let _lock = lock(path)?;
+  let mut state = host_access(path)?;
+  if now < state.passkey_attempt_window_start {
+    return Err("Host clock moved backwards; passkey authentication is temporarily unavailable".into());
+  }
+  if now.saturating_sub(state.passkey_attempt_window_start) >= ATTEMPT_WINDOW {
+    state.passkey_attempt_window_start = now;
+    state.passkey_attempts = 0;
+  }
+  if state.passkey_attempts >= MAX_PASSKEY_ATTEMPTS {
+    return Err("Too many passkey attempts; try again in five minutes".into());
+  }
+  state.passkey_attempts += 1;
+  write_atomic(path, &state)
+}
+
+pub(crate) fn host_passkeys(path: &Path, origin: &str) -> Result<Vec<Passkey>, String> {
+  let state = host_access(path)?;
+  check_passkey_origin(&state, origin)?;
+  Ok(state.passkeys.clone())
+}
+
+/// Reject a configuration change before writing host.json if existing
+/// credentials would move to another RP or become unavailable.
+pub fn validate_host_passkey_origin(path: &Path, origin: Option<&str>) -> Result<(), String> {
+  let state = host_access(path)?;
+  if state
+    .passkey_origin
+    .as_deref()
+    .is_some_and(|saved| Some(saved) != origin)
+  {
+    return Err("Host passkey origin changed; restore the configured browser origin".into());
+  }
+  Ok(())
+}
+
+fn check_passkey_origin(state: &HostAccess, origin: &str) -> Result<(), String> {
+  if state.passkey_origin.as_deref().is_some_and(|saved| saved != origin) {
+    return Err("Host passkey origin changed; restore the configured browser origin".into());
+  }
+  Ok(())
+}
+
+/// Device authorization must remain valid at completion, not just when the
+/// enrollment starts. The saved credential and its RP origin are host-owned.
+pub(crate) fn register_host_passkey(
+  path: &Path,
+  origin: &str,
+  device_public_key: &str,
+  passkey: Passkey,
+) -> Result<(), String> {
+  let _lock = lock(path)?;
+  let mut state = host_access(path)?;
+  check_passkey_origin(&state, origin)?;
+  if !state.devices.contains_key(device_public_key) {
+    return Err("Device authorization was revoked during passkey enrollment".into());
+  }
+  if state.passkeys.len() >= MAX_PASSKEYS {
+    return Err("Host passkey limit reached".into());
+  }
+  if state.passkeys.iter().any(|saved| saved.cred_id() == passkey.cred_id()) {
+    return Err("This passkey is already registered with this host".into());
+  }
+  state.passkey_origin = Some(origin.into());
+  state.passkeys.push(passkey);
+  write_atomic(path, &state)
+}
+
+/// Authentication and the new device authorization persist atomically. A
+/// removed credential or changed origin cannot finish an old ceremony.
+pub(crate) fn authorize_passkey_device(
+  path: &Path,
+  origin: &str,
+  device_public_key: &str,
+  authentication: &AuthenticationResult,
+  now: u64,
+) -> Result<(), String> {
+  decode_public_key(device_public_key)?;
+  let _lock = lock(path)?;
+  let mut state = host_access(path)?;
+  check_passkey_origin(&state, origin)?;
+  let passkey = state
+    .passkeys
+    .iter_mut()
+    .find(|passkey| passkey.cred_id() == authentication.cred_id())
+    .ok_or("Passkey is no longer registered with this host")?;
+  passkey.update_credential(authentication);
+  if !state.devices.contains_key(device_public_key) && state.devices.len() >= MAX_DEVICES {
+    return Err("Host paired-device limit reached; remove an unused device first".into());
+  }
+  state.devices.insert(device_public_key.into(), now);
+  write_atomic(path, &state)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SavedHost {
   pub host_id: String,
   pub host_public_key: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub machine_address: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub name: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -259,6 +387,7 @@ impl ClientStore {
   pub fn save_host(&self, host: SavedHost) -> Result<(), String> {
     validate_uuid(&host.host_id)?;
     decode_public_key(&host.host_public_key)?;
+    validate_host_metadata(&host)?;
     let path = self.path();
     let _lock = lock(&path)?;
     let mut state = self.read()?;
@@ -267,7 +396,7 @@ impl ClientStore {
     }
     let hub = state.hubs.entry(self.hub.clone()).or_default();
     if let Some(existing) = hub.hosts.iter().find(|value| value.host_id == host.host_id) {
-      if existing != &host {
+      if existing.host_public_key != host.host_public_key {
         return Err(
           "Host identity changed; the saved key was preserved. Restore the host key before reconnecting".into(),
         );
@@ -278,7 +407,48 @@ impl ClientStore {
       return Err("Saved host limit reached".into());
     }
     hub.hosts.push(host);
+    validate_client_state(&state)?;
     write_atomic(&path, &state)
+  }
+
+  /// Remember display metadata for an already-pinned host. The caller verifies
+  /// the directory mapping before entering this atomic local transaction.
+  pub fn remember_metadata(&self, host_id: &str, machine_address: &str, name: &str) -> Result<SavedHost, String> {
+    validate_uuid(host_id)?;
+    tokn_hub_client_core::address::parse_machine_address(machine_address)?;
+    tokn_hub_client_core::address::validate_machine_name(name)?;
+    let path = self.path();
+    let _lock = lock(&path)?;
+    let mut state = self.read()?;
+    let hub = state
+      .hubs
+      .get_mut(&self.hub)
+      .ok_or("Pair this machine before remembering its address")?;
+    if hub
+      .hosts
+      .iter()
+      .any(|host| host.host_id != host_id && host.machine_address.as_deref() == Some(machine_address))
+    {
+      return Err("This saved machine address belongs to a different UUID; its original identity was preserved".into());
+    }
+    let host = hub
+      .hosts
+      .iter_mut()
+      .find(|host| host.host_id == host_id)
+      .ok_or("Pair this machine before remembering its address")?;
+    if host
+      .machine_address
+      .as_deref()
+      .is_some_and(|address| address != machine_address)
+    {
+      return Err("This host already has a different saved machine address".into());
+    }
+    host.machine_address = Some(machine_address.into());
+    host.name = Some(name.into());
+    let remembered = host.clone();
+    validate_client_state(&state)?;
+    write_atomic(&path, &state)?;
+    Ok(remembered)
   }
 
   pub fn selected_host(&self) -> Result<Option<String>, String> {
@@ -289,6 +459,26 @@ impl ClientStore {
         .get(&self.hub)
         .and_then(|hub| hub.selected_host.clone()),
     )
+  }
+
+  /// Forget a local pin without replacing this client's identity or revoking
+  /// its device key on the remote host.
+  pub fn forget_host(&self, host_id: &str) -> Result<(), String> {
+    let path = self.path();
+    let _lock = lock(&path)?;
+    let mut state = self.read()?;
+    let hub = state
+      .hubs
+      .get_mut(&self.hub)
+      .ok_or("No hosts have been paired with this Hub")?;
+    if !hub.hosts.iter().any(|host| host.host_id == host_id) {
+      return Err("This host has no saved identity".into());
+    }
+    hub.hosts.retain(|host| host.host_id != host_id);
+    if hub.selected_host.as_deref() == Some(host_id) {
+      hub.selected_host = None;
+    }
+    write_atomic(&path, &state)
   }
 
   pub fn select_host(&self, host_id: &str) -> Result<(), String> {
@@ -317,9 +507,18 @@ fn validate_client_state(state: &ClientHosts) -> Result<(), String> {
       return Err("Too many saved hosts".into());
     }
     let mut ids = std::collections::HashSet::new();
+    let mut addresses = std::collections::HashSet::new();
     for host in &hub.hosts {
       validate_uuid(&host.host_id)?;
       decode_public_key(&host.host_public_key)?;
+      validate_host_metadata(host)?;
+      if host
+        .machine_address
+        .as_ref()
+        .is_some_and(|address| !addresses.insert(address))
+      {
+        return Err("Duplicate saved machine address".into());
+      }
       if !ids.insert(&host.host_id) {
         return Err("Duplicate saved host identity".into());
       }
@@ -331,6 +530,16 @@ fn validate_client_state(state: &ClientHosts) -> Result<(), String> {
     {
       return Err("Selected host has no saved identity".into());
     }
+  }
+  Ok(())
+}
+
+fn validate_host_metadata(host: &SavedHost) -> Result<(), String> {
+  if let Some(address) = &host.machine_address {
+    tokn_hub_client_core::address::parse_machine_address(address)?;
+  }
+  if let Some(name) = &host.name {
+    tokn_hub_client_core::address::validate_machine_name(name)?;
   }
   Ok(())
 }
@@ -512,6 +721,42 @@ mod tests {
   }
 
   #[test]
+  fn passkey_attempt_budget_persists_without_consuming_authenticator_attempts() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("host-access.json");
+    initialize_host_access(&path, &TotpSecret::generate()).unwrap();
+    for _ in 0..MAX_PASSKEY_ATTEMPTS {
+      begin_passkey(&path, 900).unwrap();
+    }
+    assert!(begin_passkey(&path, 901).is_err());
+    assert!(begin_passkey(&path, 899).is_err());
+    begin_pairing(&path, 901, 30).unwrap();
+    begin_passkey(&path, 1200).unwrap();
+  }
+
+  #[test]
+  fn existing_authenticator_state_without_passkey_fields_remains_valid() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("host-access.json");
+    let secret = TotpSecret::generate();
+    initialize_host_access(&path, &secret).unwrap();
+    let mut state: serde_json::Value = read_required(&path).unwrap();
+    for field in [
+      "passkey_origin",
+      "passkeys",
+      "passkey_attempt_window_start",
+      "passkey_attempts",
+    ] {
+      state.as_object_mut().unwrap().remove(field);
+    }
+    write_atomic(&path, &state).unwrap();
+    assert_eq!(read_totp_secret(&path).unwrap().to_base32(), secret.to_base32());
+    assert!(host_passkeys(&path, "https://hub.example.com").unwrap().is_empty());
+    begin_passkey(&path, 900).unwrap();
+    begin_pairing(&path, 900, 30).unwrap();
+  }
+
+  #[test]
   fn client_pins_are_per_hub_and_cannot_be_silently_replaced() {
     let directory = tempfile::tempdir().unwrap();
     let hub = Url::parse("https://hub.example").unwrap();
@@ -519,6 +764,8 @@ mod tests {
     let mut host = SavedHost {
       host_id: Uuid::new_v4().to_string(),
       host_public_key: NoiseIdentity::generate().unwrap().public_key(),
+      machine_address: None,
+      name: None,
     };
     store.save_host(host.clone()).unwrap();
     store.select_host(&host.host_id).unwrap();
@@ -537,6 +784,66 @@ mod tests {
     let second = ClientStore::load_or_create(second_dir.path(), &hub).unwrap();
     fs::remove_file(second.identity_file()).unwrap();
     assert!(ClientStore::load_or_create(second_dir.path(), &hub).is_err());
+  }
+
+  #[test]
+  fn client_metadata_preserves_legacy_pins_selection_and_alias_ownership() {
+    let directory = tempfile::tempdir().unwrap();
+    let hub = Url::parse("https://hub.example").unwrap();
+    let store = ClientStore::load_or_create(directory.path(), &hub).unwrap();
+    let host: SavedHost = serde_json::from_value(serde_json::json!({
+      "host_id": Uuid::new_v4().to_string(), "host_public_key": NoiseIdentity::generate().unwrap().public_key(),
+    }))
+    .unwrap();
+    assert_eq!(host.machine_address, None);
+    assert_eq!(host.name, None);
+    store.save_host(host.clone()).unwrap();
+    store.select_host(&host.host_id).unwrap();
+    let remembered = store
+      .remember_metadata(&host.host_id, "alice:workstation", "Workstation")
+      .unwrap();
+    assert_eq!(remembered.host_public_key, host.host_public_key);
+    assert_eq!(remembered.machine_address.as_deref(), Some("alice:workstation"));
+    // The same UUID/key with no metadata is an ordinary authenticated reconnect,
+    // not an identity change and not a request to erase remembered labels.
+    store.save_host(host.clone()).unwrap();
+    let reopened = ClientStore::load_or_create(directory.path(), &hub).unwrap();
+    assert_eq!(reopened.hosts().unwrap(), vec![remembered.clone()]);
+    assert_eq!(reopened.selected_host().unwrap(), Some(host.host_id.clone()));
+    let renamed = reopened
+      .remember_metadata(&host.host_id, "alice:workstation", "Workstation display")
+      .unwrap();
+    assert_eq!(renamed.name.as_deref(), Some("Workstation display"));
+    assert!(
+      reopened
+        .remember_metadata(&host.host_id, "alice:other", "Workstation")
+        .is_err()
+    );
+    let second = SavedHost {
+      host_id: Uuid::new_v4().to_string(),
+      host_public_key: NoiseIdentity::generate().unwrap().public_key(),
+      machine_address: None,
+      name: None,
+    };
+    reopened.save_host(second.clone()).unwrap();
+    assert!(
+      reopened
+        .remember_metadata(&second.host_id, "alice:workstation", "Another host")
+        .is_err()
+    );
+    assert!(
+      reopened
+        .remember_metadata(&second.host_id, "Alice:second", "Another host")
+        .is_err()
+    );
+    let other_hub =
+      ClientStore::load_or_create(directory.path(), &Url::parse("https://other.example").unwrap()).unwrap();
+    other_hub.save_host(second.clone()).unwrap();
+    other_hub
+      .remember_metadata(&second.host_id, "alice:workstation", "Other Hub")
+      .unwrap();
+    assert_eq!(reopened.hosts().unwrap()[0], renamed);
+    assert_eq!(reopened.selected_host().unwrap(), Some(host.host_id));
   }
 
   #[cfg(unix)]

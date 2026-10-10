@@ -54,9 +54,11 @@ The core abstraction is `AgentEvent`: provider-native historical sessions and li
 - `crates/workbuddy`: read-only WorkBuddy SQLite catalog and JSONL session source.
 - `crates/relay`: provider live feeds and stdout/ZeroMQ/managed-stdio transports.
 - `crates/hub`: host-verified authenticator pairing, saved device trust, encrypted client/host tunnels, and optional passkey administration; legacy signed grants remain available.
+- `crates/hub-client-core`: shared native/WASM pairing and Noise encryption without networking.
+- `crates/hub-remote`: native direct-to-Hub client, remembered identities, requests, and live events.
 - `crates/viewer-core`: shared viewer domain, index scheduler, snapshot/follow readers, and Relay supervision.
 - `crates/viewer-api`: HTTP/SSE adapter and optional static web UI host for browser clients.
-- `apps/viewer`: shared React UI; desktop uses viewer-core through Tauri, browser uses viewer-api.
+- `apps/viewer`: shared React UI; local desktop uses viewer-core, remote app/browser clients reach the host through encrypted Hub tunnels.
 - `vendor/`: source-of-truth checkouts for upstream projects. Do not edit vendored code unless explicitly asked.
 
 ## Before Non-Trivial Work

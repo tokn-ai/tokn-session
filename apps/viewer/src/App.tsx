@@ -6,6 +6,8 @@ import { isDesktop, RemoteClient, selectMachine, type ConnectionState } from "./
 import { PairedConnection } from "./components/PairedConnection";
 import { HubConnection } from "./components/HubConnection";
 import { detectHub, hubErrorMessage, type HubStatus } from "./lib/hub";
+import { HubAccess } from "./components/HubAccess";
+import { NativePasskey } from "./components/NativePasskey";
 
 function BrowserViewer({ initial_token }: { initial_token?: string }) {
   const [endpoint, setEndpoint] = useState(() => window.location.origin);
@@ -75,7 +77,9 @@ function BrowserGateway({ bootstrap_token }: { bootstrap_token?: string }) {
     return () => { cancelled = true; clearTimeout(timer); controller.abort(); };
   }, [attempt]);
   if (status === null) return <BrowserViewer />;
-  if (status) return <HubConnection initial_status={status} bootstrap_token={bootstrap_token} />;
+  if (status) return window.location.pathname === "/admin"
+    ? <HubConnection initial_status={status} bootstrap_token={bootstrap_token} />
+    : <HubAccess />;
   return <main className="machine-connect"><form onSubmit={(event) => { event.preventDefault(); setAttempt((value) => value + 1); }}>
     <h1>Session viewer</h1>
     {error ? <><p role="alert">{error}</p><button>Retry connection</button></> : <p role="status">Connecting…</p>}
@@ -83,7 +87,11 @@ function BrowserGateway({ bootstrap_token }: { bootstrap_token?: string }) {
 }
 
 function App({ initial_token, bootstrap_token }: { initial_token?: string; bootstrap_token?: string }) {
-  if (isDesktop()) return <ViewerPage />;
+  const [desktop_hub, setDesktopHub] = useState(false);
+  if (isDesktop()) return desktop_hub
+    ? <HubAccess initial_hub_url="https://" on_local={() => setDesktopHub(false)} />
+    : <ViewerPage on_open_hub={() => setDesktopHub(true)} />;
+  if (window.location.pathname === "/passkey") return <NativePasskey />;
   if (window.location.pathname === "/connect") return <PairedConnection initial_token={initial_token} />;
   return initial_token ? <BrowserViewer initial_token={initial_token} /> : <BrowserGateway bootstrap_token={bootstrap_token} />;
 }

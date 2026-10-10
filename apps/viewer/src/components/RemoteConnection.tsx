@@ -4,9 +4,11 @@ import { useFloatingPanel } from "../lib/useFloatingPanel";
 import { CloseIcon } from "./Icons";
 
 /** The same compact connection entry point for direct, Hub, and paired viewers. */
-export function RemoteConnection({ name, state, children }: {
+export function RemoteConnection({ name, state, hub_url, encrypted = false, children }: {
   name: string;
   state: ConnectionState;
+  hub_url?: string;
+  encrypted?: boolean;
   children: ReactNode;
 }) {
   const [is_open, setOpen] = useState(false);
@@ -21,7 +23,7 @@ export function RemoteConnection({ name, state, children }: {
         aria-controls={id}
         aria-expanded={is_open}
         aria-haspopup="dialog"
-        aria-label={`${label}. Connection settings`}
+        aria-label={`${name}. ${label}. Connection settings`}
         className="status-bar__connection"
         data-phase={state === "connected" ? "live" : state}
         onClick={() => setOpen((open) => !open)}
@@ -38,8 +40,12 @@ export function RemoteConnection({ name, state, children }: {
           <button aria-label="Close connection settings" className="icon-button" onClick={close} type="button"><CloseIcon /></button>
         </header>
         <div className="remote-connection__body">
-          <p>{name}</p>
-          <p>{state === "reconnecting" ? "Reconnecting · showing last received data" : label}</p>
+          <dl className="connection-summary">
+            <div><dt>Machine</dt><dd>{name}</dd></div>
+            {hub_url && <div><dt>Hub</dt><dd>{hub_url}</dd></div>}
+            {encrypted && <div><dt>Security</dt><dd>End-to-end encrypted</dd></div>}
+          </dl>
+          <p className="connection-state" role="status">{state === "reconnecting" ? "Reconnecting · showing last received data" : label}</p>
           <div className="remote-connection__actions">{children}</div>
         </div>
       </div>}

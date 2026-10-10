@@ -106,6 +106,13 @@ The initial version has one owner per Hub. The owner can access its approved
 hosts, approve enrollments, revoke hosts, and add passkeys. Separate users,
 team permissions, and unattended client credentials are not implemented.
 
+The administrator can reserve namespaces and assign permanent `username:host`
+addresses to registered encrypted machines at `/admin`. These are Hub-local
+names, not separate user accounts or content permissions. The directory exposes
+only exact address lookup and never supplies Noise keys. Addresses remain reserved
+after revocation; their UUID mapping cannot be reassigned. See
+[readable machine addresses](hub-pairing.md#readable-machine-addresses).
+
 The Hub persists public passkey credentials and approved hosts in
 `~/.tokn/hub/state.sqlite` (`--state-path` overrides it). The connector generates
 and persists its Ed25519 private key in `~/.tokn/hub/host.key`
@@ -131,7 +138,14 @@ no remote recovery bypass; preserve an additional passkey before that happens.
   server-held, expiring WebAuthn ceremonies. Auth POSTs require the configured
   browser `Origin`; `/hub/v1/auth/logout` revokes the bearer session.
 - `GET /hub/v1/hosts` returns approved hosts with connectivity and effective
-  `view`/`control` access. `DELETE /hub/v1/hosts/<host_id>` revokes one.
+  `view`/`control` access, durable encrypted-only status, and an optional
+  `machine_address`. `DELETE /hub/v1/hosts/<host_id>` revokes one.
+- Authenticated `GET /hub/v1/namespaces` lists namespaces; `POST` with
+  `{"username":"clouds"}` creates one. Authenticated
+  `POST /hub/v1/namespaces/clouds/machines/macbook` with `{"host_id":"UUID"}`
+  assigns a registered encrypted machine its permanent address.
+- Public `GET /hub/v1/resolve/clouds/macbook` returns `host_id`, `machine_address`,
+  `name`, and `online`. No directory key establishes encryption trust.
 - `GET /hub/v1/enrollments` lists pending connections. Authenticated
   `POST /hub/v1/enrollments/approve` accepts `{"pairing_code":"…"}`.
 - `/hosts/<host_id>/api/v1/<command>` forwards the existing viewer API.
