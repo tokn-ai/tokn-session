@@ -3,6 +3,7 @@ pub mod auth;
 pub mod client_onboarding;
 pub mod connector;
 pub mod host_passkeys;
+pub mod host_setup;
 pub mod onboarding;
 pub mod pairing;
 pub mod protocol;

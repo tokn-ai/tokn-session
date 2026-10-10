@@ -1,0 +1,87 @@
+import { StrictMode } from "react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { HostSetup } from "./HostSetup";
+import { getLocalHostPairing, getLocalHostStatus, listenForLocalHostStatus, startLocalHost, stopLocalHost } from "../lib/tauri";
+import type { LocalHostStatus } from "../lib/types";
+vi.mock("../lib/tauri", () => ({ getLocalHostPairing: vi.fn(), getLocalHostStatus: vi.fn(), listenForLocalHostStatus: vi.fn(), startLocalHost: vi.fn(), stopLocalHost: vi.fn() }));
+const stopped: LocalHostStatus = { phase: "stopped", hub_url: "https://hub.example", name: "Workstation", allow_control: false, machine_reference: "machine@key", error: null };
+const online: LocalHostStatus = { ...stopped, phase: "online" };
+let status_event: (status: LocalHostStatus) => void;
+let unlisten = vi.fn<() => void>();
+beforeEach(() => {
+  unlisten = vi.fn<() => void>();
+  vi.mocked(listenForLocalHostStatus).mockImplementation(async (callback) => { status_event = callback; return unlisten; });
+  vi.mocked(getLocalHostStatus).mockResolvedValue(stopped);
+  vi.mocked(startLocalHost).mockResolvedValue(online);
+  vi.mocked(stopLocalHost).mockResolvedValue(stopped);
+  vi.mocked(getLocalHostPairing).mockResolvedValue({ machine_reference: "machine@key", qr_data_url: "data:image/svg+xml;base64,test", setup_uri: "otpauth://totp/test?secret=PRIVATE&algorithm=SHA256", current_code: "123456", host_time: 100, expires_at: 130 });
+});
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.clearAllMocks(); localStorage.clear(); });
+
+it("starts and stops hosting without loading or persisting pairing secrets", async () => {
+  render(<HostSetup />);
+  await screen.findByText("Not hosting from this app");
+  expect(getLocalHostPairing).not.toHaveBeenCalled();
+  expect(screen.getByLabelText("Allow remote agent input")).not.toBeChecked();
+  fireEvent.click(screen.getByRole("button", { name: "Start hosting", hidden: true }));
+  await waitFor(() => expect(startLocalHost).toHaveBeenCalledWith({ hub_url: "https://hub.example", name: "Workstation", allow_control: false }));
+  await screen.findByText("Hosting through Hub");
+  fireEvent.click(screen.getByRole("button", { name: "Stop hosting", hidden: true }));
+  await screen.findByText("Not hosting from this app");
+  expect(stopLocalHost).toHaveBeenCalledOnce(); expect(localStorage.length).toBe(0);
+});
+it("loads QR and current code on disclosure and clears them when hidden", async () => {
+  render(<HostSetup />); await screen.findByText("Not hosting from this app");
+  fireEvent.click(screen.getByRole("button", { name: "Show pairing setup", hidden: true }));
+  await screen.findByText("123456");
+  expect(screen.getByAltText("SHA-256 authenticator setup QR")).toHaveAttribute("src", "data:image/svg+xml;base64,test");
+  expect(screen.getByText("Valid for 30s")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Hide pairing setup", hidden: true }));
+  expect(screen.queryByText("123456")).not.toBeInTheDocument();
+  expect(screen.queryByAltText("SHA-256 authenticator setup QR")).not.toBeInTheDocument();
+});
+it("preserves newer connection events over a late start response", async () => {
+  let finish!: (status: LocalHostStatus) => void;
+  vi.mocked(startLocalHost).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+  render(<HostSetup />); await screen.findByText("Not hosting from this app");
+  fireEvent.click(screen.getByRole("button", { name: "Start hosting", hidden: true }));
+  await waitFor(() => expect(startLocalHost).toHaveBeenCalled());
+  status_event(online); finish({ ...stopped, phase: "connecting" });
+  await screen.findByText("Hosting through Hub");
+  expect(screen.queryByText("Connecting to Hub…")).not.toBeInTheDocument();
+});
+it("reports external-connector conflicts without starting another flow", async () => {
+  vi.mocked(startLocalHost).mockRejectedValue(new Error("Another connector is already hosting this machine"));
+  render(<HostSetup />); await screen.findByText("Not hosting from this app");
+  fireEvent.click(screen.getByRole("button", { name: "Start hosting", hidden: true }));
+  expect(await screen.findByRole("alert", { hidden: true })).toHaveTextContent("Another connector");
+  expect(stopLocalHost).not.toHaveBeenCalled(); expect(getLocalHostPairing).not.toHaveBeenCalled();
+});
+it("unsubscribes in StrictMode and ignores pairing responses after the disclosure closes", async () => {
+  let finish!: (pairing: Awaited<ReturnType<typeof getLocalHostPairing>>) => void;
+  vi.mocked(getLocalHostPairing).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+  const { unmount } = render(<StrictMode><HostSetup /></StrictMode>);
+  await screen.findByText("Not hosting from this app");
+  fireEvent.click(screen.getByRole("button", { name: "Show pairing setup", hidden: true }));
+  await waitFor(() => expect(getLocalHostPairing).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole("button", { name: "Hide pairing setup", hidden: true }));
+  finish({ machine_reference: "machine@key", qr_data_url: "secret", setup_uri: "secret", current_code: "654321", host_time: 100, expires_at: 130 });
+  await waitFor(() => expect(screen.queryByText("654321")).not.toBeInTheDocument());
+  unmount(); expect(unlisten).toHaveBeenCalledTimes(2);
+});
+
+it("refreshes verification codes at the host boundary without relying on the client clock", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "performance"] });
+  const initial = { machine_reference: "machine@key", qr_data_url: "data:image/svg+xml;base64,test", setup_uri: "private", current_code: "123456", host_time: 100, expires_at: 130 };
+  vi.mocked(getLocalHostPairing).mockResolvedValueOnce(initial).mockResolvedValue({ ...initial, current_code: "654321", host_time: 130, expires_at: 160 });
+  render(<HostSetup />); await screen.findByText("Not hosting from this app");
+  fireEvent.click(screen.getByRole("button", { name: "Show pairing setup", hidden: true }));
+  await screen.findByText("123456");
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+  expect(screen.getByText("654321")).toBeInTheDocument();
+  expect(getLocalHostPairing).toHaveBeenCalledTimes(2);
+  fireEvent.click(screen.getByRole("button", { name: "Hide pairing setup", hidden: true }));
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  expect(getLocalHostPairing).toHaveBeenCalledTimes(2);
+});

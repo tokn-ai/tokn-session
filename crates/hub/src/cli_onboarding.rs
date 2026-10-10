@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::{
-  fs::{self, OpenOptions},
-  io::{IsTerminal, Read, Write},
+  fs::OpenOptions,
+  io::{IsTerminal, Write},
   path::{Path, PathBuf},
 };
 use tokn_session_hub::{
-  connector::{self, ConnectorConfig, PairedHostConfig},
+  connector::ConnectorConfig,
   onboarding::{self, HostProfile},
   pairing::{TOTP_PERIOD, TotpSecret},
   secure::NoiseIdentity,
@@ -13,138 +13,24 @@ use tokn_session_hub::{
 use url::Url;
 use zeroize::Zeroizing;
 
-pub struct HostOptions {
-  pub hub: Option<Url>,
-  pub name: Option<String>,
-  pub viewer_url: Option<Url>,
-  pub passkey_origin: Option<String>,
-  pub state_dir: PathBuf,
-  pub totp_secret_file: Option<PathBuf>,
-  pub viewer_token: Option<String>,
-  pub allow_control: Option<bool>,
-  pub insecure_loopback: bool,
-  pub ice_servers: Option<Vec<String>>,
-}
+pub use tokn_session_hub::host_setup::HostOptions;
+use tokn_session_hub::host_setup::read_seed;
 
 pub fn prepare_host(options: HostOptions) -> Result<ConnectorConfig, String> {
-  let profile_path = options.state_dir.join("host.json");
-  let previous = HostProfile::load(&profile_path)?;
-  let hub = options
-    .hub
-    .or_else(|| previous.as_ref().and_then(|profile| Url::parse(&profile.hub_url).ok()))
-    .ok_or("First setup requires --hub https://your-hub.example")?;
-  let local_url = options
-    .viewer_url
-    .or_else(|| {
-      previous
-        .as_ref()
-        .and_then(|profile| Url::parse(&profile.viewer_url).ok())
-    })
-    .unwrap_or_else(|| Url::parse("http://127.0.0.1:5558").unwrap());
-  let passkey_origin = options
-    .passkey_origin
-    .or_else(|| previous.as_ref().and_then(|profile| profile.passkey_origin.clone()));
-  let passkey_origin = match passkey_origin {
-    Some(origin) => Some(
-      tokn_session_hub::host_passkeys::validate_origin(&origin)?
-        .origin()
-        .ascii_serialization(),
-    ),
-    None => {
-      let origin = onboarding::canonical_hub(&hub)?;
-      tokn_session_hub::host_passkeys::validate_origin(&origin)
-        .ok()
-        .map(|origin| origin.origin().ascii_serialization())
-    }
-  };
-  let profile = HostProfile {
-    version: 1,
-    host_id: previous
-      .as_ref()
-      .map(|profile| profile.host_id.clone())
-      .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-    hub_url: onboarding::canonical_hub(&hub)?,
-    name: options
-      .name
-      .or_else(|| previous.as_ref().map(|profile| profile.name.clone()))
-      .unwrap_or_else(|| "Session host".into()),
-    viewer_url: local_url.to_string(),
-    allow_control: options
-      .allow_control
-      .unwrap_or_else(|| previous.as_ref().is_some_and(|profile| profile.allow_control)),
-    insecure_loopback: options.insecure_loopback || previous.as_ref().is_some_and(|profile| profile.insecure_loopback),
-    passkey_origin,
-    ice_servers: options.ice_servers.unwrap_or_else(|| {
-      previous
-        .as_ref()
-        .map(|profile| profile.ice_servers.clone())
-        .unwrap_or_default()
-    }),
-  };
-  let key_file = options.state_dir.join("host-enrollment.key");
-  let noise_key_file = options.state_dir.join("host-noise.key");
-  let state_file = options.state_dir.join("host-access.json");
-  if previous.is_none() && [&key_file, &noise_key_file].iter().any(|path| path.exists()) {
-    return Err("Host configuration is missing for existing keys; restore host.json before reconnecting".into());
-  }
-  let config = ConnectorConfig {
-    hub_url: hub,
-    local_url,
-    key_file: key_file.clone(),
-    name: profile.name.clone(),
-    local_token: options.viewer_token,
-    allow_control: profile.allow_control,
-    insecure_loopback: profile.insecure_loopback,
-    ice_servers: profile.ice_servers.clone(),
-    secure: None,
-    paired: Some(PairedHostConfig {
-      host_id: profile.host_id.clone(),
-      noise_key_file: noise_key_file.clone(),
-      state_file: state_file.clone(),
-    }),
-  };
-  config.validate()?;
-  if previous.is_some()
-    && [&key_file, &noise_key_file, &state_file]
-      .iter()
-      .any(|path| !path.is_file())
-  {
-    return Err("Saved host keys or pairing state are missing; restore them before reconnecting".into());
-  }
-  if options.totp_secret_file.is_some() && state_file.try_exists().map_err(|e| e.to_string())? {
-    return Err("Authenticator is already configured; importing must not replace existing device trust".into());
-  }
-  let is_new_secret = !state_file.try_exists().map_err(|e| e.to_string())?;
-  // Validate user input and existing private state before creating identities.
-  // An invalid import must be retryable without leaving a half-created host.
-  let new_secret = if is_new_secret {
-    Some(match options.totp_secret_file {
-      Some(path) => read_seed(&path)?,
-      None => TotpSecret::generate(),
-    })
-  } else {
-    onboarding::read_totp_secret(&state_file)?;
-    onboarding::validate_host_passkey_origin(&state_file, profile.passkey_origin.as_deref())?;
-    None
-  };
-  connector::initialize_identity(&key_file)?;
-  let noise_identity = NoiseIdentity::load_or_create(&noise_key_file)?;
-  if let Some(secret) = new_secret {
-    onboarding::initialize_host_access(&state_file, &secret)?;
-  }
-  profile.save(&profile_path)?;
+  let prepared = tokn_session_hub::host_setup::prepare_host(options)?;
+  let profile = prepared.config.paired.as_ref().expect("paired host setup");
   eprintln!("Host ID: {}", profile.host_id);
-  eprintln!("Machine reference: {}@{}", profile.host_id, noise_identity.public_key());
-  eprintln!("Open the Hub viewer and connect with this host ID and your authenticator code.");
-  if let Some(origin) = &profile.passkey_origin {
+  eprintln!("Machine reference: {}", prepared.reference);
+  if let Some(origin) = &prepared.passkey_origin {
     eprintln!("Host passkey browser origin: {origin}");
   }
-  if is_new_secret {
+  eprintln!("Open the Hub viewer and connect with this host ID and your authenticator code.");
+  if prepared.is_new_secret {
     if std::io::stderr().is_terminal() {
       display_authenticator(
-        &onboarding::read_totp_secret(&state_file)?,
-        &profile.name,
-        Some(&format!("{}@{}", profile.host_id, noise_identity.public_key())),
+        &onboarding::read_totp_secret(&profile.state_file)?,
+        &prepared.config.name,
+        Some(&prepared.reference),
       )?;
     } else {
       eprintln!(
@@ -152,7 +38,7 @@ pub fn prepare_host(options: HostOptions) -> Result<ConnectorConfig, String> {
       );
     }
   }
-  Ok(config)
+  Ok(prepared.config)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -333,44 +219,10 @@ fn render_authenticator(
   Ok(output)
 }
 
-fn read_seed(path: &Path) -> Result<TotpSecret, String> {
-  let metadata = fs::symlink_metadata(path).map_err(|e| format!("Could not inspect authenticator import: {e}"))?;
-  if !metadata.is_file() {
-    return Err("Authenticator import must be a private regular file".into());
-  }
-  let mut options = OpenOptions::new();
-  options.read(true);
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::OpenOptionsExt;
-    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-  }
-  let file = options
-    .open(path)
-    .map_err(|e| format!("Could not open authenticator import: {e}"))?;
-  let metadata = file.metadata().map_err(|e| e.to_string())?;
-  if !metadata.is_file() || metadata.len() > 256 {
-    return Err("Authenticator import must be a Base32 seed of at most 256 bytes".into());
-  }
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::MetadataExt;
-    // SAFETY: geteuid has no memory side effects.
-    if metadata.mode() & 0o777 != 0o600 || metadata.nlink() != 1 || metadata.uid() != unsafe { libc::geteuid() } {
-      return Err("Authenticator import must be owned by the current user with mode 0600 and no hard links".into());
-    }
-  }
-  let mut bytes = Zeroizing::new(String::new());
-  file
-    .take(257)
-    .read_to_string(&mut bytes)
-    .map_err(|_| "Authenticator import must contain Base32 text")?;
-  TotpSecret::from_base32(&bytes)
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::fs;
 
   #[test]
   fn authenticator_display_includes_reference_and_rfc_sha256_verification_code() {

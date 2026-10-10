@@ -1,5 +1,6 @@
 mod commands;
 mod hub_passkey;
+mod local_host;
 mod local_viewer;
 mod translation;
 use tauri::Manager;
@@ -12,6 +13,11 @@ pub fn run() {
     .plugin(tauri_plugin_opener::init())
     .setup(|app| {
       app.manage(local_viewer::LocalViewer::default());
+      app.manage(local_host::LocalHost::new(
+        dirs::home_dir()
+          .ok_or("Cannot resolve host state directory")?
+          .join(".tokn/hub"),
+      ));
       app.manage(tokn_hub_remote::RemoteManager::new(
         app.path().app_config_dir()?.join("hub-client"),
       ));
@@ -20,6 +26,10 @@ pub fn run() {
     })
     .invoke_handler(tauri::generate_handler![
       commands::local::initialize_local_viewer,
+      commands::host::local_host_status,
+      commands::host::local_host_start,
+      commands::host::local_host_stop,
+      commands::host::local_host_pairing,
       commands::hub::hub_client_status,
       commands::hub::hub_client_resolve,
       commands::hub::hub_client_remember_metadata,
@@ -60,6 +70,7 @@ pub fn run() {
     .expect("error while building tokn session viewer")
     .run(|app, event| {
       if matches!(event, tauri::RunEvent::Exit) {
+        tauri::async_runtime::block_on(app.state::<local_host::LocalHost>().shutdown(app));
         tauri::async_runtime::block_on(app.state::<local_viewer::LocalViewer>().shutdown());
         tauri::async_runtime::block_on(app.state::<tokn_hub_remote::RemoteManager>().close_all());
         tauri::async_runtime::block_on(app.state::<hub_passkey::PasskeyCallbacks>().cancel_all());

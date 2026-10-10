@@ -1,0 +1,18 @@
+.hub-this-machine { flex-wrap: wrap; }
+.host-setup { flex-basis: 100%; border-top: 1px solid var(--border); padding-top: 16px; font-size: 13px; }
+.host-setup > summary { cursor: pointer; font-weight: 500; }
+.host-setup-badge { margin-left: 10px; color: var(--text-soft); font-size: 12px; }
+.host-setup form { display: grid; gap: 10px; max-width: 520px; margin: 16px 0; }
+.host-setup input:not([type="checkbox"]) { padding: 9px 12px; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: var(--surface); }
+.host-control { display: flex; gap: 8px; align-items: center; }
+.host-setup .host-control input[type="checkbox"] { width: 16px; height: 16px; min-height: 16px; padding: 0; margin: 0; flex: none; accent-color: var(--text); }
+.host-setup button { justify-self: start; }
+.host-pairing { display: grid; gap: 12px; margin-top: 16px; max-width: 620px; }
+.host-pairing label { display: grid; gap: 8px; }
+.host-pairing img { background: white; border-radius: 6px; max-width: 100%; height: auto; }
+.host-pairing p { margin: 0; }
+.host-current-code { display: grid; gap: 5px; }
+.host-current-code strong { font: 26px ui-monospace, monospace; letter-spacing: 4px; color: var(--text); }
+.host-current-code span { color: var(--text-soft); }
+.host-pairing details summary { cursor: pointer; }
+.host-pairing details code { display: block; margin: 10px 0; }
