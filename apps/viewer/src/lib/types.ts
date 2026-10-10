@@ -612,5 +612,7 @@ export interface SessionNotification {
   has_unread: boolean;
   unread_final_count: number;
   is_running: boolean;
+  /** Additive for compatibility with hosts that only report direct activity. */
+  has_running_descendant?: boolean;
   question_attention: SessionSummary["question_attention"];
 }

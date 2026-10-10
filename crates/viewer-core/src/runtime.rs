@@ -364,10 +364,14 @@ impl ViewerRuntime {
               keys.sort();
               keys.dedup();
               let service = refresh_service.clone();
-              let expected_notifications = keys.len();
+              let expected_notifications = keys.clone();
               match tokio::task::spawn_blocking(move || service.session_notifications(&keys)).await {
                 Ok(notifications) => {
-                  refresh.catalog_refresh_required |= notifications.len() != expected_notifications;
+                  refresh.catalog_refresh_required |= expected_notifications.iter().any(|key| {
+                    !notifications
+                      .iter()
+                      .any(|notification| notification["session_key"].as_str() == Some(key))
+                  });
                   for notification in notifications {
                     if emit(&scheduler_events, "session-notification", notification).is_err() {
                       refresh.catalog_refresh_required = true;

@@ -2704,6 +2704,32 @@ function semanticSnapshot(request: import("./types").SessionUpdatesRequest, page
 }
 
 describe("semantic session delivery", () => {
+  it("clears cached descendant running state from compact ancestor notifications", async () => {
+    let notify: ((notification: import("./types").SessionNotification) => void) | undefined;
+    let indexChange: ((change: SessionIndexChangedEvent) => void) | undefined;
+    vi.mocked(listenForSessionNotifications).mockImplementation((handler) => { notify = handler; return Promise.resolve(vi.fn()); });
+    vi.mocked(listenForSessionIndexChanges).mockImplementation((handler) => { indexChange = handler; return Promise.resolve(vi.fn()); });
+    const parent = { ...session("parent"), child_count: 1, has_running_descendant: true };
+    const child = { ...session("child"), parent_session_id: "parent", is_subagent: true, is_running: true };
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [parent], next_cursor: null, source_errors: [], pending_providers: [] });
+    vi.mocked(listSessionChildren).mockResolvedValue({ sessions: [child], next_cursor: null });
+    const { result } = renderHook(() => useViewerState());
+    await waitFor(() => expect(result.current.sessions).toEqual([parent]));
+    act(() => result.current.loadSessionChildren("parent"));
+    await waitFor(() => expect(result.current.sessionChildren.get("parent")?.sessions).toEqual([child]));
+    const catalogCalls = vi.mocked(listSessions).mock.calls.length;
+    act(() => {
+      notify?.({ session_key: "child", has_unread: true, unread_final_count: 1, is_running: false, has_running_descendant: false, question_attention: { required_count: 0, available_count: 0 } });
+      notify?.({ session_key: "parent", has_unread: false, unread_final_count: 0, is_running: false, has_running_descendant: false, question_attention: { required_count: 0, available_count: 0 } });
+      indexChange?.({ changed: true, catalog_refresh_required: false, attention_session_keys: ["child"], updated_session_keys: ["child"] });
+    });
+    await waitFor(() => expect(result.current.sessions[0].has_running_descendant).toBe(false));
+    expect(result.current.sessions[0].has_unread).toBe(false);
+    expect(result.current.sessionChildren.get("parent")?.sessions[0].is_running).toBe(false);
+    expect(result.current.sessionChildren.get("parent")?.sessions[0].unread_final_count).toBe(1);
+    expect(listSessions).toHaveBeenCalledTimes(catalogCalls);
+  });
+
   it("accepts pushed items without reloading the retained window", async () => {
     let emit: ((update: import("./types").SessionUpdate) => void) | undefined;
     vi.mocked(listenForSessionUpdates).mockImplementation((handler) => { emit = handler; return Promise.resolve(vi.fn()); });

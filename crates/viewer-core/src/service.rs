@@ -1306,22 +1306,65 @@ impl ViewerService {
     Ok(ListSessionChildrenResponse { sessions, next_cursor })
   }
 
-  /// Admission check for untrusted remote keys. Decoding alone is insufficient:
-  /// keys contain source paths, so only the committed catalog grants access.
+  /// Refresh changed rows and their canonical ancestors from one metadata
+  /// snapshot per provider. Descendant activity must clear on a collapsed row
+  /// without waiting for another full sidebar catalog read.
   pub(crate) fn session_notifications(&self, keys: &[String]) -> Vec<serde_json::Value> {
-    keys
-      .iter()
-      .filter_map(|key| {
-        let locator = decode_session_key(key).ok()?;
-        let indexed = self.session_index.session(&index_session_key(&locator).ok()?).ok()??;
-        let attention = SessionAttention::from_index(&indexed);
-        Some(serde_json::json!({
-          "session_key": key, "has_unread": attention.has_unread,
-          "unread_final_count": attention.unread_final_count, "is_running": attention.is_running,
-          "question_attention": attention.question_attention,
-        }))
+    let mut requested = HashMap::<ViewerProvider, HashSet<SessionLocator>>::new();
+    for key in keys {
+      if self.check_session_scope(key).is_ok()
+        && let Ok(locator) = decode_session_key(key)
+      {
+        requested.entry(locator.provider).or_default().insert(locator);
+      }
+    }
+    let mut notifications = BTreeMap::new();
+    let notification = |key: String, attention: SessionAttention| {
+      json!({
+        "session_key": key, "has_unread": attention.has_unread,
+        "unread_final_count": attention.unread_final_count, "is_running": attention.is_running,
+        "has_running_descendant": attention.has_running_descendant,
+        "question_attention": attention.question_attention,
       })
-      .collect()
+    };
+    for (provider, locators) in requested {
+      let Ok(Some(inventory)) = self.indexed_session_inventory(provider) else {
+        continue;
+      };
+      // A duplicate source can change while another source owns its canonical
+      // identity. Still acknowledge that requested record; only the canonical
+      // relation graph is allowed to propagate activity to ancestors.
+      for header in &inventory.headers {
+        let locator = locator_for_header(provider, header);
+        if locators.contains(&locator)
+          && let Ok(key) = encode_session_key(&locator)
+        {
+          let attention = inventory.direct_attention.get(&locator).copied().unwrap_or_default();
+          notifications.insert(key.clone(), notification(key, attention));
+        }
+      }
+      let relations = session_relation_index(provider, inventory.headers, &mut Vec::new());
+      let attention = session_relation_attention(provider, &relations, &inventory.direct_attention);
+      let mut affected = BTreeSet::new();
+      for (index, header) in relations.headers.iter().enumerate() {
+        if !locators.contains(&locator_for_header(provider, header)) {
+          continue;
+        }
+        let mut next = Some(index);
+        while let Some(index) = next {
+          if !affected.insert(index) {
+            break;
+          }
+          next = relations.parent_indices[index];
+        }
+      }
+      for index in affected {
+        if let Ok(key) = encode_session_key(&locator_for_header(provider, &relations.headers[index])) {
+          notifications.insert(key.clone(), notification(key, attention[index]));
+        }
+      }
+    }
+    notifications.into_values().collect()
   }
 
   pub fn validate_session_key(&self, key: &str) -> Result<(), String> {
@@ -2620,8 +2663,26 @@ impl ViewerService {
       return Ok(BodyJobRefresh::Stale);
     }
     match self.repository.session_body_indexing(&job.locator)? {
-      SessionBodyIndexing::Deferred => return Ok(BodyJobRefresh::Deferred),
-      SessionBodyIndexing::CatalogOnly => return self.complete_catalog_only_body_job(job),
+      policy @ (SessionBodyIndexing::Deferred | SessionBodyIndexing::CatalogOnly) => {
+        let existing = self
+          .session_index
+          .session(&index_session_key(&job.locator)?)
+          .map_err(|error| format!("failed to read indexed body activity: {error}"))?;
+        // A rollout can finish while the viewer is offline. Preserving
+        // its old running bit and advancing the cursor would permanently hide
+        // that completion. Reconcile known active work even on a cold source;
+        // unrelated historical bodies retain their catalog-only policy.
+        if !existing
+          .as_ref()
+          .and_then(|session| Activity::from_marker(session.attention_marker.as_deref()))
+          .is_some_and(|activity| activity.running)
+        {
+          if policy == SessionBodyIndexing::Deferred {
+            return Ok(BodyJobRefresh::Deferred);
+          }
+          return self.complete_catalog_only_body_job(job);
+        }
+      }
       SessionBodyIndexing::Ready => {}
     }
 
@@ -3649,6 +3710,13 @@ fn needs_activity_upgrade(session: &IndexedSession) -> bool {
       .attention_marker
       .as_deref()
       .is_some_and(|marker| marker.starts_with("final-replies.v2."))
+    // v3 could mark a cold, oversized source complete without checking its
+    // retained running state. Repair those rows once even if its source cursor
+    // already matches; idle v3 histories need no additional body reads.
+    || session.attention_marker.as_deref().is_some_and(|marker| {
+      marker.starts_with("session-activity.v3.")
+        && Activity::from_marker(Some(marker)).is_some_and(|activity| activity.running)
+    })
 }
 
 fn needs_unread_upgrade(session: &IndexedSession) -> bool {
@@ -5707,10 +5775,12 @@ fn truncate_with_flag(value: String, max_chars: usize) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
+  mod activity_backfill;
   mod communications;
   mod event_filter;
   mod history_cache;
   mod questions;
+  mod running_notifications;
   mod targeted_index;
   mod usage_filter;
   use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -7646,7 +7716,7 @@ mod tests {
       .session(&index_session_key(&locator).expect("index key should encode"))
       .expect("indexed session should query")
       .expect("indexed session should exist");
-    assert_eq!(indexed.attention_marker.as_deref(), Some("session-activity.v3.2.0.0.0"));
+    assert_eq!(indexed.attention_marker.as_deref(), Some("session-activity.v4.2.0.0.0"));
   }
 
   #[test]
@@ -8193,7 +8263,7 @@ mod tests {
       .session(&index_session_key(&locator).expect("index key should encode"))
       .expect("indexed session should query")
       .expect("indexed session should remain present");
-    assert_eq!(stale.attention_marker.as_deref(), Some("session-activity.v3.0.0.0.0"));
+    assert_eq!(stale.attention_marker.as_deref(), Some("session-activity.v4.0.0.0.0"));
     assert!(!stale.attention_baselined);
     assert!(!stale.has_unread());
     assert!(service.index_error_for(ViewerProvider::Codex).is_none());
@@ -8206,7 +8276,7 @@ mod tests {
       .expect("indexed session should remain present");
     assert_eq!(
       recovered.attention_marker.as_deref(),
-      Some("session-activity.v3.1.0.0.0")
+      Some("session-activity.v4.1.0.0.0")
     );
     assert!(recovered.has_unread());
   }
