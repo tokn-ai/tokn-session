@@ -62,8 +62,6 @@ interface ConversationProps {
   trajectory_expanded_detail: EventDetail | null;
   trajectory_expanded_detail_error: string | null;
   trajectory_expanded_detail_loading: boolean;
-  on_trajectory_load_older: (trajectory_key: string) => void;
-  on_trajectory_load_newer: (trajectory_key: string) => void;
   on_trajectory_retry: (trajectory_key: string) => void;
   on_trajectory_event_toggle: (trajectory_key: string, event_key: string) => void;
   on_trajectory_retry_expanded_detail: (trajectory_key: string, event_key: string) => void;
@@ -112,8 +110,6 @@ export function Conversation({
   trajectory_expanded_detail,
   trajectory_expanded_detail_error,
   trajectory_expanded_detail_loading,
-  on_trajectory_load_older,
-  on_trajectory_load_newer,
   on_trajectory_retry,
   on_trajectory_event_toggle,
   on_trajectory_retry_expanded_detail,
@@ -366,8 +362,6 @@ export function Conversation({
                   is_expanded={event.event_key === expanded_event_key}
                   is_selected={event.event_key === selected_event_key}
                   key={`${session.session_key}:${event.event_key}`}
-                  on_trajectory_load_newer={on_trajectory_load_newer}
-                  on_trajectory_load_older={on_trajectory_load_older}
                   on_trajectory_retry={on_trajectory_retry}
                   on_trajectory_event_toggle={on_trajectory_event_toggle}
                   on_trajectory_retry_expanded_detail={on_trajectory_retry_expanded_detail}

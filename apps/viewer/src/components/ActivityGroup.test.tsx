@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EventSummary } from "../lib/types";
 import { ActivityGroup, activitySummary, groupActivity } from "./ActivityGroup";
 import { ShellOutputSection } from "./ShellOutputSection";
@@ -28,12 +28,36 @@ describe("activity folding", () => {
   it("folds exploration until requested and reveals a selected child", () => {
     const events = [activity("a", "file_read"), activity("b", "search")];
     const {rerender} = render(<ActivityGroup events={events}><span>Captured activity</span></ActivityGroup>);
-    expect(screen.getByText("Captured activity")).not.toBeVisible();
+    expect(screen.queryByText("Captured activity")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", {name: "Read 1 file, performed 1 search"}));
     expect(screen.getByText("Captured activity")).toBeVisible();
     fireEvent.click(screen.getByRole("button", {name: "Read 1 file, performed 1 search"}));
     rerender(<ActivityGroup events={events} selected_event_key="b"><span>Captured activity</span></ActivityGroup>);
     expect(screen.getByText("Captured activity")).toBeVisible();
+  });
+
+  it("loads a complete inner group independently and retains mounted rows on collapse", () => {
+    const first = Array.from({ length: 125 }, (_, i) => activity(`first-${i}`, "shell"));
+    const second = [activity("second", "file_read")];
+    const rows = (events: EventSummary[]) => events.map((event) => <span key={event.event_key}>{event.event_key}</span>);
+    const firstRows = vi.fn(() => rows(first));
+    const secondRows = vi.fn(() => <span>second-row</span>);
+    const { rerender } = render(<><ActivityGroup events={first}>{firstRows}</ActivityGroup>
+      <p>Intermediate assistant message</p><ActivityGroup events={second}>{secondRows}</ActivityGroup></>);
+    expect(firstRows).not.toHaveBeenCalled();
+    expect(secondRows).not.toHaveBeenCalled();
+    expect(screen.queryByText("first-0")).not.toBeInTheDocument();
+    expect(screen.getByText("Intermediate assistant message")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Ran 125 commands" }));
+    expect(screen.getByText("first-124")).toBeVisible();
+    expect(screen.queryByText("second-row")).not.toBeInTheDocument();
+    const appended = [...first, activity("first-125", "shell")];
+    rerender(<><ActivityGroup events={appended}>{() => rows(appended)}</ActivityGroup>
+      <p>Intermediate assistant message</p><ActivityGroup events={second}>{secondRows}</ActivityGroup></>);
+    expect(screen.getByText("first-125")).toBeVisible();
+    expect(secondRows).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Ran 126 commands" }));
+    expect(screen.getByText("first-125")).not.toBeVisible();
   });
 
   it("bounds shell output locally and restores the exact captured text on expansion", () => {

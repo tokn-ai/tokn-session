@@ -191,9 +191,7 @@ describe("agent communication cards", () => {
           error_count: 0, unknown_count: 0, started_at: null, ended_at: null, duration_ms: null,
         } },
       is_expanded: true,
-      trajectory_page: { events: [communication()], next_cursor: null, previous_cursor: null,
-        total_events: 1, has_loaded: true, is_loading: false, is_loading_older: false,
-        is_loading_newer: false, error: null, error_direction: null, error_cursor: null },
+      trajectory_page: { events: [communication()], total_events: 1, has_loaded: true, is_loading: false, error: null },
       trajectory_expanded_event_key: "event.v1.communication",
       trajectory_expanded_detail: detail(), on_trajectory_event_toggle: onToggle,
     }));

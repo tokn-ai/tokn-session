@@ -102,35 +102,38 @@ describe("session display replicas", () => {
     expect(cache.sourceEvents("one")).toEqual([]);
   });
 
-  it("pages complete work membership locally and updates children without replacing unchanged rows", () => {
+  it("loads complete work membership locally and updates children without replacing unchanged rows", () => {
     const cache = new SessionDisplayCache();
     const initial = snapshot(cache, "one", Array.from({ length: 125 }, (_, i) => `child-${i}`));
     const group = { ...summary("work"), type: "trajectory", child_keys: initial.items.map((item) => item.item_id) };
     initial.groups = [{ item_id: "work", kind: "work_summary", level: "steps", summary: group }];
     initial.item_order = ["work"];
     cache.apply(initial);
-    const request = { session_key: "one", trajectory_key: "work", limit: 40 };
-    const first = cache.trajectoryPage(request)!;
-    expect(first.events).toHaveLength(40);
+    const first = cache.trajectoryGroup("one", "work")!;
+    expect(first.events).toHaveLength(125);
     expect(first.total_events).toBe(125);
-    const second = cache.trajectoryPage({ ...request, cursor: first.next_cursor! })!;
-    expect(second.events[0].event_key).toBe("child-40");
-    expect(cache.trajectoryPage({ ...request, cursor: second.previous_cursor!, direction: "backward" })?.events).toEqual(first.events);
-    const tail = cache.trajectoryPage({ ...request, direction: "backward" })!;
-    expect(tail.events[0].event_key).toBe("child-85");
+    expect(first.previous_cursor).toBeNull();
+    expect(first.next_cursor).toBeNull();
     cache.apply({ ...initial, snapshot: false, revision: "2", base_revision: "1", item_order: null, groups: [],
       items: [{ ...initial.items[0], summary: summary("child-0", "finished") }] });
-    const updated = cache.trajectoryPage(request)!;
+    const updated = cache.trajectoryGroup("one", "work")!;
     expect(updated.events[0].summary).toBe("finished");
     expect(updated.events[1]).toBe(first.events[1]);
-    cache.apply({ ...initial, generation: "replacement", revision: "3" });
-    expect(() => cache.trajectoryPage({ ...request, cursor: first.next_cursor! })).toThrow("no longer current");
+    cache.apply({ ...initial, snapshot: false, revision: "3", base_revision: "2", item_order: null,
+      items: [{ item_id: "child-125", kind: "tool_summary", level: "steps", summary: summary("child-125") }],
+      groups: [{ ...initial.groups[0], summary: { ...group, child_keys: [...group.child_keys, "child-125"] } }] });
+    const appended = cache.trajectoryGroup("one", "work")!;
+    expect(appended.events).toHaveLength(126);
+    expect(appended.events[125].event_key).toBe("child-125");
+    expect(appended.events[1]).toBe(first.events[1]);
+    cache.apply({ ...initial, generation: "replacement", revision: "4" });
+    expect(cache.trajectoryGroup("one", "work")?.events).toHaveLength(125);
   });
 
   it("falls back for legacy groups and requires recovery for incomplete membership", () => {
     const cache = new SessionDisplayCache();
     const initial = snapshot(cache, "one"); cache.apply(initial);
-    expect(cache.trajectoryPage({ session_key: "one", trajectory_key: "a" })).toBeNull();
+    expect(cache.trajectoryGroup("one", "a")).toBeNull();
     expect(cache.apply({ ...initial, groups: [{ item_id: "work", kind: "work_summary", level: "steps",
       summary: { ...summary("work"), child_keys: ["missing"] } }], item_order: ["work"] })).toBeNull();
     expect(cache.get("one")).toBeNull();

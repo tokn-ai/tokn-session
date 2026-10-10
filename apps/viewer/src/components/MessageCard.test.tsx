@@ -489,16 +489,10 @@ it("passes the parent session identity into assistant messages inside a trajecto
   const child = message();
   const page: TrajectoryEventPageState = {
     events: [child],
-    next_cursor: null,
-    previous_cursor: null,
     total_events: 1,
     has_loaded: true,
     is_loading: false,
-    is_loading_older: false,
-    is_loading_newer: false,
     error: null,
-    error_direction: null,
-    error_cursor: null,
   };
   render(
     <TranslationProvider>

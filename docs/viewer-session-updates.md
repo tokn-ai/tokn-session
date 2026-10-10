@@ -51,14 +51,19 @@ instead of also reloading its timeline on index invalidations.
 
 Selected conversations subscribe at `all`. Expanded tools and Inspector use
 the delivered display details from that replica, without separate detail
-subscriptions. Work groups page their semantic children locally in 40-row
-windows, preserving loaded rows across pushes and generation replacements.
-Legacy groups without membership still use the trajectory-page command. Recently opened conversations retain their all-level display
+subscriptions. Work groups read their complete semantic membership from the replica. Each
+inner activity group between messages mounts all rows on first expansion and
+keeps them mounted on collapse; opening the outer Worked/Working disclosure
+does not mount every inner group. Live updates append to loaded groups.
+Legacy groups without membership assemble trajectory transport pages before
+publishing any rows, rejecting incomplete or changed responses. Transport
+chunks never create a partial display group or a within-group load-more control.
+Recently opened conversations retain their all-level display
 while receiving final-level updates, which do not advance their all cursor. Reopening renders cached
 content immediately, then catches up. The frontend buffers pushes arriving
 before the initial response, rejects revision gaps and stale responses, and
 keeps unchanged object references. It preserves disclosure/Inspector selection
-and stored reading positions. Only affected details and work pages are
+and stored reading positions. Only affected details and group contents are
 invalidated. A 30-second heartbeat renews active subscriptions and recovers
 missed events. Browser session-update frames allow up to 64 MiB; other notification frames
 remain limited to 2 MiB. Subscriptions expire after 90 seconds; backend state is bounded

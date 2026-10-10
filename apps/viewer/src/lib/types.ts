@@ -484,24 +484,13 @@ export interface TrajectoryEventPageResponse {
   total_events: number;
 }
 
-export type TrajectoryPageLoadDirection = "initial" | "older" | "newer";
-
-/**
- * One locally cached, bounded source-event sequence for a whole-turn card.
- * It is intentionally separate from the parent session's event page state.
- */
+/** Complete semantic children used to identify independently loaded inner groups. */
 export interface TrajectoryEventPageState {
   events: EventSummary[];
-  next_cursor: string | null;
-  previous_cursor: string | null;
   total_events: number | null;
   has_loaded: boolean;
   is_loading: boolean;
-  is_loading_older: boolean;
-  is_loading_newer: boolean;
   error: string | null;
-  error_direction: TrajectoryPageLoadDirection | null;
-  error_cursor: string | null;
 }
 
 export interface LoadEventDetailRequest {

@@ -36,7 +36,6 @@ function props(overrides: Partial<React.ComponentProps<typeof Conversation>> = {
     on_event_toggle: vi.fn(), trajectory_pages: new Map(), trajectory_expanded_key: null,
     trajectory_expanded_event_key: null, trajectory_expanded_detail: null,
     trajectory_expanded_detail_error: null, trajectory_expanded_detail_loading: false,
-    on_trajectory_load_older: vi.fn(), on_trajectory_load_newer: vi.fn(),
     on_trajectory_retry: vi.fn(), on_trajectory_event_toggle: vi.fn(),
     on_trajectory_retry_expanded_detail: vi.fn(), on_open_related_session: vi.fn(),
     on_load_older: vi.fn(), on_load_newer: vi.fn(), on_retry: vi.fn(),
@@ -155,9 +154,9 @@ describe("Conversation quick filter", () => {
       trajectory_pages: new Map([[SESSION.session_key, new Map([[turn.event_key, {
         events: [event("Nested lifecycle"), event("Nested mid-turn usage", { type: "usage" }),
           event("Nested final usage", { type: "usage", is_bookkeeping: false })],
-        next_cursor: null, previous_cursor: "earlier", total_events: 20, has_loaded: true,
-        is_loading: false, is_loading_older: false, is_loading_newer: false,
-        error: null, error_direction: null, error_cursor: null,
+        total_events: 3, has_loaded: true,
+        is_loading: false,
+        error: null,
       }]])]]) });
     render(<Conversation {...view} />);
     const turnButton = screen.getByRole("button", { name: "Worked for 1s" });
@@ -167,13 +166,12 @@ describe("Conversation quick filter", () => {
     expect(screen.queryByRole("button", { name: "Nested lifecycle" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Nested mid-turn usage" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Nested final usage" })).toBeInTheDocument();
-    expect(screen.getByText("2 events hidden in this loaded turn range.")).toBeInTheDocument();
-    expect(screen.getByText("Loaded 3 of 20 events.")).toBeInTheDocument();
+    expect(screen.getByText("2 events hidden in this turn.")).toBeInTheDocument();
+    expect(screen.queryByText(/Loaded .* of .* events/)).not.toBeInTheDocument();
     expect(view.on_trajectory_event_toggle).not.toHaveBeenCalled();
-    expect(view.on_trajectory_load_older).not.toHaveBeenCalled();
     expect(view.on_follow_change).not.toHaveBeenCalled();
     toggleFilter();
-    fireEvent.click(screen.getByRole("button", {name: "Recorded 3 events"}));
+    expect(screen.getByRole("button", {name: "Recorded 3 events"})).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("button", {name: "Nested lifecycle"})).toBeInTheDocument();
     expect(screen.getAllByRole("button", {name: /^Worked/})).toHaveLength(1);
   });

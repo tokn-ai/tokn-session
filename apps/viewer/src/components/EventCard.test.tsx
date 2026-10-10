@@ -135,16 +135,10 @@ function trajectoryPage(
 ): TrajectoryEventPageState {
   return {
     events: [],
-    next_cursor: null,
-    previous_cursor: null,
     total_events: 0,
     has_loaded: true,
     is_loading: false,
-    is_loading_older: false,
-    is_loading_newer: false,
     error: null,
-    error_direction: null,
-    error_cursor: null,
     ...overrides,
   };
 }
@@ -465,7 +459,7 @@ describe("EventCard whole-turn trajectories", () => {
       trajectory_page: trajectoryPage({ is_loading: true, has_loaded: false, events: [event({ summary: "Still visible" })] }),
     });
     expect(screen.getByText("Still visible")).toBeInTheDocument();
-    expect(screen.queryByText("Loading turn events…")).not.toBeInTheDocument();
+    expect(screen.queryByText("Loading work groups…")).not.toBeInTheDocument();
   });
 
   const trajectoryEvent = event({
@@ -541,9 +535,7 @@ describe("EventCard whole-turn trajectories", () => {
         selected_event_key={message.event_key}
         trajectory_page={trajectoryPage({
           events: [message, nestedTool, delegation],
-          next_cursor: "next-page",
-          previous_cursor: "previous-page",
-          total_events: 4,
+          total_events: 3,
         })}
       />,
     );
@@ -553,12 +545,12 @@ describe("EventCard whole-turn trajectories", () => {
     expect(screen.getByText(message.summary)).toBeInTheDocument();
     expect(container.querySelector(".trajectory-section")).toBeInTheDocument();
     expect(container.querySelector(".trajectory-section .message-event")).toBeInTheDocument();
-    expect(container.querySelector(".trajectory-section .technical-event")).toBeInTheDocument();
+    expect(container.querySelector(".trajectory-section .technical-event")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Ran 1 command, recorded 1 agent activity" }));
     expect(screen.getByRole("button", { name: "Shell: cargo test" })).toBeInTheDocument();
-    expect(screen.getByText("Showing 3 of 4 events.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Load earlier events" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Load more events" })).toBeInTheDocument();
+    expect(screen.queryByText(/Showing .* of .* events/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Load earlier events" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Load more events" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Inspect assistant message" }));
     expect(onSelect).toHaveBeenCalledWith(message.event_key);
@@ -579,46 +571,23 @@ describe("EventCard whole-turn trajectories", () => {
     const {rerender} = render(<EventCard {...props} is_expanded />);
     fireEvent.click(screen.getByRole("button", {name: "Read 1 file, performed 1 search"}));
     expect(screen.getByRole("button", {name: "Read: a.rs"})).toBeVisible();
-    rerender(<EventCard {...props} is_expanded={false} />);
+    rerender(<EventCard {...props} is_expanded={false} trajectory_page={{ ...props.trajectory_page, has_loaded: false }} />);
     expect(screen.queryByRole("button", {name: "Read: a.rs"})).not.toBeInTheDocument();
     rerender(<EventCard {...props} is_expanded />);
     expect(screen.getByRole("button", {name: "Read: a.rs"})).toBeVisible();
   });
 
-  it("retains pagination, errors, and raw counts when every loaded child is filtered", () => {
-    const onOlder = vi.fn();
-    const onNewer = vi.fn();
+  it("retains errors and filter notices without offering partial group controls", () => {
     const onRetry = vi.fn();
-    const routine = event({ event_key: "event.routine", type: "lifecycle", title: "Turn started",
-      role: null, is_bookkeeping: true });
-    const page = trajectoryPage({ events: [routine], previous_cursor: "previous-page",
-      next_cursor: "next-page", total_events: 50, error: "Child page unavailable" });
-    const { rerender } = renderCard(trajectoryEvent, {
-      is_expanded: true, hide_lifecycle: true, trajectory_page: page,
-      on_trajectory_load_older: onOlder, on_trajectory_load_newer: onNewer,
-      on_trajectory_retry: onRetry,
-    });
-    expect(screen.getByText(/No events match this filter in the loaded turn range/)).toHaveTextContent("1 event hidden");
-    expect(screen.queryByText("No events in this turn.")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Turn started" })).not.toBeInTheDocument();
-    expect(screen.getByText("Loaded 1 of 50 events.")).toBeInTheDocument();
-    expect(screen.getByRole("alert")).toHaveTextContent("Child page unavailable");
-    fireEvent.click(screen.getByRole("button", { name: "Load earlier events" }));
-    fireEvent.click(screen.getByRole("button", { name: "Load more events" }));
+    const routine = event({ event_key: "event.routine", type: "lifecycle", title: "Turn started", role: null, is_bookkeeping: true });
+    renderCard(trajectoryEvent, { is_expanded: true, hide_lifecycle: true,
+      trajectory_page: trajectoryPage({ events: [routine], total_events: 1, error: "Group unavailable" }),
+      on_trajectory_retry: onRetry });
+    expect(screen.getByText(/No events match this filter in this turn/)).toHaveTextContent("1 event hidden");
+    expect(screen.getByRole("alert")).toHaveTextContent("Group unavailable");
+    expect(screen.queryByRole("button", { name: "Load more events" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-    expect(onOlder).toHaveBeenCalledWith(trajectoryEvent.event_key);
-    expect(onNewer).toHaveBeenCalledWith(trajectoryEvent.event_key);
     expect(onRetry).toHaveBeenCalledWith(trajectoryEvent.event_key);
-    expect(page.events).toEqual([routine]);
-
-    rerender(<EventCard button_id="event-button" event={trajectoryEvent} is_expanded is_selected={false}
-      hide_lifecycle detail={null} detail_error={null} detail_loading={false}
-      on_retry_detail={vi.fn()} on_select={vi.fn()} on_toggle={vi.fn()}
-      on_trajectory_load_older={onOlder} on_trajectory_load_newer={onNewer}
-      trajectory_page={{ ...page, error: null, is_loading_older: true }} />);
-    expect(screen.getByRole("button", { name: "Loading earlier events…" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Load more events" })).toBeDisabled();
-    expect(screen.getByText(/1 event hidden in this loaded turn range/)).toBeInTheDocument();
   });
 
   it("shows loading and retryable child-page failures without using event detail", () => {
@@ -628,7 +597,7 @@ describe("EventCard whole-turn trajectories", () => {
       trajectory_page: null,
     });
 
-    expect(screen.getByRole("status")).toHaveTextContent("Loading turn events");
+    expect(screen.getByRole("status")).toHaveTextContent("Loading work groups");
 
     rerender(
       <EventCard
@@ -645,7 +614,6 @@ describe("EventCard whole-turn trajectories", () => {
         on_trajectory_retry={onRetry}
         trajectory_page={trajectoryPage({
           error: "trajectory record was unavailable",
-          error_direction: "initial",
         })}
       />,
     );

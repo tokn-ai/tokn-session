@@ -10,8 +10,11 @@ eight recent sessions. Reopening renders cached content before catch-up;
 background sessions receive final-level updates without advancing all coverage.
 The opened session subscribes to all retained source events and display details;
 Inspector/tools use delivered payloads, while older turns remain paginated.
-Work groups carry ordered semantic child keys and page children from the all
-replica, retaining legacy RPC fallback. Compact attention-only body notifications
+Work groups carry ordered semantic child keys and read complete children from
+the all replica. Each inner activity group mounts all rows on first expansion
+and retains them on collapse; messages and other group summaries stay visible.
+Legacy transport pages assemble atomically, with retry on incomplete/changed
+responses; there are no within-group load-more controls. Compact attention-only body notifications
 skip catalog reloads; metadata/catalog/warning/shared-index changes still reload.
 Selected semantic subscriptions avoid duplicate index-triggered timeline reads.
 Redaction, native opt-in, and payload bounds still apply. Unrelated detail/work

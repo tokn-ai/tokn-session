@@ -53,8 +53,6 @@ interface EventCardProps {
   on_open_related_session?: (target: SessionSummary) => void;
   on_retry_detail: () => void;
   trajectory_page?: TrajectoryEventPageState | null;
-  on_trajectory_load_older?: (trajectory_key: string) => void;
-  on_trajectory_load_newer?: (trajectory_key: string) => void;
   on_trajectory_retry?: (trajectory_key: string) => void;
   expanded_activity_keys?: Set<string>;
   expanded_activities?: Map<string, ExpandedActivityState>;
@@ -469,8 +467,6 @@ function TrajectorySection({
   event,
   is_expanded,
   is_selected,
-  on_load_newer,
-  on_load_older,
   on_open_related_session,
   on_retry,
   on_retry_child_detail,
@@ -492,8 +488,6 @@ function TrajectorySection({
   event: EventSummary;
   is_expanded: boolean;
   is_selected: boolean;
-  on_load_newer?: (trajectory_key: string) => void;
-  on_load_older?: (trajectory_key: string) => void;
   on_open_related_session?: (target: SessionSummary) => void;
   on_retry?: (trajectory_key: string) => void;
   on_retry_child_detail?: (trajectory_key: string, event_key: string) => void;
@@ -512,11 +506,16 @@ function TrajectorySection({
   const heading = useTrajectoryHeading(event);
   const regionId = `${button_id}-details`;
   const labelId = `${button_id}-label`;
-  const isLoadingPage = page?.is_loading_older || page?.is_loading_newer;
   const visibleEvents = hide_lifecycle
     ? page?.events.filter((event) => !isBookkeepingEvent(event)) ?? []
     : page?.events ?? [];
   const hiddenCount = (page?.events.length ?? 0) - visibleEvents.length;
+  // Determine identity and boundaries before filtering: revealing lifecycle
+  // rows must not unload or collapse an already opened inner group.
+  const activityGroups = groupActivity(page?.events ?? []).map((group) => ({
+    group_key: group[0].event_key,
+    events: hide_lifecycle ? group.filter((child) => !isBookkeepingEvent(child)) : group,
+  })).filter((group) => group.events.length > 0);
   return (
     <section className="trajectory-section" data-selected={is_selected}>
       <div className="trajectory-section__header">
@@ -550,7 +549,7 @@ function TrajectorySection({
         </button>
       </div>
 
-      {is_expanded || page?.has_loaded ? (
+      {is_expanded || page?.has_loaded || (page?.events.length ?? 0) > 0 ? (
         <div
           hidden={!is_expanded}
           aria-labelledby={labelId}
@@ -561,14 +560,14 @@ function TrajectorySection({
           {!page || (page.events.length === 0 && (page.is_loading || (!page.has_loaded && !page.error))) ? (
             <div className="trajectory-section__state" role="status">
               <span className="inline-spinner" aria-hidden="true" />
-              Loading turn events…
+              Loading work groups…
             </div>
           ) : (
             <>
               {page.error ? (
                 <div className="trajectory-section__error" role="alert">
                   <span>
-                    <strong>Turn events unavailable</strong>
+                    <strong>Work groups unavailable</strong>
                     <small>{page.error}</small>
                   </span>
                   <button
@@ -582,31 +581,20 @@ function TrajectorySection({
                 </div>
               ) : null}
 
-              {page.previous_cursor !== null ? (
-                <button
-                  className="trajectory-section__page-button"
-                  disabled={isLoadingPage || !on_load_older}
-                  onClick={() => on_load_older?.(event.event_key)}
-                  type="button"
-                >
-                  {page.is_loading_older ? "Loading earlier events…" : "Load earlier events"}
-                </button>
-              ) : null}
-
               {hiddenCount > 0 ? (
                 <p className="event-filter-notice" role="status">
-                  {visibleEvents.length === 0 ? "No events match this filter in the loaded turn range. " : ""}
-                  {hiddenCount} {hiddenCount === 1 ? "event hidden" : "events hidden"} in this loaded turn range.
+                  {visibleEvents.length === 0 ? "No events match this filter in this turn. " : ""}
+                  {hiddenCount} {hiddenCount === 1 ? "event hidden" : "events hidden"} in this turn.
                 </p>
               ) : null}
 
               {visibleEvents.length > 0 ? (
                 <div aria-label="Events in this turn" className="trajectory-section__events" role="list">
-                  {groupActivity(visibleEvents).map((group) => (
-                    <ActivityGroup key={group[0].event_key} events={group} selected_event_key={selected_event_key}
+                  {activityGroups.map(({ group_key, events: group }) => (
+                    <ActivityGroup key={group_key} events={group} selected_event_key={selected_event_key}
                       reveal={group.some((child) => expanded_activity_keys?.has(child.event_key)
                         ?? child.event_key === expanded_child_event_key)}>
-                      {group.map((childEvent) => (
+                      {() => group.map((childEvent) => (
                         <div
                           className="trajectory-section__item"
                           data-error={childEvent.is_error || childEvent.type === "error"}
@@ -646,22 +634,7 @@ function TrajectorySection({
                 <p className="trajectory-section__empty" role="status">No events in this turn.</p>
               ) : null}
 
-              {page.next_cursor !== null ? (
-                <button
-                  className="trajectory-section__page-button"
-                  disabled={isLoadingPage || !on_load_newer}
-                  onClick={() => on_load_newer?.(event.event_key)}
-                  type="button"
-                >
-                  {page.is_loading_newer ? "Loading more events…" : "Load more events"}
-                </button>
-              ) : null}
 
-              {page.total_events !== null && page.events.length < page.total_events ? (
-                <p className="trajectory-section__count" role="status">
-                  {hide_lifecycle ? "Loaded" : "Showing"} {page.events.length} of {page.total_events} events.
-                </p>
-              ) : null}
             </>
           )}
         </div>
@@ -777,8 +750,6 @@ export function EventCard({
   on_open_related_session,
   on_retry_detail,
   trajectory_page,
-  on_trajectory_load_older,
-  on_trajectory_load_newer,
   on_trajectory_retry,
   expanded_activity_keys,
   expanded_activities,
@@ -809,8 +780,6 @@ export function EventCard({
         expanded_child_event_key={trajectory_expanded_event_key ?? null}
         is_expanded={is_expanded}
         is_selected={is_selected}
-        on_load_newer={on_trajectory_load_newer}
-        on_load_older={on_trajectory_load_older}
         on_open_related_session={on_open_related_session}
         on_retry={on_trajectory_retry}
         on_retry_child_detail={on_trajectory_retry_expanded_detail}

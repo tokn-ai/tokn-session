@@ -52,29 +52,30 @@ export function ActivityGroup({ events, selected_event_key, reveal = false, chil
   events: EventSummary[];
   selected_event_key?: string | null;
   reveal?: boolean;
-  children: ReactNode;
+  children: ReactNode | (() => ReactNode);
 }) {
   const regionId = useId();
   const needsAttention = events.some((event) => event.is_error || event.type === "error"
     || event.tool?.status === "running" || event.tool?.status === "pending"
     || event.tool?.status === "failed" || (event.tool?.exit_code != null && event.tool.exit_code !== 0));
   const [expanded, setExpanded] = useState(needsAttention || reveal);
+  const [loaded, setLoaded] = useState(needsAttention || reveal);
   const hasSelection = events.some((event) => event.event_key === selected_event_key);
-  useEffect(() => { if (hasSelection || needsAttention || reveal) setExpanded(true); }, [hasSelection, needsAttention, reveal, selected_event_key]);
-  if (events[0]?.type === "message") return children;
+  useEffect(() => { if (hasSelection || needsAttention || reveal) { setExpanded(true); setLoaded(true); } }, [hasSelection, needsAttention, reveal, selected_event_key]);
+  if (events[0]?.type === "message") return typeof children === "function" ? children() : children;
   const summary = activitySummary(events);
   const failures = events.filter((event) => event.is_error || event.type === "error"
     || event.tool?.status === "failed" || (event.tool?.exit_code != null && event.tool.exit_code !== 0)).length;
   return (
     <div className="activity-group" role="listitem">
       <button className="activity-group__toggle" aria-expanded={expanded} aria-controls={regionId}
-        onClick={() => setExpanded((current) => !current)} type="button">
+        onClick={() => { setLoaded(true); setExpanded((current) => !current); }} type="button">
         <SearchIcon />
         <span>{summary}{failures ? <span className="activity-group__failures"> · {failures} {failures === 1 ? "failure" : "failures"}</span> : null}</span>
         <ChevronIcon className={expanded ? "chevron chevron--open" : "chevron"} />
       </button>
       <div id={regionId} hidden={!expanded} className="activity-group__events" role="list" aria-label={summary}>
-        {children}
+        {loaded ? (typeof children === "function" ? children() : children) : null}
       </div>
     </div>
   );
