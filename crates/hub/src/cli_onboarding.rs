@@ -280,11 +280,31 @@ fn render_authenticator(
   writeln!(output, "{}", qr.render::<qrcode::render::unicode::Dense1x2>().build()).map_err(|e| e.to_string())?;
   writeln!(
     output,
+    "Full setup URI (same secret and settings as the QR): {}",
+    uri.as_str()
+  )
+  .map_err(|e| e.to_string())?;
+  writeln!(
+    output,
+    "Use the QR or full URI with an authenticator that supports SHA-256 TOTP."
+  )
+  .map_err(|e| e.to_string())?;
+  writeln!(
+    output,
     "Manual setup key: {}",
     Zeroizing::new(secret.to_base32()).as_str()
   )
   .map_err(|e| e.to_string())?;
-  writeln!(output, "Time based · SHA256 · 6 digits · 30 seconds").map_err(|e| e.to_string())?;
+  writeln!(
+    output,
+    "Manual settings: Time based (TOTP) · SHA256 · 6 digits · 30 seconds"
+  )
+  .map_err(|e| e.to_string())?;
+  writeln!(
+    output,
+    "The manual key contains only the secret. Set the algorithm explicitly; a SHA-1 default produces different codes."
+  )
+  .map_err(|e| e.to_string())?;
   writeln!(
     output,
     "Current TOTP: {} (valid for {}s)",
@@ -295,6 +315,11 @@ fn render_authenticator(
   writeln!(
     output,
     "Compare this code with your authenticator; rerun this command for a fresh code."
+  )
+  .map_err(|e| e.to_string())?;
+  writeln!(
+    output,
+    "If codes differ, check the algorithm, digits, period, and device clocks. If your app cannot use SHA-256, use a compatible authenticator."
   )
   .map_err(|e| e.to_string())?;
   Ok(output)
@@ -347,6 +372,17 @@ mod tests {
     assert!(output.contains(&format!("Machine reference: {reference}")));
     assert!(output.contains("Current TOTP: 119246 (valid for 1s)"));
     assert!(output.contains("SHA256 · 6 digits · 30 seconds"));
+    let uri = output
+      .lines()
+      .find_map(|line| line.strip_prefix("Full setup URI (same secret and settings as the QR): "))
+      .unwrap();
+    assert_eq!(uri, secret.provisioning_uri("Workstation").unwrap());
+    let uri = Url::parse(uri).unwrap();
+    let settings = uri.query_pairs().collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(settings["secret"], secret.to_base32());
+    assert_eq!(settings["algorithm"], "SHA256");
+    assert_eq!(settings["digits"], "6");
+    assert_eq!(settings["period"], "30");
     let standalone = render_authenticator(&secret, "My hosts", None, 60).unwrap();
     assert!(!standalone.contains("Machine reference:"));
     assert!(standalone.contains("valid for 30s"));

@@ -55,10 +55,15 @@ tokn-session-hub connect --hub https://hub.example.com --name "Workstation"
 ```
 
 First setup generates a UUID, dedicated keys, and an authenticator seed. Scan
-the terminal QR, then copy the printed machine ID or full machine reference
-(`UUID@host_public_key`). Manual authenticator setup uses SHA-256, six digits, and
-a 30-second period. Secrets print only to an interactive terminal. To display
-them later over a trusted terminal or SSH. The display includes the machine
+the terminal QR or import the full printed `otpauth://` URI into an authenticator
+that supports SHA-256 TOTP, then copy the printed machine ID or full machine
+reference (`UUID@host_public_key`). The QR and URI include all required settings.
+Manual authenticator setup requires time-based TOTP, SHA-256, six digits, and
+a 30-second period. A bare manual key carries only the secret; an app using
+SHA-1 will produce different codes. If the app cannot configure or honor SHA-256,
+use a compatible authenticator. Apple Passwords compatibility is not verified.
+Secrets print only to an interactive terminal. To display
+them later, use a trusted terminal or SSH. The display includes the machine
 reference and current SHA-256 TOTP with its remaining validity, so you can
 compare it with the authenticator app. Rerun for a fresh code; displaying a code
 does not consume it:

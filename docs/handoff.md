@@ -145,7 +145,8 @@ state fails closed; explicit `authenticator --upgrade-sha256` rotates OTP, clear
 unclassified grants, preserves host keys/passkeys/limits, and requires rescanning
 and app re-pairing. Protocol v2 and clients must upgrade together. Release `eb86123` is deployed to `ahub.clouds56.top` and this machine’s
 connector/API. The authenticator CLI also shows its saved machine reference and current TOTP
-with seconds remaining in trusted-terminal output; exports stay Base32-only.
+with seconds remaining in trusted-terminal output, plus the full setup URI and
+explicit manual settings/mismatch guidance; exports stay Base32-only.
 Reference lookup reads existing keys without generating replacements.
 Local SHA-256 migration preserved identities/passkeys and retired
 two legacy grants; the authenticator must be rescanned. Private pre-upgrade
