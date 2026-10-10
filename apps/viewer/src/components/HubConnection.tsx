@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { HubClient, HubError, hubErrorMessage, type HubEnrollment, type HubHost, type HubStatus } from "../lib/hub";
+import { HubClient, HubError, hubErrorMessage, type HubEnrollment, type HubHost, type HubNamespace, type HubStatus } from "../lib/hub";
+import { parseMachineAddress } from "../lib/hubAddress";
 import { RemoteClient, selectMachine, type ConnectionState } from "../lib/transport";
 import { RemoteConnection } from "./RemoteConnection";
 import { ViewerPage } from "../pages/ViewerPage";
+import "./HubAccess.css";
 
 interface HubConnectionProps {
   initial_status: HubStatus;
@@ -89,6 +91,8 @@ function HubHosts({ session, initial_notice, on_authenticated, on_disconnected }
 }) {
   const [hosts, setHosts] = useState<HubHost[]>([]);
   const [enrollments, setEnrollments] = useState<HubEnrollment[]>([]);
+  const [namespaces, setNamespaces] = useState<HubNamespace[]>([]);
+  const [username, setUsername] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [active, setActive] = useState<{ host: HubHost; client: RemoteClient }>();
   const [state, setState] = useState<ConnectionState>("connecting");
@@ -112,10 +116,12 @@ function HubHosts({ session, initial_notice, on_authenticated, on_disconnected }
     refresh.current = Promise.all([
       session.request<{ hosts: HubHost[] }>("hosts"),
       session.request<{ enrollments: HubEnrollment[] }>("enrollments"),
-    ]).then(([catalog, pending]) => {
+      session.request<{ namespaces: HubNamespace[] }>("namespaces"),
+    ]).then(([catalog, pending, namespace_catalog]) => {
       if (session.signal.aborted) return;
       setHosts(catalog.hosts);
       setEnrollments(pending.enrollments);
+      setNamespaces(namespace_catalog.namespaces);
       setLoaded(true);
       if (selected.current && !catalog.hosts.some((host) => host.host_id === selected.current)) {
         disconnectHost();
@@ -188,7 +194,7 @@ function HubHosts({ session, initial_notice, on_authenticated, on_disconnected }
   }
 
   if (active) return <ViewerPage key={active.host.host_id} remote connection={
-    <RemoteConnection name={`Tokn Hub · ${active.host.name}${active.host.access === "view" ? " · View only" : ""}`} state={state}>
+    <RemoteConnection name={`${active.host.machine_address ?? active.host.name}${active.host.access === "view" ? " · View only" : ""}`} hub_url={session.endpoint} state={state}>
       <button onClick={disconnectHost}>Change host</button>
       <button onClick={() => { void logout(); }}>Sign out</button>
     </RemoteConnection>
@@ -197,8 +203,9 @@ function HubHosts({ session, initial_notice, on_authenticated, on_disconnected }
   return <main className="hub-home">
     <div className="hub-content">
       <header className="hub-header">
-        <div><p className="hub-eyebrow">Tokn Hub</p><h1>Your hosts</h1><p>Manage host connections and access.</p></div>
+        <div><p className="hub-eyebrow">Tokn Hub</p><h1>Hub administration</h1><p>Manage machine addresses and host routes.</p></div>
         <div className="hub-actions">
+          <a href="/">Open your machines</a>
           <button disabled={!!busy} onClick={() => { void action("passkey", async () => {
             const next = await session.authenticate(true);
             if (session.signal.aborted) { next.close(); return; }
@@ -210,10 +217,23 @@ function HubHosts({ session, initial_notice, on_authenticated, on_disconnected }
       {error && <p className="hub-error" role="alert">{error}</p>}
       {notice && <p role="status">{notice}</p>}
       {!loaded && <p role="status">Loading hosts…</p>}
+      {loaded && <section className="hub-namespace-section" aria-labelledby="hub-namespaces-title">
+        <h2 id="hub-namespaces-title">Machine addresses</h2><p>Create a username namespace, then assign an encrypted host an address such as <code>username:host</code>. Names are permanent and do not create sign-in accounts.</p>
+        {namespaces.length > 0 && <ul className="hub-namespace-list" aria-label="Username namespaces">{namespaces.map((entry) => <li key={entry.username}>{entry.username}</li>)}</ul>}
+        <form className="hub-namespace-form" onSubmit={(event) => { event.preventDefault(); void action("namespace", async () => {
+          const target = parseMachineAddress(`${username.trim()}:machine`).username;
+          await session.request("namespaces", "POST", { username: target });
+          setUsername(""); setNotice(`Username namespace ${target} created.`); await refreshAfterChange();
+        }); }}>
+          <label htmlFor="hub-namespace-username">New username</label><input id="hub-namespace-username" value={username} onChange={(event) => setUsername(event.target.value)} required disabled={!!busy} maxLength={63} autoComplete="off" spellCheck={false} placeholder="username" />
+          <p>Use lowercase letters, numbers, and internal hyphens. Start and end with a letter or number.</p>
+          <button disabled={!!busy || !username.trim()}>{busy === "namespace" ? "Creating…" : "Create username namespace"}</button>
+        </form>
+      </section>}
       {loaded && hosts.length === 0 && <div className="hub-empty"><h2>No hosts connected yet</h2><p>Start a host connector and approve its pairing request below.</p></div>}
       <ul className="hub-hosts" aria-label="Enrolled hosts">
-        {hosts.map((host) => <li key={host.host_id} className="hub-host">
-          <div className="hub-host-details"><h2>{host.name}</h2><p><span className={`hub-presence ${host.online ? "is-online" : ""}`}>{host.online ? "Online" : "Offline"}</span> · {host.secure_only ? "End-to-end encrypted" : host.access === "view" ? "View only" : "View and control"}</p><code>{host.host_id}</code>
+        {hosts.map((host) => <li key={host.host_id} className="hub-host hub-admin-host">
+          <div className="hub-host-details"><h2>{host.machine_address ?? host.name}</h2>{host.machine_address && <p>{host.name}</p>}<p><span className={`hub-presence ${host.online ? "is-online" : ""}`}>{host.online ? "Online" : "Offline"}</span> · {host.secure_only ? "End-to-end encrypted" : host.access === "view" ? "View only" : "View and control"}</p><code>{host.host_id}</code>
             {host.secure_only && <p>Open your machines to pair using this host’s authenticator code or sign in with a machine passkey.</p>}
           </div>
           <div className="hub-actions">
@@ -226,6 +246,11 @@ function HubHosts({ session, initial_notice, on_authenticated, on_disconnected }
               }); }}>Confirm revoke</button><button disabled={!!busy} onClick={() => setRevokeId(undefined)}>Cancel</button></>
               : <button className="hub-secondary" disabled={!!busy} onClick={() => setRevokeId(host.host_id)}>Revoke {host.name}</button>}
           </div>
+          {host.secure_only && !host.machine_address && <MachineAddressForm host={host} namespaces={namespaces} busy={!!busy} on_assign={(target) => action(`address:${host.host_id}`, async () => {
+            const address = parseMachineAddress(target);
+            await session.request(`namespaces/${encodeURIComponent(address.username)}/machines/${encodeURIComponent(address.machine_name)}`, "POST", { host_id: host.host_id });
+            setNotice(`Machine address ${target} assigned. It is permanent.`); await refreshAfterChange();
+          })} />}
         </li>)}
       </ul>
       <section className="hub-pairing" aria-labelledby="hub-pairing-title">
@@ -244,4 +269,27 @@ function HubHosts({ session, initial_notice, on_authenticated, on_disconnected }
       </section>
     </div>
   </main>;
+}
+
+function MachineAddressForm({ host, namespaces, busy, on_assign }: {
+  host: HubHost;
+  namespaces: HubNamespace[];
+  busy: boolean;
+  on_assign: (address: string) => Promise<void>;
+}) {
+  const [username, setUsername] = useState("");
+  const [machine_name, setMachineName] = useState("");
+  const selected_username = username || namespaces[0]?.username || "";
+  return <details className="hub-admin-address"><summary>Assign a machine address</summary>
+    {namespaces.length === 0 ? <p>Create a username namespace above before assigning this host an address.</p> : <form onSubmit={(event) => {
+      event.preventDefault(); void on_assign(`${selected_username}:${machine_name.trim()}`);
+    }}>
+      <label htmlFor={`host-namespace-${host.host_id}`}>Username for {host.name}</label><select id={`host-namespace-${host.host_id}`} value={selected_username} onChange={(event) => setUsername(event.target.value)} disabled={busy} required>
+        {namespaces.map((entry) => <option key={entry.username}>{entry.username}</option>)}
+      </select>
+      <label htmlFor={`host-machine-name-${host.host_id}`}>Machine name for {host.name}</label><input id={`host-machine-name-${host.host_id}`} value={machine_name} onChange={(event) => setMachineName(event.target.value)} required disabled={busy} maxLength={63} autoComplete="off" spellCheck={false} placeholder="host" />
+      <p>This address is permanent. It will remain reserved if the host is revoked.</p>
+      <button disabled={busy || !machine_name.trim()}>Assign {selected_username}:{machine_name.trim() || "host"}</button>
+    </form>}
+  </details>;
 }

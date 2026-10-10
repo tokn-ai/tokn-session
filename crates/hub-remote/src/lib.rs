@@ -1,4 +1,5 @@
 //! Direct native app connections: the app owns keys and decrypts host content.
+mod directory;
 mod exchange;
 mod stream;
 
@@ -8,6 +9,7 @@ use serde_json::{Value, json};
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
+pub use tokn_hub_client_core::address::ResolvedMachine;
 use tokn_hub_client_core::{
   pairing::ClientPairing,
   protocol,
@@ -115,6 +117,38 @@ impl RemoteManager {
     .map_err(|error| error.to_string())?
   }
 
+  pub async fn resolve(&self, hub_url: &str, machine_address: &str) -> Result<ResolvedMachine, String> {
+    directory::resolve(hub_url, machine_address).await
+  }
+
+  pub async fn remember_metadata(
+    &self,
+    hub_url: &str,
+    host_id: &str,
+    machine_address: &str,
+    name: &str,
+  ) -> Result<SavedHost, String> {
+    validate_host(host_id)?;
+    tokn_hub_client_core::address::parse_machine_address(machine_address)?;
+    tokn_hub_client_core::address::validate_machine_name(name)?;
+    let (_, store, _) = self.stored(hub_url).await?;
+    if !store.hosts()?.iter().any(|host| host.host_id == host_id) {
+      return Err("Pair this machine before remembering its address".into());
+    }
+    let resolved = self.resolve(hub_url, machine_address).await?;
+    if resolved.host_id != host_id {
+      return Err(
+        "Machine address does not resolve to the remembered UUID; its original identity was preserved".into(),
+      );
+    }
+    let host_id = host_id.to_owned();
+    let machine_address = resolved.machine_address;
+    let name = resolved.name;
+    tokio::task::spawn_blocking(move || store.remember_metadata(&host_id, &machine_address, &name))
+      .await
+      .map_err(|error| error.to_string())?
+  }
+
   pub async fn pair(
     &self,
     hub_url: &str,
@@ -122,11 +156,29 @@ impl RemoteManager {
     code: String,
     expected_host_public_key: Option<&str>,
   ) -> Result<SavedHost, String> {
+    self
+      .pair_with_address(hub_url, host_id, code, expected_host_public_key, None)
+      .await
+  }
+
+  pub async fn pair_with_address(
+    &self,
+    hub_url: &str,
+    host_id: &str,
+    code: String,
+    expected_host_public_key: Option<&str>,
+    machine_address: Option<&str>,
+  ) -> Result<SavedHost, String> {
     let code = Zeroizing::new(code);
     let (hub, store, identity) = self.stored(hub_url).await?;
     validate_host(host_id)?;
     if store.hosts()?.iter().any(|host| host.host_id == host_id) {
       return Err("This machine is already paired; open it from remembered machines".into());
+    }
+    if let Some(address) = machine_address {
+      if self.resolve(hub_url, address).await?.host_id != host_id {
+        return Err("Machine address does not resolve to the requested UUID; resolve its address again".into());
+      }
     }
     let mut socket = connect(&secure_endpoint(&hub, host_id)?).await?;
     let (pairing, first) = ClientPairing::start(host_id, &identity, &code, unix_time()?)?;
@@ -137,17 +189,25 @@ impl RemoteManager {
     if expected_host_public_key.is_some_and(|key| key != verified.host_public_key) {
       return Err("Authenticated machine key does not match the supplied reference".into());
     }
+    let metadata = if let Some(address) = machine_address {
+      let resolved = self.resolve(hub_url, address).await?;
+      if resolved.host_id != verified.host_id {
+        return Err("Machine address changed UUID during pairing; its original saved identity was preserved".into());
+      }
+      Some(resolved)
+    } else {
+      None
+    };
     let host = SavedHost {
       host_id: verified.host_id,
       host_public_key: verified.host_public_key,
+      machine_address: metadata.as_ref().map(|metadata| metadata.machine_address.clone()),
+      name: metadata.map(|metadata| metadata.name),
     };
     let saved = host.clone();
-    tokio::task::spawn_blocking(move || {
-      store.save_host(saved.clone())?;
-      store.select_host(&saved.host_id)
-    })
-    .await
-    .map_err(|error| error.to_string())??;
+    tokio::task::spawn_blocking(move || store.save_host(saved))
+      .await
+      .map_err(|error| error.to_string())??;
     Ok(host)
   }
 
@@ -326,6 +386,8 @@ impl RemoteManager {
           host: SavedHost {
             host_id: host_id.into(),
             host_public_key: host_public_key.into(),
+            machine_address: None,
+            name: None,
           },
           register,
         })),

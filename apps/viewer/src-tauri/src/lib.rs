@@ -70,6 +70,8 @@ pub fn run() {
     })
     .invoke_handler(tauri::generate_handler![
       commands::hub::hub_client_status,
+      commands::hub::hub_client_resolve,
+      commands::hub::hub_client_remember_metadata,
       commands::hub::hub_client_pair,
       commands::hub::hub_client_open,
       commands::hub::hub_client_request,

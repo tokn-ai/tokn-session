@@ -63,8 +63,8 @@ them later over a trusted terminal or SSH:
 tokn-session-hub authenticator
 ```
 
-Open the Hub URL, or enter it in the app's Hub mode. Under **Connect a machine**,
-enter the machine ID and current authenticator code. The host verifies the code
+Open the Hub URL, or enter it in the app's Hub mode. On **Connections**, choose
+**Authenticator code** and enter the machine address or UUID and current code. The host verifies the code
 through password-authenticated key exchange; the relay does not receive the raw
 code. The device saves the verified host encryption key only after authenticated
 acknowledgment. Save the full reference from the connector or connection settings
@@ -79,8 +79,28 @@ tokn-session-hub connect
 The host's viewer API must still be running. Browsers remember device keys and
 host pins in IndexedDB, scoped to their Hub origin; the native app keeps private
 files. Clearing that storage makes it a new device. **Forget** removes a local
-saved machine; it does not revoke that device on the host. **Change machine**
+saved machine; it does not revoke that device on the host. **Manage connections**
 cancels requests and streams before selecting another machine.
+
+## Readable machine addresses
+
+The Hub administrator can create a namespace such as `clouds` at `/admin`, then
+assign a registered encrypted machine a name such as `macbook`. Its address is
+`clouds:macbook`, scoped to that Hub. Names use 1–63 lowercase ASCII letters or
+digits with internal hyphens. A namespace is a managed name, not a user account;
+the Hub still has one administrator. Connector `--name` remains its display name.
+
+Addresses are permanent: an address cannot move to a different UUID, and revoking
+the host does not free its name. Only administrator authentication can assign
+names; registering a connector cannot claim another namespace. Public lookup is
+exact, works while a host is offline, and reveals the address, UUID, display name,
+and online status to anyone who knows the address. There is no public machine list.
+
+The Hub directory is trusted to associate an address with a UUID. Lookup supplies
+no host encryption key. OTP pairing still verifies the host through PAKE, and
+remembered devices retain their UUID and verified key. Opening a saved machine
+uses that identity directly; it does not need another directory lookup. Saved
+address mappings cannot silently change to another machine.
 
 For local development, serve with `--public-url http://localhost:5559` and connect
 with `--hub http://localhost:5559 --insecure-loopback`. The saved development
@@ -91,9 +111,11 @@ setting permits HTTP only on loopback. From a checkout, use the binaries under
 
 After authenticator pairing, choose **Add a passkey**. The host stores and verifies
 this credential, independently of Hub administrator passkeys. On another device,
-enter the complete machine reference and choose **Sign in with machine passkey**.
+choose **Passkey**, enter the complete machine reference, and sign in.
 The reference supplies the host key needed to authenticate the encrypted channel
-before passkey login; a bare UUID does not establish that trust. Transfer the
+before passkey login; a bare UUID or readable address does not establish that trust.
+The reference may use `clouds:macbook@host_public_key` after an address is assigned.
+An already remembered machine can use its readable address with its saved pin. Transfer the
 reference through a trusted channel. The Hub cannot replace a saved host pin.
 
 The host defaults the WebAuthn origin to the saved Hub URL. Use

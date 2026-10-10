@@ -272,6 +272,8 @@ async fn perform_pairing(state: &ClientState, host_id: &str, code: &str) -> Resu
   Ok(SavedHost {
     host_id: paired.host_id,
     host_public_key: paired.host_public_key,
+    machine_address: None,
+    name: None,
   })
 }
 
@@ -430,6 +432,8 @@ mod tests {
         .save_host(SavedHost {
           host_id: host_id.into(),
           host_public_key: NoiseIdentity::generate().unwrap().public_key(),
+          machine_address: None,
+          name: None,
         })
         .unwrap();
     }
@@ -556,7 +560,9 @@ mod tests {
       state.store.hosts().unwrap(),
       vec![SavedHost {
         host_id: HOST_A.into(),
-        host_public_key: host.public_key()
+        host_public_key: host.public_key(),
+        machine_address: None,
+        name: None,
       }]
     );
     assert!(
@@ -564,7 +570,9 @@ mod tests {
         .store
         .save_host(SavedHost {
           host_id: HOST_A.into(),
-          host_public_key: NoiseIdentity::generate().unwrap().public_key()
+          host_public_key: NoiseIdentity::generate().unwrap().public_key(),
+          machine_address: None,
+          name: None,
         })
         .is_err()
     );

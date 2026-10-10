@@ -6,6 +6,26 @@ export type JsonValue =
   | JsonValue[]
   | { [key: string]: JsonValue };
 
+/** A remembered encryption identity; readable names never replace its pin. */
+export interface SavedHubHost {
+  host_id: string;
+  host_public_key: string;
+  machine_address?: string;
+  name?: string;
+}
+
+/** Public Hub routing metadata. It deliberately contains no encryption key. */
+export interface ResolvedMachine {
+  host_id: string;
+  machine_address: string;
+  name: string;
+  online: boolean;
+}
+
+export interface HubNamespace {
+  username: string;
+}
+
 /** Availability of the viewer's local translation engine. */
 export interface TranslationStatus {
   available: boolean;

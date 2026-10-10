@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use webauthn_rs::prelude::{AuthenticationResult, Passkey};
 
+mod namespaces;
+pub use namespaces::{HostCatalogEntry, MachineRecord, Namespace, NamespaceError};
+
 const MAX_PASSKEYS: u32 = 32;
 const MAX_REGISTERED_HOSTS: u32 = 64;
 const MAX_REGISTRATION_LEDGER: u32 = MAX_REGISTERED_HOSTS + 1024;
@@ -84,6 +87,16 @@ impl Store {
            host_id TEXT PRIMARY KEY,
            public_key TEXT NOT NULL UNIQUE,
            revoked INTEGER NOT NULL DEFAULT 0 CHECK (revoked IN (0, 1))
+         );
+         CREATE TABLE IF NOT EXISTS namespaces (
+           username TEXT PRIMARY KEY,
+           owner_id TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS host_addresses (
+           username TEXT NOT NULL REFERENCES namespaces(username),
+           machine_name TEXT NOT NULL,
+           host_id TEXT NOT NULL UNIQUE REFERENCES encrypted_hosts(host_id),
+           PRIMARY KEY (username, machine_name)
          );",
       )
       .map_err(database_error)?;

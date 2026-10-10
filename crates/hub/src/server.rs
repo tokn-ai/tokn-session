@@ -1,9 +1,13 @@
 //! The public Hub boundary: owner authentication, host selection, and forwarding.
-use crate::{auth::AuthState, store::Store, tunnel::HubTunnels};
+use crate::{
+  auth::AuthState,
+  store::{MachineRecord, NamespaceError, Store},
+  tunnel::HubTunnels,
+};
 use axum::{
   Json, Router,
   body::{Body, Bytes},
-  extract::{DefaultBodyLimit, Path, Request, State, WebSocketUpgrade},
+  extract::{DefaultBodyLimit, Path, Request, State, WebSocketUpgrade, rejection::JsonRejection},
   http::{HeaderMap, HeaderValue, Method, StatusCode, header},
   middleware::{self, Next},
   response::{IntoResponse, Response},
@@ -13,6 +17,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use tokn_hub_client_core::address::ResolvedMachine;
 use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -43,6 +48,11 @@ pub fn router(state: HubState) -> Router {
   let protected = Router::new()
     .route("/hub/v1/hosts", get(hosts))
     .route("/hub/v1/hosts/{host_id}", axum::routing::delete(revoke_host))
+    .route("/hub/v1/namespaces", get(namespaces).post(create_namespace))
+    .route(
+      "/hub/v1/namespaces/{username}/machines/{machine_name}",
+      post(bind_machine),
+    )
     .route("/hub/v1/enrollments", get(enrollments))
     .route("/hub/v1/enrollments/approve", post(approve_host))
     .route("/hosts/{host_id}/api/v1/{command}", any(proxy))
@@ -52,6 +62,7 @@ pub fn router(state: HubState) -> Router {
     .merge(protected)
     .route("/hub/v1/tunnel", get(tunnel))
     .route("/hub/v1/secure/{host_id}", get(secure_tunnel))
+    .route("/hub/v1/resolve/{username}/{machine_name}", get(resolve_machine))
     .route("/hub/v1/health", get(|| async { Json(json!({ "version": 1 })) }))
     .route("/hub", any(not_found))
     .route("/hub/{*path}", any(not_found))
@@ -163,16 +174,98 @@ async fn authorize(State(state): State<HubState>, request: Request, next: Next) 
 }
 
 async fn hosts(State(state): State<HubState>) -> Result<Json<Value>, ApiError> {
-  let hosts = state.store.hosts().map_err(internal)?;
+  let hosts = state.store.host_catalog().map_err(internal)?;
   Ok(Json(json!({
-    "hosts": hosts.into_iter().map(|host| json!({
-      "online": state.tunnels.online(&host.host_id),
-      "secure_only": state.tunnels.secure_only(&host.host_id),
-      "access": state.tunnels.access(&host.host_id).unwrap_or(host.access),
-      "host_id": host.host_id,
-      "name": host.name,
-    })).collect::<Vec<_>>()
+    "hosts": hosts.into_iter().map(|host| {
+      let mut entry = json!({
+        "online": state.tunnels.online(&host.host_id),
+        "secure_only": host.secure_only || state.tunnels.secure_only(&host.host_id),
+        "access": state.tunnels.access(&host.host_id).unwrap_or(host.access),
+        "host_id": host.host_id,
+        "name": host.name,
+      });
+      if let Some(address) = host.machine_address {
+        entry["machine_address"] = json!(address);
+      }
+      entry
+    }).collect::<Vec<_>>()
   })))
+}
+
+fn namespace_error(failure: NamespaceError) -> ApiError {
+  match failure {
+    NamespaceError::Invalid(message) => error(StatusCode::BAD_REQUEST, message),
+    NamespaceError::Conflict(message) => error(StatusCode::CONFLICT, message),
+    NamespaceError::NotFound(message) => error(StatusCode::NOT_FOUND, message),
+    NamespaceError::Internal(detail) => internal(detail),
+  }
+}
+
+async fn namespaces(State(state): State<HubState>) -> Result<Json<Value>, ApiError> {
+  Ok(Json(
+    json!({"namespaces": state.store.namespaces().map_err(namespace_error)?}),
+  ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateNamespaceRequest {
+  username: String,
+}
+
+async fn create_namespace(
+  State(state): State<HubState>,
+  request: Result<Json<CreateNamespaceRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+  let Json(request) = request.map_err(|_| error(StatusCode::BAD_REQUEST, "Expected a username object"))?;
+  let namespace = state
+    .store
+    .create_namespace(&request.username)
+    .map_err(namespace_error)?;
+  Ok(Json(json!({"username": namespace.username})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BindMachineRequest {
+  host_id: String,
+}
+
+async fn bind_machine(
+  State(state): State<HubState>,
+  Path((username, machine_name)): Path<(String, String)>,
+  request: Result<Json<BindMachineRequest>, JsonRejection>,
+) -> Result<Json<ResolvedMachine>, ApiError> {
+  let Json(request) = request.map_err(|_| error(StatusCode::BAD_REQUEST, "Expected a host_id object"))?;
+  let machine = state
+    .store
+    .bind_machine(&username, &machine_name, &request.host_id)
+    .map_err(namespace_error)?;
+  Ok(Json(resolved_machine(&state, machine)))
+}
+
+fn resolved_machine(state: &HubState, machine: MachineRecord) -> ResolvedMachine {
+  ResolvedMachine {
+    online: state.tunnels.online(&machine.host_id),
+    host_id: machine.host_id,
+    machine_address: machine.machine_address,
+    name: machine.name,
+  }
+}
+
+async fn resolve_machine(
+  State(state): State<HubState>,
+  Path((username, machine_name)): Path<(String, String)>,
+  headers: HeaderMap,
+) -> Response {
+  if let Err(error) = state.auth.check_optional_origin(&headers) {
+    return error.into_response();
+  }
+  match state.store.resolve_machine(&username, &machine_name) {
+    Ok(Some(machine)) => Json(resolved_machine(&state, machine)).into_response(),
+    Ok(None) => error(StatusCode::NOT_FOUND, "Unknown machine address").into_response(),
+    Err(error) => namespace_error(error).into_response(),
+  }
 }
 
 async fn enrollments(State(state): State<HubState>) -> Json<Value> {
