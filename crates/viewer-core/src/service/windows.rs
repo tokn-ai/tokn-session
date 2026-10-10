@@ -847,6 +847,7 @@ mod tests {
     let detail = EventDetail {
       event_key: "event.v1.2".into(),
       event: json!({"type":"unknown"}),
+      content_revision: None,
       native: Some(native.clone()),
       is_hidden: false,
       tool_output: None,
@@ -861,6 +862,7 @@ mod tests {
         event_key: "event.v1.2".into(),
         event: json!({"id":{"kind":"uncorrelated", "source_event_index":2},
         "source_event_indices":[2,3], "source_event_keys":[{"source_event_index":2},{"source_event_index":3}]}),
+        content_revision: None,
         native: Some(json!({"source_records":[{"event_key":"event.v1.2", "native":{"event_key":"provider-key"}}]})),
         is_hidden: false,
         tool_output: None,

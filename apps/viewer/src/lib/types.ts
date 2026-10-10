@@ -381,6 +381,8 @@ export interface EventSummary {
   title: string;
   summary: string;
   summary_truncated: boolean;
+  /** Digest of the full message text when the summary is truncated. */
+  content_revision?: string | null;
   is_hidden: boolean;
   is_error: boolean | null;
   /** Explicit backend classification; absent on older servers. */
@@ -510,6 +512,8 @@ export interface LoadEventDetailRequest {
 export interface EventDetail {
   event_key: string;
   event: JsonValue;
+  /** Digest of the full assistant message text, when supplied by the backend. */
+  content_revision?: string | null;
   native: JsonValue | null;
   is_hidden: boolean;
   tool_output: ToolOutputPreview | null;

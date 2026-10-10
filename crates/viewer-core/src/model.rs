@@ -464,6 +464,9 @@ pub struct EventSummary {
   pub title: String,
   pub summary: String,
   pub summary_truncated: bool,
+  /// Full assistant-message content identity when the visible summary is truncated.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub content_revision: Option<String>,
   pub is_hidden: bool,
   /// A routine lifecycle/configuration row or intermediate usage record that
   /// can be hidden without loading detail. Final accounting, content, unknown
@@ -639,6 +642,9 @@ pub struct TrajectoryEventPage {
 pub struct EventDetail {
   pub event_key: String,
   pub event: Value,
+  /// Full assistant-message content identity when its summary is truncated.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub content_revision: Option<String>,
   pub native: Option<Value>,
   pub is_hidden: bool,
   pub tool_output: Option<ToolOutputPreview>,

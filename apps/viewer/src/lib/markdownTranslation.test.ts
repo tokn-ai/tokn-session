@@ -87,6 +87,21 @@ describe("translateMarkdown", () => {
       .toBe("查看 [https://example.com](https://example.com) 以及 file:///tmp/report.txt 或者 s3://bucket/key");
   });
 
+  it("translates prose next to GFM www autolinks without changing the link", async () => {
+    const source = "## Website:www.example.com and A &amp; B:www.example.org";
+    expect(await translateMarkdown(source, translator({
+      "Website:": "网站：", "and A & B:": "以及 甲和乙：",
+    }))).toBe("## 网站：www.example.com 以及 甲和乙：www.example.org");
+  });
+
+  it("keeps punctuation and adjacent www autolinks out of translation requests", async () => {
+    const source = "A:www.one.test! Then B:www.two.test.";
+    const translate = translator({ "A:": "甲：", "Then B:": "然后乙：" });
+    expect(await translateMarkdown(source, translate))
+      .toBe("甲：www.one.test! 然后乙：www.two.test.");
+    expect(translate).toHaveBeenCalledWith(["A:", "Then B:"]);
+  });
+
   it("treats translator-provided Markdown, HTML, and newlines as prose", async () => {
     const malicious = "# Header\n\n- item | **bold** [link](/target) <script>alert(1)</script> &amp;";
     const result = await translateMarkdown("Original", async () => [malicious]);
@@ -133,7 +148,7 @@ describe("translateMarkdown", () => {
   it("returns code-only, HTML-only, and URL-only responses without invoking translation", async () => {
     const translate = vi.fn(async (texts: string[]) => texts);
     for (const source of ["", "123 + 456", "`source code`", "```ts\nconst value = 1;\n```",
-      "https://example.com", "<div>Hidden text</div>"]) {
+      "https://example.com", "www.example.com", "www.one.test www.two.test", "<div>Hidden text</div>"]) {
       expect(await translateMarkdown(source, translate)).toBe(source);
     }
     expect(translate).not.toHaveBeenCalled();

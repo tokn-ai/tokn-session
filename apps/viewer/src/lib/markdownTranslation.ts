@@ -27,6 +27,13 @@ interface Replacement {
   translated?: string;
 }
 
+interface SourceSpan {
+  start: number;
+  end: number;
+}
+
+class MarkdownSourceError extends Error {}
+
 /**
  * Translate prose while retaining the original Markdown source around it.
  * Text nodes and existing line breaks are translation boundaries. This keeps
@@ -44,19 +51,33 @@ export async function translateMarkdown(
   const replacements: Replacement[] = [];
   const reference_expansions: Replacement[] = [];
 
-  function visit(node: Nodes) {
+  function visit(node: Nodes, inferred_span?: SourceSpan) {
     // Autolinks display their destinations, which must never be translated.
     if (node.type === "link" && (!node.position || !sourceFor(node, content).startsWith("["))) return;
 
     if (node.type === "text") {
-      replacements.push(...proseReplacements(node, content));
+      // GFM synthesizes positionless text around literal www autolinks. If its
+      // source span cannot be recovered, leave that text alone.
+      if (node.position) {
+        replacements.push(...proseReplacements(node, content));
+      } else if (inferred_span) {
+        try {
+          replacements.push(...proseReplacements(node, content, inferred_span));
+        } catch (error) {
+          if (!(error instanceof MarkdownSourceError)) throw error;
+          // Preserving an uncertain fragment is safer than replacing a link.
+        }
+      }
       if (replacements.length > MAX_SEGMENTS) {
         throw new Error("This response has too many text fragments to translate.");
       }
     }
 
     const before = replacements.length;
-    if ("children" in node) node.children.forEach(visit);
+    if ("children" in node) {
+      const spans = childSpans(node, content);
+      node.children.forEach((child, index) => visit(child, spans[index]));
+    }
 
     // A translated shortcut label would otherwise refer to a different target.
     if (node.type === "linkReference" && node.referenceType !== "full"
@@ -120,10 +141,103 @@ function sourceFor(node: Nodes, content: string): string {
   return content.slice(node.position?.start.offset, node.position?.end.offset);
 }
 
-function proseReplacements(node: Text, content: string): Replacement[] {
-  const start = node.position?.start.offset;
-  const end = node.position?.end.offset;
-  if (start === undefined || end === undefined) throw new Error("Cannot locate Markdown text.");
+function childSpans(parent: Nodes & { children: Nodes[] }, content: string): (SourceSpan | undefined)[] {
+  const spans = parent.children.map((child): SourceSpan | undefined => {
+    const start = child.position?.start.offset;
+    const end = child.position?.end.offset;
+    return start === undefined || end === undefined ? undefined : { start, end };
+  });
+  if (spans.every(Boolean)) return spans;
+  const parent_start = parent.position?.start.offset;
+  const parent_end = parent.position?.end.offset;
+  if (parent_start === undefined || parent_end === undefined) return spans;
+
+  const next_positioned_start: number[] = Array(parent.children.length);
+  let next_start = parent_end;
+  for (let index = parent.children.length - 1; index >= 0; index -= 1) {
+    next_positioned_start[index] = next_start;
+    if (spans[index]) next_start = spans[index]!.start;
+  }
+
+  let cursor = parent_start;
+  let found_synthetic_link = false;
+  let search_safe = true;
+  const synthetic_links = Array(parent.children.length).fill(false) as boolean[];
+  for (let index = 0; index < parent.children.length; index += 1) {
+    if (spans[index]) {
+      cursor = spans[index]!.end;
+      search_safe = true;
+      continue;
+    }
+    const child = parent.children[index];
+    // remark-gfm omits positions on literal www links and normalizes their
+    // targets to http://. Their visible labels remain exact source slices.
+    if (child.type !== "link" || child.children.length !== 1
+      || child.children[0].type !== "text" || !child.children[0].value.startsWith("www.")
+      || child.url !== `http://${child.children[0].value}`) {
+      if (child.type !== "text") search_safe = false;
+      continue;
+    }
+    if (!search_safe) continue;
+    const start = content.indexOf(child.children[0].value, cursor);
+    if (start < 0 || start + child.children[0].value.length > next_positioned_start[index]) continue;
+    spans[index] = { start, end: start + child.children[0].value.length };
+    synthetic_links[index] = true;
+    found_synthetic_link = true;
+    cursor = spans[index]!.end;
+  }
+  if (!found_synthetic_link) return spans;
+
+  for (let index = 0; index < parent.children.length;) {
+    if (parent.children[index].type !== "text" || spans[index]) {
+      index += 1;
+      continue;
+    }
+    let run_end = index + 1;
+    while (run_end < parent.children.length
+      && parent.children[run_end].type === "text" && !spans[run_end]) run_end += 1;
+    // A missing position on another kind of node leaves the intervening raw
+    // source ambiguous. Only infer text touching a validated www link.
+    if ((index > 0 && !spans[index - 1])
+      || (run_end < parent.children.length && !spans[run_end])
+      || !(synthetic_links[index - 1] || synthetic_links[run_end])) {
+      index = run_end;
+      continue;
+    }
+    let start = index === 0 ? parent_start : spans[index - 1]!.end;
+    const end = run_end === parent.children.length ? parent_end : spans[run_end]!.start;
+    for (let part = index; part < run_end && start <= end; part += 1) {
+      const next = part + 1 === run_end ? end
+        : decodedTextEnd(content, (parent.children[part] as Text).value, start, end);
+      if (next === undefined) break;
+      spans[part] = { start, end: next };
+      start = next;
+    }
+    index = run_end;
+  }
+  return spans;
+}
+
+function decodedTextEnd(content: string, value: string, start: number, end: number): number | undefined {
+  if (!value) return start;
+  const tokens = [...content.slice(start, end).matchAll(token_pattern)].map((match) => ({
+    end: start + match.index! + match[0].length,
+    value: decodeString(match[0]).replace(/\0/g, "\uFFFD"),
+  }));
+  const offset = tokens.map((token) => token.value).join("").indexOf(value);
+  if (offset < 0) return undefined;
+  let decoded_end = 0;
+  for (const token of tokens) {
+    decoded_end += token.value.length;
+    if (decoded_end >= offset + value.length) return token.end;
+  }
+  return undefined;
+}
+
+function proseReplacements(node: Text, content: string, inferred_span?: SourceSpan): Replacement[] {
+  const start = inferred_span?.start ?? node.position?.start.offset;
+  const end = inferred_span?.end ?? node.position?.end.offset;
+  if (start === undefined || end === undefined) throw new MarkdownSourceError("Cannot locate Markdown text.");
 
   const lines = [...content.slice(start, end).matchAll(/([^\r\n]*)(\r\n|\r|\n|$)/g)]
     .filter((match) => match[0].length > 0);
@@ -149,10 +263,12 @@ function proseReplacements(node: Text, content: string): Replacement[] {
     }
     const prefix_end = tokens[token_start]?.start ?? start + line.index! + raw.length;
     const prefix = content.slice(start + line.index!, prefix_end);
-    if (!/^[\t >]*$/.test(prefix)) throw new Error("Cannot preserve this Markdown text.");
+    if (!inferred_span && !/^[\t >]*$/.test(prefix)) {
+      throw new MarkdownSourceError("Cannot preserve this Markdown text.");
+    }
     if (index > 0) {
       const line_ending = lines[index - 1][2];
-      if (!remaining.endsWith(line_ending)) throw new Error("Cannot preserve Markdown line breaks.");
+      if (!remaining.endsWith(line_ending)) throw new MarkdownSourceError("Cannot preserve Markdown line breaks.");
       remaining = remaining.slice(0, -line_ending.length);
     }
 
@@ -166,7 +282,7 @@ function proseReplacements(node: Text, content: string): Replacement[] {
       }
     }
   }
-  if (remaining) throw new Error("Cannot preserve this Markdown text.");
+  if (remaining) throw new MarkdownSourceError("Cannot preserve this Markdown text.");
   return replacements.sort((a, b) => a.start - b.start);
 }
 
