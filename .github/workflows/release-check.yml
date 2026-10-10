@@ -83,7 +83,13 @@ jobs:
           for package in packages:
             assert package["source"] is None, package["name"]
             assert package["version"] == expected[package["name"]]
-            assert Path(package["manifest_path"]).resolve().is_relative_to(stage)
+            manifest = Path(package["manifest_path"]).resolve()
+            assert manifest.is_relative_to(stage)
+            # Archives normalize mtimes; cached project binaries must rebuild
+            # from these extracted sources even when their version is unchanged.
+            for path in manifest.parent.rglob("*"):
+              if path.is_file():
+                path.touch()
           print(f"Verified {len(packages)} project crates use extracted archive sources")
           PY
           cargo test --workspace --manifest-path "$archive_stage/Cargo.toml" \
