@@ -452,7 +452,11 @@ mod tests {
         async move {
           match mode {
             1 => socket.on_upgrade(|_socket| async {}).into_response(),
-            0 => StatusCode::NOT_FOUND.into_response(),
+            0 => (
+              StatusCode::BAD_GATEWAY,
+              axum::Json(serde_json::json!({"error": "Host is offline"})),
+            )
+              .into_response(),
             _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
           }
         }

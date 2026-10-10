@@ -150,7 +150,8 @@ installed macOS connector LaunchAgent is unloaded for the current login session,
 without affecting the API service or saved trust; unrecognized connectors remain
 manual. Definition, loaded service, and launcher configuration are rechecked
 before stopping. Status checks inspect ownership locks and the saved Hub for
-older connectors; unavailable checks stay distinct from hosting off. Visible
+older connectors; the Hub’s explicit 502 “Host is offline” response is offline,
+while unrelated gateway failures remain unavailable. Visible
 clients refresh status every 15 seconds and on focus. It reuses `~/.tokn/hub` trust, offers Hub/name and
 remote-input settings, Start/Stop, status events, and an on-demand pairing
 reference/QR/URI/current-code display. Secrets stay in the local command response
