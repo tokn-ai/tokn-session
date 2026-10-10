@@ -27,19 +27,19 @@ Run these from a clean checkout of the intended release commit:
 cargo fmt --all -- --check
 cargo check --workspace --all-targets --locked
 cargo test --workspace --locked
-cargo run -p tokn-session-cli --locked -- list --source codex --limit 1
+cargo run -p tokn-session-cli --locked -- list --source codex --session-dir crates/codex/fixtures --limit 1
 cargo +1.95.0 check --workspace --exclude tokn-session-viewer --all-targets --locked
-cargo publish --workspace --exclude tokn-session-viewer --dry-run --locked
+cargo package --workspace --exclude tokn-session-viewer --locked
 ```
 
-The dry run packages and verifies all 23 crates without uploading. Cargo orders
+Packaging verifies all 23 crates without uploading. Cargo orders
 the dependency graph and resolves the unpublished workspace versions from a
 temporary local registry. Inspect `target/package/*.crate` before publication.
 The release-check workflow repeats archive verification and the Rust 1.95 check
 for pull requests and main. It also extracts the archives into a temporary
 workspace and tests their sources, using local path patches solely to resolve
 unpublished sibling crates. That supplemental check generates a separate lock;
-the dry run verifies the original registry lockfiles. Existing CI checks the
+packaging verifies the original registry lockfiles. Existing CI checks the
 full workspace and viewer.
 
 For installed-service smoke tests, build from the extracted packages and use
@@ -54,8 +54,13 @@ CI passes. Run it from a clean checkout of that reviewed commit with a crates.io
 owner credential configured through Cargo; never commit the credential:
 
 ```sh
+cargo publish --workspace --exclude tokn-session-viewer --dry-run --locked
 cargo publish --workspace --exclude tokn-session-viewer --locked
 ```
+
+The publish dry run repeats verification and aborts every upload. Its temporary
+archives remain under `target/package/tmp-crate`; use `cargo package` for the
+reviewable `target/package/*.crate` files.
 
 Cargo uploads dependency crates before their consumers and waits for registry
 availability. If a run stops after some uploads, confirm their versions on
