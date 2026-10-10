@@ -6,12 +6,26 @@ Public origin: `https://ahub.clouds56.top`. The DNS A record points to
 This deploys the Hub and compiled browser UI. Session indexing and provider
 access remain on the machines that connect outward to the Hub.
 
-The first active release is `70bec8f` (2026-10-10), merging main `4d0c9be`
+The current release is `eb86123` (2026-10-10), with SHA-256 pairing and browser
+passkey sign-in per tab. It preserves the session-delivery changes from the
+first release `70bec8f`, which merged main `4d0c9be`
 with the session delivery split. Release metadata records the full source commit
 and asset hashes. Verification passed HTTPS health, every served asset hash,
 WASM content type, anonymous access rejection, and the WebSocket host challenge.
 The existing site remained reachable; both the Hub and certificate renewal are
 enabled at boot.
+
+The local Mac host connector/API also run `eb86123`. Its explicit SHA-256
+migration preserved the machine UUID/keys, passkeys, origin, and attempt limits,
+rotated the seed, and retired two legacy device grants. Rescan its authenticator
+QR and pair native apps again. Browser code now stores host pins only and requires
+passkey sign-in after reload or in each new tab.
+
+Pre-upgrade backups: Hub database `/var/lib/tokn-hub/backups/pre-eb86123.sqlite`
+and local host state `~/.tokn/hub/backups/pre-eb86123/`, both private. The Hub
+routing/database protocol remains compatible, but the old connector cannot read
+host-access v2. A host rollback would require its matching private state backup;
+repointing its binary alone is insufficient.
 
 ## Layout
 
