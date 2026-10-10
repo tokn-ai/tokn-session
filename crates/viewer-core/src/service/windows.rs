@@ -301,6 +301,11 @@ impl WindowIdentity {
         translate_key(&summary.event_key, |index| index.checked_add(self.event_offset)).expect("valid source position"),
       );
     }
+    if let Some(keys) = &mut summary.child_keys {
+      for key in keys {
+        *key = self.key(key);
+      }
+    }
     summary.event_key = self.key(&summary.event_key);
     summary
   }
@@ -497,6 +502,25 @@ mod tests {
         .iter()
         .any(|item| item["kind"] == "detail" && item["detail"]["event"]["type"] == "trajectory")
     );
+    let groups: Vec<_> = first
+      .groups
+      .iter()
+      .filter(|group| group["summary"]["type"] == "trajectory")
+      .collect();
+    assert!(!groups.is_empty());
+    for group in groups {
+      let keys = group["summary"]["child_keys"].as_array().unwrap();
+      assert!(!keys.is_empty());
+      for key in keys {
+        assert!(key.as_str().unwrap().starts_with("window.v1."));
+        assert!(
+          first
+            .items
+            .iter()
+            .any(|item| item["item_id"] == *key && item["summary"].is_object())
+        );
+      }
+    }
     let unchanged = load(SessionUpdatesRequest {
       cursor: Some(first.revision.clone()),
       ..request.clone()

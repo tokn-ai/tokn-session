@@ -447,6 +447,9 @@ pub struct AcknowledgeSessionAttentionResponse {
 
 #[derive(Debug, Serialize)]
 pub struct EventSummary {
+  /// Ordered semantic children of a work group; independent of Inspector limits.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub child_keys: Option<Vec<String>>,
   /// Positional presentation slot across generation replacement. Never use
   /// this as a detail/cache identity; event_key owns that generation.
   #[serde(skip_serializing_if = "Option::is_none")]

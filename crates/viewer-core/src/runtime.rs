@@ -163,6 +163,7 @@ impl ViewerRuntime {
                     "session-index-changed",
                     IndexRefresh {
                       changed: true,
+                      catalog_refresh_required: true,
                       ..Default::default()
                     },
                   );
@@ -247,6 +248,7 @@ impl ViewerRuntime {
                 "session-index-changed",
                 IndexRefresh {
                   changed: true,
+                  catalog_refresh_required: true,
                   ..Default::default()
                 },
               );
@@ -283,7 +285,7 @@ impl ViewerRuntime {
         })
         .await;
         match result {
-          Ok(Ok(refresh)) => {
+          Ok(Ok(mut refresh)) => {
             // A full catalog is the deliberate recovery path for watcher
             // gaps and provider topology changes. Its normal cadence starts
             // after the potentially slow scan returns; ordinary writes use
@@ -362,11 +364,17 @@ impl ViewerRuntime {
               keys.sort();
               keys.dedup();
               let service = refresh_service.clone();
-              if let Ok(notifications) = tokio::task::spawn_blocking(move || service.session_notifications(&keys)).await
-              {
-                for notification in notifications {
-                  let _ = emit(&scheduler_events, "session-notification", notification);
+              let expected_notifications = keys.len();
+              match tokio::task::spawn_blocking(move || service.session_notifications(&keys)).await {
+                Ok(notifications) => {
+                  refresh.catalog_refresh_required |= notifications.len() != expected_notifications;
+                  for notification in notifications {
+                    if emit(&scheduler_events, "session-notification", notification).is_err() {
+                      refresh.catalog_refresh_required = true;
+                    }
+                  }
                 }
+                Err(_) => refresh.catalog_refresh_required = true,
               }
               let _ = emit(&scheduler_events, "session-index-changed", refresh);
             }

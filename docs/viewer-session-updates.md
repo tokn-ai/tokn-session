@@ -35,15 +35,25 @@ are the same as Inspector; `all` does not bypass them. `removed_items` retires o
 `semantic_order` changes only when the semantic sequence changes. Intermediate
 messages remain individually available even when displayed inside a work group.
 `groups` and `item_order` are an adapter for the existing folded conversation
-UI, separate from semantic objects. Unchanged items and orders are omitted.
+UI, separate from semantic objects. Work summaries include ordered `child_keys`
+pointing to semantic items; membership is independent of bounded Inspector
+source records. Unchanged items and orders are omitted.
 Control `state` includes history cursors, outstanding questions, attention
 revision, and running status. Errors preserve the last usable display and emit
 a source-error notification; recovery removes it. `session-notification` carries
 compact indexed unread/running/question state directly to sidebar rows.
+`session-index-changed.catalog_refresh_required` is false for body completions
+whose effective title/preview stay unchanged and whose compact notifications
+were delivered. Catalog changes, warning changes, stale/shared-index commits,
+and missing notifications still require a catalog read. Older backends omit
+the flag and retain that read. A selected semantic subscription consumes pushes
+instead of also reloading its timeline on index invalidations.
 
 Selected conversations subscribe at `all`. Expanded tools and Inspector use
 the delivered display details from that replica, without separate detail
-subscriptions. Recently opened conversations retain their all-level display
+subscriptions. Work groups page their semantic children locally in 40-row
+windows, preserving loaded rows across pushes and generation replacements.
+Legacy groups without membership still use the trajectory-page command. Recently opened conversations retain their all-level display
 while receiving final-level updates, which do not advance their all cursor. Reopening renders cached
 content immediately, then catches up. The frontend buffers pushes arriving
 before the initial response, rejects revision gaps and stale responses, and

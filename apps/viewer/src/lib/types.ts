@@ -239,6 +239,7 @@ export interface ListSessionChildrenResponse {
  * belongs to an unrelated provider or source.
  */
 export interface SessionIndexChangedEvent {
+  catalog_refresh_required?: boolean;
   updated_session_keys?: string[];
   changed: boolean;
   attention_session_keys: string[];
@@ -369,6 +370,7 @@ export interface TrajectoryCardSummary {
 }
 
 export interface EventSummary {
+  child_keys?: string[];
   delivery?: "commentary" | "final" | "unspecified";
   event_key: string;
   /** Stable source slot, used only to restore disclosure after a generation reset. */

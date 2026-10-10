@@ -1,5 +1,5 @@
 import { createUuid } from "./id";
-import type { EventPageResponse, SessionUpdate, SessionUpdateItem, SessionUpdatesRequest, UpdateLevel } from "./types";
+import type { EventPageResponse, LoadTrajectoryEventPageRequest, TrajectoryEventPageResponse, SessionUpdate, SessionUpdateItem, SessionUpdatesRequest, UpdateLevel } from "./types";
 
 interface Replica {
   subscription_id: string;
@@ -76,6 +76,35 @@ export class SessionDisplayCache {
   detail(session_key: string, event_key: string) {
     return this.replicas.get(this.key(session_key, "all"))?.items.get(`detail:${event_key}`)?.detail
       ?? this.replicas.get(this.key(session_key, "details"))?.items.get(`detail:${event_key}`)?.detail ?? null;
+  }
+
+  /** Page semantic children locally, retaining the same summaries as live updates. */
+  trajectoryPage(request: LoadTrajectoryEventPageRequest): TrajectoryEventPageResponse | null {
+    const replica = this.replicas.get(this.key(request.session_key, "all"));
+    const keys = replica?.items.get(request.trajectory_key)?.summary?.child_keys;
+    if (!replica || !keys) return null;
+    const events = keys.map((key) => replica.items.get(key)?.summary);
+    if (events.some((event) => !event)) return null;
+    let boundary = request.direction === "backward" ? keys.length : 0;
+    if (request.cursor) {
+      if (!request.cursor.startsWith("display-work.v1:")) return null;
+      const [generation, group, offset] = JSON.parse(request.cursor.slice("display-work.v1:".length));
+      if (generation !== replica.generation || group !== request.trajectory_key
+        || !Number.isSafeInteger(offset) || offset < 0 || offset > keys.length) {
+        throw new Error("Work group cursor is no longer current");
+      }
+      boundary = offset;
+    }
+    const limit = Math.max(1, Math.min(200, request.limit ?? 40));
+    const start = request.direction === "backward" ? Math.max(0, boundary - limit) : boundary;
+    const end = request.direction === "backward" ? boundary : Math.min(keys.length, boundary + limit);
+    const cursor = (offset: number) => `display-work.v1:${JSON.stringify([replica.generation, request.trajectory_key, offset])}`;
+    return {
+      events: events.slice(start, end) as NonNullable<typeof events[number]>[],
+      previous_cursor: start > 0 ? cursor(start) : null,
+      next_cursor: end < keys.length ? cursor(end) : null,
+      total_events: keys.length,
+    };
   }
 
   sourceEvents(session_key: string) {
@@ -157,6 +186,10 @@ export class SessionDisplayCache {
     const event_order = update.event_order ?? previous?.event_order ?? [];
     if (event_order.some((id) => !items.get(id)?.event)) { this.replicas.delete(key); return null; }
     const events = order.map((id) => items.get(id)?.summary).filter((event) => event !== undefined);
+    if (update.level === "all" && [...items.values()].some((item) =>
+      item.summary?.child_keys?.some((child) => !items.get(child)?.summary))) {
+      this.replicas.delete(key); return null;
+    }
     if (events.length !== order.length) { this.replicas.delete(key); return null; }
     const page: EventPageResponse = { ...update.state, events };
     this.pageItems.set(page, items);

@@ -270,8 +270,15 @@ export function useViewerState() {
   const displayCache = useRef(new SessionDisplayCache());
   const pushedPage = useRef<import("./types").EventPageResponse | null>(null);
   const semanticLive = useRef(new Set<string>());
+  const notificationsReady = useRef(false);
   const semanticSupported = useRef<boolean | null>(null);
   const onSessionUpdate = useRef<(update: import("./types").SessionUpdate) => void>(() => {});
+  const loadWorkPage = useCallback(async (request: import("./types").LoadTrajectoryEventPageRequest) => {
+    const cached = displayCache.current.trajectoryPage(request);
+    if (cached) return cached;
+    if (request.cursor?.startsWith("display-work.v1:")) throw new Error("Work group cache expired; reopen the group");
+    return loadTrajectoryEventPage(request);
+  }, []);
   const loadDisplayPage = useCallback(async (request: import("./types").LoadEventPageRequest) => {
     if (semanticSupported.current === false) return loadEventPage(request);
     if (request.window_mode !== "retained") {
@@ -450,9 +457,9 @@ export function useViewerState() {
     let unlisten: (() => void) | undefined;
 
     void listenForSessionIndexChanges((change) => {
-      setSessionsAttempt((attempt) => attempt + 1);
+      if (change.catalog_refresh_required !== false || !notificationsReady.current) setSessionsAttempt((attempt) => attempt + 1);
       const selectedSessionKey = selectedSessionKeyRef.current;
-      if (selectedSessionKey && (
+      if (selectedSessionKey && !semanticLive.current.has(selectedSessionKey) && (
         change.updated_session_keys?.includes(selectedSessionKey)
         || change.attention_session_keys.includes(selectedSessionKey)
       )) {
@@ -681,8 +688,11 @@ export function useViewerState() {
       const children = new Map(sessionChildrenRef.current);
       for (const [key, page] of children) children.set(key, { ...page, sessions: page.sessions.map(update) });
       sessionChildrenRef.current = children; setSessionChildren(children);
-    }).then((unlisten) => { if (disposed) unlisten(); else stop = unlisten; }).catch(() => {});
-    return () => { disposed = true; stop?.(); };
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else { stop = unlisten; notificationsReady.current = true; }
+    }).catch(() => {});
+    return () => { disposed = true; notificationsReady.current = false; stop?.(); };
   }, []);
 
   useEffect(() => {
@@ -866,8 +876,8 @@ export function useViewerState() {
         limit: TRAJECTORY_EVENT_PAGE_SIZE,
       };
       const response = direction === "initial"
-        ? refreshTrajectoryWindow(request, current?.events ?? [], loadTrajectoryEventPage, () => trajectoryPageGeneration.current === generation && trajectoryPageRequests.current.get(requestKey) === requestId)
-        : loadTrajectoryEventPage(request);
+        ? refreshTrajectoryWindow(request, current?.events ?? [], loadWorkPage, () => trajectoryPageGeneration.current === generation && trajectoryPageRequests.current.get(requestKey) === requestId)
+        : loadWorkPage(request);
       void response
         .then((response) => {
           if (
@@ -931,7 +941,7 @@ export function useViewerState() {
           }
         });
     },
-    [updateTrajectoryPage],
+    [loadWorkPage, updateTrajectoryPage],
   );
 
   const applyEventSelection = useCallback((eventKey: string | null, openInspector: boolean) => {
@@ -1437,7 +1447,7 @@ export function useViewerState() {
               direction: target.trajectory?.status === "working" || previous?.next_cursor === null
                 ? "backward" : "forward",
               limit: TRAJECTORY_EVENT_PAGE_SIZE,
-            }, previous?.events ?? [], loadTrajectoryEventPage,
+            }, previous?.events ?? [], loadWorkPage,
             () => eventsRequest.current === requestId && selectionIsCurrent(), true);
           } catch (error: unknown) {
             if (eventsRequest.current !== requestId) return;
@@ -1541,6 +1551,7 @@ export function useViewerState() {
     invalidateEventDetails,
     invalidateTrajectoryPages,
     loadDisplayPage,
+    loadWorkPage,
     selectedSessionKey,
     updateTrajectoryPage,
   ]);

@@ -2747,6 +2747,50 @@ describe("semantic session delivery", () => {
     expect(vi.mocked(loadSessionUpdates).mock.calls.filter(([request]) => request.level === "all")).toHaveLength(1);
   });
 
+  it("expands and refreshes work children from all delivery without child RPCs", async () => {
+    let emit: ((update: import("./types").SessionUpdate) => void) | undefined;
+    vi.mocked(listenForSessionUpdates).mockImplementation((handler) => { emit = handler; return Promise.resolve(vi.fn()); });
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
+    const page = trajectoryEventPage();
+    const child = trajectoryChildPage().events[0];
+    page.events[0] = { ...page.events[0], child_keys: [child.event_key] };
+    const makeUpdate = (request: import("./types").SessionUpdatesRequest): import("./types").SessionUpdate => ({ ...semanticSnapshot(request, page),
+      items: [{ item_id: child.event_key, kind: "tool_summary", level: "steps", summary: child }],
+      groups: [{ item_id: page.events[0].event_key, kind: "work_summary", level: "steps", summary: page.events[0] }] });
+    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => makeUpdate(request));
+    const { result } = renderHook(() => useViewerState());
+    await selectListedSession(result, "live");
+    await waitFor(() => expect(result.current.events).toEqual(page.events));
+    act(() => result.current.toggleEventExpanded(page.events[0].event_key));
+    await waitFor(() => expect(result.current.trajectoryPages.get("live")?.get(page.events[0].event_key)?.events).toEqual([child]));
+    const request = vi.mocked(loadSessionUpdates).mock.calls.find(([request]) => request.level === "all")![0];
+    act(() => emit?.({ ...makeUpdate(request), snapshot: false, base_revision: "1", revision: "2", item_order: null, groups: [],
+      items: [{ item_id: child.event_key, kind: "tool_summary", level: "steps", summary: { ...child, summary: "cached progress" } }] }));
+    await waitFor(() => expect(result.current.trajectoryPages.get("live")?.get(page.events[0].event_key)?.events[0].summary).toBe("cached progress"));
+    expect(loadTrajectoryEventPage).not.toHaveBeenCalled();
+    expect(loadEventPage).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("uses compact attention only when notification delivery is available (%s)", async (available) => {
+    if (!available) vi.mocked(listenForSessionNotifications).mockRejectedValue(new Error("unavailable"));
+    let indexChange: ((change: SessionIndexChangedEvent) => void) | undefined;
+    vi.mocked(listenForSessionIndexChanges).mockImplementation((handler) => { indexChange = handler; return Promise.resolve(vi.fn()); });
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
+    const page = toolEventPage();
+    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    const { result } = renderHook(() => useViewerState());
+    await selectListedSession(result, "live");
+    await waitFor(() => expect(result.current.events).toEqual(page.events));
+    const catalogCalls = vi.mocked(listSessions).mock.calls.length;
+    const updateCalls = vi.mocked(loadSessionUpdates).mock.calls.length;
+    act(() => indexChange?.({ changed: true, catalog_refresh_required: false,
+      attention_session_keys: ["live"], updated_session_keys: ["live"] }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
+    expect(listSessions).toHaveBeenCalledTimes(catalogCalls + (available ? 0 : 1));
+    expect(loadSessionUpdates).toHaveBeenCalledTimes(updateCalls);
+    expect(loadEventPage).not.toHaveBeenCalled();
+  });
+
   it("renders cached content immediately while reopening catches up", async () => {
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("one"), session("two")], next_cursor: null, source_errors: [], pending_providers: [] });
     const page = toolEventPage();
