@@ -124,14 +124,44 @@ fn header_key(line: &CodexLine) -> serde_json::Value {
   })
 }
 
-fn segments_are_paginated(line: &CodexLine, expected: Option<u64>, end: Option<u64>) -> Result<bool, String> {
-  let paginated = expected.is_some()
-    || end.is_some()
-    || matches!(line.item(), RolloutItem::SessionMeta(meta) if meta.history_mode.as_deref() == Some("paginated"));
-  if paginated && (line.ordinal().is_none() || expected.is_some_and(|expected| line.ordinal() != Some(expected))) {
-    return Err("invalid Codex history lineage: missing or out-of-order ordinal".into());
+struct HistoryOrdinals {
+  paginated: bool,
+  last: Option<u64>,
+}
+
+impl HistoryOrdinals {
+  fn new(paginated: bool) -> Self {
+    Self { paginated, last: None }
   }
-  Ok(paginated)
+
+  fn accept(&mut self, line: &CodexLine, path: &Path, offset: u64) -> Result<(), String> {
+    if !self.paginated {
+      return Ok(());
+    }
+    let ordinal = line.ordinal().ok_or_else(|| {
+      format!(
+        "invalid Codex history lineage at {} byte {offset}: missing ordinal",
+        path.display()
+      )
+    })?;
+    // Persisted Codex rows can repeat an ordinal or resume across a gap.
+    // Physical record IDs preserve distinct rows in file order.
+    // Retaining the last ordinal also keeps validation active after u64::MAX.
+    if let Some(last) = self.last
+      && ordinal < last
+    {
+      return Err(format!(
+        "invalid Codex history lineage at {} byte {offset}: out-of-order ordinal {ordinal} after previous {last}",
+        path.display()
+      ));
+    }
+    self.last = Some(ordinal);
+    Ok(())
+  }
+
+  fn ends_before(&self, end: u64) -> bool {
+    self.last.is_some_and(|last| last < end)
+  }
 }
 
 fn collect_paths(root: &Path, paths: &mut Vec<PathBuf>) -> Result<(), String> {
@@ -204,7 +234,7 @@ fn cutoff_matches(path: &Path, base: &HistoryPosition) -> Result<bool, String> {
   if file.metadata().map_err(|err| err.to_string())?.len() < base.end_byte_offset {
     return Ok(false);
   }
-  // Only inspect the final bounded record; full ordinal continuity is checked
+  // Only inspect the final bounded record; full ordinal ordering is checked
   // by the atomic loader. This keeps dependency discovery independent of size.
   let mut window = 64 * 1024;
   loop {
@@ -233,6 +263,30 @@ fn cutoff_matches(path: &Path, base: &HistoryPosition) -> Result<bool, String> {
     let Ok(line) = serde_json::from_slice::<CodexLine>(&bytes[record_start..end]) else {
       return Ok(false);
     };
-    return Ok(line.ordinal().and_then(|ordinal| ordinal.checked_add(1)) == Some(base.end_ordinal_exclusive));
+    let Some(ordinal) = line.ordinal() else {
+      return Ok(false);
+    };
+    if ordinal.checked_add(1) == Some(base.end_ordinal_exclusive) {
+      return Ok(true);
+    }
+    if ordinal >= base.end_ordinal_exclusive {
+      return Ok(false);
+    }
+    // A BeforeTurn cutoff uses the excluded turn's ordinal across a gap. Verify
+    // that row at the exact boundary so another same-owner segment with a lower
+    // ordinal cannot masquerade as this prefix.
+    file
+      .seek(SeekFrom::Start(base.end_byte_offset))
+      .map_err(|err| err.to_string())?;
+    let mut next = Vec::new();
+    BufReader::new(Read::by_ref(&mut file).take(MAX_HEADER_BYTES))
+      .read_until(b'\n', &mut next)
+      .map_err(|err| err.to_string())?;
+    if next.last() != Some(&b'\n') {
+      return Ok(false);
+    }
+    return Ok(
+      serde_json::from_slice::<CodexLine>(&next).is_ok_and(|line| line.ordinal() == Some(base.end_ordinal_exclusive)),
+    );
   }
 }

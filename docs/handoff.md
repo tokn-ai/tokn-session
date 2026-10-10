@@ -194,9 +194,16 @@ reset them. See [snapshot protocol](relay.md#local-snapshotfollow-service).
 Codex paginated rollouts can reference earlier physical files through
 `session_meta.history_base`, including after a native revert. CLI and viewer
 history assemble these bounded prefixes before the active segment, validating
-both byte and ordinal cutoffs so reverted turns stay excluded. Repeated
-continuations may reference the physical segment UUID in a native filename
-rather than its logical session ID; resolution verifies the filename owner
+both byte and ordinal cutoffs so reverted turns stay excluded.
+Some persisted Codex rollouts repeat paginated ordinals, and forward
+gaps are accepted like native Codex resume/projection. Distinct physical rows
+remain visible in file order. A revert before a turn may set its exclusive
+ordinal to that excluded turn across a gap; resolution verifies that next row
+at the exact byte cutoff before accepting the prefix.
+Ordinal validation follows the owning header's mode. Missing or regressed
+ordinals report the physical file, byte offset, and ordinal details.
+Repeated continuations may reference the physical segment UUID in a native
+filename rather than its logical session ID; resolution verifies the filename owner
 against metadata before accepting that alias. Native discovery
 uses Desktop's current rollout path to avoid duplicate tasks; exported roots
 collapse only a uniquely verified continuation chain. Missing or ambiguous
