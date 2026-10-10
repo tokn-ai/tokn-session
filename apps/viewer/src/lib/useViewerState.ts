@@ -2,7 +2,7 @@ import { captureTransport, type CommandInvoker, type EventSubscriber } from "./t
 import { SessionDisplayCache } from "./sessionDisplayCache";
 import type { ExpandedActivityState } from "./types";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { loadReadingWindow, readReadingPosition, readingEventKey } from "./readingPosition";
+import { readReadingPosition, readingEventKey } from "./readingPosition";
 import { refreshEventWindow, loadCompleteTrajectory } from "./liveEvents";
 import { compareProjects, readSessionOrder, saveSessionOrder } from "./sidebarOrder";
 import { useSessionView } from "./useSessionView";
@@ -18,6 +18,10 @@ import {
   listenForSessionUpdates as apiListenForSessionUpdates,
   listenForSessionNotifications as apiListenForSessionNotifications,
   loadSessionUpdates as apiLoadSessionUpdates,
+  loadGroupDetails as apiLoadGroupDetails,
+  loadToolDetails as apiLoadToolDetails,
+  inspectSessionEvent as apiInspectSessionEvent,
+  renewSessionSubscriptions as apiRenewSessionSubscriptions,
   loadEventDetail as apiLoadEventDetail,
   loadEventPage as apiLoadEventPage,
   loadTrajectoryEventPage as apiLoadTrajectoryEventPage,
@@ -177,6 +181,7 @@ export function useViewerState() {
   const {
     acknowledgeSessionAttention, getSessionIndexProgress, listSessionChildren, listSessions,
     loadSessionUpdates, loadEventDetail, loadEventPage, loadTrajectoryEventPage, requestSessionIndexRetry,
+    loadGroupDetails, loadToolDetails, inspectSessionEvent, renewSessionSubscriptions,
     listenForSessionIndexChanges, listenForSessionIndexProgress, listenForRelayChanges,
     listenForTransportReconnect, listenForSessionUpdates, listenForSessionNotifications,
   } = useMemo(() => ({
@@ -185,6 +190,10 @@ export function useViewerState() {
     listSessionChildren: (request: Parameters<typeof apiListSessionChildren>[0]) => apiListSessionChildren(request, send),
     listSessions: (request: Parameters<typeof apiListSessions>[0]) => apiListSessions(request, send),
     loadSessionUpdates: (request: Parameters<typeof apiLoadSessionUpdates>[0]) => apiLoadSessionUpdates(request, send),
+    loadGroupDetails: (request: Parameters<typeof apiLoadGroupDetails>[0]) => apiLoadGroupDetails(request, send),
+    loadToolDetails: (request: Parameters<typeof apiLoadToolDetails>[0]) => apiLoadToolDetails(request, send),
+    inspectSessionEvent: (request: Parameters<typeof apiInspectSessionEvent>[0]) => apiInspectSessionEvent(request, send),
+    renewSessionSubscriptions: (ids: Parameters<typeof apiRenewSessionSubscriptions>[0]) => apiRenewSessionSubscriptions(ids, send),
     loadEventDetail: (request: Parameters<typeof apiLoadEventDetail>[0]) => apiLoadEventDetail(request, send),
     loadEventPage: (request: Parameters<typeof apiLoadEventPage>[0]) => apiLoadEventPage(request, send),
     loadTrajectoryEventPage: (request: Parameters<typeof apiLoadTrajectoryEventPage>[0]) => apiLoadTrajectoryEventPage(request, send),
@@ -313,15 +322,27 @@ export function useViewerState() {
     const epoch = readerLifetime.current;
     ensureReaderCurrent(epoch);
     const cached = displayCache.current.trajectoryGroup(request.session_key, request.trajectory_key);
-    if (cached) return cached;
+    if (cached) {
+      displayCache.current.resources.set(request.session_key, "group", request.trajectory_key,
+        { status: "complete", ...displayCache.current.coverageVersion(request.session_key) });
+      return cached;
+    }
     if (request.trajectory_key.startsWith("activity:")) {
       displayCache.current.includeGroup(request.session_key, request.trajectory_key);
-      const update = await loadSessionUpdates(displayCache.current.request(request.session_key, "steps"));
-      ensureReaderCurrent(epoch);
-      if (!displayCache.current.apply(update)) throw new Error("Work group changed; try again");
-      const group = displayCache.current.trajectoryGroup(request.session_key, request.trajectory_key);
-      if (!group) throw new Error("Work group is no longer available");
-      return group;
+      displayCache.current.resources.set(request.session_key, "group", request.trajectory_key, { status: "loading" });
+      try {
+        const update = await loadGroupDetails(displayCache.current.request(request.session_key, "steps"));
+        ensureReaderCurrent(epoch);
+        if (!displayCache.current.apply(update)) throw new Error("Work group changed; try again");
+        const group = displayCache.current.trajectoryGroup(request.session_key, request.trajectory_key);
+        if (!group) throw new Error("Work group is no longer available");
+        displayCache.current.resources.set(request.session_key, "group", request.trajectory_key, { status: "complete", ...displayCache.current.coverageVersion(request.session_key) });
+        return group;
+      } catch (error: unknown) {
+        ensureReaderCurrent(epoch);
+        displayCache.current.resources.set(request.session_key, "group", request.trajectory_key, { status: "failed", error: errorMessage(error) });
+        throw error;
+      }
     }
     return loadTrajectoryEventPage(request);
   }, []);
@@ -487,6 +508,9 @@ export function useViewerState() {
       sessionIndexProgressRevision.current = null;
       setSessionIndexProgressLoading(true);
       void readSnapshot(epoch);
+      for (const request of displayCache.current.backgroundRequests()) {
+        void loadSessionUpdates({ ...request, cursor: null }).then((update) => onSessionUpdate.current(update)).catch(() => {});
+      }
     });
 
     async function subscribeThenReadSnapshot() {
@@ -620,14 +644,16 @@ export function useViewerState() {
       const delivered = displayCache.current.detail(sessionKey, eventKey);
       if (delivered) return delivered;
       if (!semanticLive.current.has(sessionKey)) return loadEventDetail({ session_key: sessionKey, event_key: eventKey });
-      const keys = [...new Set([...activeDetailKeys.current, eventKey])].slice(-16);
-      const update = await loadSessionUpdates(displayCache.current.request(sessionKey, "details", keys));
-      displayCache.current.apply(update);
-      const detail = displayCache.current.detail(sessionKey, eventKey);
-      if (!detail) throw new Error("Tool details changed; retry loading them");
+      displayCache.current.resources.set(sessionKey, "tool", eventKey, { status: "loading" });
+      const detail = await loadToolDetails({ session_key: sessionKey, event_key: eventKey });
+      if (detailGeneration.current !== generation) throw new Error("Tool changed while loading; retry its details");
+      displayCache.current.resources.set(sessionKey, "tool", eventKey, { status: "complete", ...displayCache.current.coverageVersion(sessionKey) }, detail);
       return detail;
     };
-    request = load().then((response) => {
+    request = load().catch((error: unknown) => {
+      if (detailGeneration.current === generation) displayCache.current.resources.set(sessionKey, "tool", eventKey, { status: "failed", error: errorMessage(error) });
+      throw error;
+    }).then((response) => {
       if (detailGeneration.current === generation) {
         writeCachedDetail(detailCache.current, cacheKey, response);
       }
@@ -641,8 +667,32 @@ export function useViewerState() {
     return request;
   }, []);
 
+  const requestInspection = useCallback((sessionKey: string, eventKey: string) => {
+    if (!semanticLive.current.has(sessionKey)) return requestDetail(sessionKey, eventKey);
+    const cached = displayCache.current.resources.detail(sessionKey, "inspect", eventKey);
+    if (cached) return Promise.resolve(cached);
+    const cacheKey = `inspect:${sessionKey}:${eventKey}`;
+    const pending = detailLoads.current.get(cacheKey);
+    if (pending) return pending;
+    const generation = detailGeneration.current;
+    displayCache.current.resources.set(sessionKey, "inspect", eventKey, { status: "loading" });
+    const request = inspectSessionEvent({ session_key: sessionKey, event_key: eventKey }).then((detail) => {
+      if (generation !== detailGeneration.current) throw new Error("Event changed while inspecting; retry inspection");
+      displayCache.current.resources.set(sessionKey, "inspect", eventKey,
+        { status: "complete", ...displayCache.current.coverageVersion(sessionKey) }, detail);
+      return detail;
+    }).catch((error: unknown) => {
+      if (generation === detailGeneration.current) displayCache.current.resources.set(sessionKey, "inspect", eventKey,
+        { status: "failed", error: errorMessage(error) });
+      throw error;
+    }).finally(() => { if (detailLoads.current.get(cacheKey) === request) detailLoads.current.delete(cacheKey); });
+    detailLoads.current.set(cacheKey, request);
+    return request;
+  }, [requestDetail]);
+
   const invalidateEventDetails = useCallback((retainVisible: boolean) => {
     detailGeneration.current += 1;
+    if (selectedSessionKeyRef.current) displayCache.current.resources.invalidate(selectedSessionKeyRef.current);
     const owner = selectedSessionKeyRef.current;
     for (const key of detailCache.current.keys()) if (!owner || key.startsWith(`${owner}:`)) detailCache.current.delete(key);
     detailLoads.current.clear();
@@ -738,6 +788,7 @@ export function useViewerState() {
   const refreshSessionAfterInput = useCallback((sessionKey: string) => {
     if (selectedSessionKeyRef.current !== sessionKey) return;
     clearInputRefreshTimers();
+    if (semanticLive.current.has(sessionKey)) return;
     const refresh = () => {
       if (selectedSessionKeyRef.current !== sessionKey) return;
       // Use the normal live path so loaded history, reading position and open
@@ -836,34 +887,11 @@ export function useViewerState() {
 
   const detailSubscriptionKey = JSON.stringify([selectedSessionKey, activeDetailKeys.current]);
   useEffect(() => {
-    const sessionKey = selectedSessionKeyRef.current;
-    if (!sessionKey || !semanticLive.current.has(sessionKey) || displayCache.current.get(sessionKey, "all")) return;
-    const keys = [...activeDetailKeys.current];
-    if (!keys.length) {
-      const release = displayCache.current.release(sessionKey, "details");
-      if (release) void loadSessionUpdates(release).catch(() => {});
-      return;
-    }
-    const refresh = () => {
-      void loadSessionUpdates(displayCache.current.request(sessionKey, "details", keys)).then((update) => {
-        displayCache.current.apply(update);
-        for (const item of update.items) if (item.detail && item.event_key) writeCachedDetail(detailCache.current, `${sessionKey}:${item.event_key}`, item.detail);
-        if (selectedSessionKeyRef.current === sessionKey && update.items.some((item) => item.detail)) setDetailRevision((revision) => revision + 1);
-      }).catch(() => {});
-    };
-    refresh();
-    const timer = window.setInterval(refresh, 30_000);
-    return () => window.clearInterval(timer);
-  }, [detailSubscriptionKey]);
-
-  useEffect(() => {
     const timer = window.setInterval(() => {
       if (semanticSupported.current !== true || !selectedSessionKeyRef.current || eventRefreshInFlight.current) return;
-      for (const request of displayCache.current.backgroundRequests()) {
-        void loadSessionUpdates(request).then((update) => onSessionUpdate.current(update)).catch(() => {});
-      }
-      liveRefresh.current = true;
-      setEventsAttempt((attempt) => attempt + 1);
+      void renewSessionSubscriptions(displayCache.current.subscriptionIds()).then((updates) => {
+        for (const update of updates ?? []) onSessionUpdate.current(update);
+      }).catch(() => {});
     }, 30_000);
     return () => window.clearInterval(timer);
   }, []);
@@ -1456,8 +1484,7 @@ export function useViewerState() {
     pushedPage.current = null;
     const page = isLiveRefresh
       ? pushed ? Promise.resolve(pushed) : refreshEventWindow(selectedSessionKey, loadDisplayPage)
-      : loadReadingWindow(selectedSessionKey, readReadingPosition(selectedSessionKey), loadDisplayPage,
-        () => eventsRequest.current === requestId);
+      : loadDisplayPage({ session_key: selectedSessionKey, window_mode: "retained", direction: "backward" });
     void page
       .then(async (response) => {
         if (eventsRequest.current !== requestId) {
@@ -1571,7 +1598,9 @@ export function useViewerState() {
           }
         }
         applyEventSelection(
-          preserveEventSelection(selectedEventKeyRef.current, response.events),
+          preserveEventSelection(selectedEventKeyRef.current, response.events)
+            ?? (selectedEventKeyRef.current && displayCache.current.activityGroupForEvent(selectedSessionKey, selectedEventKeyRef.current)
+              ? selectedEventKeyRef.current : null),
           false,
         );
         if (response.attention_revision) {
@@ -1673,7 +1702,9 @@ export function useViewerState() {
     if (detailOwnerKeyRef.current !== cacheKey) setDetail(null);
     detailOwnerKeyRef.current = cacheKey;
     setDetailOwnerKey(cacheKey);
-    const cached = readCachedDetail(detailCache.current, cacheKey);
+    const cached = semanticLive.current.has(selectedSessionKey)
+      ? displayCache.current.resources.detail(selectedSessionKey, "inspect", selectedEventKey)
+      : readCachedDetail(detailCache.current, cacheKey);
     if (cached) {
       setDetail(cached);
       setDetailLoading(false);
@@ -1681,7 +1712,7 @@ export function useViewerState() {
     }
 
     setDetailLoading(true);
-    void requestDetail(selectedSessionKey, selectedEventKey)
+    void requestInspection(selectedSessionKey, selectedEventKey)
       .then((response) => {
         if (detailRequest.current !== requestId) {
           return;
@@ -1702,7 +1733,7 @@ export function useViewerState() {
     detailAttempt,
     detailRevision,
     inspectorOpen,
-    requestDetail,
+    requestInspection,
     selectedEventKey,
     selectedSessionKey,
   ]);

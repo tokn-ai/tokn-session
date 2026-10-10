@@ -40,6 +40,7 @@ pub struct RelayChange {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct WindowInfo {
+  pub revision: String,
   pub event_offset: usize,
   pub has_earlier: bool,
   pub generation: String,
@@ -660,6 +661,7 @@ impl ViewerRelay {
         let first_explicit = session.loaded.is_none() && session.priority == SessionPriority::Explicit;
         session.generation = snapshot.generation.clone();
         session.window = WindowInfo {
+          revision: snapshot.revision.clone(),
           event_offset: snapshot.event_offset,
           has_earlier: snapshot.has_earlier,
           generation: snapshot.generation,

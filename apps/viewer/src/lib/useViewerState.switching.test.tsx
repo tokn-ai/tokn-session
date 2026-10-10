@@ -3,7 +3,7 @@ import { listen as nativeListen } from "@tauri-apps/api/event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { saveReadingPosition } from "./readingPosition";
 import { selectMachine, type ViewerClient } from "./transport";
-import type { EventPageResponse, ListSessionsResponse, SessionSummary } from "./types";
+import type { EventSummary, ListSessionsResponse, SessionSummary, SessionUpdate, SessionUpdatesRequest } from "./types";
 import { useViewerState } from "./useViewerState";
 
 // Keep the real reader API and transport: this exercises the local IPC / remote
@@ -51,12 +51,34 @@ function remoteMachine() {
   return { client, invoke };
 }
 
+function snapshot(request: SessionUpdatesRequest, revision = "1"): SessionUpdate {
+  const event: EventSummary = {
+    event_key: "latest-row", type: "message", provider: "codex", timestamp: null,
+    phase: "final", role: "assistant", title: "Assistant", summary: "Latest turn",
+    summary_truncated: false, is_hidden: false, is_error: false,
+    tool: null, usage: null, reasoning: null,
+  };
+  return {
+    subscription_id: request.subscription_id, session_key: request.session_key, level: request.level,
+    generation: "local", base_revision: null, revision, snapshot: true,
+    items: [{ item_id: event.event_key, kind: "assistant_message", level: "steps", summary: event }],
+    groups: [], removed_items: [], item_order: [event.event_key],
+    state: { previous_cursor: "local-earlier", next_cursor: null,
+      total_events: 2, history_status: "complete", scope: request.scope },
+  };
+}
+
 it("stops delayed local pagination when a remote viewer replaces the local reader", async () => {
-  const pending = deferred<EventPageResponse>();
-  nativeInvoke.mockImplementation(async (command: string) => {
+  const subscription = deferred<{ revision: string }>();
+  const pending = deferred<SessionUpdate>();
+  let backward_request: SessionUpdatesRequest | undefined;
+  nativeInvoke.mockImplementation(async (command: string, payload?: { request: SessionUpdatesRequest }) => {
     if (command === "list_sessions") return catalog("local-session");
-    if (command === "load_session_updates") throw new Error("Unknown viewer command");
-    if (command === "load_event_page") return pending.promise;
+    if (command === "subscribe_session") return subscription.promise;
+    if (command === "load_session_backward") {
+      backward_request = payload!.request;
+      return backward_request.history_cursor ? pending.promise : snapshot(backward_request);
+    }
     if (command === "update_session_view") return;
     return new Promise(() => {});
   });
@@ -69,28 +91,41 @@ it("stops delayed local pagination when a remote viewer replaces the local reade
   act(() => local.result.current.selectSession("local-session"));
   await waitFor(() => {
     expect(local.result.current.eventsError).toBeNull();
-    expect(nativeInvoke).toHaveBeenCalledWith("load_event_page", {
-      request: { session_key: "local-session", window_mode: "retained", direction: "backward" },
+    expect(nativeInvoke).toHaveBeenCalledWith("subscribe_session", {
+      request: expect.objectContaining({ session_key: "local-session", level: "steps",
+        cursor: null, scope: { history: "latest_turn", group_keys: [] } }),
     }, undefined);
   });
+  expect(nativeInvoke.mock.calls.map(([command]) => command)).not.toContain("load_session_backward");
+  await act(async () => subscription.resolve({ revision: "0" }));
+  await waitFor(() => expect(local.result.current.eventsLoading).toBe(false));
+  expect(local.result.current.events[0]?.event_key).toBe("latest-row");
+  // Saved anchors do not backfill history before the first screen. Pagination
+  // starts only after this explicit request for older content.
+  expect(nativeInvoke.mock.calls.filter(([command]) => command === "load_session_backward")).toHaveLength(1);
+  expect(backward_request?.history_cursor).toBeUndefined();
+  act(() => local.result.current.loadOlderEvents());
+  await waitFor(() => expect(nativeInvoke).toHaveBeenCalledWith("load_session_backward", {
+    request: expect.objectContaining({ session_key: "local-session", history_cursor: "local-earlier",
+      scope: { history: "retained", group_keys: [] } }),
+  }, undefined));
   local.unmount();
   const remote = remoteMachine(); selectMachine(remote.client);
   const next = renderHook(() => useViewerState());
   await waitFor(() => expect(next.result.current.sessions[0]?.session_key).toBe("remote-session"));
-  await act(async () => pending.resolve({
-    events: [], previous_cursor: "local-earlier", next_cursor: null,
-    total_events: 1, history_status: "complete",
-  }));
-  expect(nativeInvoke.mock.calls.filter(([command]) => command === "load_event_page")).toHaveLength(1);
-  expect(remote.invoke.mock.calls.map(([command]) => command)).not.toContain("load_event_page");
+  await act(async () => pending.resolve(snapshot(backward_request!, "2")));
+  expect(nativeInvoke.mock.calls.filter(([command]) => command === "load_session_backward")).toHaveLength(2);
+  expect(nativeInvoke.mock.calls.map(([command]) => command)).not.toContain("load_event_page");
+  expect(remote.invoke.mock.calls.map(([command]) => command)).not.toContain("load_session_backward");
   expect(next.result.current.selectedSessionKey).toBeNull();
 });
 
-it("does not issue a compatibility fallback after a retired local request rejects", async () => {
+it.each(["subscribe_session", "load_session_backward"])("does not issue a compatibility fallback after a retired local %s rejects", async (stage) => {
   const pending = deferred<never>();
   nativeInvoke.mockImplementation(async (command: string) => {
     if (command === "list_sessions") return catalog("local-session");
-    if (command === "load_session_updates") return pending.promise;
+    if (command === stage) return pending.promise;
+    if (command === "subscribe_session") return { revision: "0" };
     if (command === "update_session_view") return;
     return new Promise(() => {});
   });
@@ -99,12 +134,17 @@ it("does not issue a compatibility fallback after a retired local request reject
   act(() => local.result.current.selectSession("local-session"));
   await waitFor(() => {
     expect(local.result.current.eventsError).toBeNull();
-    expect(nativeInvoke).toHaveBeenCalledWith("load_session_updates", expect.any(Object), undefined);
+    expect(nativeInvoke).toHaveBeenCalledWith(stage, expect.any(Object), undefined);
   });
   local.unmount();
   const remote = remoteMachine(); selectMachine(remote.client);
   renderHook(() => useViewerState());
   await act(async () => pending.reject(new Error("Unknown viewer command")));
-  expect(nativeInvoke.mock.calls.map(([command]) => command)).not.toContain("load_event_page");
-  expect(remote.invoke.mock.calls.map(([command]) => command)).not.toContain("load_event_page");
+  const local_commands = nativeInvoke.mock.calls.map(([command]) => command);
+  const remote_commands = remote.invoke.mock.calls.map(([command]) => command);
+  expect(local_commands).not.toContain("load_session_updates");
+  expect(local_commands).not.toContain("load_event_page");
+  expect(remote_commands).not.toContain("load_session_updates");
+  expect(remote_commands).not.toContain("load_event_page");
+  expect(remote_commands).not.toContain("load_session_backward");
 });

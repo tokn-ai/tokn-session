@@ -1,9 +1,9 @@
 import { expect, it } from "vitest";
-import { HubDeviceStore, canonicalHubUrl, machineReference, parseMachineReference, type DeviceStorage, type HubDeviceRecord } from "./hubDeviceStore";
+import { HubDeviceStore, canonicalHubUrl, machineReference, parseMachineReference, type DeviceStorage, type HubDeviceRecord, type StoredHubDeviceRecord } from "./hubDeviceStore";
 import type { CryptoApi, DeviceIdentity } from "./hubCrypto";
 class MemoryStorage implements DeviceStorage {
-  records = new Map<string, HubDeviceRecord>();
-  async update(key: string, change: (record: HubDeviceRecord | undefined) => HubDeviceRecord) {
+  records = new Map<string, StoredHubDeviceRecord>();
+  async update(key: string, change: (record: StoredHubDeviceRecord | undefined) => HubDeviceRecord) {
     const record = change(this.records.get(key)); this.records.set(key, record); return record;
   }
 }
@@ -12,12 +12,12 @@ const makeIdentity = (secret: string): DeviceIdentity => ({ public_key: () => se
 const crypto = { DeviceIdentity: { generate: () => makeIdentity(String.fromCharCode(65 + identities++).repeat(43)), from_secret: makeIdentity } } as unknown as CryptoApi;
 const first_host = { host_id: "550e8400-e29b-41d4-a716-446655440000", host_public_key: "H".repeat(43) };
 const second_host = { host_id: "550e8400-e29b-41d4-a716-446655440001", host_public_key: "I".repeat(43) };
-it("persists one device per Hub and partitions host pins and selected machines", async () => {
+it("persists metadata with a fresh identity per tab and partitions host pins and selected machines", async () => {
   const storage = new MemoryStorage();
   const first = await HubDeviceStore.open("https://hub.example", crypto, storage);
   await first.saveHost(first_host); await first.saveHost(second_host); await first.selectHost(second_host.host_id);
   const reopened = await HubDeviceStore.open("https://hub.example/", crypto, storage);
-  expect(reopened.identity.public_key()).toBe(first.identity.public_key());
+  expect(reopened.identity.public_key()).not.toBe(first.identity.public_key());
   expect(reopened.hosts).toEqual([first_host, second_host]);
   expect(reopened.selected_host_id).toBe(second_host.host_id);
   const separate = await HubDeviceStore.open("https://other.example", crypto, storage);
@@ -32,9 +32,9 @@ it("refuses changed pins and corrupt existing trust without resetting device ide
   await store.saveHost(first_host);
   await expect(store.saveHost({ ...first_host, host_public_key: "J".repeat(43) })).rejects.toThrow("encryption key changed");
   expect(store.hosts).toEqual([first_host]);
-  storage.records.get("https://hub.example")!.device_secret = "invalid";
+  storage.records.set("https://hub.example", { ...storage.records.get("https://hub.example")!, version: 1, device_secret: "invalid" });
   await expect(HubDeviceStore.open("https://hub.example", crypto, storage)).rejects.toThrow("invalid");
-  expect(storage.records.get("https://hub.example")!.device_secret).toBe("invalid");
+  expect(storage.records.get("https://hub.example")).toHaveProperty("device_secret", "invalid");
 });
 it("requires a full independently obtained machine reference for passkey first use", () => {
   expect(parseMachineReference(machineReference(first_host))).toEqual(first_host);
@@ -84,4 +84,16 @@ it("refreshes cross-tab alias pins and failed named saves preserve the selected 
   await first_tab.refresh();
   expect(first_tab.hosts).toEqual(second_tab.hosts);
   expect(first_tab.selected_host_id).toBe(first_host.host_id);
+});
+
+it("removes legacy browser secrets while preserving host pins and selection", async () => {
+  const storage = new MemoryStorage();
+  storage.records.set("https://hub.example", {
+    version: 1, hub_url: "https://hub.example", device_secret: "Z".repeat(43), hosts: [first_host], selected_host_id: first_host.host_id,
+  });
+  const store = await HubDeviceStore.open("https://hub.example", crypto, storage);
+  expect(store.identity.public_key()).not.toBe("Z".repeat(43));
+  expect(storage.records.get("https://hub.example")).toEqual({
+    version: 2, hub_url: "https://hub.example", hosts: [first_host], selected_host_id: first_host.host_id,
+  });
 });

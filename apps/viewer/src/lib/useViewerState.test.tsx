@@ -16,6 +16,9 @@ import {
   listenForSessionUpdates,
   listenForSessionNotifications,
   loadSessionUpdates,
+  inspectSessionEvent,
+  loadToolDetails,
+  renewSessionSubscriptions,
   loadEventDetail,
   loadEventPage,
   loadTrajectoryEventPage,
@@ -41,6 +44,10 @@ vi.mock("../components/RelayConnection", () => ({ RelayConnection: () => null })
 vi.mock("./tauri", () => ({
   updateSessionView: vi.fn(() => Promise.resolve()),
   loadSessionUpdates: vi.fn(() => Promise.reject(new Error("Unknown viewer command"))),
+  loadGroupDetails: vi.fn((request) => loadSessionUpdates(request)),
+  loadToolDetails: vi.fn((request) => loadEventDetail(request)),
+  inspectSessionEvent: vi.fn((request) => loadEventDetail(request)),
+  renewSessionSubscriptions: vi.fn(() => Promise.resolve()),
   listenForSessionUpdates: vi.fn(() => Promise.resolve(vi.fn())),
   listenForSessionNotifications: vi.fn(() => Promise.resolve(vi.fn())),
   listenForRelayChanges: vi.fn(() => Promise.resolve(vi.fn())),
@@ -61,6 +68,8 @@ vi.mock("./tauri", () => ({
 
 beforeEach(() => {
   localStorage.clear();
+  vi.mocked(loadToolDetails).mockClear();
+  vi.mocked(inspectSessionEvent).mockReset().mockImplementation((request) => loadEventDetail(request));
   vi.mocked(loadSessionUpdates).mockReset().mockRejectedValue(new Error("Unknown viewer command"));
   vi.mocked(listenForSessionUpdates).mockReset().mockResolvedValue(vi.fn());
   vi.mocked(listenForSessionNotifications).mockReset().mockResolvedValue(vi.fn());
@@ -936,9 +945,11 @@ describe("useViewerState Relay updates", () => {
     const failed = deferred<EventDetail>();
     vi.mocked(loadEventDetail).mockReturnValue(failed.promise);
     act(() => emit?.({ session_key: "live", reset: false }));
-    await waitFor(() => expect(loadEventDetail).toHaveBeenCalledTimes(2));
+    await waitFor(() => {
+      expect(loadEventDetail).toHaveBeenCalledTimes(2);
+      expect(currentLoading()).toBe(true);
+    });
     expect(currentDetail()).toEqual(existing);
-    expect(currentLoading()).toBe(true);
     if (!isTrajectory) expect(result.current.detail).toEqual(existing);
     await act(async () => failed.reject(new Error("temporarily unavailable")));
     await waitFor(() => expect(currentError()).toBe("temporarily unavailable"));
@@ -2772,26 +2783,66 @@ describe("semantic session delivery", () => {
     expect(result.current.events[0].summary).toBe("one");
     expect(loadEventPage).not.toHaveBeenCalled();
   });
-  it("requests details only for Inspector and refreshes it on detail-only pushes", async () => {
+  it("opens only the latest screen despite a missing saved bookmark and renews without fetching history", async () => {
+    const timers = vi.spyOn(window, "setInterval");
+    saveReadingPosition("live", { anchors: [{ slot_key: "removed", type: "message", timestamp: null, top: 0 }],
+      last_event: "old-final", at_end: true });
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
+    const page = { ...toolEventPage(), previous_cursor: "older" };
+    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    const { result } = renderHook(() => useViewerState());
+    await selectListedSession(result, "live");
+    await waitFor(() => expect(result.current.events).toEqual(page.events));
+    expect(loadSessionUpdates).toHaveBeenCalledOnce();
+    expect(loadEventPage).not.toHaveBeenCalled();
+    await waitFor(() => expect(result.current.eventsLoading).toBe(false));
+    await act(async () => {
+      for (const [callback, delay] of timers.mock.calls) if (delay === 30_000 && typeof callback === "function") callback();
+    });
+    expect(renewSessionSubscriptions).toHaveBeenCalled();
+    expect(loadSessionUpdates).toHaveBeenCalledOnce();
+  });
+
+  it("loads display payload and inspection independently for the same event", async () => {
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
+    const page = toolEventPage();
+    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    vi.mocked(loadToolDetails).mockResolvedValueOnce(toolDetail("display payload"));
+    vi.mocked(inspectSessionEvent).mockResolvedValueOnce({ ...toolDetail("inspection"), native: { source: "native record" } });
+    const { result } = renderHook(() => useViewerState());
+    await selectListedSession(result, "live");
+    await waitFor(() => expect(result.current.events).toEqual(page.events));
+    act(() => result.current.toggleEventExpanded(page.events[0].event_key));
+    await waitFor(() => expect(result.current.expandedDetail?.tool_output?.sections[0].text).toBe("display payload"));
+    expect(inspectSessionEvent).not.toHaveBeenCalled();
+    act(() => result.current.selectEvent(page.events[0].event_key));
+    await waitFor(() => expect(result.current.detail?.native).toEqual({ source: "native record" }));
+    expect(result.current.expandedDetail?.tool_output?.sections[0].text).toBe("display payload");
+    expect(loadToolDetails).toHaveBeenCalledOnce();
+    expect(inspectSessionEvent).toHaveBeenCalledOnce();
+  });
+
+  it("uses dedicated inspection, invalidates it on live changes, and never subscribes to details", async () => {
     let emit: ((update: import("./types").SessionUpdate) => void) | undefined;
     vi.mocked(listenForSessionUpdates).mockImplementation((handler) => { emit = handler; return Promise.resolve(vi.fn()); });
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
     const page = toolEventPage();
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => ({ ...semanticSnapshot(request, page),
-      items: [...semanticSnapshot(request, page).items, ...(request.level === "details" && !request.unsubscribe
-        ? [{ item_id: `detail:${page.events[0].event_key}`, kind: "detail" as const, level: "details" as const, event_key: page.events[0].event_key, detail: toolDetail("delivered") }] : [])] }));
+    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    vi.mocked(inspectSessionEvent).mockResolvedValueOnce(toolDetail("inspected"))
+      .mockResolvedValueOnce(toolDetail("updated inspection"));
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "live");
     await waitFor(() => expect(result.current.events).toEqual(page.events));
-    expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) => request.level === "details")).toBe(false);
+    expect(inspectSessionEvent).not.toHaveBeenCalled();
     act(() => result.current.selectEvent(page.events[0].event_key));
-    await waitFor(() => expect(result.current.detail?.tool_output?.sections[0].text).toBe("delivered"));
-    const request = vi.mocked(loadSessionUpdates).mock.calls.find(([request]) => request.level === "details")![0];
-    act(() => emit?.({ ...semanticSnapshot(request, page), snapshot: false, base_revision: "1", revision: "2", item_order: null,
-      items: [{ item_id: `detail:${page.events[0].event_key}`, kind: "detail", level: "details", event_key: page.events[0].event_key, detail: toolDetail("pushed") }] }));
-    await waitFor(() => expect(result.current.detail?.tool_output?.sections[0].text).toBe("pushed"));
-    expect(loadEventDetail).not.toHaveBeenCalled();
-    expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) => request.level === "details")).toBe(true);
+    await waitFor(() => expect(result.current.detail?.tool_output?.sections[0].text).toBe("inspected"));
+    const request = vi.mocked(loadSessionUpdates).mock.calls.find(([request]) => request.level === "steps")![0];
+    const initial = semanticSnapshot(request, page);
+    act(() => emit?.({ ...initial, snapshot: false, base_revision: "1", revision: "2", item_order: null,
+      items: [{ ...initial.items[0], summary: { ...page.events[0], summary: "changed" } }] }));
+    await waitFor(() => expect(result.current.detail?.tool_output?.sections[0].text).toBe("updated inspection"));
+    expect(loadToolDetails).not.toHaveBeenCalled();
+    expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) => request.level === "details")).toBe(false);
   });
 
   it("loads one complete inner group on demand without fetching its details", async () => {

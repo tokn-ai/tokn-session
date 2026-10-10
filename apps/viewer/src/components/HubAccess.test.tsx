@@ -30,7 +30,7 @@ it("pairs in browser without a local bearer token and closes the selected machin
   expect(screen.getByRole("link", { name: "Hub administration" })).toHaveAttribute("href", "/admin");
   fireEvent.change(screen.getByLabelText("Machine address or reference"), { target: { value: host.machine_address } });
   fireEvent.change(screen.getByLabelText("Authenticator code"), { target: { value: "123456" } });
-  fireEvent.click(screen.getByRole("button", { name: "Pair and connect" }));
+  fireEvent.click(screen.getByRole("button", { name: "Pair and set up passkey" }));
   expect(await screen.findByText("Encrypted sessions")).toBeInTheDocument();
   expect(service.pairMachine).toHaveBeenCalledWith(host.machine_address, "123456", expect.any(AbortSignal));
   fireEvent.click(screen.getByRole("button", { name: /connection settings/i }));
@@ -58,6 +58,7 @@ it("requires the complete machine reference before passkey first use", async () 
 });
 
 it("reopens the remembered machine without another code and offers host-owned passkey enrollment", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
   vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: host.host_id, device_public_key: "D".repeat(43) });
   render(<HubAccess initial_hub_url="https://hub.example" />);
   expect(await screen.findByText("Encrypted sessions")).toBeInTheDocument();
@@ -68,6 +69,7 @@ it("reopens the remembered machine without another code and offers host-owned pa
 });
 
 it("cancels abandoned pairing and rejects a late connection after unmount", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
   let resolve_connection!: (client: RemoteClient) => void;
   vi.mocked(service.connect).mockImplementation(() => new Promise((resolve) => { resolve_connection = resolve; }));
   vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: host.host_id, device_public_key: "D".repeat(43) });
@@ -81,6 +83,8 @@ it("cancels abandoned pairing and rejects a late connection after unmount", asyn
 });
 
 it("preserves a successor machine when an old picker's delayed cleanup runs", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+  service.dispose = vi.fn();
   vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: host.host_id, device_public_key: "D".repeat(43) });
   const old_close = vi.spyOn(client, "close");
   const view = render(<HubAccess initial_hub_url="https://hub.example" />);
@@ -93,9 +97,11 @@ it("preserves a successor machine when an old picker's delayed cleanup runs", as
   expect(viewerStorageScope()).toBe(successor.endpoint);
   expect(successor_close).not.toHaveBeenCalled();
   expect(old_close).toHaveBeenCalledOnce();
+  expect(service.dispose).toHaveBeenCalledOnce();
 });
 
 it("cancels a remembered reconnect and ignores its late connection", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
   let resolve_connection!: (client: RemoteClient) => void;
   vi.mocked(service.connect).mockImplementation(() => new Promise((resolve) => { resolve_connection = resolve; }));
   vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: host.host_id, device_public_key: "D".repeat(43) });
@@ -114,6 +120,7 @@ it("cancels a remembered reconnect and ignores its late connection", async () =>
 });
 
 it("keeps a failed remembered machine available for an explicit retry without pairing again", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
   vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: host.host_id, device_public_key: "D".repeat(43) });
   vi.mocked(service.connect).mockRejectedValueOnce(new Error("Machine is offline"));
   render(<HubAccess initial_hub_url="https://hub.example" />);
@@ -131,7 +138,7 @@ it("keeps a long machine address visible beside a concise accessible open action
   vi.mocked(service.status).mockResolvedValue({ hosts: [{ ...host, machine_address }], selected_host_id: null, device_public_key: "D".repeat(43) });
   render(<HubAccess initial_hub_url="https://hub.example" />); await ready();
   expect(screen.getByRole("heading", { name: machine_address })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: `Open ${machine_address}` })).toHaveTextContent(/^Open$/);
+  expect(screen.getByRole("button", { name: `Sign in to ${machine_address}` })).toHaveTextContent(/^Sign in$/);
 });
 
 it("clears the code and does not open a machine after canceled pairing", async () => {
@@ -141,13 +148,13 @@ it("clears the code and does not open a machine after canceled pairing", async (
   expect(screen.getByText("No saved machines")).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("Machine address or reference"), { target: { value: host.machine_address } });
   fireEvent.change(screen.getByLabelText("Authenticator code"), { target: { value: "123456" } });
-  fireEvent.click(screen.getByRole("button", { name: "Pair and connect" }));
+  fireEvent.click(screen.getByRole("button", { name: "Pair and set up passkey" }));
   const signal = vi.mocked(service.pairMachine).mock.calls[0][2];
   expect(screen.getByLabelText("Authenticator code")).toHaveValue("");
   fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
   expect(signal.aborted).toBe(true);
   finish_pairing(host);
-  await waitFor(() => expect(screen.getByRole("button", { name: "Pair and connect" })).toBeDisabled());
+  await waitFor(() => expect(screen.getByRole("button", { name: "Pair and set up passkey" })).toBeDisabled());
   expect(service.connect).not.toHaveBeenCalled();
 });
 
@@ -192,6 +199,7 @@ it("leaves This machine available after a Hub failure and exposes local retry fe
 });
 
 it("honors picker startup instead of the Hub's remembered selected host", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
   vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: host.host_id, device_public_key: "D".repeat(43) });
   const on_machine_open = vi.fn();
   render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} on_machine_open={on_machine_open} />); await ready();
@@ -200,6 +208,7 @@ it("honors picker startup instead of the Hub's remembered selected host", async 
 });
 
 it("opens only the explicit startup UUID and reports successful selection with its Hub", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
   const other = { ...host, host_id: "550e8400-e29b-41d4-a716-446655440001", machine_address: "alice:laptop" };
   vi.mocked(service.status).mockResolvedValue({ hosts: [host, other], selected_host_id: other.host_id, device_public_key: "D".repeat(43) });
   const on_machine_open = vi.fn();
@@ -213,6 +222,7 @@ it("opens only the explicit startup UUID and reports successful selection with i
 });
 
 it("does not substitute the Hub's last host for a missing explicit startup UUID", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
   vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: host.host_id, device_public_key: "D".repeat(43) });
   const on_machine_open = vi.fn();
   render(<HubAccess initial_hub_url="https://hub.example" startup_host_id="550e8400-e29b-41d4-a716-446655440099" on_machine_open={on_machine_open} />); await ready();
@@ -221,6 +231,7 @@ it("does not substitute the Hub's last host for a missing explicit startup UUID"
 });
 
 it("does not publish a failed startup selection", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
   vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: host.host_id, device_public_key: "D".repeat(43) });
   vi.mocked(service.connect).mockRejectedValueOnce(new Error("Machine unavailable"));
   const on_machine_open = vi.fn();
@@ -247,10 +258,37 @@ it("keeps known Hubs accessible and loads the same UUID independently through ea
 });
 
 it("does not reopen a machine when callbacks persist startup preferences", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
   vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: null, device_public_key: "D".repeat(43) });
   const view = render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
   fireEvent.click(screen.getByRole("button", { name: "Open alice:workstation" }));
   expect(await screen.findByText("Encrypted sessions")).toBeInTheDocument();
   view.rerender(<HubAccess initial_hub_url="https://hub.example" startup_host_id={host.host_id} />);
   expect(service.connect).toHaveBeenCalledOnce(); expect(openHubAccess).toHaveBeenCalledOnce();
+});
+
+it("keeps remembered browser machines locked until explicit sign-in and destroys keys on pagehide", async () => {
+  service.dispose = vi.fn();
+  vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: host.host_id, device_public_key: "D".repeat(43) });
+  const close = vi.spyOn(client, "close");
+  render(<HubAccess initial_hub_url="https://hub.example" />); await ready();
+  expect(service.connect).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Sign in to alice:workstation" }));
+  await screen.findByText("Encrypted sessions");
+  fireEvent(window, new PageTransitionEvent("pagehide"));
+  expect(close).toHaveBeenCalledOnce();
+  expect(service.dispose).toHaveBeenCalledOnce();
+  expect(screen.queryByText("Encrypted sessions")).not.toBeInTheDocument();
+});
+
+it("requires explicit browser sign-in even with a remembered startup UUID", async () => {
+  vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: host.host_id, device_public_key: "D".repeat(43) });
+  const on_machine_open = vi.fn();
+  render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={host.host_id} on_machine_open={on_machine_open} />); await ready();
+  expect(screen.getByRole("button", { name: "Sign in to alice:workstation" })).toBeEnabled();
+  expect(service.connect).not.toHaveBeenCalled(); expect(on_machine_open).not.toHaveBeenCalled();
+  expect(screen.queryByText(/selected machine is no longer saved/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Sign in to alice:workstation" }));
+  expect(await screen.findByText("Encrypted sessions")).toBeInTheDocument();
+  expect(on_machine_open).toHaveBeenCalledWith({ kind: "hub", hub_url: "https://hub.example", host_id: host.host_id });
 });

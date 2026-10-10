@@ -77,3 +77,56 @@ pub async fn load_session_updates(
     .await
     .map_err(|error| error.to_string())?
 }
+
+#[tauri::command]
+pub async fn subscribe_session(
+  app: AppHandle,
+  state: State<'_, LocalViewer>,
+  request: tokn_viewer_core::updates::SessionUpdatesRequest,
+) -> Result<serde_json::Value, String> {
+  let service = state.service(&app).await?;
+  tauri::async_runtime::spawn_blocking(move || service.subscribe_session(request))
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn load_session_backward(
+  app: AppHandle,
+  state: State<'_, LocalViewer>,
+  request: tokn_viewer_core::updates::SessionUpdatesRequest,
+) -> Result<tokn_viewer_core::updates::SessionUpdate, String> {
+  let service = state.service(&app).await?;
+  tauri::async_runtime::spawn_blocking(move || service.load_session_backward(request))
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn load_session_details(
+  app: AppHandle,
+  state: State<'_, LocalViewer>,
+  request: tokn_viewer_core::delivery::SessionDetailsRequest,
+) -> Result<tokn_viewer_core::delivery::SessionDetails, String> {
+  let service = state.service(&app).await?;
+  tauri::async_runtime::spawn_blocking(move || service.load_session_details(request))
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn inspect_session_event(
+  app: AppHandle,
+  state: State<'_, LocalViewer>,
+  request: LoadEventDetailRequest,
+) -> Result<EventDetail, String> {
+  let service = state.service(&app).await?;
+  tauri::async_runtime::spawn_blocking(move || service.inspect_session_event(request))
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn renew_session_subscriptions(
+  app: AppHandle,
+  state: State<'_, LocalViewer>,
+  ids: Vec<String>,
+) -> Result<(), String> {
+  state.service(&app).await?.renew_session_subscriptions(&ids)
+}

@@ -156,9 +156,65 @@ export function listenForSessionIndexProgress(
   return subscribe<SessionIndexProgress>("session-index-progress", (event) => handler(event.payload));
 }
 
-export function loadSessionUpdates(request: import("./types").SessionUpdatesRequest, send: CommandInvoker = invoke): Promise<import("./types").SessionUpdate> {
-  return send("load_session_updates", { request });
+// Compatibility leases belong to the same captured machine as their requests.
+const legacySubscriptions = new WeakMap<CommandInvoker, Map<string, import("./types").SessionUpdatesRequest>>();
+
+function legacySubscriptionsFor(send: CommandInvoker): Map<string, import("./types").SessionUpdatesRequest> {
+  let subscriptions = legacySubscriptions.get(send);
+  if (!subscriptions) {
+    subscriptions = new Map();
+    legacySubscriptions.set(send, subscriptions);
+  }
+  return subscriptions;
 }
+
+function unknownDelivery(error: unknown): boolean {
+  return /unknown.*command|unknown.*variant|command.*not found|unknown viewer api route|unavailable for a session share/i.test(String(error));
+}
+
+/** Compatibility facade: modern transports subscribe live, then read backward. */
+export async function loadSessionUpdates(request: import("./types").SessionUpdatesRequest, send: CommandInvoker = invoke): Promise<import("./types").SessionUpdate> {
+  try {
+    await send("subscribe_session", { request });
+    if (request.unsubscribe) return { ...request, generation: "released", revision: "0", base_revision: null, snapshot: true,
+      items: [], groups: [], removed_items: [], item_order: [], state: { total_events: 0, history_status: "complete", previous_cursor: null, next_cursor: null } };
+    return await send("load_session_backward", { request });
+  } catch (error) {
+    if (!unknownDelivery(error)) throw error;
+    const update = await send<import("./types").SessionUpdate>("load_session_updates", { request });
+    const subscriptions = legacySubscriptionsFor(send);
+    if (request.unsubscribe) subscriptions.delete(request.subscription_id);
+    else subscriptions.set(request.subscription_id, { ...request, cursor: update.revision });
+    while (subscriptions.size > 24) subscriptions.delete(subscriptions.keys().next().value!);
+    return update;
+  }
+}
+export async function loadGroupDetails(request: import("./types").SessionUpdatesRequest, send: CommandInvoker = invoke): Promise<import("./types").SessionUpdate> {
+  try { return await send("load_session_details", { request: { kind: "group", request } }); }
+  catch (error) { if (!unknownDelivery(error)) throw error; return send("load_session_updates", { request }); }
+}
+export async function loadToolDetails(request: LoadEventDetailRequest, send: CommandInvoker = invoke): Promise<EventDetail> {
+  try { return await send("load_session_details", { request: { kind: "tool", request } }); }
+  catch (error) { if (!unknownDelivery(error)) throw error; return loadEventDetail(request, send); }
+}
+export async function inspectSessionEvent(request: LoadEventDetailRequest, send: CommandInvoker = invoke): Promise<EventDetail> {
+  try { return await send("inspect_session_event", { request }); }
+  catch (error) { if (!unknownDelivery(error)) throw error; return loadEventDetail(request, send); }
+}
+export async function renewSessionSubscriptions(ids: string[], send: CommandInvoker = invoke): Promise<import("./types").SessionUpdate[]> {
+  try { await send("renew_session_subscriptions", { ids }); return []; }
+  catch (error) {
+    if (!unknownDelivery(error)) throw error;
+    const subscriptions = legacySubscriptionsFor(send);
+    return Promise.all(ids.filter((id) => subscriptions.has(id)).map(async (id) => {
+      const update = await send<import("./types").SessionUpdate>("load_session_updates", { request: subscriptions.get(id)! });
+      const request = subscriptions.get(id);
+      if (request) subscriptions.set(id, { ...request, cursor: update.revision });
+      return update;
+    }));
+  }
+}
+
 export function listenForSessionUpdates(handler: (update: import("./types").SessionUpdate) => void, subscribe: EventSubscriber = listen): Promise<UnlistenFn> {
   return subscribe<import("./types").SessionUpdate>("session-updated", (event) => handler(event.payload));
 }

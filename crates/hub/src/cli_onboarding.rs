@@ -7,7 +7,7 @@ use std::{
 use tokn_session_hub::{
   connector::{self, ConnectorConfig, PairedHostConfig},
   onboarding::{self, HostProfile},
-  pairing::TotpSecret,
+  pairing::{TOTP_PERIOD, TotpSecret},
   secure::NoiseIdentity,
 };
 use url::Url;
@@ -133,7 +133,11 @@ pub fn prepare_host(options: HostOptions) -> Result<ConnectorConfig, String> {
   }
   if is_new_secret {
     if std::io::stderr().is_terminal() {
-      display_authenticator(&onboarding::read_totp_secret(&state_file)?, &profile.name)?;
+      display_authenticator(
+        &onboarding::read_totp_secret(&state_file)?,
+        &profile.name,
+        Some(&format!("{}@{}", profile.host_id, noise_identity.public_key())),
+      )?;
     } else {
       eprintln!(
         "Authenticator saved locally. Run `tokn-session-hub authenticator` in a terminal with the same --state-dir to display its setup QR."
@@ -226,25 +230,99 @@ pub fn authenticator(
     );
     return Ok(());
   }
-  let label = HostProfile::load(&state_dir.join("host.json"))?
-    .map(|profile| profile.name)
-    .unwrap_or_else(|| "My hosts".into());
-  display_authenticator(&secret, &label)
+  let profile = HostProfile::load(&state_dir.join("host.json"))?;
+  let label = profile
+    .as_ref()
+    .map(|profile| profile.name.as_str())
+    .unwrap_or("My hosts");
+  let reference = profile
+    .as_ref()
+    .map(|profile| {
+      let identity = NoiseIdentity::load(&state_dir.join("host-noise.key"))?;
+      Ok::<_, String>(format!("{}@{}", profile.host_id, identity.public_key()))
+    })
+    .transpose()?;
+  display_authenticator(&secret, label, reference.as_deref())
 }
 
-fn display_authenticator(secret: &TotpSecret, label: &str) -> Result<(), String> {
+fn display_authenticator(secret: &TotpSecret, label: &str, reference: Option<&str>) -> Result<(), String> {
   if !std::io::stderr().is_terminal() {
     return Err(
       "Display authenticator setup in a local terminal, or use --export-file to create a private seed file".into(),
     );
   }
+  let now = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map_err(|_| "Invalid host clock")?
+    .as_secs();
+  eprint!("{}", render_authenticator(secret, label, reference, now)?.as_str());
+  Ok(())
+}
+
+fn render_authenticator(
+  secret: &TotpSecret,
+  label: &str,
+  reference: Option<&str>,
+  now: u64,
+) -> Result<Zeroizing<String>, String> {
+  use std::fmt::Write;
   let uri = Zeroizing::new(secret.provisioning_uri(label)?);
   let qr = qrcode::QrCode::new(uri.as_bytes()).map_err(|_| "Could not render authenticator QR")?;
-  eprintln!("Scan this QR with your authenticator. It contains a secret; keep it off the Hub.");
-  eprintln!("{}", qr.render::<qrcode::render::unicode::Dense1x2>().build());
-  eprintln!("Manual setup key: {}", secret.to_base32());
-  eprintln!("Time based · SHA1 · 6 digits · 30 seconds");
-  Ok(())
+  let mut output = Zeroizing::new(String::new());
+  if let Some(reference) = reference {
+    writeln!(output, "Machine reference: {reference}").map_err(|e| e.to_string())?;
+  }
+  writeln!(
+    output,
+    "Scan this QR with your authenticator. It contains a secret; keep it off the Hub."
+  )
+  .map_err(|e| e.to_string())?;
+  writeln!(output, "{}", qr.render::<qrcode::render::unicode::Dense1x2>().build()).map_err(|e| e.to_string())?;
+  writeln!(
+    output,
+    "Full setup URI (same secret and settings as the QR): {}",
+    uri.as_str()
+  )
+  .map_err(|e| e.to_string())?;
+  writeln!(
+    output,
+    "Use the QR or full URI with an authenticator that supports SHA-256 TOTP."
+  )
+  .map_err(|e| e.to_string())?;
+  writeln!(
+    output,
+    "Manual setup key: {}",
+    Zeroizing::new(secret.to_base32()).as_str()
+  )
+  .map_err(|e| e.to_string())?;
+  writeln!(
+    output,
+    "Manual settings: Time based (TOTP) · SHA256 · 6 digits · 30 seconds"
+  )
+  .map_err(|e| e.to_string())?;
+  writeln!(
+    output,
+    "The manual key contains only the secret. Set the algorithm explicitly; a SHA-1 default produces different codes."
+  )
+  .map_err(|e| e.to_string())?;
+  writeln!(
+    output,
+    "Current TOTP: {} (valid for {}s)",
+    Zeroizing::new(secret.code_at(now)).as_str(),
+    TOTP_PERIOD - now % TOTP_PERIOD
+  )
+  .map_err(|e| e.to_string())?;
+  writeln!(
+    output,
+    "Compare this code with your authenticator; rerun this command for a fresh code."
+  )
+  .map_err(|e| e.to_string())?;
+  writeln!(
+    output,
+    "If codes differ, check the algorithm, digits, period, and device clocks. If your app cannot use SHA-256, use a compatible authenticator."
+  )
+  .map_err(|e| e.to_string())?;
+  Ok(output)
 }
 
 fn read_seed(path: &Path) -> Result<TotpSecret, String> {
@@ -285,6 +363,30 @@ fn read_seed(path: &Path) -> Result<TotpSecret, String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn authenticator_display_includes_reference_and_rfc_sha256_verification_code() {
+    let secret = TotpSecret::from_base32("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZA").unwrap();
+    let reference = "11111111-1111-4111-8111-111111111111@verified-host-key";
+    let output = render_authenticator(&secret, "Workstation", Some(reference), 59).unwrap();
+    assert!(output.contains(&format!("Machine reference: {reference}")));
+    assert!(output.contains("Current TOTP: 119246 (valid for 1s)"));
+    assert!(output.contains("SHA256 · 6 digits · 30 seconds"));
+    let uri = output
+      .lines()
+      .find_map(|line| line.strip_prefix("Full setup URI (same secret and settings as the QR): "))
+      .unwrap();
+    assert_eq!(uri, secret.provisioning_uri("Workstation").unwrap());
+    let uri = Url::parse(uri).unwrap();
+    let settings = uri.query_pairs().collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(settings["secret"], secret.to_base32());
+    assert_eq!(settings["algorithm"], "SHA256");
+    assert_eq!(settings["digits"], "6");
+    assert_eq!(settings["period"], "30");
+    let standalone = render_authenticator(&secret, "My hosts", None, 60).unwrap();
+    assert!(!standalone.contains("Machine reference:"));
+    assert!(standalone.contains("valid for 30s"));
+  }
 
   #[test]
   fn saved_host_reconnects_without_options_and_missing_keys_do_not_reset_trust() {

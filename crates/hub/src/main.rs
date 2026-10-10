@@ -117,6 +117,9 @@ enum Command {
   },
   /// Show local authenticator setup, or import/export its secret for user-managed synchronization.
   Authenticator {
+    /// Rotate a legacy SHA1 authenticator and retire unclassified device grants.
+    #[arg(long, conflicts_with = "import_file")]
+    upgrade_sha256: bool,
     #[arg(long)]
     state_dir: Option<PathBuf>,
     #[arg(long, conflicts_with = "export_file")]
@@ -366,10 +369,23 @@ async fn run(args: Args) -> Result<(), String> {
       result
     }
     Command::Authenticator {
+      upgrade_sha256,
       state_dir,
       import_file,
       export_file,
-    } => cli_onboarding::authenticator(&state_dir.unwrap_or(default_path("")?), import_file, export_file),
+    } => {
+      let state_dir = state_dir.unwrap_or(default_path("")?);
+      if upgrade_sha256 {
+        use std::io::IsTerminal;
+        if export_file.is_none() && !std::io::stderr().is_terminal() {
+          return Err(
+            "Upgrade requires a local terminal or --export-file so the new authenticator can be saved".into(),
+          );
+        }
+        onboarding::upgrade_authenticator(&state_dir.join("host-access.json"))?;
+      }
+      cli_onboarding::authenticator(&state_dir, import_file, export_file)
+    }
     Command::Devices { state_dir } => {
       let state_dir = state_dir.unwrap_or(default_path("")?);
       println!(

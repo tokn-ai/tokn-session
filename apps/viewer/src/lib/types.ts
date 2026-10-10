@@ -488,6 +488,7 @@ export interface AcknowledgeSessionAttentionResponse {
 }
 
 export interface EventPageResponse {
+  source_revision?: string;
   events: EventSummary[];
   next_cursor: string | null;
   previous_cursor: string | null;
