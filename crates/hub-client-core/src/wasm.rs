@@ -48,8 +48,14 @@ pub struct WasmClientPairing {
 #[wasm_bindgen(js_class = ClientPairing)]
 impl WasmClientPairing {
   pub fn start(host_id: &str, identity: &WasmDeviceIdentity, code: &str, now_seconds: f64) -> Result<Self, JsValue> {
-    let (inner, record) =
-      ClientPairing::start(host_id, &identity.0, code, unix_seconds(now_seconds)?).map_err(error)?;
+    let (inner, record) = ClientPairing::start_for(
+      host_id,
+      &identity.0,
+      code,
+      unix_seconds(now_seconds)?,
+      crate::pairing::ClientKind::Browser,
+    )
+    .map_err(error)?;
     Ok(Self { inner, record })
   }
 

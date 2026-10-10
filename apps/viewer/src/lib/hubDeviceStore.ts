@@ -3,14 +3,18 @@ import type { SavedHubHost } from "./types";
 import { parseMachineAddress } from "./hubAddress";
 export type { SavedHubHost } from "./types";
 export interface HubDeviceRecord {
-  version: 1;
+  version: 2;
   hub_url: string;
-  device_secret: string;
   hosts: SavedHubHost[];
   selected_host_id: string | null;
 }
+export interface LegacyHubDeviceRecord extends Omit<HubDeviceRecord, "version"> {
+  version: 1;
+  device_secret: string;
+}
+export type StoredHubDeviceRecord = HubDeviceRecord | LegacyHubDeviceRecord;
 export interface DeviceStorage {
-  update(hub_url: string, change: (record: HubDeviceRecord | undefined) => HubDeviceRecord): Promise<HubDeviceRecord>;
+  update(hub_url: string, change: (record: StoredHubDeviceRecord | undefined) => HubDeviceRecord): Promise<HubDeviceRecord>;
 }
 const KEY = /^[A-Za-z0-9_-]{43}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -47,8 +51,9 @@ export function parseMachineReference(value: string): SavedHubHost {
   if (!match) throw new Error("Paste the complete machine reference printed by the host connector.");
   return validateHost({ host_id: match[1], host_public_key: match[2] });
 }
-function validateRecord(record: HubDeviceRecord, hub_url: string): HubDeviceRecord {
-  if (record.version !== 1 || record.hub_url !== hub_url || !KEY.test(record.device_secret)
+function validateRecord(record: StoredHubDeviceRecord, hub_url: string): HubDeviceRecord {
+  if (!record || (record.version !== 1 && record.version !== 2) || record.hub_url !== hub_url
+    || (record.version === 1 && !KEY.test(record.device_secret))
     || !Array.isArray(record.hosts) || record.hosts.length > 64) throw new Error("Saved device state is invalid. Restore it before reconnecting.");
   const hosts = record.hosts.map(validateHost);
   if (new Set(hosts.map((host) => host.host_id)).size !== hosts.length
@@ -56,7 +61,8 @@ function validateRecord(record: HubDeviceRecord, hub_url: string): HubDeviceReco
     || (record.selected_host_id !== null && !hosts.some((host) => host.host_id === record.selected_host_id))) {
     throw new Error("Saved device state is invalid. Restore it before reconnecting.");
   }
-  return { ...record, hosts };
+  // Drop legacy private keys atomically while retaining independently pinned hosts.
+  return { version: 2, hub_url, hosts, selected_host_id: record.selected_host_id };
 }
 
 function mergeHost(hosts: SavedHubHost[], host: SavedHubHost, require_existing = false): SavedHubHost[] {
@@ -86,7 +92,7 @@ export class IndexedDeviceStorage implements DeviceStorage {
     });
     return this.database;
   }
-  async update(hub_url: string, change: (record: HubDeviceRecord | undefined) => HubDeviceRecord): Promise<HubDeviceRecord> {
+  async update(hub_url: string, change: (record: StoredHubDeviceRecord | undefined) => HubDeviceRecord): Promise<HubDeviceRecord> {
     const database = await this.open();
     return new Promise((resolve, reject) => {
       const transaction = database.transaction("devices", "readwrite");
@@ -95,7 +101,7 @@ export class IndexedDeviceStorage implements DeviceStorage {
       let result: HubDeviceRecord;
       let failure: unknown;
       read.onsuccess = () => {
-        try { result = change(read.result as HubDeviceRecord | undefined); store.put(result); }
+        try { result = change(read.result as StoredHubDeviceRecord | undefined); store.put(result); }
         catch (error) { failure = error; transaction.abort(); }
       };
       transaction.oncomplete = () => resolve(result);
@@ -109,22 +115,22 @@ export class HubDeviceStore {
   private constructor(readonly hub_url: string, readonly identity: DeviceIdentity, private record: HubDeviceRecord, private storage: DeviceStorage) {}
   static async open(hub_url: string, crypto: CryptoApi, storage: DeviceStorage = browser_storage): Promise<HubDeviceStore> {
     const canonical = canonicalHubUrl(hub_url);
-    // Generate outside the transaction; an atomic read/write chooses an existing
-    // identity if another tab enrolled this origin in the meantime.
-    const candidate = crypto.DeviceIdentity.generate();
+    // Each document owns a fresh identity. IndexedDB contains only host pins.
+    const identity = crypto.DeviceIdentity.generate();
     try {
       const record = await storage.update(canonical, (existing) => existing ? validateRecord(existing, canonical) : {
-        version: 1, hub_url: canonical, device_secret: candidate.export_secret(), hosts: [], selected_host_id: null,
+        version: 2, hub_url: canonical, hosts: [], selected_host_id: null,
       });
-      return new HubDeviceStore(canonical, crypto.DeviceIdentity.from_secret(record.device_secret), record, storage);
-    } finally { candidate.free(); }
+      return new HubDeviceStore(canonical, identity, record, storage);
+    } catch (error) { identity.free(); throw error; }
   }
+  private disposed = false;
+  dispose(): void { if (!this.disposed) { this.disposed = true; this.identity.free(); } }
   get hosts(): SavedHubHost[] { return this.record.hosts.map((host) => ({ ...host })); }
   get selected_host_id(): string | null { return this.record.selected_host_id; }
   async refresh(): Promise<void> {
     this.record = await this.storage.update(this.hub_url, (stored) => {
       const current = validateRecord(stored!, this.hub_url);
-      if (current.device_secret !== this.identity.export_secret()) throw new Error("This device's saved identity changed. Reload before reconnecting.");
       return current;
     });
   }

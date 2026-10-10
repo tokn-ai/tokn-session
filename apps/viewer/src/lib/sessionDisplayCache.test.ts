@@ -172,4 +172,20 @@ describe("session display replicas", () => {
     expect(cache.request("one", "steps").scope?.history).toBe("retained");
   });
 
+  it("invalidates resource payloads on source-only changes while retaining unchanged summary references", () => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one");
+    initial.state.source_revision = "source:1";
+    const first = cache.apply(initial)!; cache.commit("one", first);
+    const detail = { event_key: "a", event: { output: "old payload" }, native: null, is_hidden: false, tool_output: null };
+    cache.resources.set("one", "tool", "a", { status: "complete" }, detail);
+    cache.resources.set("one", "inspect", "a", { status: "complete" }, detail);
+    const second = cache.apply({ ...initial, snapshot: false, base_revision: "1", revision: "2", items: [], item_order: null,
+      state: { ...initial.state, source_revision: "source:2" } })!;
+    expect(second.events[0]).toBe(first.events[0]);
+    expect([...cache.commit("one", second)!]).toEqual(["a"]);
+    expect(cache.resources.detail("one", "tool", "a")).toBeNull();
+    expect(cache.resources.coverage("one", "inspect", "a").status).toBe("stale");
+  });
+
 });

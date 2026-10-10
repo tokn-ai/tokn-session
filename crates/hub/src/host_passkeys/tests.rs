@@ -137,7 +137,8 @@ fn host_passkey_authorizes_a_new_device_and_persists_independently_of_hub_admin(
     result,
     json!({"authorized": true, "registered": false, "device_public_key": new_device})
   );
-  assert!(onboarding::is_authorized(&path, &new_device).unwrap());
+  assert!(onboarding::is_authorized_at(&path, &new_device, 903).unwrap());
+  assert!(!onboarding::is_authorized_at(&path, &new_device, 903 + 8 * 60 * 60).unwrap());
   let reopened = HostPasskeys::new(path.clone(), HOST, "Workstation", ORIGIN).unwrap();
   assert_eq!(onboarding::host_passkeys(&path, ORIGIN).unwrap().len(), 1);
   let (pending, payload) = assertion(&reopened, &new_device, "new-handshake", &mut authenticator);
@@ -257,4 +258,56 @@ fn only_stable_https_origins_or_localhost_are_accepted() {
   }
   assert!(validate_origin(ORIGIN).is_ok());
   assert!(validate_origin("http://localhost:5559").is_ok());
+}
+
+#[test]
+fn browser_bootstrap_requires_passkey_assertion_and_never_becomes_persistent() {
+  let directory = tempfile::tempdir().unwrap();
+  let path = directory.path().join("host-access.json");
+  onboarding::initialize_host_access(&path, &TotpSecret::generate()).unwrap();
+  let device = NoiseIdentity::generate().unwrap().public_key();
+  onboarding::authorize_pairing(&path, &device, 30, 900, crate::pairing::ClientKind::Browser).unwrap();
+  let host = HostPasskeys::new(path.clone(), HOST, "Workstation", ORIGIN).unwrap();
+  let mut authenticator = WebauthnAuthenticator::new(SoftPasskey::new(true));
+  enroll(&host, &device, &mut authenticator);
+  assert!(!onboarding::is_authorized_at(&path, &device, 902).unwrap());
+  let (pending, payload) = assertion(&host, &device, BINDING, &mut authenticator);
+  host
+    .finish(pending, HostAuthOperation::LoginFinish, payload, &device, BINDING, 903)
+    .unwrap();
+  assert!(onboarding::is_authorized_at(&path, &device, 904).unwrap());
+  assert!(!onboarding::is_authorized_at(&path, &device, 903 + 8 * 60 * 60).unwrap());
+  assert!(matches!(
+    onboarding::devices(&path).unwrap()[&device],
+    onboarding::DeviceAuthorization::BrowserSession { .. }
+  ));
+  let new_tab = NoiseIdentity::generate().unwrap().public_key();
+  assert!(!onboarding::is_authorized_at(&path, &new_tab, 904).unwrap());
+  assert!(
+    host
+      .start(HostAuthOperation::RegisterStart, json!({}), &new_tab, BINDING, 904)
+      .is_err()
+  );
+}
+
+#[test]
+fn sha256_migration_preserves_registered_passkeys_for_new_browser_login() {
+  let directory = tempfile::tempdir().unwrap();
+  let path = directory.path().join("host-access.json");
+  let (host, paired) = setup(&path);
+  let mut authenticator = WebauthnAuthenticator::new(SoftPasskey::new(true));
+  enroll(&host, &paired, &mut authenticator);
+  let mut legacy: Value = onboarding::read_optional(&path).unwrap().unwrap();
+  legacy["version"] = json!(1);
+  legacy["devices"] = json!({ paired.clone(): 900 });
+  onboarding::save_configuration(&path, &legacy).unwrap();
+  onboarding::upgrade_authenticator(&path).unwrap();
+  assert_eq!(onboarding::host_passkeys(&path, ORIGIN).unwrap().len(), 1);
+  assert!(!onboarding::is_authorized_at(&path, &paired, 904).unwrap());
+  let browser = NoiseIdentity::generate().unwrap().public_key();
+  let (pending, payload) = assertion(&host, &browser, BINDING, &mut authenticator);
+  host
+    .finish(pending, HostAuthOperation::LoginFinish, payload, &browser, BINDING, 903)
+    .unwrap();
+  assert!(onboarding::is_authorized_at(&path, &browser, 904).unwrap());
 }

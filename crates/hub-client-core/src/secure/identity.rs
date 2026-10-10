@@ -62,6 +62,13 @@ impl NoiseIdentity {
     Self::from_secret(*secret)
   }
 
+  /// Read an existing private identity without creating or replacing any file.
+  #[cfg(not(target_arch = "wasm32"))]
+  pub fn load(path: &Path) -> Result<Self, String> {
+    let secret = native::read_secret(path, "noise_x25519")?;
+    Self::from_secret(*secret)
+  }
+
   /// Import only canonical unpadded URL-safe base64 containing exactly 32 bytes.
   pub fn import_secret(value: &str) -> Result<Self, String> {
     if value.len() != 43 {
@@ -150,6 +157,18 @@ pub(super) fn decode_noise_public_key(value: &str) -> Result<[u8; 32], String> {
 mod tests {
   use super::*;
   use std::fs;
+
+  #[test]
+  fn read_only_noise_load_preserves_identity_and_never_creates_a_missing_key() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("noise.json");
+    assert!(NoiseIdentity::load(&path).is_err());
+    assert!(!path.exists());
+    let identity = NoiseIdentity::load_or_create(&path).unwrap();
+    let original = fs::read(&path).unwrap();
+    assert_eq!(NoiseIdentity::load(&path).unwrap().public_key(), identity.public_key());
+    assert_eq!(fs::read(&path).unwrap(), original);
+  }
 
   #[test]
   fn exported_noise_secrets_restore_identity_and_reject_noncanonical_storage() {

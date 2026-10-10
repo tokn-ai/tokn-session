@@ -4,26 +4,24 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
-Session delivery now has final/steps/details/all subscriptions, semantic item
-changes over Tauri/SSE, snapshot recovery on gaps, and frontend replicas for
-eight recent sessions. Reopening renders cached content before catch-up;
-background sessions receive final-level updates without advancing all coverage.
-The opened session subscribes at steps with a latest-turn scope: messages,
-attention context, and inner activity-group summaries. The returned turn anchor
-pins live appends. Each inner group's first expansion requests complete child
-summaries; cached groups remain interested on collapse and receive live updates.
-Inspector and visible expanded tools subscribe to requested details separately;
-closing their inner/outer disclosures stops detail delivery. Older history
-extends the retained window and scope, while omitting scope preserves legacy
-consumers. All remains available for complete source records and display details.
-Legacy transport pages assemble atomically, with retry on incomplete/changed
-responses; there are no within-group load-more controls. Compact attention-only body notifications
-skip catalog reloads; metadata/catalog/warning/shared-index changes still reload.
-Selected semantic subscriptions avoid duplicate index-triggered timeline reads.
-Redaction, native opt-in, and payload bounds still apply. Unrelated detail/work
-caches survive updates. Indexed Automatic and Local share one source-reader path
-without a redundant managed feed child. See [session updates](viewer-session-updates.md)
-for the contract, ownership, limits, compatibility paths, and remaining costs.
+Session delivery separates live subscription from loading. Direct browsers use
+connection-scoped WebSocket interests and live diffs, with backward HTTP for
+initial/older screens, details HTTP for complete groups/tool display payloads,
+and dedicated inspection HTTP for source/native records. Tauri exposes the
+same commands through its event bridge. Opening defaults to latest-turn steps
+with collapsed inner groups and never backfills saved reading anchors before
+first paint. Heartbeats renew identity leases without fetching data. Snapshot
+baselines and publication share revisions; reconnects and replacements recover
+through backward reads. Old-socket cleanup cannot remove reclaimed interests.
+
+Frontend replicas retain eight recent sessions. Independent group/tool/inspect
+coverage tracks missing, loading, complete, stale, and failed resources; loaded
+groups receive live appends after collapse. Display details and inspection are
+separate caches. Legacy servers and the existing Hub HTTP tunnel retain SSE
+compatibility; Hub allows the new loading commands. Shared-session authorization
+continues through its legacy scoped commands. Compact attention notifications
+avoid redundant catalog/timeline reads. See [session delivery](viewer-session-updates.md)
+for ownership, recovery, limits, and remaining source/projection costs.
 
 The viewer sidebar and conversation use a compact Codex-style layout with neutral
 light/dark colors, larger message text, inline expandable tool activity, and an
@@ -131,9 +129,20 @@ implementation (`hub-client-core`, compiled to WASM for browsers).
 `connect --hub …` saves UUID/keys/config, displays a local TOTP setup QR, and
 prints a machine reference `UUID@host_public_key`. Open the Hub URL or choose
 Hub in the app, then enter the machine and authenticator code. The host verifies
-pairing and authorizes the device key. Remembered keys and host pins reconnect
-without OTP: IndexedDB in browsers, owner-only native files in the app.
-Enrolled host-owned passkeys authorize new devices on their original Noise
+pairing with HMAC-SHA-256. App pairing grants persistent access using owner-only
+native key files. Browser TOTP pairing only grants five-minute passkey enrollment;
+passkey sign-in grants at most eight hours to a fresh in-memory tab key. New tabs,
+reloads, and reopened windows require sign-in; live-tab network reconnects retain
+authorization. IndexedDB v2 holds metadata/pins only and deletes legacy secrets.
+Pagehide clears active content and keys; BFCache restoration reloads. Host state
+v2 distinguishes native, browser enrollment, and browser session grants. Legacy
+state fails closed; explicit `authenticator --upgrade-sha256` rotates OTP, clears
+unclassified grants, preserves host keys/passkeys/limits, and requires rescanning
+and app re-pairing. Protocol v2 and clients must upgrade together. The authenticator CLI also shows its saved machine reference and current TOTP
+with seconds remaining in trusted-terminal output, plus the full setup URI and
+explicit manual settings/mismatch guidance; exports stay Base32-only.
+Reference lookup reads existing keys without generating replacements.
+Enrolled host-owned passkeys authorize tab keys on their original Noise
 channel; a new device needs the full machine reference to pin the host first.
 Native passkey prompts use the Hub browser origin and a one-shot loopback form
 callback carrying only the credential. Hub administration lives at `/admin`.
@@ -161,9 +170,10 @@ older plaintext browser-through-Hub mode. See [onboarding](hub-pairing.md),
 require HTTPS termination; the host API stays on loopback. Browser builds need
 the `wasm32-unknown-unknown` Rust target and pinned `wasm-bindgen-cli` 0.2.126;
 `pnpm build` generates bindings before bundling them.
-The Hub viewer-route allowlist includes `load_session_updates`, so semantic
-subscription pulls reach hosts through paired, signed-grant, and trusted-Hub
-connections. Encrypted tunnel tests cover forwarding those request bodies.
+The shared Hub viewer-route allowlist includes subscription, backward loading,
+resource details, independent inspection, lease renewal, and legacy session
+updates. These HTTP commands reach hosts through paired, signed-grant, and
+trusted-Hub connections. Encrypted tunnel tests cover forwarding request bodies.
 
 ## Viewer core and remote API
 

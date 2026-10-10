@@ -8,15 +8,15 @@ fn seed() -> TotpSecret {
 }
 
 #[test]
-fn rfc6238_sha1_vectors_and_six_digit_truncation() {
-  let seed = seed();
+fn rfc6238_sha256_vectors_and_six_digit_truncation() {
+  let seed = TotpSecret(Zeroizing::new(b"12345678901234567890123456789012".to_vec()));
   for (time, expected) in [
-    (59, "94287082"),
-    (1_111_111_109, "07081804"),
-    (1_111_111_111, "14050471"),
-    (1_234_567_890, "89005924"),
-    (2_000_000_000, "69279037"),
-    (20_000_000_000, "65353130"),
+    (59, "46119246"),
+    (1_111_111_109, "68084774"),
+    (1_111_111_111, "67062674"),
+    (1_234_567_890, "91819424"),
+    (2_000_000_000, "90698825"),
+    (20_000_000_000, "77737706"),
   ] {
     assert_eq!(format!("{:08}", seed.hotp(time / 30) % 100_000_000), expected);
     assert_eq!(seed.code_at(time), expected[2..]);
@@ -36,7 +36,7 @@ fn seed_import_generation_and_provisioning() {
   assert_eq!(uri.host_str(), Some("totp"));
   let query = uri.query_pairs().collect::<std::collections::HashMap<_, _>>();
   assert_eq!(query["secret"], secret.to_base32());
-  assert_eq!(query["algorithm"], "SHA1");
+  assert_eq!(query["algorithm"], "SHA256");
   assert_eq!(query["digits"], "6");
   assert_eq!(query["period"], "30");
   assert!(secret.provisioning_uri("host\nname").is_err());
@@ -207,4 +207,28 @@ fn malformed_oversized_or_wrong_role_records_are_rejected() {
   pake[0] = b'B';
   hello.pake = encode(&pake);
   assert!(HostPairing::respond(&seed, HOST, &host, &write_record(&hello).unwrap(), NOW).is_err());
+}
+
+#[test]
+fn browser_enrollment_kind_is_authenticated_and_cannot_be_promoted_in_transit() {
+  let seed = seed();
+  let host_identity = NoiseIdentity::generate().unwrap();
+  let device = NoiseIdentity::generate().unwrap();
+  let (client, hello) = ClientPairing::start_for(HOST, &device, &seed.code_at(NOW), NOW, ClientKind::Browser).unwrap();
+  let (host, response) = HostPairing::respond(&seed, HOST, &host_identity, &hello, NOW).unwrap();
+  let (client, confirmation) = client.confirm(&response).unwrap();
+  let (authenticated, ack) = host.finish(&confirmation, NOW).unwrap();
+  assert_eq!(authenticated.client_kind, ClientKind::Browser);
+  assert_eq!(client.finish(&ack).unwrap(), authenticated);
+
+  let (client, hello) = ClientPairing::start_for(HOST, &device, &seed.code_at(NOW), NOW, ClientKind::Browser).unwrap();
+  let mut altered: ClientHello = read_record(&hello).unwrap();
+  altered.client_kind = ClientKind::Native;
+  let (_, response) = HostPairing::respond(&seed, HOST, &host_identity, &write_record(&altered).unwrap(), NOW).unwrap();
+  assert!(client.confirm(&response).is_err());
+
+  let mut legacy = hello.clone();
+  legacy[MAGIC.len() - 2] = b'1';
+  assert!(!is_pairing_record(&legacy));
+  assert!(HostPairing::respond(&seed, HOST, &host_identity, &legacy, NOW).is_err());
 }

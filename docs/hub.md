@@ -1,8 +1,9 @@
 # Session Hub
 
 For the default encrypted workflow, use [authenticator pairing](hub-pairing.md).
-Hosts register automatically and verify codes locally; passkeys are optional
-Hub administration. The earlier [signed-grant workflow](hub-e2ee.md) remains
+Hosts register automatically and verify codes locally; browser content sign-in
+requires a host-owned passkey. Hub administration is optional and uses separate
+passkeys. The earlier [signed-grant workflow](hub-e2ee.md) remains
 available separately.
 The setup below describes the explicit `--trusted-hub` compatibility mode and
 the passkey administration available alongside encrypted access.

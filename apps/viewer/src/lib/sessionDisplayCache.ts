@@ -1,3 +1,4 @@
+import { SessionResources } from "./sessionResources";
 import { createUuid } from "./id";
 import type { EventPageResponse, TrajectoryEventPageResponse, SessionUpdate, SessionUpdateItem, SessionUpdatesRequest, SessionUpdateScope, UpdateLevel } from "./types";
 
@@ -30,6 +31,12 @@ function weight(value: unknown): number {
 /** Each level has independent coverage. A final-only update never advances the
  * steps cursor. Unchanged objects retain their references across updates. */
 export class SessionDisplayCache {
+  readonly resources = new SessionResources();
+  coverageVersion(session_key: string) {
+    const replica = this.replicas.get(this.key(session_key, "steps"));
+    return replica ? { generation: replica.generation, revision: replica.revision } : {};
+  }
+  subscriptionIds() { return [...this.subscriptions.values()]; }
   private replicas = new Map<string, Replica>();
   private subscriptions = new Map<string, string>();
   private prefix = createUuid();
@@ -39,6 +46,7 @@ export class SessionDisplayCache {
   private scopes = new Map<string, SessionUpdateScope>();
   private pending = new Map<string, SessionUpdate[]>();
   private pageItems = new WeakMap<EventPageResponse, Map<string, SessionUpdateItem>>();
+  private acceptedSources = new Map<string, string>();
   private acceptedItems = new Map<string, Map<string, SessionUpdateItem>>();
   private key(session_key: string, level: UpdateLevel) { return JSON.stringify([session_key, level]); }
 
@@ -90,7 +98,8 @@ export class SessionDisplayCache {
   detail(session_key: string, event_key: string) {
     return this.replicas.get(this.key(session_key, "steps"))?.items.get(`detail:${event_key}`)?.detail
       ?? this.replicas.get(this.key(session_key, "all"))?.items.get(`detail:${event_key}`)?.detail
-      ?? this.replicas.get(this.key(session_key, "details"))?.items.get(`detail:${event_key}`)?.detail ?? null;
+      ?? this.replicas.get(this.key(session_key, "details"))?.items.get(`detail:${event_key}`)?.detail
+      ?? this.resources.detail(session_key, "tool", event_key);
   }
 
   /** Complete semantic membership; activity disclosures decide which rows to mount. */
@@ -138,6 +147,13 @@ export class SessionDisplayCache {
     if (!items) return null;
     const previous = this.acceptedItems.get(session_key);
     const changed = new Set<string>();
+    const previousSource = this.acceptedSources.get(session_key);
+    if (page.source_revision) {
+      if (previousSource && previousSource !== page.source_revision) {
+        for (const key of this.resources.payloadKeys(session_key)) changed.add(key);
+      }
+      this.acceptedSources.set(session_key, page.source_revision);
+    }
     const changedKey = (key: string, item: SessionUpdateItem) => item.kind === "event" ? null : item.event_key ?? key;
     for (const [key, item] of items) {
       const eventKey = changedKey(key, item);
@@ -148,7 +164,7 @@ export class SessionDisplayCache {
       if (eventKey && !items.has(key)) changed.add(eventKey);
     }
     const details = this.replicas.get(this.key(session_key, "details"));
-    for (const key of changed) details?.items.delete(`detail:${key}`);
+    for (const key of changed) { details?.items.delete(`detail:${key}`); this.resources.invalidate(session_key, key); }
     this.acceptedItems.set(session_key, items);
     return changed;
   }
@@ -230,7 +246,9 @@ export class SessionDisplayCache {
       }
       this.access.delete(oldest);
       this.scopes.delete(oldest);
+      this.resources.remove(oldest);
       this.acceptedItems.delete(oldest);
+      this.acceptedSources.delete(oldest);
     }
     return page;
   }

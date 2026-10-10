@@ -35,6 +35,7 @@ export function HubAccess({ initial_hub_url = window.location.origin, on_local }
   const [notice, setNotice] = useState<string>();
   const operation = useRef<AbortController>(undefined);
   const lifetime = useRef(0);
+  const service_ref = useRef<HubAccessService>(undefined);
   const active_client = useRef<ViewerClient>(undefined);
   const busy = !!pending;
 
@@ -48,14 +49,17 @@ export function HubAccess({ initial_hub_url = window.location.origin, on_local }
     selectMachine(client); setActive({ host, client });
   }
   async function loadService(url: string, signal: AbortSignal) {
-    setService(undefined); setHosts([]);
+    service_ref.current?.dispose?.(); service_ref.current = undefined; setService(undefined); setHosts([]);
     const next = await openHubAccess(url);
-    const status = await next.status();
-    if (signal.aborted) return;
-    setService(next); setDraftHubUrl(next.hub_url); setHosts(status.hosts); setEditingHub(false);
+    if (signal.aborted) { next.dispose?.(); return; }
+    let status: Awaited<ReturnType<HubAccessService["status"]>>;
+    try { status = await next.status(); }
+    catch (error) { next.dispose?.(); throw error; }
+    if (signal.aborted) { next.dispose?.(); return; }
+    service_ref.current = next; setService(next); setDraftHubUrl(next.hub_url); setHosts(status.hosts); setEditingHub(false);
     if (isDesktop()) { try { localStorage.setItem(LAST_HUB, next.hub_url); } catch { /* Keys remain in native device storage. */ } }
     const selected = status.hosts.find((host) => host.host_id === status.selected_host_id);
-    if (selected) { setPending({ kind: "opening_machine", host_id: selected.host_id }); await openHost(next, selected, signal); }
+    if (selected && isDesktop()) { setPending({ kind: "opening_machine", host_id: selected.host_id }); await openHost(next, selected, signal); }
   }
   async function action(kind: Operation, run: (signal: AbortSignal) => Promise<void>, host_id?: string) {
     operation.current?.abort();
@@ -75,9 +79,28 @@ export function HubAccess({ initial_hub_url = window.location.origin, on_local }
     if (!isDesktop() || url !== "https://") void action("loading_hub", (signal) => loadService(url, signal));
     return () => {
       operation.current?.abort(); active_client.current = undefined;
-      queueMicrotask(() => { if (lifetime.current === generation) selectMachine(); });
+      queueMicrotask(() => {
+        if (lifetime.current === generation) { selectMachine(); service_ref.current?.dispose?.(); service_ref.current = undefined; }
+      });
     };
   }, [initial_hub_url]);
+
+  useEffect(() => {
+    if (isDesktop()) return;
+    const lock = () => {
+      operation.current?.abort(); operation.current = undefined;
+      selectMachine(); active_client.current = undefined;
+      service_ref.current?.dispose?.(); service_ref.current = undefined;
+      setActive(undefined); setService(undefined); setPending(undefined); setCode("");
+    };
+    const restore = (event: PageTransitionEvent) => { if (event.persisted) window.location.reload(); };
+    window.addEventListener("pagehide", lock);
+    window.addEventListener("pageshow", restore);
+    return () => {
+      window.removeEventListener("pagehide", lock);
+      window.removeEventListener("pageshow", restore);
+    };
+  }, []);
 
   async function refreshHosts(current: HubAccessService, signal: AbortSignal) {
     const status = await current.status(); if (!signal.aborted) setHosts(status.hosts);
@@ -129,12 +152,12 @@ export function HubAccess({ initial_hub_url = window.location.origin, on_local }
     {progress}{error && <p className="hub-error hub-feedback" role="alert">{error}</p>}{notice && <p className="hub-feedback" role="status">{notice}</p>}
     {service && <div className="hub-access-layout">
       <section className="hub-saved-machines" aria-labelledby="saved-machines-title"><div className="hub-section-heading"><h2 id="saved-machines-title">Saved machines</h2><span>{hosts.length}</span></div>
-        <p className="hub-muted">This device is remembered. No code is needed to reconnect.</p>
+        <p className="hub-muted">{isDesktop() ? "Apps paired with an authenticator reconnect without a code." : "Sign in with a passkey in each new tab or after reloading."}</p>
         {hosts.length === 0 ? <div className="hub-empty-state"><h3>No saved machines</h3><p>Connect a machine using its address and authenticator code.</p></div>
           : <ul className="hub-hosts" aria-label="Saved machines">{hosts.map((host) => <li key={host.host_id} className="hub-host hub-saved-host">
             <div className="hub-host-details"><h3>{hostLabel(host)}</h3>{host.machine_address && host.name && host.name !== host.machine_address && <p>{host.name}</p>}
               <p>End-to-end encrypted</p></div>
-            <button aria-label={`Open ${hostLabel(host)}`} disabled={busy} onClick={() => { void action("opening_machine", (signal) => openHost(service, host, signal), host.host_id); }}>{pending?.host_id === host.host_id && pending.kind === "opening_machine" ? "Connecting…" : "Open"}</button>
+            <button aria-label={`${isDesktop() ? "Open" : "Sign in to"} ${hostLabel(host)}`} disabled={busy} onClick={() => { void action("opening_machine", (signal) => openHost(service, host, signal), host.host_id); }}>{pending?.host_id === host.host_id && pending.kind === "opening_machine" ? "Connecting…" : isDesktop() ? "Open" : "Sign in"}</button>
             <details className="hub-machine-settings"><summary>Machine settings</summary><div>
               <button disabled={busy} onClick={() => { void action("adding_passkey", (signal) => addPasskey(host, signal), host.host_id); }}>Add a passkey</button>
               <p className="hub-field-label">Machine reference</p><code className="hub-machine-reference">{machineReference(host)}</code>
@@ -153,7 +176,7 @@ export function HubAccess({ initial_hub_url = window.location.origin, on_local }
           {method === "code" ? <><label htmlFor="encrypted-code">Authenticator code</label><input id="encrypted-code" value={code} onChange={(event) => setCode(event.target.value)} type="password" inputMode="numeric" pattern="[0-9]{6}" minLength={6} maxLength={6} required autoComplete="one-time-code" disabled={busy} />
             <p className="machine-hint">Enter the current six-digit code from the machine’s authenticator. Your machine verifies it.</p></>
             : <p className="machine-hint">On a new device, paste <strong>username:host@public_key</strong> or the complete machine reference from its connector. Remembered machines can use their address.</p>}
-          <button className="hub-connect-primary" disabled={busy || !machine.trim() || (method === "code" && !/^[0-9]{6}$/.test(code))}>{method === "code" ? "Pair and connect" : "Sign in with machine passkey"}</button>
+          <button className="hub-connect-primary" disabled={busy || !machine.trim() || (method === "code" && !/^[0-9]{6}$/.test(code))}>{method === "code" ? (isDesktop() ? "Pair and connect" : "Pair and set up passkey") : "Sign in with machine passkey"}</button>
           <details className="hub-input-help"><summary>Where do I find the address?</summary><p>Use the address assigned in Hub administration, or paste the machine ID or reference printed by the host connector.</p></details>
         </form>
       </section>

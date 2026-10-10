@@ -8,6 +8,7 @@ import type { ResolvedMachine } from "./types";
 
 export interface HubAccessBackend {
   readonly hub_url: string;
+  dispose?(): void;
   status(): Promise<{ hosts: SavedHubHost[]; selected_host_id: string | null; device_public_key: string }>;
   pair(host_id: string, code: string, signal: AbortSignal, expected_host_public_key?: string, machine?: ResolvedMachine): Promise<SavedHubHost>;
   authenticate(host: SavedHubHost, register: boolean, signal: AbortSignal): Promise<void>;
@@ -43,7 +44,7 @@ export function withMachineAddressing(backend: HubAccessBackend): HubAccessServi
   return Object.assign(backend, {
     async pairMachine(input: string, code: string, signal: AbortSignal) {
       const selected = await target(input, signal);
-      const host = selected.remembered ?? await backend.pair(selected.host_id, code, signal, selected.host_public_key, selected.resolved);
+      const host = await backend.pair(selected.host_id, code, signal, selected.host_public_key, selected.resolved);
       checkCancelled(signal);
       return selected.resolved ? backend.rememberMetadata(selected.resolved, signal) : host;
     },
@@ -58,32 +59,54 @@ export function withMachineAddressing(backend: HubAccessBackend): HubAccessServi
   });
 }
 
-class BrowserHubAccess implements HubAccessBackend {
+export class BrowserHubAccess implements HubAccessBackend {
+  private disposed = false;
+  private checkActive(signal?: AbortSignal): void {
+    if (this.disposed || signal?.aborted) throw new Error("Machine disconnected");
+  }
+  private enrollment_hosts = new Set<string>();
+  private unlocked_hosts = new Map<string, number>();
+  dispose(): void { this.disposed = true; this.enrollment_hosts.clear(); this.unlocked_hosts.clear(); this.store.dispose(); }
   constructor(readonly hub_url: string, private crypto: CryptoApi, private store: HubDeviceStore) {}
-  async status() { await this.store.refresh(); return { hosts: this.store.hosts, selected_host_id: this.store.selected_host_id, device_public_key: this.store.identity.public_key() }; }
+  async status() { this.checkActive(); await this.store.refresh(); this.checkActive(); return { hosts: this.store.hosts, selected_host_id: this.store.selected_host_id, device_public_key: this.store.identity.public_key() }; }
   async pair(host_id: string, code: string, signal: AbortSignal, expected_host_public_key?: string, machine?: ResolvedMachine) {
+    this.checkActive(signal);
     const host = await pairHubHost(this.hub_url, host_id, code, this.store.identity, this.crypto, signal);
-    if (signal.aborted) throw new Error("Machine disconnected");
+    this.checkActive(signal);
     if (expected_host_public_key && host.host_public_key !== expected_host_public_key) throw new Error("Paired machine key differs from the reference. Verify the reference before opening it.");
     const resolved = machine ? await this.resolve(machine.machine_address, signal) : undefined;
     checkCancelled(signal);
     if (resolved && resolved.host_id !== host.host_id) throw new Error("Machine address changed during pairing. Its saved identity was preserved.");
     const named = resolved ? { ...host, machine_address: resolved.machine_address, name: resolved.name } : host;
     await this.store.saveHost(named);
+    this.checkActive(signal);
+    this.enrollment_hosts.add(host.host_id);
     return named;
   }
   async authenticate(host: SavedHubHost, register: boolean, signal: AbortSignal) {
     validateHost(host);
+    this.checkActive(signal);
+    if (register && !this.enrollment_hosts.has(host.host_id) && (this.unlocked_hosts.get(host.host_id) ?? 0) <= Date.now()) {
+      await this.authenticate(host, false, signal);
+    }
     await authenticateHubHost(this.hub_url, host, this.store.identity, this.crypto, register, signal);
     if (signal.aborted) throw new Error("Machine disconnected");
     await this.store.saveHost(host);
+    this.checkActive(signal);
+    if (register) this.enrollment_hosts.delete(host.host_id);
+    else this.unlocked_hosts.set(host.host_id, Date.now() + 8 * 60 * 60 * 1000);
   }
   async connect(host: SavedHubHost, signal: AbortSignal) {
+    this.checkActive(signal);
+    if ((this.unlocked_hosts.get(host.host_id) ?? 0) <= Date.now()) {
+      if (this.enrollment_hosts.has(host.host_id)) await this.authenticate(host, true, signal);
+      await this.authenticate(host, false, signal);
+    }
     const client = await EncryptedHubClient.connect(this.hub_url, host, this.store.identity, this.crypto, signal);
     try { await this.store.selectHost(host.host_id); return client; }
     catch (error) { client.close(); throw error; }
   }
-  forget(host_id: string) { return this.store.forgetHost(host_id); }
+  forget(host_id: string) { this.enrollment_hosts.delete(host_id); this.unlocked_hosts.delete(host_id); return this.store.forgetHost(host_id); }
   resolve(machine_address: string, signal: AbortSignal) { return resolveBrowserMachine(this.hub_url, machine_address, signal); }
   async rememberMetadata(machine: ResolvedMachine, signal: AbortSignal) {
     const resolved = await this.resolve(machine.machine_address, signal);

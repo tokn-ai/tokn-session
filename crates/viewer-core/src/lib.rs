@@ -1,6 +1,7 @@
 //! Shared viewer domain and runtime. Both Tauri and HTTP adapters consume
 //! this crate; core owns snapshots and semantic delivery, while standalone
 //! Relay supplies provider feeds.
+pub mod delivery;
 mod index_queries;
 mod indexer;
 mod input;

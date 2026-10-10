@@ -3,7 +3,9 @@
 For normal setup, use [machine pairing](hub-pairing.md). A browser or native app
 connects directly through the Hub; shared Rust crypto runs in browser WASM or
 the native app. The host verifies an authenticator code or a host-owned passkey
-and remembers the device key. New-device passkey login requires a trusted
+and grants persistent app access or an expiring browser session. Browsers use
+TOTP only for passkey enrollment and require sign-in in every new tab or reload.
+New-device passkey login requires a trusted
 machine reference containing the host's encryption public key. Hub administrator
 passkeys at `/admin` remain separate from host content authorization.
 

@@ -20,6 +20,7 @@ use tower_http::{
   services::{ServeDir, ServeFile},
 };
 
+mod live;
 mod shared;
 
 #[derive(Clone)]
@@ -30,6 +31,7 @@ struct ApiState {
   requests: Arc<Semaphore>,
   subscribers: Arc<Semaphore>,
   shutdown: CancellationToken,
+  origins: Vec<String>,
 }
 
 type ApiError = (StatusCode, Json<Value>);
@@ -51,9 +53,17 @@ pub fn router(
     requests: Arc::new(Semaphore::new(16)),
     subscribers: Arc::new(Semaphore::new(32)),
     shutdown,
+    origins: origins
+      .iter()
+      .filter_map(|value| value.to_str().ok().map(str::to_owned))
+      .collect(),
   };
   Router::new()
-    .route("/api/v1/health", get(|| async { Json(json!({"version": 1})) }))
+    .route(
+      "/api/v1/health",
+      get(|| async { Json(json!({"version": 1, "live_updates": true})) }),
+    )
+    .route("/api/v1/live", get(live::upgrade))
     .route("/api/v1/events", get(event_stream))
     .route(
       "/api/v1/shared",
@@ -91,6 +101,9 @@ async fn api_not_found() -> ApiError {
 }
 
 async fn authenticate(State(state): State<ApiState>, request: Request, next: Next) -> Response {
+  if request.uri().path() == "/api/v1/live" {
+    return next.run(request).await;
+  }
   if let Some(token) = &state.token {
     let supplied = request
       .headers()
@@ -169,6 +182,9 @@ fn dispatch(service: &ViewerService, command: &str, payload: Value) -> Result<Va
     "list_session_children"
       | "load_event_page"
       | "load_session_updates"
+      | "load_session_backward"
+      | "subscribe_session"
+      | "inspect_session_event"
       | "load_event_detail"
       | "load_trajectory_event_page"
       | "acknowledge_session_attention"
@@ -203,6 +219,21 @@ fn dispatch(service: &ViewerService, command: &str, payload: Value) -> Result<Va
     "list_session_children" => call!(list_session_children),
     "load_event_page" => call!(load_event_page),
     "load_session_updates" => call!(load_session_updates),
+    "load_session_backward" => call!(load_session_backward),
+    "subscribe_session" => call!(subscribe_session),
+    "load_session_details" => call!(load_session_details),
+    "inspect_session_event" => call!(inspect_session_event),
+    "renew_session_subscriptions" => {
+      let ids: Vec<String> = serde_json::from_value(payload.get("ids").cloned().unwrap_or_else(|| json!([])))
+        .map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
+      if ids.len() > 24 {
+        return Err(error(StatusCode::BAD_REQUEST, "Too many subscriptions"));
+      }
+      service
+        .renew_session_subscriptions(&ids)
+        .map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+      Ok(Value::Null)
+    }
     "update_session_view" => call!(update_session_view),
     "load_event_detail" => call!(load_event_detail),
     "load_trajectory_event_page" => call!(load_trajectory_event_page),
@@ -219,7 +250,10 @@ fn dispatch(service: &ViewerService, command: &str, payload: Value) -> Result<Va
   result.map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Could not encode viewer response"))
 }
 
-async fn event_stream(State(state): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
+async fn event_stream(
+  State(state): State<ApiState>,
+  axum::extract::Query(options): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<impl IntoResponse, ApiError> {
   let permit = state
     .subscribers
     .clone()
@@ -232,7 +266,10 @@ async fn event_stream(State(state): State<ApiState>) -> Result<impl IntoResponse
     loop {
       let received = tokio::select! { biased; _ = state.shutdown.cancelled() => break, event = receiver.recv() => event };
       match received {
-        Ok(event) => yield Ok(Event::default().event(event.event).data(event.payload.to_string())),
+        Ok(event) => {
+          if event.event == "session-updated" && options.get("session_updates").is_some_and(|value| value == "false") { continue; }
+          yield Ok(Event::default().event(event.event).data(event.payload.to_string()));
+        },
         Err(broadcast::error::RecvError::Lagged(_)) => {
           // Reconnect forces a fresh catalog/timeline; never apply an incomplete sequence.
           break;

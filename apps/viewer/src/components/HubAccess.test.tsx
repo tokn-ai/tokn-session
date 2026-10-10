@@ -30,7 +30,7 @@ it("pairs in browser without a local bearer token and closes the selected machin
   expect(screen.getByRole("link", { name: "Hub administration" })).toHaveAttribute("href", "/admin");
   fireEvent.change(screen.getByLabelText("Machine address or reference"), { target: { value: host.machine_address } });
   fireEvent.change(screen.getByLabelText("Authenticator code"), { target: { value: "123456" } });
-  fireEvent.click(screen.getByRole("button", { name: "Pair and connect" }));
+  fireEvent.click(screen.getByRole("button", { name: "Pair and set up passkey" }));
   expect(await screen.findByText("Encrypted sessions")).toBeInTheDocument();
   expect(service.pairMachine).toHaveBeenCalledWith(host.machine_address, "123456", expect.any(AbortSignal));
   fireEvent.click(screen.getByRole("button", { name: /connection settings/i }));
@@ -58,6 +58,7 @@ it("requires the complete machine reference before passkey first use", async () 
 });
 
 it("reopens the remembered machine without another code and offers host-owned passkey enrollment", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
   vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: host.host_id, device_public_key: "D".repeat(43) });
   render(<HubAccess initial_hub_url="https://hub.example" />);
   expect(await screen.findByText("Encrypted sessions")).toBeInTheDocument();
@@ -68,6 +69,7 @@ it("reopens the remembered machine without another code and offers host-owned pa
 });
 
 it("cancels abandoned pairing and rejects a late connection after unmount", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
   let resolve_connection!: (client: RemoteClient) => void;
   vi.mocked(service.connect).mockImplementation(() => new Promise((resolve) => { resolve_connection = resolve; }));
   vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: host.host_id, device_public_key: "D".repeat(43) });
@@ -81,6 +83,7 @@ it("cancels abandoned pairing and rejects a late connection after unmount", asyn
 });
 
 it("cancels a remembered reconnect and ignores its late connection", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
   let resolve_connection!: (client: RemoteClient) => void;
   vi.mocked(service.connect).mockImplementation(() => new Promise((resolve) => { resolve_connection = resolve; }));
   vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: host.host_id, device_public_key: "D".repeat(43) });
@@ -97,6 +100,7 @@ it("cancels a remembered reconnect and ignores its late connection", async () =>
 });
 
 it("keeps a failed remembered machine available for an explicit retry without pairing again", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
   vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: host.host_id, device_public_key: "D".repeat(43) });
   vi.mocked(service.connect).mockRejectedValueOnce(new Error("Machine is offline"));
   render(<HubAccess initial_hub_url="https://hub.example" />);
@@ -114,7 +118,7 @@ it("keeps a long machine address visible beside a concise accessible open action
   vi.mocked(service.status).mockResolvedValue({ hosts: [{ ...host, machine_address }], selected_host_id: null, device_public_key: "D".repeat(43) });
   render(<HubAccess initial_hub_url="https://hub.example" />); await ready();
   expect(screen.getByRole("heading", { name: machine_address })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: `Open ${machine_address}` })).toHaveTextContent(/^Open$/);
+  expect(screen.getByRole("button", { name: `Sign in to ${machine_address}` })).toHaveTextContent(/^Sign in$/);
 });
 
 it("clears the code and does not open a machine after canceled pairing", async () => {
@@ -124,13 +128,13 @@ it("clears the code and does not open a machine after canceled pairing", async (
   expect(screen.getByText("No saved machines")).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("Machine address or reference"), { target: { value: host.machine_address } });
   fireEvent.change(screen.getByLabelText("Authenticator code"), { target: { value: "123456" } });
-  fireEvent.click(screen.getByRole("button", { name: "Pair and connect" }));
+  fireEvent.click(screen.getByRole("button", { name: "Pair and set up passkey" }));
   const signal = vi.mocked(service.pairMachine).mock.calls[0][2];
   expect(screen.getByLabelText("Authenticator code")).toHaveValue("");
   fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
   expect(signal.aborted).toBe(true);
   finish_pairing(host);
-  await waitFor(() => expect(screen.getByRole("button", { name: "Pair and connect" })).toBeDisabled());
+  await waitFor(() => expect(screen.getByRole("button", { name: "Pair and set up passkey" })).toBeDisabled());
   expect(service.connect).not.toHaveBeenCalled();
 });
 
@@ -148,4 +152,18 @@ it("separates a draft Hub address and removes the previous service after a faile
   expect(screen.queryByRole("button", { name: "Open alice:workstation" })).not.toBeInTheDocument();
   expect(screen.queryByRole("region", { name: "Current Hub" })).not.toBeInTheDocument();
   expect(screen.getByLabelText("Hub address")).toHaveValue("https://other.example");
+});
+
+it("keeps remembered browser machines locked until explicit sign-in and destroys keys on pagehide", async () => {
+  service.dispose = vi.fn();
+  vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: host.host_id, device_public_key: "D".repeat(43) });
+  const close = vi.spyOn(client, "close");
+  render(<HubAccess initial_hub_url="https://hub.example" />); await ready();
+  expect(service.connect).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Sign in to alice:workstation" }));
+  await screen.findByText("Encrypted sessions");
+  fireEvent(window, new PageTransitionEvent("pagehide"));
+  expect(close).toHaveBeenCalledOnce();
+  expect(service.dispose).toHaveBeenCalledOnce();
+  expect(screen.queryByText("Encrypted sessions")).not.toBeInTheDocument();
 });
