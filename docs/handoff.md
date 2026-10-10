@@ -132,6 +132,9 @@ scoping remain behind explicit CLI options. `connect --trusted-hub` retains the
 older browser-through-Hub mode. See [onboarding](hub-pairing.md),
 [legacy grants](hub-e2ee.md), and [Hub administration](hub.md). Remote connections
 require HTTPS termination; the host API and installed client stay on loopback.
+The Hub viewer-route allowlist includes `load_session_updates`, so semantic
+subscription pulls reach hosts through paired, signed-grant, and trusted-Hub
+connections. Encrypted tunnel tests cover forwarding those request bodies.
 
 ## Viewer core and remote API
 
