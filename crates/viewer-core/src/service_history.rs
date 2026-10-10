@@ -15,6 +15,7 @@ use tokn_session_relay::{RecordOperation, SessionContext};
 use crate::RelayRecord;
 
 pub(crate) const HISTORY_TURNS: usize = 3;
+pub(crate) const INITIAL_HISTORY_TURNS: usize = 3;
 const FALLBACK_EVENTS: usize = 300;
 
 struct RecordIndex {
@@ -205,7 +206,7 @@ impl History {
     Ok(())
   }
 
-  /// Choose a turn boundary. Earlier requests extend by three user turns.
+  /// Open at the latest three turns. Earlier requests extend by three user turns.
   /// Reconnect offsets are snapped backwards to a complete turn/record.
   pub fn window_start(&self, retain_from: Option<usize>, before_event: Option<usize>) -> usize {
     let journal = self.journal.lock().unwrap_or_else(|e| e.into_inner());
@@ -230,7 +231,7 @@ impl History {
           .map_or(0, |turn| turn.start)
       }
     } else {
-      self.start_for_span(&journal, HISTORY_TURNS, FALLBACK_EVENTS)
+      self.start_for_span(&journal, INITIAL_HISTORY_TURNS, FALLBACK_EVENTS)
     };
     self.complete_context(&journal, start)
   }
@@ -242,10 +243,10 @@ impl History {
   }
 
   /// A replacement retains the number of loaded turns, rather than applying
-  /// an unrelated old absolute offset or shrinking an expanded window to 3.
+  /// an unrelated old absolute offset or shrinking an expanded window to one.
   pub fn replacement_start(&self, turns: usize, events: usize) -> usize {
     let journal = self.journal.lock().unwrap_or_else(|e| e.into_inner());
-    let start = self.start_for_span(&journal, turns.max(HISTORY_TURNS), events.max(FALLBACK_EVENTS));
+    let start = self.start_for_span(&journal, turns.max(INITIAL_HISTORY_TURNS), events.max(FALLBACK_EVENTS));
     self.complete_context(&journal, start)
   }
 

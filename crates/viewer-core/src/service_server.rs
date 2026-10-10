@@ -21,6 +21,7 @@ use crate::{
 
 struct FollowedSession {
   current: OnceCell<watch::Sender<Arc<Snapshot>>>,
+  reader: OnceCell<Arc<std::sync::Mutex<SessionReader>>>,
   initialized: watch::Sender<Option<Result<(), String>>>,
   wake: watch::Sender<()>,
   cancel: CancellationToken,
@@ -240,7 +241,12 @@ impl Service {
     Ok((Arc::new(self.metadata.decorate(&entries)), warnings))
   }
 
+  #[cfg(test)]
   async fn follow(self: &Arc<Self>, key: &str) -> Result<Arc<FollowedSession>, String> {
+    self.follow_mode(key, false).await
+  }
+
+  async fn follow_mode(self: &Arc<Self>, key: &str, window: bool) -> Result<Arc<FollowedSession>, String> {
     let session = {
       let mut sessions = self.sessions.lock().await;
       if let Some(session) = sessions.get(key).and_then(Weak::upgrade) {
@@ -252,6 +258,7 @@ impl Service {
         }
         let session = Arc::new(FollowedSession {
           current: OnceCell::new(),
+          reader: OnceCell::new(),
           initialized: watch::channel(None).0,
           wake: watch::channel(()).0,
           cancel: CancellationToken::new(),
@@ -269,7 +276,7 @@ impl Service {
         tokio::spawn(async move {
           let result = tokio::select! {
             _ = cancel.cancelled() => return,
-            result = service.initialize_reader(&key, &cancel) => result,
+            result = service.initialize_reader(&key, &cancel, window) => result,
           };
           let Some(session) = worker.upgrade() else {
             return;
@@ -280,8 +287,12 @@ impl Service {
                 .current
                 .set(watch::channel(Arc::new(reader.snapshot.clone())).0)
                 .unwrap_or_else(|_| unreachable!("one initializer per reserved session"));
+              session
+                .reader
+                .set(Arc::new(std::sync::Mutex::new(reader)))
+                .unwrap_or_else(|_| unreachable!("one initializer per reserved session"));
               session.initialized.send_replace(Some(Ok(())));
-              service.follow_reader(reader, worker, cancel, wake);
+              service.follow_reader(worker, cancel, wake);
             }
             Err(error) => {
               session.initialized.send_replace(Some(Err(error)));
@@ -307,7 +318,12 @@ impl Service {
     }
   }
 
-  async fn initialize_reader(&self, key: &str, cancel: &CancellationToken) -> Result<SessionReader, String> {
+  async fn initialize_reader(
+    &self,
+    key: &str,
+    cancel: &CancellationToken,
+    window: bool,
+  ) -> Result<SessionReader, String> {
     #[cfg(test)]
     {
       let gate = self.load_gates.lock().unwrap().get(key).cloned();
@@ -342,23 +358,22 @@ impl Service {
       .path
       .clone();
     let cancel = cancel.clone();
-    tokio::task::spawn_blocking(move || SessionReader::new_cancellable(entry, native, root, cancel))
-      .await
-      .map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || {
+      if window {
+        SessionReader::new_window_cancellable(entry, native, root, cancel)
+      } else {
+        SessionReader::new_cancellable(entry, native, root, cancel)
+      }
+    })
+    .await
+    .map_err(|e| e.to_string())?
   }
 
-  fn follow_reader(
-    &self,
-    reader: SessionReader,
-    worker: Weak<FollowedSession>,
-    cancel: CancellationToken,
-    mut wake: watch::Receiver<()>,
-  ) {
+  fn follow_reader(&self, worker: Weak<FollowedSession>, cancel: CancellationToken, mut wake: watch::Receiver<()>) {
     let interval = self.config.poll_interval;
     let metadata = self.metadata.clone();
     let index = self.index.clone();
     tokio::spawn(async move {
-      let mut reader = reader;
       loop {
         if !wait_for_reader_poll(&mut wake, &cancel, interval).await {
           break;
@@ -367,9 +382,17 @@ impl Service {
         if let Some(worker) = worker.upgrade() {
           worker.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
+        let Some(session) = worker.upgrade() else {
+          break;
+        };
+        let reader = session.reader.get().unwrap().clone();
+        drop(session);
         let metadata = metadata.clone();
         let index = index.clone();
+        let publisher = worker.clone();
         let result = tokio::task::spawn_blocking(move || {
+          let mut reader = reader.lock().map_err(|_| "Session reader lock poisoned".to_string())?;
+          let reader = &mut *reader;
           let result = reader.poll().and_then(|changed| {
             if let Some(index) = &index {
               if let Some(entry) = crate::index_queries::snapshot_entry_for_key(index, &reader.snapshot.entry.key)? {
@@ -401,30 +424,30 @@ impl Service {
             }
             Ok(changed)
           });
-          (reader, result)
+          if let Err(error) = &result {
+            reader.snapshot.error = Some(error.clone());
+          }
+          if (result.is_err() || result.as_ref().is_ok_and(|changed| *changed))
+            && let Some(publisher) = publisher.upgrade()
+          {
+            // Publish while holding the reader lock, in the same order as
+            // explicit history expansions. An older poll cannot overwrite a
+            // newer expanded snapshot after releasing that lock.
+            publisher.snapshots().send_replace(Arc::new(reader.snapshot.clone()));
+          }
+          result.map(|_| ())
         })
         .await;
         let Some(worker) = worker.upgrade() else {
           break;
         };
-        let (next, result) = match result {
-          Ok(result) => result,
+        match result {
+          Ok(Ok(())) => {}
+          Ok(Err(_)) => break,
           Err(error) => {
             let mut failed = worker.snapshots().borrow().as_ref().clone();
             failed.error = Some(format!("Relay session reader stopped: {error}"));
             worker.snapshots().send_replace(Arc::new(failed));
-            break;
-          }
-        };
-        reader = next;
-        match result {
-          Ok(true) => {
-            worker.snapshots().send_replace(Arc::new(reader.snapshot.clone()));
-          }
-          Ok(false) => {}
-          Err(error) => {
-            reader.snapshot.error = Some(error);
-            worker.snapshots().send_replace(Arc::new(reader.snapshot.clone()));
             break;
           }
         }
@@ -475,11 +498,27 @@ impl Service {
           } => (session_key, Some((retain_from, before_event))),
           _ => unreachable!(),
         };
-        let session = self.follow(&session_key).await?;
+        let session = self.follow_mode(&session_key, window.is_some()).await?;
+        let selected = session.clone();
+        tokio::task::spawn_blocking(move || {
+          let mut reader = selected
+            .reader
+            .get()
+            .unwrap()
+            .lock()
+            .map_err(|_| "Session reader lock poisoned".to_string())?;
+          if reader.ensure_history(window)? {
+            selected.snapshots().send_replace(Arc::new(reader.snapshot.clone()));
+          }
+          Ok::<_, String>(())
+        })
+        .await
+        .map_err(|e| e.to_string())??;
         let mut changes = session.snapshots().subscribe();
         let mut previous_generation = String::new();
         let mut previous_length = 0;
-        let mut event_offset = 0;
+        let mut event_offset: usize = 0;
+        let mut base = 0;
         let mut retained_turns = 0;
         let mut retained_events = 0;
         loop {
@@ -489,9 +528,14 @@ impl Service {
           }
           let generation_changed = previous_generation != snapshot.generation;
           let previous_offset = event_offset;
+          let previous_base = base;
+          base = snapshot.event_base;
           if let Some((retain_from, before_event)) = window {
             event_offset = if previous_generation.is_empty() {
-              snapshot.records.window_start(retain_from, before_event)
+              snapshot.records.window_start(
+                retain_from.map(|position| position.saturating_sub(snapshot.event_base)),
+                before_event.map(|position| position.saturating_sub(snapshot.event_base)),
+              )
             } else if generation_changed {
               if event_offset == 0 {
                 0
@@ -499,10 +543,16 @@ impl Service {
                 snapshot.records.replacement_start(retained_turns, retained_events)
               }
             } else {
-              snapshot.records.context_start(event_offset)
+              snapshot
+                .records
+                .context_start(event_offset.saturating_sub(snapshot.event_base))
             };
           }
-          let reset = generation_changed || event_offset != previous_offset;
+          if window.is_some() {
+            event_offset += base;
+          }
+          let local_offset = event_offset.saturating_sub(base);
+          let reset = generation_changed || event_offset != previous_offset || base != previous_base;
           send(
             stream,
             Frame::Begin {
@@ -518,14 +568,14 @@ impl Service {
               stream,
               Frame::Window {
                 event_offset,
-                has_earlier: event_offset > 0,
+                has_earlier: snapshot.has_earlier || local_offset > 0,
               },
             )
             .await?;
           }
           let mut position = if reset {
             if window.is_some() {
-              snapshot.records.record_at_event(event_offset)
+              snapshot.records.record_at_event(local_offset)
             } else {
               0
             }
@@ -543,7 +593,7 @@ impl Service {
             .await
             .map_err(|e| e.to_string())??;
             for (mut record, start) in records {
-              if start < event_offset {
+              if start < local_offset {
                 // A redacted sibling may be trimmed out of this window, but
                 // its shared native payload must remain withheld.
                 if record.record.events.iter().any(|event| {
@@ -552,7 +602,7 @@ impl Service {
                 }) {
                   record.record.native = None;
                 }
-                let skip = (event_offset - start).min(record.record.events.len());
+                let skip = (local_offset - start).min(record.record.events.len());
                 record.record.events.drain(..skip);
               }
               send(
@@ -575,8 +625,8 @@ impl Service {
           .await?;
           previous_generation = snapshot.generation.clone();
           previous_length = snapshot.records.len();
-          retained_turns = snapshot.records.retained_turns(event_offset);
-          retained_events = snapshot.records.events.saturating_sub(event_offset);
+          retained_turns = snapshot.records.retained_turns(local_offset);
+          retained_events = snapshot.records.events.saturating_sub(local_offset);
           loop {
             tokio::select! {
               result = changes.changed() => { result.map_err(|_| "Relay session reader stopped")?; break; }

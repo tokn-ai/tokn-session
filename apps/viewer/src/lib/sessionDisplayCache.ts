@@ -59,18 +59,18 @@ export class SessionDisplayCache {
       this.subscriptions.set(key, subscription_id);
     }
     const scope = level === "steps" || level === "details"
-      ? this.scopes.get(session_key) ?? { history: "latest_turn" as const, group_keys: [] } : undefined;
+      ? this.scopes.get(session_key) ?? { history: "recent_turns" as const, group_keys: [] } : undefined;
     return { session_key, level, subscription_id, cursor: this.replicas.get(key)?.revision ?? null, detail_keys,
       ...(scope ? { scope: level === "details" ? { ...scope, group_keys: [] } : scope } : {}) };
   }
 
   includeGroup(session_key: string, group_key: string) {
-    const scope = this.scopes.get(session_key) ?? { history: "latest_turn" as const, group_keys: [] };
+    const scope = this.scopes.get(session_key) ?? { history: "recent_turns" as const, group_keys: [] };
     this.scopes.set(session_key, { ...scope, group_keys: [...new Set([...scope.group_keys, group_key])] });
   }
 
   includeHistory(session_key: string) {
-    const scope = this.scopes.get(session_key) ?? { history: "latest_turn" as const, group_keys: [] };
+    const scope = this.scopes.get(session_key) ?? { history: "recent_turns" as const, group_keys: [] };
     this.scopes.set(session_key, { ...scope, history: "retained" });
   }
 

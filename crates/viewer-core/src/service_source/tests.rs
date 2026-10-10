@@ -1,6 +1,58 @@
 use super::*;
 use tempfile::TempDir;
 
+/// Read-only local diagnostic; prints timings/counts, never session contents.
+/// TOKN_PROFILE_SOURCE points to JSON containing source_path and session_id.
+#[test]
+#[ignore = "requires an explicitly selected local Codex source"]
+fn profile_local_codex_open() {
+  let metadata = std::env::var("TOKN_PROFILE_SOURCE").expect("Set TOKN_PROFILE_SOURCE");
+  let metadata: serde_json::Value = serde_json::from_slice(&std::fs::read(metadata).unwrap()).unwrap();
+  let path = PathBuf::from(metadata["source_path"].as_str().unwrap());
+  let root = std::env::var_os("TOKN_PROFILE_ROOT")
+    .map(PathBuf::from)
+    .expect("Set TOKN_PROFILE_ROOT");
+  let source = tokn_session_codex::CodexSessionSource::new(Some(root.clone()));
+  let start = std::time::Instant::now();
+  let segments = source.history_segments(&path).unwrap();
+  eprintln!("lineage_ms={} segments={}", start.elapsed().as_millis(), segments.len());
+  let start = std::time::Instant::now();
+  let mut history =
+    tokn_session_codex::CodexHistoryReader::new(path.clone(), false, crate::service_protocol::MAX_SNAPSHOT_BYTES);
+  let decoded = history.poll(&source).unwrap().unwrap();
+  eprintln!(
+    "decode_ms={} records={}",
+    start.elapsed().as_millis(),
+    decoded.records.len()
+  );
+  drop(decoded);
+  drop(history);
+  let start = std::time::Instant::now();
+  let reader = SessionReader::new_with_mode(
+    CatalogEntry {
+      key: "profile".into(),
+      provider: Provider::Codex,
+      header: serde_json::from_value(serde_json::json!({"id": metadata["session_id"], "path": path})).unwrap(),
+    },
+    false,
+    root,
+    None,
+    true,
+  )
+  .unwrap();
+  eprintln!(
+    "lazy_reader_ms={} records={} events={}",
+    start.elapsed().as_millis(),
+    reader.snapshot.records.len(),
+    reader.snapshot.records.events
+  );
+  let latest = reader.snapshot.records.window_start(None, None);
+  eprintln!("initial_delivery_events={}", reader.snapshot.records.events - latest);
+  if let Some(history) = &reader.codex_history {
+    eprintln!("read_stats={:?}", history.stats());
+  }
+}
+
 struct CodexHistoryFixture {
   directory: TempDir,
   base_path: PathBuf,
@@ -597,4 +649,83 @@ fn workbuddy_catalog_wal_updates_followed_presentation() {
     Some("Changed catalog title")
   );
   assert_eq!(reader.snapshot.generation, initial);
+}
+
+#[test]
+fn lazy_codex_prepend_preserves_existing_event_positions_across_pages() {
+  use std::collections::BTreeMap;
+  use std::io::Write;
+  let directory = TempDir::new().unwrap();
+  let path = directory.path().join("rollout-lazy.jsonl");
+  let turn = |index| {
+    format!(
+      "{}\n{}\n",
+      serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_id":format!("turn-{index}")}}),
+      serde_json::json!({"type":"event_msg","payload":{"type":"user_message","message":format!("prompt-{index}")}})
+    )
+  };
+  let mut body = format!(
+    "{}\n",
+    serde_json::json!({"type":"session_meta","payload":{"id":"lazy","cwd":"/tmp"}})
+  );
+  for index in 0..8 {
+    body.push_str(&turn(index));
+  }
+  std::fs::write(&path, body).unwrap();
+  let mut reader = SessionReader::new_with_mode(
+    CatalogEntry {
+      key: "lazy".into(),
+      provider: Provider::Codex,
+      header: serde_json::from_value(serde_json::json!({"id":"lazy","path":path})).unwrap(),
+    },
+    false,
+    directory.path().into(),
+    None,
+    true,
+  )
+  .unwrap();
+  let positions = |reader: &SessionReader| {
+    let mut result = BTreeMap::new();
+    for index in 0..reader.snapshot.records.len() {
+      let (record, start) = reader.snapshot.records.read(index).unwrap();
+      for (offset, event) in record.record.events.into_iter().enumerate() {
+        if let tokn_session_core::AgentEvent::Message(message) = event {
+          result.insert(message.text, reader.snapshot.event_base + start + offset);
+        }
+      }
+    }
+    result
+  };
+  let generation = reader.snapshot.generation.clone();
+  assert_eq!(positions(&reader).len(), 3);
+  assert!(!reader.ensure_history(Some((None, None))).unwrap());
+  for expected in [6, 8] {
+    let before = positions(&reader);
+    assert!(
+      reader
+        .ensure_history(Some((None, Some(reader.snapshot.event_base))))
+        .unwrap()
+    );
+    let after = positions(&reader);
+    assert_eq!(after.len(), expected);
+    assert_eq!(reader.snapshot.generation, generation);
+    for (message, position) in before {
+      assert_eq!(after[&message], position);
+    }
+  }
+  assert!(!reader.snapshot.has_earlier);
+  assert!(reader.snapshot.event_base > 0);
+  std::fs::OpenOptions::new()
+    .append(true)
+    .open(path)
+    .unwrap()
+    .write_all(turn(8).as_bytes())
+    .unwrap();
+  let before = positions(&reader);
+  assert!(reader.poll().unwrap());
+  let after = positions(&reader);
+  assert_eq!(after.len(), 9);
+  for (message, position) in before {
+    assert_eq!(after[&message], position);
+  }
 }

@@ -93,7 +93,7 @@ it("stops delayed local pagination when a remote viewer replaces the local reade
     expect(local.result.current.eventsError).toBeNull();
     expect(nativeInvoke).toHaveBeenCalledWith("subscribe_session", {
       request: expect.objectContaining({ session_key: "local-session", level: "steps",
-        cursor: null, scope: { history: "latest_turn", group_keys: [] } }),
+        cursor: null, scope: { history: "recent_turns", group_keys: [] } }),
     }, undefined);
   });
   expect(nativeInvoke.mock.calls.map(([command]) => command)).not.toContain("load_session_backward");

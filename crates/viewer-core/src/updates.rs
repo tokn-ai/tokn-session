@@ -501,7 +501,7 @@ impl ViewerService {
         history: if request.history_cursor.is_some() {
           HistoryScope::Retained
         } else {
-          HistoryScope::LatestTurn
+          HistoryScope::RecentTurns
         },
         ..Default::default()
       });
@@ -543,6 +543,14 @@ impl ViewerService {
         item_order: Some(Vec::new()),
         state: json!({"total_events":0,"previous_cursor":null,"next_cursor":null,"history_status":"complete","attention_revision":null,"outstanding_questions":[]}),
       });
+    }
+    // Cold source reads can take seconds. Warm the reader without holding the
+    // shared subscription lock, so opening one session cannot block live
+    // publication or subscription changes for every other session. Projection
+    // below still advances to the current snapshot under that lock.
+    let locator = crate::model::decode_session_key(&request.session_key)?;
+    if self.relay.covers(locator.provider) {
+      self.relay.load(&locator)?;
     }
     // Serialize registration and publication: no source update can fall into
     // the gap between producing the initial snapshot and registering interest.
