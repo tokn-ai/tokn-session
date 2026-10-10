@@ -125,6 +125,8 @@ token measurements, and optional Relay-native contributor detail. Compaction
 does not complete a turn or count as unread conversation; terminal-pet ignores
 it for activity/focus. Existing Relay follow/cache updates carry the event,
 including when native is off. Earlier transcript content remains visible.
+Codex checkpoint/completion correlation survives its validated snapshot metadata
+and accounting, with session/turn guards; both native contributors remain inspectable.
 Codex/Pi persisted history does not expose compaction start; OpenCode exposes a
 request, while ZCode/DSH expose explicit start/end observations. ZCode coverage
 is based on the installed 3.7.3 bundle and representative fixtures, not a real
