@@ -1,4 +1,5 @@
 import type { EventDetail, EventSummary, JsonValue } from "../lib/types";
+import { parseQuestionDisplay } from "../lib/questionDisplay";
 import { DetailRefreshError } from "./DetailRefreshError";
 import { MarkdownContent } from "./MarkdownContent";
 
@@ -30,62 +31,53 @@ export function QuestionCard({ event, detail, error, is_loading, on_retry }: {
   if (recorded.truncated === true) {
     return <p role="status">{label} exceed the viewer’s detail size limit.</p>;
   }
-  if (recorded.type === "question_reply" && Array.isArray(recorded.replies)) {
-    return (
-      <div aria-busy={is_loading} className="question-card">
-        <DetailRefreshError error={error} on_retry={on_retry} />
-        <p className="question-card__notice">Recorded user answers</p>
-        {recorded.replies.length === 0 ? <p>No answers recorded</p> : null}
-        {recorded.replies.map((value, index) => {
-          const reply = object(value);
-          if (!reply || !Array.isArray(reply.answers)) return null;
-          return <section className="question-card__question" key={index}>
-            {typeof reply.header === "string" && reply.header ? <h4>{reply.header}</h4> : null}
-            {typeof reply.question === "string" ? <MarkdownContent content={reply.question} />
-              : <h4>{typeof reply.question_id === "string" ? reply.question_id : "Question"}</h4>}
-            {reply.answers.length === 0 ? <p>No answer recorded</p> : reply.answers.map((answer, answer_index) =>
-              typeof answer === "string" ? <MarkdownContent key={answer_index} content={answer} /> : null)}
-          </section>;
-        })}
-      </div>
-    );
-  }
-  if (recorded.type !== "question_request" || !Array.isArray(recorded.questions)) {
-    return <p>No structured questions were recorded.</p>;
-  }
+  const display = parseQuestionDisplay(recorded);
+  if (!display) return <p>No structured questions were recorded.</p>;
+  const is_reply = display.kind === "reply";
+  const notice = is_reply ? "Recorded user answers" : display.is_blocking === true ? "Recorded blocking question request"
+    : display.is_blocking === false ? "Recorded asynchronous question request" : "Recorded question request";
   return (
-    <div aria-busy={is_loading} className="question-card">
+    <div aria-busy={is_loading} className="question-card" data-kind={display.kind}>
       <DetailRefreshError error={error} on_retry={on_retry} />
-      <p className="question-card__notice">
-        {recorded.is_blocking === true ? "Recorded blocking question request"
-          : recorded.is_blocking === false ? "Recorded asynchronous question request"
-            : "Recorded question request"}
-      </p>
-      {recorded.questions.map((value, index) => {
-        const question = object(value);
-        if (!question || typeof question.question !== "string") return null;
-        return (
-          <section className="question-card__question" key={index}>
-            {typeof question.header === "string" && question.header ? <h4>{question.header}</h4> : null}
-            <MarkdownContent content={question.question} />
-            {Array.isArray(question.options) && question.options.length > 0 ? (
-              <ul className="question-card__options">
-                {question.options.map((value, option_index) => {
-                  const option = object(value);
-                  if (!option || typeof option.label !== "string") return null;
-                  return <li key={option_index}>
-                    <strong>{option.label}</strong>
-                    {typeof option.description === "string" && option.description
-                      ? <span> — {option.description}</span> : null}
-                  </li>;
-                })}
-              </ul>
-            ) : null}
-            {question.allows_free_text === true ? <p className="question-card__notice">Free-text answer allowed</p> : null}
-            {question.is_secret === true ? <p className="question-card__notice">Secret answer requested</p> : null}
-          </section>
-        );
-      })}
+      <div className="question-card__heading">
+        <span className="question-card__symbol" aria-hidden="true">{is_reply ? "✓" : "?"}</span>
+        <span className="question-card__notice">{notice}</span>
+      </div>
+      {display.questions.length === 0 ? <p>{is_reply ? "No answers recorded" : "No structured questions were recorded."}</p> : null}
+      {display.questions.map((question, index) => (
+        <section className="question-card__question" key={index}>
+          <div className="question-card__question-heading">
+            <h4>{question.header ?? (is_reply && !question.question ? question.question_id : null) ?? "Question"}</h4>
+            {display.questions.length > 1 ? <span className="question-card__count">{index + 1} of {display.questions.length}</span> : null}
+          </div>
+          {question.question ? <div className="question-card__prompt"><MarkdownContent content={question.question} /></div> : null}
+          {question.options.length > 0 ? (
+            <ol className="question-card__options" aria-label="Recorded options">
+              {question.options.map((option, option_index) => (
+                <li className="question-card__option" key={option_index}>
+                  <span className="question-card__option-number" aria-hidden="true">{option_index + 1}</span>
+                  <div className="question-card__option-content">
+                    <div className="question-card__option-label">
+                      <strong>{option.label}</strong>
+                      {option.is_recommended ? <span className="question-card__recommended">Recommended</span> : null}
+                    </div>
+                    {option.description ? <p className="question-card__description">{option.description}</p> : null}
+                  </div>
+                </li>
+              ))}
+            </ol>
+          ) : null}
+          {is_reply ? <div className="question-card__answers">
+            <span className="question-card__answer-label">Recorded answer</span>
+            {question.answers.length === 0 ? <p className="question-card__notice">No answer recorded</p>
+              : question.answers.map((answer, answer_index) => <MarkdownContent key={answer_index} content={answer} />)}
+          </div> : null}
+          {question.allows_free_text || question.is_secret ? <div className="question-card__hints">
+            {question.allows_free_text ? <span>Free-text answer allowed</span> : null}
+            {question.is_secret ? <span>Secret answer requested</span> : null}
+          </div> : null}
+        </section>
+      ))}
     </div>
   );
 }

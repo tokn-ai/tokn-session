@@ -65,7 +65,11 @@ describe("historical question cards", () => {
     expect(screen.getByRole("heading", { name: "Storage" })).toBeInTheDocument();
     expect(screen.getByText("storage").tagName).toBe("STRONG");
     expect(screen.getAllByRole("listitem")).toHaveLength(2);
-    expect(screen.getByText("SQLite (Recommended)")).toBeInTheDocument();
+    expect(screen.getByText("Recommended")).toBeInTheDocument();
+    expect(screen.getByText("1 of 2")).toBeInTheDocument();
+    expect(screen.getByText("2 of 2")).toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "Recorded options" }).tagName).toBe("OL");
+    expect(screen.getByText("SQLite", { selector: "strong" })).toBeInTheDocument();
     expect(screen.getByText(/Keep it local/)).toBeInTheDocument();
     expect(screen.getByText("Any constraints?")).toBeInTheDocument();
     expect(screen.getByText("Secret answer requested")).toBeInTheDocument();
@@ -82,7 +86,7 @@ describe("historical question cards", () => {
     expect(on_toggle).toHaveBeenCalledWith(event.event_key);
     rerender(card({ detail: detail({ event_key: "event.v1.other" }), detail_loading: true }));
     expect(screen.getByRole("status")).toHaveTextContent("Loading questions");
-    expect(screen.queryByText("SQLite (Recommended)")).not.toBeInTheDocument();
+    expect(screen.queryByText("SQLite", { selector: "strong" })).not.toBeInTheDocument();
   });
 
   it("shows retry, refresh errors, and detail truncation", () => {
@@ -92,7 +96,7 @@ describe("historical question cards", () => {
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(on_retry_detail).toHaveBeenCalledOnce();
     rerender(card({ detail_error: "Refresh failed" }));
-    expect(screen.getByText("SQLite (Recommended)")).toBeInTheDocument();
+    expect(screen.getByText("SQLite", { selector: "strong" })).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("Refresh failed");
     rerender(card({ detail: detail({ event: { truncated: true } }) }));
     expect(screen.getByRole("status")).toHaveTextContent("detail size limit");
@@ -101,7 +105,7 @@ describe("historical question cards", () => {
   it("honors hidden content", () => {
     render(card({ detail: detail({ is_hidden: true }) }));
     expect(screen.getByText("Questions are hidden by the provider.")).toBeInTheDocument();
-    expect(screen.queryByText("SQLite (Recommended)")).not.toBeInTheDocument();
+    expect(screen.queryByText("SQLite", { selector: "strong" })).not.toBeInTheDocument();
   });
 
   it("does not invent a blocking mode when only a historical tool invocation was recorded", () => {

@@ -649,3 +649,26 @@ export interface LocalHostPairing {
   host_time: number;
   expires_at: number;
 }
+
+/** Read-only projection of normalized question details. */
+export interface QuestionDisplayOption {
+  label: string;
+  description: string | null;
+  is_recommended: boolean;
+}
+
+export interface QuestionDisplayItem {
+  question_id: string | null;
+  header: string | null;
+  question: string | null;
+  options: QuestionDisplayOption[];
+  answers: string[];
+  allows_free_text: boolean;
+  is_secret: boolean;
+}
+
+export interface QuestionDisplay {
+  kind: "request" | "reply";
+  is_blocking: boolean | null;
+  questions: QuestionDisplayItem[];
+}
