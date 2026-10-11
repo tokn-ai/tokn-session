@@ -32,6 +32,7 @@ function weight(value: unknown): number {
  * steps cursor. Unchanged objects retain their references across updates. */
 export class SessionDisplayCache {
   readonly resources = new SessionResources();
+  runningRevision = 0;
   coverageVersion(session_key: string) {
     const replica = this.replicas.get(this.key(session_key, "steps"));
     return replica ? { generation: replica.generation, revision: replica.revision } : {};
@@ -47,6 +48,7 @@ export class SessionDisplayCache {
   private pending = new Map<string, SessionUpdate[]>();
   private pageItems = new WeakMap<EventPageResponse, Map<string, SessionUpdateItem>>();
   private acceptedSources = new Map<string, string>();
+  private running = new Map<string, { source_revision?: string; is_running: boolean }>();
   private acceptedItems = new Map<string, Map<string, SessionUpdateItem>>();
   private key(session_key: string, level: UpdateLevel) { return JSON.stringify([session_key, level]); }
 
@@ -57,6 +59,7 @@ export class SessionDisplayCache {
     if (!subscription_id) {
       subscription_id = `${this.prefix}:${createUuid()}`;
       this.subscriptions.set(key, subscription_id);
+      this.runningRevision += 1;
     }
     const scope = level === "steps" || level === "details"
       ? this.scopes.get(session_key) ?? { history: "recent_turns" as const, group_keys: [] } : undefined;
@@ -84,6 +87,7 @@ export class SessionDisplayCache {
     if (!this.subscriptions.has(key)) return null;
     const request = { ...this.request(session_key, level), unsubscribe: true };
     this.subscriptions.delete(key);
+    this.runningRevision += 1;
     return request;
   }
 
@@ -93,6 +97,34 @@ export class SessionDisplayCache {
     if (!replica) return null;
     this.replicas.delete(key); this.replicas.set(key, replica);
     return replica.page;
+  }
+
+  /** Indexed attention can lag the source stream. Only a live replica owns
+   * running state; retained display content alone must not mask the catalog. */
+  liveRunning(session_key: string): boolean | undefined {
+    const subscribed = (["steps", "all", "final"] as const).some((level) => {
+      const key = this.key(session_key, level);
+      const replica = this.replicas.get(key);
+      return replica && this.subscriptions.get(key) === replica.subscription_id;
+    });
+    return subscribed ? this.running.get(session_key)?.is_running : undefined;
+  }
+
+  private observeRunning(session_key: string, page: EventPageResponse) {
+    if (page.is_running === undefined) return;
+    const previous = this.running.get(session_key);
+    // Delivery-level revisions are independent. Source revisions order state
+    // across levels, including delayed snapshots from another subscription.
+    const split = (value?: string) => {
+      const index = value?.lastIndexOf(":") ?? -1;
+      return index < 0 ? null : [value!.slice(0, index), value!.slice(index + 1)];
+    };
+    const before = split(previous?.source_revision), after = split(page.source_revision);
+    if (before && after && before[0] === after[0]
+      && /^\d+$/.test(before[1]) && /^\d+$/.test(after[1])
+      && BigInt(after[1]) < BigInt(before[1])) return;
+    this.runningRevision += 1;
+    this.running.set(session_key, { source_revision: page.source_revision, is_running: page.is_running });
   }
 
   detail(session_key: string, event_key: string) {
@@ -131,8 +163,9 @@ export class SessionDisplayCache {
   }
 
   invalidate(session_key?: string) {
+    this.runningRevision += 1;
     for (const [key] of this.replicas) {
-      if (!session_key || JSON.parse(key)[0] === session_key) { this.replicas.delete(key); this.pending.delete(key); }
+      if (!session_key || JSON.parse(key)[0] === session_key) { this.replicas.delete(key); this.pending.delete(key); this.running.delete(JSON.parse(key)[0]); }
     }
   }
 
@@ -227,6 +260,7 @@ export class SessionDisplayCache {
           ? update.state.scope.group_keys : [...new Set([...update.state.scope.group_keys, ...(pendingScope?.group_keys ?? [])])],
       });
     }
+    if (update.level !== "details") this.observeRunning(update.session_key, page);
     this.pageItems.set(page, items);
     this.replicas.delete(key);
     this.replicas.set(key, { subscription_id: update.subscription_id, generation: update.generation, revision: update.revision, items, order, event_order, page, bytes });
@@ -249,6 +283,7 @@ export class SessionDisplayCache {
       this.resources.remove(oldest);
       this.acceptedItems.delete(oldest);
       this.acceptedSources.delete(oldest);
+      this.running.delete(oldest);
     }
     return page;
   }
