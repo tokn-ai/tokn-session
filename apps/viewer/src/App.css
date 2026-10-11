@@ -3700,3 +3700,18 @@ button:disabled {
 .question-attention__item:hover {
   background: var(--surface-raised);
 }
+
+.question-card__option[data-selected="true"] {
+  border-color: var(--codex);
+  background: color-mix(in srgb, var(--codex) 10%, var(--app-bg));
+}
+
+.question-card__option[data-selected="true"] .question-card__option-number,
+.question-card__selected {
+  color: var(--codex);
+}
+
+.question-card__selected {
+  font-size: 11px;
+  font-weight: 600;
+}

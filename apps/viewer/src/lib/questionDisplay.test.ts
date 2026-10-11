@@ -12,9 +12,9 @@ describe("question display parsing", () => {
     ] })!;
     expect(display.is_blocking).toBe(false);
     expect(display.questions[0]).toMatchObject({ question_id: "q1", allows_free_text: true, options: [
-      { label: "SQLite", description: "Local database", is_recommended: true },
-      { label: "Recommended reading", description: null, is_recommended: false },
-      { label: "Postgres", description: null, is_recommended: false },
+      { label: "SQLite", description: "Local database", is_recommended: true, is_selected: false },
+      { label: "Recommended reading", description: null, is_recommended: false, is_selected: false },
+      { label: "Postgres", description: null, is_recommended: false, is_selected: false },
     ] });
   });
 

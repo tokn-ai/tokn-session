@@ -37,6 +37,7 @@ mod agent_activity;
 mod compaction;
 mod event_filter;
 mod input;
+mod question_display;
 mod trajectory_state;
 mod usage_filter;
 mod windows;
@@ -4605,6 +4606,7 @@ fn trajectory_event_summary(trajectory: &Trajectory, events: &[AgentEvent]) -> E
     reasoning: None,
     trajectory: Some(card),
     agent_activity: None,
+    question_selections: None,
     compaction: None,
   }
 }
@@ -4827,13 +4829,7 @@ fn event_summary_with_delegation_targets(
         .first()
         .map(|question| question.question.clone())
         .unwrap_or_default(),
-      AgentEvent::QuestionReply(reply) => reply
-        .replies
-        .iter()
-        .flat_map(|reply| &reply.answers)
-        .next()
-        .cloned()
-        .unwrap_or_else(|| "No answers recorded".into()),
+      AgentEvent::QuestionReply(reply) => question_display::reply_text(reply),
       AgentEvent::Reasoning(_) => reasoning
         .as_ref()
         .and_then(|card| {
@@ -4846,7 +4842,7 @@ fn event_summary_with_delegation_targets(
       _ => render_event_summary(event),
     }
   };
-  let summary_max_chars = if !hidden && matches!(event, AgentEvent::Message(_)) {
+  let summary_max_chars = if !hidden && matches!(event, AgentEvent::Message(_) | AgentEvent::QuestionReply(_)) {
     MAX_MESSAGE_SUMMARY_CHARS
   } else {
     MAX_TECHNICAL_SUMMARY_CHARS
@@ -4895,6 +4891,9 @@ fn event_summary_with_delegation_targets(
     reasoning,
     trajectory: None,
     agent_activity,
+    question_selections: (!hidden)
+      .then(|| question_display::selections(events, index, event))
+      .flatten(),
     compaction: compaction::card(event),
   }
 }
@@ -4948,6 +4947,7 @@ fn tool_operation_event_summary(source_event_index: usize, operation: &ToolOpera
     reasoning: None,
     trajectory: None,
     agent_activity: None,
+    question_selections: None,
     compaction: None,
   }
 }

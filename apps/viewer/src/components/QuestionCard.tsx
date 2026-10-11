@@ -31,7 +31,7 @@ export function QuestionCard({ event, detail, error, is_loading, on_retry }: {
   if (recorded.truncated === true) {
     return <p role="status">{label} exceed the viewer’s detail size limit.</p>;
   }
-  const display = parseQuestionDisplay(recorded);
+  const display = parseQuestionDisplay(recorded, event.question_selections);
   if (!display) return <p>No structured questions were recorded.</p>;
   const is_reply = display.kind === "reply";
   const notice = is_reply ? "Recorded user answers" : display.is_blocking === true ? "Recorded blocking question request"
@@ -54,11 +54,12 @@ export function QuestionCard({ event, detail, error, is_loading, on_retry }: {
           {question.options.length > 0 ? (
             <ol className="question-card__options" aria-label="Recorded options">
               {question.options.map((option, option_index) => (
-                <li className="question-card__option" key={option_index}>
+                <li className="question-card__option" data-selected={option.is_selected} key={option_index}>
                   <span className="question-card__option-number" aria-hidden="true">{option_index + 1}</span>
                   <div className="question-card__option-content">
                     <div className="question-card__option-label">
                       <strong>{option.label}</strong>
+                      {option.is_selected ? <span className="question-card__selected">✓ Selected</span> : null}
                       {option.is_recommended ? <span className="question-card__recommended">Recommended</span> : null}
                     </div>
                     {option.description ? <p className="question-card__description">{option.description}</p> : null}

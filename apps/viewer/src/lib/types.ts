@@ -410,7 +410,13 @@ export interface TrajectoryCardSummary {
   duration_ms: string | null;
 }
 
+export interface QuestionSelectionSummary {
+  question_id: string;
+  option_indices: number[];
+}
+
 export interface EventSummary {
+  question_selections?: QuestionSelectionSummary[];
   child_keys?: string[];
   delivery?: "commentary" | "final" | "unspecified";
   event_key: string;
@@ -655,6 +661,7 @@ export interface QuestionDisplayOption {
   label: string;
   description: string | null;
   is_recommended: boolean;
+  is_selected: boolean;
 }
 
 export interface QuestionDisplayItem {

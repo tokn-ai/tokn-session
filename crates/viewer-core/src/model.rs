@@ -446,7 +446,16 @@ pub struct AcknowledgeSessionAttentionResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct QuestionSelectionSummary {
+  pub question_id: String,
+  pub option_indices: Vec<usize>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct EventSummary {
+  /// Recorded selections only; absent when no reply can be correlated safely.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub question_selections: Option<Vec<QuestionSelectionSummary>>,
   /// Ordered semantic children of a work group; independent of Inspector limits.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub child_keys: Option<Vec<String>>,
