@@ -114,10 +114,14 @@ The switch uses saved settings; without a configured Hub it opens the same
 dialog. Configuration and pairing setup remain on Machines. External
 connectors show **Hosting externally**, with the switch disabled because the app
 cannot stop arbitrary connectors. The floating dialog offers **Stop external
-hosting** for the verified installed macOS connector LaunchAgent. It unloads only
-that connector for the current login session, preserves its configuration/trust,
-and leaves the viewer API service running. It may start again at the next login.
-Unrecognized connectors show a disabled stop button and manual-stop guidance. Status refreshes every 15 seconds while visible and on focus;
+hosting** for the verified installed macOS background services. It stops the Hub
+connector first, then the session API, for the current login session. Both may
+start again at the next login. The dialog reports each service independently;
+an API left running alone shows **Background API running** and can also be stopped.
+**Remove background hosting** asks for confirmation, stops both services, then
+removes their verified LaunchAgent registrations to prevent login startup.
+Configuration, machine identity, and paired-device trust are preserved.
+Unrecognized services show disabled actions and manual management guidance. Status refreshes every 15 seconds while visible and on focus;
 a failed Hub check shows status unavailable rather than hosting off. Viewing is the default for a new host. The dialog reports connecting,
 online, and reconnecting states. **Stop hosting** or quitting the app disconnects
 its connector and closes its private loopback API. Hosting is not started
@@ -132,9 +136,9 @@ The QR and URI contain a secret and belong only on the hosting device.
 
 The app and CLI share `~/.tokn/hub` configuration, keys, and paired-device trust.
 An existing online connector or an ownership lock held by another updated
-process blocks app hosting with a clear error. The app does not stop external
-services or replace their connection. A saved host needs a reachable saved Hub
-for the legacy-connector check before starting. Stop your external connector
+process, or a loaded background API, blocks app hosting with a clear error.
+The app only stops verified services when explicitly requested in the dialog. A saved host needs a reachable saved Hub
+for the legacy-connector check before starting. Stop your background hosting services
 first if you want the app to own hosting. The CLI's saved viewer URL remains
 intact; the app uses a separate ephemeral API port and token with its existing
 local reader and event stream.

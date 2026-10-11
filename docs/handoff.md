@@ -151,11 +151,13 @@ and remote session connection panels show its status and quick on/off switch
 for this computer. One desktop provider retains status across navigation;
 dialog dismissal clears pairing secrets and restores keyboard focus. The panels
 keep configuration on Machines and report externally owned connectors with a
-disabled switch. Only the floating dialog offers external stop: a verified
-installed macOS connector LaunchAgent is unloaded for the current login session,
-without affecting the API service or saved trust; unrecognized connectors remain
-manual. Definition, loaded service, and launcher configuration are rechecked
-before stopping. Status checks inspect ownership locks and the saved Hub for
+disabled switch. The floating dialog reports the installed macOS API and connector
+independently, including an orphaned API that still owns the indexer. Verified
+external stop unloads the connector before the API for this login. Remove background
+hosting confirms removal, unloads both, and removes their verified LaunchAgent files
+so they do not start at login; saved identity, pairing trust, and binaries remain.
+Unknown services stay manual. Definition, loaded arguments, and the complete launcher
+shape are verified before either service changes; partial failures publish current status. Status checks inspect ownership locks and the saved Hub for
 older connectors; the Hub’s explicit 502 “Host is offline” response is offline,
 while unrelated gateway failures remain unavailable. Visible
 clients refresh status every 15 seconds and on focus. It reuses `~/.tokn/hub` trust, offers Hub/name and

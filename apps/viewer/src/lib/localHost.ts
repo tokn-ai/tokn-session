@@ -10,13 +10,15 @@ export interface LocalHostControls {
   open: (opener?: HTMLElement | null) => void;
   close: () => void;
   retry: () => void;
+  remove_external: () => Promise<void>;
   stop_external: () => Promise<void>;
   change: (request?: StartLocalHostRequest) => Promise<void>;
 }
 export const LocalHostContext = createContext<LocalHostControls | undefined>(undefined);
 export const useLocalHost = () => useContext(LocalHostContext);
-export const isHosting = (status?: LocalHostStatus) => !!status && !["stopped", "external", "unavailable"].includes(status.phase);
+export const isHosting = (status?: LocalHostStatus) => !!status && !["stopped", "external", "background", "unavailable"].includes(status.phase);
 export const hostLabels: Record<LocalHostStatus["phase"], string> = {
+  background: "Background API running",
   external: "Hosting externally", unavailable: "Hosting status unavailable",
   stopped: "Hosting off", connecting: "Connecting to Hub…", online: "Hosting online",
   reconnecting: "Reconnecting to Hub…", error: "Hosting needs attention",

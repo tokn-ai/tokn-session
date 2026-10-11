@@ -32,6 +32,10 @@
 .host-summary dt { color: var(--text-muted); }
 .host-summary dd { margin: 0; overflow-wrap: anywhere; }
 .host-dialog .hub-error, .host-quick [role="alert"] { color: var(--danger); }
+.host-background, .host-background > div { display: grid; gap: 12px; }
+.host-background { padding-top: 16px; border-top: 1px solid var(--border); }
+.host-background h3 { margin: 0; font-size: 14px; }
+.host-background [role="alert"] { color: var(--danger); }
 .host-pairing-section { border-top: 1px solid var(--border); padding-top: 16px; }
 .host-pairing { display: grid; gap: 12px; margin-top: 16px; min-width: 0; }
 .host-pairing label { display: grid; gap: 8px; }
