@@ -494,6 +494,7 @@ export interface AcknowledgeSessionAttentionResponse {
 }
 
 export interface EventPageResponse {
+  is_running?: boolean;
   source_revision?: string;
   events: EventSummary[];
   next_cursor: string | null;

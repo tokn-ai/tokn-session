@@ -58,6 +58,9 @@ use whole seconds. When questions or compaction split an active turn, only its
 latest work segment remains running; earlier durations stop at the separator.
 Parent running state owns delegated activity: a stopped parent blocks descendant
 running propagation, even when child histories lack completion records.
+Live display replicas own sidebar running state while subscribed; lagging catalog
+and index notifications cannot override it. Source revisions order running state
+across delivery levels; released/invalidated replicas relinquish ownership.
 Live work shows a spinner. Provider filters and session metadata live in disclosures.
 Desktop sidebar collapse preserves navigation state and removes hidden controls
 from keyboard focus; mobile retains the modal session drawer. The latest-activity

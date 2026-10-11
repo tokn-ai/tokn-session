@@ -13,6 +13,24 @@ function snapshot(cache: SessionDisplayCache, key: string, ids = ["a"]): Session
 }
 
 describe("session display replicas", () => {
+  it("orders running state by source revision across delivery levels and releases ownership", () => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one");
+    cache.apply({ ...initial, state: { ...initial.state, is_running: true, source_revision: "source:10" } });
+    expect(cache.liveRunning("one")).toBe(true);
+    const final = cache.request("one", "final");
+    cache.apply({ ...initial, ...final, state: { ...initial.state, is_running: false, source_revision: "source:9" } });
+    expect(cache.liveRunning("one")).toBe(true);
+    cache.apply({ ...initial, ...final, revision: "2", state: { ...initial.state, is_running: false, source_revision: "source:11" } });
+    expect(cache.liveRunning("one")).toBe(false);
+    cache.release("one", "all");
+    cache.release("one", "final");
+    expect(cache.liveRunning("one")).toBeUndefined();
+    cache.request("one", "final");
+    expect(cache.liveRunning("one")).toBeUndefined();
+    cache.invalidate("one");
+    expect(cache.liveRunning("one")).toBeUndefined();
+  });
   it("applies changed items while retaining unchanged references", () => {
     const cache = new SessionDisplayCache(); const initial = snapshot(cache, "one", ["a", "b"]);
     const first = cache.apply(initial)!;

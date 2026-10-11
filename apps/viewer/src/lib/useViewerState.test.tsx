@@ -2704,6 +2704,41 @@ function semanticSnapshot(request: import("./types").SessionUpdatesRequest, page
 }
 
 describe("semantic session delivery", () => {
+  it("keeps live running state through stale catalog and attention updates, then clears on completion", async () => {
+    let emit: ((update: import("./types").SessionUpdate) => void) | undefined;
+    let notify: ((notification: import("./types").SessionNotification) => void) | undefined;
+    vi.mocked(listenForSessionUpdates).mockImplementation((handler) => { emit = handler; return Promise.resolve(vi.fn()); });
+    vi.mocked(listenForSessionNotifications).mockImplementation((handler) => { notify = handler; return Promise.resolve(vi.fn()); });
+    const indexed = { ...session("live"), is_running: false };
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [indexed], next_cursor: null, source_errors: [], pending_providers: [] });
+    const page = { ...toolEventPage(), is_running: true, source_revision: "source:10" };
+    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    const { result } = renderHook(() => useViewerState());
+    await selectListedSession(result, "live");
+    await waitFor(() => expect(result.current.events).toEqual(page.events));
+    const request = vi.mocked(loadSessionUpdates).mock.calls.find(([request]) => request.level === "steps")![0];
+    act(() => emit?.({ ...semanticSnapshot(request, page), revision: "2" }));
+    await waitFor(() => expect(result.current.sessions[0].is_running).toBe(true));
+    const pending = deferred<ListSessionsResponse>();
+    vi.mocked(listSessions).mockReturnValueOnce(pending.promise);
+    const calls = vi.mocked(listSessions).mock.calls.length;
+    act(() => result.current.retrySessions());
+    await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(calls + 1));
+    const attention = { session_key: "live", has_unread: false, unread_final_count: 0,
+      is_running: false, has_running_descendant: false, question_attention: { required_count: 0, available_count: 0 } };
+    act(() => notify?.(attention));
+    expect(result.current.sessions[0].is_running).toBe(true);
+    await act(async () => pending.resolve({ sessions: [indexed], next_cursor: null, source_errors: [], pending_providers: [] }));
+    expect(result.current.sessions[0].is_running).toBe(true);
+    expect(result.current.selectedSession?.is_running).toBe(true);
+    act(() => emit?.({ ...semanticSnapshot(request, { ...page, is_running: false, source_revision: "source:11" }), revision: "3" }));
+    await waitFor(() => expect(result.current.sessions[0].is_running).toBe(false));
+    act(() => notify?.({ ...attention, is_running: true, has_running_descendant: true }));
+    expect(result.current.sessions[0].is_running).toBe(false);
+    expect(result.current.selectedSession?.is_running).toBe(false);
+    expect(result.current.sessions[0].has_running_descendant).toBe(false);
+  });
+
   it("clears cached descendant running state from compact ancestor notifications", async () => {
     let notify: ((notification: import("./types").SessionNotification) => void) | undefined;
     let indexChange: ((change: SessionIndexChangedEvent) => void) | undefined;

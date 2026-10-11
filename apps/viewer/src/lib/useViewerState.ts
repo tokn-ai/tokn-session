@@ -1286,27 +1286,36 @@ export function useViewerState() {
     }
   }, []);
 
-  // A catalog refresh may still contain the previous attention counts while
-  // indexing catches up. The accepted page owns the selected session's badge.
+  // Source subscriptions own running state while indexing catches up. Apply
+  // this at display time so root/child pages and compact notifications cannot
+  // overwrite it with an older indexed snapshot.
+  const runningRevision = displayCache.current.runningRevision;
+  const projectSession = useCallback((session: SessionSummary): SessionSummary => {
+    const liveRunning = displayCache.current.liveRunning(session.session_key);
+    const is_running = liveRunning ?? session.is_running;
+    const has_running_descendant = liveRunning === false ? false : session.has_running_descendant;
+    const question_attention = pageQuestionAttention !== undefined && session.session_key === selectedSessionKey
+      ? pageQuestionAttention : session.question_attention;
+    return is_running === session.is_running && has_running_descendant === session.has_running_descendant
+      && question_attention === session.question_attention
+      ? session : { ...session, is_running, has_running_descendant, question_attention };
+  }, [pageQuestionAttention, selectedSessionKey, runningRevision]);
   const displayedSessions = useMemo(() => {
-    if (pageQuestionAttention === undefined) return { sessions, children: sessionChildren };
-    const update = (session: SessionSummary) => pageQuestionAttention !== undefined
-      && session.session_key === selectedSessionKey
-      ? { ...session, question_attention: pageQuestionAttention }
-      : session;
-    return {
-      sessions: sessions.map(update),
-      children: new Map([...sessionChildren].map(([parent, state]) => [
-        parent, { ...state, sessions: state.sessions.map(update) },
-      ])),
+    const projectRows = (rows: SessionSummary[]) => {
+      const next = rows.map(projectSession);
+      return next.some((row, index) => row !== rows[index]) ? next : rows;
     };
-  }, [pageQuestionAttention, selectedSessionKey, sessionChildren, sessions]);
-
-  const selectedSession = useMemo(
-    () => findKnownSession(displayedSessions.sessions, displayedSessions.children, selectedSessionKey)
-      ?? (selectedSessionMetadata?.session_key === selectedSessionKey ? selectedSessionMetadata : null),
-    [selectedSessionKey, selectedSessionMetadata, displayedSessions],
-  );
+    let childrenChanged = false;
+    const children = new Map([...sessionChildren].map(([parent, state]) => {
+      const rows = projectRows(state.sessions);
+      childrenChanged ||= rows !== state.sessions;
+      return [parent, rows === state.sessions ? state : { ...state, sessions: rows }] as const;
+    }));
+    return { sessions: projectRows(sessions), children: childrenChanged ? children : sessionChildren };
+  }, [projectSession, sessionChildren, sessions]);
+  const selectedSession = useMemo(() => findKnownSession(displayedSessions.sessions, displayedSessions.children, selectedSessionKey)
+    ?? (selectedSessionMetadata?.session_key === selectedSessionKey ? projectSession(selectedSessionMetadata) : null),
+    [displayedSessions, selectedSessionKey, selectedSessionMetadata, projectSession]);
   useSessionView(selectedSessionKey, selectedSession, sessions, sessionChildren);
 
   const openRelatedSession = useCallback((sourceSessionKey: string, target: SessionSummary) => {
