@@ -67,6 +67,8 @@ from keyboard focus; mobile retains the modal session drawer. The latest-activit
 button floats inside the history area so it does not shift the reading position.
 
 The viewer tracks unanswered questions separately from unread final replies.
+Question navigation scrolls only the conversation viewport, preserving the app
+shell position while focusing and expanding the question.
 Sidebar badges and session notices show **Input required** for explicit blocking
 requests and **Question available** for async/unknown blocking requests. They
 remain visible after read acknowledgement; exact question-ID replies resolve
