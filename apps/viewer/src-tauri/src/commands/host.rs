@@ -26,3 +26,8 @@ pub async fn local_host_pairing(state: State<'_, LocalHost>) -> Result<HostPairi
 pub async fn local_host_stop_external(app: AppHandle, state: State<'_, LocalHost>) -> Result<HostStatus, String> {
   state.stop_external(&app).await
 }
+
+#[tauri::command]
+pub async fn local_host_remove_external(app: AppHandle, state: State<'_, LocalHost>) -> Result<HostStatus, String> {
+  state.remove_external(&app).await
+}

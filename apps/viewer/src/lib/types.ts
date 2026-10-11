@@ -617,9 +617,18 @@ export interface SessionNotification {
   question_attention: SessionSummary["question_attention"];
 }
 
+export interface BackgroundServiceStatus {
+  registered: boolean;
+  loaded: boolean;
+  running: boolean;
+  verified: boolean;
+  error: string | null;
+}
 export interface LocalHostStatus {
+  background_services?: { api: BackgroundServiceStatus; connector: BackgroundServiceStatus };
+  external_remove_supported?: boolean;
   external_stop_supported?: boolean;
-  phase: "stopped" | "external" | "unavailable" | "connecting" | "online" | "reconnecting" | "error";
+  phase: "stopped" | "external" | "background" | "unavailable" | "connecting" | "online" | "reconnecting" | "error";
   hub_url: string;
   name: string;
   allow_control: boolean;

@@ -240,6 +240,9 @@ export function stopLocalHost(): Promise<import("./types").LocalHostStatus> {
 export function stopExternalLocalHost(): Promise<import("./types").LocalHostStatus> {
   return localHostCommand("local_host_stop_external");
 }
+export function removeExternalLocalHost(): Promise<import("./types").LocalHostStatus> {
+  return localHostCommand("local_host_remove_external");
+}
 export function getLocalHostPairing(): Promise<import("./types").LocalHostPairing> {
   return localHostCommand("local_host_pairing");
 }
