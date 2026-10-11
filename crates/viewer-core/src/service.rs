@@ -3989,6 +3989,11 @@ fn session_relation_attention(
     let child = attention[child_index];
     let mut parent_index = relations.parent_indices[child_index];
     while let Some(index) = parent_index {
+      // The parent owns the lifetime of its delegated work. Missing child
+      // completion records must not reopen a stopped parent or its ancestors.
+      if !attention[index].is_running {
+        break;
+      }
       attention[index].has_running_descendant |= child.is_running;
       parent_index = relations.parent_indices[index];
     }
@@ -8454,7 +8459,7 @@ mod tests {
       .expect("indexed listing should work");
     assert!(!no_attention.sessions[0].has_unread);
     assert!(!no_attention.sessions[0].has_unread_descendant);
-    assert!(no_attention.sessions[0].has_running_descendant);
+    assert!(!no_attention.sessions[0].has_running_descendant);
     assert!(!no_attention.sessions[0].is_running);
 
     std::fs::write(&child_path, "child commentary and final reply").expect("child fixture source should change");

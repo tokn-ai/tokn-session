@@ -56,6 +56,8 @@ command, cwd, exit status, and an eight-line output preview with local expansion
 Collapsed event headings occupy one line; expanded paths wrap. Work durations
 use whole seconds. When questions or compaction split an active turn, only its
 latest work segment remains running; earlier durations stop at the separator.
+Parent running state owns delegated activity: a stopped parent blocks descendant
+running propagation, even when child histories lack completion records.
 Live work shows a spinner. Provider filters and session metadata live in disclosures.
 Desktop sidebar collapse preserves navigation state and removes hidden controls
 from keyboard focus; mobile retains the modal session drawer. The latest-activity
