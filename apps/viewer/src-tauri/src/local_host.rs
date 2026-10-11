@@ -28,6 +28,7 @@ pub enum HostPhase {
   #[default]
   Stopped,
   External,
+  Background,
   Unavailable,
   Connecting,
   Online,
@@ -43,6 +44,8 @@ pub struct HostStatus {
   pub machine_reference: Option<String>,
   pub error: Option<String>,
   pub external_stop_supported: bool,
+  pub external_remove_supported: bool,
+  pub background_services: crate::external_host::BackgroundHosting,
 }
 impl Default for HostStatus {
   fn default() -> Self {
@@ -54,6 +57,8 @@ impl Default for HostStatus {
       machine_reference: None,
       error: None,
       external_stop_supported: false,
+      external_remove_supported: false,
+      background_services: Default::default(),
     }
   }
 }
@@ -142,6 +147,10 @@ impl LocalHost {
     })
     .await
     .map_err(|_| "Host ownership task failed")??;
+    let background = crate::external_host::inspect(&self.state_dir, previous.as_ref()).await?;
+    if background.has_loaded() || background.api.error.is_some() || background.connector.error.is_some() {
+      return Err("Stop background hosting services, or resolve their status errors, before hosting in the app".into());
+    }
     if let Some(profile) = &previous {
       if host_setup::existing_host_online(profile).await? {
         return Err("Another connector is already hosting this machine through its saved Hub. Stop that connector before hosting in the app.".into());
@@ -188,6 +197,8 @@ impl LocalHost {
       machine_reference: Some(prepared.reference),
       error: None,
       external_stop_supported: false,
+      external_remove_supported: false,
+      background_services: Default::default(),
     };
     publish(&app, &self.status, status);
     let shutdown = CancellationToken::new();
@@ -248,30 +259,46 @@ impl LocalHost {
     if running.is_some() {
       return Err("Use Stop hosting for the connector owned by this app".into());
     }
-    let status = detected_status(self.state_dir.clone()).await?;
-    if !matches!(status.phase, HostPhase::External) {
-      return Err("External hosting is no longer detected; refresh its status".into());
+    self.manage_background(app, false).await
+  }
+  pub async fn remove_external(&self, app: &AppHandle) -> Result<HostStatus, String> {
+    let running = self.operation.lock().await;
+    if running.is_some() {
+      return Err("Stop app hosting before removing background service registrations".into());
+    }
+    self.manage_background(app, true).await
+  }
+  async fn manage_background(&self, app: &AppHandle, remove: bool) -> Result<HostStatus, String> {
+    let observed = detected_status(self.state_dir.clone()).await?;
+    if !(if remove {
+      observed.external_remove_supported
+    } else {
+      observed.external_stop_supported
+    }) {
+      return Err(
+        "Background hosting cannot be managed safely; refresh its status or stop unrecognized connectors manually"
+          .into(),
+      );
     }
     let path = self.state_dir.join("host.json");
     let profile = tokio::task::spawn_blocking(move || HostProfile::load(&path))
       .await
-      .map_err(|_| "Host configuration task failed")??
-      .ok_or("No saved host configuration")?;
-    crate::external_host::stop(&self.state_dir, &profile).await?;
-    let status = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-      loop {
-        let status = detected_status(self.state_dir.clone()).await?;
-        if matches!(status.phase, HostPhase::Stopped) {
-          break Ok::<_, String>(status);
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-      }
-    })
-    .await
-    .map_err(|_| {
-      "Connector service was unloaded, but hosting has not been confirmed offline. Refresh its status.".to_string()
-    })??;
+      .map_err(|_| "Host configuration task failed")??;
+    let result = crate::external_host::manage(&self.state_dir, profile.as_ref(), remove).await;
+    // Always publish observed partial progress, including a failed second stop
+    // or removal. Never retain the old all-running view after one service stops.
+    let mut status = detected_status(self.state_dir.clone()).await?;
+    if let Err(error) = &result {
+      status.error = Some(error.clone());
+    }
     publish(app, &self.status, status.clone());
+    result?;
+    if status.background_services.has_loaded() {
+      return Err("Background services are still loaded; refresh their status".into());
+    }
+    if remove && status.background_services.has_registered() {
+      return Err("Background hosting registrations remain; refresh their status".into());
+    }
     Ok(status)
   }
   pub async fn shutdown(&self, app: &AppHandle) {
@@ -300,10 +327,15 @@ async fn detected_status(path: PathBuf) -> Result<HostStatus, String> {
   })
   .await
   .map_err(|_| "Host status task failed")??;
-  if held {
+  status.background_services = crate::external_host::inspect(&path, profile.as_ref()).await?;
+  status.external_stop_supported = status.background_services.stop_supported();
+  status.external_remove_supported = status.background_services.remove_supported();
+  if held || status.background_services.connector.loaded {
     status.phase = HostPhase::External;
+  } else if status.background_services.api.loaded {
+    status.phase = HostPhase::Background;
   } else if let Some(profile) = &profile {
-    match host_setup::existing_host_online(&profile).await {
+    match host_setup::existing_host_online(profile).await {
       Ok(true) => status.phase = HostPhase::External,
       Ok(false) => {}
       Err(error) => {
@@ -312,10 +344,22 @@ async fn detected_status(path: PathBuf) -> Result<HostStatus, String> {
       }
     }
   }
-  if matches!(status.phase, HostPhase::External) {
-    if let Some(profile) = &profile {
-      status.external_stop_supported = crate::external_host::available(&path, profile).await;
-    }
+  // A manual/unknown connector may depend on the registered API. Do not
+  // advertise a whole-unit stop that would leave that connector alive.
+  if matches!(status.phase, HostPhase::External) && !status.background_services.connector.loaded {
+    status.external_stop_supported = false;
+    status.external_remove_supported = false;
+  }
+  if !status.background_services.has_loaded()
+    && let Some(error) = status
+      .background_services
+      .api
+      .error
+      .as_ref()
+      .or(status.background_services.connector.error.as_ref())
+  {
+    status.phase = HostPhase::Unavailable;
+    status.error = Some(error.clone());
   }
   Ok(status)
 }
@@ -337,6 +381,8 @@ fn profile_status(path: &std::path::Path, profile: Option<&HostProfile>) -> Resu
     machine_reference: Some(format!("{}@{}", profile.host_id, identity.public_key())),
     error: None,
     external_stop_supported: false,
+    external_remove_supported: false,
+    background_services: Default::default(),
   })
 }
 fn pairing(path: &std::path::Path) -> Result<HostPairing, String> {

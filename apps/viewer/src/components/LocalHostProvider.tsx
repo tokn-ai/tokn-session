@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { getLocalHostStatus, listenForLocalHostStatus, startLocalHost, stopLocalHost, stopExternalLocalHost } from "../lib/tauri";
+import { getLocalHostStatus, listenForLocalHostStatus, startLocalHost, stopLocalHost, stopExternalLocalHost, removeExternalLocalHost } from "../lib/tauri";
 import { isHosting, LocalHostContext } from "../lib/localHost";
 import type { LocalHostStatus, StartLocalHostRequest } from "../lib/types";
 import { HostDialog } from "./HostSetup";
@@ -60,7 +60,7 @@ export function LocalHostProvider({ children }: { children: ReactNode }) {
   }, [attempt]);
 
   async function change(request?: StartLocalHostRequest) {
-    if (pending.current || !status || status.phase === "external" || status.phase === "unavailable") return;
+    if (pending.current || !status || ["external", "background", "unavailable"].includes(status.phase)) return;
     const hosting = isHosting(status);
     const settings = request ?? status;
     if (!hosting && (!settings.hub_url.trim() || !settings.name.trim())) { open(); return; }
@@ -91,12 +91,13 @@ export function LocalHostProvider({ children }: { children: ReactNode }) {
       if (alive.current) setBusy(false);
     }
   }
-  async function stopExternal() {
-    if (pending.current || status?.phase !== "external" || !status.external_stop_supported) return;
+  async function manageExternal(remove: boolean) {
+    if (pending.current || !status || isHosting(status)
+      || !(remove ? status.external_remove_supported : status.external_stop_supported)) return;
     pending.current = true; setBusy(true); setError(undefined);
     const before = revision.current;
     try {
-      const next = await stopExternalLocalHost();
+      const next = await (remove ? removeExternalLocalHost() : stopExternalLocalHost());
       if (alive.current && before === revision.current) { revision.current++; setStatus(next); }
     } catch (error) {
       if (alive.current) setError(error instanceof Error ? error.message : String(error));
@@ -105,7 +106,7 @@ export function LocalHostProvider({ children }: { children: ReactNode }) {
       if (alive.current) setBusy(false);
     }
   }
-  return <LocalHostContext value={{ status, busy, error, is_open, change, stop_external: stopExternal,
+  return <LocalHostContext value={{ status, busy, error, is_open, change, stop_external: () => manageExternal(false), remove_external: () => manageExternal(true),
     return_focus: return_focus.current, open, close: () => setOpen(false), retry: () => setAttempt((value) => value + 1) }}>
     {children}
     {is_open && <HostDialog />}

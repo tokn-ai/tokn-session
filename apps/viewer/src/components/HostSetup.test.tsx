@@ -4,9 +4,9 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { RemoteConnection } from "./RemoteConnection";
 import { LocalHostProvider } from "./LocalHostProvider";
 import { HostSetup, HostQuickControl } from "./HostSetup";
-import { getLocalHostPairing, getLocalHostStatus, listenForLocalHostStatus, startLocalHost, stopLocalHost, stopExternalLocalHost } from "../lib/tauri";
+import { getLocalHostPairing, getLocalHostStatus, listenForLocalHostStatus, startLocalHost, stopLocalHost, stopExternalLocalHost, removeExternalLocalHost } from "../lib/tauri";
 import type { LocalHostStatus } from "../lib/types";
-vi.mock("../lib/tauri", () => ({ getLocalHostPairing: vi.fn(), getLocalHostStatus: vi.fn(), listenForLocalHostStatus: vi.fn(), startLocalHost: vi.fn(), stopLocalHost: vi.fn(), stopExternalLocalHost: vi.fn() }));
+vi.mock("../lib/tauri", () => ({ getLocalHostPairing: vi.fn(), getLocalHostStatus: vi.fn(), listenForLocalHostStatus: vi.fn(), startLocalHost: vi.fn(), stopLocalHost: vi.fn(), stopExternalLocalHost: vi.fn(), removeExternalLocalHost: vi.fn() }));
 const stopped: LocalHostStatus = { phase: "stopped", hub_url: "https://hub.example", name: "Workstation", allow_control: false, machine_reference: "machine@key", error: null };
 const online: LocalHostStatus = { ...stopped, phase: "online" };
 let status_event: (status: LocalHostStatus) => void;
@@ -18,6 +18,7 @@ beforeEach(() => {
   vi.mocked(startLocalHost).mockResolvedValue(online);
   vi.mocked(stopLocalHost).mockResolvedValue(stopped);
   vi.mocked(stopExternalLocalHost).mockResolvedValue(stopped);
+  vi.mocked(removeExternalLocalHost).mockResolvedValue(stopped);
   vi.mocked(getLocalHostPairing).mockResolvedValue({ machine_reference: "machine@key", qr_data_url: "data:image/svg+xml;base64,test", setup_uri: "otpauth://totp/test?secret=PRIVATE&algorithm=SHA256", current_code: "123456", host_time: 100, expires_at: 130 });
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.clearAllMocks(); localStorage.clear(); });
@@ -162,7 +163,7 @@ it("shows external hosting and disables app controls without trying to stop it",
   fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
   expect(screen.queryByRole("button", { name: "Start hosting" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Stop hosting" })).not.toBeInTheDocument();
-  expect(screen.getByRole("dialog")).toHaveTextContent("Stop it outside the app");
+  expect(screen.getByRole("dialog")).toHaveTextContent("Manage them outside the app");
   expect(screen.getByRole("button", { name: "Stop external hosting" })).toBeDisabled();
   expect(startLocalHost).not.toHaveBeenCalled(); expect(stopLocalHost).not.toHaveBeenCalled();
 });
@@ -212,4 +213,44 @@ it("preserves external hosting status when stopping its service fails", async ()
   fireEvent.click(screen.getByRole("button", { name: "Stop external hosting" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("Service identity changed");
   expect(screen.getByText("Hosting externally")).toBeInTheDocument();
+});
+
+const installedService = { registered: true, loaded: false, running: false, verified: true, error: null };
+const absentService = { registered: false, loaded: false, running: false, verified: false, error: null };
+it("detects and stops an orphaned API without presenting app hosting as online", async () => {
+  vi.mocked(getLocalHostStatus).mockResolvedValue({ ...stopped, phase: "background", external_stop_supported: true,
+    external_remove_supported: true, background_services: { api: { ...installedService, loaded: true, running: true }, connector: installedService } });
+  render(<LocalHostProvider><HostSetup /><HostQuickControl on_open_settings={() => {}} /></LocalHostProvider>);
+  await screen.findByText("Background API running");
+  expect(screen.getByRole("switch")).toBeDisabled();
+  expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "false");
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
+  expect(screen.getByRole("region", { name: "Background hosting services" })).toHaveTextContent("Session APIRunning");
+  fireEvent.click(screen.getByRole("button", { name: "Stop external hosting" }));
+  await waitFor(() => expect(stopExternalLocalHost).toHaveBeenCalledOnce());
+  await screen.findByRole("button", { name: "Start hosting" });
+  expect(startLocalHost).not.toHaveBeenCalled();
+});
+it("removes stopped login registrations only after explicit confirmation", async () => {
+  vi.mocked(getLocalHostStatus).mockResolvedValue({ ...stopped, external_remove_supported: true,
+    background_services: { api: installedService, connector: installedService } });
+  render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Remove background hosting" }));
+  expect(removeExternalLocalHost).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Cancel removal" }));
+  expect(removeExternalLocalHost).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Remove background hosting" }));
+  fireEvent.click(screen.getByRole("button", { name: "Remove registrations" }));
+  await waitFor(() => expect(removeExternalLocalHost).toHaveBeenCalledOnce());
+  await waitFor(() => expect(screen.queryByRole("region", { name: "Background hosting services" })).not.toBeInTheDocument());
+});
+it("does not offer removal of an unverified leftover API", async () => {
+  vi.mocked(getLocalHostStatus).mockResolvedValue({ ...stopped, phase: "background",
+    background_services: { api: { ...installedService, loaded: true, running: true, verified: false, error: "Unknown service definition" }, connector: absentService } });
+  render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Unknown service definition");
+  expect(screen.getByRole("button", { name: "Stop external hosting" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Remove background hosting" })).toBeDisabled();
 });
