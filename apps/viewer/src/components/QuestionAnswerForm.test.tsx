@@ -37,15 +37,35 @@ describe("async question answering", () => {
     expect(screen.queryByRole("button", { name: "Submit answers" })).not.toBeInTheDocument();
   });
 
+  it("offers inline free text and switches between a draft and an option without losing text", async () => {
+    const send = vi.fn(async (command: string, payload?: { request: SubmitSessionQuestionAnswersRequest }) => command === "get_session_question_status" ? status
+      : { request_id: payload!.request.request_id, status: "accepted", message: "Accepted" });
+    render(<QuestionAnswersProvider send={send as CommandInvoker}>{form()}</QuestionAnswersProvider>);
+    const field = await screen.findByRole("textbox", { name: "Written answer for Storage" });
+    const submit = screen.getByRole("button", { name: "Submit answers" });
+    expect(field).toHaveAttribute("placeholder", "Type your own answer…");
+    fireEvent.click(screen.getByRole("radio", { name: /Local/ }));
+    fireEvent.focus(field);
+    expect(screen.getByRole("radio", { name: /Local/ })).not.toBeChecked();
+    expect(submit).toBeDisabled();
+    fireEvent.change(field, { target: { value: "Custom storage" } });
+    expect(submit).toBeEnabled();
+    fireEvent.click(screen.getByRole("radio", { name: "Remote" }));
+    expect(field).toHaveValue("Custom storage");
+    fireEvent.click(submit);
+    await screen.findByText("Answer submitted; waiting for the recorded reply.");
+    expect(send.mock.calls.find(([command]) => command === "submit_session_question_answers")![1]!.request.answers)
+      .toEqual([{ question_id: "q1", option_index: 1 }]);
+  });
+
   it("retains written drafts across card closures and keeps session drafts separate", async () => {
     const send = vi.fn((_command: string) => Promise.resolve(status));
     const view = render(<QuestionAnswersProvider send={send as CommandInvoker}>{form()}</QuestionAnswersProvider>);
     await screen.findByRole("button", { name: "Submit answers" });
-    fireEvent.click(screen.getByRole("radio", { name: "Write an answer" }));
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "No external service." } });
     view.rerender(<QuestionAnswersProvider send={send as CommandInvoker}>{form("another")}</QuestionAnswersProvider>);
     await screen.findByRole("button", { name: "Submit answers" });
-    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toHaveValue("");
     view.rerender(<QuestionAnswersProvider send={send as CommandInvoker}><p>Closed card</p></QuestionAnswersProvider>);
     view.rerender(<QuestionAnswersProvider send={send as CommandInvoker}>{form()}</QuestionAnswersProvider>);
     expect(await screen.findByRole("textbox")).toHaveValue("No external service.");
@@ -58,7 +78,6 @@ describe("async question answering", () => {
       : { request_id: payload!.request.request_id, status: result_status, message: "Try again" });
     render(<QuestionAnswersProvider send={send as CommandInvoker}>{form()}</QuestionAnswersProvider>);
     await screen.findByRole("button", { name: "Submit answers" });
-    fireEvent.click(screen.getByRole("radio", { name: "Write an answer" }));
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Custom answer" } });
     fireEvent.click(screen.getByRole("button", { name: "Submit answers" }));
     await screen.findByText("Try again");

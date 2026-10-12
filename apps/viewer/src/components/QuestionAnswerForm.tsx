@@ -103,14 +103,13 @@ export function QuestionAnswerForm({ session_key, display, recorded_card, on_acc
               {option.description ? <p className="question-card__description">{option.description}</p> : null}</div>
           </label>)}
         </div> : null}
-        {question.allows_free_text ? <div className="question-answer__written">
-          {question.options.length > 0 ? <label className="question-answer__other"><input type="radio" name={`${prefix}-${id}`} checked={value.write}
-            onChange={() => setDraft(id, { ...value, write: true })} />Write an answer</label> : null}
-          {value.write ? <label><span className="sr-only">Written answer for {question.header ?? question.question}</span>
-            {question.is_secret ? <input type="password" value={value.text} maxLength={status.max_length} onChange={(event) => setDraft(id, { ...value, text: event.target.value })} />
-              : <textarea value={value.text} rows={3} maxLength={status.max_length} placeholder="Your answer…" onChange={(event) => setDraft(id, { ...value, text: event.target.value })} />}
-          </label> : null}
-        </div> : null}
+        {question.allows_free_text ? <label className="question-answer__written" data-chosen={value.write}>
+          <span className="sr-only">Written answer for {question.header ?? question.question}</span>
+          <input type={question.is_secret ? "password" : "text"} value={value.text} maxLength={status.max_length}
+            placeholder={question.options.length > 0 ? "Type your own answer…" : "Your answer…"}
+            onFocus={() => { if (!value.write) setDraft(id, { ...value, write: true, option_index: null }); }}
+            onChange={(event) => setDraft(id, { ...value, write: true, option_index: null, text: event.target.value })} />
+        </label> : null}
       </fieldset>;
     })}
     <div className="question-answer__footer"><span role="status">{state.notice ?? (state.sending ? "Submitting answer…" : "")}</span>

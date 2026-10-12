@@ -79,8 +79,10 @@ bounded previews flag truncation. User reply frames pair each question with its
 quoted answer, recovering missing prompts by recorded IDs. They share the user
 message frame but use a dedicated Recorded answers heading, stronger question
 text, and inset answer quotes.
-Pending Codex async questions now offer one option or a written answer and an
-explicit Submit action. Host-authoritative status/submission commands validate
+Pending Codex async questions now offer one option or an always-visible single-line
+written answer below the options, with an explicit Submit action. Focusing or typing
+selects the written answer; switching to an option preserves the text draft.
+Host-authoritative status/submission commands validate
 catalog ownership, async item IDs, unanswered state, choices, and envelope limits.
 Delivery steers the owning Desktop turn through the observed version-1 IPC
 method; no fallback starts a new turn. In-memory per-question claims cover
