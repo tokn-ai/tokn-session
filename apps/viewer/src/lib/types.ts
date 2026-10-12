@@ -410,7 +410,15 @@ export interface TrajectoryCardSummary {
   duration_ms: string | null;
 }
 
+export interface QuestionSelectionSummary {
+  question_id: string;
+  option_indices: number[];
+  written_answer?: string;
+  written_answer_truncated?: boolean;
+}
+
 export interface EventSummary {
+  question_selections?: QuestionSelectionSummary[];
   child_keys?: string[];
   delivery?: "commentary" | "final" | "unspecified";
   event_key: string;
@@ -648,4 +656,30 @@ export interface LocalHostPairing {
   current_code: string;
   host_time: number;
   expires_at: number;
+}
+
+/** Read-only projection of normalized question details. */
+export interface QuestionDisplayOption {
+  label: string;
+  description: string | null;
+  is_recommended: boolean;
+  is_selected: boolean;
+}
+
+export interface QuestionDisplayItem {
+  question_id: string | null;
+  header: string | null;
+  question: string | null;
+  options: QuestionDisplayOption[];
+  answers: string[];
+  written_answer: string | null;
+  written_answer_truncated: boolean;
+  allows_free_text: boolean;
+  is_secret: boolean;
+}
+
+export interface QuestionDisplay {
+  kind: "request" | "reply";
+  is_blocking: boolean | null;
+  questions: QuestionDisplayItem[];
 }

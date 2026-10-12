@@ -67,6 +67,18 @@ from keyboard focus; mobile retains the modal session drawer. The latest-activit
 button floats inside the history area so it does not shift the reading position.
 
 The viewer tracks unanswered questions separately from unread final replies.
+Question navigation scrolls only the conversation viewport, preserving the app
+shell position while focusing and expanding the question.
+Read-only question cards parse normalized details into typed display models and
+show numbered options, descriptions, explicit Recommended badges, question counts,
+and recorded replies as always-visible user-message frames. Compact selection
+metadata links request/question IDs to exact, unambiguous recorded option values;
+selected options show green with a checkmark and label. Unmatched/free-text
+answers appear in green recorded-answer blocks, including optionless questions;
+bounded previews flag truncation. User reply frames pair each question with its
+quoted answer, recovering missing prompts by recorded IDs. They share the user
+message frame but use a dedicated Recorded answers heading, stronger question
+text, and inset answer quotes. Submission remains future work.
 Sidebar badges and session notices show **Input required** for explicit blocking
 requests and **Question available** for async/unknown blocking requests. They
 remain visible after read acknowledgement; exact question-ID replies resolve

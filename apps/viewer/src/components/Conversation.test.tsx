@@ -81,6 +81,31 @@ describe("Conversation quick filter", () => {
     })} />);
     expect(screen.getByRole("button", { name: "Questions: question detail" })).toHaveFocus();
   });
+  it("scrolls only the history viewport when opening an unanswered question", () => {
+    const viewProps = props({ events: [event("question", { type: "question_request", is_bookkeeping: false })] });
+    const view = render(<div className="viewer-shell"><Conversation {...viewProps} /></div>);
+    const timeline = view.container.querySelector<HTMLDivElement>(".conversation__timeline")!;
+    const shell = view.container.querySelector<HTMLDivElement>(".viewer-shell")!;
+    const button = screen.getByRole("button", { name: "Questions: question detail" });
+    timeline.scrollTop = 120;
+    shell.scrollTop = 15;
+    Object.defineProperty(timeline, "clientTop", { value: 2 });
+    Object.defineProperty(timeline, "clientHeight", { value: 400 });
+    Object.defineProperty(timeline, "scrollHeight", { value: 1000 });
+    vi.spyOn(timeline, "getBoundingClientRect").mockReturnValue({ top: 100, bottom: 500, height: 400 } as DOMRect);
+    vi.spyOn(button, "getBoundingClientRect").mockImplementation(() => ({
+      top: 380 - timeline.scrollTop, bottom: 420 - timeline.scrollTop, height: 40,
+    } as DOMRect));
+    const scrollIntoView = vi.fn(() => { shell.scrollTop = 100; });
+    Object.defineProperty(button, "scrollIntoView", { configurable: true, value: scrollIntoView });
+    view.rerender(<div className="viewer-shell"><Conversation {...viewProps}
+      question_navigation={{ event_key: "question", revision: 1 }} /></div>);
+    expect(timeline.scrollTop).toBe(278);
+    expect(shell.scrollTop).toBe(15);
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(button).toHaveFocus();
+  });
+
   it("hides intermediate usage and routine lifecycle while keeping final usage, errors, unknowns, and meaningful outcomes", () => {
     render(<Conversation {...props({ events: [
       event("Turn started"), event("Context settings", { type: "metadata" }),
