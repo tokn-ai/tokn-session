@@ -76,7 +76,9 @@ metadata links request/question IDs to exact, unambiguous recorded option values
 selected options show green with a checkmark and label. Unmatched/free-text
 answers appear in green recorded-answer blocks, including optionless questions;
 bounded previews flag truncation. User reply frames pair each question with its
-quoted answer, recovering missing prompts by recorded IDs. Submission remains future work.
+quoted answer, recovering missing prompts by recorded IDs. They share the user
+message frame but use a dedicated Recorded answers heading, stronger question
+text, and inset answer quotes. Submission remains future work.
 Sidebar badges and session notices show **Input required** for explicit blocking
 requests and **Question available** for async/unknown blocking requests. They
 remain visible after read acknowledgement; exact question-ID replies resolve

@@ -23,9 +23,10 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
   const canTranslate = Boolean(status && session_key && role === "assistant" && !event.is_hidden && event.summary.trim());
 
   return (
-    <article className="message-event" data-presentation={presentation} data-role={role} data-selected={is_selected}>
+    <article className="message-event" data-kind={event.type} data-presentation={presentation} data-role={role} data-selected={is_selected}>
       <div className="message-event__surface">
         <span className={role === "user" || role === "assistant" ? "sr-only" : "message-event__role"}>{role}</span>
+        {event.type === "question_reply" && !event.is_hidden ? <span className="message-event__answer-heading">Recorded answers</span> : null}
         {usesMarkdown ? (
           <div aria-busy={translation.loading} lang={translation.showing_translation ? "zh-Hans" : undefined}>
             <MarkdownContent class_name="message-event__text" content={translation.content || event.title} />
