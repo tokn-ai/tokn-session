@@ -68,6 +68,11 @@ export function QuestionCard({ event, detail, error, is_loading, on_retry }: {
               ))}
             </ol>
           ) : null}
+          {question.written_answer !== null ? <div className="question-card__answers question-card__answers--selected">
+            <span className="question-card__selected">✓ Recorded answer</span>
+            <MarkdownContent content={question.written_answer} />
+            {question.written_answer_truncated ? <span className="question-card__notice">Answer preview truncated; inspect the recorded reply for full text.</span> : null}
+          </div> : null}
           {is_reply ? <div className="question-card__answers">
             <span className="question-card__answer-label">Recorded answer</span>
             {question.answers.length === 0 ? <p className="question-card__notice">No answer recorded</p>

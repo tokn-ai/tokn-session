@@ -38,11 +38,13 @@ function card(props: Partial<React.ComponentProps<typeof EventCard>> = {}) {
 
 describe("historical question cards", () => {
   it("renders recorded replies as user input without requiring expansion or details", () => {
-    const reply = { ...event, type: "question_reply", title: "Question answers", summary: "SQLite\n\nKeep it **local**.", role: "user" };
+    const reply = { ...event, type: "question_reply", title: "Question answers", summary: "Which **storage engine**?\n\n> SQLite\n> \n> Keep it **local**.", role: "user" };
     const on_toggle = vi.fn();
     const view = render(card({ event: reply, is_expanded: false, detail: null, on_toggle }));
     expect(screen.getByText("SQLite", { selector: "p" })).toBeInTheDocument();
     expect(screen.getByText("local").tagName).toBe("STRONG");
+    expect(screen.getByText("storage engine")).toBeInTheDocument();
+    expect(screen.getByText("SQLite", { selector: "p" }).closest("blockquote")).toBeInTheDocument();
     expect(view.container.querySelector('[data-presentation="bubble"][data-role="user"]')).toBeInTheDocument();
     expect(screen.queryByRole("button", { expanded: false })).not.toBeInTheDocument();
     expect(on_toggle).not.toHaveBeenCalled();
@@ -66,6 +68,20 @@ describe("historical question cards", () => {
     expect(screen.getByText("SQLite", { selector: "strong" }).closest("li")).toHaveAttribute("data-selected", "true");
     expect(screen.getByText("Postgres", { selector: "strong" }).closest("li")).toHaveAttribute("data-selected", "false");
     expect(screen.queryByRole("radio")).not.toBeInTheDocument();
+  });
+
+  it("shows custom recorded answers beside options and for free-text-only questions", () => {
+    const recorded = detail();
+    const rows = (recorded.event as { questions: { id?: string }[] }).questions;
+    rows[0].id = "storage"; rows[1].id = "constraints";
+    render(card({ detail: recorded, event: { ...event, question_selections: [
+      { question_id: "storage", option_indices: [0], written_answer: "Keep it **local**." },
+      { question_id: "constraints", option_indices: [], written_answer: "Works offline." },
+    ] } }));
+    expect(screen.getAllByText("✓ Recorded answer")).toHaveLength(2);
+    expect(screen.getByText("local")).toBeInTheDocument();
+    expect(screen.getByText("Works offline.")).toBeInTheDocument();
+    expect(screen.getByText("✓ Selected")).toBeInTheDocument();
   });
 
   it("shows questions and choices as recorded content without answer controls or completion status", () => {

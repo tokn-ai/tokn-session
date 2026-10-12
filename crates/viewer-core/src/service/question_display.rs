@@ -2,7 +2,7 @@
 use crate::model::QuestionSelectionSummary;
 use tokn_session_core::{AgentEvent, QuestionReplyEvent};
 
-pub(super) fn reply_text(reply: &QuestionReplyEvent) -> String {
+pub(super) fn reply_text(events: &[AgentEvent], index: usize, reply: &QuestionReplyEvent) -> String {
   let rows: Vec<_> = reply
     .replies
     .iter()
@@ -12,18 +12,44 @@ pub(super) fn reply_text(reply: &QuestionReplyEvent) -> String {
       } else {
         item.answers.join("\n\n")
       };
-      if reply.replies.len() > 1 {
-        format!(
-          "{}\n\n{answers}",
-          item
-            .header
-            .as_deref()
-            .or(item.question.as_deref())
-            .unwrap_or(&item.question_id)
-        )
+      let quoted = answers
+        .lines()
+        .map(|line| format!("> {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+      let candidates: Vec<_> = events
+        .iter()
+        .take(index)
+        .filter(|event| !event.is_hidden())
+        .filter_map(|event| {
+          let AgentEvent::QuestionRequest(request) = event else {
+            return None;
+          };
+          if reply
+            .request_id
+            .as_ref()
+            .is_some_and(|id| request.request_id.as_ref() != Some(id))
+          {
+            return None;
+          }
+          request
+            .questions
+            .iter()
+            .find(|question| question.id.as_ref() == Some(&item.question_id))
+        })
+        .collect();
+      let linked_question = if reply.request_id.is_some() || candidates.len() == 1 {
+        candidates.last().map(|question| question.question.as_str())
       } else {
-        answers
-      }
+        None
+      };
+      let prompt = item
+        .question
+        .as_deref()
+        .or(linked_question)
+        .or(item.header.as_deref())
+        .unwrap_or(&item.question_id);
+      format!("{prompt}\n\n{quoted}")
     })
     .collect();
   if rows.is_empty() {
@@ -43,9 +69,10 @@ pub(super) fn selections(
   };
   let mut selections = Vec::new();
   for question in &request.questions {
-    let (Some(id), Some(options)) = (&question.id, &question.options) else {
+    let Some(id) = &question.id else {
       continue;
     };
+    let options = question.options.as_deref().unwrap_or_default();
     let unique_owner = events.iter().filter(|event| matches!(event,
       AgentEvent::QuestionRequest(other) if !event.is_hidden() && other.questions.iter().any(|question| question.id.as_ref() == Some(id))
     )).count() == 1;
@@ -71,6 +98,7 @@ pub(super) fn selections(
       continue;
     };
     let mut indices = Vec::new();
+    let mut written = Vec::new();
     for answer in answers {
       let exact: Vec<_> = options
         .iter()
@@ -92,14 +120,24 @@ pub(super) fn selections(
       };
       if matches.len() == 1 {
         indices.push(matches[0]);
+      } else {
+        written.push(answer.as_str());
       }
     }
     indices.sort_unstable();
     indices.dedup();
-    if !indices.is_empty() {
+    let (written_answer, written_answer_truncated) = if written.is_empty() {
+      (None, false)
+    } else {
+      let (text, truncated) = super::truncate_with_flag(written.join("\n\n"), super::MAX_MESSAGE_SUMMARY_CHARS);
+      (Some(text), truncated)
+    };
+    if !indices.is_empty() || written_answer.is_some() {
       selections.push(QuestionSelectionSummary {
         question_id: id.clone(),
         option_indices: indices,
+        written_answer,
+        written_answer_truncated,
       });
     }
   }

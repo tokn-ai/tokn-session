@@ -4829,7 +4829,7 @@ fn event_summary_with_delegation_targets(
         .first()
         .map(|question| question.question.clone())
         .unwrap_or_default(),
-      AgentEvent::QuestionReply(reply) => question_display::reply_text(reply),
+      AgentEvent::QuestionReply(reply) => question_display::reply_text(events, index, reply),
       AgentEvent::Reasoning(_) => reasoning
         .as_ref()
         .and_then(|card| {

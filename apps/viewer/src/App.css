@@ -3715,3 +3715,9 @@ button:disabled {
   font-size: 11px;
   font-weight: 600;
 }
+
+.question-card__answers--selected {
+  border: 1px solid var(--codex);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--codex) 10%, var(--app-bg));
+}

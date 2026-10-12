@@ -449,6 +449,9 @@ pub struct AcknowledgeSessionAttentionResponse {
 pub struct QuestionSelectionSummary {
   pub question_id: String,
   pub option_indices: Vec<usize>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub written_answer: Option<String>,
+  pub written_answer_truncated: bool,
 }
 
 #[derive(Debug, Serialize)]

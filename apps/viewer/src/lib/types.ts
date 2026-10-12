@@ -413,6 +413,8 @@ export interface TrajectoryCardSummary {
 export interface QuestionSelectionSummary {
   question_id: string;
   option_indices: number[];
+  written_answer?: string;
+  written_answer_truncated?: boolean;
 }
 
 export interface EventSummary {
@@ -670,6 +672,8 @@ export interface QuestionDisplayItem {
   question: string | null;
   options: QuestionDisplayOption[];
   answers: string[];
+  written_answer: string | null;
+  written_answer_truncated: boolean;
   allows_free_text: boolean;
   is_secret: boolean;
 }

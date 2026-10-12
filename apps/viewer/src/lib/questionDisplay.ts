@@ -28,6 +28,7 @@ export function parseQuestionDisplay(value: JsonValue, selections: QuestionSelec
   for (const value of rows) {
     const row = object(value);
     if (!row || (kind === "request" && !text(row.question)) || (kind === "reply" && !Array.isArray(row.answers))) continue;
+    const selection = selections.find((selection) => selection.question_id === text(row.id));
     questions.push({
       question_id: text(kind === "request" ? row.id : row.question_id),
       header: text(row.header),
@@ -39,6 +40,8 @@ export function parseQuestionDisplay(value: JsonValue, selections: QuestionSelec
             && selection.option_indices.includes(index)) }] : [];
         }) : [],
       answers: kind === "reply" && Array.isArray(row.answers) ? row.answers.filter((value): value is string => typeof value === "string") : [],
+      written_answer: selection?.written_answer ?? null,
+      written_answer_truncated: selection?.written_answer_truncated === true,
       allows_free_text: row.allows_free_text === true,
       is_secret: row.is_secret === true,
     });

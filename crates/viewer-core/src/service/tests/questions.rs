@@ -115,7 +115,10 @@ fn parsed_answers_are_visible_user_rows_with_linked_question_and_native_result()
   );
   assert_eq!(summary.event_type, "question_reply");
   assert_eq!(summary.role.as_deref(), Some("user"));
-  assert_eq!(summary.summary, "SQLite\n\nKeep it **local**.");
+  assert_eq!(
+    summary.summary,
+    "Which storage engine?\n\n> SQLite\n> \n> Keep it **local**."
+  );
   assert!(!summary.is_bookkeeping);
   assert!(summary.trajectory.is_none());
   let value = serde_json::to_value(&events[index]).unwrap();
@@ -146,7 +149,7 @@ fn question_selections_require_recorded_id_links_and_unambiguous_option_values()
   };
   assert_eq!(
     selected(&events),
-    json!([{ "question_id": "storage", "option_indices": [0] }])
+    json!([{ "question_id": "storage", "option_indices": [0], "written_answer": "Keep it **local**.", "written_answer_truncated": false }])
   );
   assert!(selected(&events[..reply_index]).is_null());
   let original = events[reply_index].clone();
@@ -158,21 +161,24 @@ fn question_selections_require_recorded_id_links_and_unambiguous_option_values()
   if let AgentEvent::QuestionReply(reply) = &mut events[reply_index] {
     reply.replies[0].answers = vec!["SQLite is nice".into()];
   }
-  assert!(selected(&events).is_null());
+  assert_eq!(
+    selected(&events),
+    json!([{ "question_id": "storage", "option_indices": [], "written_answer": "SQLite is nice", "written_answer_truncated": false }])
+  );
   events[reply_index] = original;
   if let AgentEvent::QuestionRequest(request) = &mut events[request_index] {
     request.questions[0].options.as_mut().unwrap()[0].label = "SQLite (Recommended)".into();
   }
   assert_eq!(
     selected(&events),
-    json!([{ "question_id": "storage", "option_indices": [0] }])
+    json!([{ "question_id": "storage", "option_indices": [0], "written_answer": "Keep it **local**.", "written_answer_truncated": false }])
   );
   if let AgentEvent::QuestionReply(reply) = &mut events[reply_index] {
     reply.request_id = None;
   }
   assert_eq!(
     selected(&events),
-    json!([{ "question_id": "storage", "option_indices": [0] }])
+    json!([{ "question_id": "storage", "option_indices": [0], "written_answer": "Keep it **local**.", "written_answer_truncated": false }])
   );
   let mut duplicate = events[request_index].clone();
   if let AgentEvent::QuestionRequest(request) = &mut duplicate {
@@ -180,4 +186,43 @@ fn question_selections_require_recorded_id_links_and_unambiguous_option_values()
   }
   events.push(duplicate);
   assert!(selected(&events).is_null());
+}
+
+#[test]
+fn written_answers_survive_questions_without_options_and_reply_prompts_are_recovered() {
+  let mut normalizer = CodexNormalizer::new();
+  let mut events: Vec<_> = include_str!("../../../tests/fixtures/codex/question_replies.jsonl")
+    .lines()
+    .flat_map(|line| normalizer.normalize(serde_json::from_str(line).unwrap()))
+    .collect();
+  let request_index = events
+    .iter()
+    .position(|event| matches!(event, AgentEvent::QuestionRequest(_)))
+    .unwrap();
+  let reply_index = events
+    .iter()
+    .position(|event| matches!(event, AgentEvent::QuestionReply(_)))
+    .unwrap();
+  if let AgentEvent::QuestionRequest(request) = &mut events[request_index] {
+    request.questions[0].options = None;
+  }
+  if let AgentEvent::QuestionReply(reply) = &mut events[reply_index] {
+    reply.replies[0].question = None;
+    reply.replies[0].answers = vec!["Use a local file.\nKeep **everything** offline.".into()];
+  }
+  let request = serde_json::to_value(event_summary(&events, request_index, &events[request_index])).unwrap();
+  assert_eq!(request["question_selections"][0]["option_indices"], json!([]));
+  assert_eq!(
+    request["question_selections"][0]["written_answer"],
+    "Use a local file.\nKeep **everything** offline."
+  );
+  assert_eq!(
+    event_summary(&events, reply_index, &events[reply_index]).summary,
+    "Which storage engine?\n\n> Use a local file.\n> Keep **everything** offline."
+  );
+  if let AgentEvent::QuestionReply(reply) = &mut events[reply_index] {
+    reply.replies[0].answers = vec!["x".repeat(MAX_MESSAGE_SUMMARY_CHARS + 1)];
+  }
+  let request = serde_json::to_value(event_summary(&events, request_index, &events[request_index])).unwrap();
+  assert_eq!(request["question_selections"][0]["written_answer_truncated"], true);
 }
