@@ -133,12 +133,12 @@ pub fn valid_host_uuid(host_id: &str) -> bool {
 }
 
 /// Exact paths prevent the gateway becoming a general loopback HTTP proxy.
-/// Some POSTs update viewer bookkeeping, but only submit_session_input executes
+/// Some POSTs update viewer bookkeeping, but only input/answer submissions execute
 /// agent input and requires the connector's explicit control permission.
 pub fn allowed_route(method: &str, path: &str, allow_control: bool) -> bool {
   match (method, path) {
     ("GET", "/api/v1/health" | "/api/v1/events") => true,
-    ("POST", "/api/v1/submit_session_input") => allow_control,
+    ("POST", "/api/v1/submit_session_input" | "/api/v1/submit_session_question_answers") => allow_control,
     (
       "POST",
       "/api/v1/list_sessions"
@@ -157,7 +157,8 @@ pub fn allowed_route(method: &str, path: &str, allow_control: bool) -> bool {
       | "/api/v1/get_session_index_progress"
       | "/api/v1/retry_session_index"
       | "/api/v1/get_relay_status"
-      | "/api/v1/get_session_input_status",
+      | "/api/v1/get_session_input_status"
+      | "/api/v1/get_session_question_status",
     ) => true,
     _ => false,
   }
@@ -190,6 +191,9 @@ mod tests {
     }
     assert!(allowed_route("POST", "/api/v1/submit_session_input", true));
     assert!(!allowed_route("POST", "/api/v1/submit_session_input", false));
+    assert!(allowed_route("POST", "/api/v1/submit_session_question_answers", true));
+    assert!(!allowed_route("POST", "/api/v1/submit_session_question_answers", false));
+    assert!(allowed_route("POST", "/api/v1/get_session_question_status", false));
     for path in [
       "/",
       "http://127.0.0.1/secrets",

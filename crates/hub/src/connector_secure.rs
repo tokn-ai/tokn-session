@@ -724,13 +724,17 @@ async fn forward_device(
   if !protocol::allowed_route(method, path, config.allow_control) {
     return Err("Route unavailable or host control is disabled".into());
   }
-  if path == "/api/v1/get_session_input_status" && !config.allow_control {
+  if matches!(
+    path,
+    "/api/v1/get_session_input_status" | "/api/v1/get_session_question_status"
+  ) && !config.allow_control
+  {
     return Ok(reqwest::Response::from(
       axum::http::Response::builder()
         .header("content-type", "application/json")
         .body(
           serde_json::to_vec(&serde_json::json!({
-            "available": false, "message": "Agent input is disabled on this host", "max_length": 0
+            "available": false, "message": "Agent input is disabled on this host", "max_length": 0, "question_ids": []
           }))
           .map_err(|_| "Could not encode input status")?,
         )

@@ -23,9 +23,13 @@ pub async fn forward(
   let mut url = config.local_url.clone();
   let request = match &grant.scope {
     GrantScope::All {} => {
-      if path == "/api/v1/get_session_input_status" && !(config.allow_control && grant.allow_control) {
+      if matches!(
+        path,
+        "/api/v1/get_session_input_status" | "/api/v1/get_session_question_status"
+      ) && !(config.allow_control && grant.allow_control)
+      {
         let body = serde_json::to_vec(&json!({
-          "available": false, "message": "This grant allows viewing only", "max_length": 0
+          "available": false, "message": "This grant allows viewing only", "max_length": 0, "question_ids": []
         }))
         .map_err(|_| "Could not encode input status")?;
         return Ok(reqwest::Response::from(
@@ -41,7 +45,10 @@ pub async fn forward(
     }
     GrantScope::Sessions { session_keys } => {
       let command = path.strip_prefix("/api/v1/").ok_or("Route unavailable")?;
-      if matches!(command, "submit_session_input" | "retry_session_index") {
+      if matches!(
+        command,
+        "submit_session_input" | "submit_session_question_answers" | "retry_session_index"
+      ) {
         return Err("This session share is read-only".into());
       }
       let payload: Value = if body.is_empty() {

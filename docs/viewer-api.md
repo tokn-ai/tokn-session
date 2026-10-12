@@ -141,6 +141,7 @@ Tauri adapter, normally `{"request":{...}}`. Commands without a request take
 - `update_session_view`
 - `get_session_index_progress`, `retry_session_index`, `get_relay_status`
 - `get_session_input_status`, `submit_session_input`
+- `get_session_question_status`, `submit_session_question_answers`
 
 Session keys are admitted against the server's index before any
 history access. A syntactically valid key containing an arbitrary source path
@@ -215,3 +216,21 @@ the original session working directory. Clients should group by `project_key`,
 falling back to `cwd` for older servers. Clients keep Recent display positions in
 memory; this does not change API activity ordering. Start a fresh cursor when
 changing the order or filters.
+
+### Async question answers
+
+`get_session_question_status` accepts `session_key` and `question_request_id`,
+returning `available`, `message`, `question_ids`, and `max_length`.
+`submit_session_question_answers` additionally accepts a UUID `request_id` and
+an `answers` array. Each item contains `question_id` and exactly one of
+`option_index` or `text`. Prompts and option labels come from host-verified
+source records, never client text. Its response uses the existing input delivery
+statuses: `accepted`, `not_sent`, `pending`, or `unknown`.
+
+Only pending Codex async questions can be answered. The host sends the canonical
+question-reply envelope through active-turn steering. Other providers, historical
+or resolved questions, blocking requests, and session shares stay read-only.
+All remote submission paths require host and grant control permission. A status
+request from a viewing-only connection reports unavailable. Duplicate question
+submissions are guarded in memory while recorded source state catches up;
+clients must not retry uncertain delivery automatically.

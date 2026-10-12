@@ -70,7 +70,7 @@ function directHarness(options: { reject_input?: boolean; wrong_pin?: boolean; h
   });
   const direct = harness((socket, message) => {
     if (message.type !== "request_end") return;
-    if (options.reject_input && socket.request?.path === "/api/v1/submit_session_input") socket.fail();
+    if (options.reject_input && ["/api/v1/submit_session_input", "/api/v1/submit_session_question_answers"].some((path) => path === socket.request?.path)) socket.fail();
     else if (!options.hold_health || socket.request?.path !== "/api/v1/health") viewerReply(socket);
   });
   let fail!: (error: Error) => void;
@@ -185,13 +185,13 @@ it("keeps encrypted relay access when the direct host pin cannot authenticate", 
   expect(links.peer.close).toHaveBeenCalled(); client.close();
 });
 
-it("falls back for subsequent requests without replaying uncertain direct input", async () => {
+it.each(["submit_session_input", "submit_session_question_answers"])("falls back without replaying uncertain direct %s", async (command) => {
   const links = directHarness({ reject_input: true });
   const client = await EncryptedHubClient.connect("https://hub.example", host, identity, crypto(), undefined, links.relay.factory, links.factory);
   const path = vi.fn(); client.setTransportListener(path);
   await vi.waitFor(() => expect(path).toHaveBeenLastCalledWith({ kind: "direct" }));
-  await expect(client.invoke("submit_session_input", { text: "send once" })).rejects.toThrow("delivery may be uncertain");
-  expect(links.relay.sockets.some((socket) => socket.request?.path === "/api/v1/submit_session_input")).toBe(false);
+  await expect(client.invoke(command, { text: "send once" })).rejects.toThrow("delivery may be uncertain");
+  expect(links.relay.sockets.some((socket) => socket.request?.path === `/api/v1/${command}`)).toBe(false);
   expect(path).toHaveBeenLastCalledWith({ kind: "relay", reason: expect.stringContaining("delivery may be uncertain") });
   await client.invoke("list_sessions");
   expect(links.relay.sockets[links.relay.sockets.length - 1]?.request?.path).toBe("/api/v1/list_sessions"); client.close();

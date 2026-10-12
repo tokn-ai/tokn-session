@@ -50,6 +50,9 @@ pub(super) async fn command(State(state): State<ApiState>, Json(mut share): Json
       "get_session_input_status" => Ok(json!({
         "available": false, "message": "This session share is read-only", "max_length": 0
       })),
+      "get_session_question_status" => Ok(json!({
+        "available": false, "message": "This session share is read-only", "max_length": 0, "question_ids": []
+      })),
       // Operational state is host-wide and must not disclose other sessions,
       // provider roots, errors, counters, or the owner's read markers.
       "get_relay_status" => Ok(json!({
@@ -98,7 +101,8 @@ fn prepare(share: &mut SharedRequest) -> Result<(), &'static str> {
     | "load_event_detail"
     | "load_trajectory_event_page"
     | "acknowledge_session_attention"
-    | "get_session_input_status" => {
+    | "get_session_input_status"
+    | "get_session_question_status" => {
       let field = if share.command == "list_session_children" {
         "parent_session_key"
       } else {
@@ -232,6 +236,7 @@ mod tests {
       "load_trajectory_event_page",
       "acknowledge_session_attention",
       "get_session_input_status",
+      "get_session_question_status",
     ] {
       assert!(prepare(&mut request(command, json!({"request":{"session_key":"allowed"}}))).is_ok());
       assert!(prepare(&mut request(command, json!({"request":{"session_key":"hidden"}}))).is_err());
@@ -245,6 +250,7 @@ mod tests {
     );
     for command in [
       "submit_session_input",
+      "submit_session_question_answers",
       "retry_session_index",
       "configure_relay",
       "shared",

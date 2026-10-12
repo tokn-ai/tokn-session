@@ -38,6 +38,7 @@ mod compaction;
 mod event_filter;
 mod input;
 mod question_display;
+mod question_input;
 mod trajectory_state;
 mod usage_filter;
 mod windows;
@@ -88,6 +89,7 @@ pub struct ViewerService {
   failed_body_jobs: Arc<Mutex<HashMap<(SourceKey, String), FailedBodyJob>>>,
   loaded_session_cache: Arc<Mutex<Option<CachedSession>>>,
   input_broker: crate::input::InputBroker,
+  question_claims: Arc<Mutex<question_input::QuestionClaims>>,
   pub(crate) updates: Arc<Mutex<crate::updates::UpdateStore>>,
   /// Per-request metadata projection. The adapter still owns grant verification,
   /// command permissions, and stream lifetime; never install this on a worker.
@@ -686,6 +688,7 @@ impl ViewerService {
       loaded_session_cache: Arc::new(Mutex::new(None)),
       updates: Arc::new(Mutex::new(crate::updates::UpdateStore::default())),
       input_broker: crate::input::InputBroker::default(),
+      question_claims: Arc::new(Mutex::new(question_input::QuestionClaims::default())),
       session_scope: None,
     };
     // Existing durable rows should be reflected immediately when a viewer is

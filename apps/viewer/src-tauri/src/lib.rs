@@ -63,6 +63,8 @@ pub fn run() {
       commands::indexing::retry_session_index,
       commands::input::get_session_input_status,
       commands::input::submit_session_input,
+      commands::input::get_session_question_status,
+      commands::input::submit_session_question_answers,
       commands::relay::get_relay_status,
       commands::relay::configure_relay,
       commands::translation::get_translation_status,

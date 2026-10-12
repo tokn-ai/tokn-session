@@ -3748,3 +3748,40 @@ button:disabled {
 .message-event[data-kind="question_reply"] .message-event__text > blockquote:last-child {
   margin-bottom: 0;
 }
+
+.question-answer__question {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  margin: 0;
+  padding: 12px 0 0;
+  border: 0;
+}
+.question-answer__question + .question-answer__question { border-top: 1px solid var(--border); }
+.question-answer__question legend { display: flex; gap: 12px; align-items: center; font-size: 13px; font-weight: 600; }
+.question-answer__question .markdown-content > :first-child { margin-top: 0; }
+.question-answer__question .markdown-content > :last-child { margin-bottom: 0; }
+.question-answer__choices { display: grid; gap: 8px; }
+.question-answer__choice { cursor: pointer; }
+.question-answer__choice input { flex: 0 0 auto; margin: 4px 0 0; accent-color: var(--text); }
+.question-answer__choice[data-chosen="true"] { border-color: var(--text-soft); background: var(--surface-hover); }
+.question-answer__written { display: grid; gap: 10px; }
+.question-answer__other { display: flex; align-items: center; gap: 10px; font-size: 13px; cursor: pointer; }
+.question-answer__written textarea, .question-answer__written input[type="password"] {
+  width: 100%; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 8px;
+  background: var(--app-bg); color: var(--text); resize: vertical; font: inherit; font-size: 13px;
+}
+.question-answer__footer { display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; align-items: center; font-size: 12px; }
+.question-answer__footer span { flex: 1; color: var(--text-soft); }
+.question-answer__status { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 8px 0; color: var(--text-soft); font-size: 12px; }
+.question-answer__submit {
+  min-height: 36px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: var(--text);
+  color: var(--app-bg);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.question-answer__submit:disabled { cursor: default; }

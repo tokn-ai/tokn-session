@@ -946,3 +946,35 @@ mod tests {
     assert!(decode_trajectory_event_cursor("trajectory-events.v1.2a.7.extra").is_err());
   }
 }
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionQuestionStatusRequest {
+  pub session_key: String,
+  pub question_request_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionQuestionStatus {
+  pub available: bool,
+  pub message: String,
+  pub question_ids: Vec<String>,
+  pub max_length: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionQuestionAnswer {
+  pub question_id: String,
+  pub option_index: Option<usize>,
+  pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitSessionQuestionAnswersRequest {
+  pub session_key: String,
+  pub question_request_id: String,
+  pub request_id: String,
+  pub answers: Vec<SessionQuestionAnswer>,
+}

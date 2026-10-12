@@ -41,6 +41,16 @@ pub(super) async fn submit(target: &InputTarget, request_id: &str, text: &str) -
   client.submit(&target.session_id, request_id, text).await
 }
 
+pub(crate) async fn submit_question(
+  target: &InputTarget,
+  request_id: &str,
+  text: &str,
+) -> Result<Admission, DeliveryError> {
+  let mut client = DesktopClient::connect(&desktop_endpoint()?, REQUEST_TIMEOUT).await?;
+  client.request_timeout = SUBMISSION_TIMEOUT;
+  client.submit_question(&target.session_id, request_id, text).await
+}
+
 fn desktop_endpoint() -> Result<PathBuf, DeliveryError> {
   #[cfg(windows)]
   {
@@ -140,6 +150,37 @@ impl DesktopClient {
         }),
         &wire_request_id,
         START_TURN_METHOD,
+        true,
+      )
+      .await?;
+    Ok(Admission::Accepted)
+  }
+
+  async fn submit_question(
+    &mut self,
+    session_id: &str,
+    request_id: &str,
+    text: &str,
+  ) -> Result<Admission, DeliveryError> {
+    let wire_id = Uuid::new_v4().to_string();
+    // Observed in ChatGPT/Codex Desktop's follower router: steering adds a
+    // structured answer to the active turn without starting another turn.
+    self
+      .request(
+        json!({
+          "type": "request", "requestId": wire_id, "sourceClientId": self.client_id,
+          "version": 1, "method": "thread-follower-steer-turn",
+          "params": { "conversationId": session_id,
+            "input": [{ "type": "text", "text": text, "text_elements": [] }],
+            "clientUserMessageId": request_id, "restoreMessage": {
+              "cwd": null, "context": { "workspaceRoots": [], "commentAttachments": [], "collaborationMode": null },
+              "responsesapiClientMetadata": null, "serverQueuedMessageId": null
+            },
+            "serviceTier": null, "attachments": [], "additionalContext": null, "toolOutput": null },
+          "timeoutMs": self.request_timeout.as_millis() as u64
+        }),
+        &wire_id,
+        "thread-follower-steer-turn",
         true,
       )
       .await?;

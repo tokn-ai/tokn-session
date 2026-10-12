@@ -132,6 +132,14 @@ impl Questions {
     self.active_turn = None;
   }
 
+  pub(crate) fn pending_ids(&self, request_id: &str) -> Vec<String> {
+    self
+      .requests
+      .get(request_id)
+      .map(|request| request.unanswered.iter().cloned().collect())
+      .unwrap_or_default()
+  }
+
   pub fn summary(&self) -> QuestionAttention {
     let mut summary = QuestionAttention::default();
     for request in self.requests.values() {
