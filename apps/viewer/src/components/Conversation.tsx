@@ -136,9 +136,13 @@ export function Conversation({
   useLayoutEffect(() => {
     if (!question_navigation) return;
     const button = document.getElementById(`${eventButtonId(question_navigation.event_key)}-label`)?.closest("button");
-    if (!button || !scroll.timelineRef.current?.contains(button)) return;
+    const timeline = scroll.timelineRef.current;
+    if (!button || !timeline?.contains(button)) return;
     scroll.pause();
-    button.scrollIntoView?.({ block: "start" });
+    // scrollIntoView also scrolls overflow-hidden ancestors, shifting the app
+    // shell. Question navigation belongs exclusively to the history viewport.
+    timeline.scrollTop += button.getBoundingClientRect().top
+      - timeline.getBoundingClientRect().top - timeline.clientTop;
     button.focus({ preventScroll: true });
     // Capture the chosen position so later detail/Markdown layout changes
     // preserve it instead of restoring the previously visible timeline row.

@@ -354,9 +354,6 @@ function eventTone(event: EventSummary): string {
 }
 
 function cardHeading(event: EventSummary): TechnicalCardHeading | null {
-  if (event.type === "question_reply") {
-    return { action: "User answers", primary: event.summary || event.title, secondary: "Recorded question reply", monospace: false };
-  }
   if (event.type === "question_request") {
     return { action: "Questions", primary: event.summary || event.title, secondary: "Recorded question request", monospace: false };
   }
@@ -377,7 +374,7 @@ function cardHeading(event: EventSummary): TechnicalCardHeading | null {
 
 function usesControlledExpansion(event: EventSummary): boolean {
   return event.type === "tool_call" || event.type === "reasoning" || event.type === "compaction"
-    || event.type === "question_request" || event.type === "question_reply" || isAgentCommunication(event);
+    || event.type === "question_request" || isAgentCommunication(event);
 }
 
 function eventStatus(event: EventSummary): { label: string; tone: string } | null {
@@ -815,7 +812,7 @@ export function EventCard({
     );
   }
 
-  if (isMessage(event)) {
+  if (isMessage(event) || event.type === "question_reply") {
     return (
       <MessageCard event={event} session_key={session_key} button_id={button_id} is_selected={is_selected} on_select={on_select} />
     );
@@ -947,7 +944,7 @@ export function EventCard({
               is_loading={detail_loading}
               on_retry={on_retry_detail}
             />
-          ) : event.type === "question_request" || event.type === "question_reply" ? (
+          ) : event.type === "question_request" ? (
             <QuestionCard event={event} detail={detail} error={detail_error} is_loading={detail_loading} on_retry={on_retry_detail} />
           ) : event.type === "agent_activity" ? (
             <AgentActivityBody activity={event.agent_activity} event={event} />

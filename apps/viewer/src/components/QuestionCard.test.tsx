@@ -37,35 +37,64 @@ function card(props: Partial<React.ComponentProps<typeof EventCard>> = {}) {
 }
 
 describe("historical question cards", () => {
-  it("renders parsed answers alongside their question without inferring a selected option", () => {
-    const reply = { ...event, type: "question_reply", title: "Question answers", summary: "SQLite", role: "user" };
-    render(card({ event: reply, detail: detail({ event: {
-      type: "question_reply", request_id: "call-1", replies: [
-        { question_id: "storage", header: "Storage", question: "Which **storage engine**?", answers: ["SQLite", "Keep it **local**."] },
-        { question_id: "extra", header: null, question: null, answers: [] },
-      ],
-    } }) }));
-    expect(screen.getByText("Recorded user answers")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Storage" })).toBeInTheDocument();
-    expect(screen.getByText("storage engine").tagName).toBe("STRONG");
+  it("renders recorded replies as user input without requiring expansion or details", () => {
+    const reply = { ...event, type: "question_reply", title: "Question answers", summary: "Which **storage engine**?\n\n> SQLite\n> \n> Keep it **local**.", role: "user" };
+    const on_toggle = vi.fn();
+    const view = render(card({ event: reply, is_expanded: false, detail: null, on_toggle }));
     expect(screen.getByText("SQLite", { selector: "p" })).toBeInTheDocument();
     expect(screen.getByText("local").tagName).toBe("STRONG");
-    expect(screen.getByRole("heading", { name: "extra" })).toBeInTheDocument();
-    expect(screen.getByText("No answer recorded")).toBeInTheDocument();
+    expect(screen.getByText("storage engine")).toBeInTheDocument();
+    expect(screen.getByText("SQLite", { selector: "p" }).closest("blockquote")).toBeInTheDocument();
+    expect(view.container.querySelector('[data-presentation="bubble"][data-role="user"]')).toBeInTheDocument();
+    expect(screen.queryByRole("button", { expanded: false })).not.toBeInTheDocument();
+    expect(on_toggle).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Inspect user message" })).toBeInTheDocument();
+  });
+
+  it("shows an empty recorded reply as a user frame", () => {
+    render(card({ event: { ...event, type: "question_reply", role: "user", summary: "No answers recorded" }, detail: null, is_expanded: false }));
+    expect(screen.getByText("No answers recorded")).toBeInTheDocument();
+  });
+
+  it("marks only correlated recorded selections and updates them after a reply arrives", () => {
+    const recorded = detail();
+    (recorded.event as { questions: { id?: string }[] }).questions[0].id = "storage";
+    const view = render(card({ detail: recorded }));
+    expect(screen.queryByText("✓ Selected")).not.toBeInTheDocument();
+    view.rerender(card({ detail: recorded, event: { ...event,
+      question_selections: [{ question_id: "storage", option_indices: [0] }, { question_id: "other", option_indices: [1] }],
+    } }));
+    expect(screen.getByText("✓ Selected")).toBeInTheDocument();
+    expect(screen.getByText("SQLite", { selector: "strong" }).closest("li")).toHaveAttribute("data-selected", "true");
+    expect(screen.getByText("Postgres", { selector: "strong" }).closest("li")).toHaveAttribute("data-selected", "false");
     expect(screen.queryByRole("radio")).not.toBeInTheDocument();
   });
 
-  it("shows empty response maps without claiming a choice was made", () => {
-    render(card({ event: { ...event, type: "question_reply" }, detail: detail({ event: { type: "question_reply", replies: [] } }) }));
-    expect(screen.getByText("No answers recorded")).toBeInTheDocument();
+  it("shows custom recorded answers beside options and for free-text-only questions", () => {
+    const recorded = detail();
+    const rows = (recorded.event as { questions: { id?: string }[] }).questions;
+    rows[0].id = "storage"; rows[1].id = "constraints";
+    render(card({ detail: recorded, event: { ...event, question_selections: [
+      { question_id: "storage", option_indices: [0], written_answer: "Keep it **local**." },
+      { question_id: "constraints", option_indices: [], written_answer: "Works offline." },
+    ] } }));
+    expect(screen.getAllByText("✓ Recorded answer")).toHaveLength(2);
+    expect(screen.getByText("local")).toBeInTheDocument();
+    expect(screen.getByText("Works offline.")).toBeInTheDocument();
+    expect(screen.getByText("✓ Selected")).toBeInTheDocument();
   });
+
   it("shows questions and choices as recorded content without answer controls or completion status", () => {
     render(card());
     expect(screen.getByText("Recorded asynchronous question request")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Storage" })).toBeInTheDocument();
     expect(screen.getByText("storage").tagName).toBe("STRONG");
     expect(screen.getAllByRole("listitem")).toHaveLength(2);
-    expect(screen.getByText("SQLite (Recommended)")).toBeInTheDocument();
+    expect(screen.getByText("Recommended")).toBeInTheDocument();
+    expect(screen.getByText("1 of 2")).toBeInTheDocument();
+    expect(screen.getByText("2 of 2")).toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "Recorded options" }).tagName).toBe("OL");
+    expect(screen.getByText("SQLite", { selector: "strong" })).toBeInTheDocument();
     expect(screen.getByText(/Keep it local/)).toBeInTheDocument();
     expect(screen.getByText("Any constraints?")).toBeInTheDocument();
     expect(screen.getByText("Secret answer requested")).toBeInTheDocument();
@@ -82,7 +111,7 @@ describe("historical question cards", () => {
     expect(on_toggle).toHaveBeenCalledWith(event.event_key);
     rerender(card({ detail: detail({ event_key: "event.v1.other" }), detail_loading: true }));
     expect(screen.getByRole("status")).toHaveTextContent("Loading questions");
-    expect(screen.queryByText("SQLite (Recommended)")).not.toBeInTheDocument();
+    expect(screen.queryByText("SQLite", { selector: "strong" })).not.toBeInTheDocument();
   });
 
   it("shows retry, refresh errors, and detail truncation", () => {
@@ -92,7 +121,7 @@ describe("historical question cards", () => {
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(on_retry_detail).toHaveBeenCalledOnce();
     rerender(card({ detail_error: "Refresh failed" }));
-    expect(screen.getByText("SQLite (Recommended)")).toBeInTheDocument();
+    expect(screen.getByText("SQLite", { selector: "strong" })).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("Refresh failed");
     rerender(card({ detail: detail({ event: { truncated: true } }) }));
     expect(screen.getByRole("status")).toHaveTextContent("detail size limit");
@@ -101,7 +130,7 @@ describe("historical question cards", () => {
   it("honors hidden content", () => {
     render(card({ detail: detail({ is_hidden: true }) }));
     expect(screen.getByText("Questions are hidden by the provider.")).toBeInTheDocument();
-    expect(screen.queryByText("SQLite (Recommended)")).not.toBeInTheDocument();
+    expect(screen.queryByText("SQLite", { selector: "strong" })).not.toBeInTheDocument();
   });
 
   it("does not invent a blocking mode when only a historical tool invocation was recorded", () => {
