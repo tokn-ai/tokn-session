@@ -348,7 +348,10 @@ async fn proxy(
   }
   // Advertising unavailable input also keeps the viewer's composer disabled.
   if method == Method::POST
-    && command == "get_session_input_status"
+    && matches!(
+      command.as_str(),
+      "get_session_input_status" | "get_session_question_status"
+    )
     && state.tunnels.online(&host_id)
     && state.tunnels.access(&host_id).as_deref() != Some("control")
   {
@@ -356,6 +359,7 @@ async fn proxy(
       "available": false,
       "message": "This host allows viewing only",
       "max_length": 0,
+      "question_ids": [],
     }))
     .into_response();
   }

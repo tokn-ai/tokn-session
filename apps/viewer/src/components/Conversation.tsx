@@ -356,6 +356,8 @@ export function Conversation({
                   data-reading-timestamp={event.timestamp ?? ""}
                   data-event-key={event.event_key} data-scroll-key={event.event_key} key={`${session.session_key}:${event.event_key}`}>
                 <EventCard
+                  question_is_pending={outstanding_questions.some((question) => question.event_key === event.event_key)}
+                  on_question_accepted={on_input_accepted}
                   expanded_activity_keys={expanded_activity_keys}
                   expanded_activities={expanded_activities}
                   session_key={session.session_key}

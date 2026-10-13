@@ -5,6 +5,7 @@ import { Inspector } from "../components/Inspector";
 import { SessionDrawer } from "../components/SessionDrawer";
 import { Sidebar } from "../components/Sidebar";
 import { StatusBar } from "../components/StatusBar";
+import { QuestionAnswersProvider } from "../components/QuestionAnswersProvider";
 import { TranslationProvider } from "../components/TranslationProvider";
 import { useViewerState } from "../lib/useViewerState";
 
@@ -15,7 +16,7 @@ interface ViewerPageProps {
 }
 
 export function ViewerPage({ remote = false, connection, on_open_machines }: ViewerPageProps) {
-  return <TranslationProvider><ViewerContent remote={remote} connection={connection} on_open_machines={on_open_machines} /></TranslationProvider>;
+  return <TranslationProvider><QuestionAnswersProvider><ViewerContent remote={remote} connection={connection} on_open_machines={on_open_machines} /></QuestionAnswersProvider></TranslationProvider>;
 }
 
 function ViewerContent({ remote, connection, on_open_machines }: ViewerPageProps) {

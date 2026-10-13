@@ -250,3 +250,10 @@ export async function listenForLocalHostStatus(handler: (status: import("./types
   if (!isDesktop()) throw new Error("Host setup is available in the desktop app.");
   return (await import("@tauri-apps/api/event")).listen<import("./types").LocalHostStatus>("local-host-status", (event) => handler(event.payload));
 }
+
+export function getSessionQuestionStatus(request: import("./types").SessionQuestionStatusRequest, send: CommandInvoker = invoke): Promise<import("./types").SessionQuestionStatus> {
+  return send("get_session_question_status", { request });
+}
+export function submitSessionQuestionAnswers(request: import("./types").SubmitSessionQuestionAnswersRequest, send: CommandInvoker = invoke): Promise<SubmitSessionInputResponse> {
+  return send("submit_session_question_answers", { request });
+}

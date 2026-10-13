@@ -660,6 +660,7 @@ export interface LocalHostPairing {
 
 /** Read-only projection of normalized question details. */
 export interface QuestionDisplayOption {
+  option_index: number;
   label: string;
   description: string | null;
   is_recommended: boolean;
@@ -679,7 +680,28 @@ export interface QuestionDisplayItem {
 }
 
 export interface QuestionDisplay {
+  request_id: string | null;
   kind: "request" | "reply";
   is_blocking: boolean | null;
   questions: QuestionDisplayItem[];
+}
+
+export interface SessionQuestionStatusRequest {
+  session_key: string;
+  question_request_id: string;
+}
+export interface SessionQuestionStatus {
+  available: boolean;
+  message: string;
+  question_ids: string[];
+  max_length: number;
+}
+export interface SessionQuestionAnswer {
+  question_id: string;
+  option_index?: number;
+  text?: string;
+}
+export interface SubmitSessionQuestionAnswersRequest extends SessionQuestionStatusRequest {
+  request_id: string;
+  answers: SessionQuestionAnswer[];
 }
