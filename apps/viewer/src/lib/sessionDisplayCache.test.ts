@@ -47,6 +47,18 @@ describe("session display replicas", () => {
     expect(cache.assistantPreview("7")).toBeNull();
   });
 
+  it("uses semantic assistant messages inside folded work, without expanding it", () => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one", ["event.v1.2"]);
+    const message = summary("window.v1.source.event.v1.5", "Latest intermediate reply.\nMore detail");
+    initial.items.push({ item_id: message.event_key, kind: "assistant_message", level: "steps", summary: message });
+    initial.semantic_order = ["event.v1.2", message.event_key];
+    const page = cache.apply(initial)!;
+    expect(page.events).toHaveLength(1);
+    expect(page.events[0].event_key).toBe("event.v1.2");
+    expect(cache.assistantPreview("one")).toBe("Latest intermediate reply.");
+  });
+
   it("uses cached assistant summaries across levels without adding subscriptions", () => {
     const cache = new SessionDisplayCache();
     const initial = snapshot(cache, "one", ["event.v1.2", "event.v1.5"]);

@@ -2705,6 +2705,27 @@ function semanticSnapshot(request: import("./types").SessionUpdatesRequest, page
 }
 
 describe("semantic session delivery", () => {
+  it("renders the opened session preview from a folded semantic assistant message", async () => {
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("folded")], next_cursor: null, source_errors: [], pending_providers: [] });
+    const page = toolEventPage();
+    const message = { ...page.events[0], event_key: "window.v1.source.event.v1.5", type: "message", role: "assistant", tool: null,
+      summary: "Latest assistant line inside work.\nDetails" };
+    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => {
+      const update = semanticSnapshot(request, page);
+      update.items.push({ item_id: message.event_key, kind: "assistant_message", level: "steps", summary: message });
+      update.semantic_order = [page.events[0].event_key, message.event_key];
+      return update;
+    });
+    const view = render(<ViewerPage />);
+    const row = await screen.findByRole("button", { name: /folded, Codex session folded/ });
+    fireEvent.click(row);
+    await waitFor(() => expect(row.querySelector(".session-row__title")).toHaveTextContent("Latest assistant line inside work."));
+    expect(view.container.querySelector(".conversation__timeline")).not.toHaveTextContent("Latest assistant line inside work.");
+    expect(loadSessionUpdates).toHaveBeenCalledOnce();
+    expect(loadTrajectoryEventPage).not.toHaveBeenCalled();
+    expect(loadEventDetail).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])("updates the sidebar preview from the opened page (semantic=%s) without more reads", async (semantic) => {
     const listed = session("preview");
     vi.mocked(listSessions).mockResolvedValue({ sessions: [listed, session("other")], next_cursor: null, source_errors: [], pending_providers: [] });

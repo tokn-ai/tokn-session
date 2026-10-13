@@ -51,6 +51,8 @@ to the session title, plus a small project name. Project-grouped rows show title
 only. Previews use retained semantic summaries and never trigger backend queries,
 subscriptions, or body backfills. Accepted first-screen pages refresh sidebar
 previews immediately, including legacy pages and hosts without running-state fields.
+Semantic previews include intermediate assistant messages inside collapsed work;
+the folded timeline adapter does not limit which cached messages can supply them.
 They disappear with cache invalidation/eviction.
 Worked/Working disclosures use wrapping activity summaries and
 an indented activity trail. Each turn contains activity groups separated by

@@ -135,7 +135,8 @@ export class SessionDisplayCache {
     let preview: string | null = null;
     let position = -1;
     for (const { replica } of replicas) {
-      for (const [index, event] of replica.page.events.entries()) {
+      const summaries = [...replica.items.values()].flatMap((item) => item.summary ? [item.summary] : []);
+      for (const [index, event] of summaries.entries()) {
         if (event.type !== "message" || event.role !== "assistant" || event.is_hidden) continue;
         const line = event.summary.split(/\r?\n/).find((line) => line.trim())?.replace(/\s+/g, " ").trim();
         if (!line) continue;
