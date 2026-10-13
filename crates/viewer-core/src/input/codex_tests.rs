@@ -425,3 +425,31 @@ async fn rejects_invalid_json_and_zero_length_frames() {
     assert!(read_frame(&mut bytes).await.is_err());
   }
 }
+
+#[tokio::test]
+#[cfg(any(unix, windows))]
+async fn async_answers_steer_with_display_context_and_never_start_another_turn() {
+  let (mut client, server) = initialized_client(|mut stream| async move {
+    let request = read_frame(&mut stream).await.unwrap();
+    assert_eq!(request["method"], "thread-follower-steer-turn");
+    assert_eq!(request["version"], 1);
+    assert_eq!(request["params"]["conversationId"], "session");
+    assert_eq!(request["params"]["input"][0]["text"], "answer envelope");
+    assert_eq!(request["params"]["input"][0]["text_elements"], json!([]));
+    assert_eq!(request["params"]["clientUserMessageId"], "attempt");
+    assert_eq!(
+      request["params"]["restoreMessage"]["context"]["commentAttachments"],
+      json!([])
+    );
+    write_frame(&mut stream, &success(&request, json!({"result":{"turnId":"active"}}))).await;
+  })
+  .await;
+  assert!(matches!(
+    client
+      .submit_question("session", "attempt", "answer envelope")
+      .await
+      .unwrap(),
+    Admission::Accepted
+  ));
+  server.await.unwrap();
+}

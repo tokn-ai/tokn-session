@@ -137,7 +137,13 @@ async fn command(
     .map_err(|_| error(StatusCode::TOO_MANY_REQUESTS, "Viewer is busy; retry shortly"))?;
   // Live input uses bounded async sockets. Target validation is shared with
   // desktop in viewer-core; dropping this HTTP request never resends input.
-  if matches!(command.as_str(), "get_session_input_status" | "submit_session_input") {
+  if matches!(
+    command.as_str(),
+    "get_session_input_status"
+      | "submit_session_input"
+      | "get_session_question_status"
+      | "submit_session_question_answers"
+  ) {
     let _permit = permit;
     let request = payload.get("request").cloned().unwrap_or_else(|| json!({}));
     let response = match command.as_str() {
@@ -147,6 +153,26 @@ async fn command(
           state
             .service
             .get_session_input_status(request)
+            .await
+            .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
+        )
+      }
+      "get_session_question_status" => {
+        let request = serde_json::from_value(request).map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
+        serde_json::to_value(
+          state
+            .service
+            .get_session_question_status(request)
+            .await
+            .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
+        )
+      }
+      "submit_session_question_answers" => {
+        let request = serde_json::from_value(request).map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
+        serde_json::to_value(
+          state
+            .service
+            .submit_session_question_answers(request)
             .await
             .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
         )

@@ -1,6 +1,6 @@
 //! Native live-session input shared by desktop and HTTP clients.
 
-mod codex;
+pub(crate) mod codex;
 mod pi;
 
 use crate::model::{InputDeliveryStatus, SubmitSessionInputRequest, SubmitSessionInputResponse, ViewerProvider};
@@ -23,7 +23,7 @@ pub(crate) struct InputTarget {
 }
 
 impl InputTarget {
-  fn identity(&self) -> String {
+  pub(crate) fn identity(&self) -> String {
     // Client keys can have equivalent encodings. Codex ownership is by thread
     // ID; Pi ownership is by the catalog's exact session file and ID.
     if self.provider == ViewerProvider::Codex {
@@ -128,6 +128,40 @@ impl InputBroker {
     request.session_key = target.identity();
     let delivery_request = request.clone();
     self.submit_with(request, deliver(target, delivery_request)).await
+  }
+
+  pub(crate) fn receipt(
+    &self,
+    target: &InputTarget,
+    request: &SubmitSessionInputRequest,
+  ) -> Option<SubmitSessionInputResponse> {
+    let state = self.0.lock().unwrap_or_else(|error| error.into_inner());
+    let previous = state.recent.get(&request.request_id)?;
+    let hash: [u8; 32] = Sha256::digest(request.text.as_bytes()).into();
+    Some(
+      if previous.session_key == target.identity() && previous.text_hash == hash {
+        previous.response.clone()
+      } else {
+        SubmitSessionInputResponse {
+          request_id: request.request_id.clone(),
+          status: InputDeliveryStatus::NotSent,
+          message: "This request ID was already used for a different message.".into(),
+        }
+      },
+    )
+  }
+
+  pub(crate) async fn submit_custom<F>(
+    &self,
+    target: &InputTarget,
+    mut request: SubmitSessionInputRequest,
+    delivery: F,
+  ) -> SubmitSessionInputResponse
+  where
+    F: Future<Output = Result<Admission, DeliveryError>> + Send + 'static,
+  {
+    request.session_key = target.identity();
+    self.submit_with(request, delivery).await
   }
 
   async fn submit_with<F>(&self, request: SubmitSessionInputRequest, delivery: F) -> SubmitSessionInputResponse

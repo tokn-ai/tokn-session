@@ -55,7 +55,7 @@ impl ViewerService {
     Ok(self.input_broker.submit(target, request).await)
   }
 
-  fn resolve_input_target(&self, session_key: &str) -> Result<InputTarget, String> {
+  pub(super) fn resolve_input_target(&self, session_key: &str) -> Result<InputTarget, String> {
     if self.relay.status().settings.mode == crate::relay::RelayMode::External {
       return Err("Message input is unavailable through the external snapshot connection. Connect to that machine's viewer API instead.".into());
     }

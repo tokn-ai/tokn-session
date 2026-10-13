@@ -78,7 +78,21 @@ answers appear in green recorded-answer blocks, including optionless questions;
 bounded previews flag truncation. User reply frames pair each question with its
 quoted answer, recovering missing prompts by recorded IDs. They share the user
 message frame but use a dedicated Recorded answers heading, stronger question
-text, and inset answer quotes. Submission remains future work.
+text, and inset answer quotes.
+Pending Codex async questions now offer one option or an always-visible single-line
+written answer below the options, with an explicit Submit action. Focusing or typing
+selects the written answer; switching to an option preserves the text draft.
+Host-authoritative status/submission commands validate
+catalog ownership, async item IDs, unanswered state, choices, and envelope limits.
+Delivery steers the owning Desktop turn through the observed version-1 IPC
+method; no fallback starts a new turn. In-memory per-question claims cover
+pending/accepted/uncertain delivery and clear only for definite non-delivery or
+resolved source state. Desktop, HTTP, direct encrypted clients, and legacy Hub
+relays share commands and control gates. Session shares remain read-only.
+Viewer-scoped drafts survive card closure/session switching within 128 recent
+requests, without browser persistence. Acceptance waits for recorded live replies;
+uncertain delivery never retries automatically. Blocking questions and historical
+requests remain read-only. Blocking answers need live server-request discovery.
 Sidebar badges and session notices show **Input required** for explicit blocking
 requests and **Question available** for async/unknown blocking requests. They
 remain visible after read acknowledgement; exact question-ID replies resolve

@@ -39,6 +39,8 @@ import { DetailRefreshError } from "./DetailRefreshError";
 import { isBookkeepingEvent } from "../lib/eventFilter";
 
 interface EventCardProps {
+  question_is_pending?: boolean;
+  on_question_accepted?: (session_key: string) => void;
   session_key?: string;
   hide_lifecycle?: boolean;
   event: EventSummary;
@@ -749,6 +751,8 @@ function ToolOutput({
 }
 
 export function EventCard({
+  question_is_pending = false,
+  on_question_accepted,
   session_key,
   hide_lifecycle = false,
   event,
@@ -945,7 +949,7 @@ export function EventCard({
               on_retry={on_retry_detail}
             />
           ) : event.type === "question_request" ? (
-            <QuestionCard event={event} detail={detail} error={detail_error} is_loading={detail_loading} on_retry={on_retry_detail} />
+            <QuestionCard session_key={session_key} is_pending={question_is_pending} on_accepted={on_question_accepted} event={event} detail={detail} error={detail_error} is_loading={detail_loading} on_retry={on_retry_detail} />
           ) : event.type === "agent_activity" ? (
             <AgentActivityBody activity={event.agent_activity} event={event} />
           ) : (
