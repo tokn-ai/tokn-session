@@ -33,6 +33,8 @@ function weight(value: unknown): number {
 export class SessionDisplayCache {
   readonly resources = new SessionResources();
   runningRevision = 0;
+  previewRevision = 0;
+  private loadedPreviews = new Map<string, string | null>();
   coverageVersion(session_key: string) {
     const replica = this.replicas.get(this.key(session_key, "steps"));
     return replica ? { generation: replica.generation, revision: replica.revision } : {};
@@ -129,6 +131,7 @@ export class SessionDisplayCache {
     // replicas must not resurrect it; newer final updates can still contribute.
     const replicas = eligible.filter((entry) => entry === complete || (entry.level === "final"
       && (!complete || revision(entry.replica) > revision(complete.replica))));
+    if (eligible.length === 0) return this.loadedPreviews.get(session_key) ?? null;
     let preview: string | null = null;
     let position = -1;
     for (const { replica } of replicas) {
@@ -147,6 +150,25 @@ export class SessionDisplayCache {
       }
     }
     return preview;
+  }
+
+  /** Record already accepted legacy pages; semantic pages are owned by their
+   * replicas. Retain only the bounded preview, never another history copy. */
+  rememberLoadedPage(session_key: string, page: EventPageResponse) {
+    if (this.pageItems.has(page)) return;
+    const event = [...page.events].reverse().find((event) => event.type === "message" && event.role === "assistant" && !event.is_hidden && event.summary.trim());
+    const line = event?.summary.split(/\r?\n/).find((line) => line.trim())?.replace(/\s+/g, " ").trim();
+    const preview = line ? [...line].slice(0, 240).join("") : null;
+    const previous = this.loadedPreviews.get(session_key);
+    this.loadedPreviews.delete(session_key);
+    this.loadedPreviews.set(session_key, preview);
+    if (previous !== preview) this.previewRevision += 1;
+    while (this.loadedPreviews.size > 8) {
+      const oldest = [...this.loadedPreviews.keys()].find((key) => key !== this.selected);
+      if (!oldest) break;
+      this.loadedPreviews.delete(oldest);
+      this.previewRevision += 1;
+    }
   }
 
   private observeRunning(session_key: string, page: EventPageResponse) {
@@ -203,6 +225,9 @@ export class SessionDisplayCache {
 
   invalidate(session_key?: string) {
     this.runningRevision += 1;
+    this.previewRevision += 1;
+    if (session_key) this.loadedPreviews.delete(session_key);
+    else this.loadedPreviews.clear();
     for (const [key] of this.replicas) {
       if (!session_key || JSON.parse(key)[0] === session_key) { this.replicas.delete(key); this.pending.delete(key); this.running.delete(JSON.parse(key)[0]); }
     }
@@ -300,6 +325,7 @@ export class SessionDisplayCache {
       });
     }
     if (update.level !== "details") this.observeRunning(update.session_key, page);
+    if (update.level !== "details") this.previewRevision += 1;
     this.pageItems.set(page, items);
     this.replicas.delete(key);
     this.replicas.set(key, { subscription_id: update.subscription_id, generation: update.generation, revision: update.revision, items, order, event_order, page, bytes });
@@ -323,6 +349,7 @@ export class SessionDisplayCache {
       this.acceptedItems.delete(oldest);
       this.acceptedSources.delete(oldest);
       this.running.delete(oldest);
+      this.loadedPreviews.delete(oldest);
     }
     return page;
   }

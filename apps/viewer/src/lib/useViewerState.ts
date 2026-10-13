@@ -1290,6 +1290,7 @@ export function useViewerState() {
   // this at display time so root/child pages and compact notifications cannot
   // overwrite it with an older indexed snapshot.
   const runningRevision = displayCache.current.runningRevision;
+  const previewRevision = displayCache.current.previewRevision;
   const projectSession = useCallback((session: SessionSummary): SessionSummary => {
     const liveRunning = displayCache.current.liveRunning(session.session_key);
     const latest_assistant_preview = displayCache.current.assistantPreview(session.session_key) ?? session.latest_assistant_preview;
@@ -1300,7 +1301,7 @@ export function useViewerState() {
     return is_running === session.is_running && has_running_descendant === session.has_running_descendant
       && latest_assistant_preview === session.latest_assistant_preview && question_attention === session.question_attention
       ? session : { ...session, is_running, has_running_descendant, question_attention, latest_assistant_preview };
-  }, [pageQuestionAttention, selectedSessionKey, runningRevision]);
+  }, [pageQuestionAttention, selectedSessionKey, runningRevision, previewRevision]);
   const displayedSessions = useMemo(() => {
     const projectRows = (rows: SessionSummary[]) => {
       const next = rows.map(projectSession);
@@ -1572,6 +1573,7 @@ export function useViewerState() {
           }
         }
         const changed = displayCache.current.commit(selectedSessionKey, response);
+        displayCache.current.rememberLoadedPage(selectedSessionKey, response);
         if (isLiveRefresh && !reset && semanticLive.current.has(selectedSessionKey)) {
           const previousEvents = new Map(events.map((event) => [event.event_key, event]));
           for (const key of changed ?? []) detailCache.current.delete(`${selectedSessionKey}:${key}`);

@@ -31,6 +31,22 @@ describe("session display replicas", () => {
     cache.invalidate("one");
     expect(cache.liveRunning("one")).toBeUndefined();
   });
+  it("retains bounded previews from loaded legacy pages and invalidates them", () => {
+    const cache = new SessionDisplayCache();
+    const page = { events: [summary("event.v1.1", "\nLoaded reply.\nDetails")], total_events: 1,
+      next_cursor: null, previous_cursor: null, history_status: "complete" as const };
+    cache.rememberLoadedPage("one", page);
+    expect(cache.assistantPreview("one")).toBe("Loaded reply.");
+    expect(cache.subscriptionIds()).toEqual([]);
+    const revision = cache.previewRevision;
+    cache.rememberLoadedPage("one", page);
+    expect(cache.previewRevision).toBe(revision);
+    for (let index = 0; index < 8; index++) cache.rememberLoadedPage(String(index), page);
+    expect(cache.assistantPreview("one")).toBeNull();
+    cache.invalidate("7");
+    expect(cache.assistantPreview("7")).toBeNull();
+  });
+
   it("uses cached assistant summaries across levels without adding subscriptions", () => {
     const cache = new SessionDisplayCache();
     const initial = snapshot(cache, "one", ["event.v1.2", "event.v1.5"]);
