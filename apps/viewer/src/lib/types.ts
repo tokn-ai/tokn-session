@@ -182,6 +182,7 @@ export interface SessionSummary {
   provider: ViewerProvider;
   title: string | null;
   preview: string | null;
+  latest_assistant_preview?: string | null;
   project: string | null;
   project_order_ms?: number | null;
   project_key?: string | null;

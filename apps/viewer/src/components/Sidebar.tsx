@@ -45,7 +45,7 @@ interface SidebarProps {
 }
 
 interface SessionBranchProps {
-  show_project?: boolean;
+  order: SessionOrder;
   session: SessionSummary;
   depth: number;
   expanded_session_keys: ReadonlySet<string>;
@@ -74,7 +74,7 @@ function pendingProviderLabel(providers: ViewerProvider[]): string {
 }
 
 function SessionBranch({
-  show_project = false,
+  order,
   session,
   depth,
   expanded_session_keys,
@@ -94,7 +94,8 @@ function SessionBranch({
   const children = childrenState?.sessions ?? [];
   const relationship = depth > 0 ? subagentDetail(session) : null;
   const title = sessionDisplayTitle(session);
-  const preview = session.preview?.replace(/\s+/g, " ").trim();
+  const preview = session.latest_assistant_preview?.split(/\r?\n/).find((line) => line.trim())?.replace(/\s+/g, " ").trim();
+  const project = session.project?.trim() || session.cwd?.split(/[\\/]/).filter(Boolean).slice(-1)[0] || "Unassigned project";
   const sessionDescription = depth > 0 ? `subagent ${title}` : title;
   const requiredCount = session.question_attention?.required_count ?? 0;
   const availableCount = session.question_attention?.available_count ?? 0;
@@ -157,13 +158,10 @@ function SessionBranch({
                 >{unreadCount > 1 ? unreadCount : null}</span>
               ) : null}
             </span>
-            {preview && preview !== title ? <span className="session-row__preview sr-only">{preview}</span> : null}
+            {order === "time" && preview ? <span className="session-row__preview" title={preview}>{preview}</span> : null}
+            {order === "time" ? <span className="session-row__project" title={session.cwd ?? project}>{project}</span> : null}
             <span className="session-row__meta sr-only" id={metadataId}>
               <span className="session-row__provider" data-provider={session.provider}>{providerLabel(session.provider)}</span>
-              {show_project && (session.project || session.cwd) ? <>
-                <span aria-hidden="true">·</span>
-                <span className="session-row__project" title={session.cwd ?? session.project ?? undefined}>{session.project || session.cwd}</span>
-              </> : null}
               <span aria-hidden="true">·</span>
               <span>{formatRelativeTime(session.timestamp, session.updated_at_ms)}</span>
               {relationship ? (
@@ -198,6 +196,7 @@ function SessionBranch({
 
           {children.map((child) => (
             <SessionBranch
+              order={order}
               depth={depth + 1}
               expanded_session_keys={expanded_session_keys}
               key={child.session_key}
@@ -445,8 +444,8 @@ export function Sidebar({
             <div className="session-group__items">
               {group.sessions.map((session) => (
                 <SessionBranch
+                  order={order}
                   depth={0}
-                  show_project={order === "time"}
                   expanded_session_keys={expandedSessionKeys}
                   key={session.session_key}
                   on_children_load={on_children_load}

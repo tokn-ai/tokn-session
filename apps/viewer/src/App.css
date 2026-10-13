@@ -3652,8 +3652,12 @@ button:disabled {
 
 .session-row__project {
   min-width: 0;
-  max-width: 45%;
+  max-width: 100%;
   overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10.5px;
+  line-height: 16px;
+  white-space: nowrap;
   text-overflow: ellipsis;
 }
 
