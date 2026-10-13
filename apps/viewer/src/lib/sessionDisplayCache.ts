@@ -110,6 +110,45 @@ export class SessionDisplayCache {
     return subscribed ? this.running.get(session_key)?.is_running : undefined;
   }
 
+  /** Best available assistant line from retained semantic summaries. Reading
+   * this projection never subscribes, loads history, or fetches tool details. */
+  assistantPreview(session_key: string): string | null {
+    const sourceGeneration = (revision?: string) => revision?.slice(0, revision.lastIndexOf(":"));
+    const currentGeneration = sourceGeneration(this.running.get(session_key)?.source_revision);
+    const revision = (replica: Replica) => {
+      const value = replica.page.source_revision?.split(":").pop();
+      return value && /^\d+$/.test(value) ? BigInt(value) : 0n;
+    };
+    const eligible = (["steps", "all", "final"] as const)
+      .map((level) => ({ level, replica: this.replicas.get(this.key(session_key, level)) }))
+      .filter((entry): entry is { level: "steps" | "all" | "final"; replica: Replica } => !!entry.replica
+        && (currentGeneration === undefined || sourceGeneration(entry.replica.page.source_revision) === currentGeneration));
+    const complete = eligible.filter(({ level }) => level !== "final")
+      .sort((left, right) => revision(left.replica) < revision(right.replica) ? 1 : revision(left.replica) > revision(right.replica) ? -1 : 0)[0];
+    // A newer full semantic page can remove a message. Older, filtered final
+    // replicas must not resurrect it; newer final updates can still contribute.
+    const replicas = eligible.filter((entry) => entry === complete || (entry.level === "final"
+      && (!complete || revision(entry.replica) > revision(complete.replica))));
+    let preview: string | null = null;
+    let position = -1;
+    for (const { replica } of replicas) {
+      for (const [index, event] of replica.page.events.entries()) {
+        if (event.type !== "message" || event.role !== "assistant" || event.is_hidden) continue;
+        const line = event.summary.split(/\r?\n/).find((line) => line.trim())?.replace(/\s+/g, " ").trim();
+        if (!line) continue;
+        // Absolute source slots preserve chronology across delivery levels and
+        // older-history expansion. Legacy pages retain their local ordering.
+        const slot = (event.slot_key ?? event.event_key).match(/(?:^|\.)event\.v1\.([0-9a-f]+)$/);
+        const sourcePosition = slot ? Number.parseInt(slot[1], 16) : index;
+        if (sourcePosition >= position) {
+          position = sourcePosition;
+          preview = [...line].slice(0, 240).join("");
+        }
+      }
+    }
+    return preview;
+  }
+
   private observeRunning(session_key: string, page: EventPageResponse) {
     if (page.is_running === undefined) return;
     const previous = this.running.get(session_key);

@@ -45,7 +45,12 @@ for ownership, recovery, limits, and remaining source/projection costs.
 
 The viewer sidebar and conversation use a compact Codex-style layout with neutral
 light/dark colors, larger message text, inline expandable tool activity, and an
-aligned composer. Worked/Working disclosures use wrapping activity summaries and
+aligned composer. Time-grouped session rows show the first available line of the
+latest assistant message from the existing frontend display cache, falling back
+to the session title, plus a small project name. Project-grouped rows show titles
+only. Previews use retained semantic summaries and never trigger backend queries,
+subscriptions, or body backfills. They disappear with cache invalidation/eviction.
+Worked/Working disclosures use wrapping activity summaries and
 an indented activity trail. Each turn contains activity groups separated by
 intermediate messages. Inner disclosures summarize actions (commands, reads,
 edits, searches) rather than duration; only the outer turn uses Worked/Working.

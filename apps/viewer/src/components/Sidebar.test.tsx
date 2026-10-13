@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SessionSummary, ViewerProvider } from "../lib/types";
+import type { SessionOrder, SessionSummary, ViewerProvider } from "../lib/types";
 import { Sidebar } from "./Sidebar";
 
 afterEach(cleanup);
@@ -35,9 +35,11 @@ function renderSidebar(
   pendingProviders: ViewerProvider[] = [],
   error: string | null = null,
   onCollapse?: () => void,
+  order: SessionOrder = "time",
 ) {
   return render(
     <Sidebar
+      order={order}
       enabled_providers={new Set(["codex"])}
       error={error}
       has_more={false}
@@ -113,6 +115,24 @@ describe("Sidebar session identity", () => {
     expect(screen.getByText("Indexed session")).toBeInTheDocument();
   });
 
+  it("uses the assistant preview in time view with a title fallback and project name", () => {
+    renderSidebar([session({ title: "Storage discussion", preview: "Original user prompt", latest_assistant_preview: "\nUse SQLite locally.\nExtra details stay in the conversation." })]);
+    const row = screen.getByRole("button", { name: /Storage discussion, Codex session/ });
+    expect(within(row).getByText("Use SQLite locally.")).toHaveClass("session-row__title");
+    expect(within(row).queryByText("Storage discussion")).not.toBeInTheDocument();
+    expect(within(row).getByText("Viewer")).toHaveClass("session-row__project");
+    expect(within(row).queryByText(/Extra details/)).not.toBeInTheDocument();
+    expect(within(row).queryByText("Original user prompt")).not.toBeInTheDocument();
+  });
+
+  it("keeps project-grouped rows to titles even when a cached preview exists", () => {
+    renderSidebar([session({ title: "Storage discussion", latest_assistant_preview: "Use SQLite locally." })], [], null, undefined, "project");
+    const row = screen.getByRole("button", { name: /Storage discussion, Codex session/ });
+    expect(within(row).getByText("Storage discussion")).toHaveClass("session-row__title");
+    expect(within(row).queryByText("Use SQLite locally.")).not.toBeInTheDocument();
+    expect(within(row).queryByText("Viewer")).not.toBeInTheDocument();
+  });
+
   it("renders title fallbacks while keeping the full session id discoverable", () => {
     const titledId = "01991dce-7f6a-7000-8000-000000000001";
     const previewId = "abcdef01-2345-6789-abcd-ef0123456789";
@@ -142,7 +162,7 @@ describe("Sidebar session identity", () => {
       name: `Provider title, Codex session ${titledId}`,
     });
     expect(within(titled).getByText("Provider title")).toHaveClass("session-row__title");
-    expect(within(titled).getByText("First prompt should not win")).toHaveClass("session-row__preview");
+    expect(within(titled).queryByText("First prompt should not win")).not.toBeInTheDocument();
     expect(within(titled).getByText("Codex")).toHaveClass("session-row__provider");
     expect(within(titled).queryByText(titledId)).not.toBeInTheDocument();
     expect(titled).toHaveAttribute("title", `Provider title\nCodex · Viewer\n${titledId}`);

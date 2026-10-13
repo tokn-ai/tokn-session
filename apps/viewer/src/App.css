@@ -1056,15 +1056,6 @@ button:disabled {
   color: var(--text-soft);
 }
 
-.session-row__preview {
-  overflow: hidden;
-  color: var(--text-soft);
-  font-size: 11px;
-  line-height: 16px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .session-row__provider {
   font-weight: 600;
 }
@@ -3652,8 +3643,12 @@ button:disabled {
 
 .session-row__project {
   min-width: 0;
-  max-width: 45%;
+  max-width: 100%;
   overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10.5px;
+  line-height: 16px;
+  white-space: nowrap;
   text-overflow: ellipsis;
 }
 

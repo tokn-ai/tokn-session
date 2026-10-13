@@ -1292,13 +1292,14 @@ export function useViewerState() {
   const runningRevision = displayCache.current.runningRevision;
   const projectSession = useCallback((session: SessionSummary): SessionSummary => {
     const liveRunning = displayCache.current.liveRunning(session.session_key);
+    const latest_assistant_preview = displayCache.current.assistantPreview(session.session_key) ?? session.latest_assistant_preview;
     const is_running = liveRunning ?? session.is_running;
     const has_running_descendant = liveRunning === false ? false : session.has_running_descendant;
     const question_attention = pageQuestionAttention !== undefined && session.session_key === selectedSessionKey
       ? pageQuestionAttention : session.question_attention;
     return is_running === session.is_running && has_running_descendant === session.has_running_descendant
-      && question_attention === session.question_attention
-      ? session : { ...session, is_running, has_running_descendant, question_attention };
+      && latest_assistant_preview === session.latest_assistant_preview && question_attention === session.question_attention
+      ? session : { ...session, is_running, has_running_descendant, question_attention, latest_assistant_preview };
   }, [pageQuestionAttention, selectedSessionKey, runningRevision]);
   const displayedSessions = useMemo(() => {
     const projectRows = (rows: SessionSummary[]) => {
