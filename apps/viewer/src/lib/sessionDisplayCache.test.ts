@@ -47,7 +47,7 @@ describe("session display replicas", () => {
     expect(cache.assistantPreview("7")).toBeNull();
   });
 
-  it("ignores semantic assistant messages inside folded work", () => {
+  it("previews this session intermediate messages even when its work is folded", () => {
     const cache = new SessionDisplayCache();
     const initial = snapshot(cache, "one", ["event.v1.2"]);
     initial.items[0].summary = summary("event.v1.2", "Main conversation reply.");
@@ -57,7 +57,12 @@ describe("session display replicas", () => {
     const page = cache.apply(initial)!;
     expect(page.events).toHaveLength(1);
     expect(page.events[0].event_key).toBe("event.v1.2");
-    expect(cache.assistantPreview("one")).toBe("Main conversation reply.");
+    expect(cache.assistantPreview("one")).toBe("Latest intermediate reply.");
+    const child = snapshot(cache, "child", ["event.v1.9"]);
+    child.items[0].summary = summary("event.v1.9", "Subagent reply");
+    cache.apply(child);
+    expect(cache.assistantPreview("one")).toBe("Latest intermediate reply.");
+    expect(cache.assistantPreview("child")).toBe("Subagent reply");
   });
 
   it("uses cached assistant summaries across levels without adding subscriptions", () => {

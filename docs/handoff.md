@@ -46,10 +46,11 @@ for ownership, recovery, limits, and remaining source/projection costs.
 The viewer sidebar and conversation use a compact Codex-style layout with neutral
 light/dark colors, larger message text, inline expandable tool activity, and an
 aligned composer. Time-grouped session rows retain the title, show a separate
-first-line preview of the latest main assistant message when cached, and show a
-small project name. Project-grouped rows show titles only. Previews use existing
-frontend display pages, excluding intermediate messages inside folded work groups,
-and never trigger backend queries, subscriptions, or body backfills. Accepted
+first-line preview of the latest cached assistant message from that session, and
+show a small project name. Project-grouped rows show titles only. Previews use existing
+frontend semantic summaries, including intermediate assistant messages inside
+folded work groups. Child/subagent sessions have separate previews. They never
+trigger backend queries, subscriptions, or body backfills. Accepted
 first-screen pages refresh sidebar previews immediately, including legacy pages
 and hosts without running-state fields. Previews disappear with cache eviction
 or invalidation.
