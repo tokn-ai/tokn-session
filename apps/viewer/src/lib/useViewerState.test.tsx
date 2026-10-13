@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { useLayoutEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readingEventKey, saveReadingPosition } from "./readingPosition";
@@ -1262,7 +1262,8 @@ describe("useViewerState refresh after message input", () => {
       role: "assistant" as const, summary: "Response after sending", reasoning: null };
     vi.mocked(loadEventPage).mockResolvedValue({ ...original, events: [...original.events, response], total_events: 2 });
     await act(async () => vi.advanceTimersByTimeAsync(2_000));
-    expect(screen.getByText("Response after sending")).toBeInTheDocument();
+    expect(within(timeline).getByText("Response after sending")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /session live/ }).querySelector(".session-row__preview")).toHaveTextContent("Response after sending");
     expect(timeline.scrollTop).toBe(120);
     await act(async () => vi.advanceTimersByTimeAsync(5_000));
     await act(async () => vi.advanceTimersByTimeAsync(12_000));
@@ -2704,6 +2705,49 @@ function semanticSnapshot(request: import("./types").SessionUpdatesRequest, page
 }
 
 describe("semantic session delivery", () => {
+  it("renders a separate preview including this session folded intermediate message", async () => {
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("folded")], next_cursor: null, source_errors: [], pending_providers: [] });
+    const base = toolEventPage();
+    const page = { ...base, events: [{ ...base.events[0], event_key: "event.v1.2", type: "message", role: "assistant", tool: null, summary: "Main conversation reply." }] };
+    const message = { ...page.events[0], event_key: "window.v1.source.event.v1.5", type: "message", role: "assistant", tool: null,
+      summary: "Latest assistant line inside work.\nDetails" };
+    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => {
+      const update = semanticSnapshot(request, page);
+      update.items.push({ item_id: message.event_key, kind: "assistant_message", level: "steps", summary: message });
+      update.semantic_order = [page.events[0].event_key, message.event_key];
+      return update;
+    });
+    const view = render(<ViewerPage />);
+    const row = await screen.findByRole("button", { name: /folded, Codex session folded/ });
+    fireEvent.click(row);
+    await waitFor(() => expect(row.querySelector(".session-row__preview")).toHaveTextContent("Latest assistant line inside work."));
+    expect(row.querySelector(".session-row__title")).toHaveTextContent("folded");
+    expect(view.container.querySelector(".conversation__timeline")).not.toHaveTextContent("Latest assistant line inside work.");
+    expect(loadSessionUpdates).toHaveBeenCalledOnce();
+    expect(loadTrajectoryEventPage).not.toHaveBeenCalled();
+    expect(loadEventDetail).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("updates the sidebar preview from the opened page (semantic=%s) without more reads", async (semantic) => {
+    const listed = session("preview");
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [listed, session("other")], next_cursor: null, source_errors: [], pending_providers: [] });
+    const base = toolEventPage();
+    const page = { ...base, events: [{ ...base.events[0], type: "message", role: "assistant", tool: null,
+      summary: "Latest answer.\nFull details belong in the conversation." }] };
+    if (semantic) vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    else vi.mocked(loadEventPage).mockResolvedValue(page);
+    const { result } = renderHook(() => useViewerState());
+    await selectListedSession(result, "preview");
+    await waitFor(() => expect(result.current.events).toEqual(page.events));
+    await waitFor(() => expect(result.current.sessions[0].latest_assistant_preview).toBe("Latest answer."));
+    expect(result.current.selectedSession?.latest_assistant_preview).toBe("Latest answer.");
+    expect(loadSessionUpdates).toHaveBeenCalledOnce();
+    expect(loadEventPage).toHaveBeenCalledTimes(semantic ? 0 : 1);
+    act(() => result.current.selectSession("other"));
+    await waitFor(() => expect(result.current.selectedSessionKey).toBe("other"));
+    expect(result.current.sessions[0].latest_assistant_preview).toBe("Latest answer.");
+  });
+
   it("keeps live running state through stale catalog and attention updates, then clears on completion", async () => {
     let emit: ((update: import("./types").SessionUpdate) => void) | undefined;
     let notify: ((notification: import("./types").SessionNotification) => void) | undefined;

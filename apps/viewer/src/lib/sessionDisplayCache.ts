@@ -33,6 +33,8 @@ function weight(value: unknown): number {
 export class SessionDisplayCache {
   readonly resources = new SessionResources();
   runningRevision = 0;
+  previewRevision = 0;
+  private loadedPreviews = new Map<string, string | null>();
   coverageVersion(session_key: string) {
     const replica = this.replicas.get(this.key(session_key, "steps"));
     return replica ? { generation: replica.generation, revision: replica.revision } : {};
@@ -110,6 +112,69 @@ export class SessionDisplayCache {
     return subscribed ? this.running.get(session_key)?.is_running : undefined;
   }
 
+  /** Best available assistant line from retained semantic summaries. Reading
+   * this projection never subscribes, loads history, or fetches tool details. */
+  assistantPreview(session_key: string): string | null {
+    const sourceGeneration = (revision?: string) => revision?.slice(0, revision.lastIndexOf(":"));
+    const currentGeneration = sourceGeneration(this.running.get(session_key)?.source_revision);
+    const revision = (replica: Replica) => {
+      const value = replica.page.source_revision?.split(":").pop();
+      return value && /^\d+$/.test(value) ? BigInt(value) : 0n;
+    };
+    const eligible = (["steps", "all", "final"] as const)
+      .map((level) => ({ level, replica: this.replicas.get(this.key(session_key, level)) }))
+      .filter((entry): entry is { level: "steps" | "all" | "final"; replica: Replica } => !!entry.replica
+        && (currentGeneration === undefined || sourceGeneration(entry.replica.page.source_revision) === currentGeneration));
+    const complete = eligible.filter(({ level }) => level !== "final")
+      .sort((left, right) => revision(left.replica) < revision(right.replica) ? 1 : revision(left.replica) > revision(right.replica) ? -1 : 0)[0];
+    // A newer full semantic page can remove a message. Older, filtered final
+    // replicas must not resurrect it; newer final updates can still contribute.
+    const replicas = eligible.filter((entry) => entry === complete || (entry.level === "final"
+      && (!complete || revision(entry.replica) > revision(complete.replica))));
+    if (eligible.length === 0) return this.loadedPreviews.get(session_key) ?? null;
+    let preview: string | null = null;
+    let position = -1;
+    for (const { replica } of replicas) {
+      // Semantic messages belong to this session even when its display rows
+      // fold intermediate replies into work groups. Child sessions have their
+      // own replicas and never enter this preview.
+      const summaries = [...replica.items.values()].flatMap((item) => item.summary ? [item.summary] : []);
+      for (const [index, event] of summaries.entries()) {
+        if (event.type !== "message" || event.role !== "assistant" || event.is_hidden) continue;
+        const line = event.summary.split(/\r?\n/).find((line) => line.trim())?.replace(/\s+/g, " ").trim();
+        if (!line) continue;
+        // Absolute source slots preserve chronology across delivery levels and
+        // older-history expansion. Legacy pages retain their local ordering.
+        const slot = (event.slot_key ?? event.event_key).match(/(?:^|\.)event\.v1\.([0-9a-f]+)$/);
+        const sourcePosition = slot ? Number.parseInt(slot[1], 16) : index;
+        if (sourcePosition >= position) {
+          position = sourcePosition;
+          preview = [...line].slice(0, 240).join("");
+        }
+      }
+    }
+    return preview;
+  }
+
+  /** Record already accepted legacy pages; semantic pages are owned by their
+   * replicas. Retain only the bounded preview, never another history copy. */
+  rememberLoadedPage(session_key: string, page: EventPageResponse) {
+    if (this.pageItems.has(page)) return;
+    const event = [...page.events].reverse().find((event) => event.type === "message" && event.role === "assistant" && !event.is_hidden && event.summary.trim());
+    const line = event?.summary.split(/\r?\n/).find((line) => line.trim())?.replace(/\s+/g, " ").trim();
+    const preview = line ? [...line].slice(0, 240).join("") : null;
+    const previous = this.loadedPreviews.get(session_key);
+    this.loadedPreviews.delete(session_key);
+    this.loadedPreviews.set(session_key, preview);
+    if (previous !== preview) this.previewRevision += 1;
+    while (this.loadedPreviews.size > 8) {
+      const oldest = [...this.loadedPreviews.keys()].find((key) => key !== this.selected);
+      if (!oldest) break;
+      this.loadedPreviews.delete(oldest);
+      this.previewRevision += 1;
+    }
+  }
+
   private observeRunning(session_key: string, page: EventPageResponse) {
     if (page.is_running === undefined) return;
     const previous = this.running.get(session_key);
@@ -164,6 +229,9 @@ export class SessionDisplayCache {
 
   invalidate(session_key?: string) {
     this.runningRevision += 1;
+    this.previewRevision += 1;
+    if (session_key) this.loadedPreviews.delete(session_key);
+    else this.loadedPreviews.clear();
     for (const [key] of this.replicas) {
       if (!session_key || JSON.parse(key)[0] === session_key) { this.replicas.delete(key); this.pending.delete(key); this.running.delete(JSON.parse(key)[0]); }
     }
@@ -261,6 +329,7 @@ export class SessionDisplayCache {
       });
     }
     if (update.level !== "details") this.observeRunning(update.session_key, page);
+    if (update.level !== "details") this.previewRevision += 1;
     this.pageItems.set(page, items);
     this.replicas.delete(key);
     this.replicas.set(key, { subscription_id: update.subscription_id, generation: update.generation, revision: update.revision, items, order, event_order, page, bytes });
@@ -284,6 +353,7 @@ export class SessionDisplayCache {
       this.acceptedItems.delete(oldest);
       this.acceptedSources.delete(oldest);
       this.running.delete(oldest);
+      this.loadedPreviews.delete(oldest);
     }
     return page;
   }

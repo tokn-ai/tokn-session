@@ -31,6 +31,85 @@ describe("session display replicas", () => {
     cache.invalidate("one");
     expect(cache.liveRunning("one")).toBeUndefined();
   });
+  it("retains bounded previews from loaded legacy pages and invalidates them", () => {
+    const cache = new SessionDisplayCache();
+    const page = { events: [summary("event.v1.1", "\nLoaded reply.\nDetails")], total_events: 1,
+      next_cursor: null, previous_cursor: null, history_status: "complete" as const };
+    cache.rememberLoadedPage("one", page);
+    expect(cache.assistantPreview("one")).toBe("Loaded reply.");
+    expect(cache.subscriptionIds()).toEqual([]);
+    const revision = cache.previewRevision;
+    cache.rememberLoadedPage("one", page);
+    expect(cache.previewRevision).toBe(revision);
+    for (let index = 0; index < 8; index++) cache.rememberLoadedPage(String(index), page);
+    expect(cache.assistantPreview("one")).toBeNull();
+    cache.invalidate("7");
+    expect(cache.assistantPreview("7")).toBeNull();
+  });
+
+  it("previews this session intermediate messages even when its work is folded", () => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one", ["event.v1.2"]);
+    initial.items[0].summary = summary("event.v1.2", "Main conversation reply.");
+    const message = summary("window.v1.source.event.v1.5", "Latest intermediate reply.\nMore detail");
+    initial.items.push({ item_id: message.event_key, kind: "assistant_message", level: "steps", summary: message });
+    initial.semantic_order = ["event.v1.2", message.event_key];
+    const page = cache.apply(initial)!;
+    expect(page.events).toHaveLength(1);
+    expect(page.events[0].event_key).toBe("event.v1.2");
+    expect(cache.assistantPreview("one")).toBe("Latest intermediate reply.");
+    const child = snapshot(cache, "child", ["event.v1.9"]);
+    child.items[0].summary = summary("event.v1.9", "Subagent reply");
+    cache.apply(child);
+    expect(cache.assistantPreview("one")).toBe("Latest intermediate reply.");
+    expect(cache.assistantPreview("child")).toBe("Subagent reply");
+  });
+
+  it("uses cached assistant summaries across levels without adding subscriptions", () => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one", ["event.v1.2", "event.v1.5"]);
+    initial.items[0].summary = { ...summary("event.v1.2", "Earlier final"), delivery: "final" };
+    initial.items[1].summary = { ...summary("event.v1.5", "\nChecking schema.\nMore detail"), delivery: "commentary" };
+    initial.state.is_running = true; initial.state.source_revision = "source:10";
+    cache.apply(initial);
+    const subscriptions = cache.subscriptionIds();
+    expect(cache.assistantPreview("one")).toBe("Checking schema.");
+    expect(cache.assistantPreview("unopened")).toBeNull();
+    expect(cache.subscriptionIds()).toEqual(subscriptions);
+    const final = cache.request("one", "final");
+    cache.apply({ ...initial, ...final, items: [initial.items[0]], item_order: ["event.v1.2"],
+      state: { ...initial.state, source_revision: "source:9" } });
+    expect(cache.assistantPreview("one")).toBe("Checking schema.");
+    cache.release("one", "all");
+    expect(cache.assistantPreview("one")).toBe("Checking schema.");
+    cache.apply({ ...initial, ...final, generation: "replacement", revision: "1", items: [], item_order: [],
+      state: { ...initial.state, source_revision: "replacement:1" } });
+    expect(cache.assistantPreview("one")).toBeNull();
+    cache.invalidate("one");
+    expect(cache.assistantPreview("one")).toBeNull();
+  });
+
+  it("does not resurrect a removed message from an older final replica", () => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one", ["event.v1.1"]);
+    initial.state.is_running = false; initial.state.source_revision = "source:1";
+    cache.apply(initial);
+    const final = cache.request("one", "final");
+    cache.apply({ ...initial, ...final });
+    cache.apply({ ...initial, revision: "2", items: [], item_order: [], state: { ...initial.state, source_revision: "source:2" } });
+    expect(cache.assistantPreview("one")).toBeNull();
+  });
+
+  it("excludes user and hidden summaries and bounds preview characters", () => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one", ["event.v1.1", "event.v1.2", "event.v1.3"]);
+    initial.items[0].summary = summary("event.v1.1", "界".repeat(300));
+    initial.items[1].summary = { ...summary("event.v1.2", "User prompt"), role: "user" };
+    initial.items[2].summary = { ...summary("event.v1.3", "Hidden answer"), is_hidden: true };
+    cache.apply(initial);
+    expect([...cache.assistantPreview("one")!]).toHaveLength(240);
+  });
+
   it("applies changed items while retaining unchanged references", () => {
     const cache = new SessionDisplayCache(); const initial = snapshot(cache, "one", ["a", "b"]);
     const first = cache.apply(initial)!;
