@@ -1263,7 +1263,7 @@ describe("useViewerState refresh after message input", () => {
     vi.mocked(loadEventPage).mockResolvedValue({ ...original, events: [...original.events, response], total_events: 2 });
     await act(async () => vi.advanceTimersByTimeAsync(2_000));
     expect(within(timeline).getByText("Response after sending")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /session live/ }).querySelector(".session-row__title")).toHaveTextContent("Response after sending");
+    expect(screen.getByRole("button", { name: /session live/ }).querySelector(".session-row__preview")).toHaveTextContent("Response after sending");
     expect(timeline.scrollTop).toBe(120);
     await act(async () => vi.advanceTimersByTimeAsync(5_000));
     await act(async () => vi.advanceTimersByTimeAsync(12_000));
@@ -2705,9 +2705,10 @@ function semanticSnapshot(request: import("./types").SessionUpdatesRequest, page
 }
 
 describe("semantic session delivery", () => {
-  it("renders the opened session preview from a folded semantic assistant message", async () => {
+  it("renders a separate main-message preview and excludes folded assistant messages", async () => {
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("folded")], next_cursor: null, source_errors: [], pending_providers: [] });
-    const page = toolEventPage();
+    const base = toolEventPage();
+    const page = { ...base, events: [{ ...base.events[0], event_key: "event.v1.2", type: "message", role: "assistant", tool: null, summary: "Main conversation reply." }] };
     const message = { ...page.events[0], event_key: "window.v1.source.event.v1.5", type: "message", role: "assistant", tool: null,
       summary: "Latest assistant line inside work.\nDetails" };
     vi.mocked(loadSessionUpdates).mockImplementation(async (request) => {
@@ -2719,7 +2720,9 @@ describe("semantic session delivery", () => {
     const view = render(<ViewerPage />);
     const row = await screen.findByRole("button", { name: /folded, Codex session folded/ });
     fireEvent.click(row);
-    await waitFor(() => expect(row.querySelector(".session-row__title")).toHaveTextContent("Latest assistant line inside work."));
+    await waitFor(() => expect(row.querySelector(".session-row__preview")).toHaveTextContent("Main conversation reply."));
+    expect(row.querySelector(".session-row__title")).toHaveTextContent("folded");
+    expect(row).not.toHaveTextContent("Latest assistant line inside work.");
     expect(view.container.querySelector(".conversation__timeline")).not.toHaveTextContent("Latest assistant line inside work.");
     expect(loadSessionUpdates).toHaveBeenCalledOnce();
     expect(loadTrajectoryEventPage).not.toHaveBeenCalled();

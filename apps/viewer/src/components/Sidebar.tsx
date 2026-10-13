@@ -144,7 +144,7 @@ function SessionBranch({
           <span className="session-row__body">
             <span className="session-row__headline">
               {depth > 0 ? <BranchIcon className="session-row__branch-icon" /> : null}
-              <span className="session-row__title" title={order === "time" && preview ? preview : title}>{order === "time" && preview ? preview : title}</span>
+              <span className="session-row__title">{title}</span>
               <span className="session-row__time" aria-hidden="true">{formatRelativeTime(session.timestamp, session.updated_at_ms)}</span>
               {questionCount > 0 ? <span className="session-row__question" data-blocking={requiredCount > 0} role="img" aria-label={`${questionLabel}, ${questionCount} unanswered ${questionCount === 1 ? "question" : "questions"}`} title={questionLabel}>?{questionCount > 1 ? questionCount : ""}</span> : null}
               {isRunning ? (
@@ -158,6 +158,7 @@ function SessionBranch({
                 >{unreadCount > 1 ? unreadCount : null}</span>
               ) : null}
             </span>
+            {order === "time" && preview ? <span className="session-row__preview" title={preview}>{preview}</span> : null}
             {order === "time" ? <span className="session-row__project" title={session.cwd ?? project}>{project}</span> : null}
             <span className="session-row__meta sr-only" id={metadataId}>
               <span className="session-row__provider" data-provider={session.provider}>{providerLabel(session.provider)}</span>

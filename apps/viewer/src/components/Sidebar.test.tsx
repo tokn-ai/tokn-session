@@ -115,11 +115,12 @@ describe("Sidebar session identity", () => {
     expect(screen.getByText("Indexed session")).toBeInTheDocument();
   });
 
-  it("uses the assistant preview in time view with a title fallback and project name", () => {
+  it("shows separate title, main assistant preview, and project lines in time view", () => {
     renderSidebar([session({ title: "Storage discussion", preview: "Original user prompt", latest_assistant_preview: "\nUse SQLite locally.\nExtra details stay in the conversation." })]);
     const row = screen.getByRole("button", { name: /Storage discussion, Codex session/ });
-    expect(within(row).getByText("Use SQLite locally.")).toHaveClass("session-row__title");
-    expect(within(row).queryByText("Storage discussion")).not.toBeInTheDocument();
+    expect(within(row).getByText("Use SQLite locally.")).toHaveClass("session-row__preview");
+    expect(within(row).getByText("Use SQLite locally.")).not.toHaveClass("sr-only");
+    expect(within(row).getByText("Storage discussion")).toHaveClass("session-row__title");
     expect(within(row).getByText("Viewer")).toHaveClass("session-row__project");
     expect(within(row).queryByText(/Extra details/)).not.toBeInTheDocument();
     expect(within(row).queryByText("Original user prompt")).not.toBeInTheDocument();

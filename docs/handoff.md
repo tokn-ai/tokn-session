@@ -45,15 +45,14 @@ for ownership, recovery, limits, and remaining source/projection costs.
 
 The viewer sidebar and conversation use a compact Codex-style layout with neutral
 light/dark colors, larger message text, inline expandable tool activity, and an
-aligned composer. Time-grouped session rows show the first available line of the
-latest assistant message from the existing frontend display cache, falling back
-to the session title, plus a small project name. Project-grouped rows show titles
-only. Previews use retained semantic summaries and never trigger backend queries,
-subscriptions, or body backfills. Accepted first-screen pages refresh sidebar
-previews immediately, including legacy pages and hosts without running-state fields.
-Semantic previews include intermediate assistant messages inside collapsed work;
-the folded timeline adapter does not limit which cached messages can supply them.
-They disappear with cache invalidation/eviction.
+aligned composer. Time-grouped session rows retain the title, show a separate
+first-line preview of the latest main assistant message when cached, and show a
+small project name. Project-grouped rows show titles only. Previews use existing
+frontend display pages, excluding intermediate messages inside folded work groups,
+and never trigger backend queries, subscriptions, or body backfills. Accepted
+first-screen pages refresh sidebar previews immediately, including legacy pages
+and hosts without running-state fields. Previews disappear with cache eviction
+or invalidation.
 Worked/Working disclosures use wrapping activity summaries and
 an indented activity trail. Each turn contains activity groups separated by
 intermediate messages. Inner disclosures summarize actions (commands, reads,

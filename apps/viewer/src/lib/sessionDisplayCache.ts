@@ -135,8 +135,9 @@ export class SessionDisplayCache {
     let preview: string | null = null;
     let position = -1;
     for (const { replica } of replicas) {
-      const summaries = [...replica.items.values()].flatMap((item) => item.summary ? [item.summary] : []);
-      for (const [index, event] of summaries.entries()) {
+      // Preview the main conversation, excluding intermediate messages that
+      // the timeline places inside a folded work group.
+      for (const [index, event] of replica.page.events.entries()) {
         if (event.type !== "message" || event.role !== "assistant" || event.is_hidden) continue;
         const line = event.summary.split(/\r?\n/).find((line) => line.trim())?.replace(/\s+/g, " ").trim();
         if (!line) continue;
