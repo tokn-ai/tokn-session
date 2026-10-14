@@ -104,9 +104,7 @@ impl SessionReader {
   ) -> Result<Self, String> {
     check_cancelled(cancel.as_ref())?;
     let mut reader = Self {
-      file: if matches!(entry.provider, Provider::Codex | Provider::Pi)
-        && !(window && entry.provider == Provider::Codex)
-      {
+      file: if entry.provider == Provider::Pi {
         Some(FileState::for_snapshot(
           entry.header.path.clone(),
           entry.provider,
@@ -124,13 +122,21 @@ impl SessionReader {
       native,
       root,
       version: Vec::new(),
-      codex_history: (window && entry.provider == Provider::Codex).then(|| {
-        tokn_session_codex::CodexHistoryReader::new_window(
-          entry.header.path.clone(),
-          native,
-          crate::service_protocol::MAX_SNAPSHOT_BYTES,
-          crate::service_history::INITIAL_HISTORY_TURNS,
-        )
+      codex_history: (entry.provider == Provider::Codex).then(|| {
+        if window {
+          tokn_session_codex::CodexHistoryReader::new_window(
+            entry.header.path.clone(),
+            native,
+            crate::service_protocol::MAX_SNAPSHOT_BYTES,
+            crate::service_history::INITIAL_HISTORY_TURNS,
+          )
+        } else {
+          tokn_session_codex::CodexHistoryReader::new(
+            entry.header.path.clone(),
+            native,
+            crate::service_protocol::MAX_SNAPSHOT_BYTES,
+          )
+        }
       }),
       window_anchor: None,
       window_shapes: Vec::new(),
@@ -205,20 +211,6 @@ impl SessionReader {
     if self.database.is_some() {
       return self.poll_database(version);
     }
-    if self.snapshot.entry.provider == Provider::Codex {
-      // Detect inherited history from the owning header. The history reader
-      // resolves and validates the lineage itself; doing it here would walk
-      // the provider roots and verify every prefix twice on a cold open.
-      let header = tokn_session_codex::history_header(path)?;
-      if !header.native()["payload"]["history_base"].is_null() {
-        self.codex_history = Some(tokn_session_codex::CodexHistoryReader::new(
-          path.clone(),
-          self.native,
-          crate::service_protocol::MAX_SNAPSHOT_BYTES,
-        ));
-        return self.poll_codex_history();
-      }
-    }
     if matches!(self.snapshot.entry.provider, Provider::WorkBuddy | Provider::Dsh) {
       return self.poll_grouped_file(version);
     }
@@ -234,7 +226,7 @@ impl SessionReader {
   fn poll_file(&mut self, version: Vec<Option<FileVersion>>) -> Result<bool, String> {
     let path = &self.snapshot.entry.header.path;
     let was_grouped = self.file.is_none();
-    if was_grouped && matches!(self.snapshot.entry.provider, Provider::Codex | Provider::Pi) {
+    if was_grouped && self.snapshot.entry.provider == Provider::Pi {
       self.file = Some(FileState::for_snapshot(
         path.clone(),
         self.snapshot.entry.provider,
@@ -320,10 +312,13 @@ impl SessionReader {
     result
   }
 
-  fn commit_codex_history(&mut self, update: tokn_session_codex::CodexHistoryUpdate) -> Result<bool, String> {
+  fn commit_codex_history(&mut self, mut update: tokn_session_codex::CodexHistoryUpdate) -> Result<bool, String> {
     if update.reference.id != self.snapshot.entry.header.id {
       return Err("Relay session identity changed; refresh the catalog".into());
     }
+    // The provider may resolve a selected plain path to a compressed sibling.
+    // Keep the selected source identity on the wire across that transition.
+    update.reference.path = self.snapshot.entry.header.path.clone();
     let shapes = if update.source_start.is_some() || self.window_anchor.is_some() {
       update
         .records

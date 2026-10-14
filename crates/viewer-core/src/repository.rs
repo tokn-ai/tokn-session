@@ -117,7 +117,12 @@ impl ViewerRepository for NativeRepository {
     if !matches!(locator.provider, ViewerProvider::Codex | ViewerProvider::Pi) {
       return Ok(SessionBodyIndexing::Ready);
     }
-    let metadata = std::fs::metadata(&locator.source_path)
+    let source_path = if locator.provider == ViewerProvider::Codex {
+      tokn_session_codex::resolve_rollout_path(&locator.source_path)
+    } else {
+      locator.source_path.clone()
+    };
+    let metadata = std::fs::metadata(&source_path)
       .map_err(|error| format!("failed to inspect {}: {error}", locator.source_path.display()))?;
     let modified = metadata
       .modified()

@@ -41,3 +41,4 @@ notify.workspace = true
 [dev-dependencies]
 rusqlite = { version = "0.40", features = ["bundled"] }
 tokio = { workspace = true, features = ["test-util"] }
+zstd = "0.13"

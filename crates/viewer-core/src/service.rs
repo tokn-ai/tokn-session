@@ -3803,9 +3803,18 @@ fn source_revision(locator: &SessionLocator) -> Option<SourceRevision> {
     #[cfg(test)]
     HISTORY_DEPENDENCY_DISCOVERIES.with(|count| count.set(count.get() + 1));
     for segment in source.history_segments(&locator.source_path).ok()? {
-      if segment.path != locator.source_path {
-        revision.files.push(Some(file_revision(&segment.path)?));
-        revision.paths.push(segment.path);
+      let physical_path = tokn_session_codex::resolve_rollout_path(&segment.path);
+      if !revision.paths.contains(&physical_path) {
+        revision.files.push(Some(file_revision(&physical_path)?));
+        revision.paths.push(physical_path.clone());
+      }
+      if let Some(plain_path) = codex_plain_sibling(&physical_path)
+        && !revision.paths.contains(&plain_path)
+      {
+        // A plain sibling takes precedence when it reappears, even though
+        // the resolved compressed dependency itself remains unchanged.
+        revision.files.push(file_revision(&plain_path));
+        revision.paths.push(plain_path);
       }
     }
   }
@@ -3813,7 +3822,17 @@ fn source_revision(locator: &SessionLocator) -> Option<SourceRevision> {
 }
 
 fn source_revision_for(provider: ViewerProvider, source_path: &Path) -> Option<SourceRevision> {
-  let mut paths = vec![source_path.to_path_buf()];
+  let primary_path = if provider == ViewerProvider::Codex {
+    tokn_session_codex::resolve_rollout_path(source_path)
+  } else {
+    source_path.to_path_buf()
+  };
+  let mut paths = vec![primary_path.clone()];
+  if provider == ViewerProvider::Codex
+    && let Some(plain_path) = codex_plain_sibling(&primary_path)
+  {
+    paths.push(plain_path);
+  }
   if matches!(provider, ViewerProvider::OpenCode | ViewerProvider::ZCode) {
     // The SHM sidecar is a reader-writable WAL index. It can change during our
     // own reads without any session content changing, so only track the WAL.
@@ -3826,6 +3845,13 @@ fn source_revision_for(provider: ViewerProvider, source_path: &Path) -> Option<S
   let mut files = vec![Some(primary)];
   files.extend(paths[1..].iter().map(|path| file_revision(path)));
   Some(SourceRevision { paths, files })
+}
+
+fn codex_plain_sibling(path: &Path) -> Option<PathBuf> {
+  let plain = path.with_extension("");
+  (path.extension().is_some_and(|extension| extension == "zst")
+    && plain.extension().is_some_and(|extension| extension == "jsonl"))
+  .then_some(plain)
 }
 
 fn source_cursor(provider: ViewerProvider, source_path: &Path) -> Result<String, String> {

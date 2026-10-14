@@ -7,6 +7,8 @@ const TAIL_GUARD_BYTES: usize = 4096;
 /// Work performed by a reader, useful for diagnosing history amplification.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CodexHistoryReadStats {
+  /// Decoded bytes read for normalization. Boundary probes are counted below;
+  /// streaming lineage verification and temporary decompression are excluded.
   pub source_bytes_read: u64,
   pub rows_parsed: u64,
   pub guard_bytes_read: u64,
@@ -134,14 +136,37 @@ impl CodexHistoryReader {
     if source.history_roots(&self.path)? != state.roots {
       return self.rebuild(source).map(Some);
     }
+    if state
+      .segments
+      .iter()
+      .any(|segment| crate::storage::resolve_path(&segment.path) != segment.path)
+    {
+      return self.rebuild(source).map(Some);
+    }
     let versions = state
       .segments
       .iter()
       .map(|segment| FileVersion::read(&segment.path))
-      .collect::<Result<Vec<_>, _>>()?;
+      .collect::<Result<Vec<_>, _>>();
+    // Native compression can retire a plain physical file while preserving
+    // every decoded byte. Resolve the replacement before reporting it missing.
+    let Ok(versions) = versions else {
+      return self.rebuild(source).map(Some);
+    };
     if versions == state.versions {
       self.state = Some(state);
       return Ok(None);
+    }
+    if state
+      .segments
+      .iter()
+      .zip(&state.versions)
+      .zip(&versions)
+      .any(|((segment, before), after)| crate::storage::is_compressed(&segment.path) && before != after)
+    {
+      // Compressed offsets describe decoded bytes, so physical growth cannot
+      // use the append cursor. Rebuild and validate the entire selected range.
+      return self.rebuild(source).map(Some);
     }
     let head = versions.last().unwrap();
     let previous = state.versions.last().unwrap();
@@ -173,7 +198,7 @@ impl CodexHistoryReader {
     {
       return Err("Codex history exceeds the snapshot size limit".into());
     }
-    let mut file = File::open(&self.path).map_err(|err| err.to_string())?;
+    let mut file = File::open(&state.segments.last().unwrap().path).map_err(|err| err.to_string())?;
     if !guards_match(
       &mut file,
       &state.header_guard,
@@ -266,16 +291,30 @@ impl CodexHistoryReader {
       return Err("Codex history owner changed while reading its metadata".into());
     }
     source.apply_indexed_metadata(std::slice::from_mut(&mut reference));
+    let mut files = segments
+      .iter()
+      .map(|segment| crate::storage::seekable(&segment.path, segment.end_byte_offset))
+      .collect::<Result<Vec<_>, _>>()?;
     let lengths = segments
       .iter()
-      .zip(&versions)
-      .map(|(segment, version)| segment.end_byte_offset.unwrap_or(version.length))
-      .collect::<Vec<_>>();
+      .zip(&files)
+      .map(|(segment, file)| {
+        segment.end_byte_offset.map_or_else(
+          || {
+            file
+              .metadata()
+              .map(|metadata| metadata.len())
+              .map_err(|err| err.to_string())
+          },
+          Ok,
+        )
+      })
+      .collect::<Result<Vec<_>, _>>()?;
     // Thread-spawn filtering requires an earlier trigger; keep its proven full
     // reader until a provider checkpoint can seed that boundary safely.
     let source_start = if !thread_spawn {
       match self.window_turns {
-        Some(turns) => super::window::start(&segments, &lengths, turns, &mut self.stats)?,
+        Some(turns) => super::window::start(&mut files, &lengths, turns, &mut self.stats)?,
         None => 0,
       }
     } else {
@@ -297,24 +336,23 @@ impl CodexHistoryReader {
     let mut selected_bytes = 0u64;
     let mut head_state = None;
     let mut prefix_guards = Vec::new();
-    for (segment, length) in segments.iter().zip(&lengths) {
+    for ((segment, length), file) in segments.iter().zip(&lengths).zip(&mut files) {
       let length = *length;
       let start = source_start.saturating_sub(consumed).min(length);
-      let mut file = File::open(&segment.path).map_err(|err| err.to_string())?;
-      let header_guard = read_header_guard(&mut file)?;
+      let header_guard = read_header_guard(file)?;
       let header = history_header(&segment.path)?;
       if header_key(&header) != segment.header_key {
         return Err("Codex history changed while reading its prefix".into());
       }
       let tail_guard = read_range(
-        &mut file,
+        file,
         length.saturating_sub(TAIL_GUARD_BYTES as u64),
         length.min(TAIL_GUARD_BYTES as u64),
       )?;
       if selected_bytes.saturating_add(length - start) > self.max_bytes as u64 {
         return Err("Codex history exceeds the snapshot size limit".into());
       }
-      let bytes = read_range(&mut file, start, length - start)?;
+      let bytes = read_range(file, start, length - start)?;
       selected_bytes += bytes.len() as u64;
       self.stats.source_bytes_read += bytes.len() as u64;
       let complete = complete_length(&bytes);
@@ -469,7 +507,7 @@ fn guarded_prefix_growth(
   guard: &PrefixGuard,
   stats: &mut CodexHistoryReadStats,
 ) -> Result<bool, String> {
-  if after.identity != before.identity || after.length <= before.length {
+  if crate::storage::is_compressed(path) || after.identity != before.identity || after.length <= before.length {
     return Ok(false);
   }
   let mut file = File::open(path).map_err(|err| err.to_string())?;
@@ -519,7 +557,7 @@ fn normalize_record(
     .filter(|event| matches!(event, AgentEvent::Message(_)))
     .count();
   NormalizedRecord {
-    record_id: format!("segment:{}:{offset}", path.display()),
+    record_id: format!("segment:{}:{offset}", crate::storage::logical_path(path).display()),
     native,
     events,
   }
@@ -532,8 +570,13 @@ fn validate_versions(
   stats: &mut CodexHistoryReadStats,
 ) -> Result<(), String> {
   for (index, (segment, before)) in segments.iter().zip(versions).enumerate() {
+    if crate::storage::resolve_path(&segment.path) != segment.path {
+      return Err("Codex history changed while reading its prefix".into());
+    }
     let after = FileVersion::read(&segment.path)?;
-    let valid = if segment.end_byte_offset.is_some() {
+    let valid = if crate::storage::is_compressed(&segment.path) {
+      after == *before
+    } else if segment.end_byte_offset.is_some() {
       after == *before || guarded_prefix_growth(&segment.path, before, &after, &guards[index], stats)?
     } else {
       after.identity == before.identity && (after == *before || after.length > before.length)

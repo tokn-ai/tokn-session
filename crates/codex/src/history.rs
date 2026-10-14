@@ -30,8 +30,7 @@ pub struct CodexHistorySegment {
 
 /// Reads the owning metadata without scanning the rollout body.
 pub fn history_header(path: &Path) -> Result<CodexLine, String> {
-  let file = File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
-  for line in BufReader::new(file.take(MAX_HEADER_BYTES)).lines() {
+  for line in BufReader::new(crate::storage::reader(path)?.take(MAX_HEADER_BYTES)).lines() {
     let line = line.map_err(|err| err.to_string())?;
     if line.trim().is_empty() {
       continue;
@@ -52,7 +51,7 @@ impl CodexSessionSource {
   /// Resolves a logical history using physical metadata and exact exclusive
   /// cutoffs. The native database is not needed, including after export.
   pub fn history_segments(&self, path: &Path) -> Result<Vec<CodexHistorySegment>, String> {
-    let mut current = path.to_path_buf();
+    let mut current = crate::storage::resolve_path(path);
     let mut end: Option<HistoryPosition> = None;
     let mut segments = Vec::new();
     let mut seen = HashSet::new();
@@ -91,7 +90,7 @@ impl CodexSessionSource {
       if candidates.is_none() {
         let mut paths = Vec::new();
         for root in self.history_roots(path)? {
-          collect_paths(&root, &mut paths)?;
+          crate::storage::collect_rollouts(&root, &mut paths)?;
         }
         candidates = Some(paths);
       }
@@ -171,22 +170,6 @@ impl HistoryOrdinals {
   }
 }
 
-fn collect_paths(root: &Path, paths: &mut Vec<PathBuf>) -> Result<(), String> {
-  if !root.exists() {
-    return Ok(());
-  }
-  for entry in std::fs::read_dir(root).map_err(|err| err.to_string())? {
-    let entry = entry.map_err(|err| err.to_string())?;
-    let kind = entry.file_type().map_err(|err| err.to_string())?;
-    if kind.is_dir() {
-      collect_paths(&entry.path(), paths)?;
-    } else if kind.is_file() && entry.path().extension().is_some_and(|extension| extension == "jsonl") {
-      paths.push(entry.path());
-    }
-  }
-  Ok(())
-}
-
 fn resolve_prefix(paths: &[PathBuf], current: &Path, base: &HistoryPosition) -> Result<PathBuf, String> {
   if base.end_ordinal_exclusive == 0 || base.end_byte_offset == 0 {
     return Err("invalid Codex history lineage: empty prefix cutoff".into());
@@ -237,8 +220,9 @@ fn resolve_prefix(paths: &[PathBuf], current: &Path, base: &HistoryPosition) -> 
 }
 
 fn cutoff_matches(path: &Path, base: &HistoryPosition) -> Result<bool, String> {
-  let mut file = File::open(path).map_err(|err| err.to_string())?;
-  if file.metadata().map_err(|err| err.to_string())?.len() < base.end_byte_offset {
+  if !crate::storage::is_compressed(path)
+    && std::fs::metadata(path).map_err(|err| err.to_string())?.len() < base.end_byte_offset
+  {
     return Ok(false);
   }
   // Only inspect the final bounded record; full ordinal ordering is checked
@@ -246,13 +230,13 @@ fn cutoff_matches(path: &Path, base: &HistoryPosition) -> Result<bool, String> {
   let mut window = 64 * 1024;
   loop {
     let start = base.end_byte_offset.saturating_sub(window);
-    file.seek(SeekFrom::Start(start)).map_err(|err| err.to_string())?;
+    let mut file = crate::storage::reader_at(path, start)?;
     let mut bytes = Vec::new();
     Read::by_ref(&mut file)
       .take(base.end_byte_offset - start)
       .read_to_end(&mut bytes)
       .map_err(|err| err.to_string())?;
-    if bytes.last() != Some(&b'\n') {
+    if bytes.len() as u64 != base.end_byte_offset - start || bytes.last() != Some(&b'\n') {
       return Ok(false);
     }
     let end = bytes.len() - 1;
@@ -282,9 +266,6 @@ fn cutoff_matches(path: &Path, base: &HistoryPosition) -> Result<bool, String> {
     // A BeforeTurn cutoff uses the excluded turn's ordinal across a gap. Verify
     // that row at the exact boundary so another same-owner segment with a lower
     // ordinal cannot masquerade as this prefix.
-    file
-      .seek(SeekFrom::Start(base.end_byte_offset))
-      .map_err(|err| err.to_string())?;
     let mut next = Vec::new();
     BufReader::new(Read::by_ref(&mut file).take(MAX_HEADER_BYTES))
       .read_until(b'\n', &mut next)

@@ -549,6 +549,16 @@ fn classify_session_file_event_for_roots(roots: &[WatchRoot], event: &Event) -> 
       if is_directory_path(roots, path) {
         return Some(WatchRequest::FullCatalog);
       }
+      if is_compressed_codex_history(path)
+        && source_paths
+          .iter()
+          .any(|(provider, _)| *provider == ViewerProvider::Codex)
+      {
+        // Compressing a rollout can replace an inherited prefix for several
+        // sessions. Reconcile the catalog rather than treating packed bytes
+        // as an append to one established JSONL source.
+        return Some(WatchRequest::FullCatalog);
+      }
       if !is_session_file(path) {
         continue;
       }
@@ -727,6 +737,10 @@ fn is_session_file(path: &Path) -> bool {
   path.extension().is_some_and(|extension| extension == "jsonl")
 }
 
+fn is_compressed_codex_history(path: &Path) -> bool {
+  path.extension().is_some_and(|extension| extension == "zst") && is_session_file(&path.with_extension(""))
+}
+
 #[cfg(test)]
 mod tests {
   use std::{
@@ -771,6 +785,28 @@ mod tests {
         Some(WatchRequest::ChangedFiles(vec![(ViewerProvider::Codex, path.clone())]))
       );
     }
+  }
+
+  #[test]
+  fn compressed_codex_history_changes_reconcile_the_full_catalog() {
+    let path = PathBuf::from("/sessions/codex/2026/session.jsonl.zst");
+    for kind in [
+      EventKind::Create(notify::event::CreateKind::File),
+      EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+      EventKind::Modify(ModifyKind::Metadata(MetadataKind::WriteTime)),
+    ] {
+      let event = Event::new(kind).add_path(path.clone());
+      assert_eq!(
+        classify_session_file_event(&roots(), &event),
+        Some(WatchRequest::FullCatalog)
+      );
+    }
+    let pi = Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content)))
+      .add_path(PathBuf::from("/sessions/pi/session.jsonl.zst"));
+    let unrelated = Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content)))
+      .add_path(PathBuf::from("/sessions/codex/other.zst"));
+    assert_eq!(classify_session_file_event(&roots(), &pi), None);
+    assert_eq!(classify_session_file_event(&roots(), &unrelated), None);
   }
 
   #[cfg(target_os = "windows")]
