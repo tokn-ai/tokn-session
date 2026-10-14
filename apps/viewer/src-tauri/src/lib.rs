@@ -48,6 +48,8 @@ pub fn run() {
       commands::hub::hub_client_passkey_credential,
       commands::sessions::list_sessions,
       commands::sessions::list_session_children,
+      commands::background::subscribe_background_updates,
+      commands::background::renew_background_subscriptions,
       commands::events::load_event_page,
       commands::events::load_session_updates,
       commands::events::subscribe_session,

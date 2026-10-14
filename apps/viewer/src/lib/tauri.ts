@@ -223,6 +223,16 @@ export function listenForSessionNotifications(handler: (notification: import("./
   return subscribe<import("./types").SessionNotification>("session-notification", (event) => handler(event.payload));
 }
 
+export function subscribeBackgroundUpdates(request: import("./types").BackgroundUpdatesRequest, send: CommandInvoker = invoke): Promise<import("./types").BackgroundUpdatesSubscription> {
+  return send<import("./types").BackgroundUpdatesSubscription>("subscribe_background_updates", { request });
+}
+export function renewBackgroundSubscriptions(ids: string[], send: CommandInvoker = invoke): Promise<void> {
+  return send<void>("renew_background_subscriptions", { ids });
+}
+export function listenForBackgroundUpdates(handler: (update: import("./types").BackgroundSessionUpdate) => void, subscribe: EventSubscriber = listen): Promise<UnlistenFn> {
+  return subscribe<import("./types").BackgroundSessionUpdate>("background-session-updated", (event) => handler(event.payload));
+}
+
 // Hosting belongs to this app, independent of the currently selected machine.
 async function localHostCommand<T>(command: string, payload?: Record<string, unknown>): Promise<T> {
   if (!isDesktop()) throw new Error("Host setup is available in the desktop app.");

@@ -32,6 +32,7 @@ struct ApiState {
   subscribers: Arc<Semaphore>,
   shutdown: CancellationToken,
   origins: Vec<String>,
+  shared_background: Arc<std::sync::Mutex<std::collections::HashMap<String, shared::BackgroundIdentity>>>,
 }
 
 type ApiError = (StatusCode, Json<Value>);
@@ -52,6 +53,7 @@ pub fn router(
     token: token.map(Arc::new),
     requests: Arc::new(Semaphore::new(16)),
     subscribers: Arc::new(Semaphore::new(32)),
+    shared_background: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     shutdown,
     origins: origins
       .iter()
@@ -247,6 +249,7 @@ fn dispatch(service: &ViewerService, command: &str, payload: Value) -> Result<Va
     "load_session_updates" => call!(load_session_updates),
     "load_session_backward" => call!(load_session_backward),
     "subscribe_session" => call!(subscribe_session),
+    "subscribe_background_updates" => call!(subscribe_background),
     "load_session_details" => call!(load_session_details),
     "inspect_session_event" => call!(inspect_session_event),
     "renew_session_subscriptions" => {
@@ -259,6 +262,17 @@ fn dispatch(service: &ViewerService, command: &str, payload: Value) -> Result<Va
         .renew_session_subscriptions(&ids)
         .map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
       Ok(Value::Null)
+    }
+    "renew_background_subscriptions" => {
+      let ids: Vec<String> = serde_json::from_value(payload.get("ids").cloned().unwrap_or_else(|| json!([])))
+        .map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
+      if ids.len() > 24 {
+        return Err(error(StatusCode::BAD_REQUEST, "Too many background subscriptions"));
+      }
+      let result = service
+        .renew_background_subscriptions(&ids)
+        .map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+      Ok(result)
     }
     "update_session_view" => call!(update_session_view),
     "load_event_detail" => call!(load_event_detail),
@@ -294,6 +308,7 @@ async fn event_stream(
       match received {
         Ok(event) => {
           if event.event == "session-updated" && options.get("session_updates").is_some_and(|value| value == "false") { continue; }
+          if event.event == "background-session-updated" && options.get("background_updates").is_some_and(|value| value == "false") { continue; }
           yield Ok(Event::default().event(event.event).data(event.payload.to_string()));
         },
         Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -312,6 +327,93 @@ mod tests {
   use super::*;
   use axum::body::{Body, to_bytes};
   use tower::ServiceExt;
+
+  #[tokio::test]
+  async fn background_interest_registers_and_renews_without_loading_a_timeline() {
+    let data = tempfile::tempdir().unwrap();
+    let service = ViewerService::native(data.path().join("index.sqlite")).unwrap();
+    let (events, _) = broadcast::channel(16);
+    let app = router(service, events, None, vec![], CancellationToken::new());
+    let request = |command: &str, payload: Value| {
+      Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/{command}"))
+        .header("content-type", "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap()
+    };
+    let response = app
+      .clone()
+      .oneshot(request(
+        "subscribe_background_updates",
+        json!({
+          "request":{"subscription_id":"sidebar","scope":"all"}
+        }),
+      ))
+      .await
+      .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: Value = serde_json::from_slice(&to_bytes(response.into_body(), 1024).await.unwrap()).unwrap();
+    assert_eq!(value["subscription_id"], "sidebar");
+    assert_eq!(value["revision"], "0");
+    assert!(value.get("items").is_none());
+    let response = app
+      .clone()
+      .oneshot(request("renew_background_subscriptions", json!({"ids":["sidebar"]})))
+      .await
+      .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: Value = serde_json::from_slice(&to_bytes(response.into_body(), 1024).await.unwrap()).unwrap();
+    assert_eq!(value["renewed"], true);
+    let response = app
+      .oneshot(request(
+        "subscribe_background_updates",
+        json!({
+          "request":{"subscription_id":"sidebar","scope":"all","unsubscribe":true}
+        }),
+      ))
+      .await
+      .unwrap();
+    let value: Value = serde_json::from_slice(&to_bytes(response.into_body(), 1024).await.unwrap()).unwrap();
+    assert_eq!(value["unsubscribed"], true);
+  }
+
+  #[tokio::test]
+  async fn direct_websocket_clients_can_exclude_duplicate_background_events_from_sse() {
+    use http_body_util::BodyExt;
+    let data = tempfile::tempdir().unwrap();
+    let service = ViewerService::native(data.path().join("index.sqlite")).unwrap();
+    let (events, _) = broadcast::channel(16);
+    let app = router(service, events.clone(), None, vec![], CancellationToken::new());
+    let response = app
+      .oneshot(
+        Request::builder()
+          .uri("/api/v1/events?background_updates=false")
+          .body(Body::empty())
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+    let mut body = response.into_body();
+    let ready = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    assert!(std::str::from_utf8(&ready).unwrap().contains("event: ready"));
+    events
+      .send(ViewerEvent {
+        event: "background-session-updated".into(),
+        payload: json!({"subscription_id":"sidebar"}),
+      })
+      .unwrap();
+    events
+      .send(ViewerEvent {
+        event: "session-notification".into(),
+        payload: json!({"session_key":"one"}),
+      })
+      .unwrap();
+    let next = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    let next = std::str::from_utf8(&next).unwrap();
+    assert!(next.contains("event: session-notification"));
+    assert!(!next.contains("background-session-updated"));
+  }
 
   #[tokio::test]
   async fn serves_the_browser_without_exposing_or_masking_api_routes() {

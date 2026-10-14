@@ -136,6 +136,9 @@ Tauri adapter, normally `{"request":{...}}`. Commands without a request take
 `{}`. Responses use the shared viewer-core models. Supported commands:
 
 - `list_sessions`, `list_session_children`
+- `subscribe_session`, `renew_session_subscriptions`, `load_session_backward`
+- `load_session_details`, `inspect_session_event`
+- `subscribe_background_updates`, `renew_background_subscriptions`
 - `load_session_updates`, `load_event_page`, `load_trajectory_event_page`, `load_event_detail`
 - `acknowledge_session_attention`
 - `update_session_view`
@@ -149,10 +152,14 @@ does not grant access. The API allows at most 16 concurrent command requests,
 32 SSE clients, and 1 MiB request bodies. Error responses contain `error`;
 invalid JSON/body-limit responses may be plain text.
 
-Modern viewers use `load_session_updates` and `session-updated` events for level-based
-semantic delivery. The history compatibility API requests `load_event_page` with `window_mode: "retained"` and
+Modern viewers use `subscribe_session`, `load_session_backward`, and
+`session-updated` events for semantic delivery. Levels are `final`, `messages`
+(including intermediate assistant replies), `steps`, and `all`; the legacy
+`details` level remains accepted. Backward loading defaults to `steps` and the
+latest three turns. `load_session_updates` remains a compatibility command.
+The history compatibility API requests `load_event_page` with `window_mode: "retained"` and
 `direction: "backward"` to receive the complete resident history window,
-initially the latest user turn. `window_mode: "earlier"` with its `previous_cursor`
+initially the latest three turns. `window_mode: "earlier"` with its `previous_cursor`
 extends that window by three turns and returns the complete expanded window.
 Both window modes require explicit `direction: "backward"` and omit `offset`;
 omitting direction selects the legacy default `forward` and is rejected.
@@ -160,6 +167,24 @@ omitting direction selects the legacy default `forward` and is rejected.
 `previous_cursor` means older source history remains. Row pagination without
 `window_mode` preserves the full-history API. Window keys/cursors are opaque
 and generation-scoped; clients must not construct or modify them.
+
+`subscribe_background_updates` takes `{"request":{"subscription_id":"…",
+"scope":"all","session_keys":[]}}`. Scope defaults to `all`; `sidebar` uses
+the supplied loaded root/child keys. The acknowledgement contains identity,
+generation, decimal revision, and `subscribed`, with no history. Send
+`unsubscribe:true` to release. `renew_background_subscriptions` takes `ids`
+and only renews leases. On direct WebSockets the equivalent frame kind is
+`subscribe_background`; ping renews connection-owned interests. Shared grants
+clamp `all` to their exact granted keys.
+
+`background-session-updated` contains `subscription_id`, `generation`,
+`revision`, `session_key`, compact activity fields, `message_revision`, and
+`latest_assistant_message` (`message_id`, `delivery`, `phase`, `preview`). Preview
+text is limited to 240 characters. A null message revision means unknown, not
+cleared; a non-null revision with a null message means known empty. `removed`
+retires a deleted session. No tool payloads or native records are included.
+Scope changes and reconnects establish fresh live interests without history
+requests; initial/older screens still use backward loading.
 
 `update_session_view` takes `view_id`, a monotonically increasing `revision`,
 an optional selected `session_key`, and up to 128 `candidate_session_keys` from
@@ -181,10 +206,12 @@ changing its target or text is rejected. A disconnected caller does not cancel
 delivery already in progress. Never automatically retry an unknown outcome.
 
 `GET /api/v1/events` is SSE with a `ready` handshake and 15-second heartbeats.
-Named events match Tauri: `session-updated`, `session-notification`,
+Named events match Tauri: `session-updated`, `background-session-updated`, `session-notification`,
 `relay-changed`, `relay-status`, `session-index-changed`, and
 `session-index-progress`. Session updates carry changed semantic objects;
 legacy relay/index events retain invalidation/recovery behavior. A lagging subscriber disconnects.
+Direct browser clients use `session_updates=false&background_updates=false`
+on SSE when receiving those events over WebSocket, avoiding duplicate transfer.
 The browser retries, then reloads the catalog and selected timeline so missed
 notifications cannot leave stale data indefinitely. Reconnects also refresh index progress and Relay status, establish a fresh progress
 revision baseline after restarts, and reject stale in-flight responses. Event pages

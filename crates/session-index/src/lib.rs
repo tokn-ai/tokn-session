@@ -2,9 +2,10 @@
 //!
 //! The index deliberately stores only source checkpoints, session identity, and
 //! bounded caller-supplied metadata. It never stores normalized events, native
-//! provider payloads, reasoning, tool inputs, or tool outputs. `title` and a
-//! bounded `preview` are the only caller-supplied presentation text the index
-//! permits; callers should keep the preview bounded before indexing.
+//! provider payloads, reasoning, tool inputs, or tool outputs. Titles and
+//! bounded previews are the caller-supplied presentation text the index permits.
+//! Latest-message JSON contains compact display metadata, never full records;
+//! callers must bound each field before indexing.
 //!
 //! A source replacement is transactional. Callers only invoke it after a
 //! complete provider scan succeeds, which means sessions omitted from the
@@ -226,6 +227,54 @@ CREATE TABLE project_aliases (
 );
 "#;
 
+// Add a compact latest-assistant projection without invalidating completed
+// body baselines. SQL NULL means not inspected by this version; JSON null is
+// an authoritative body inspection with no visible assistant message.
+const MIGRATION_009: &str = r#"
+ALTER TABLE sessions
+  ADD COLUMN latest_message TEXT CHECK(latest_message IS NULL OR
+    (length(latest_message) <= 4096 AND json_valid(latest_message)));
+
+DROP VIEW indexed_sessions;
+
+CREATE VIEW indexed_sessions AS
+SELECT
+  source.provider AS provider,
+  source.source_key AS source_key,
+  source.cursor AS source_cursor,
+  source.generation AS source_generation,
+  session.id AS id,
+  session.source_id AS source_id,
+  session.session_id AS session_id,
+  session.source_path AS source_path,
+  COALESCE(session.title, session.body_title) AS title,
+  COALESCE(session.preview, session.body_preview) AS preview,
+  session.title AS catalog_title,
+  session.preview AS catalog_preview,
+  session.body_title AS body_title,
+  session.body_preview AS body_preview,
+  session.latest_message AS latest_message,
+  session.cwd AS cwd,
+  session.timestamp AS timestamp,
+  session.updated_at AS updated_at,
+  session.updated_at_ms AS updated_at_ms,
+  session.parent_session_id AS parent_session_id,
+  session.agent_path AS agent_path,
+  session.agent_nickname AS agent_nickname,
+  session.agent_role AS agent_role,
+  session.attention_marker AS attention_marker,
+  session.attention_baselined AS attention_baselined,
+  session.notify_on_baseline AS notify_on_baseline,
+  session.attention_revision AS attention_revision,
+  session.seen_attention_revision AS seen_attention_revision,
+  session.seen_at_ms AS seen_at_ms,
+  session.present AS present,
+  session.first_indexed_at_ms AS first_indexed_at_ms,
+  session.indexed_at_ms AS indexed_at_ms
+FROM sessions AS session
+INNER JOIN sources AS source ON source.id = session.source_id;
+"#;
+
 #[derive(Clone, Debug)]
 pub struct ProjectGroup {
   pub project_key: String,
@@ -269,6 +318,10 @@ const MIGRATIONS: &[Migration] = &[
   Migration {
     version: 8,
     sql: MIGRATION_008,
+  },
+  Migration {
+    version: 9,
+    sql: MIGRATION_009,
   },
 ];
 
@@ -510,6 +563,8 @@ pub struct SessionMetadata {
   /// moves a session to a new source before its body can be read again.
   pub body_title: Option<String>,
   pub body_preview: Option<String>,
+  /// Bounded latest-assistant JSON carried across source relocation.
+  pub latest_message: Option<String>,
   pub cwd: Option<String>,
   /// Provider-native creation time, retained as supplied.
   pub timestamp: Option<String>,
@@ -543,6 +598,7 @@ impl SessionMetadata {
       preview: None,
       body_title: None,
       body_preview: None,
+      latest_message: None,
       cwd: None,
       timestamp: None,
       updated_at: None,
@@ -626,6 +682,9 @@ impl SourceReplacement {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IndexedSession {
   pub key: SessionKey,
+  /// Source checkpoint read atomically with this session row.
+  pub source_cursor: String,
+  pub source_generation: i64,
   pub source_path: String,
   /// Effective display title: catalog value when present, otherwise body fallback.
   pub title: Option<String>,
@@ -639,6 +698,8 @@ pub struct IndexedSession {
   pub body_title: Option<String>,
   /// Raw fallback preview captured from a completed session body.
   pub body_preview: Option<String>,
+  /// Bounded latest-assistant JSON carried across source relocation.
+  pub latest_message: Option<String>,
   pub cwd: Option<String>,
   pub timestamp: Option<String>,
   pub updated_at: Option<String>,
@@ -760,6 +821,9 @@ impl SessionBaselineCompletion {
 pub struct SessionPresentation {
   pub title: Option<String>,
   pub preview: Option<String>,
+  /// Compact latest-assistant JSON; JSON null clears a known message, while
+  /// SQL NULL denotes an unknown projection. Limited to 4096 characters.
+  pub latest_message: Option<String>,
 }
 
 /// Body-derived data used to complete one cataloged session baseline.
@@ -1829,7 +1893,8 @@ fn complete_session_attention_baseline(
            attention_revision = ?3,
            seen_attention_revision = ?4,
            body_title = ?5,
-           body_preview = ?6
+           body_preview = ?6,
+           latest_message = ?7
        WHERE id = ?1",
       params![
         id,
@@ -1838,6 +1903,7 @@ fn complete_session_attention_baseline(
         seen_attention_revision,
         presentation.title,
         presentation.preview,
+        presentation.latest_message,
       ],
     )?;
   } else {
@@ -1914,10 +1980,10 @@ fn insert_session(
        updated_at, updated_at_ms, parent_session_id, agent_path, agent_nickname,
        agent_role, attention_marker, attention_baselined, notify_on_baseline,
        attention_revision, seen_attention_revision, seen_at_ms, present,
-       first_indexed_at_ms, indexed_at_ms
+       first_indexed_at_ms, indexed_at_ms, latest_message
      ) VALUES(
        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-       ?17, ?18, ?19, ?20, NULL, 1, ?21, ?21
+       ?17, ?18, ?19, ?20, NULL, 1, ?21, ?21, ?22
      )",
     params![
       source_id,
@@ -1941,6 +2007,7 @@ fn insert_session(
       attention_revision,
       seen_attention_revision,
       indexed_at_ms,
+      session.latest_message,
     ],
   )?;
   Ok(())
@@ -1975,7 +2042,8 @@ fn update_session(
          attention_revision = ?18,
          seen_attention_revision = ?19,
          present = 1,
-         indexed_at_ms = ?20
+         indexed_at_ms = ?20,
+         latest_message = COALESCE(?21, latest_message)
      WHERE id = ?1",
     params![
       id,
@@ -1998,6 +2066,7 @@ fn update_session(
       attention_revision,
       seen_attention_revision,
       indexed_at_ms,
+      session.latest_message,
     ],
   )?;
   Ok(())
@@ -2028,7 +2097,10 @@ const SESSION_COLUMNS: &str = "
   session.attention_revision,
   session.seen_attention_revision,
   session.seen_at_ms,
-  session.present";
+  session.present,
+  session.latest_message,
+  source.cursor,
+  source.generation";
 
 fn select_session<P>(connection: &Connection, where_clause: &str, parameters: P) -> Result<Option<IndexedSession>>
 where
@@ -2097,6 +2169,9 @@ fn indexed_session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Indexed
     seen_attention_revision: row.get(22)?,
     seen_at_ms: row.get(23)?,
     present: present != 0,
+    latest_message: row.get(25)?,
+    source_cursor: row.get(26)?,
+    source_generation: row.get(27)?,
   })
 }
 
@@ -2174,6 +2249,7 @@ mod tests {
     request.presentation = Some(SessionPresentation {
       title: title.map(str::to_owned),
       preview: preview.map(str::to_owned),
+      latest_message: None,
     });
     request
   }
@@ -2341,8 +2417,135 @@ mod tests {
         (6, migration_checksum(MIGRATION_006)),
         (7, migration_checksum(MIGRATION_007)),
         (8, migration_checksum(MIGRATION_008)),
+        (9, migration_checksum(MIGRATION_009)),
       ]
     );
+  }
+
+  #[test]
+  fn latest_message_migration_preserves_completed_baselines_without_requeueing() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("v8.sqlite3");
+    let connection = Connection::open(&path).unwrap();
+    connection
+      .pragma_update(None, "application_id", APPLICATION_ID)
+      .unwrap();
+    connection.execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at_ms INTEGER NOT NULL);").unwrap();
+    for migration in MIGRATIONS.iter().take(8) {
+      connection.execute_batch(migration.sql).unwrap();
+      connection
+        .execute(
+          "INSERT INTO schema_migrations VALUES(?1, ?2, 0)",
+          params![migration.version, migration_checksum(migration.sql)],
+        )
+        .unwrap();
+    }
+    connection.execute("INSERT INTO sources(id, provider, source_key, cursor, scanned_at_ms, created_at_ms, updated_at_ms) VALUES(1, 'codex', 'fixture', 'body.v3.existing', 0, 0, 0)", []).unwrap();
+    connection.execute("INSERT INTO sessions(source_id, session_id, source_path, title, attention_baselined, first_indexed_at_ms, indexed_at_ms) VALUES(1, 'existing', '/fixture', 'Existing title', 1, 0, 0)", []).unwrap();
+    drop(connection);
+    let index = SessionIndex::open(&path).unwrap();
+    let row = index
+      .session(&SessionKey::new("codex", "fixture", "existing"))
+      .unwrap()
+      .unwrap();
+    assert_eq!(row.title.as_deref(), Some("Existing title"));
+    assert!(row.attention_baselined);
+    assert!(
+      row.latest_message.is_none(),
+      "migration does not invent a known-empty projection"
+    );
+    assert_eq!(row.source_cursor, "body.v3.existing");
+    assert!(index.list_unbaselined_present_sessions().unwrap().is_empty());
+  }
+
+  #[test]
+  fn latest_message_persists_through_catalog_updates_and_clears_on_body_reset() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("compact.sqlite3");
+    let index = SessionIndex::open(&path).unwrap();
+    index
+      .replace_source(replacement("catalog-one", 0, vec![pending_session("a", false)]))
+      .unwrap();
+    let staged = index
+      .source_state(&SourceKey::new(PROVIDER, SOURCE_KEY))
+      .unwrap()
+      .unwrap();
+    let message =
+      r#"{"message_id":"progress","delivery":"commentary","phase":"finished","preview":"Checking schema."}"#;
+    let mut request = completion_request_with_presentation("a", Some("same-marker"), None, None);
+    request.presentation.as_mut().unwrap().latest_message = Some(message.into());
+    index
+      .complete_session_baseline(&staged, &source("body-one", 1), request)
+      .unwrap();
+    drop(index);
+    let index = SessionIndex::open(&path).unwrap();
+    let key = SessionKey::new(PROVIDER, SOURCE_KEY, "a");
+    let saved = index.session(&key).unwrap().unwrap();
+    assert_eq!(saved.latest_message.as_deref(), Some(message));
+    assert!(saved.source_generation > staged.generation);
+    index
+      .replace_source(replacement("catalog-two", 2, vec![pending_session("a", false)]))
+      .unwrap();
+    assert_eq!(
+      index.session(&key).unwrap().unwrap().latest_message.as_deref(),
+      Some(message)
+    );
+    let staged = index.source_state(&key.source_key()).unwrap().unwrap();
+    let mut request = completion_request_with_presentation("a", None, None, None);
+    request.presentation.as_mut().unwrap().latest_message = Some("null".into());
+    index
+      .complete_session_baseline(&staged, &source("body-two", 3), request)
+      .unwrap();
+    assert_eq!(
+      index.session(&key).unwrap().unwrap().latest_message.as_deref(),
+      Some("null")
+    );
+    let connection = Connection::open(&path).unwrap();
+    let compact: String = connection
+      .query_row(
+        "SELECT latest_message FROM indexed_sessions WHERE session_id = 'a'",
+        [],
+        |row| row.get(0),
+      )
+      .unwrap();
+    assert_eq!(compact, "null");
+  }
+
+  #[test]
+  fn relocated_rows_carry_compact_messages_and_reject_unbounded_or_invalid_json() {
+    let index = SessionIndex::open_in_memory().unwrap();
+    let message = r#"{"message_id":null,"delivery":"final","phase":"finished","preview":"Done."}"#;
+    let mut relocated = session("a", None);
+    relocated.latest_message = Some(message.into());
+    index
+      .replace_source(replacement("relocated", 0, vec![relocated.clone()]))
+      .unwrap();
+    assert_eq!(
+      index
+        .session(&relocated.key)
+        .unwrap()
+        .unwrap()
+        .latest_message
+        .as_deref(),
+      Some(message)
+    );
+    for invalid in ["not JSON".to_string(), format!("\"{}\"", "x".repeat(4097))] {
+      relocated.latest_message = Some(invalid);
+      assert!(
+        index
+          .replace_source(replacement("invalid", 1, vec![relocated.clone()]))
+          .is_err()
+      );
+      assert_eq!(
+        index
+          .session(&relocated.key)
+          .unwrap()
+          .unwrap()
+          .latest_message
+          .as_deref(),
+        Some(message)
+      );
+    }
   }
 
   #[test]
@@ -2492,7 +2695,7 @@ mod tests {
       .expect("migration query should run")
       .collect::<rusqlite::Result<Vec<_>>>()
       .expect("migration versions should decode");
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
   }
 
   #[test]
