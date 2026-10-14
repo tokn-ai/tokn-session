@@ -475,6 +475,44 @@ impl ViewerService {
     Ok(json!({"renewed":true}))
   }
 
+  /// Socket renewal acknowledges only live interests still owned by that
+  /// connection. Rich and compact subscriptions keep independent inventories.
+  pub fn renew_background_subscriptions_owned(
+    &self,
+    ids: &[String],
+    owner: Option<&str>,
+  ) -> Result<crate::updates::SessionSubscriptionRenewal, String> {
+    if ids.len() > MAX_SUBSCRIPTIONS || ids.iter().any(|id| id.is_empty() || id.len() > 128) {
+      return Err("Invalid background subscription renewal".into());
+    }
+    let mut renewal = crate::updates::SessionSubscriptionRenewal::default();
+    if ids.is_empty() {
+      return Ok(renewal);
+    }
+    if self.relay.status().settings.mode == crate::relay::RelayMode::External {
+      return Err("Background updates unavailable in External reader mode".into());
+    }
+    let mut store = self.background.lock().map_err(|_| "Background store lock poisoned")?;
+    store.prune();
+    store.ensure_healthy()?;
+    let now = Instant::now();
+    let mut seen = HashSet::new();
+    for id in ids {
+      if !seen.insert(id) {
+        continue;
+      }
+      if let Some(subscription) = store.subscriptions.get_mut(id)
+        && owner.is_none_or(|owner| subscription.owner.as_deref() == Some(owner))
+      {
+        subscription.accessed = now;
+        renewal.renewed_ids.push(id.clone());
+      } else {
+        renewal.missing_ids.push(id.clone());
+      }
+    }
+    Ok(renewal)
+  }
+
   pub fn release_background_subscriptions(&self, owner: &str) {
     if let Ok(mut store) = self.background.lock() {
       store
@@ -602,6 +640,39 @@ impl ViewerService {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn owned_renewal_reports_expired_missing_and_reclaimed_compact_interests_without_body_reads() {
+    let root = tempfile::tempdir().unwrap();
+    let service = ViewerService::native(root.path().join("index.sqlite")).unwrap();
+    for (id, owner) in [("live", "mine"), ("expired", "mine"), ("reclaimed", "other")] {
+      service
+        .subscribe_background_owned(request(id, BackgroundScope::All, &[]), Some(owner.into()))
+        .unwrap();
+    }
+    let previous_access = {
+      let mut store = service.background.lock().unwrap();
+      store.subscriptions.get_mut("expired").unwrap().accessed = Instant::now() - LEASE;
+      store.subscriptions.get_mut("reclaimed").unwrap().accessed = Instant::now() - LEASE / 2;
+      store.subscriptions["reclaimed"].accessed
+    };
+    let renewal = service
+      .renew_background_subscriptions_owned(
+        &["live".into(), "expired".into(), "missing".into(), "reclaimed".into()],
+        Some("mine"),
+      )
+      .unwrap();
+    assert_eq!(renewal.renewed_ids, ["live"]);
+    assert_eq!(renewal.missing_ids, ["expired", "missing", "reclaimed"]);
+    let store = service.background.lock().unwrap();
+    assert!(!store.subscriptions.contains_key("expired"));
+    assert_eq!(store.subscriptions["reclaimed"].accessed, previous_access);
+    drop(store);
+    assert_eq!(
+      service.renew_background_subscriptions(&["live".into()]).unwrap(),
+      json!({"renewed":true})
+    );
+  }
 
   fn request(id: &str, scope: BackgroundScope, keys: &[&str]) -> BackgroundUpdatesRequest {
     BackgroundUpdatesRequest {

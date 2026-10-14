@@ -258,10 +258,10 @@ fn dispatch(service: &ViewerService, command: &str, payload: Value) -> Result<Va
       if ids.len() > 24 {
         return Err(error(StatusCode::BAD_REQUEST, "Too many subscriptions"));
       }
-      service
+      let renewal = service
         .renew_session_subscriptions(&ids)
         .map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
-      Ok(Value::Null)
+      serde_json::to_value(renewal)
     }
     "renew_background_subscriptions" => {
       let ids: Vec<String> = serde_json::from_value(payload.get("ids").cloned().unwrap_or_else(|| json!([])))
@@ -327,6 +327,31 @@ mod tests {
   use super::*;
   use axum::body::{Body, to_bytes};
   use tower::ServiceExt;
+
+  #[tokio::test]
+  async fn subscription_renewal_returns_missing_identities_as_an_object() {
+    let root = tempfile::tempdir().unwrap();
+    let service = ViewerService::native(root.path().join("index.sqlite")).unwrap();
+    let (events, _) = broadcast::channel(16);
+    let app = router(service, events, None, vec![], CancellationToken::new());
+    let response = app
+      .oneshot(
+        Request::builder()
+          .method(Method::POST)
+          .uri("/api/v1/renew_session_subscriptions")
+          .header(header::CONTENT_TYPE, "application/json")
+          .body(Body::from(json!({"ids":["missing"]}).to_string()))
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024).await.unwrap();
+    assert_eq!(
+      serde_json::from_slice::<Value>(&body).unwrap(),
+      json!({"renewed_ids":[],"missing_ids":["missing"]})
+    );
+  }
 
   #[tokio::test]
   async fn background_interest_registers_and_renews_without_loading_a_timeline() {

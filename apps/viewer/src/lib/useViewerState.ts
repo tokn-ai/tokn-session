@@ -18,6 +18,7 @@ import {
   listenForTransportReconnect as apiListenForTransportReconnect,
   listenForSessionUpdates as apiListenForSessionUpdates,
   listenForSessionNotifications as apiListenForSessionNotifications,
+  listenForSubscriptionLoss as apiListenForSubscriptionLoss,
   loadSessionUpdates as apiLoadSessionUpdates,
   loadGroupDetails as apiLoadGroupDetails,
   loadToolDetails as apiLoadToolDetails,
@@ -195,7 +196,7 @@ export function useViewerState() {
     loadSessionUpdates, loadEventDetail, loadEventPage, loadTrajectoryEventPage, requestSessionIndexRetry,
     loadGroupDetails, loadToolDetails, inspectSessionEvent, renewSessionSubscriptions,
     listenForSessionIndexChanges, listenForSessionIndexProgress, listenForRelayChanges,
-    listenForTransportReconnect, listenForSessionUpdates, listenForSessionNotifications,
+    listenForTransportReconnect, listenForSessionUpdates, listenForSessionNotifications, listenForSubscriptionLoss,
   } = useMemo(() => ({
     acknowledgeSessionAttention: (request: Parameters<typeof apiAcknowledgeSessionAttention>[0]) => apiAcknowledgeSessionAttention(request, send),
     getSessionIndexProgress: () => apiGetSessionIndexProgress(send),
@@ -216,6 +217,7 @@ export function useViewerState() {
     listenForTransportReconnect: (handler: Parameters<typeof apiListenForTransportReconnect>[0]) => apiListenForTransportReconnect(handler, subscribe),
     listenForSessionUpdates: (handler: Parameters<typeof apiListenForSessionUpdates>[0]) => apiListenForSessionUpdates(handler, subscribe),
     listenForSessionNotifications: (handler: Parameters<typeof apiListenForSessionNotifications>[0]) => apiListenForSessionNotifications(handler, subscribe),
+    listenForSubscriptionLoss: (handler: Parameters<typeof apiListenForSubscriptionLoss>[0]) => apiListenForSubscriptionLoss(handler, subscribe),
   }), [send, subscribe]);
   const [sessionOrder, setSessionOrder] = useState(readSessionOrder);
   const [search, setSearchValue] = useState("");
@@ -251,6 +253,9 @@ export function useViewerState() {
   const [pendingProviders, setPendingProviders] = useState<ViewerProvider[]>([]);
   const [sessionsCursor, setSessionsCursor] = useState<string | null>(null);
   const [sessionsAttempt, setSessionsAttempt] = useState(0);
+  useEffect(() => {
+    if (backgroundUpdates.authority_revision > 0) setSessionsAttempt((attempt) => attempt + 1);
+  }, [backgroundUpdates.authority_revision]);
   const sessionsRequest = useRef(0);
   const sessionListInFlight = useRef<number | null>(null);
   const sessionListRefreshQueued = useRef(false);
@@ -335,7 +340,75 @@ export function useViewerState() {
   const semanticLive = useRef(new Set<string>());
   const notificationsReady = useRef(false);
   const semanticSupported = useRef<boolean | null>(null);
-  const onSessionUpdate = useRef<(update: import("./types").SessionUpdate) => void>(() => {});
+  const onSessionUpdate = useRef<(update: import("./types").SessionUpdate, lease_acknowledged?: boolean) => void>(() => {});
+  const [subscriptionRevision, setSubscriptionRevision] = useState(0);
+  const subscriptionRecovery = useRef(new Map<string, Promise<void>>());
+  const snapshotSources = useRef(new WeakMap<import("./types").SessionUpdate, string | undefined>());
+  const subscriptionRenewal = useRef(false);
+  const suspendSubscriptions = useCallback((ids?: readonly string[]) => {
+    if (!mounted.current) return;
+    const requests = displayCache.current.requests(ids);
+    if (!requests.length) return;
+    const ownedRunning = requests.some((request) => semanticLive.current.has(request.session_key)
+      || displayCache.current.get(request.session_key, request.level)?.is_running !== undefined);
+    displayCache.current.suspendLive(ids);
+    for (const request of requests) semanticLive.current.delete(request.session_key);
+    setSubscriptionRevision((revision) => revision + 1);
+    if (ownedRunning) setSessionsAttempt((attempt) => attempt + 1);
+  }, []);
+  const loadAcknowledgedUpdate = useCallback(async (request: import("./types").SessionUpdatesRequest) => {
+    const epoch = readerLifetime.current;
+    try {
+      // Concurrent delivery levels can return an older generation after a
+      // newer baseline is accepted. Retry from the current source instead of
+      // letting an opaque, previously unseen generation replace it.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const source_generation = displayCache.current.sourceGeneration(request.session_key);
+        const update = await loadSessionUpdates(request);
+        ensureReaderCurrent(epoch);
+        if (request.unsubscribe || displayCache.current.acceptsSnapshot(update, source_generation)) {
+          snapshotSources.current.set(update, source_generation);
+          return update;
+        }
+      }
+      throw new Error("Session source changed during recovery; retry the snapshot");
+    } catch (error) {
+      if (!request.unsubscribe && mounted.current && readerLifetime.current === epoch) {
+        suspendSubscriptions([request.subscription_id]);
+      }
+      throw error;
+    }
+  }, [ensureReaderCurrent, loadSessionUpdates, suspendSubscriptions]);
+  const applyDisplayUpdate = useCallback((update: import("./types").SessionUpdate, lease_acknowledged = false) => {
+    const page = displayCache.current.apply(update, lease_acknowledged);
+    for (const release of displayCache.current.takeEvictedSubscriptions()) {
+      semanticLive.current.delete(release.session_key);
+      void loadAcknowledgedUpdate(release).catch(() => {});
+    }
+    return page;
+  }, [loadAcknowledgedUpdate]);
+  const recoverSubscriptions = useCallback(async (ids?: readonly string[]) => {
+    const requests = ids ? displayCache.current.requests(ids) : displayCache.current.liveRecoveryRequests();
+    await Promise.all(requests.map((request) => {
+      const existing = subscriptionRecovery.current.get(request.subscription_id);
+      if (existing) return existing;
+      const pending = loadAcknowledgedUpdate({ ...request, cursor: null })
+        .then((update) => {
+          // A cold read can recreate its interest after an earlier release.
+          // Retire the exact old identity without touching its successor.
+          if (!displayCache.current.accepts(update)) {
+            return loadAcknowledgedUpdate({ ...request, unsubscribe: true }).then(() => {});
+          }
+          onSessionUpdate.current(update, true);
+        })
+        .catch(() => { /* The retained page stays usable; the next heartbeat retries. */ })
+        .finally(() => {
+          if (subscriptionRecovery.current.get(request.subscription_id) === pending) subscriptionRecovery.current.delete(request.subscription_id);
+        });
+      subscriptionRecovery.current.set(request.subscription_id, pending);
+      return pending;
+    }));
+  }, [loadAcknowledgedUpdate]);
   const loadWorkPage = useCallback(async (request: import("./types").LoadTrajectoryEventPageRequest) => {
     const epoch = readerLifetime.current;
     const selectionEpoch = projectionEpoch.current;
@@ -358,10 +431,11 @@ export function useViewerState() {
       displayCache.current.includeGroup(request.session_key, request.trajectory_key);
       displayCache.current.resources.set(request.session_key, "group", request.trajectory_key, { status: "loading" });
       try {
+        const source_generation = displayCache.current.sourceGeneration(request.session_key);
         groupRequest = displayCache.current.request(request.session_key, "steps");
         const update = await loadGroupDetails(groupRequest);
         ensureGroupCurrent();
-        if (!displayCache.current.apply(update)) throw new Error("Work group changed; try again");
+        if (!displayCache.current.acceptsSnapshot(update, source_generation) || !applyDisplayUpdate(update, true)) throw new Error("Work group changed; try again");
         const group = displayCache.current.trajectoryGroup(request.session_key, request.trajectory_key);
         if (!group) throw new Error("Work group is no longer available");
         displayCache.current.resources.set(request.session_key, "group", request.trajectory_key, { status: "complete", ...displayCache.current.coverageVersion(request.session_key) });
@@ -373,7 +447,7 @@ export function useViewerState() {
       }
     }
     return loadTrajectoryEventPage(request);
-  }, []);
+  }, [applyDisplayUpdate, ensureReaderCurrent, loadGroupDetails, loadTrajectoryEventPage]);
   const loadDisplayPage = useCallback(async (request: import("./types").LoadEventPageRequest) => {
     const epoch = readerLifetime.current;
     const selectionEpoch = projectionEpoch.current;
@@ -401,7 +475,7 @@ export function useViewerState() {
     let update: import("./types").SessionUpdate;
     deliveryRequest = { ...displayCache.current.request(request.session_key, level),
       ...(request.window_mode === "earlier" ? { history_cursor: request.cursor } : {}) };
-    try { update = await loadSessionUpdates(deliveryRequest); }
+    try { update = await loadAcknowledgedUpdate(deliveryRequest); }
     catch (error: unknown) {
       ensureProjectionCurrent();
       const message = errorMessage(error);
@@ -415,12 +489,15 @@ export function useViewerState() {
       throw error;
     }
     ensureProjectionCurrent();
-    const page = displayCache.current.apply(update);
+    if (!displayCache.current.acceptsSnapshot(update, snapshotSources.current.get(update))) {
+      throw new Error("Session source changed before applying its snapshot; retry the page");
+    }
+    const page = applyDisplayUpdate(update, true);
     if (!page) throw new Error("Session updates changed; retry the snapshot");
     semanticSupported.current = true;
-    semanticLive.current.add(request.session_key);
+    if (!update.state.error && !page.follow_error && !displayCache.current.needsBaseline([update.subscription_id])) semanticLive.current.add(request.session_key);
     return page;
-  }, []);
+  }, [applyDisplayUpdate, loadAcknowledgedUpdate]);
 
   const detailLoads = useRef(new Map<string, Promise<EventDetail>>());
   const detailGeneration = useRef(0);
@@ -551,13 +628,24 @@ export function useViewerState() {
         applySessionIndexProgress(progress, "event");
       }
     });
-    const reconnectSubscription = listenForTransportReconnect(() => {
+    const reconnectSubscription = listenForTransportReconnect((scope) => {
       if (disposed) return;
+      if (scope?.subscription_ids) {
+        const ids = scope.subscription_ids.filter((id) => displayCache.current.needsBaseline([id]));
+        if (ids.length) {
+          suspendSubscriptions(ids);
+          void recoverSubscriptions(ids);
+        }
+        return;
+      }
+      if (scope?.background_subscription_ids) return;
       const epoch = ++sessionIndexConnectionEpoch.current;
       // A restarted API can begin its progress revisions at one again.
       sessionIndexProgressRevision.current = null;
       setSessionIndexProgressLoading(true);
       void readSnapshot(epoch);
+      suspendSubscriptions();
+      void recoverSubscriptions(displayCache.current.subscriptionIds());
     });
 
     async function subscribeThenReadSnapshot() {
@@ -588,7 +676,7 @@ export function useViewerState() {
       unlistenProgress?.();
       unlistenReconnect?.();
     };
-  }, [applySessionIndexProgress]);
+  }, [applySessionIndexProgress, recoverSubscriptions, suspendSubscriptions]);
 
   const retrySessionIndex = useCallback(async () => {
     if (!mounted.current || sessionIndexRetryInFlight.current) {
@@ -886,22 +974,42 @@ export function useViewerState() {
   useEffect(() => {
     let disposed = false;
     let stop: (() => void) | undefined;
-    const handle = (update: import("./types").SessionUpdate) => {
-      if (disposed || !displayCache.current.accepts(update) || displayCache.current.stale(update)) return;
+    const handle = (update: import("./types").SessionUpdate, lease_acknowledged = false) => {
+      if (disposed || !displayCache.current.accepts(update) || (!lease_acknowledged && displayCache.current.stale(update))) return;
+      if (lease_acknowledged && snapshotSources.current.has(update)
+        && !displayCache.current.acceptsSnapshot(update, snapshotSources.current.get(update))) {
+        // Recheck at publication: another delivery level may have accepted a
+        // source replacement after this request resolved but before its caller.
+        return;
+      }
       const previousFinal = update.level === "final" ? displayCache.current.get(update.session_key, "final") : null;
-      const page = displayCache.current.apply(update);
+      const page = applyDisplayUpdate(update, lease_acknowledged);
       if (update.session_key === selectedSessionKeyRef.current) {
         if (update.level === "details") setExpandedDetailError(update.state.error ?? null);
         else if (update.level === conversationUpdateLevelRef.current && update.state.error) setEventsError(update.state.error);
       }
-      if (!page) semanticLive.current.delete(update.session_key);
+      if (!page) {
+        semanticLive.current.delete(update.session_key);
+        setSubscriptionRevision((revision) => revision + 1);
+        if (update.session_key !== selectedSessionKeyRef.current || !eventRefreshInFlight.current) {
+          void recoverSubscriptions([update.subscription_id]);
+        }
+        return;
+      }
+      if (update.state.error || page.follow_error) {
+        suspendSubscriptions([update.subscription_id]);
+      } else if (lease_acknowledged && !displayCache.current.needsBaseline([update.subscription_id])) {
+        semanticLive.current.add(update.session_key);
+      } else if (displayCache.current.needsBaseline([update.subscription_id])) {
+        void recoverSubscriptions([update.subscription_id]);
+      }
       if (update.level === "details") {
         for (const item of update.items) if (item.detail && item.event_key) writeCachedDetail(detailCache.current, `${update.session_key}:${item.event_key}`, item.detail);
         for (const key of update.removed_items) if (key.startsWith("detail:")) detailCache.current.delete(`${update.session_key}:${key.slice(7)}`);
         if (update.session_key === selectedSessionKeyRef.current && (update.items.some((item) => item.detail) || update.removed_items.length)) setDetailRevision((revision) => revision + 1);
         return;
       }
-      {
+      if (!update.state.error) {
         const questions = update.state.outstanding_questions ?? [];
         const question_attention = { required_count: 0, available_count: 0 };
         for (const question of questions) {
@@ -910,8 +1018,9 @@ export function useViewerState() {
         }
         const newFinals = update.snapshot || update.level !== "final" ? 0 : update.items.filter((item) => item.kind === "assistant_message" && item.level === "final"
           && !previousFinal?.events.some((event) => event.event_key === item.item_id)).length;
+        const live_attention = !displayCache.current.needsBaseline([update.subscription_id]);
         const updateSummary = (session: SessionSummary) => session.session_key === update.session_key
-          ? { ...session, question_attention, is_running: update.state.is_running ?? session.is_running, has_unread: newFinals > 0 || session.has_unread, unread_final_count: Math.max(session.unread_final_count ?? 0, newFinals) } : session;
+          ? { ...session, question_attention: live_attention ? question_attention : session.question_attention, has_unread: newFinals > 0 || session.has_unread, unread_final_count: Math.max(session.unread_final_count ?? 0, newFinals) } : session;
         setSessions((current) => current.map(updateSummary));
         setSelectedSessionMetadata((current) => current ? updateSummary(current) : current);
         const children = new Map(sessionChildrenRef.current);
@@ -930,32 +1039,82 @@ export function useViewerState() {
     void listenForSessionUpdates(handle).then((unlisten) => { if (disposed) unlisten(); else stop = unlisten; })
       .catch((error: unknown) => { if (!disposed) setEventsError(errorMessage(error)); });
     return () => { disposed = true; stop?.(); };
-  }, []);
+  }, [applyDisplayUpdate, recoverSubscriptions, suspendSubscriptions]);
 
   const detailSubscriptionKey = JSON.stringify([selectedSessionKey, activeDetailKeys.current]);
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      if (semanticSupported.current !== true || !selectedSessionKeyRef.current || eventRefreshInFlight.current) return;
-      void renewSessionSubscriptions(displayCache.current.subscriptionIds()).then((updates) => {
-        for (const update of updates ?? []) onSessionUpdate.current(update);
-      }).catch(() => {});
-    }, 30_000);
-    return () => window.clearInterval(timer);
-  }, []);
+    let disposed = false;
+    const renew = async () => {
+      if (semanticSupported.current !== true || subscriptionRenewal.current) return;
+      const ids = displayCache.current.subscriptionIds();
+      if (!ids.length) return;
+      const source_generations = new Map(displayCache.current.requests(ids).map((request) => [
+        request.subscription_id, displayCache.current.sourceGeneration(request.session_key),
+      ]));
+      subscriptionRenewal.current = true;
+      const stale = displayCache.current.liveRecoveryRequests().map((request) => request.subscription_id);
+      if (stale.length) suspendSubscriptions(stale);
+      try {
+        const result = await renewSessionSubscriptions(ids);
+        if (disposed) return;
+        displayCache.current.acknowledgeRenewal(result?.renewed_ids ?? ids);
+        if (result?.missing_ids.length) {
+          suspendSubscriptions(result.missing_ids);
+          await recoverSubscriptions(result.missing_ids);
+        }
+        for (const update of result?.updates ?? []) {
+          snapshotSources.current.set(update, source_generations.get(update.subscription_id));
+          onSessionUpdate.current(update, true);
+        }
+        await recoverSubscriptions();
+        setSubscriptionRevision((revision) => revision + 1);
+      } catch {
+        if (disposed) return;
+        suspendSubscriptions(ids);
+        await recoverSubscriptions();
+      } finally { subscriptionRenewal.current = false; }
+    };
+    const timer = window.setInterval(() => { void renew(); }, 30_000);
+    const resume = () => { void renew(); };
+    window.addEventListener("focus", resume);
+    document.addEventListener("visibilitychange", resume);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", resume);
+      document.removeEventListener("visibilitychange", resume);
+    };
+  }, [recoverSubscriptions, renewSessionSubscriptions, suspendSubscriptions]);
+
+  useEffect(() => {
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void listenForSubscriptionLoss((loss) => {
+      if (disposed) return;
+      suspendSubscriptions(loss.subscription_ids);
+      void recoverSubscriptions(loss.subscription_ids);
+    }).then((unlisten) => { if (disposed) unlisten(); else stop = unlisten; }).catch(() => {});
+    return () => { disposed = true; stop?.(); };
+  }, [listenForSubscriptionLoss, recoverSubscriptions, suspendSubscriptions]);
 
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listenForRelayChanges((change) => {
       if (disposed) return;
-      if (change.session_key === null) setSessionsAttempt((attempt) => attempt + 1);
+      if (change.session_key === null || change.reset) setSessionsAttempt((attempt) => attempt + 1);
+      if (change.reset) {
+        const ids = displayCache.current.requests().filter((request) => !change.session_key || request.session_key === change.session_key)
+          .map((request) => request.subscription_id);
+        suspendSubscriptions(ids);
+        displayCache.current.invalidate(change.session_key ?? undefined);
+        void recoverSubscriptions(ids);
+      }
       if (!selectedSessionKeyRef.current) return;
       if (change.session_key === null && !change.reset) return;
       if (change.session_key !== null && change.session_key !== selectedSessionKeyRef.current) return;
       if (change.session_key !== null && !change.reset && semanticLive.current.has(change.session_key)) return;
       if (change.reset) {
-        displayCache.current.invalidate(change.session_key ?? undefined);
-        semanticLive.current.clear();
         pushedPage.current = null;
       }
       pendingLiveReset.current ||= change.reset;
@@ -970,7 +1129,7 @@ export function useViewerState() {
       else unlisten = stop;
     }).catch((error: unknown) => setEventsError(errorMessage(error)));
     return () => { disposed = true; unlisten?.(); };
-  }, [showLiveActivity]);
+  }, [recoverSubscriptions, showLiveActivity, suspendSubscriptions]);
 
   useEffect(() => {
     if (eventsOwnerKey !== selectedSessionKey) return;
@@ -1107,8 +1266,9 @@ export function useViewerState() {
       while (sessionDisclosures.current.size > 8) sessionDisclosures.current.delete(sessionDisclosures.current.keys().next().value!);
       for (const level of ["final", "messages", "steps", "all", "details"] as const) {
         const release = displayCache.current.release(previousKey, level);
-        if (release) void loadSessionUpdates(release).catch(() => {});
+        if (release) void loadAcknowledgedUpdate(release).catch(() => {});
       }
+      semanticLive.current.delete(previousKey);
     }
     displayCache.current.select(sessionKey);
     selectedSessionKeyRef.current = sessionKey;
@@ -1159,18 +1319,22 @@ export function useViewerState() {
       applyExpandedEventKey(disclosure.expanded_event_key);
       applyEventSelection(disclosure.selected_event_key, disclosure.inspector_open);
     }
-  }, [applyEventSelection, applyExpandedEventKey, clearTrajectoryPages, inspectorOpen]);
+  }, [applyEventSelection, applyExpandedEventKey, clearTrajectoryPages, inspectorOpen, loadAcknowledgedUpdate]);
 
   const setConversationUpdateLevel = useCallback((level: ConversationUpdateLevel) => {
     if (level === conversationUpdateLevelRef.current) return;
-    const previousLevel = conversationUpdateLevelRef.current;
     conversationUpdateLevelRef.current = level;
     projectionEpoch.current += 1;
     eventsRequest.current += 1;
     const sessionKey = selectedSessionKeyRef.current;
     if (sessionKey) {
-      const release = displayCache.current.release(sessionKey, previousLevel);
-      if (release) void loadSessionUpdates(release).catch(() => {});
+      // Auxiliary work-group interests must not reuse their identity after a
+      // mode switch; a late group read still needs to release its old ID.
+      for (const previousLevel of ["final", "messages", "steps", "all"] as const) {
+        const release = displayCache.current.release(sessionKey, previousLevel);
+        if (release) void loadAcknowledgedUpdate(release).catch(() => {});
+      }
+      semanticLive.current.delete(sessionKey);
       const cached = displayCache.current.get(sessionKey, level);
       // Level coverage is independent. Keep disclosure/resource and reading
       // state; only the chosen projection can replace the conversation rows.
@@ -1192,7 +1356,7 @@ export function useViewerState() {
     }
     try { localStorage.setItem(CONVERSATION_LEVEL_KEY, level); } catch { /* Preference remains usable for this viewer. */ }
     setConversationUpdateLevelValue(level);
-  }, []);
+  }, [loadAcknowledgedUpdate]);
 
   const closeInspector = useCallback(() => {
     const trigger = inspectorTriggerRef.current;
@@ -1380,7 +1544,7 @@ export function useViewerState() {
     return is_running === session.is_running && has_running_descendant === session.has_running_descendant
       && latest_assistant_preview === session.latest_assistant_preview && question_attention === session.question_attention
       ? session : { ...session, is_running, has_running_descendant, question_attention, latest_assistant_preview };
-  }, [pageQuestionAttention, selectedSessionKey, runningRevision, previewRevision, backgroundUpdates.cache, backgroundUpdates.revision]);
+  }, [pageQuestionAttention, selectedSessionKey, runningRevision, previewRevision, subscriptionRevision, backgroundUpdates.cache, backgroundUpdates.revision]);
   const displayedSessions = useMemo(() => {
     const projectRows = (rows: SessionSummary[]) => {
       const next = rows.map(projectSession);

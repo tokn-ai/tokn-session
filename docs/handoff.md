@@ -86,9 +86,14 @@ use whole seconds. When questions or compaction split an active turn, only its
 latest work segment remains running; earlier durations stop at the separator.
 Parent running state owns delegated activity: a stopped parent blocks descendant
 running propagation, even when child histories lack completion records.
-Live display replicas own sidebar running state while subscribed; lagging catalog
-and index notifications cannot override it. Source revisions order running state
-across delivery levels; released/invalidated replicas relinquish ownership.
+Healthy, acknowledged live replicas own sidebar running state; lost, expired,
+or errored interests yield to the index while retaining readable cards. All
+retained interests renew even without a selected conversation. Renewal reports
+missing identities, and backward baselines recover them after pauses/reconnects;
+targeted recovery leaves healthy sessions alone. Source revisions and captured
+request generations reject delayed/retired snapshots across delivery levels.
+Cache eviction explicitly releases interests; late reads cannot revive a released
+socket registration.
 Live work shows a spinner. Provider filters and session metadata live in disclosures.
 Desktop sidebar collapse preserves navigation state and removes hidden controls
 from keyboard focus; mobile retains the modal session drawer. The latest-activity

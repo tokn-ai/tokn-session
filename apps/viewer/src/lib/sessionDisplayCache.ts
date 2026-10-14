@@ -3,6 +3,7 @@ import { createUuid } from "./id";
 import type { EventPageResponse, EventSummary, TrajectoryEventPageResponse, SessionUpdate, SessionUpdateItem, SessionUpdatesRequest, SessionUpdateScope, UpdateLevel } from "./types";
 
 interface Replica {
+  session_key: string;
   subscription_id: string;
   generation: string;
   revision: string;
@@ -10,8 +11,20 @@ interface Replica {
   order: string[];
   semantic_order: string[];
   event_order: string[];
-  page: EventPageResponse;
+  page: EventPageResponse & { error?: string };
   bytes: number;
+}
+
+interface LiveLease {
+  expires_at: number;
+  suspended: boolean;
+}
+
+const LIVE_LEASE_MS = 90_000;
+
+function sourceGenerationFrom(revision?: string): string | undefined {
+  const index = revision?.lastIndexOf(":") ?? -1;
+  return index < 0 ? undefined : revision!.slice(0, index);
 }
 
 function equal(left: unknown, right: unknown): boolean {
@@ -60,7 +73,11 @@ export class SessionDisplayCache {
   private pending = new Map<string, SessionUpdate[]>();
   private pageItems = new WeakMap<EventPageResponse, Map<string, SessionUpdateItem>>();
   private acceptedSources = new Map<string, string>();
-  private running = new Map<string, { source_revision?: string; is_running: boolean }>();
+  private running = new Map<string, boolean>();
+  private liveLeases = new Map<string, LiveLease>();
+  private sourceRevisions = new Map<string, string>();
+  private retiredGenerations = new Map<string, Set<string>>();
+  private evictedSubscriptions: SessionUpdatesRequest[] = [];
   private acceptedItems = new Map<string, Map<string, SessionUpdateItem>>();
   private pageLevels = new WeakMap<EventPageResponse, UpdateLevel>();
   private key(session_key: string, level: UpdateLevel) { return JSON.stringify([session_key, level]); }
@@ -99,6 +116,8 @@ export class SessionDisplayCache {
     if (!this.subscriptions.has(key)) return null;
     const request = { ...this.request(session_key, level), unsubscribe: true };
     this.subscriptions.delete(key);
+    this.liveLeases.delete(request.subscription_id);
+    this.clearUnownedRunning(session_key);
     this.runningRevision += 1;
     return request;
   }
@@ -117,9 +136,115 @@ export class SessionDisplayCache {
     const subscribed = (["messages", "steps", "all", "final"] as const).some((level) => {
       const key = this.key(session_key, level);
       const replica = this.replicas.get(key);
-      return replica && this.subscriptions.get(key) === replica.subscription_id;
+      return replica && this.subscriptions.get(key) === replica.subscription_id && this.hasLiveLease(replica);
     });
-    return subscribed ? this.running.get(session_key)?.is_running : undefined;
+    return subscribed ? this.running.get(session_key) : undefined;
+  }
+
+  /** Retained cards remain useful while their source ownership is suspended. */
+  suspendLive(ids: readonly string[] = this.subscriptionIds()) {
+    const active = new Set(this.subscriptionIds());
+    for (const id of ids) {
+      if (!active.has(id)) continue;
+      const lease = this.liveLeases.get(id);
+      if (!lease?.suspended) {
+        this.liveLeases.set(id, { expires_at: lease?.expires_at ?? 0, suspended: true });
+        this.runningRevision += 1;
+      }
+    }
+  }
+
+  /** A renewal proves an existing interest is alive; it cannot recover a
+   * suspended or expired baseline whose missing updates still need a read. */
+  acknowledgeRenewal(ids: readonly string[]) {
+    for (const replica of this.replicas.values()) {
+      if (!ids.includes(replica.subscription_id) || !this.hasLiveLease(replica)) continue;
+      this.liveLeases.set(replica.subscription_id, { expires_at: Date.now() + LIVE_LEASE_MS, suspended: false });
+    }
+  }
+
+  requests(ids?: readonly string[]): SessionUpdatesRequest[] {
+    return [...this.subscriptions].filter(([, id]) => !ids || ids.includes(id)).map(([key]) => {
+      const [session_key, level] = JSON.parse(key) as [string, UpdateLevel];
+      return this.request(session_key, level);
+    });
+  }
+
+  /** Return exact release requests before the transport forgets their IDs. */
+  takeEvictedSubscriptions(): SessionUpdatesRequest[] {
+    const requests = this.evictedSubscriptions;
+    this.evictedSubscriptions = [];
+    return requests;
+  }
+
+  liveRecoveryRequests(): SessionUpdatesRequest[] {
+    return this.requests().filter((request) => request.level !== "details" && this.needsBaseline([request.subscription_id]));
+  }
+
+  needsBaseline(ids?: readonly string[]): boolean {
+    return this.requests(ids).some((request) => {
+      if (request.level === "details") return false;
+      const replica = this.replicas.get(this.key(request.session_key, request.level));
+      return !replica || replica.subscription_id !== request.subscription_id || !this.hasLiveLease(replica);
+    });
+  }
+
+  sourceGeneration(session_key: string): string | undefined {
+    return sourceGenerationFrom(this.sourceRevisions.get(session_key));
+  }
+
+  /** Source generations are opaque. A request begun before a replacement may
+   * publish only if its response belongs to the source now accepted locally. */
+  acceptsSnapshot(update: SessionUpdate, source_generation_at_request: string | undefined): boolean {
+    if (update.level === "details") return true;
+    if (this.isRetiredSource(update) || this.isOlderSource(update)) return false;
+    const current = this.sourceGeneration(update.session_key);
+    return current === source_generation_at_request || sourceGenerationFrom(update.state.source_revision) === current;
+  }
+
+  private hasLiveLease(replica: Replica): boolean {
+    const lease = this.liveLeases.get(replica.subscription_id);
+    const current = this.sourceGeneration(replica.session_key);
+    return !!lease && !lease.suspended && Date.now() < lease.expires_at
+      && !replica.page.error && !replica.page.follow_error
+      && (current === undefined || sourceGenerationFrom(replica.page.source_revision) === current);
+  }
+
+  private clearUnownedRunning(session_key: string) {
+    if (![...this.replicas].some(([key, replica]) => JSON.parse(key)[0] === session_key
+      && this.subscriptions.get(key) === replica.subscription_id && this.hasLiveLease(replica))) {
+      this.running.delete(session_key);
+    }
+  }
+
+  private isRetiredSource(update: SessionUpdate): boolean {
+    const generation = sourceGenerationFrom(update.state.source_revision);
+    return update.level !== "details" && generation !== undefined
+      && this.retiredGenerations.get(update.session_key)?.has(generation) === true;
+  }
+
+  private isOlderSource(update: SessionUpdate): boolean {
+    if (update.level === "details") return false;
+    const before = this.sourceRevisions.get(update.session_key), after = update.state.source_revision;
+    if (!before || !after || sourceGenerationFrom(before) !== sourceGenerationFrom(after)) return false;
+    const before_revision = before.slice(before.lastIndexOf(":") + 1), after_revision = after.slice(after.lastIndexOf(":") + 1);
+    return /^\d+$/.test(before_revision) && /^\d+$/.test(after_revision) && BigInt(after_revision) < BigInt(before_revision);
+  }
+
+  private observeSource(session_key: string, page: EventPageResponse, subscription_id: string) {
+    const generation = sourceGenerationFrom(page.source_revision);
+    if (generation === undefined) return;
+    const previous = this.sourceGeneration(session_key);
+    this.sourceRevisions.set(session_key, page.source_revision!);
+    if (previous === generation) return;
+    if (previous !== undefined) {
+      const retired = this.retiredGenerations.get(session_key) ?? new Set<string>();
+      retired.add(previous);
+      this.retiredGenerations.set(session_key, retired);
+      this.suspendLive(this.requests().filter((request) => request.session_key === session_key
+        && request.subscription_id !== subscription_id).map((request) => request.subscription_id));
+    }
+    this.running.delete(session_key);
   }
 
   /** An active semantic replica is fresher than the independently indexed
@@ -128,7 +253,7 @@ export class SessionDisplayCache {
     const active = (["messages", "steps", "all"] as const).some((level) => {
       const key = this.key(session_key, level);
       const replica = this.replicas.get(key);
-      return replica && this.subscriptions.get(key) === replica.subscription_id;
+      return replica && this.subscriptions.get(key) === replica.subscription_id && this.hasLiveLease(replica);
     });
     if (!active) return undefined;
     const projection = this.assistantPreviewProjection(session_key);
@@ -148,8 +273,7 @@ export class SessionDisplayCache {
   }
 
   private assistantPreviewProjection(session_key: string): AssistantPreviewProjection {
-    const sourceGeneration = (revision?: string) => revision?.slice(0, revision.lastIndexOf(":"));
-    const currentGeneration = sourceGeneration(this.running.get(session_key)?.source_revision);
+    const currentGeneration = this.sourceGeneration(session_key);
     const revision = (replica: Replica) => {
       const value = replica.page.source_revision?.split(":").pop();
       return value && /^\d+$/.test(value) ? BigInt(value) : 0n;
@@ -157,7 +281,7 @@ export class SessionDisplayCache {
     const eligible = (["messages", "steps", "all", "final"] as const)
       .map((level) => ({ level, replica: this.replicas.get(this.key(session_key, level)) }))
       .filter((entry): entry is { level: "messages" | "steps" | "all" | "final"; replica: Replica } => !!entry.replica
-        && (currentGeneration === undefined || sourceGeneration(entry.replica.page.source_revision) === currentGeneration));
+        && (currentGeneration === undefined || sourceGenerationFrom(entry.replica.page.source_revision) === currentGeneration));
     const complete = eligible.filter(({ level }) => level !== "final")
       .sort((left, right) => revision(left.replica) < revision(right.replica) ? 1 : revision(left.replica) > revision(right.replica) ? -1 : 0)[0];
     // A newer full semantic page can remove a message. Older, filtered final
@@ -219,23 +343,12 @@ export class SessionDisplayCache {
 
   private observeRunning(session_key: string, page: EventPageResponse) {
     if (page.is_running === undefined) return;
-    const previous = this.running.get(session_key);
-    // Delivery-level revisions are independent. Source revisions order state
-    // across levels, including delayed snapshots from another subscription.
-    const split = (value?: string) => {
-      const index = value?.lastIndexOf(":") ?? -1;
-      return index < 0 ? null : [value!.slice(0, index), value!.slice(index + 1)];
-    };
-    const before = split(previous?.source_revision), after = split(page.source_revision);
-    if (before && after && before[0] === after[0]
-      && /^\d+$/.test(before[1]) && /^\d+$/.test(after[1])
-      && BigInt(after[1]) < BigInt(before[1])) return;
     this.runningRevision += 1;
-    this.running.set(session_key, { source_revision: page.source_revision, is_running: page.is_running });
+    this.running.set(session_key, page.is_running);
   }
 
   private currentResourceReplicas(session_key: string, levels: UpdateLevel[]): Replica[] {
-    const source = this.running.get(session_key)?.source_revision;
+    const source = this.sourceRevisions.get(session_key);
     return levels.flatMap((level) => {
       const key = this.key(session_key, level);
       const replica = this.replicas.get(key);
@@ -285,10 +398,20 @@ export class SessionDisplayCache {
   invalidate(session_key?: string) {
     this.runningRevision += 1;
     this.previewRevision += 1;
-    if (session_key) this.loadedPreviews.delete(session_key);
-    else this.loadedPreviews.clear();
-    for (const [key] of this.replicas) {
-      if (!session_key || JSON.parse(key)[0] === session_key) { this.replicas.delete(key); this.pending.delete(key); this.running.delete(JSON.parse(key)[0]); }
+    const owners = session_key ? [session_key] : [...new Set([
+      ...this.running.keys(), ...this.loadedPreviews.keys(), ...this.acceptedSources.keys(),
+      ...this.access.keys(), ...[...this.subscriptions.keys(), ...this.replicas.keys(), ...this.pending.keys()].map((key) => JSON.parse(key)[0] as string),
+    ])];
+    this.suspendLive(this.requests().filter((request) => owners.includes(request.session_key)).map((request) => request.subscription_id));
+    for (const owner of owners) {
+      this.running.delete(owner);
+      this.loadedPreviews.delete(owner);
+      for (const key of this.acceptedItems.keys()) if (JSON.parse(key)[0] === owner) this.acceptedItems.delete(key);
+      this.acceptedSources.delete(owner);
+      this.resources.remove(owner);
+    }
+    for (const map of [this.replicas, this.pending]) {
+      for (const key of map.keys()) if (owners.includes(JSON.parse(key)[0])) map.delete(key);
     }
   }
 
@@ -321,6 +444,7 @@ export class SessionDisplayCache {
   }
 
   stale(update: SessionUpdate): boolean {
+    if (this.isRetiredSource(update) || this.isOlderSource(update)) return true;
     const previous = this.replicas.get(this.key(update.session_key, update.level));
     return previous?.generation === update.generation && (previous.revision.length > update.revision.length
       || (previous.revision.length === update.revision.length && previous.revision >= update.revision));
@@ -330,9 +454,19 @@ export class SessionDisplayCache {
     return this.subscriptions.get(this.key(update.session_key, update.level)) === update.subscription_id;
   }
 
-  apply(update: SessionUpdate): EventPageResponse | null {
+  apply(update: SessionUpdate, leaseAcknowledged = false): EventPageResponse | null {
     const key = this.key(update.session_key, update.level);
-    if (!this.accepts(update)) return null;
+    if (!this.accepts(update) || this.isRetiredSource(update) || this.isOlderSource(update)) return null;
+    const current_source = this.sourceGeneration(update.session_key);
+    const next_source = sourceGenerationFrom(update.state.source_revision);
+    if (!leaseAcknowledged && update.level !== "details" && current_source !== undefined
+      && next_source !== undefined && next_source !== current_source) {
+      // Opaque generations have no ordering. A queued frame can describe an
+      // unseen older source, so only an acknowledged backward baseline may
+      // replace the accepted source; keep the current cards until it arrives.
+      this.suspendLive([update.subscription_id]);
+      return null;
+    }
     const previous = this.replicas.get(key);
     if (previous?.generation === update.generation
       && (previous.revision.length > update.revision.length
@@ -345,7 +479,7 @@ export class SessionDisplayCache {
       return null;
     }
     if (!update.snapshot && (!previous || previous.generation !== update.generation || previous.revision !== update.base_revision)) {
-      this.replicas.delete(key);
+      this.dropReplica(key, update.session_key);
       return null;
     }
     const items = new Map(update.snapshot ? [] : previous?.items);
@@ -364,14 +498,14 @@ export class SessionDisplayCache {
     const semantic_order = update.semantic_order ?? (update.snapshot || update.item_order != null ? order : previous?.semantic_order ?? order);
     const display_order = update.level === "messages" || update.level === "final" ? semantic_order : order;
     const event_order = update.event_order ?? previous?.event_order ?? [];
-    if (event_order.some((id) => !items.get(id)?.event)) { this.replicas.delete(key); return null; }
+    if (event_order.some((id) => !items.get(id)?.event)) { this.dropReplica(key, update.session_key); return null; }
     const events = display_order.map((id) => items.get(id)?.summary).filter((event) => event !== undefined);
     if (update.level === "all" && [...items.values()].some((item) =>
       item.summary?.child_keys?.some((child) => !items.get(child)?.summary))) {
-      this.replicas.delete(key); return null;
+      this.dropReplica(key, update.session_key); return null;
     }
-    if (events.length !== display_order.length) { this.replicas.delete(key); return null; }
-    const page: EventPageResponse = { ...update.state, events,
+    if (events.length !== display_order.length) { this.dropReplica(key, update.session_key); return null; }
+    const page: Replica["page"] = { ...update.state, events,
       ...(update.level === "messages" || update.level === "final" ? { total_events: events.length } : {}) };
     if (update.level !== "details" && update.state.scope) {
       const pendingScope = this.scopes.get(update.session_key);
@@ -381,12 +515,26 @@ export class SessionDisplayCache {
           ? update.state.scope.group_keys : [...new Set([...update.state.scope.group_keys, ...(pendingScope?.group_keys ?? [])])],
       });
     }
-    if (update.level !== "details") this.observeRunning(update.session_key, page);
+    if (update.level !== "details") {
+      if (page.error || page.follow_error) {
+        this.suspendLive(this.requests().filter((request) => request.session_key === update.session_key).map((request) => request.subscription_id));
+      } else {
+        const lease = this.liveLeases.get(update.subscription_id);
+        const baseline = update.snapshot && (leaseAcknowledged || !lease);
+        if (baseline || lease && !lease.suspended && Date.now() < lease.expires_at) {
+          this.observeSource(update.session_key, page, update.subscription_id);
+          this.observeRunning(update.session_key, page);
+        }
+        if (baseline) {
+          this.liveLeases.set(update.subscription_id, { expires_at: Date.now() + LIVE_LEASE_MS, suspended: false });
+        }
+      }
+    }
     if (update.level !== "details") this.previewRevision += 1;
     this.pageItems.set(page, items);
     this.pageLevels.set(page, update.level);
     this.replicas.delete(key);
-    this.replicas.set(key, { subscription_id: update.subscription_id, generation: update.generation, revision: update.revision, items, order, semantic_order, event_order, page, bytes });
+    this.replicas.set(key, { session_key: update.session_key, subscription_id: update.subscription_id, generation: update.generation, revision: update.revision, items, order, semantic_order, event_order, page, bytes });
     if (update.snapshot && this.pending.has(key)) {
       const queued = this.pending.get(key)!;
       this.pending.delete(key);
@@ -398,8 +546,11 @@ export class SessionDisplayCache {
       const oldest = [...sessions()].filter((session) => session !== this.selected)
         .sort((left, right) => (this.access.get(left) ?? 0) - (this.access.get(right) ?? 0))[0];
       if (!oldest) break;
-      for (const key of this.replicas.keys()) if (JSON.parse(key)[0] === oldest) {
-        this.replicas.delete(key); this.subscriptions.delete(key);
+      for (const key of new Set([...this.replicas.keys(), ...this.subscriptions.keys(), ...this.pending.keys()])) if (JSON.parse(key)[0] === oldest) {
+        const [, level] = JSON.parse(key) as [string, UpdateLevel];
+        const release = this.release(oldest, level);
+        if (release) this.evictedSubscriptions.push(release);
+        this.replicas.delete(key); this.pending.delete(key);
       }
       this.access.delete(oldest);
       this.scopes.delete(oldest);
@@ -407,8 +558,20 @@ export class SessionDisplayCache {
       for (const key of this.acceptedItems.keys()) if (JSON.parse(key)[0] === oldest) this.acceptedItems.delete(key);
       this.acceptedSources.delete(oldest);
       this.running.delete(oldest);
+      this.sourceRevisions.delete(oldest);
+      this.retiredGenerations.delete(oldest);
       this.loadedPreviews.delete(oldest);
     }
     return page;
+  }
+
+  private dropReplica(key: string, session_key: string) {
+    const id = this.subscriptions.get(key);
+    if (id) this.suspendLive([id]);
+    this.replicas.delete(key);
+    this.pending.delete(key);
+    this.resources.invalidate(session_key);
+    this.clearUnownedRunning(session_key);
+    this.runningRevision += 1;
   }
 }

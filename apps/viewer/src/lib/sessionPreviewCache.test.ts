@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionPreviewCache } from "./sessionPreviewCache";
 import type { BackgroundSessionUpdate } from "./types";
 
@@ -9,6 +9,29 @@ function update(revision = "1", session_key = "main"): BackgroundSessionUpdate {
 }
 
 describe("compact session previews", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it.each([false, true])("expires or suspends activity=%s while retaining text and requiring fresh events", (is_running) => {
+    vi.useFakeTimers(); vi.setSystemTime(0);
+    const cache = new SessionPreviewCache(); cache.begin("subscription");
+    cache.apply({ ...update(), is_running });
+    expect(cache.activity("main")).toBeUndefined();
+    expect(cache.acknowledge({ subscription_id: "subscription", generation: "generation", revision: "0", scope: "all", subscribed: true })).toBe(true);
+    expect(cache.activity("main")?.is_running).toBe(is_running);
+    vi.setSystemTime(90_001);
+    expect(cache.activity("main")).toBeUndefined();
+    expect(cache.acknowledgeRenewal("subscription")).toBe(false);
+    cache.suspend();
+    cache.apply({ ...update("2"), is_running: !is_running });
+    expect(cache.activity("main")).toBeUndefined();
+    expect(cache.preview("main")).toBe("Latest line.");
+    cache.begin("fresh");
+    cache.acknowledge({ subscription_id: "fresh", generation: "generation", revision: "0", scope: "all", subscribed: true });
+    expect(cache.activity("main")).toBeUndefined();
+    cache.apply({ ...update(), subscription_id: "fresh", is_running: !is_running });
+    expect(cache.activity("main")?.is_running).toBe(!is_running);
+  });
+
   it("bounds first lines independently of rich replicas and keeps child ownership", () => {
     const cache = new SessionPreviewCache(2); cache.begin("subscription");
     cache.apply({ ...update(), latest_assistant_message: { ...update().latest_assistant_message!, preview: "界".repeat(300) } });
@@ -38,6 +61,7 @@ describe("compact session previews", () => {
 
   it("preserves an existing body for unknown projection but clears an authoritative null", () => {
     const cache = new SessionPreviewCache(); cache.begin("subscription"); cache.apply(update());
+    cache.acknowledge({ subscription_id: "subscription", generation: "generation", revision: "0", scope: "all", subscribed: true });
     cache.apply({ ...update("2"), message_revision: null, latest_assistant_message: null, is_running: false });
     expect(cache.preview("main")).toBe("Latest line.");
     expect(cache.activity("main")?.is_running).toBe(false);
