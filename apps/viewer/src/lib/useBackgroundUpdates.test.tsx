@@ -63,6 +63,73 @@ describe("background update interests", () => {
     expect(connection.release).toHaveBeenCalledExactlyOnceWith("subscribe_background_updates", { request: { ...first, unsubscribe: true } });
   });
 
+  it("does not restore activity from a subscription acknowledgement delayed across lease expiry", async () => {
+    const connection = transport();
+    const original = connection.send.getMockImplementation()!;
+    let accept!: () => void;
+    const pending = new Promise<void>((resolve) => { accept = resolve; });
+    connection.send.mockImplementationOnce(async (command, payload) => {
+      await pending;
+      return original(command, payload);
+    });
+    const { result } = renderHook(() => useBackgroundUpdates(connection.invoke, connection.listen, connection.release, []));
+    await act(async () => {});
+    const first = connection.requests()[0];
+    act(() => connection.emit("background-session-updated", { ...update(first, "root"), is_running: true }));
+    expect(result.current.cache.activity("root")).toBeUndefined();
+    vi.setSystemTime(Date.now() + 90_001);
+    await act(async () => { accept(); });
+    expect(connection.requests()).toHaveLength(2);
+    expect(result.current.cache.preview("root")).toBe("Main assistant reply.");
+    expect(result.current.cache.activity("root")).toBeUndefined();
+  });
+
+  it.each([false, true])("releases activity=%s immediately after renewal failure while preserving previews", async (is_running) => {
+    const connection = transport();
+    const original = connection.send.getMockImplementation()!;
+    connection.send.mockImplementation(async (command, payload) => {
+      if (command === "renew_background_subscriptions") throw new Error("Connection interrupted");
+      return original(command, payload);
+    });
+    const { result } = renderHook(() => useBackgroundUpdates(connection.invoke, connection.listen, connection.release, []));
+    await act(async () => {});
+    const request = connection.requests()[0];
+    act(() => connection.emit("background-session-updated", { ...update(request, "root"), is_running }));
+    expect(result.current.cache.activity("root")?.is_running).toBe(is_running);
+    expect(result.current.authority_revision).toBe(0);
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(result.current.cache.activity("root")).toBeUndefined();
+    expect(result.current.authority_revision).toBe(1);
+    expect(result.current.cache.preview("root")).toBe("Main assistant reply.");
+    act(() => connection.emit("background-session-updated", { ...update(request, "root", "2"), is_running: !is_running }));
+    expect(result.current.cache.activity("root")).toBeUndefined();
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    expect(connection.requests()).toHaveLength(2);
+    expect(result.current.cache.activity("root")).toBeUndefined();
+  });
+
+  it("recovers compact socket loss and local expiry without resetting on rich reconnects", async () => {
+    const connection = transport();
+    const { result } = renderHook(() => useBackgroundUpdates(connection.invoke, connection.listen, connection.release, []));
+    await act(async () => {});
+    const first = connection.requests()[0];
+    act(() => connection.emit("background-session-updated", { ...update(first, "root"), is_running: true }));
+    await act(async () => { connection.emit("transport-reconnected", { subscription_ids: ["rich-only"] }); });
+    expect(connection.requests()).toHaveLength(1);
+    expect(result.current.cache.activity("root")?.is_running).toBe(true);
+    await act(async () => { connection.emit("background-subscriptions-lost", { subscription_ids: [first.subscription_id] }); });
+    expect(connection.requests()).toHaveLength(2);
+    expect(result.current.cache.activity("root")).toBeUndefined();
+    expect(result.current.cache.preview("root")).toBe("Main assistant reply.");
+    const second = connection.requests()[1];
+    act(() => connection.emit("background-session-updated", update(second, "root")));
+    vi.setSystemTime(Date.now() + 90_001);
+    expect(result.current.cache.activity("root")).toBeUndefined();
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    expect(connection.requests()).toHaveLength(3);
+    expect(connection.send.mock.calls.every(([command]) => command === "subscribe_background_updates")).toBe(true);
+  });
+
   it("defaults to all sessions, without deriving interests or reads from visible rows", async () => {
     const connection = transport();
     const { result, rerender, unmount } = renderHook(({ keys }) => useBackgroundUpdates(connection.invoke, connection.listen, connection.release, keys), {
@@ -338,6 +405,7 @@ describe("background update interests", () => {
     const { result } = renderHook(() => useBackgroundUpdates(connection.invoke, connection.listen, connection.release, []));
     await act(async () => {});
     expect(result.current.status).toBe("Background updates unavailable on this host. Open sessions still update.");
+    expect(result.current.authority_revision).toBe(0);
     await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
     expect(connection.send).toHaveBeenCalledOnce();
     expect(result.current.cache.preview("unopened")).toBeUndefined();

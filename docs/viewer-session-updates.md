@@ -151,13 +151,27 @@ transfer. Owner read markers and unshared descendant activity stay private.
 Scoped fixed-cadence invalidations remain compatible.
 
 Subscriptions expire after 90 seconds and are bounded to 24 entries/64 MiB.
+Renewal acknowledges `renewed_ids` and `missing_ids` without loading bodies;
+expired interests cannot be revived by renewal. Desktop, HTTP, and WebSocket
+clients recover missing identities through registration and a backward baseline.
+WebSocket pongs acknowledge only the connection's still-owned interests.
+Rich `renewed_ids`/`missing_ids` remain separate from compact
+`renewed_background_ids`/`missing_background_ids` inventories.
+All retained frontend interests renew independently of the selected conversation.
+Lost, expired, and source-error leases relinquish sidebar running ownership while
+keeping cached cards available. Focus/resume checks leases; targeted recovery
+leaves healthy sessions alone. Backward responses recheck their captured source
+generation at application, and retired or unseen cross-generation pushes require
+a fresh baseline before replacing authoritative state.
 Compact background interests have an independent 24-entry limit, up to 4,096
 sidebar keys/256 KiB per interest, and 10,000 in-memory deduplication entries.
 Evicted fingerprints spill to a private temporary SQLite file with a bounded
 page cache, so large follower scans do not replay unchanged messages. The spill
 contains session keys and digests, never message text, and is removed on shutdown.
 Frontend display replicas retain eight recent sessions with a 64 MiB target,
-protecting the selected session. Session activity does not promote its LRU
+protecting the selected session. Eviction releases every active delivery level;
+late HTTP reads and subscription acknowledgements cannot restore released socket
+ownership. Session activity does not promote its LRU
 position. Each level has independent revision coverage; receiving final events
 does not advance steps coverage. Source events at `all` remain separate from
 folded display objects. Native inspection is independently opt-in.

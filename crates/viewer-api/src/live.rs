@@ -10,7 +10,11 @@ use axum::{
 };
 use serde_json::{Value, json};
 use std::{collections::HashSet, time::Duration};
-use tokn_viewer_core::{background::BackgroundUpdatesRequest, runtime::ViewerEvent, updates::SessionUpdatesRequest};
+use tokn_viewer_core::{
+  background::BackgroundUpdatesRequest,
+  runtime::ViewerEvent,
+  updates::{SessionSubscriptionRenewal, SessionUpdatesRequest},
+};
 
 pub(super) async fn upgrade(
   State(state): State<ApiState>,
@@ -86,10 +90,14 @@ async fn run(mut socket: WebSocket, state: ApiState) {
         let Ok(frame) = serde_json::from_str::<Value>(&text) else { break; };
         if frame["kind"] == "ping" {
           let ids = owned.iter().cloned().collect::<Vec<_>>();
-          if state.service.renew_session_subscriptions(&ids).is_err() { break; }
-          let ids = owned_background.iter().cloned().collect::<Vec<_>>();
-          if state.service.renew_background_subscriptions(&ids).is_err() { break; }
-          if send(&mut socket, json!({"kind":"pong"})).await.is_err() { break; }
+          let Ok(renewal) = state.service.renew_session_subscriptions_owned(&ids, Some(&owner)) else { break; };
+          let background_ids = owned_background.iter().cloned().collect::<Vec<_>>();
+          let Ok(background_renewal) = state.service.renew_background_subscriptions_owned(&background_ids, Some(&owner)) else { break; };
+          let mut pong = renewal_frame(renewal, &mut owned);
+          for id in &background_renewal.missing_ids { owned_background.remove(id); }
+          pong["renewed_background_ids"] = json!(background_renewal.renewed_ids);
+          pong["missing_background_ids"] = json!(background_renewal.missing_ids);
+          if send(&mut socket, pong).await.is_err() { break; }
           continue;
         }
         if frame["kind"] != "subscribe" && frame["kind"] != "subscribe_background" { break; }
@@ -138,6 +146,13 @@ async fn run(mut socket: WebSocket, state: ApiState) {
   state.service.release_background_subscriptions(&owner);
 }
 
+fn renewal_frame(renewal: SessionSubscriptionRenewal, owned: &mut HashSet<String>) -> Value {
+  for id in &renewal.missing_ids {
+    owned.remove(id);
+  }
+  json!({"kind":"pong","renewed_ids":renewal.renewed_ids,"missing_ids":renewal.missing_ids})
+}
+
 fn live_frame(event: ViewerEvent, owned: &HashSet<String>, owned_background: &HashSet<String>) -> Option<Value> {
   if event.event == "background-session-updated" {
     if !event.payload["subscription_id"]
@@ -165,6 +180,35 @@ fn live_frame(event: ViewerEvent, owned: &HashSet<String>, owned_background: &Ha
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn renewal_pong_releases_missing_interests_without_dropping_recognized_ones() {
+    let mut owned = HashSet::from(["present".to_owned(), "expired".to_owned(), "reclaimed".to_owned()]);
+    let pong = renewal_frame(
+      SessionSubscriptionRenewal {
+        renewed_ids: vec!["present".into()],
+        missing_ids: vec!["expired".into(), "reclaimed".into()],
+      },
+      &mut owned,
+    );
+    assert_eq!(
+      pong,
+      json!({"kind":"pong","renewed_ids":["present"],"missing_ids":["expired","reclaimed"]})
+    );
+    assert_eq!(owned, HashSet::from(["present".into()]));
+    assert!(
+      live_frame(
+        ViewerEvent {
+          event: "session-updated".into(),
+          payload: json!({"subscription_id":"reclaimed","snapshot":false}),
+        },
+        &owned,
+        &HashSet::new()
+      )
+      .is_none()
+    );
+  }
+
   #[test]
   fn live_delivery_filters_foreign_interests_and_never_pushes_history_snapshots() {
     let owned = HashSet::from(["mine".to_owned()]);
@@ -245,6 +289,15 @@ mod socket_tests {
       .unwrap();
     let ready = socket.next().await.unwrap().unwrap().into_text().unwrap();
     assert_eq!(serde_json::from_str::<Value>(&ready).unwrap()["kind"], "ready");
+    socket
+      .send(WireMessage::Text(json!({"kind":"ping"}).to_string().into()))
+      .await
+      .unwrap();
+    let pong = socket.next().await.unwrap().unwrap().into_text().unwrap();
+    assert_eq!(
+      serde_json::from_str::<Value>(&pong).unwrap(),
+      json!({"kind":"pong","renewed_ids":[],"missing_ids":[],"renewed_background_ids":[],"missing_background_ids":[]})
+    );
     events
       .send(ViewerEvent {
         event: "session-updated".into(),
@@ -302,6 +355,10 @@ mod socket_tests {
       .unwrap();
     let pong: Value = serde_json::from_str(&socket.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
     assert_eq!(pong["kind"], "pong");
+    assert_eq!(pong["renewed_ids"], json!([]));
+    assert_eq!(pong["missing_ids"], json!([]));
+    assert_eq!(pong["renewed_background_ids"], json!(["sidebar"]));
+    assert_eq!(pong["missing_background_ids"], json!([]));
     socket
       .send(WireMessage::Text(
         json!({

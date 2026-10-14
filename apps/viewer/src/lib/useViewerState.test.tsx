@@ -15,6 +15,7 @@ import {
   listenForTransportReconnect,
   listenForSessionUpdates,
   listenForSessionNotifications,
+  listenForSubscriptionLoss,
   loadSessionUpdates,
   inspectSessionEvent,
   loadToolDetails,
@@ -57,6 +58,7 @@ vi.mock("./tauri", () => ({
   renewSessionSubscriptions: vi.fn(() => Promise.resolve()),
   listenForSessionUpdates: vi.fn(() => Promise.resolve(vi.fn())),
   listenForSessionNotifications: vi.fn(() => Promise.resolve(vi.fn())),
+  listenForSubscriptionLoss: vi.fn(() => Promise.resolve(vi.fn())),
   listenForRelayChanges: vi.fn(() => Promise.resolve(vi.fn())),
   acknowledgeSessionAttention: vi.fn(() => Promise.resolve({ changed: false })),
   getSessionIndexProgress: vi.fn(() => new Promise(() => undefined)),
@@ -83,6 +85,8 @@ beforeEach(() => {
   vi.mocked(loadSessionUpdates).mockReset().mockRejectedValue(new Error("Unknown viewer command"));
   vi.mocked(listenForSessionUpdates).mockReset().mockResolvedValue(vi.fn());
   vi.mocked(listenForSessionNotifications).mockReset().mockResolvedValue(vi.fn());
+  vi.mocked(listenForSubscriptionLoss).mockReset().mockResolvedValue(vi.fn());
+  vi.mocked(renewSessionSubscriptions).mockReset().mockImplementation(async (ids) => ({ renewed_ids: ids, missing_ids: [], updates: [] }));
   vi.mocked(updateSessionView).mockReset().mockResolvedValue(undefined);
   vi.mocked(listenForRelayChanges).mockReset().mockResolvedValue(vi.fn());
   vi.mocked(acknowledgeSessionAttention).mockReset().mockResolvedValue({ changed: false });

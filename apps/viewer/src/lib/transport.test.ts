@@ -8,7 +8,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
 const clients: RemoteClient[] = [];
-afterEach(() => { for (const client of clients) client.close(); clients.length = 0; Socket.instances = []; selectMachine(); vi.unstubAllGlobals(); vi.useRealTimers(); });
+afterEach(() => { for (const client of clients) client.close(); clients.length = 0; selectMachine(); LiveSocket.instances = []; vi.unstubAllGlobals(); vi.useRealTimers(); });
 function client() { const result = new RemoteClient("http://machine:5558", "secret"); clients.push(result); return result; }
 function stream() {
   let controller!: ReadableStreamDefaultController<Uint8Array>;
@@ -16,16 +16,16 @@ function stream() {
   return { response: new Response(body), send: (value: string) => controller.enqueue(new TextEncoder().encode(value)), end: () => controller.close() };
 }
 
-class Socket {
-  static instances: Socket[] = [];
+class LiveSocket {
+  static instances: LiveSocket[] = [];
   onopen?: () => void;
   onmessage?: (event: { data: string }) => void;
   onclose?: () => void;
-  onerror?: () => void;
   sent: Record<string, unknown>[] = [];
-  constructor() { Socket.instances.push(this); }
+  constructor() { LiveSocket.instances.push(this); }
   send(value: string) {
     const frame = JSON.parse(value); this.sent.push(frame);
+    if (frame.kind === "subscribe") queueMicrotask(() => this.frame({ kind: "ack", request_id: frame.request_id, result: {} }));
     if (frame.kind === "subscribe_background") queueMicrotask(() => this.frame({ kind: "ack", request_id: frame.request_id,
       result: { subscription_id: frame.request.subscription_id, generation: "compact-generation", revision: "0", scope: frame.request.scope, subscribed: !frame.request.unsubscribe } }));
   }
@@ -33,6 +33,7 @@ class Socket {
   open() { this.onopen?.(); this.frame({ kind: "ready" }); }
   close() { this.onclose?.(); }
 }
+
 const background: BackgroundUpdatesRequest = { subscription_id: "compact", scope: "sidebar", session_keys: ["one"] };
 
 describe("remote viewer transport", () => {
@@ -143,6 +144,91 @@ describe("remote viewer transport", () => {
     await expect(captured.invoke("load_event_page", {})).rejects.toThrow("Machine disconnected");
     expect(fetcher).toHaveBeenCalledOnce();
   });
+  it("returns verified WebSocket lease acknowledgements and exposes live loss even while the SSE stream remains connected", async () => {
+    vi.useFakeTimers(); vi.stubGlobal("WebSocket", LiveSocket);
+    const feed = stream();
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json({ version: 1, live_updates: true })).mockResolvedValueOnce(feed.response);
+    vi.stubGlobal("fetch", fetcher);
+    const remote = await RemoteClient.connect("http://machine:5558", "secret"); clients.push(remote);
+    const lost = vi.fn(), restored = vi.fn(), relay = vi.fn();
+    const listening = remote.listen("session-subscriptions-lost", lost);
+    feed.send("event: ready\ndata: {}\n\n");
+    const stop = await listening;
+    const stopRestored = await remote.listen("transport-reconnected", restored);
+    const stopRelay = await remote.listen("relay-changed", relay);
+    const request = { session_key: "one", subscription_id: "subscription", level: "steps", cursor: null, detail_keys: [] };
+    const subscribing = remote.invoke("subscribe_session", { request });
+    const socket = LiveSocket.instances[0]; socket.open(); await subscribing;
+
+    const renewing = remote.invoke("renew_session_subscriptions", { ids: [request.subscription_id] });
+    expect(socket.sent[socket.sent.length - 1]).toEqual({ kind: "ping" });
+    socket.frame({ kind: "pong", renewed_ids: [request.subscription_id], missing_ids: [] });
+    expect(await renewing).toEqual({ renewed_ids: [request.subscription_id], missing_ids: [] });
+    expect(lost).not.toHaveBeenCalled();
+    expect(restored).not.toHaveBeenCalled();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+
+    const expired = remote.invoke("renew_session_subscriptions", { ids: [request.subscription_id] });
+    socket.frame({ kind: "pong", renewed_ids: [], missing_ids: [request.subscription_id] });
+    expect(await expired).toEqual({ renewed_ids: [], missing_ids: [request.subscription_id] });
+    expect(lost).toHaveBeenCalledWith({ payload: { subscription_ids: [request.subscription_id] } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(restored).toHaveBeenCalledWith({ payload: { subscription_ids: [request.subscription_id] } });
+    expect(relay).not.toHaveBeenCalled();
+    lost.mockClear(); socket.close();
+    expect(lost).toHaveBeenCalledWith({ payload: { subscription_ids: [request.subscription_id] } });
+    await expect(remote.invoke("renew_session_subscriptions", { ids: [request.subscription_id] })).rejects.toThrow("Live connection interrupted");
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    stop(); stopRestored(); stopRelay(); remote.close(); feed.end();
+  });
+  it.each([
+    ["load_session_backward", false], ["load_session_details", false],
+    ["load_session_backward", true], ["load_session_details", true],
+  ])("does not let a late %s response revive or overwrite a registration after release (successor=%s)", async (command, successor) => {
+    vi.useFakeTimers(); vi.stubGlobal("WebSocket", LiveSocket);
+    let finishRead!: (response: Response) => void;
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json({ version: 1, live_updates: true }))
+      .mockReturnValueOnce(new Promise<Response>((resolve) => { finishRead = resolve; }));
+    vi.stubGlobal("fetch", fetcher);
+    const remote = await RemoteClient.connect("http://machine:5558", "secret"); clients.push(remote);
+    const request = { session_key: "one", subscription_id: "subscription", level: "steps", cursor: null, detail_keys: [],
+      scope: { history: "latest_turn", group_keys: [] } };
+    const subscribing = remote.invoke("subscribe_session", { request });
+    const socket = LiveSocket.instances[0]; socket.open(); await subscribing;
+    const oldRead = { ...request, scope: { ...request.scope, group_keys: ["old-group"] } };
+    const payload = command === "load_session_details" ? { request: { kind: "group", request: oldRead } } : { request: oldRead };
+    const reading = remote.invoke(command, payload);
+    await remote.invoke("subscribe_session", { request: { ...request, unsubscribe: true } });
+    const nextRequest = { ...request, session_key: "two", scope: { ...request.scope, group_keys: ["new-group"] } };
+    if (successor) await remote.invoke("subscribe_session", { request: nextRequest });
+    finishRead(Response.json({ revision: "late" }));
+    expect(await reading).toEqual({ revision: "late" });
+
+    const renewing = remote.invoke("renew_session_subscriptions", { ids: [request.subscription_id] });
+    socket.frame({ kind: "pong", renewed_ids: [request.subscription_id], missing_ids: [] });
+    expect(await renewing).toEqual(successor
+      ? { renewed_ids: [request.subscription_id], missing_ids: [] }
+      : { renewed_ids: [], missing_ids: [request.subscription_id] });
+    socket.close(); await vi.advanceTimersByTimeAsync(1000);
+    const next = LiveSocket.instances[1]; next.open(); await vi.advanceTimersByTimeAsync(0);
+    expect(next.sent.filter((frame) => frame.kind === "subscribe").map((frame) => frame.request)).toEqual(successor ? [nextRequest] : []);
+    remote.close();
+  });
+  it("keeps successful backward-read coverage on its active registration for reconnect", async () => {
+    vi.useFakeTimers(); vi.stubGlobal("WebSocket", LiveSocket);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(Response.json({ version: 1, live_updates: true }))
+      .mockResolvedValueOnce(Response.json({ revision: "2" })));
+    const remote = await RemoteClient.connect("http://machine:5558", "secret"); clients.push(remote);
+    const request = { session_key: "one", subscription_id: "subscription", level: "steps", cursor: null, detail_keys: [] };
+    const subscribing = remote.invoke("subscribe_session", { request });
+    const socket = LiveSocket.instances[0]; socket.open(); await subscribing;
+    const coverage = { ...request, scope: { history: "retained", group_keys: ["activity:one"] }, history_cursor: "older" };
+    await remote.invoke("load_session_backward", { request: coverage });
+    socket.close(); await vi.advanceTimersByTimeAsync(1000);
+    const next = LiveSocket.instances[1]; next.open(); await vi.advanceTimersByTimeAsync(0);
+    expect(next.sent.filter((frame) => frame.kind === "subscribe").map((frame) => frame.request)).toEqual([{ ...coverage, history_cursor: undefined }]);
+    remote.close();
+  });
   it("shares one stream, waits for readiness, and refreshes after reconnect", async () => {
     vi.useFakeTimers();
     const first = stream(); const second = stream();
@@ -172,25 +258,27 @@ describe("remote viewer transport", () => {
     const feed = stream();
     const fetcher = vi.fn((url: string) => Promise.resolve(url.endsWith("/health")
       ? Response.json({ version: 1, live_updates: true }) : feed.response));
-    vi.stubGlobal("fetch", fetcher); vi.stubGlobal("WebSocket", Socket);
+    vi.stubGlobal("fetch", fetcher); vi.stubGlobal("WebSocket", LiveSocket);
     const remote = await RemoteClient.connect("http://machine:5558", "secret"); clients.push(remote);
     const changed = vi.fn();
     const listening = remote.listen("background-session-updated", changed);
     feed.send("event: ready\ndata: {}\n\n");
-    await vi.waitFor(() => expect(Socket.instances).toHaveLength(1));
-    const socket = Socket.instances[0]; socket.open();
+    await vi.waitFor(() => expect(LiveSocket.instances).toHaveLength(1));
+    const socket = LiveSocket.instances[0]; socket.open();
     const stop = await listening;
     expect(fetcher.mock.calls[1][0]).toBe("http://machine:5558/api/v1/events?session_updates=false&background_updates=false");
     expect(await remote.invoke("subscribe_background_updates", { request: background })).toEqual({
       subscription_id: "compact", generation: "compact-generation", revision: "0", scope: "sidebar", subscribed: true,
     });
     expect(socket.sent[1]).toMatchObject({ kind: "subscribe_background", request: background });
-    await remote.invoke("renew_background_subscriptions", { ids: ["compact"] });
+    const renewing = remote.invoke("renew_background_subscriptions", { ids: ["compact"] });
+    socket.frame({ kind: "pong", renewed_ids: [], missing_ids: [], renewed_background_ids: ["compact"], missing_background_ids: [] });
+    await renewing;
     const payload = { subscription_id: "compact", session_key: "one", latest_assistant_message: { preview: "Reply" } };
     socket.frame({ kind: "event", event: "background-session-updated", payload });
     expect(changed).toHaveBeenCalledWith({ payload });
     await remote.release("subscribe_background_updates", { request: { ...background, unsubscribe: true } });
-    expect(socket.sent[2]).toMatchObject({ kind: "subscribe_background", request: { ...background, unsubscribe: true } });
+    expect(socket.sent[3]).toMatchObject({ kind: "subscribe_background", request: { ...background, unsubscribe: true } });
     socket.close();
     await remote.release("subscribe_background_updates", { request: { ...background, unsubscribe: true } });
     expect(fetcher).toHaveBeenCalledTimes(2);
