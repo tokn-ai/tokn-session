@@ -83,8 +83,20 @@ allowlist. Read-only shares retain their authorized legacy commands and scoped
 fixed-cadence invalidations. No share gains access to host-wide live streams.
 
 Subscriptions expire after 90 seconds and are bounded to 24 entries/64 MiB.
+Renewal acknowledges `renewed_ids` and `missing_ids` without loading bodies;
+expired interests cannot be revived by renewal. Desktop, HTTP, and WebSocket
+clients recover missing identities through registration and a backward baseline.
+WebSocket pongs acknowledge only the connection's still-owned interests.
+All retained frontend interests renew independently of the selected conversation.
+Lost, expired, and source-error leases relinquish sidebar running ownership while
+keeping cached cards available. Focus/resume checks leases; targeted recovery
+leaves healthy sessions alone. Backward responses recheck their captured source
+generation at application, and retired or unseen cross-generation pushes require
+a fresh baseline before replacing authoritative state.
 Frontend display replicas retain eight recent sessions with a 64 MiB target,
-protecting the selected session. Session activity does not promote its LRU
+protecting the selected session. Eviction releases every active delivery level;
+late HTTP reads and subscription acknowledgements cannot restore released socket
+ownership. Session activity does not promote its LRU
 position. Each level has independent revision coverage; receiving final events
 does not advance steps coverage. Source events at `all` remain separate from
 folded display objects. Native inspection is independently opt-in.

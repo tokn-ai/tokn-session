@@ -17,6 +17,9 @@ import type {
   SessionIndexProgress,
   SessionInputStatus,
   SessionInputStatusRequest,
+  SessionSubscriptionLoss,
+  SessionSubscriptionRenewal,
+  SessionSubscriptionRenewalResult,
   SubmitSessionInputRequest,
   SubmitSessionInputResponse,
   TrajectoryEventPageResponse,
@@ -71,8 +74,8 @@ export function listenForRelayChanges(handler: (change: RelayChange) => void, su
 }
 
 /** Browser SSE reconnects require fresh state snapshots; desktop events stay live. */
-export function listenForTransportReconnect(handler: () => void, subscribe: EventSubscriber = listen): Promise<UnlistenFn> {
-  return subscribe("transport-reconnected", handler);
+export function listenForTransportReconnect(handler: (scope?: Partial<SessionSubscriptionLoss>) => void, subscribe: EventSubscriber = listen): Promise<UnlistenFn> {
+  return subscribe<Partial<SessionSubscriptionLoss>>("transport-reconnected", (event) => handler(event.payload));
 }
 
 export function listSessions(request: ListSessionsRequest, send: CommandInvoker = invoke): Promise<ListSessionsResponse> {
@@ -201,18 +204,29 @@ export async function inspectSessionEvent(request: LoadEventDetailRequest, send:
   try { return await send("inspect_session_event", { request }); }
   catch (error) { if (!unknownDelivery(error)) throw error; return loadEventDetail(request, send); }
 }
-export async function renewSessionSubscriptions(ids: string[], send: CommandInvoker = invoke): Promise<import("./types").SessionUpdate[]> {
-  try { await send("renew_session_subscriptions", { ids }); return []; }
+export async function renewSessionSubscriptions(ids: string[], send: CommandInvoker = invoke): Promise<SessionSubscriptionRenewalResult> {
+  try {
+    const result = await send<SessionSubscriptionRenewal | null | undefined>("renew_session_subscriptions", { ids });
+    // Older modern hosts return no acknowledgement. Local lease expiry still
+    // forces a baseline after a long pause instead of trusting this fallback.
+    return { renewed_ids: result?.renewed_ids ?? ids, missing_ids: result?.missing_ids ?? [], updates: [] };
+  }
   catch (error) {
     if (!unknownDelivery(error)) throw error;
     const subscriptions = legacySubscriptionsFor(send);
-    return Promise.all(ids.filter((id) => subscriptions.has(id)).map(async (id) => {
+    const known = ids.filter((id) => subscriptions.has(id));
+    const updates = await Promise.all(known.map(async (id) => {
       const update = await send<import("./types").SessionUpdate>("load_session_updates", { request: subscriptions.get(id)! });
       const request = subscriptions.get(id);
       if (request) subscriptions.set(id, { ...request, cursor: update.revision });
       return update;
     }));
+    return { renewed_ids: known, missing_ids: ids.filter((id) => !subscriptions.has(id)), updates };
   }
+}
+
+export function listenForSubscriptionLoss(handler: (loss: SessionSubscriptionLoss) => void, subscribe: EventSubscriber = listen): Promise<UnlistenFn> {
+  return subscribe<SessionSubscriptionLoss>("session-subscriptions-lost", (event) => handler(event.payload));
 }
 
 export function listenForSessionUpdates(handler: (update: import("./types").SessionUpdate) => void, subscribe: EventSubscriber = listen): Promise<UnlistenFn> {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionDisplayCache } from "./sessionDisplayCache";
 import type { EventSummary, SessionUpdate } from "./types";
 
@@ -13,6 +13,189 @@ function snapshot(cache: SessionDisplayCache, key: string, ids = ["a"]): Session
 }
 
 describe("session display replicas", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it.each([false, true])("suspends running=%s ownership until an acknowledged healthy baseline", (is_running) => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one");
+    initial.state = { ...initial.state, is_running, source_revision: "source:1" };
+    cache.apply(initial);
+    cache.suspendLive([initial.subscription_id]);
+    expect(cache.get("one")).not.toBeNull();
+    expect(cache.liveRunning("one")).toBeUndefined();
+    cache.apply({ ...initial, revision: "2", state: { ...initial.state, is_running: !is_running, source_revision: "source:2" } });
+    cache.acknowledgeRenewal([initial.subscription_id]);
+    expect(cache.liveRunning("one")).toBeUndefined();
+    expect(cache.needsBaseline([initial.subscription_id])).toBe(true);
+    cache.apply({ ...initial, revision: "3", state: { ...initial.state, source_revision: "source:3" } }, true);
+    expect(cache.liveRunning("one")).toBe(is_running);
+    expect(cache.needsBaseline([initial.subscription_id])).toBe(false);
+  });
+
+  it("keeps existing request identities and requires an accepted snapshot before ownership", () => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one");
+    initial.state.is_running = true;
+    expect(cache.requests([initial.subscription_id])).toEqual([cache.request("one")]);
+    expect(cache.liveRecoveryRequests()).toEqual([cache.request("one")]);
+    expect(cache.liveRunning("one")).toBeUndefined();
+    cache.apply({ ...initial, snapshot: false, base_revision: "1", revision: "2" });
+    expect(cache.liveRunning("one")).toBeUndefined();
+    cache.apply(initial);
+    expect(cache.liveRunning("one")).toBe(true);
+  });
+
+  it.each([false, true])("expires running=%s ownership without counting live frames as lease renewals", (is_running) => {
+    vi.useFakeTimers(); vi.setSystemTime(0);
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one");
+    initial.state = { ...initial.state, is_running, source_revision: "source:1" };
+    cache.apply(initial);
+    vi.setSystemTime(80_000);
+    cache.apply({ ...initial, snapshot: false, base_revision: "1", revision: "2", state: { ...initial.state, source_revision: "source:2" } });
+    expect(cache.liveRunning("one")).toBe(is_running);
+    vi.setSystemTime(90_001);
+    expect(cache.liveRunning("one")).toBeUndefined();
+    cache.acknowledgeRenewal([initial.subscription_id]);
+    expect(cache.liveRunning("one")).toBeUndefined();
+    expect(cache.liveRecoveryRequests().map((request) => request.subscription_id)).toEqual([initial.subscription_id]);
+    expect(cache.get("one")).not.toBeNull();
+    cache.apply({ ...initial, revision: "3", state: { ...initial.state, source_revision: "source:3" } }, true);
+    expect(cache.liveRunning("one")).toBe(is_running);
+  });
+
+  it("extends a healthy lease only after a verified renewal", () => {
+    vi.useFakeTimers(); vi.setSystemTime(0);
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one"); initial.state.is_running = true;
+    cache.apply(initial);
+    vi.setSystemTime(80_000);
+    cache.acknowledgeRenewal([initial.subscription_id]);
+    vi.setSystemTime(100_000);
+    expect(cache.liveRunning("one")).toBe(true);
+    vi.setSystemTime(170_001);
+    expect(cache.liveRunning("one")).toBeUndefined();
+  });
+
+  it("recovers an identical acknowledged snapshot but rejects older source baselines", () => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one");
+    initial.state = { ...initial.state, is_running: false, source_revision: "source:10" };
+    cache.apply(initial);
+    cache.suspendLive();
+    const older = { ...initial, state: { ...initial.state, is_running: true, source_revision: "source:9" } };
+    expect(cache.acceptsSnapshot(older, "source")).toBe(false);
+    expect(cache.apply(older, true)).toBeNull();
+    expect(cache.liveRunning("one")).toBeUndefined();
+    cache.apply(initial, true);
+    expect(cache.liveRunning("one")).toBe(false);
+  });
+
+  it("does not retire the accepted source when a suspended subscription receives a late unknown generation", () => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one");
+    initial.state = { ...initial.state, is_running: true, source_revision: "current:10" };
+    cache.apply(initial);
+    cache.suspendLive();
+    cache.apply({ ...initial, generation: "late", state: { ...initial.state, is_running: false, source_revision: "unseen-old:99" } });
+    expect(cache.sourceGeneration("one")).toBe("current");
+    expect(cache.liveRunning("one")).toBeUndefined();
+    cache.apply(initial, true);
+    expect(cache.sourceGeneration("one")).toBe("current");
+    expect(cache.liveRunning("one")).toBe(true);
+  });
+
+  it.each([false, true])("recovers rather than accepting an unseen queued source while current running=%s", (is_running) => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one");
+    initial.state = { ...initial.state, is_running, source_revision: "current:10" };
+    const previous = cache.apply(initial);
+    const queued = { ...initial, generation: "queued", state: { ...initial.state, is_running: !is_running, source_revision: "unseen-old:99" } };
+    expect(cache.apply(queued)).toBeNull();
+    expect(cache.get("one")).toBe(previous);
+    expect(cache.sourceGeneration("one")).toBe("current");
+    expect(cache.liveRunning("one")).toBeUndefined();
+    expect(cache.needsBaseline([initial.subscription_id])).toBe(true);
+    cache.apply(initial, true);
+    expect(cache.liveRunning("one")).toBe(is_running);
+  });
+
+  it.each([false, true])("relinquishes running=%s ownership on source errors across delivery levels", (is_running) => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one"); initial.state.is_running = is_running;
+    cache.apply(initial);
+    const final = cache.request("one", "final");
+    cache.apply({ ...initial, ...final });
+    cache.apply({ ...initial, revision: "2", state: { ...initial.state, error: "Source history is unavailable" } });
+    expect(cache.liveRunning("one")).toBeUndefined();
+    cache.acknowledgeRenewal(cache.subscriptionIds());
+    expect(cache.liveRunning("one")).toBeUndefined();
+    expect(cache.liveRecoveryRequests()).toHaveLength(2);
+    cache.apply({ ...initial, revision: "3" }, true);
+    expect(cache.liveRunning("one")).toBe(is_running);
+  });
+
+  it("does not establish an initial live baseline from an error or follow failure", () => {
+    for (const failure of [{ error: "Unavailable history" }, { follow_error: "Interrupted source follow" }]) {
+      const cache = new SessionDisplayCache();
+      const initial = snapshot(cache, "one"); initial.state.is_running = true;
+      cache.apply({ ...initial, state: { ...initial.state, ...failure } });
+      expect(cache.liveRunning("one")).toBeUndefined();
+      cache.apply({ ...initial, revision: "2" });
+      expect(cache.liveRunning("one")).toBeUndefined();
+      cache.apply({ ...initial, revision: "3" }, true);
+      expect(cache.liveRunning("one")).toBe(true);
+    }
+  });
+
+  it.each([false, true])("fences retired source generations across levels when current running=%s", (is_running) => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one");
+    initial.state = { ...initial.state, is_running: !is_running, source_revision: "old:10" };
+    cache.apply(initial);
+    cache.apply({ ...initial, generation: "replacement", revision: "1", state: { ...initial.state, is_running, source_revision: "new:1" } }, true);
+    const final = cache.request("one", "final");
+    const delayed = { ...initial, ...final, state: { ...initial.state, source_revision: "old:99" } };
+    expect(cache.stale(delayed)).toBe(true);
+    expect(cache.acceptsSnapshot(delayed, "new")).toBe(false);
+    expect(cache.apply(delayed)).toBeNull();
+    expect(cache.sourceGeneration("one")).toBe("new");
+    expect(cache.liveRunning("one")).toBe(is_running);
+    cache.invalidate("one");
+    expect(cache.stale(delayed)).toBe(true);
+  });
+
+  it("fences unseen late request generations and leaves source generation unchanged by details", () => {
+    const cache = new SessionDisplayCache();
+    const started = cache.sourceGeneration("one");
+    const initial = snapshot(cache, "one");
+    cache.apply({ ...initial, state: { ...initial.state, is_running: true, source_revision: "new:1" } });
+    const final = cache.request("one", "final");
+    const delayed = { ...initial, ...final, state: { ...initial.state, is_running: false, source_revision: "unseen-old:99" } };
+    expect(cache.acceptsSnapshot(delayed, started)).toBe(false);
+    expect(cache.acceptsSnapshot({ ...delayed, state: { ...delayed.state, source_revision: "new:1" } }, started)).toBe(true);
+    const details = cache.request("one", "details");
+    cache.apply({ ...initial, ...details, state: { ...initial.state, source_revision: "details:20", is_running: false } });
+    expect(cache.sourceGeneration("one")).toBe("new");
+    expect(cache.liveRunning("one")).toBe(true);
+  });
+
+  it("clears orphan running, pending updates, and resource payloads after a gap and invalidation", () => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one"); initial.state.is_running = true;
+    cache.apply(initial);
+    cache.resources.set("one", "group", "group", { status: "complete" });
+    cache.apply({ ...initial, snapshot: false, base_revision: "missing", revision: "3" });
+    expect(cache.liveRunning("one")).toBeUndefined();
+    expect(cache.resources.coverage("one", "group", "group").status).toBe("stale");
+    cache.apply({ ...initial, snapshot: false, base_revision: "1", revision: "2", items: [{ ...initial.items[0], summary: summary("a", "stale pending") }] });
+    cache.invalidate("one");
+    expect(cache.resources.coverage("one", "group", "group").status).toBe("missing");
+    const page = cache.apply({ ...initial, state: { ...initial.state, is_running: undefined } }, true)!;
+    expect(page.events[0].summary).toBe("a");
+    expect(cache.liveRunning("one")).toBeUndefined();
+  });
+
   it("orders running state by source revision across delivery levels and releases ownership", () => {
     const cache = new SessionDisplayCache();
     const initial = snapshot(cache, "one");
@@ -83,7 +266,7 @@ describe("session display replicas", () => {
     cache.release("one", "all");
     expect(cache.assistantPreview("one")).toBe("Checking schema.");
     cache.apply({ ...initial, ...final, generation: "replacement", revision: "1", items: [], item_order: [],
-      state: { ...initial.state, source_revision: "replacement:1" } });
+      state: { ...initial.state, source_revision: "replacement:1" } }, true);
     expect(cache.assistantPreview("one")).toBeNull();
     cache.invalidate("one");
     expect(cache.assistantPreview("one")).toBeNull();
@@ -159,6 +342,31 @@ describe("session display replicas", () => {
     const old = snapshot(cache, "session-0"); cache.apply({ ...old, revision: "2" });
     cache.apply(snapshot(cache, "new"));
     expect(cache.get("selected")).not.toBeNull(); expect(cache.get("session-0")).toBeNull(); expect(cache.get("new")).not.toBeNull();
+  });
+
+  it("queues every evicted active level once with its original identity and scope", () => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "old");
+    cache.apply(initial);
+    cache.includeHistory("old"); cache.includeGroup("old", "group-old");
+    const steps = cache.request("old", "steps"), final = cache.request("old", "final"), details = cache.request("old", "details");
+    cache.apply({ ...initial, ...steps });
+    cache.apply({ ...initial, ...final });
+    // A pending interest has no replica yet and still needs remote release.
+    cache.apply({ ...initial, ...details, snapshot: false, base_revision: "1", revision: "2" });
+    const expected = cache.requests().map((request) => ({ ...request, unsubscribe: true }));
+    cache.select("retained");
+    cache.apply(snapshot(cache, "retained"));
+    for (let index = 0; index < 7; index++) cache.apply(snapshot(cache, `next-${index}`));
+    const retained = cache.subscriptionIds();
+    expect(cache.get("old")).toBeNull();
+    expect(cache.takeEvictedSubscriptions()).toEqual(expected);
+    expect(cache.takeEvictedSubscriptions()).toEqual([]);
+    expect(cache.subscriptionIds()).toEqual(retained);
+    expect(retained.some((id) => expected.some((request) => request.subscription_id === id))).toBe(false);
+    cache.invalidate("retained");
+    expect(cache.takeEvictedSubscriptions()).toEqual([]);
+    expect(cache.subscriptionIds()).toEqual(retained);
   });
 
   it("can drop a subscription while retaining display content", () => {

@@ -48,6 +48,14 @@ pub struct SessionUpdatesRequest {
   pub unsubscribe: bool,
 }
 
+/// Identity-only acknowledgement. Missing leases require registration and a
+/// fresh baseline before the client can rely on live source updates again.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct SessionSubscriptionRenewal {
+  pub renewed_ids: Vec<String>,
+  pub missing_ids: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct SessionUpdate {
   pub subscription_id: String,
@@ -124,6 +132,12 @@ fn weight(value: &Value) -> usize {
 }
 
 impl UpdateStore {
+  fn expire_leases(&mut self, now: Instant) {
+    self
+      .subscriptions
+      .retain(|_, subscription| now.saturating_duration_since(subscription.accessed) < LEASE);
+  }
+
   fn enforce_budget(&mut self) {
     while self
       .subscriptions
@@ -433,7 +447,7 @@ impl ViewerService {
       }
       return Ok(json!({"subscription_id":request.subscription_id,"unsubscribed":true}));
     }
-    store.subscriptions.retain(|_, value| value.accessed.elapsed() < LEASE);
+    store.expire_leases(Instant::now());
     if !store.subscriptions.contains_key(&request.subscription_id) && store.subscriptions.len() >= MAX_SUBSCRIPTIONS {
       return Err("Too many session subscriptions".into());
     }
@@ -470,14 +484,36 @@ impl ViewerService {
     Ok(json!({"subscription_id":id,"generation":subscription.generation,"revision":subscription.revision.to_string()}))
   }
 
-  pub fn renew_session_subscriptions(&self, ids: &[String]) -> Result<(), String> {
+  pub fn renew_session_subscriptions(&self, ids: &[String]) -> Result<SessionSubscriptionRenewal, String> {
+    self.renew_session_subscriptions_owned(ids, None)
+  }
+
+  /// Connection renewals only extend leases still owned by that connection.
+  /// A previous owner cannot revive or prolong a reclaimed subscription.
+  pub fn renew_session_subscriptions_owned(
+    &self,
+    ids: &[String],
+    owner: Option<&str>,
+  ) -> Result<SessionSubscriptionRenewal, String> {
     let mut store = self.updates.lock().map_err(|_| "Update store lock poisoned")?;
+    let now = Instant::now();
+    store.expire_leases(now);
+    let mut renewal = SessionSubscriptionRenewal::default();
+    let mut seen = std::collections::HashSet::new();
     for id in ids {
-      if let Some(subscription) = store.subscriptions.get_mut(id) {
-        subscription.accessed = Instant::now();
+      if !seen.insert(id) {
+        continue;
+      }
+      if let Some(subscription) = store.subscriptions.get_mut(id)
+        && owner.is_none_or(|owner| subscription.owner.as_deref() == Some(owner))
+      {
+        subscription.accessed = now;
+        renewal.renewed_ids.push(id.clone());
+      } else {
+        renewal.missing_ids.push(id.clone());
       }
     }
-    Ok(())
+    Ok(renewal)
   }
 
   pub fn release_session_subscriptions(&self, owner: &str) {
@@ -551,7 +587,7 @@ impl ViewerService {
     // Serialize registration and publication: no source update can fall into
     // the gap between producing the initial snapshot and registering interest.
     let mut store = self.updates.lock().map_err(|_| "Update store lock poisoned")?;
-    store.subscriptions.retain(|_, value| value.accessed.elapsed() < LEASE);
+    store.expire_leases(Instant::now());
     if !store.subscriptions.contains_key(&request.subscription_id) && store.subscriptions.len() >= MAX_SUBSCRIPTIONS {
       let oldest = store
         .subscriptions
@@ -607,7 +643,7 @@ impl ViewerService {
     let Ok(mut store) = self.updates.lock() else {
       return Vec::new();
     };
-    store.subscriptions.retain(|_, value| value.accessed.elapsed() < LEASE);
+    store.expire_leases(Instant::now());
     let mut result = Vec::new();
     let all_sessions: std::collections::HashSet<_> = store
       .subscriptions
@@ -715,6 +751,100 @@ mod tests {
 
   fn page(events: Vec<Value>, questions: Vec<Value>) -> Value {
     json!({"events":events,"total_events":0,"outstanding_questions":questions,"previous_cursor":null,"next_cursor":null,"history_status":"complete","attention_revision":null,"is_running":false})
+  }
+
+  #[test]
+  fn renewal_acknowledges_present_and_missing_ids_without_reading_source_history() {
+    let root = tempfile::tempdir().unwrap();
+    let service = ViewerService::native(root.path().join("index.sqlite")).unwrap();
+    let mut active = subscription(UpdateLevel::Steps);
+    // This identity cannot load a body. Renewal still succeeds because it
+    // inspects only the existing lease, preserving its accepted projection.
+    active.request.session_key = "unresolvable-body-identity".into();
+    active.revision = 42;
+    active.state = json!({"is_running":true});
+    active.accessed = Instant::now() - LEASE / 2;
+    let previous_access = active.accessed;
+    service
+      .updates
+      .lock()
+      .unwrap()
+      .subscriptions
+      .insert("view".into(), active);
+
+    let renewal = service
+      .renew_session_subscriptions(&["view".into(), "missing".into(), "view".into(), "missing".into()])
+      .unwrap();
+    assert_eq!(
+      serde_json::to_value(renewal).unwrap(),
+      json!({"renewed_ids":["view"],"missing_ids":["missing"]})
+    );
+    let store = service.updates.lock().unwrap();
+    let renewed = &store.subscriptions["view"];
+    assert!(renewed.accessed > previous_access);
+    assert_eq!(renewed.revision, 42);
+    assert_eq!(renewed.generation, "initial");
+    assert_eq!(renewed.state, json!({"is_running":true}));
+    assert_eq!(store.subscriptions.len(), 1);
+  }
+
+  #[test]
+  fn renewal_expires_leases_before_lookup_and_never_resurrects_them() {
+    let root = tempfile::tempdir().unwrap();
+    let service = ViewerService::native(root.path().join("index.sqlite")).unwrap();
+    let mut expired = subscription(UpdateLevel::Steps);
+    expired.accessed = Instant::now() - LEASE;
+    let mut other_expired = subscription(UpdateLevel::Steps);
+    other_expired.accessed = expired.accessed;
+    service
+      .updates
+      .lock()
+      .unwrap()
+      .subscriptions
+      .extend([("expired".into(), expired), ("unrequested".into(), other_expired)]);
+
+    let renewal = service.renew_session_subscriptions(&["expired".into()]).unwrap();
+    assert_eq!(renewal.renewed_ids, Vec::<String>::new());
+    assert_eq!(renewal.missing_ids, ["expired"]);
+    assert!(service.updates.lock().unwrap().subscriptions.is_empty());
+    assert_eq!(
+      service.renew_session_subscriptions(&["expired".into()]).unwrap(),
+      renewal
+    );
+  }
+
+  #[test]
+  fn connection_renewal_cannot_prolong_or_release_another_owners_reclaimed_lease() {
+    let root = tempfile::tempdir().unwrap();
+    let service = ViewerService::native(root.path().join("index.sqlite")).unwrap();
+    let mut reclaimed = subscription(UpdateLevel::Steps);
+    reclaimed.owner = Some("new-connection".into());
+    reclaimed.accessed = Instant::now() - LEASE / 2;
+    let previous_access = reclaimed.accessed;
+    service
+      .updates
+      .lock()
+      .unwrap()
+      .subscriptions
+      .insert("view".into(), reclaimed);
+
+    let old = service
+      .renew_session_subscriptions_owned(&["view".into()], Some("old-connection"))
+      .unwrap();
+    assert!(old.renewed_ids.is_empty());
+    assert_eq!(old.missing_ids, ["view"]);
+    service.release_session_subscriptions("old-connection");
+    assert_eq!(
+      service.updates.lock().unwrap().subscriptions["view"].accessed,
+      previous_access
+    );
+
+    let current = service
+      .renew_session_subscriptions_owned(&["view".into()], Some("new-connection"))
+      .unwrap();
+    assert_eq!(current.renewed_ids, ["view"]);
+    assert!(current.missing_ids.is_empty());
+    assert_eq!(service.renew_session_subscriptions(&["view".into()]).unwrap(), current);
   }
 
   #[test]

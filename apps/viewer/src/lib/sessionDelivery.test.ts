@@ -32,7 +32,7 @@ it("keeps tool display and source inspection requests distinct", async () => {
 it("unsubscribes and renews without fetching any display data", async () => {
   vi.mocked(invoke).mockResolvedValue(null);
   await loadSessionUpdates({ ...request, unsubscribe: true });
-  expect(await renewSessionSubscriptions([request.subscription_id])).toEqual([]);
+  expect(await renewSessionSubscriptions([request.subscription_id])).toEqual({ renewed_ids: [request.subscription_id], missing_ids: [], updates: [] });
   expect(vi.mocked(invoke).mock.calls.map(([command]) => command)).toEqual(["subscribe_session", "renew_session_subscriptions"]);
 });
 it("renews legacy leases with their revision and returns recovery changes", async () => {
@@ -41,8 +41,16 @@ it("renews legacy leases with their revision and returns recovery changes", asyn
   await loadSessionUpdates(legacy);
   vi.mocked(invoke).mockRejectedValueOnce(new Error("Unknown viewer API route")).mockResolvedValueOnce({ ...update, subscription_id: "legacy", revision: "2" });
   const changes = await renewSessionSubscriptions(["legacy"]);
-  expect(changes[0].revision).toBe("2");
+  expect(changes.updates[0].revision).toBe("2");
   expect(invoke).toHaveBeenLastCalledWith("load_session_updates", { request: { ...legacy, cursor: "1" } });
+});
+
+it("reports expired modern interests without fetching history during renewal", async () => {
+  vi.mocked(invoke).mockResolvedValue({ renewed_ids: ["live"], missing_ids: ["expired"] });
+  expect(await renewSessionSubscriptions(["live", "expired"])).toEqual({
+    renewed_ids: ["live"], missing_ids: ["expired"], updates: [],
+  });
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("renew_session_subscriptions", { ids: ["live", "expired"] });
 });
 
 function machineInvoker() {

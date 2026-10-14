@@ -127,6 +127,6 @@ pub async fn renew_session_subscriptions(
   app: AppHandle,
   state: State<'_, LocalViewer>,
   ids: Vec<String>,
-) -> Result<(), String> {
+) -> Result<tokn_viewer_core::updates::SessionSubscriptionRenewal, String> {
   state.service(&app).await?.renew_session_subscriptions(&ids)
 }

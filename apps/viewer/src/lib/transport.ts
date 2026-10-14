@@ -54,7 +54,8 @@ export class RemoteClient {
       // Existing Hub and paired HTTP tunnels cannot upgrade an upstream WebSocket.
       if (health.live_updates && !/\/(?:hosts|paired)\//.test(url.pathname)) client.live = new LiveSessionSocket(client.endpoint, token, (event, payload) => {
         client.emit(event, payload);
-        if (event === "transport-reconnected") client.emit("relay-changed", { session_key: null, reset: true });
+        const targeted = payload && typeof payload === "object" && "subscription_ids" in payload;
+        if (event === "transport-reconnected" && !targeted) client.emit("relay-changed", { session_key: null, reset: true });
       });
       return client;
     } catch (error) { client.close(); throw error; }
@@ -87,13 +88,15 @@ export class RemoteClient {
   }
   invoke<T>(command: string, payload: unknown = {}): Promise<T> {
     if (command === "subscribe_session" && this.live) return this.live.subscribe((payload as { request: SessionUpdatesRequest }).request) as Promise<T>;
-    if (command === "renew_session_subscriptions" && this.live) return Promise.resolve(undefined as T);
+    if (command === "renew_session_subscriptions" && this.live) return this.live.renew((payload as { ids: string[] }).ids) as Promise<T>;
+    let request: SessionUpdatesRequest | undefined;
+    if (this.live && (command === "load_session_backward" || command === "load_session_details")) {
+      const value = payload as { request: SessionUpdatesRequest | { kind: string; request: SessionUpdatesRequest } };
+      request = "kind" in value.request ? value.request.request : value.request;
+    }
+    const registration = request ? this.live?.interestVersion(request.subscription_id) : undefined;
     return this.fetchJson(command, payload).then((result) => {
-      if (this.live && (command === "load_session_backward" || command === "load_session_details")) {
-        const value = payload as { request: SessionUpdatesRequest | { kind: string; request: SessionUpdatesRequest } };
-        const request = "kind" in value.request ? value.request.request : value.request;
-        if (request.subscription_id) this.live.remember(request);
-      }
+      if (request?.subscription_id) this.live?.remember(request, registration);
       return result as T;
     });
   }
