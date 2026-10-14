@@ -51,7 +51,8 @@ show a small project name. Project-grouped rows show titles only. Previews use e
 frontend semantic summaries and compact background messages, including
 intermediate assistant messages inside folded work groups. Child/subagent
 sessions have separate previews. A compact live-updates entry in the bottom status
-bar opens separate session-scope, background-delivery, and open-conversation controls, keeping the session sidebar focused
+bar opens a compact popover with segmented session scope, separate delivery
+selectors, and a connection badge, keeping the session sidebar focused
 on navigation and remaining available when it is collapsed. The scope defaults to
 All sessions on the connected machine; Sidebar sessions limits it to loaded
 root/child rows. One independent leased interest carries bounded latest-assistant

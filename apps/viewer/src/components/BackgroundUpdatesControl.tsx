@@ -51,6 +51,7 @@ export function BackgroundUpdatesControl({
   const levelLabel = level === "final" ? "Final replies" : "All assistant messages";
   const isConnecting = status?.startsWith("Connecting") === true;
   const phaseLabel = isConnecting ? "Connecting" : status ? "Unavailable" : "Live";
+  const phase = isConnecting ? "connecting" : status ? "unavailable" : "live";
 
   return (
     <div className="background-updates">
@@ -82,61 +83,80 @@ export function BackgroundUpdatesControl({
         tabIndex={-1}
       >
         <header className="background-updates-panel__header">
-          <h2 id={`${panel_id}-title`}>Live updates</h2>
+          <div>
+            <h2 id={`${panel_id}-title`}>Live updates</h2>
+            <p>Choose what stays up to date.</p>
+          </div>
+          <span className="background-updates-panel__phase" data-phase={phase}>
+            <span aria-hidden="true" className="background-updates-panel__dot" />{phaseLabel}
+          </span>
           <button aria-label="Close live updates" className="icon-button" onClick={close} type="button"><CloseIcon /></button>
         </header>
-        <fieldset className="background-updates-panel__options">
-          <legend className="background-updates-panel__legend">Sessions</legend>
-          {SCOPES.map((choice) => <label className="background-updates-panel__option" data-selected={scope === choice.scope} key={choice.scope}>
-            <input
-              aria-describedby={`${panel_id}-${choice.scope}-description`}
-              aria-labelledby={`${panel_id}-${choice.scope}-label`}
-              checked={scope === choice.scope}
-              name={`${panel_id}-scope`}
-              onChange={() => on_scope_change(choice.scope)}
-              type="radio"
-              value={choice.scope}
-            />
-            <span>
-              <strong className="background-updates-panel__label" id={`${panel_id}-${choice.scope}-label`}>{choice.label}</strong>
-              <span className="background-updates-panel__description" id={`${panel_id}-${choice.scope}-description`}>{choice.description}</span>
-            </span>
-          </label>)}
-        </fieldset>
-        <fieldset className="background-updates-panel__options">
-          <legend className="background-updates-panel__legend" id={`${panel_id}-background-level-title`}>Background delivery</legend>
-          <select
-            aria-describedby={`${panel_id}-background-level-description`}
-            aria-labelledby={`${panel_id}-background-level-title`}
-            className="background-updates-panel__select"
-            onChange={(event) => on_level_change(event.currentTarget.value as BackgroundUpdateLevel)}
-            value={level}
-          >
-            {LEVELS.map((choice) => <option key={choice.level} value={choice.level}>{choice.label}</option>)}
-          </select>
-          <p className="background-updates-panel__level-description" id={`${panel_id}-background-level-description`}>
-            {LEVELS.find((choice) => choice.level === level)?.description}
-          </p>
-        </fieldset>
-        <fieldset className="background-updates-panel__options" disabled={!conversation_available}>
-          <legend className="background-updates-panel__legend" id={`${panel_id}-conversation-level-title`}>Open conversation</legend>
-          <select
-            aria-describedby={`${panel_id}-conversation-level-description`}
-            aria-labelledby={`${panel_id}-conversation-level-title`}
-            className="background-updates-panel__select"
-            onChange={(event) => on_conversation_level_change(event.currentTarget.value as ConversationUpdateLevel)}
-            value={conversation_level}
-          >
-            {CONVERSATION_LEVELS.map((choice) => <option key={choice.level} value={choice.level}>{choice.label}</option>)}
-          </select>
-          <p className="background-updates-panel__level-description" id={`${panel_id}-conversation-level-description`}>
-            {conversation_available
-              ? CONVERSATION_LEVELS.find((choice) => choice.level === conversation_level)?.description
-              : "Open a session to choose its live delivery level."}
-          </p>
-        </fieldset>
-        <p aria-live="polite" className="background-updates-panel__status" data-tone={status && !isConnecting ? "warning" : "neutral"}>
-          {status ?? "Receiving live background updates."}
+        <div className="background-updates-panel__body">
+          <fieldset className="background-updates-panel__options">
+            <legend className="background-updates-panel__legend">Sessions</legend>
+            <div className="background-updates-panel__segments">
+              {SCOPES.map((choice) => <label className="background-updates-panel__option" data-selected={scope === choice.scope} key={choice.scope}>
+                <input
+                  aria-describedby={`${panel_id}-${choice.scope}-description`}
+                  aria-labelledby={`${panel_id}-${choice.scope}-label`}
+                  checked={scope === choice.scope}
+                  className="sr-only"
+                  name={`${panel_id}-scope`}
+                  onChange={() => on_scope_change(choice.scope)}
+                  type="radio"
+                  value={choice.scope}
+                />
+                <span className="background-updates-panel__label" id={`${panel_id}-${choice.scope}-label`}>{choice.label}</span>
+                <span className="sr-only" id={`${panel_id}-${choice.scope}-description`}>{choice.description}</span>
+              </label>)}
+            </div>
+            <p aria-hidden="true" className="background-updates-panel__level-description">
+              {SCOPES.find((choice) => choice.scope === scope)?.description}
+            </p>
+          </fieldset>
+          <fieldset className="background-updates-panel__options">
+            <legend className="background-updates-panel__legend" id={`${panel_id}-background-level-title`}>Background delivery</legend>
+            <div className="background-updates-panel__select-wrap">
+              <select
+                aria-describedby={`${panel_id}-background-level-description`}
+                aria-labelledby={`${panel_id}-background-level-title`}
+                className="background-updates-panel__select"
+                onChange={(event) => on_level_change(event.currentTarget.value as BackgroundUpdateLevel)}
+                value={level}
+              >
+                {LEVELS.map((choice) => <option key={choice.level} value={choice.level}>{choice.label}</option>)}
+              </select>
+              <ChevronIcon aria-hidden="true" />
+            </div>
+            <p className="background-updates-panel__level-description" id={`${panel_id}-background-level-description`}>
+              {LEVELS.find((choice) => choice.level === level)?.description}
+            </p>
+          </fieldset>
+          <fieldset className="background-updates-panel__options" disabled={!conversation_available}>
+            <legend className="background-updates-panel__legend" id={`${panel_id}-conversation-level-title`}>Open conversation</legend>
+            <div className="background-updates-panel__select-wrap">
+              <select
+                aria-describedby={`${panel_id}-conversation-level-description`}
+                aria-labelledby={`${panel_id}-conversation-level-title`}
+                className="background-updates-panel__select"
+                onChange={(event) => on_conversation_level_change(event.currentTarget.value as ConversationUpdateLevel)}
+                value={conversation_level}
+              >
+                {CONVERSATION_LEVELS.map((choice) => <option key={choice.level} value={choice.level}>{choice.label}</option>)}
+              </select>
+              <ChevronIcon aria-hidden="true" />
+            </div>
+            <p className="background-updates-panel__level-description" id={`${panel_id}-conversation-level-description`}>
+              {conversation_available
+                ? CONVERSATION_LEVELS.find((choice) => choice.level === conversation_level)?.description
+                : "Open a session to choose its live delivery level."}
+            </p>
+          </fieldset>
+        </div>
+        <p aria-live="polite" className="background-updates-panel__status" data-phase={phase}>
+          <span aria-hidden="true" className="background-updates-panel__dot" />
+          <span>{status ?? "Receiving live background updates."}</span>
         </p>
       </div> : null}
     </div>
