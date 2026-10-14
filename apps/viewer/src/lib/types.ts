@@ -618,6 +618,24 @@ export interface SessionUpdatesRequest {
   unsubscribe?: boolean;
 }
 
+export interface SessionSubscriptionRenewal {
+  renewed_ids: string[];
+  missing_ids: string[];
+}
+
+export interface SessionSubscriptionRenewalResult extends SessionSubscriptionRenewal {
+  updates: SessionUpdate[];
+}
+
+export interface SessionSubscriptionLoss {
+  subscription_ids: string[];
+}
+
+export interface SessionSubscriptionReconnect {
+  subscription_ids?: string[];
+  background_subscription_ids?: string[];
+}
+
 export interface SessionNotification {
   session_key: string;
   has_unread: boolean;

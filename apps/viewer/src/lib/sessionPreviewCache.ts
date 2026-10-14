@@ -7,6 +7,7 @@ interface PreviewEntry {
   removed?: boolean;
 }
 export interface PreviewReadToken { epoch: number; message_version: number }
+const LEASE_MS = 90_000;
 
 export function assistantPreviewLine(value: string | null | undefined): string | null {
   const line = value?.split(/\r?\n/).find((line) => line.trim())?.replace(/\s+/g, " ").trim();
@@ -21,27 +22,59 @@ export class SessionPreviewCache {
   private revision = 0n;
   private epoch = 0;
   private clock = 0;
+  private expires_at = 0;
+  private suspended = true;
+  private awaiting_ack = false;
 
   constructor(private limit = 2048) {}
 
   begin(subscription_id: string) {
+    const relinquished = this.resetAuthority();
     this.subscription_id = subscription_id;
     this.generation = null;
     this.revision = 0n;
-    this.resetAuthority();
+    this.expires_at = 0;
+    this.suspended = true;
+    this.awaiting_ack = true;
+    return relinquished;
   }
 
   private resetAuthority() {
+    // Expired activity still displaced catalog values before the pause. A
+    // never-acknowledged interest has never held that authority.
+    const relinquished = this.expires_at > 0 && [...this.entries.values()].some((entry) => entry.activity !== undefined);
     // A new live interest has no replay baseline. Keep bounded known text,
     // while relinquishing the previous stream's activity authority.
     for (const [key, entry] of this.entries) this.entries.set(key, { preview: entry.preview, message_version: entry.message_version, removed: entry.removed });
     this.epoch += 1;
+    return relinquished;
   }
 
   acknowledge(ack: BackgroundUpdatesSubscription) {
-    if (ack.subscription_id !== this.subscription_id || ack.subscribed === false) return;
+    if (ack.subscription_id !== this.subscription_id || ack.subscribed === false || !this.awaiting_ack
+      || this.generation !== null && this.generation !== ack.generation) return false;
     // Events can overtake the command response; their cursor must survive it.
     if (this.generation === null) this.generation = ack.generation;
+    this.awaiting_ack = false;
+    this.suspended = false;
+    this.expires_at = Date.now() + LEASE_MS;
+    return true;
+  }
+
+  hasLease(subscription_id: string): boolean {
+    return subscription_id === this.subscription_id && !this.suspended && !this.awaiting_ack && Date.now() < this.expires_at;
+  }
+
+  acknowledgeRenewal(subscription_id: string): boolean {
+    if (!this.hasLease(subscription_id)) return false;
+    this.expires_at = Date.now() + LEASE_MS;
+    return true;
+  }
+
+  suspend() {
+    this.suspended = true;
+    this.awaiting_ack = false;
+    return this.resetAuthority();
   }
 
   apply(update: BackgroundSessionUpdate): boolean {
@@ -67,7 +100,8 @@ export class SessionPreviewCache {
     const previous = this.entries.get(update.session_key);
     const { session_key, has_unread, unread_final_count, is_running, has_running_descendant, question_attention } = update;
     const entry: PreviewEntry = { ...previous, removed: false, message_version: previous?.message_version ?? 0,
-      activity: { session_key, has_unread, unread_final_count, is_running, has_running_descendant, question_attention } };
+      activity: this.awaiting_ack || this.hasLease(update.subscription_id)
+        ? { session_key, has_unread, unread_final_count, is_running, has_running_descendant, question_attention } : undefined };
     // Null message_revision means no body projection was available, rather
     // than that the source authoritatively removed its last assistant message.
     if (update.message_revision !== null) {
@@ -92,7 +126,9 @@ export class SessionPreviewCache {
   }
 
   preview(session_key: string): string | null | undefined { return this.entries.get(session_key)?.preview; }
-  activity(session_key: string): SessionNotification | undefined { return this.entries.get(session_key)?.activity; }
+  activity(session_key: string): SessionNotification | undefined {
+    return this.subscription_id && this.hasLease(this.subscription_id) ? this.entries.get(session_key)?.activity : undefined;
+  }
   isRemoved(session_key: string): boolean { return this.entries.get(session_key)?.removed === true; }
 
   private write(session_key: string, entry: PreviewEntry) {
