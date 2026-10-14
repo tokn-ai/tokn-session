@@ -574,7 +574,7 @@ export interface ExpandedActivityState {
   is_loading: boolean;
 }
 
-export type UpdateLevel = "final" | "steps" | "details" | "all";
+export type UpdateLevel = "final" | "messages" | "steps" | "details" | "all";
 export interface SessionUpdateItem {
   item_id: string;
   kind: "user_message" | "assistant_message" | "notification" | "tool_summary" | "detail" | "work_summary" | "event";
@@ -625,6 +625,37 @@ export interface SessionNotification {
   /** Additive for compatibility with hosts that only report direct activity. */
   has_running_descendant?: boolean;
   question_attention: SessionSummary["question_attention"];
+}
+
+/** Compact live interests never imply historical or detail loading. */
+export type BackgroundUpdatesScope = "all" | "sidebar";
+export interface BackgroundUpdatesRequest {
+  subscription_id: string;
+  scope: BackgroundUpdatesScope;
+  session_keys: string[];
+  unsubscribe?: boolean;
+}
+export interface BackgroundUpdatesSubscription {
+  subscription_id: string;
+  generation: string;
+  revision: string;
+  scope: BackgroundUpdatesScope;
+  subscribed?: boolean;
+  unsubscribed?: boolean;
+}
+export interface BackgroundAssistantMessage {
+  message_id: string | null;
+  delivery: string | null;
+  phase: string | null;
+  preview: string | null;
+}
+export interface BackgroundSessionUpdate extends SessionNotification {
+  removed?: boolean;
+  subscription_id: string;
+  generation: string;
+  revision: string;
+  latest_assistant_message: BackgroundAssistantMessage | null;
+  message_revision: string | null;
 }
 
 export interface BackgroundServiceStatus {

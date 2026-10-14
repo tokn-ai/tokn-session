@@ -1,8 +1,11 @@
-//! Compact body projection: final replies and the most recent turn state.
+//! Compact body projection: attention, latest assistant line, and turn state.
 //! JSONL readers retain decoding cursors, never completed transcript records.
 use std::{collections::HashMap, time::Instant};
 
-use tokn_session_core::{AgentEvent, LifecycleScope, MessageDelivery, Phase, Provider, Role, ToolRecordKind};
+use sha2::{Digest, Sha256};
+use tokn_session_core::{
+  AgentEvent, LifecycleScope, MessageDelivery, MessageEvent, Phase, Provider, Role, ToolRecordKind,
+};
 use tokn_session_index::SessionPresentation;
 
 use crate::{
@@ -10,15 +13,90 @@ use crate::{
   service_source::{FileVersion, versions},
 };
 
+/// Only the first nonempty display line survives streaming. Whitespace and
+/// line boundaries can cross chunks; no complete message text is retained.
 #[derive(Clone, Default)]
+struct AssistantLine {
+  text: String,
+  chars: usize,
+  pending_space: bool,
+  complete: bool,
+}
+
+impl AssistantLine {
+  fn append(&mut self, fragment: &str) {
+    if self.complete {
+      return;
+    }
+    for character in fragment.chars() {
+      if character == '\n' {
+        if !self.text.is_empty() {
+          self.complete = true;
+          break;
+        }
+        self.pending_space = false;
+      } else if character.is_whitespace() {
+        self.pending_space = !self.text.is_empty();
+      } else {
+        if self.pending_space && self.chars < 240 {
+          self.text.push(' ');
+          self.chars += 1;
+        }
+        self.pending_space = false;
+        if self.chars < 240 {
+          self.text.push(character);
+          self.chars += 1;
+        }
+        if self.chars == 240 {
+          self.complete = true;
+          break;
+        }
+      }
+    }
+  }
+
+  fn preview(&self) -> Option<&str> {
+    (!self.text.is_empty()).then_some(self.text.as_str())
+  }
+}
+
+#[derive(Clone)]
+struct AssistantStream {
+  provider: Provider,
+  // Exact identity matching stays bounded even if provider IDs are huge.
+  message_id: Option<[u8; 32]>,
+  delivery: MessageDelivery,
+  line: AssistantLine,
+}
+
+#[derive(Clone)]
 pub(crate) struct Activity {
   pub final_count: u64,
   pub running: bool,
   active_turn: Option<String>,
   last_final_id: Option<String>,
+  assistant_stream: Option<AssistantStream>,
   pub presentation: SessionPresentation,
   questions: crate::questions::Questions,
   pub question_attention: crate::model::QuestionAttention,
+}
+
+impl Default for Activity {
+  fn default() -> Self {
+    Self {
+      final_count: 0,
+      running: false,
+      active_turn: None,
+      last_final_id: None,
+      assistant_stream: None,
+      presentation: SessionPresentation {
+        latest_message: Some("null".into()),
+        ..Default::default()
+      },
+      questions: Default::default(),
+      question_attention: Default::default(),
+    }
+  }
 }
 
 impl Activity {
@@ -30,6 +108,7 @@ impl Activity {
       presentation: SessionPresentation {
         title: loaded.reference.title.map(|v| v.chars().take(160).collect()),
         preview: loaded.reference.preview.map(|v| v.chars().take(240).collect()),
+        latest_message: Some("null".into()),
       },
       ..Self::default()
     };
@@ -43,6 +122,26 @@ impl Activity {
     if event.is_hidden() {
       return;
     }
+    match event {
+      AgentEvent::Lifecycle(lifecycle) if lifecycle.phase == Phase::Started => self.assistant_stream = None,
+      AgentEvent::Message(message) if message.role == Role::User => self.assistant_stream = None,
+      AgentEvent::ToolCall(tool)
+        if tool.record_kind == ToolRecordKind::Invocation
+          && self
+            .assistant_stream
+            .as_ref()
+            .is_some_and(|stream| stream.message_id.is_none()) =>
+      {
+        self.assistant_stream = None
+      }
+      AgentEvent::Error(_) | AgentEvent::SessionStarted(_) => self.assistant_stream = None,
+      _ => {}
+    }
+    if let AgentEvent::Message(message) = event
+      && message.role == Role::Assistant
+    {
+      self.observe_assistant(message);
+    }
     self.questions.observe(event, 0);
     self.question_attention = self.questions.summary();
     match event {
@@ -53,6 +152,7 @@ impl Activity {
         } else if l.phase == Phase::Finished && self.active_turn.as_ref().is_none_or(|id| id == &l.turn_id) {
           self.running = false;
           self.active_turn = None;
+          self.assistant_stream = None;
         }
       }
       AgentEvent::Message(m)
@@ -84,6 +184,45 @@ impl Activity {
       }
       _ => {}
     }
+  }
+
+  fn observe_assistant(&mut self, message: &MessageEvent) {
+    let fragments = matches!(message.provider, Provider::Codex | Provider::Dsh);
+    let identity: Option<[u8; 32]> = message
+      .message_id
+      .as_ref()
+      .map(|id| Sha256::digest(id.as_bytes()).into());
+    let mut stream = if fragments && message.phase == Phase::Delta {
+      self
+        .assistant_stream
+        .take()
+        .filter(|stream| stream.provider == message.provider && stream.message_id == identity)
+    } else {
+      None
+    }
+    .unwrap_or_else(|| AssistantStream {
+      provider: message.provider,
+      message_id: identity,
+      delivery: message.delivery,
+      line: AssistantLine::default(),
+    });
+    if message.delivery != MessageDelivery::Unspecified {
+      stream.delivery = message.delivery;
+    }
+    stream.line.append(&message.text);
+    // Codex/DSH deltas append fragments. OpenCode/ZCode deltas and all other
+    // providers contain snapshots, so they replace the compact line. A finished
+    // canonical snapshot replaces any partial accumulated stream as well.
+    self.presentation.latest_message = Some(
+      serde_json::json!({
+        "message_id": message.message_id.as_ref().map(|id| id.chars().take(256).collect::<String>()),
+        "delivery": stream.delivery,
+        "phase": message.phase,
+        "preview": stream.line.preview(),
+      })
+      .to_string(),
+    );
+    self.assistant_stream = (fragments && message.phase != Phase::Finished).then_some(stream);
   }
 
   pub fn marker(&self) -> String {
@@ -214,10 +353,8 @@ impl ActivityReaders {
           if update.reset {
             entry.activity = Activity::default();
           }
-          entry.activity.presentation = SessionPresentation {
-            title: update.reference.title.map(|v| v.chars().take(160).collect()),
-            preview: update.reference.preview.map(|v| v.chars().take(240).collect()),
-          };
+          entry.activity.presentation.title = update.reference.title.map(|v| v.chars().take(160).collect());
+          entry.activity.presentation.preview = update.reference.preview.map(|v| v.chars().take(240).collect());
           for record in update.records {
             for event in record.events {
               entry.activity.observe(&event);
@@ -307,6 +444,176 @@ mod tests {
       native: json!({}),
       timestamp: None,
     })
+  }
+
+  #[test]
+  fn latest_assistant_projection_includes_commentary_but_excludes_hidden_and_other_roles() {
+    let mut activity = Activity::default();
+    assert_eq!(activity.presentation.latest_message.as_deref(), Some("null"));
+    let mut event = message(Role::Assistant, MessageDelivery::Final, Phase::Finished);
+    if let AgentEvent::Message(m) = &mut event {
+      m.message_id = Some("final".into());
+      m.text = "First reply".into();
+    }
+    activity.observe(&event);
+    if let AgentEvent::Message(m) = &mut event {
+      m.message_id = Some("commentary".into());
+      m.delivery = MessageDelivery::Commentary;
+      m.text = "\n  Checking  schema. \nSecond line".into();
+    }
+    activity.observe(&event);
+    let expected =
+      json!({"message_id":"commentary", "delivery":"commentary", "phase":"finished", "preview":"Checking schema."});
+    assert_eq!(
+      serde_json::from_str::<serde_json::Value>(activity.presentation.latest_message.as_deref().unwrap()).unwrap(),
+      expected
+    );
+    for role in [Role::User, Role::System, Role::Tool] {
+      activity.observe(&message(role, MessageDelivery::Unspecified, Phase::Finished));
+    }
+    if let AgentEvent::Message(m) = &mut event {
+      m.text = "Hidden private text".into();
+      m.provenance = Some(tokn_session_core::MessageProvenance {
+        source: json!({}),
+        display: Some(false),
+        native: None,
+        surface_op: None,
+        source_event_seqs: None,
+      });
+    }
+    activity.observe(&event);
+    assert_eq!(
+      serde_json::from_str::<serde_json::Value>(activity.presentation.latest_message.as_deref().unwrap()).unwrap(),
+      expected
+    );
+  }
+
+  #[test]
+  fn latest_assistant_projection_bounds_text_and_preserves_empty_as_authoritative() {
+    let mut activity = Activity::default();
+    let mut event = message(Role::Assistant, MessageDelivery::Commentary, Phase::Delta);
+    if let AgentEvent::Message(m) = &mut event {
+      m.text = "😀".repeat(500);
+      m.message_id = Some("x".repeat(2000));
+    }
+    activity.observe(&event);
+    let compact: serde_json::Value =
+      serde_json::from_str(activity.presentation.latest_message.as_deref().unwrap()).unwrap();
+    assert_eq!(compact["preview"].as_str().unwrap().chars().count(), 240);
+    assert_eq!(compact["message_id"].as_str().unwrap().chars().count(), 256);
+    assert_eq!(compact.as_object().unwrap().len(), 4);
+    if let AgentEvent::Message(m) = &mut event {
+      m.text = " \n ".into();
+      m.phase = Phase::Finished;
+    }
+    activity.observe(&event);
+    let compact: serde_json::Value =
+      serde_json::from_str(activity.presentation.latest_message.as_deref().unwrap()).unwrap();
+    assert!(compact["preview"].is_null());
+    assert_eq!(compact["phase"], "finished");
+  }
+
+  fn text_message(provider: Provider, id: Option<&str>, phase: Phase, text: &str) -> AgentEvent {
+    let mut event = message(Role::Assistant, MessageDelivery::Unspecified, phase);
+    if let AgentEvent::Message(message) = &mut event {
+      message.provider = provider;
+      message.message_id = id.map(str::to_owned);
+      message.text = text.to_owned();
+    }
+    event
+  }
+
+  fn latest(activity: &Activity) -> serde_json::Value {
+    serde_json::from_str(activity.presentation.latest_message.as_deref().unwrap()).unwrap()
+  }
+
+  #[test]
+  fn codex_fragment_deltas_extend_the_first_line_and_finished_snapshots_replace_it() {
+    let mut activity = Activity::default();
+    activity.observe(&text_message(Provider::Codex, Some("one"), Phase::Started, "\n First"));
+    activity.observe(&text_message(Provider::Codex, Some("one"), Phase::Delta, "  line"));
+    activity.observe(&text_message(
+      Provider::Codex,
+      Some("one"),
+      Phase::Delta,
+      ".\nSecond line",
+    ));
+    activity.observe(&text_message(
+      Provider::Codex,
+      Some("one"),
+      Phase::Delta,
+      " should stay out",
+    ));
+    assert_eq!(latest(&activity)["preview"], "First line.");
+    assert_eq!(latest(&activity)["phase"], "delta");
+    activity.observe(&text_message(Provider::Codex, Some("two"), Phase::Delta, "New message"));
+    assert_eq!(latest(&activity)["preview"], "New message");
+    activity.observe(&text_message(
+      Provider::Codex,
+      Some("two"),
+      Phase::Finished,
+      "Canonical final reply\nFull details",
+    ));
+    assert_eq!(latest(&activity)["preview"], "Canonical final reply");
+    assert!(activity.assistant_stream.is_none());
+  }
+
+  #[test]
+  fn dsh_idless_deltas_accumulate_until_a_new_step_or_user_turn() {
+    let mut activity = Activity::default();
+    activity.observe(&lifecycle("turn", LifecycleScope::Turn, Phase::Started));
+    activity.observe(&lifecycle("turn", LifecycleScope::Step, Phase::Started));
+    for text in ["Still", " working", "..."] {
+      activity.observe(&text_message(Provider::Dsh, None, Phase::Delta, text));
+    }
+    assert_eq!(latest(&activity)["preview"], "Still working...");
+    activity.observe(&lifecycle("turn", LifecycleScope::Step, Phase::Started));
+    activity.observe(&text_message(Provider::Dsh, None, Phase::Delta, "Next step"));
+    assert_eq!(latest(&activity)["preview"], "Next step");
+    activity.observe(&message(Role::User, MessageDelivery::Unspecified, Phase::Finished));
+    activity.observe(&text_message(Provider::Dsh, None, Phase::Delta, "New turn"));
+    assert_eq!(latest(&activity)["preview"], "New turn");
+    activity.observe(&text_message(
+      Provider::Dsh,
+      Some("done"),
+      Phase::Finished,
+      "Finished snapshot",
+    ));
+    assert_eq!(latest(&activity)["preview"], "Finished snapshot");
+    activity.observe(&text_message(Provider::Dsh, None, Phase::Delta, "Independent stream"));
+    assert_eq!(latest(&activity)["preview"], "Independent stream");
+  }
+
+  #[test]
+  fn mutable_snapshot_providers_replace_delta_and_updated_text_instead_of_appending() {
+    for (provider, phase) in [
+      (Provider::OpenCode, Phase::Delta),
+      (Provider::ZCode, Phase::Delta),
+      (Provider::WorkBuddy, Phase::Updated),
+    ] {
+      let mut activity = Activity::default();
+      activity.observe(&text_message(provider, Some("same"), phase, "First"));
+      activity.observe(&text_message(provider, Some("same"), phase, "First complete"));
+      assert_eq!(latest(&activity)["preview"], "First complete");
+      assert!(activity.assistant_stream.is_none());
+    }
+  }
+
+  #[test]
+  fn compact_stream_never_retains_more_than_240_unicode_characters() {
+    for provider in [Provider::Codex, Provider::Dsh] {
+      let mut activity = Activity::default();
+      activity.observe(&text_message(provider, None, Phase::Delta, "😀"));
+      activity.observe(&text_message(provider, None, Phase::Delta, &"😀".repeat(1000)));
+      assert_eq!(latest(&activity)["preview"].as_str().unwrap().chars().count(), 240);
+      let stream = activity.assistant_stream.as_ref().unwrap();
+      assert_eq!(stream.line.text.chars().count(), 240);
+      activity.observe(&text_message(provider, None, Phase::Delta, "never retained"));
+      assert_eq!(
+        activity.assistant_stream.as_ref().unwrap().line.text.chars().count(),
+        240
+      );
+    }
   }
 
   #[test]

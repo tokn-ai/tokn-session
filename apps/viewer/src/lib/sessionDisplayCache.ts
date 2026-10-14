@@ -1,6 +1,6 @@
 import { SessionResources } from "./sessionResources";
 import { createUuid } from "./id";
-import type { EventPageResponse, TrajectoryEventPageResponse, SessionUpdate, SessionUpdateItem, SessionUpdatesRequest, SessionUpdateScope, UpdateLevel } from "./types";
+import type { EventPageResponse, EventSummary, TrajectoryEventPageResponse, SessionUpdate, SessionUpdateItem, SessionUpdatesRequest, SessionUpdateScope, UpdateLevel } from "./types";
 
 interface Replica {
   subscription_id: string;
@@ -28,13 +28,22 @@ function weight(value: unknown): number {
   return 8;
 }
 
+function isAssistantFragment(event: EventSummary): boolean {
+  return event.phase === "delta" && (event.provider === "codex" || event.provider === "dsh");
+}
+
+interface AssistantPreviewProjection {
+  preview: string | null;
+  latest_is_fragment: boolean;
+}
+
 /** Each level has independent coverage. A final-only update never advances the
  * steps cursor. Unchanged objects retain their references across updates. */
 export class SessionDisplayCache {
   readonly resources = new SessionResources();
   runningRevision = 0;
   previewRevision = 0;
-  private loadedPreviews = new Map<string, string | null>();
+  private loadedPreviews = new Map<string, AssistantPreviewProjection>();
   coverageVersion(session_key: string) {
     const replica = this.replicas.get(this.key(session_key, "steps"));
     return replica ? { generation: replica.generation, revision: replica.revision } : {};
@@ -104,7 +113,7 @@ export class SessionDisplayCache {
   /** Indexed attention can lag the source stream. Only a live replica owns
    * running state; retained display content alone must not mask the catalog. */
   liveRunning(session_key: string): boolean | undefined {
-    const subscribed = (["steps", "all", "final"] as const).some((level) => {
+    const subscribed = (["messages", "steps", "all", "final"] as const).some((level) => {
       const key = this.key(session_key, level);
       const replica = this.replicas.get(key);
       return replica && this.subscriptions.get(key) === replica.subscription_id;
@@ -112,18 +121,41 @@ export class SessionDisplayCache {
     return subscribed ? this.running.get(session_key)?.is_running : undefined;
   }
 
+  /** An active semantic replica is fresher than the independently indexed
+   * compact stream. Retained/released timelines do not keep this authority. */
+  liveAssistantPreview(session_key: string): string | null | undefined {
+    const active = (["messages", "steps", "all"] as const).some((level) => {
+      const key = this.key(session_key, level);
+      const replica = this.replicas.get(key);
+      return replica && this.subscriptions.get(key) === replica.subscription_id;
+    });
+    if (!active) return undefined;
+    const projection = this.assistantPreviewProjection(session_key);
+    // Codex and DSH deltas are fragments, unlike OpenCode/ZCode snapshots.
+    // The compact producer accumulates those fragments with provider context.
+    return projection.latest_is_fragment ? undefined : projection.preview;
+  }
+
   /** Best available assistant line from retained semantic summaries. Reading
    * this projection never subscribes, loads history, or fetches tool details. */
   assistantPreview(session_key: string): string | null {
+    return this.assistantPreviewProjection(session_key).preview;
+  }
+
+  hasFragmentedAssistantPreview(session_key: string): boolean {
+    return this.assistantPreviewProjection(session_key).latest_is_fragment;
+  }
+
+  private assistantPreviewProjection(session_key: string): AssistantPreviewProjection {
     const sourceGeneration = (revision?: string) => revision?.slice(0, revision.lastIndexOf(":"));
     const currentGeneration = sourceGeneration(this.running.get(session_key)?.source_revision);
     const revision = (replica: Replica) => {
       const value = replica.page.source_revision?.split(":").pop();
       return value && /^\d+$/.test(value) ? BigInt(value) : 0n;
     };
-    const eligible = (["steps", "all", "final"] as const)
+    const eligible = (["messages", "steps", "all", "final"] as const)
       .map((level) => ({ level, replica: this.replicas.get(this.key(session_key, level)) }))
-      .filter((entry): entry is { level: "steps" | "all" | "final"; replica: Replica } => !!entry.replica
+      .filter((entry): entry is { level: "messages" | "steps" | "all" | "final"; replica: Replica } => !!entry.replica
         && (currentGeneration === undefined || sourceGeneration(entry.replica.page.source_revision) === currentGeneration));
     const complete = eligible.filter(({ level }) => level !== "final")
       .sort((left, right) => revision(left.replica) < revision(right.replica) ? 1 : revision(left.replica) > revision(right.replica) ? -1 : 0)[0];
@@ -131,9 +163,11 @@ export class SessionDisplayCache {
     // replicas must not resurrect it; newer final updates can still contribute.
     const replicas = eligible.filter((entry) => entry === complete || (entry.level === "final"
       && (!complete || revision(entry.replica) > revision(complete.replica))));
-    if (eligible.length === 0) return this.loadedPreviews.get(session_key) ?? null;
+    if (eligible.length === 0) return this.loadedPreviews.get(session_key) ?? { preview: null, latest_is_fragment: false };
     let preview: string | null = null;
     let position = -1;
+    let latestPosition = -1;
+    let latest_is_fragment = false;
     for (const { replica } of replicas) {
       // Semantic messages belong to this session even when its display rows
       // fold intermediate replies into work groups. Child sessions have their
@@ -141,32 +175,39 @@ export class SessionDisplayCache {
       const summaries = [...replica.items.values()].flatMap((item) => item.summary ? [item.summary] : []);
       for (const [index, event] of summaries.entries()) {
         if (event.type !== "message" || event.role !== "assistant" || event.is_hidden) continue;
-        const line = event.summary.split(/\r?\n/).find((line) => line.trim())?.replace(/\s+/g, " ").trim();
-        if (!line) continue;
         // Absolute source slots preserve chronology across delivery levels and
         // older-history expansion. Legacy pages retain their local ordering.
         const slot = (event.slot_key ?? event.event_key).match(/(?:^|\.)event\.v1\.([0-9a-f]+)$/);
         const sourcePosition = slot ? Number.parseInt(slot[1], 16) : index;
+        if (sourcePosition >= latestPosition) {
+          latestPosition = sourcePosition;
+          latest_is_fragment = isAssistantFragment(event);
+        }
+        if (isAssistantFragment(event)) continue;
+        const line = event.summary.split(/\r?\n/).find((line) => line.trim())?.replace(/\s+/g, " ").trim();
+        if (!line) continue;
         if (sourcePosition >= position) {
           position = sourcePosition;
           preview = [...line].slice(0, 240).join("");
         }
       }
     }
-    return preview;
+    return { preview, latest_is_fragment };
   }
 
   /** Record already accepted legacy pages; semantic pages are owned by their
    * replicas. Retain only the bounded preview, never another history copy. */
   rememberLoadedPage(session_key: string, page: EventPageResponse) {
     if (this.pageItems.has(page)) return;
-    const event = [...page.events].reverse().find((event) => event.type === "message" && event.role === "assistant" && !event.is_hidden && event.summary.trim());
+    const assistantEvents = [...page.events].reverse().filter((event) => event.type === "message" && event.role === "assistant" && !event.is_hidden);
+    const latest_is_fragment = !!assistantEvents[0] && isAssistantFragment(assistantEvents[0]);
+    const event = assistantEvents.find((event) => !isAssistantFragment(event) && event.summary.trim());
     const line = event?.summary.split(/\r?\n/).find((line) => line.trim())?.replace(/\s+/g, " ").trim();
     const preview = line ? [...line].slice(0, 240).join("") : null;
     const previous = this.loadedPreviews.get(session_key);
     this.loadedPreviews.delete(session_key);
-    this.loadedPreviews.set(session_key, preview);
-    if (previous !== preview) this.previewRevision += 1;
+    this.loadedPreviews.set(session_key, { preview, latest_is_fragment });
+    if (previous?.preview !== preview || previous?.latest_is_fragment !== latest_is_fragment) this.previewRevision += 1;
     while (this.loadedPreviews.size > 8) {
       const oldest = [...this.loadedPreviews.keys()].find((key) => key !== this.selected);
       if (!oldest) break;
@@ -235,12 +276,6 @@ export class SessionDisplayCache {
     for (const [key] of this.replicas) {
       if (!session_key || JSON.parse(key)[0] === session_key) { this.replicas.delete(key); this.pending.delete(key); this.running.delete(JSON.parse(key)[0]); }
     }
-  }
-
-  backgroundRequests(): SessionUpdatesRequest[] {
-    return [...this.subscriptions.keys()].map((key) => JSON.parse(key) as [string, UpdateLevel])
-      .filter(([session_key, level]) => level === "final" && session_key !== this.selected)
-      .slice(-8).map(([session_key, level]) => this.request(session_key, level));
   }
 
   commit(session_key: string, page: EventPageResponse): ReadonlySet<string> | null {

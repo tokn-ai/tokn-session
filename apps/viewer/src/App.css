@@ -3661,6 +3661,33 @@ button:disabled {
   text-overflow: ellipsis;
 }
 
+.sidebar-background-updates {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.sidebar-background-updates select {
+  min-width: 0;
+  max-width: 140px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.sidebar-background-updates__status {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+
 @media (max-width: 860px) {
   .sidebar-order button { min-height: 40px; }
 }

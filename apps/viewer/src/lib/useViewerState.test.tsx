@@ -25,6 +25,9 @@ import {
   retrySessionIndex,
   submitSessionInput,
   updateSessionView,
+  subscribeBackgroundUpdates,
+  renewBackgroundSubscriptions,
+  listenForBackgroundUpdates,
 } from "./tauri";
 import type {
   EventDetail,
@@ -42,6 +45,9 @@ import { ViewerPage } from "../pages/ViewerPage";
 vi.mock("../components/RelayConnection", () => ({ RelayConnection: () => null }));
 
 vi.mock("./tauri", () => ({
+  subscribeBackgroundUpdates: vi.fn((request) => Promise.resolve({ subscription_id: request.subscription_id, generation: "background", revision: "0", scope: request.scope, subscribed: true })),
+  renewBackgroundSubscriptions: vi.fn(() => Promise.resolve()),
+  listenForBackgroundUpdates: vi.fn(() => Promise.resolve(vi.fn())),
   updateSessionView: vi.fn(() => Promise.resolve()),
   loadSessionUpdates: vi.fn(() => Promise.reject(new Error("Unknown viewer command"))),
   loadGroupDetails: vi.fn((request) => loadSessionUpdates(request)),
@@ -68,6 +74,9 @@ vi.mock("./tauri", () => ({
 
 beforeEach(() => {
   localStorage.clear();
+  vi.mocked(subscribeBackgroundUpdates).mockReset().mockImplementation(async (request) => ({ subscription_id: request.subscription_id, generation: "background", revision: "0", scope: request.scope, subscribed: true }));
+  vi.mocked(renewBackgroundSubscriptions).mockReset().mockResolvedValue(undefined);
+  vi.mocked(listenForBackgroundUpdates).mockReset().mockResolvedValue(vi.fn());
   vi.mocked(loadToolDetails).mockClear();
   vi.mocked(inspectSessionEvent).mockReset().mockImplementation((request) => loadEventDetail(request));
   vi.mocked(loadSessionUpdates).mockReset().mockRejectedValue(new Error("Unknown viewer command"));
@@ -2705,6 +2714,167 @@ function semanticSnapshot(request: import("./types").SessionUpdatesRequest, page
 }
 
 describe("semantic session delivery", () => {
+  it("updates a never-opened sidebar session from compact events without loading history", async () => {
+    let emit!: (update: import("./types").BackgroundSessionUpdate) => void;
+    vi.mocked(listenForBackgroundUpdates).mockImplementation(async (handler) => { emit = handler; return () => {}; });
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("unopened")], next_cursor: null, source_errors: [], pending_providers: [] });
+    const { result } = renderHook(() => useViewerState());
+    await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+    await waitFor(() => expect(subscribeBackgroundUpdates).toHaveBeenCalledOnce());
+    const request = vi.mocked(subscribeBackgroundUpdates).mock.calls[0][0];
+    act(() => emit({ subscription_id: request.subscription_id, generation: "background", revision: "1", session_key: "unopened",
+      message_revision: "body:1", latest_assistant_message: { message_id: "assistant", delivery: "commentary", phase: "running", preview: "Examining the source.\nMore detail" },
+      has_unread: false, unread_final_count: 0, is_running: true, question_attention: { required_count: 0, available_count: 1 } }));
+    expect(result.current.sessions[0].latest_assistant_preview).toBe("Examining the source.");
+    expect(result.current.sessions[0].is_running).toBe(true);
+    expect(result.current.sessions[0].question_attention?.available_count).toBe(1);
+    expect(loadSessionUpdates).not.toHaveBeenCalled();
+    expect(loadEventPage).not.toHaveBeenCalled();
+    expect(loadTrajectoryEventPage).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("keeps catalog unread authority after a compact unread update (acknowledgement accepted=%s)", async (accepted) => {
+    let emit!: (update: import("./types").BackgroundSessionUpdate) => void;
+    vi.mocked(listenForBackgroundUpdates).mockImplementation(async (handler) => { emit = handler; return () => {}; });
+    const unread = { ...session("unread"), has_unread: true, unread_final_count: 1 };
+    const catalog = (row: SessionSummary) => ({ sessions: [row], next_cursor: null, source_errors: [], pending_providers: [] });
+    vi.mocked(listSessions).mockResolvedValue(catalog(unread));
+    vi.mocked(loadEventPage).mockResolvedValue({ ...toolEventPage(), attention_revision: "10" });
+    vi.mocked(acknowledgeSessionAttention).mockImplementation(async () => {
+      if (!accepted) throw new Error("Acknowledgement rejected");
+      vi.mocked(listSessions).mockResolvedValue(catalog({ ...unread, has_unread: false, unread_final_count: 0 }));
+      return { changed: true };
+    });
+    const { result } = renderHook(() => useViewerState());
+    await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+    await waitFor(() => expect(subscribeBackgroundUpdates).toHaveBeenCalledOnce());
+    const request = vi.mocked(subscribeBackgroundUpdates).mock.calls[0][0];
+    const compact: import("./types").BackgroundSessionUpdate = { subscription_id: request.subscription_id, generation: "background", revision: "1", session_key: "unread",
+      message_revision: null, latest_assistant_message: null,
+      has_unread: true, unread_final_count: 2, is_running: false, question_attention: { required_count: 0, available_count: 0 } };
+    act(() => emit(compact));
+    expect(result.current.sessions[0].unread_final_count).toBe(1);
+    act(() => result.current.selectSession("unread"));
+    await waitFor(() => expect(acknowledgeSessionAttention).toHaveBeenCalledOnce());
+    await waitFor(() => expect(result.current.sessions[0].has_unread).toBe(!accepted));
+    act(() => emit({ ...compact, revision: "2" }));
+    expect(result.current.sessions[0].has_unread).toBe(!accepted);
+    expect(result.current.sessions[0].unread_final_count).toBe(accepted ? 0 : 1);
+  });
+
+  it.each([false, true])("keeps answered question attention from the selected page over lagging compact indexing (semantic=%s)", async (semantic) => {
+    let emit!: (update: import("./types").BackgroundSessionUpdate) => void;
+    vi.mocked(listenForBackgroundUpdates).mockImplementation(async (handler) => { emit = handler; return () => {}; });
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("answered")], next_cursor: null, source_errors: [], pending_providers: [] });
+    const page = { ...toolEventPage(), outstanding_questions: [] };
+    if (semantic) vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    else vi.mocked(loadEventPage).mockResolvedValue(page);
+    const { result } = renderHook(() => useViewerState());
+    await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+    await waitFor(() => expect(subscribeBackgroundUpdates).toHaveBeenCalledOnce());
+    const request = vi.mocked(subscribeBackgroundUpdates).mock.calls[0][0];
+    const compact: import("./types").BackgroundSessionUpdate = { subscription_id: request.subscription_id, generation: "background", revision: "1", session_key: "answered",
+      message_revision: null, latest_assistant_message: null,
+      has_unread: false, unread_final_count: 0, is_running: false, question_attention: { required_count: 1, available_count: 2 } };
+    act(() => emit(compact));
+    expect(result.current.sessions[0].question_attention).toEqual({ required_count: 1, available_count: 2 });
+    act(() => result.current.selectSession("answered"));
+    await waitFor(() => expect(result.current.eventsLoading).toBe(false));
+    expect(result.current.sessions[0].question_attention).toEqual({ required_count: 0, available_count: 0 });
+    act(() => emit({ ...compact, revision: "2" }));
+    expect(result.current.sessions[0].question_attention).toEqual({ required_count: 0, available_count: 0 });
+    expect(result.current.selectedSession?.question_attention).toEqual({ required_count: 0, available_count: 0 });
+    expect(result.current.outstandingQuestions).toEqual([]);
+  });
+
+  it("keeps an authoritative empty steps preview cleared despite lagging compact text", async () => {
+    let emit!: (update: import("./types").BackgroundSessionUpdate) => void;
+    vi.mocked(listenForBackgroundUpdates).mockImplementation(async (handler) => { emit = handler; return () => {}; });
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("reset")], next_cursor: null, source_errors: [], pending_providers: [] });
+    const page = { ...toolEventPage(), events: [], total_events: 0, outstanding_questions: [], source_revision: "source:2" };
+    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    const { result } = renderHook(() => useViewerState());
+    await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+    await waitFor(() => expect(subscribeBackgroundUpdates).toHaveBeenCalledOnce());
+    const request = vi.mocked(subscribeBackgroundUpdates).mock.calls[0][0];
+    const compact: import("./types").BackgroundSessionUpdate = { subscription_id: request.subscription_id, generation: "background", revision: "1", session_key: "reset",
+      message_revision: "index:older", latest_assistant_message: { message_id: "older", delivery: "final", phase: "finished", preview: "Previous reply." },
+      has_unread: false, unread_final_count: 0, is_running: false, question_attention: { required_count: 0, available_count: 0 } };
+    act(() => emit(compact));
+    expect(result.current.sessions[0].latest_assistant_preview).toBe("Previous reply.");
+    act(() => result.current.selectSession("reset"));
+    await waitFor(() => expect(result.current.eventsLoading).toBe(false));
+    act(() => emit({ ...compact, revision: "2" }));
+    expect(result.current.events).toEqual([]);
+    expect(result.current.sessions[0].latest_assistant_preview).toBeNull();
+    expect(result.current.selectedSession?.latest_assistant_preview).toBeNull();
+  });
+
+  it("prefers an active steps preview over lagging compact indexing, then releases its authority", async () => {
+    let emit!: (update: import("./types").BackgroundSessionUpdate) => void;
+    vi.mocked(listenForBackgroundUpdates).mockImplementation(async (handler) => { emit = handler; return () => {}; });
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("active"), session("other")], next_cursor: null, source_errors: [], pending_providers: [] });
+    const base = toolEventPage();
+    const page = { ...base, events: [{ ...base.events[0], type: "message", role: "assistant", tool: null, summary: "Newest semantic reply." }] };
+    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    const { result } = renderHook(() => useViewerState());
+    await selectListedSession(result, "active");
+    await waitFor(() => expect(result.current.eventsLoading).toBe(false));
+    const request = vi.mocked(subscribeBackgroundUpdates).mock.calls[0][0];
+    const compact: import("./types").BackgroundSessionUpdate = { subscription_id: request.subscription_id, generation: "background", revision: "1", session_key: "active",
+      message_revision: "indexed:older", latest_assistant_message: { message_id: "older", delivery: "commentary", phase: null, preview: "Older indexed reply." },
+      has_unread: false, unread_final_count: 0, is_running: false, question_attention: { required_count: 0, available_count: 0 } };
+    act(() => emit(compact));
+    expect(result.current.sessions[0].latest_assistant_preview).toBe("Newest semantic reply.");
+    act(() => result.current.selectSession("other"));
+    await waitFor(() => expect(result.current.selectedSessionKey).toBe("other"));
+    act(() => emit({ ...compact, revision: "2", message_revision: "indexed:new", latest_assistant_message: { ...compact.latest_assistant_message!, preview: "Background caught up." } }));
+    expect(result.current.sessions[0].latest_assistant_preview).toBe("Background caught up.");
+    act(() => emit({ ...compact, revision: "3", message_revision: "removed", latest_assistant_message: null, removed: true }));
+    expect(result.current.sessions[0].latest_assistant_preview).toBeNull();
+  });
+
+  it.each([false, true])("uses the compact accumulated prefix when an accepted page ends with Codex fragments (semantic=%s)", async (semantic) => {
+    let emit!: (update: import("./types").BackgroundSessionUpdate) => void;
+    vi.mocked(listenForBackgroundUpdates).mockImplementation(async (handler) => { emit = handler; return () => {}; });
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("streaming")], next_cursor: null, source_errors: [], pending_providers: [] });
+    const base = toolEventPage();
+    const full = { ...base.events[0], event_key: "event.v1.1", type: "message", role: "assistant", provider: "codex" as const, phase: "finished", tool: null, summary: "Last full response." };
+    const page = { ...base, events: [full, { ...full, event_key: "event.v1.2", phase: "delta", summary: " working" }, { ...full, event_key: "event.v1.3", phase: "delta", summary: "..." }] };
+    if (semantic) vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    else vi.mocked(loadEventPage).mockResolvedValue(page);
+    const { result } = renderHook(() => useViewerState());
+    await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+    await waitFor(() => expect(subscribeBackgroundUpdates).toHaveBeenCalledOnce());
+    const request = vi.mocked(subscribeBackgroundUpdates).mock.calls[0][0];
+    act(() => emit({ subscription_id: request.subscription_id, generation: "background", revision: "1", session_key: "streaming",
+      message_revision: "accumulated:1", latest_assistant_message: { message_id: "streaming-message", delivery: "commentary", phase: "delta", preview: "Still working..." },
+      has_unread: false, unread_final_count: 0, is_running: true, question_attention: { required_count: 0, available_count: 0 } }));
+    act(() => result.current.selectSession("streaming"));
+    await waitFor(() => expect(result.current.eventsLoading).toBe(false));
+    expect(result.current.events[2].summary).toBe("...");
+    expect(result.current.sessions[0].latest_assistant_preview).toBe("Still working...");
+  });
+
+  it("keeps a newer compact preview when an older opening page finishes", async () => {
+    let emit!: (update: import("./types").BackgroundSessionUpdate) => void;
+    vi.mocked(listenForBackgroundUpdates).mockImplementation(async (handler) => { emit = handler; return () => {}; });
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("race")], next_cursor: null, source_errors: [], pending_providers: [] });
+    const opening = deferred<EventPageResponse>();
+    vi.mocked(loadEventPage).mockReturnValue(opening.promise);
+    const { result } = renderHook(() => useViewerState());
+    await selectListedSession(result, "race");
+    await waitFor(() => expect(loadEventPage).toHaveBeenCalledOnce());
+    const request = vi.mocked(subscribeBackgroundUpdates).mock.calls[0][0];
+    act(() => emit({ subscription_id: request.subscription_id, generation: "background", revision: "1", session_key: "race",
+      message_revision: "body:2", latest_assistant_message: { message_id: "new", delivery: "commentary", phase: null, preview: "Newer live message." },
+      has_unread: false, unread_final_count: 0, is_running: true, question_attention: { required_count: 0, available_count: 0 } }));
+    const base = toolEventPage();
+    await act(async () => opening.resolve({ ...base, events: [{ ...base.events[0], type: "message", role: "assistant", tool: null, summary: "Older initial message." }] }));
+    await waitFor(() => expect(result.current.eventsLoading).toBe(false));
+    expect(result.current.sessions[0].latest_assistant_preview).toBe("Newer live message.");
+  });
+
   it("renders a separate preview including this session folded intermediate message", async () => {
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("folded")], next_cursor: null, source_errors: [], pending_providers: [] });
     const base = toolEventPage();
@@ -2981,7 +3151,7 @@ describe("semantic session delivery", () => {
     expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) => request.level === "all")).toBe(false);
   });
 
-  it("downgrades the previous session to final and opens the next at steps", async () => {
+  it("releases the previous timeline without a final history read and opens the next at steps", async () => {
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("one"), session("two")], next_cursor: null, source_errors: [], pending_providers: [] });
     vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, request.level === "steps" && !request.unsubscribe
       ? toolEventPage() : { ...toolEventPage(), events: [], total_events: 0 }));
@@ -2992,7 +3162,8 @@ describe("semantic session delivery", () => {
     await waitFor(() => expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) => request.session_key === "two" && request.level === "steps")).toBe(true));
     const requests = vi.mocked(loadSessionUpdates).mock.calls.map(([request]) => request);
     expect(requests.some((request) => request.session_key === "one" && request.level === "steps" && request.unsubscribe)).toBe(true);
-    expect(requests.some((request) => request.session_key === "one" && request.level === "final" && !request.unsubscribe)).toBe(true);
+    expect(requests.some((request) => request.session_key === "one" && request.level === "final" && !request.unsubscribe)).toBe(false);
+    expect(vi.mocked(subscribeBackgroundUpdates).mock.calls.filter(([request]) => !request.unsubscribe)).toHaveLength(1);
   });
 
 });

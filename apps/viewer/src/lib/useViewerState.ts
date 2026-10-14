@@ -1,5 +1,6 @@
 import { captureTransport, type CommandInvoker, type EventSubscriber } from "./transport";
 import { SessionDisplayCache } from "./sessionDisplayCache";
+import { useBackgroundUpdates } from "./useBackgroundUpdates";
 import type { ExpandedActivityState } from "./types";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { readReadingPosition, readingEventKey } from "./readingPosition";
@@ -218,6 +219,9 @@ export function useViewerState() {
   const [sessionChildren, setSessionChildren] = useState<Map<string, SessionChildrenState>>(
     () => new Map(),
   );
+  const backgroundSessionKeys = useMemo(() => [...sessions.map((row) => row.session_key),
+    ...[...sessionChildren.values()].flatMap((page) => page.sessions.map((row) => row.session_key))], [sessions, sessionChildren]);
+  const backgroundUpdates = useBackgroundUpdates(send, subscribe, transport.release, backgroundSessionKeys);
   const sessionChildrenRef = useRef<Map<string, SessionChildrenState>>(new Map());
   const sessionChildrenGeneration = useRef(0);
   const sessionChildRequests = useRef(new Map<string, number>());
@@ -508,9 +512,6 @@ export function useViewerState() {
       sessionIndexProgressRevision.current = null;
       setSessionIndexProgressLoading(true);
       void readSnapshot(epoch);
-      for (const request of displayCache.current.backgroundRequests()) {
-        void loadSessionUpdates({ ...request, cursor: null }).then((update) => onSessionUpdate.current(update)).catch(() => {});
-      }
     });
 
     async function subscribeThenReadSnapshot() {
@@ -1062,13 +1063,6 @@ export function useViewerState() {
         const release = displayCache.current.release(previousKey, level);
         if (release) void loadSessionUpdates(release).catch(() => {});
       }
-      if (semanticLive.current.has(previousKey)) {
-        void loadSessionUpdates(displayCache.current.request(previousKey, "final")).then((update) => onSessionUpdate.current(update)).catch(() => {});
-      }
-    }
-    if (sessionKey) {
-      const release = displayCache.current.release(sessionKey, "final");
-      if (release) void loadSessionUpdates(release).catch(() => {});
     }
     displayCache.current.select(sessionKey);
     selectedSessionKeyRef.current = sessionKey;
@@ -1293,15 +1287,20 @@ export function useViewerState() {
   const previewRevision = displayCache.current.previewRevision;
   const projectSession = useCallback((session: SessionSummary): SessionSummary => {
     const liveRunning = displayCache.current.liveRunning(session.session_key);
-    const latest_assistant_preview = displayCache.current.assistantPreview(session.session_key) ?? session.latest_assistant_preview;
-    const is_running = liveRunning ?? session.is_running;
-    const has_running_descendant = liveRunning === false ? false : session.has_running_descendant;
+    const activity = backgroundUpdates.cache.activity(session.session_key);
+    const compactPreview = backgroundUpdates.cache.preview(session.session_key);
+    const activePreview = displayCache.current.liveAssistantPreview(session.session_key);
+    const latest_assistant_preview = backgroundUpdates.cache.isRemoved(session.session_key) ? null
+      : activePreview !== undefined ? activePreview : (compactPreview !== undefined ? compactPreview
+        : displayCache.current.assistantPreview(session.session_key) ?? session.latest_assistant_preview);
+    const is_running = liveRunning ?? activity?.is_running ?? session.is_running;
+    const has_running_descendant = liveRunning === false ? false : activity?.has_running_descendant ?? session.has_running_descendant;
     const question_attention = pageQuestionAttention !== undefined && session.session_key === selectedSessionKey
-      ? pageQuestionAttention : session.question_attention;
+      ? pageQuestionAttention : activity?.question_attention ?? session.question_attention;
     return is_running === session.is_running && has_running_descendant === session.has_running_descendant
       && latest_assistant_preview === session.latest_assistant_preview && question_attention === session.question_attention
       ? session : { ...session, is_running, has_running_descendant, question_attention, latest_assistant_preview };
-  }, [pageQuestionAttention, selectedSessionKey, runningRevision, previewRevision]);
+  }, [pageQuestionAttention, selectedSessionKey, runningRevision, previewRevision, backgroundUpdates.cache, backgroundUpdates.revision]);
   const displayedSessions = useMemo(() => {
     const projectRows = (rows: SessionSummary[]) => {
       const next = rows.map(projectSession);
@@ -1493,6 +1492,7 @@ export function useViewerState() {
     const refreshExpansionRevision = expansionRevision.current;
     const pushed = pushedPage.current;
     pushedPage.current = null;
+    const previewReadToken = backgroundUpdates.cache.capture(selectedSessionKey);
     const page = isLiveRefresh
       ? pushed ? Promise.resolve(pushed) : refreshEventWindow(selectedSessionKey, loadDisplayPage)
       : loadDisplayPage({ session_key: selectedSessionKey, window_mode: "retained", direction: "backward" });
@@ -1574,6 +1574,9 @@ export function useViewerState() {
         }
         const changed = displayCache.current.commit(selectedSessionKey, response);
         displayCache.current.rememberLoadedPage(selectedSessionKey, response);
+        if (!displayCache.current.hasFragmentedAssistantPreview(selectedSessionKey)) {
+          backgroundUpdates.rememberPage(selectedSessionKey, displayCache.current.assistantPreview(selectedSessionKey), previewReadToken);
+        }
         if (isLiveRefresh && !reset && semanticLive.current.has(selectedSessionKey)) {
           const previousEvents = new Map(events.map((event) => [event.event_key, event]));
           for (const key of changed ?? []) detailCache.current.delete(`${selectedSessionKey}:${key}`);
@@ -2166,6 +2169,9 @@ export function useViewerState() {
   }, [retrySessionIndex]);
 
   return {
+    backgroundUpdatesScope: backgroundUpdates.scope,
+    setBackgroundUpdatesScope: backgroundUpdates.changeScope,
+    backgroundUpdatesStatus: backgroundUpdates.status,
     sessionOrder,
     setSessionOrder: changeSessionOrder,
     search,

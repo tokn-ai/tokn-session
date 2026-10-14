@@ -2,18 +2,38 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseEvent, RemoteClient, selectMachine, deselectMachine, invoke, listen, viewerStorageScope, captureTransport } from "./transport";
 import { invoke as nativeInvoke } from "@tauri-apps/api/core";
 import { listen as nativeListen } from "@tauri-apps/api/event";
+import type { BackgroundUpdatesRequest } from "./types";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
 const clients: RemoteClient[] = [];
-afterEach(() => { for (const client of clients) client.close(); clients.length = 0; selectMachine(); vi.unstubAllGlobals(); vi.useRealTimers(); });
+afterEach(() => { for (const client of clients) client.close(); clients.length = 0; Socket.instances = []; selectMachine(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 function client() { const result = new RemoteClient("http://machine:5558", "secret"); clients.push(result); return result; }
 function stream() {
   let controller!: ReadableStreamDefaultController<Uint8Array>;
   const body = new ReadableStream<Uint8Array>({ start(value) { controller = value; } });
   return { response: new Response(body), send: (value: string) => controller.enqueue(new TextEncoder().encode(value)), end: () => controller.close() };
 }
+
+class Socket {
+  static instances: Socket[] = [];
+  onopen?: () => void;
+  onmessage?: (event: { data: string }) => void;
+  onclose?: () => void;
+  onerror?: () => void;
+  sent: Record<string, unknown>[] = [];
+  constructor() { Socket.instances.push(this); }
+  send(value: string) {
+    const frame = JSON.parse(value); this.sent.push(frame);
+    if (frame.kind === "subscribe_background") queueMicrotask(() => this.frame({ kind: "ack", request_id: frame.request_id,
+      result: { subscription_id: frame.request.subscription_id, generation: "compact-generation", revision: "0", scope: frame.request.scope, subscribed: !frame.request.unsubscribe } }));
+  }
+  frame(value: unknown) { this.onmessage?.({ data: JSON.stringify(value) }); }
+  open() { this.onopen?.(); this.frame({ kind: "ready" }); }
+  close() { this.onclose?.(); }
+}
+const background: BackgroundUpdatesRequest = { subscription_id: "compact", scope: "sidebar", session_keys: ["one"] };
 
 describe("remote viewer transport", () => {
   it("keeps captured local requests and listeners local after selecting a remote machine", async () => {
@@ -28,7 +48,11 @@ describe("remote viewer transport", () => {
     expect(await local.invoke("list_sessions")).toEqual({ local: true });
     const handler = vi.fn();
     await local.listen("session-updated", handler);
+    await local.listen("background-session-updated", handler);
+    await local.invoke("subscribe_background_updates", { request: background });
     expect(nativeListen).toHaveBeenCalledWith("session-updated", handler);
+    expect(nativeListen).toHaveBeenCalledWith("background-session-updated", handler);
+    expect(nativeInvoke).toHaveBeenCalledWith("subscribe_background_updates", { request: background });
     expect(send).not.toHaveBeenCalled();
     expect(subscribe).not.toHaveBeenCalled();
     expect(await invoke("list_sessions")).toEqual({ remote: true });
@@ -143,6 +167,53 @@ describe("remote viewer transport", () => {
     expect(restored).toHaveBeenCalledOnce();
     expect(changed).toHaveBeenCalledWith({ payload: { session_key: null, reset: true } });
     stopOne(); stopTwo(); stopThree(); remote.close(); second.end();
+  });
+  it("uses the live socket for compact subscriptions and omits duplicate SSE pushes", async () => {
+    const feed = stream();
+    const fetcher = vi.fn((url: string) => Promise.resolve(url.endsWith("/health")
+      ? Response.json({ version: 1, live_updates: true }) : feed.response));
+    vi.stubGlobal("fetch", fetcher); vi.stubGlobal("WebSocket", Socket);
+    const remote = await RemoteClient.connect("http://machine:5558", "secret"); clients.push(remote);
+    const changed = vi.fn();
+    const listening = remote.listen("background-session-updated", changed);
+    feed.send("event: ready\ndata: {}\n\n");
+    await vi.waitFor(() => expect(Socket.instances).toHaveLength(1));
+    const socket = Socket.instances[0]; socket.open();
+    const stop = await listening;
+    expect(fetcher.mock.calls[1][0]).toBe("http://machine:5558/api/v1/events?session_updates=false&background_updates=false");
+    expect(await remote.invoke("subscribe_background_updates", { request: background })).toEqual({
+      subscription_id: "compact", generation: "compact-generation", revision: "0", scope: "sidebar", subscribed: true,
+    });
+    expect(socket.sent[1]).toMatchObject({ kind: "subscribe_background", request: background });
+    await remote.invoke("renew_background_subscriptions", { ids: ["compact"] });
+    const payload = { subscription_id: "compact", session_key: "one", latest_assistant_message: { preview: "Reply" } };
+    socket.frame({ kind: "event", event: "background-session-updated", payload });
+    expect(changed).toHaveBeenCalledWith({ payload });
+    await remote.release("subscribe_background_updates", { request: { ...background, unsubscribe: true } });
+    expect(socket.sent[2]).toMatchObject({ kind: "subscribe_background", request: { ...background, unsubscribe: true } });
+    socket.close();
+    await remote.release("subscribe_background_updates", { request: { ...background, unsubscribe: true } });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    stop(); remote.close(); feed.end();
+  });
+  it("retains HTTP and SSE compact delivery for tunnels without a live socket", async () => {
+    const feed = stream();
+    const fetcher = vi.fn((url: string) => Promise.resolve(url.endsWith("/events") ? feed.response : Response.json(null)));
+    vi.stubGlobal("fetch", fetcher);
+    const remote = client(); const changed = vi.fn();
+    const listening = remote.listen("background-session-updated", changed);
+    feed.send("event: ready\ndata: {}\n\n"); const stop = await listening;
+    await remote.invoke("subscribe_background_updates", { request: background });
+    await remote.invoke("renew_background_subscriptions", { ids: ["compact"] });
+    const payload = { subscription_id: "compact", session_key: "one" };
+    feed.send(`event: background-session-updated\ndata: ${JSON.stringify(payload)}\n\n`);
+    await vi.waitFor(() => expect(changed).toHaveBeenCalledWith({ payload }));
+    await remote.release("subscribe_background_updates", { request: { ...background, unsubscribe: true } });
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      "http://machine:5558/api/v1/events", "http://machine:5558/api/v1/subscribe_background_updates",
+      "http://machine:5558/api/v1/renew_background_subscriptions", "http://machine:5558/api/v1/subscribe_background_updates",
+    ]);
+    stop(); remote.close(); feed.end();
   });
   it("accepts a large chunk of individually bounded SSE frames", async () => {
     const feed = stream();

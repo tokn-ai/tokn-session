@@ -74,7 +74,7 @@ pub struct ViewerService {
   pub relay: Arc<crate::relay::ViewerRelay>,
   pub(crate) indexer_lock: Option<crate::indexer::IndexerLock>,
   repository: Arc<dyn ViewerRepository>,
-  session_index: Arc<SessionIndex>,
+  pub(crate) session_index: Arc<SessionIndex>,
   index_refresh_gate: Arc<Mutex<()>>,
   index_progress: IndexProgressStore,
   index_retry_sender: Arc<Mutex<Option<mpsc::UnboundedSender<SessionIndexWake>>>>,
@@ -91,9 +91,10 @@ pub struct ViewerService {
   input_broker: crate::input::InputBroker,
   question_claims: Arc<Mutex<question_input::QuestionClaims>>,
   pub(crate) updates: Arc<Mutex<crate::updates::UpdateStore>>,
+  pub(crate) background: Arc<Mutex<crate::background::BackgroundStore>>,
   /// Per-request metadata projection. The adapter still owns grant verification,
   /// command permissions, and stream lifetime; never install this on a worker.
-  session_scope: Option<Arc<HashSet<String>>>,
+  pub(crate) session_scope: Option<Arc<HashSet<String>>>,
 }
 
 /// The progress center must never need to touch provider storage. This store
@@ -687,6 +688,7 @@ impl ViewerService {
       failed_body_jobs: Arc::new(Mutex::new(HashMap::new())),
       loaded_session_cache: Arc::new(Mutex::new(None)),
       updates: Arc::new(Mutex::new(crate::updates::UpdateStore::default())),
+      background: Arc::new(Mutex::new(crate::background::BackgroundStore::default())),
       input_broker: crate::input::InputBroker::default(),
       question_claims: Arc::new(Mutex::new(question_input::QuestionClaims::default())),
       session_scope: None,
@@ -716,7 +718,7 @@ impl ViewerService {
     Ok(service)
   }
 
-  fn check_session_scope(&self, key: &str) -> Result<(), String> {
+  pub(crate) fn check_session_scope(&self, key: &str) -> Result<(), String> {
     if self.session_scope.as_ref().is_some_and(|scope| !scope.contains(key)) {
       return Err("Session is not included in this share".into());
     }
@@ -1323,17 +1325,49 @@ impl ViewerService {
       }
     }
     let mut notifications = BTreeMap::new();
-    let notification = |key: String, attention: SessionAttention| {
-      json!({
-        "session_key": key, "has_unread": attention.has_unread,
-        "unread_final_count": attention.unread_final_count, "is_running": attention.is_running,
-        "has_running_descendant": attention.has_running_descendant,
-        "question_attention": attention.question_attention,
-      })
-    };
     for (provider, locators) in requested {
       let Ok(Some(inventory)) = self.indexed_session_inventory(provider) else {
         continue;
+      };
+      // One compact batch also includes tombstones. All-session interests must
+      // not turn each notification into another SQLite round trip.
+      let indexed = if self.relay.external_catalog_covers(provider) {
+        HashMap::new()
+      } else {
+        let Ok(rows) = self.session_index.list_all_sessions_for_provider(provider.as_str()) else {
+          continue;
+        };
+        rows
+          .into_iter()
+          .map(|row| (row.key.clone(), row))
+          .collect::<HashMap<_, _>>()
+      };
+      let notification = |key: String, attention: SessionAttention| {
+        // Each row carries its own compact body projection and source checkpoint.
+        // Ancestor attention propagation must never carry the child's message.
+        let message = decode_session_key(&key)
+          .ok()
+          .and_then(|locator| index_session_key(&locator).ok())
+          .and_then(|indexed_key| indexed.get(&indexed_key))
+          .filter(|row| row.attention_baselined)
+          .and_then(|row| {
+            let compact = row.latest_message.as_ref()?;
+            let value = serde_json::from_str::<Value>(compact).ok()?;
+            let revision = format!(
+              "index-message.v1.{}.{:x}",
+              row.source_generation,
+              Sha256::digest(row.source_cursor.as_bytes())
+            );
+            Some((value, revision))
+          });
+        json!({
+          "session_key": key, "has_unread": attention.has_unread,
+          "unread_final_count": attention.unread_final_count, "is_running": attention.is_running,
+          "has_running_descendant": attention.has_running_descendant,
+          "question_attention": attention.question_attention,
+          "latest_assistant_message": message.as_ref().map(|(value, _)| value),
+          "message_revision": message.as_ref().map(|(_, revision)| revision),
+        })
       };
       // A duplicate source can change while another source owns its canonical
       // identity. Still acknowledge that requested record; only the canonical
@@ -1365,6 +1399,33 @@ impl ViewerService {
       for index in affected {
         if let Ok(key) = encode_session_key(&locator_for_header(provider, &relations.headers[index])) {
           notifications.insert(key.clone(), notification(key, attention[index]));
+        }
+      }
+      if !self.relay.external_catalog_covers(provider) {
+        for locator in &locators {
+          let Ok(key) = encode_session_key(locator) else {
+            continue;
+          };
+          if notifications.contains_key(&key) {
+            continue;
+          }
+          let Ok(indexed_key) = index_session_key(locator) else {
+            continue;
+          };
+          // An available committed provider catalog proves deletion. A source
+          // read failure or unavailable external catalog does not.
+          if indexed.get(&indexed_key).is_none_or(|row| !row.present) {
+            notifications.insert(
+              key.clone(),
+              json!({
+                "session_key": key, "removed": true,
+                "latest_assistant_message": null, "message_revision": "removed",
+                "has_unread": false, "unread_final_count": 0, "is_running": false,
+                "has_running_descendant": false,
+                "question_attention": {"required_count": 0, "available_count": 0},
+              }),
+            );
+          }
         }
       }
     }
@@ -2115,6 +2176,7 @@ impl ViewerService {
             // make a known session look untitled.
             metadata.body_title = relocated.body_title.clone();
             metadata.body_preview = relocated.body_preview.clone();
+            metadata.latest_message = relocated.latest_message.clone();
             if relocated.has_unread() {
               metadata.attention_marker = known_attention_marker(relocated);
               metadata.has_new_attention = true;
@@ -5787,6 +5849,7 @@ mod tests {
   mod communications;
   mod event_filter;
   mod history_cache;
+  mod latest_message;
   mod questions;
   mod running_notifications;
   mod targeted_index;
@@ -6180,6 +6243,8 @@ mod tests {
   fn indexed_attention_session(marker: Option<&str>, present: bool) -> IndexedSession {
     IndexedSession {
       key: IndexedSessionKey::new("codex", "path.v1.fixture", "fixture"),
+      source_cursor: "fixture".into(),
+      source_generation: 0,
       source_path: "/tmp/fixture.jsonl".to_string(),
       title: None,
       preview: None,
@@ -6187,6 +6252,7 @@ mod tests {
       catalog_preview: None,
       body_title: None,
       body_preview: None,
+      latest_message: None,
       cwd: None,
       timestamp: None,
       updated_at: None,
