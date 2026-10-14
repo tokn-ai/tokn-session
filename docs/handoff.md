@@ -50,18 +50,23 @@ first-line preview of the latest cached assistant message from that session, and
 show a small project name. Project-grouped rows show titles only. Previews use existing
 frontend semantic summaries and compact background messages, including
 intermediate assistant messages inside folded work groups. Child/subagent
-sessions have separate previews. A compact Updates entry in the bottom status
-bar opens the background scope/status popup, keeping the session sidebar focused
+sessions have separate previews. A compact live-updates entry in the bottom status
+bar opens separate session-scope, background-delivery, and open-conversation controls, keeping the session sidebar focused
 on navigation and remaining available when it is collapsed. The scope defaults to
 All sessions on the connected machine; Sidebar sessions limits it to loaded
 root/child rows. One independent leased interest carries bounded latest-assistant
 and activity projections over WebSocket, Tauri, or Hub/SSE; registration,
 scope changes, and reconnects never load unopened history. Delivery presets are
 `final`, `messages`, `steps`, and `all`, with `details` retained for compatibility.
+Background delivery defaults to Messages; Final filters intermediate previews
+while keeping question/activity state live. The open conversation defaults to
+Steps and offers all four presets, each with independent cache coverage and
+a backward baseline when switching. Both level preferences persist locally.
 Migration 9 stores compact latest-message metadata from existing normalization
 jobs without requeueing bodies; a second viewer follows SQLite projections.
 The frontend retains up to 2,048 compact previews separately from eight rich
-replicas. Active steps replicas own their preview while subscribed; late page
+replicas. Active Messages/Steps/All replicas own their preview while subscribed;
+Final keeps compact intermediate previews authoritative. Late page
 responses cannot replace newer compact updates. Scope changes retain text but
 retire old activity authority. Unknown projections preserve previews; committed
 empty/reset/removal projections clear them. Accepted first-screen pages seed

@@ -575,6 +575,7 @@ export interface ExpandedActivityState {
 }
 
 export type UpdateLevel = "final" | "messages" | "steps" | "details" | "all";
+export type ConversationUpdateLevel = Exclude<UpdateLevel, "details">;
 export interface SessionUpdateItem {
   item_id: string;
   kind: "user_message" | "assistant_message" | "notification" | "tool_summary" | "detail" | "work_summary" | "event";
@@ -629,9 +630,12 @@ export interface SessionNotification {
 
 /** Compact live interests never imply historical or detail loading. */
 export type BackgroundUpdatesScope = "all" | "sidebar";
+export type BackgroundUpdateLevel = "final" | "messages";
 export interface BackgroundUpdatesRequest {
   subscription_id: string;
   scope: BackgroundUpdatesScope;
+  /** Omitted for the default messages preset to support older hosts. */
+  level?: BackgroundUpdateLevel;
   session_keys: string[];
   unsubscribe?: boolean;
 }
@@ -640,6 +644,7 @@ export interface BackgroundUpdatesSubscription {
   generation: string;
   revision: string;
   scope: BackgroundUpdatesScope;
+  level?: BackgroundUpdateLevel;
   subscribed?: boolean;
   unsubscribed?: boolean;
 }
@@ -650,6 +655,7 @@ export interface BackgroundAssistantMessage {
   preview: string | null;
 }
 export interface BackgroundSessionUpdate extends SessionNotification {
+  level?: BackgroundUpdateLevel;
   removed?: boolean;
   subscription_id: string;
   generation: string;

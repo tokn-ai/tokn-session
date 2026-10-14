@@ -55,9 +55,14 @@ This scope is separate from delivery level. The background projection carries
 the session's latest assistant first line, including intermediate replies,
 message identity/delivery/phase, and direct attention/running state. It does not
 carry tools, native records, or child text as the parent's preview.
+Background delivery offers `messages` (the default, including intermediate
+replies) and `final` (only final assistant previews). Question/running state and
+authoritative clearing/removal stay live at both levels. Intermediate-only
+changes do not consume final subscription revisions; activity changes alongside
+an intermediate reply omit message coverage so the previous preview survives.
 
 `subscribe_background_updates` (WebSocket `subscribe_background`) registers
-identity and scope only. Registration, scope changes, and reconnection never
+identity, scope, and background level only. Registration, scope/level changes, and reconnection never
 read history or send a history snapshot. The first live update can advance from
 revision zero without a backward baseline. Each subscription has its own
 generation and decimal revision; updates are complete compact projections,
@@ -83,17 +88,25 @@ Subscription and reconnect therefore do not replay existing sidebar data.
 
 The frontend keeps up to 2,048 compact previews independently of its eight rich
 conversation replicas. Accepted first-screen pages can seed previews, but late
-page responses cannot overwrite newer compact messages. Active semantic steps
-replicas own their previews while subscribed, because their source pipeline can
-be ahead of indexing. Subscription changes retain bounded preview text while
+page responses cannot overwrite newer compact messages. Active semantic replicas
+at Messages/Steps/All own their previews while subscribed, because their source
+pipeline can be ahead of indexing. Subscription changes retain bounded preview text while
 retiring live activity authority; stale IDs/generations are ignored. Gaps and
 reconnects establish a fresh live interest without loading unopened history.
-The scope preference is stored locally. The bottom status bar shows a compact
-Updates entry; its popup contains scope choices and status details. Unsupported
+The scope and level preferences are stored locally. The bottom status bar shows a compact
+live-updates entry; its popup separates session scope, background delivery,
+and open-conversation delivery. The conversation offers `final`, `messages`,
+`steps` (the default), and `all`; changes load the requested projection's
+backward baseline and retain per-resource cache coverage. Unsupported
 hosts show a warning there while open sessions continue through the existing path.
 Legacy desktop External reader mode has no compact metadata feed and reports
 background updates unavailable; native Local/Automatic mode and encrypted remote
 connections to modern hosts support it.
+Messages subscriptions omit the new level field for older-host compatibility.
+Final requires an explicit matching acknowledgement; unsupported hosts report
+the failure without silently reverting to Messages.
+Legacy full-page conversation loading remains available at Steps. Missing
+non-Steps presets report a conversation error rather than showing unfiltered rows.
 
 ## Explicit resources and cache coverage
 

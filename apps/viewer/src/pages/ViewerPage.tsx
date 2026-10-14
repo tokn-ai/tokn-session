@@ -132,8 +132,13 @@ function ViewerContent({ remote, connection, on_open_machines }: ViewerPageProps
 
       <StatusBar
         background_updates_scope={viewer.backgroundUpdatesScope}
+        background_updates_level={viewer.backgroundUpdatesLevel}
         background_updates_status={viewer.backgroundUpdatesStatus}
+        conversation_update_level={viewer.conversationUpdateLevel}
+        conversation_available={viewer.selectedSessionKey !== null}
         on_background_updates_scope_change={viewer.setBackgroundUpdatesScope}
+        on_background_updates_level_change={viewer.setBackgroundUpdatesLevel}
+        on_conversation_update_level_change={viewer.setConversationUpdateLevel}
         connection={remote ? connection : <RelayConnection on_open_machines={on_open_machines} />}
         error={viewer.sessionIndexProgressError}
         is_loading={viewer.sessionIndexProgressLoading}

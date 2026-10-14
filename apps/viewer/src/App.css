@@ -308,8 +308,36 @@ button:disabled {
   border: 0;
 }
 
+.background-updates-panel fieldset + fieldset {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
 .background-updates-panel legend {
   margin-bottom: 8px;
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.background-updates-panel__select {
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 9px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.background-updates-panel__select:disabled {
+  opacity: 0.6;
+}
+
+.background-updates-panel__level-description {
+  margin: 6px 0 0;
   color: var(--text-soft);
   font-size: 12px;
 }

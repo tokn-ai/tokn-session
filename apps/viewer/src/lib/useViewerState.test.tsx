@@ -2705,7 +2705,7 @@ describe("useViewerState subagent discovery", () => {
   });
 });
 
-function semanticSnapshot(request: import("./types").SessionUpdatesRequest, page: EventPageResponse): import("./types").SessionUpdate {
+function semanticSnapshot(request: import("./types").SessionUpdatesRequest, page: EventPageResponse & { scope?: import("./types").SessionUpdateScope }): import("./types").SessionUpdate {
   const { events, ...state } = page;
   return { subscription_id: request.subscription_id, session_key: request.session_key, level: request.level,
     generation: "fixture", base_revision: null, revision: "1", snapshot: true,
@@ -2714,6 +2714,117 @@ function semanticSnapshot(request: import("./types").SessionUpdatesRequest, page
 }
 
 describe("semantic session delivery", () => {
+  it.each(["final", "messages", "steps", "all"] as const)("requests and renders the chosen %s conversation projection", async (level) => {
+    let emit!: (update: import("./types").SessionUpdate) => void;
+    vi.mocked(listenForSessionUpdates).mockImplementation(async (handler) => { emit = handler; return () => {}; });
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("levels")], next_cursor: null, source_errors: [], pending_providers: [] });
+    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, {
+      ...toolEventPage(), events: [{ ...toolEventPage().events[0], event_key: request.level, summary: request.level }],
+      scope: request.scope,
+    }));
+    const { result } = renderHook(() => useViewerState());
+    await selectListedSession(result, "levels");
+    await waitFor(() => expect(result.current.events[0]?.event_key).toBe("steps"));
+    act(() => result.current.setConversationUpdateLevel(level));
+    await waitFor(() => expect(result.current.events[0]?.event_key).toBe(level));
+    expect(result.current.conversationUpdateLevel).toBe(level);
+    const request = vi.mocked(loadSessionUpdates).mock.calls.slice().reverse().find(([request]) => request.level === level && !request.unsubscribe)![0];
+    expect(request.scope).toEqual({ history: "recent_turns", group_keys: [] });
+    if (level !== "steps") {
+      expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) => request.level === "steps" && request.unsubscribe)).toBe(true);
+      expect(localStorage.getItem("tokn.viewer.conversation-update-level")).toBe(level);
+    }
+    // Each preset remains live, including Final. A late other-level update
+    // must not replace the chosen conversation or its error state.
+    act(() => emit({ ...semanticSnapshot(request, { ...toolEventPage(), events: [{ ...toolEventPage().events[0], event_key: `${level}-live` }] }), revision: "2" }));
+    await waitFor(() => expect(result.current.events[0]?.event_key).toBe(`${level}-live`));
+  });
+
+  it("retires an in-flight old-level baseline and retains loaded history scope", async () => {
+    const pending = deferred<import("./types").SessionUpdate>();
+    let oldRequest!: import("./types").SessionUpdatesRequest;
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("race-level")], next_cursor: null, source_errors: [], pending_providers: [] });
+    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => {
+      if (request.level === "steps" && !request.unsubscribe) { oldRequest = request; return pending.promise; }
+      return semanticSnapshot(request, { ...toolEventPage(), events: [{ ...toolEventPage().events[0], event_key: request.level }],
+        previous_cursor: "older", scope: request.scope });
+    });
+    const { result } = renderHook(() => useViewerState());
+    await selectListedSession(result, "race-level");
+    await waitFor(() => expect(oldRequest).toBeDefined());
+    act(() => result.current.setConversationUpdateLevel("messages"));
+    await waitFor(() => expect(result.current.events[0]?.event_key).toBe("messages"));
+    await act(async () => pending.resolve(semanticSnapshot(oldRequest, toolEventPage())));
+    expect(result.current.events[0]?.event_key).toBe("messages");
+    expect(result.current.eventsError).toBeNull();
+    expect(vi.mocked(loadSessionUpdates).mock.calls.filter(([request]) => request.level === "steps" && request.unsubscribe)).toHaveLength(2);
+    act(() => result.current.loadOlderEvents());
+    await waitFor(() => expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) => request.level === "messages"
+      && request.history_cursor === "older" && request.scope?.history === "retained")).toBe(true));
+    await waitFor(() => expect(result.current.olderLoading).toBe(false));
+    act(() => result.current.setConversationUpdateLevel("all"));
+    await waitFor(() => expect(result.current.events[0]?.event_key).toBe("all"));
+    expect(vi.mocked(loadSessionUpdates).mock.calls.slice().reverse().find(([request]) => request.level === "all")![0].scope?.history).toBe("retained");
+  });
+
+  it("keeps a compact intermediate preview while opening the Final conversation", async () => {
+    let emit!: (update: import("./types").BackgroundSessionUpdate) => void;
+    localStorage.setItem("tokn.viewer.conversation-update-level", "final");
+    vi.mocked(listenForBackgroundUpdates).mockImplementation(async (handler) => { emit = handler; return () => {}; });
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("final-preview")], next_cursor: null, source_errors: [], pending_providers: [] });
+    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, {
+      ...toolEventPage(), events: [{ ...toolEventPage().events[0], type: "message", role: "assistant", delivery: "final", summary: "Earlier final." }],
+    }));
+    const { result } = renderHook(() => useViewerState());
+    await waitFor(() => expect(subscribeBackgroundUpdates).toHaveBeenCalledOnce());
+    const request = vi.mocked(subscribeBackgroundUpdates).mock.calls[0][0];
+    act(() => emit({ subscription_id: request.subscription_id, generation: "background", revision: "1", session_key: "final-preview",
+      message_revision: "index:2", latest_assistant_message: { message_id: "latest", delivery: "commentary", phase: "running", preview: "Newest intermediate." },
+      has_unread: false, unread_final_count: 0, is_running: true, question_attention: { required_count: 0, available_count: 0 } }));
+    await selectListedSession(result, "final-preview");
+    await waitFor(() => expect(result.current.events[0]?.summary).toBe("Earlier final."));
+    expect(result.current.sessions[0].latest_assistant_preview).toBe("Newest intermediate.");
+  });
+
+  it.each(["final", "messages", "all"] as const)("never silently loads unfiltered legacy rows for %s", async (level) => {
+    localStorage.setItem("tokn.viewer.conversation-update-level", level);
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("legacy-level")], next_cursor: null, source_errors: [], pending_providers: [] });
+    vi.mocked(loadEventPage).mockResolvedValue(toolEventPage());
+    const { result } = renderHook(() => useViewerState());
+    await selectListedSession(result, "legacy-level");
+    await waitFor(() => expect(result.current.eventsError).toContain("Delivery-level selection is unavailable"));
+    expect(loadEventPage).not.toHaveBeenCalled();
+    expect(result.current.events).toEqual([]);
+    act(() => result.current.setConversationUpdateLevel("steps"));
+    await waitFor(() => expect(result.current.events).toEqual(toolEventPage().events));
+    expect(result.current.eventsError).toBeNull();
+  });
+
+  it("keeps supported semantic levels usable after an unsupported Messages variant", async () => {
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("old-semantic")], next_cursor: null, source_errors: [], pending_providers: [] });
+    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => {
+      if (request.level === "messages" && !request.unsubscribe) throw new Error("unknown variant messages");
+      return semanticSnapshot(request, { ...toolEventPage(), events: [{ ...toolEventPage().events[0], event_key: request.level }] });
+    });
+    const { result } = renderHook(() => useViewerState());
+    await selectListedSession(result, "old-semantic");
+    await waitFor(() => expect(result.current.events[0]?.event_key).toBe("steps"));
+    act(() => result.current.setConversationUpdateLevel("messages"));
+    await waitFor(() => expect(result.current.eventsError).toContain("Delivery-level selection is unavailable"));
+    act(() => result.current.setConversationUpdateLevel("final"));
+    await waitFor(() => expect(result.current.events[0]?.event_key).toBe("final"));
+    expect(result.current.eventsError).toBeNull();
+    expect(loadEventPage).not.toHaveBeenCalled();
+  });
+
+  it("restores a valid conversation preference and rejects legacy details as a user preset", () => {
+    localStorage.setItem("tokn.viewer.conversation-update-level", "messages");
+    const messages = renderHook(() => useViewerState());
+    expect(messages.result.current.conversationUpdateLevel).toBe("messages");
+    messages.unmount();
+    localStorage.setItem("tokn.viewer.conversation-update-level", "details");
+    expect(renderHook(() => useViewerState()).result.current.conversationUpdateLevel).toBe("steps");
+  });
   it("updates a never-opened sidebar session from compact events without loading history", async () => {
     let emit!: (update: import("./types").BackgroundSessionUpdate) => void;
     vi.mocked(listenForBackgroundUpdates).mockImplementation(async (handler) => { emit = handler; return () => {}; });

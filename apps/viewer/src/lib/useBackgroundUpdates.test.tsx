@@ -1,17 +1,18 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CommandInvoker, EventSubscriber } from "./transport";
-import type { BackgroundSessionUpdate, BackgroundUpdatesRequest } from "./types";
+import type { BackgroundSessionUpdate, BackgroundUpdatesRequest, BackgroundUpdatesSubscription } from "./types";
 import { useBackgroundUpdates } from "./useBackgroundUpdates";
 
 type Handler = (event: { payload: unknown }) => void;
 
 function transport() {
   const handlers = new Map<string, Set<Handler>>();
-  const send = vi.fn(async (command: string, payload?: Record<string, unknown>) => {
+  const send = vi.fn(async (command: string, payload?: Record<string, unknown>): Promise<BackgroundUpdatesSubscription | undefined> => {
     if (command === "subscribe_background_updates") {
       const request = (payload as { request: BackgroundUpdatesRequest }).request;
-      return { subscription_id: request.subscription_id, generation: "server", revision: "0", scope: request.scope, subscribed: true };
+      return { subscription_id: request.subscription_id, generation: "server", revision: "0", scope: request.scope,
+        level: request.level ?? "messages", subscribed: true };
     }
     if (command === "renew_background_subscriptions") return;
     throw new Error(`Unexpected command: ${command}`);
@@ -35,6 +36,7 @@ function transport() {
 
 function update(request: BackgroundUpdatesRequest, session_key: string, revision = "1", preview = "Main assistant reply."): BackgroundSessionUpdate {
   return { subscription_id: request.subscription_id, generation: "server", revision, session_key,
+    level: request.level ?? "messages",
     has_unread: false, unread_final_count: 0, is_running: false, has_running_descendant: false,
     question_attention: { required_count: 0, available_count: 0 },
     latest_assistant_message: { message_id: `${session_key}:message`, delivery: "final", phase: "finished", preview },
@@ -53,7 +55,9 @@ describe("background update interests", () => {
     await act(async () => {});
     const request = connection.requests()[0];
     expect(request).toMatchObject({ scope: "all", session_keys: [] });
+    expect(request).not.toHaveProperty("level");
     expect(result.current.scope).toBe("all");
+    expect(result.current.level).toBe("messages");
     expect(result.current.status).toBeNull();
     await act(async () => { rerender({ keys: ["different"] }); });
     expect(connection.requests()).toHaveLength(1);
@@ -62,6 +66,63 @@ describe("background update interests", () => {
     expect(connection.send).toHaveBeenLastCalledWith("renew_background_subscriptions", { ids: [request.subscription_id] });
     unmount();
     expect(connection.release).toHaveBeenCalledExactlyOnceWith("subscribe_background_updates", { request: { ...request, unsubscribe: true } });
+  });
+
+  it("persists independent levels, retires the previous interest, and preserves known previews without reads", async () => {
+    const connection = transport();
+    const { result } = renderHook(() => useBackgroundUpdates(connection.invoke, connection.listen, connection.release, ["visible"]));
+    await act(async () => {});
+    const first = connection.requests()[0];
+    act(() => connection.emit("background-session-updated", update(first, "visible", "1", "Known reply")));
+    await act(async () => { result.current.changeLevel("final"); });
+    const second = connection.requests()[1];
+    expect(second).toMatchObject({ level: "final", scope: "all", session_keys: [] });
+    expect(second.subscription_id).not.toBe(first.subscription_id);
+    expect(localStorage.getItem("tokn.viewer.background-update-level")).toBe("final");
+    expect(result.current.cache.preview("visible")).toBe("Known reply");
+    expect(result.current.cache.activity("visible")).toBeUndefined();
+    expect(connection.release).toHaveBeenCalledWith("subscribe_background_updates", { request: { ...first, unsubscribe: true } });
+    act(() => {
+      connection.emit("background-session-updated", update(first, "visible", "2", "Retired commentary"));
+      connection.emit("background-session-updated", { ...update(second, "visible"), latest_assistant_message: null, message_revision: null, is_running: true });
+    });
+    expect(result.current.cache.preview("visible")).toBe("Known reply");
+    expect(result.current.cache.activity("visible")?.is_running).toBe(true);
+    await act(async () => { result.current.changeScope("sidebar"); });
+    expect(connection.requests()[2]).toMatchObject({ level: "final", scope: "sidebar", session_keys: ["visible"] });
+    await act(async () => { result.current.changeLevel("messages"); });
+    expect(connection.requests()[3]).not.toHaveProperty("level");
+    expect(connection.requests()[3]).toMatchObject({ scope: "sidebar", session_keys: ["visible"] });
+    expect(connection.send.mock.calls.every(([command]) => command === "subscribe_background_updates")).toBe(true);
+  });
+
+  it("restores final filtering and rejects unacknowledged legacy delivery without a fallback", async () => {
+    localStorage.setItem("tokn.viewer.background-update-level", "final");
+    const connection = transport();
+    connection.send.mockImplementation(async (_command, payload) => {
+      const request = (payload as { request: BackgroundUpdatesRequest }).request;
+      connection.emit("background-session-updated", { ...update(request, "visible", "1", "Unfiltered reply"), level: undefined });
+      return { subscription_id: request.subscription_id, generation: "server", revision: "0", scope: request.scope, subscribed: true };
+    });
+    const { result } = renderHook(() => useBackgroundUpdates(connection.invoke, connection.listen, connection.release, []));
+    await act(async () => {});
+    expect(result.current.level).toBe("final");
+    expect(result.current.cache.preview("visible")).toBeUndefined();
+    expect(result.current.status).toContain("Final-only background updates are unavailable");
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(connection.requests()).toHaveLength(1);
+    expect(connection.requests()[0].level).toBe("final");
+    expect(connection.release).toHaveBeenCalled();
+  });
+
+  it("reports old-host validation errors for final filtering without retrying as messages", async () => {
+    localStorage.setItem("tokn.viewer.background-update-level", "final");
+    const connection = transport();
+    connection.send.mockRejectedValue(new Error("Invalid background subscription"));
+    const { result } = renderHook(() => useBackgroundUpdates(connection.invoke, connection.listen, connection.release, []));
+    await act(async () => {});
+    expect(result.current.status).toContain("Select All assistant messages or update the host");
+    expect(connection.requests()).toHaveLength(1);
   });
 
   it("restores sidebar scope and treats sorted unique keys as one interest set", async () => {

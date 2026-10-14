@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState, type ReactNode } from "react";
-import type { BackgroundUpdatesScope, SessionIndexProgress, SourceError } from "../lib/types";
+import type { BackgroundUpdateLevel, BackgroundUpdatesScope, ConversationUpdateLevel, SessionIndexProgress, SourceError } from "../lib/types";
 import { BackgroundUpdatesControl } from "./BackgroundUpdatesControl";
 import { BellIcon } from "./Icons";
 import {
@@ -10,8 +10,13 @@ import {
 
 interface StatusBarProps {
   background_updates_scope?: BackgroundUpdatesScope;
+  background_updates_level?: BackgroundUpdateLevel;
+  conversation_update_level?: ConversationUpdateLevel;
+  conversation_available?: boolean;
   background_updates_status?: string | null;
   on_background_updates_scope_change?: (scope: BackgroundUpdatesScope) => void;
+  on_background_updates_level_change?: (level: BackgroundUpdateLevel) => void;
+  on_conversation_update_level_change?: (level: ConversationUpdateLevel) => void;
   connection?: ReactNode;
   progress: SessionIndexProgress | null;
   is_loading: boolean;
@@ -78,8 +83,13 @@ function describeStatusAnnouncement(
  */
 export function StatusBar({
   background_updates_scope = "all",
+  background_updates_level = "messages",
+  conversation_update_level = "steps",
+  conversation_available = false,
   background_updates_status = null,
   on_background_updates_scope_change,
+  on_background_updates_level_change,
+  on_conversation_update_level_change,
   connection,
   progress,
   is_loading,
@@ -107,10 +117,15 @@ export function StatusBar({
     <div className="status-region">
       <footer className="status-bar" data-tone={summary.tone}>
         {connection}
-        {on_background_updates_scope_change ? <BackgroundUpdatesControl
+        {on_background_updates_scope_change && on_background_updates_level_change && on_conversation_update_level_change ? <BackgroundUpdatesControl
           scope={background_updates_scope}
+          level={background_updates_level}
+          conversation_level={conversation_update_level}
+          conversation_available={conversation_available}
           status={background_updates_status}
           on_scope_change={on_background_updates_scope_change}
+          on_level_change={on_background_updates_level_change}
+          on_conversation_level_change={on_conversation_update_level_change}
         /> : null}
 
         <span aria-atomic="true" aria-live="polite" className="sr-only" key={announcement.key} role="status">

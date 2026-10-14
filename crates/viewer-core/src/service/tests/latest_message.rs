@@ -177,7 +177,7 @@ fn separate_index_reader_receives_persisted_compact_projection_without_loading_s
 
 #[test]
 fn follower_scope_widening_does_not_replay_changes_from_before_subscription() {
-  use crate::background::{BackgroundScope, BackgroundUpdatesRequest};
+  use crate::background::{BackgroundScope, BackgroundUpdateLevel, BackgroundUpdatesRequest};
   let directory = tempfile::tempdir().unwrap();
   let specs = ["inside", "outside"].map(|id| {
     let path = directory.path().join(format!("{id}.jsonl"));
@@ -198,6 +198,7 @@ fn follower_scope_widening_does_not_replay_changes_from_before_subscription() {
     .subscribe_background(BackgroundUpdatesRequest {
       subscription_id: "scope".into(),
       scope: BackgroundScope::Sidebar,
+      level: BackgroundUpdateLevel::Messages,
       session_keys: vec![inside.clone()],
       unsubscribe: false,
     })
@@ -247,6 +248,7 @@ fn follower_scope_widening_does_not_replay_changes_from_before_subscription() {
     .subscribe_background(BackgroundUpdatesRequest {
       subscription_id: "scope".into(),
       scope: BackgroundScope::All,
+      level: BackgroundUpdateLevel::Messages,
       session_keys: vec![],
       unsubscribe: false,
     })
@@ -328,7 +330,7 @@ async fn runtime_preview(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_codex_appends_reach_background_runtime_without_opening_history() {
-  use crate::background::{BackgroundScope, BackgroundUpdatesRequest};
+  use crate::background::{BackgroundScope, BackgroundUpdateLevel, BackgroundUpdatesRequest};
   use std::io::Write;
 
   let directory = tempfile::tempdir().unwrap();
@@ -356,6 +358,7 @@ async fn real_codex_appends_reach_background_runtime_without_opening_history() {
     .subscribe_background(BackgroundUpdatesRequest {
       subscription_id: "runtime-background".into(),
       scope: BackgroundScope::Sidebar,
+      level: BackgroundUpdateLevel::Messages,
       session_keys: vec![key.clone()],
       unsubscribe: false,
     })

@@ -56,23 +56,49 @@ function renderStatusBar(
 }
 
 describe("StatusBar", () => {
-  it("keeps background scope in the persistent footer alongside connection and notifications", () => {
+  it("keeps background scope and delivery level in the footer alongside connection and notifications", () => {
     const change = vi.fn();
+    const level_change = vi.fn();
+    const conversation_change = vi.fn();
     render(<StatusBar
       connection={<button type="button">This machine</button>}
       background_updates_scope="sidebar"
+      background_updates_level="final"
       background_updates_status={null}
       on_background_updates_scope_change={change}
+      on_background_updates_level_change={level_change}
+      on_conversation_update_level_change={conversation_change}
+      conversation_available={true}
       error={null} is_loading={false} is_retrying={false}
       on_retry={vi.fn()} progress={progress()} source_errors={[]}
     />);
     const bar = document.querySelector("footer")!;
-    const trigger = screen.getByRole("button", { name: /Background updates.*Sidebar sessions/ });
+    const trigger = screen.getByRole("button", { name: /Live updates.*Sidebar sessions/ });
     expect(bar).toContainElement(trigger);
+    expect(trigger).toHaveTextContent("Final · Sidebar");
     expect(bar).toContainElement(screen.getByRole("button", { name: "This machine" }));
     fireEvent.click(trigger);
     fireEvent.click(screen.getByRole("radio", { name: "All sessions" }));
     expect(change).toHaveBeenCalledExactlyOnceWith("all");
+    fireEvent.change(screen.getByRole("combobox", { name: "Background delivery" }), { target: { value: "messages" } });
+    expect(level_change).toHaveBeenCalledExactlyOnceWith("messages");
+    expect(screen.getByRole("combobox", { name: "Open conversation" })).toHaveValue("steps");
+    fireEvent.change(screen.getByRole("combobox", { name: "Open conversation" }), { target: { value: "all" } });
+    expect(conversation_change).toHaveBeenCalledExactlyOnceWith("all");
+    expect(screen.getByRole("dialog", { name: "Live updates" })).toBeInTheDocument();
+  });
+  it("defaults background delivery to all assistant messages", () => {
+    render(<StatusBar
+      on_background_updates_scope_change={vi.fn()}
+      on_background_updates_level_change={vi.fn()}
+      on_conversation_update_level_change={vi.fn()}
+      error={null} is_loading={false} is_retrying={false}
+      on_retry={vi.fn()} progress={progress()} source_errors={[]}
+    />);
+    const trigger = screen.getByRole("button", { name: "Live updates. All sessions. All assistant messages. Live. Change settings" });
+    expect(trigger).toHaveTextContent("Messages · All");
+    fireEvent.click(trigger);
+    expect(screen.getByRole("combobox", { name: "Background delivery" })).toHaveValue("messages");
   });
   it("shows shared ownership while the first catalog is still pending", () => {
     const shared = progress({ activity: "waiting_for_indexer" });

@@ -8,6 +8,7 @@ interface Replica {
   revision: string;
   items: Map<string, SessionUpdateItem>;
   order: string[];
+  semantic_order: string[];
   event_order: string[];
   page: EventPageResponse;
   bytes: number;
@@ -44,8 +45,8 @@ export class SessionDisplayCache {
   runningRevision = 0;
   previewRevision = 0;
   private loadedPreviews = new Map<string, AssistantPreviewProjection>();
-  coverageVersion(session_key: string) {
-    const replica = this.replicas.get(this.key(session_key, "steps"));
+  coverageVersion(session_key: string, level: UpdateLevel = "steps") {
+    const replica = this.replicas.get(this.key(session_key, level));
     return replica ? { generation: replica.generation, revision: replica.revision } : {};
   }
   subscriptionIds() { return [...this.subscriptions.values()]; }
@@ -61,6 +62,7 @@ export class SessionDisplayCache {
   private acceptedSources = new Map<string, string>();
   private running = new Map<string, { source_revision?: string; is_running: boolean }>();
   private acceptedItems = new Map<string, Map<string, SessionUpdateItem>>();
+  private pageLevels = new WeakMap<EventPageResponse, UpdateLevel>();
   private key(session_key: string, level: UpdateLevel) { return JSON.stringify([session_key, level]); }
 
   request(session_key: string, level: UpdateLevel = "all", detail_keys: string[] = []): SessionUpdatesRequest {
@@ -72,8 +74,7 @@ export class SessionDisplayCache {
       this.subscriptions.set(key, subscription_id);
       this.runningRevision += 1;
     }
-    const scope = level === "steps" || level === "details"
-      ? this.scopes.get(session_key) ?? { history: "recent_turns" as const, group_keys: [] } : undefined;
+    const scope = this.scopes.get(session_key) ?? { history: "recent_turns" as const, group_keys: [] };
     return { session_key, level, subscription_id, cursor: this.replicas.get(key)?.revision ?? null, detail_keys,
       ...(scope ? { scope: level === "details" ? { ...scope, group_keys: [] } : scope } : {}) };
   }
@@ -233,20 +234,32 @@ export class SessionDisplayCache {
     this.running.set(session_key, { source_revision: page.source_revision, is_running: page.is_running });
   }
 
+  private currentResourceReplicas(session_key: string, levels: UpdateLevel[]): Replica[] {
+    const source = this.running.get(session_key)?.source_revision;
+    return levels.flatMap((level) => {
+      const key = this.key(session_key, level);
+      const replica = this.replicas.get(key);
+      if (!replica || (source && replica.page.source_revision && source !== replica.page.source_revision)) return [];
+      return [{ replica, active: this.subscriptions.get(key) === replica.subscription_id }];
+    }).sort((left, right) => Number(right.active) - Number(left.active)).map(({ replica }) => replica);
+  }
+
   detail(session_key: string, event_key: string) {
-    return this.replicas.get(this.key(session_key, "steps"))?.items.get(`detail:${event_key}`)?.detail
-      ?? this.replicas.get(this.key(session_key, "all"))?.items.get(`detail:${event_key}`)?.detail
-      ?? this.replicas.get(this.key(session_key, "details"))?.items.get(`detail:${event_key}`)?.detail
+    return this.currentResourceReplicas(session_key, ["all", "steps", "details"])
+      .map((replica) => replica.items.get(`detail:${event_key}`)?.detail).find((detail) => !!detail)
       ?? this.resources.detail(session_key, "tool", event_key);
   }
 
   /** Complete semantic membership; activity disclosures decide which rows to mount. */
   trajectoryGroup(session_key: string, trajectory_key: string): TrajectoryEventPageResponse | null {
-    const replica = this.replicas.get(this.key(session_key, "steps")) ?? this.replicas.get(this.key(session_key, "all"));
+    const replicas = this.currentResourceReplicas(session_key, ["all", "steps"]);
+    const replica = replicas.find((entry) => {
+      const keys = entry?.items.get(trajectory_key)?.summary?.child_keys;
+      return keys && keys.every((key) => entry?.items.get(key)?.summary);
+    });
     const keys = replica?.items.get(trajectory_key)?.summary?.child_keys;
     if (!replica || !keys) return null;
     const events = keys.map((key) => replica.items.get(key)?.summary);
-    if (events.some((event) => !event)) return null;
     return {
       events: events as NonNullable<typeof events[number]>[],
       previous_cursor: null,
@@ -256,9 +269,10 @@ export class SessionDisplayCache {
   }
 
   activityGroupForEvent(session_key: string, event_key: string): string | null {
-    const replica = this.replicas.get(this.key(session_key, "steps"));
-    for (const item of replica?.items.values() ?? []) {
-      if (item.summary?.type === "activity_group" && item.summary.child_keys?.includes(event_key)) return item.item_id;
+    for (const replica of this.currentResourceReplicas(session_key, ["all", "steps"])) {
+      for (const item of replica.items.values()) {
+        if (item.summary?.type === "activity_group" && item.summary.child_keys?.includes(event_key)) return item.item_id;
+      }
     }
     return null;
   }
@@ -281,7 +295,8 @@ export class SessionDisplayCache {
   commit(session_key: string, page: EventPageResponse): ReadonlySet<string> | null {
     const items = this.pageItems.get(page);
     if (!items) return null;
-    const previous = this.acceptedItems.get(session_key);
+    const acceptedKey = this.key(session_key, this.pageLevels.get(page) ?? "steps");
+    const previous = this.acceptedItems.get(acceptedKey);
     const changed = new Set<string>();
     const previousSource = this.acceptedSources.get(session_key);
     if (page.source_revision) {
@@ -293,7 +308,7 @@ export class SessionDisplayCache {
     const changedKey = (key: string, item: SessionUpdateItem) => item.kind === "event" ? null : item.event_key ?? key;
     for (const [key, item] of items) {
       const eventKey = changedKey(key, item);
-      if (eventKey && previous?.get(key) !== item) changed.add(eventKey);
+      if (eventKey && previous && !equal(previous.get(key), item)) changed.add(eventKey);
     }
     for (const [key, item] of previous ?? []) {
       const eventKey = changedKey(key, item);
@@ -301,7 +316,7 @@ export class SessionDisplayCache {
     }
     const details = this.replicas.get(this.key(session_key, "details"));
     for (const key of changed) { details?.items.delete(`detail:${key}`); this.resources.invalidate(session_key, key); }
-    this.acceptedItems.set(session_key, items);
+    this.acceptedItems.set(acceptedKey, items);
     return changed;
   }
 
@@ -346,16 +361,19 @@ export class SessionDisplayCache {
       items.set(item.item_id, retained); bytes += weight(retained);
     }
     const order = update.item_order ?? previous?.order ?? [];
+    const semantic_order = update.semantic_order ?? (update.snapshot || update.item_order != null ? order : previous?.semantic_order ?? order);
+    const display_order = update.level === "messages" || update.level === "final" ? semantic_order : order;
     const event_order = update.event_order ?? previous?.event_order ?? [];
     if (event_order.some((id) => !items.get(id)?.event)) { this.replicas.delete(key); return null; }
-    const events = order.map((id) => items.get(id)?.summary).filter((event) => event !== undefined);
+    const events = display_order.map((id) => items.get(id)?.summary).filter((event) => event !== undefined);
     if (update.level === "all" && [...items.values()].some((item) =>
       item.summary?.child_keys?.some((child) => !items.get(child)?.summary))) {
       this.replicas.delete(key); return null;
     }
-    if (events.length !== order.length) { this.replicas.delete(key); return null; }
-    const page: EventPageResponse = { ...update.state, events };
-    if (update.level === "steps" && update.state.scope) {
+    if (events.length !== display_order.length) { this.replicas.delete(key); return null; }
+    const page: EventPageResponse = { ...update.state, events,
+      ...(update.level === "messages" || update.level === "final" ? { total_events: events.length } : {}) };
+    if (update.level !== "details" && update.state.scope) {
       const pendingScope = this.scopes.get(update.session_key);
       this.scopes.set(update.session_key, { ...update.state.scope,
         history: pendingScope?.history === "retained" ? "retained" : update.state.scope.history,
@@ -366,8 +384,9 @@ export class SessionDisplayCache {
     if (update.level !== "details") this.observeRunning(update.session_key, page);
     if (update.level !== "details") this.previewRevision += 1;
     this.pageItems.set(page, items);
+    this.pageLevels.set(page, update.level);
     this.replicas.delete(key);
-    this.replicas.set(key, { subscription_id: update.subscription_id, generation: update.generation, revision: update.revision, items, order, event_order, page, bytes });
+    this.replicas.set(key, { subscription_id: update.subscription_id, generation: update.generation, revision: update.revision, items, order, semantic_order, event_order, page, bytes });
     if (update.snapshot && this.pending.has(key)) {
       const queued = this.pending.get(key)!;
       this.pending.delete(key);
@@ -385,7 +404,7 @@ export class SessionDisplayCache {
       this.access.delete(oldest);
       this.scopes.delete(oldest);
       this.resources.remove(oldest);
-      this.acceptedItems.delete(oldest);
+      for (const key of this.acceptedItems.keys()) if (JSON.parse(key)[0] === oldest) this.acceptedItems.delete(key);
       this.acceptedSources.delete(oldest);
       this.running.delete(oldest);
       this.loadedPreviews.delete(oldest);

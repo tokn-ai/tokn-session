@@ -41,6 +41,7 @@ import {
 } from "./state";
 import {
   PROVIDERS,
+  type ConversationUpdateLevel,
   type EventDetail,
   type EventSummary,
   type OutstandingQuestion,
@@ -62,6 +63,16 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
     return () => window.clearTimeout(timeout);
   }, [delayMs, value]);
   return debounced;
+}
+
+const CONVERSATION_LEVEL_KEY = "tokn.viewer.conversation-update-level";
+
+function readConversationUpdateLevel(): ConversationUpdateLevel {
+  try {
+    const level = localStorage.getItem(CONVERSATION_LEVEL_KEY);
+    if (level === "final" || level === "messages" || level === "steps" || level === "all") return level;
+  } catch { /* Storage can be unavailable in private browser contexts. */ }
+  return "steps";
 }
 
 const DETAIL_CACHE_LIMIT = 50;
@@ -225,6 +236,9 @@ export function useViewerState() {
   const sessionChildrenRef = useRef<Map<string, SessionChildrenState>>(new Map());
   const sessionChildrenGeneration = useRef(0);
   const sessionChildRequests = useRef(new Map<string, number>());
+  const [conversationUpdateLevel, setConversationUpdateLevelValue] = useState(readConversationUpdateLevel);
+  const conversationUpdateLevelRef = useRef(conversationUpdateLevel);
+  const projectionEpoch = useRef(0);
   const [selectedSessionKey, setSelectedSessionKey] = useState<string | null>(null);
   const selectedSessionKeyRef = useRef<string | null>(null);
   // A verified communication sender can be outside the loaded sidebar pages.
@@ -324,7 +338,16 @@ export function useViewerState() {
   const onSessionUpdate = useRef<(update: import("./types").SessionUpdate) => void>(() => {});
   const loadWorkPage = useCallback(async (request: import("./types").LoadTrajectoryEventPageRequest) => {
     const epoch = readerLifetime.current;
-    ensureReaderCurrent(epoch);
+    const selectionEpoch = projectionEpoch.current;
+    let groupRequest: import("./types").SessionUpdatesRequest | undefined;
+    const ensureGroupCurrent = () => {
+      ensureReaderCurrent(epoch);
+      if (projectionEpoch.current !== selectionEpoch) {
+        if (groupRequest) void loadSessionUpdates({ ...groupRequest, unsubscribe: true }).catch(() => {});
+        throw new Error("Work group load was superseded");
+      }
+    };
+    ensureGroupCurrent();
     const cached = displayCache.current.trajectoryGroup(request.session_key, request.trajectory_key);
     if (cached) {
       displayCache.current.resources.set(request.session_key, "group", request.trajectory_key,
@@ -335,15 +358,16 @@ export function useViewerState() {
       displayCache.current.includeGroup(request.session_key, request.trajectory_key);
       displayCache.current.resources.set(request.session_key, "group", request.trajectory_key, { status: "loading" });
       try {
-        const update = await loadGroupDetails(displayCache.current.request(request.session_key, "steps"));
-        ensureReaderCurrent(epoch);
+        groupRequest = displayCache.current.request(request.session_key, "steps");
+        const update = await loadGroupDetails(groupRequest);
+        ensureGroupCurrent();
         if (!displayCache.current.apply(update)) throw new Error("Work group changed; try again");
         const group = displayCache.current.trajectoryGroup(request.session_key, request.trajectory_key);
         if (!group) throw new Error("Work group is no longer available");
         displayCache.current.resources.set(request.session_key, "group", request.trajectory_key, { status: "complete", ...displayCache.current.coverageVersion(request.session_key) });
         return group;
       } catch (error: unknown) {
-        ensureReaderCurrent(epoch);
+        ensureGroupCurrent();
         displayCache.current.resources.set(request.session_key, "group", request.trajectory_key, { status: "failed", error: errorMessage(error) });
         throw error;
       }
@@ -352,23 +376,45 @@ export function useViewerState() {
   }, []);
   const loadDisplayPage = useCallback(async (request: import("./types").LoadEventPageRequest) => {
     const epoch = readerLifetime.current;
-    ensureReaderCurrent(epoch);
-    if (semanticSupported.current === false) return loadEventPage(request);
+    const selectionEpoch = projectionEpoch.current;
+    const level = conversationUpdateLevelRef.current;
+    let deliveryRequest: import("./types").SessionUpdatesRequest | undefined;
+    const ensureProjectionCurrent = () => {
+      ensureReaderCurrent(epoch);
+      if (projectionEpoch.current !== selectionEpoch) {
+        // A slow backward read can register its old interest after the early
+        // release. Retire that exact identity once its late response settles.
+        if (deliveryRequest) void loadSessionUpdates({ ...deliveryRequest, unsubscribe: true }).catch(() => {});
+        throw new Error("Conversation level changed");
+      }
+    };
+    const unsupportedLevel = () => new Error("Delivery-level selection is unavailable on this host. Select Steps or update the host.");
+    const loadLegacyPage = () => {
+      if (level !== "steps") throw unsupportedLevel();
+      return loadEventPage(request);
+    };
+    ensureProjectionCurrent();
+    if (semanticSupported.current === false) return loadLegacyPage();
     if (request.window_mode !== "retained") {
       displayCache.current.includeHistory(request.session_key);
     }
     let update: import("./types").SessionUpdate;
-    try { update = await loadSessionUpdates({ ...displayCache.current.request(request.session_key, "steps"),
-        ...(request.window_mode === "earlier" ? { history_cursor: request.cursor } : {}) }); }
+    deliveryRequest = { ...displayCache.current.request(request.session_key, level),
+      ...(request.window_mode === "earlier" ? { history_cursor: request.cursor } : {}) };
+    try { update = await loadSessionUpdates(deliveryRequest); }
     catch (error: unknown) {
-      ensureReaderCurrent(epoch);
-      if (/unknown.*command|unknown.*variant|command.*not found|unavailable for a session share/i.test(errorMessage(error))) {
+      ensureProjectionCurrent();
+      const message = errorMessage(error);
+      // An older semantic host can support Final/Steps while rejecting the
+      // newer Messages preset. Keep its other projections usable.
+      if (level !== "steps" && /unknown.*variant/i.test(message)) throw unsupportedLevel();
+      if (/unknown.*command|unknown.*variant|command.*not found|unknown viewer api route|unavailable for a session share/i.test(message)) {
         semanticSupported.current = false;
-        return loadEventPage(request);
+        return loadLegacyPage();
       }
       throw error;
     }
-    ensureReaderCurrent(epoch);
+    ensureProjectionCurrent();
     const page = displayCache.current.apply(update);
     if (!page) throw new Error("Session updates changed; retry the snapshot");
     semanticSupported.current = true;
@@ -648,7 +694,7 @@ export function useViewerState() {
       displayCache.current.resources.set(sessionKey, "tool", eventKey, { status: "loading" });
       const detail = await loadToolDetails({ session_key: sessionKey, event_key: eventKey });
       if (detailGeneration.current !== generation) throw new Error("Tool changed while loading; retry its details");
-      displayCache.current.resources.set(sessionKey, "tool", eventKey, { status: "complete", ...displayCache.current.coverageVersion(sessionKey) }, detail);
+      displayCache.current.resources.set(sessionKey, "tool", eventKey, { status: "complete", ...displayCache.current.coverageVersion(sessionKey, conversationUpdateLevelRef.current) }, detail);
       return detail;
     };
     request = load().catch((error: unknown) => {
@@ -680,7 +726,7 @@ export function useViewerState() {
     const request = inspectSessionEvent({ session_key: sessionKey, event_key: eventKey }).then((detail) => {
       if (generation !== detailGeneration.current) throw new Error("Event changed while inspecting; retry inspection");
       displayCache.current.resources.set(sessionKey, "inspect", eventKey,
-        { status: "complete", ...displayCache.current.coverageVersion(sessionKey) }, detail);
+        { status: "complete", ...displayCache.current.coverageVersion(sessionKey, conversationUpdateLevelRef.current) }, detail);
       return detail;
     }).catch((error: unknown) => {
       if (generation === detailGeneration.current) displayCache.current.resources.set(sessionKey, "inspect", eventKey,
@@ -846,7 +892,7 @@ export function useViewerState() {
       const page = displayCache.current.apply(update);
       if (update.session_key === selectedSessionKeyRef.current) {
         if (update.level === "details") setExpandedDetailError(update.state.error ?? null);
-        else if (update.state.error) setEventsError(update.state.error);
+        else if (update.level === conversationUpdateLevelRef.current && update.state.error) setEventsError(update.state.error);
       }
       if (!page) semanticLive.current.delete(update.session_key);
       if (update.level === "details") {
@@ -872,7 +918,7 @@ export function useViewerState() {
         for (const [key, child] of children) children.set(key, { ...child, sessions: child.sessions.map(updateSummary) });
         sessionChildrenRef.current = children; setSessionChildren(children);
       }
-      if (update.level === "final" || update.session_key !== selectedSessionKeyRef.current) return;
+      if (update.level !== conversationUpdateLevelRef.current || update.session_key !== selectedSessionKeyRef.current) return;
       pushedPage.current = page;
       pendingLiveReset.current ||= update.snapshot;
       liveRefresh.current = true;
@@ -1059,13 +1105,14 @@ export function useViewerState() {
       sessionDisclosures.current.delete(previousKey);
       sessionDisclosures.current.set(previousKey, { expanded_event_key: expandedEventKeyRef.current, selected_event_key: selectedEventKeyRef.current, inspector_open: inspectorOpen, manual_expansion: manualExpansion.current });
       while (sessionDisclosures.current.size > 8) sessionDisclosures.current.delete(sessionDisclosures.current.keys().next().value!);
-      for (const level of ["all", "steps", "details"] as const) {
+      for (const level of ["final", "messages", "steps", "all", "details"] as const) {
         const release = displayCache.current.release(previousKey, level);
         if (release) void loadSessionUpdates(release).catch(() => {});
       }
     }
     displayCache.current.select(sessionKey);
     selectedSessionKeyRef.current = sessionKey;
+    projectionEpoch.current += 1;
     inspectorTriggerRef.current = null;
     eventsRequest.current += 1;
     eventsOwnerKeyRef.current = null;
@@ -1079,7 +1126,7 @@ export function useViewerState() {
     setEventsOwnerKey(null);
     setInitialPageSessionKey(null);
     pushedPage.current = null;
-    const cachedPage = sessionKey ? displayCache.current.get(sessionKey, "steps") : null;
+    const cachedPage = sessionKey ? displayCache.current.get(sessionKey, conversationUpdateLevelRef.current) : null;
     liveRefresh.current = !!cachedPage;
     if (cachedPage && sessionKey) {
       eventsOwnerKeyRef.current = sessionKey;
@@ -1113,6 +1160,39 @@ export function useViewerState() {
       applyEventSelection(disclosure.selected_event_key, disclosure.inspector_open);
     }
   }, [applyEventSelection, applyExpandedEventKey, clearTrajectoryPages, inspectorOpen]);
+
+  const setConversationUpdateLevel = useCallback((level: ConversationUpdateLevel) => {
+    if (level === conversationUpdateLevelRef.current) return;
+    const previousLevel = conversationUpdateLevelRef.current;
+    conversationUpdateLevelRef.current = level;
+    projectionEpoch.current += 1;
+    eventsRequest.current += 1;
+    const sessionKey = selectedSessionKeyRef.current;
+    if (sessionKey) {
+      const release = displayCache.current.release(sessionKey, previousLevel);
+      if (release) void loadSessionUpdates(release).catch(() => {});
+      const cached = displayCache.current.get(sessionKey, level);
+      // Level coverage is independent. Keep disclosure/resource and reading
+      // state; only the chosen projection can replace the conversation rows.
+      pushedPage.current = null;
+      pendingLiveReset.current = false;
+      uncommittedLiveReset.current = false;
+      eventRefreshInFlight.current = false;
+      liveUpdateQueued.current = false;
+      liveRefresh.current = true;
+      setEvents(cached?.events ?? []);
+      setOlderCursor(cached?.previous_cursor ?? null);
+      setNewerCursor(cached?.next_cursor ?? null);
+      setTotalEvents(cached?.total_events ?? null);
+      setHistoryStatus(cached?.history_status ?? null);
+      setOlderLoading(false);
+      setNewerLoading(false);
+      setEventsLoading(!cached);
+      setEventsError(null);
+    }
+    try { localStorage.setItem(CONVERSATION_LEVEL_KEY, level); } catch { /* Preference remains usable for this viewer. */ }
+    setConversationUpdateLevelValue(level);
+  }, []);
 
   const closeInspector = useCallback(() => {
     const trigger = inspectorTriggerRef.current;
@@ -1574,7 +1654,7 @@ export function useViewerState() {
         }
         const changed = displayCache.current.commit(selectedSessionKey, response);
         displayCache.current.rememberLoadedPage(selectedSessionKey, response);
-        if (!displayCache.current.hasFragmentedAssistantPreview(selectedSessionKey)) {
+        if (conversationUpdateLevel !== "final" && !displayCache.current.hasFragmentedAssistantPreview(selectedSessionKey)) {
           backgroundUpdates.rememberPage(selectedSessionKey, displayCache.current.assistantPreview(selectedSessionKey), previewReadToken);
         }
         if (isLiveRefresh && !reset && semanticLive.current.has(selectedSessionKey)) {
@@ -1653,6 +1733,7 @@ export function useViewerState() {
     loadDisplayPage,
     loadWorkPage,
     selectedSessionKey,
+    conversationUpdateLevel,
     updateTrajectoryPage,
   ]);
 
@@ -2171,6 +2252,10 @@ export function useViewerState() {
   return {
     backgroundUpdatesScope: backgroundUpdates.scope,
     setBackgroundUpdatesScope: backgroundUpdates.changeScope,
+    conversationUpdateLevel,
+    setConversationUpdateLevel,
+    backgroundUpdatesLevel: backgroundUpdates.level,
+    setBackgroundUpdatesLevel: backgroundUpdates.changeLevel,
     backgroundUpdatesStatus: backgroundUpdates.status,
     sessionOrder,
     setSessionOrder: changeSessionOrder,

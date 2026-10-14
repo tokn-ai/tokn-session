@@ -13,6 +13,64 @@ function snapshot(cache: SessionDisplayCache, key: string, ids = ["a"]): Session
 }
 
 describe("session display replicas", () => {
+  it("uses semantic message order to expose folded commentary at Messages level", () => {
+    const cache = new SessionDisplayCache();
+    const request = cache.request("one", "messages");
+    const message = summary("commentary", "Intermediate progress.");
+    const final = summary("final", "Final reply.");
+    const page = cache.apply({ ...snapshot(cache, "one", []), ...request,
+      items: [ { item_id: "commentary", kind: "assistant_message", level: "messages", summary: message },
+        { item_id: "final", kind: "assistant_message", level: "final", summary: final } ],
+      item_order: ["final"], semantic_order: ["commentary", "final"] })!;
+    expect(page.events).toEqual([message, final]);
+    expect(page.total_events).toBe(2);
+  });
+
+  it("retains independent resource coverage and history across same-source level changes", () => {
+    const cache = new SessionDisplayCache();
+    const steps = cache.request("one", "steps");
+    const initial = { ...snapshot(cache, "one"), ...steps, state: { ...snapshot(cache, "one").state,
+      source_revision: "source:1", scope: { history: "recent_turns" as const, turn_key: "turn", group_keys: [] } } };
+    cache.commit("one", cache.apply(initial)!);
+    const detail = { event_key: "a", event: { output: "retained" }, native: null, is_hidden: false, tool_output: null };
+    cache.resources.set("one", "tool", "a", { status: "complete" }, detail);
+    cache.resources.set("one", "inspect", "a", { status: "complete" }, detail);
+    cache.resources.set("one", "group", "activity:a", { status: "complete" });
+    cache.includeGroup("one", "activity:a");
+    cache.includeHistory("one");
+    cache.release("one", "steps");
+    const final = cache.request("one", "final");
+    expect(final.scope).toEqual({ history: "retained", turn_key: "turn", group_keys: ["activity:a"] });
+    expect([...cache.commit("one", cache.apply({ ...initial, ...final, items: [], item_order: [] })!)!]).toEqual([]);
+    expect(cache.resources.detail("one", "tool", "a")).toBe(detail);
+    expect(cache.resources.detail("one", "inspect", "a")).toBe(detail);
+    expect(cache.resources.coverage("one", "group", "activity:a").status).toBe("complete");
+  });
+  it("uses fresh All groups and details instead of a released complete Steps replica", () => {
+    const cache = new SessionDisplayCache();
+    const steps = cache.request("one", "steps");
+    const group = { ...summary("activity:group"), type: "activity_group", child_keys: ["a"] };
+    const detail = { event_key: "a", event: { output: "old" }, native: null, is_hidden: false, tool_output: null };
+    const initial: SessionUpdate = { ...snapshot(cache, "one"), ...steps,
+      items: [ { item_id: group.event_key, kind: "work_summary", level: "steps", summary: group },
+        { item_id: "a", kind: "tool_summary", level: "steps", summary: summary("a", "old row") },
+        { item_id: "detail:a", kind: "detail", level: "details", event_key: "a", detail } ],
+      item_order: [group.event_key], state: { ...snapshot(cache, "one").state, is_running: true, source_revision: "source:1" } };
+    cache.apply(initial);
+    cache.release("one", "steps");
+    const all = cache.request("one", "all");
+    const fresh = { ...detail, event: { output: "new" } };
+    cache.apply({ ...initial, ...all, items: [
+      { item_id: group.event_key, kind: "work_summary", level: "steps", summary: { ...group, child_keys: ["a", "b"] } },
+      { item_id: "a", kind: "tool_summary", level: "steps", summary: summary("a", "new row") },
+      { item_id: "b", kind: "tool_summary", level: "steps", summary: summary("b") },
+      { item_id: "detail:a", kind: "detail", level: "details", event_key: "a", detail: fresh } ],
+      state: { ...initial.state, source_revision: "source:2" } });
+    expect(cache.trajectoryGroup("one", group.event_key)?.events.map((event) => event.summary)).toEqual(["new row", "b"]);
+    expect(cache.activityGroupForEvent("one", "b")).toBe(group.event_key);
+    expect(cache.detail("one", "a")).toEqual(fresh);
+  });
+
   it("orders running state by source revision across delivery levels and releases ownership", () => {
     const cache = new SessionDisplayCache();
     const initial = snapshot(cache, "one");

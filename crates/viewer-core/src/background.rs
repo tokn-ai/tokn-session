@@ -26,12 +26,22 @@ pub enum BackgroundScope {
   Sidebar,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundUpdateLevel {
+  Final,
+  #[default]
+  Messages,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackgroundUpdatesRequest {
   pub subscription_id: String,
   #[serde(default)]
   pub scope: BackgroundScope,
+  #[serde(default)]
+  pub level: BackgroundUpdateLevel,
   #[serde(default)]
   pub session_keys: Vec<String>,
   #[serde(default)]
@@ -50,6 +60,7 @@ pub struct BackgroundAssistantMessage {
 struct Subscription {
   owner: Option<String>,
   scope: BackgroundScope,
+  level: BackgroundUpdateLevel,
   keys: HashSet<String>,
   generation: String,
   revision: u64,
@@ -61,6 +72,18 @@ struct Observation {
   message_fingerprint: Option<[u8; 32]>,
   activity_fingerprint: [u8; 32],
   used: u64,
+}
+
+#[derive(Default)]
+struct ObservationChanges {
+  message: bool,
+  activity: bool,
+}
+
+impl ObservationChanges {
+  fn is_empty(&self) -> bool {
+    !self.message && !self.activity
+  }
 }
 
 /// Evicted entries contain only exact keys and digests. SQLite's small page
@@ -264,25 +287,27 @@ impl BackgroundStore {
     let subscription = self.subscriptions.entry(id.clone()).or_insert_with(|| Subscription {
       owner,
       scope: request.scope,
+      level: request.level,
       keys: keys.clone(),
       generation: uuid::Uuid::new_v4().to_string(),
       revision: 0,
       accessed: Instant::now(),
     });
-    if subscription.scope != request.scope || subscription.keys != keys {
+    if subscription.scope != request.scope || subscription.level != request.level || subscription.keys != keys {
       subscription.generation = uuid::Uuid::new_v4().to_string();
       subscription.revision = 0;
     }
     subscription.scope = request.scope;
+    subscription.level = request.level;
     subscription.keys = keys;
     subscription.accessed = Instant::now();
     Ok(
-      json!({"subscription_id":id,"scope":subscription.scope,"generation":subscription.generation,
+      json!({"subscription_id":id,"scope":subscription.scope,"level":subscription.level,"generation":subscription.generation,
       "revision":subscription.revision.to_string(),"subscribed":true}),
     )
   }
 
-  fn remember(&mut self, key: String, notification: &Value) -> Result<bool, String> {
+  fn remember(&mut self, key: String, notification: &Value) -> Result<ObservationChanges, String> {
     self.ensure_healthy()?;
     let mut message_fingerprint = (!notification["message_revision"].is_null())
       .then(|| Sha256::digest(notification["latest_assistant_message"].to_string().as_bytes()).into());
@@ -291,12 +316,21 @@ impl BackgroundStore {
       "unread_final_count": notification["unread_final_count"], "is_running": notification["is_running"],
       "has_running_descendant": notification["has_running_descendant"], "question_attention": notification["question_attention"],
     }).to_string().as_bytes()).into();
-    if let Some(previous) = self.observation(&key)? {
+    let previous = self.observation(&key)?;
+    if let Some(previous) = &previous {
       // Unknown staged bodies do not erase the last known message digest.
       message_fingerprint = message_fingerprint.or(previous.message_fingerprint);
-      if previous.message_fingerprint == message_fingerprint && previous.activity_fingerprint == activity_fingerprint {
-        return Ok(false);
-      }
+    }
+    let changes = ObservationChanges {
+      message: previous
+        .as_ref()
+        .is_none_or(|value| value.message_fingerprint != message_fingerprint),
+      activity: previous
+        .as_ref()
+        .is_none_or(|value| value.activity_fingerprint != activity_fingerprint),
+    };
+    if changes.is_empty() {
+      return Ok(changes);
     }
     self.clock = self
       .clock
@@ -310,7 +344,7 @@ impl BackgroundStore {
         used: self.clock,
       },
     )?;
-    Ok(true)
+    Ok(changes)
   }
 
   fn seed(&mut self, notification: Value) {
@@ -324,7 +358,7 @@ impl BackgroundStore {
     // must never overwrite the live digest after hot-tier eviction.
     let result = self.observation(key).and_then(|previous| {
       if previous.is_some() {
-        Ok(false)
+        Ok(ObservationChanges::default())
       } else {
         self.remember(key.into(), &notification)
       }
@@ -341,14 +375,14 @@ impl BackgroundStore {
     };
     // Source checkpoints can advance for tools without changing a message or
     // attention. Compare display fields, not the source cursor carried on wire.
-    match self.remember(key.clone(), &notification) {
-      Ok(true) => {}
-      Ok(false) => return Vec::new(),
+    let changes = match self.remember(key.clone(), &notification) {
+      Ok(changes) if !changes.is_empty() => changes,
+      Ok(_) => return Vec::new(),
       Err(error) => {
         self.fail(error);
         return Vec::new();
       }
-    }
+    };
     self
       .subscriptions
       .iter_mut()
@@ -356,9 +390,24 @@ impl BackgroundStore {
         if subscription.scope != BackgroundScope::All && !subscription.keys.contains(&key) {
           return None;
         }
-        subscription.revision = subscription.revision.saturating_add(1);
         let mut payload = notification.clone();
+        if subscription.level == BackgroundUpdateLevel::Final
+          && !notification["latest_assistant_message"].is_null()
+          && notification["latest_assistant_message"]["delivery"] != "final"
+          && notification["removed"] != true
+        {
+          if !changes.activity {
+            return None;
+          }
+          // Attention remains live at every level. A missing message revision
+          // preserves the client's last preview instead of clearing it when
+          // this projection filters an intermediate assistant reply.
+          payload["latest_assistant_message"] = Value::Null;
+          payload["message_revision"] = Value::Null;
+        }
+        subscription.revision = subscription.revision.saturating_add(1);
         payload["subscription_id"] = json!(id);
+        payload["level"] = json!(subscription.level);
         payload["generation"] = json!(subscription.generation);
         payload["revision"] = json!(subscription.revision.to_string());
         Some(payload)
@@ -558,12 +607,188 @@ mod tests {
     BackgroundUpdatesRequest {
       subscription_id: id.into(),
       scope,
+      level: BackgroundUpdateLevel::Messages,
       session_keys: keys.iter().map(|key| (*key).into()).collect(),
       unsubscribe: false,
     }
   }
   fn notification(key: &str, preview: Option<&str>) -> Value {
     json!({"session_key":key,"message_revision":"source:1","latest_assistant_message":preview.map(|preview| json!({"message_id":null,"delivery":"commentary","phase":"finished","preview":preview}))})
+  }
+
+  #[test]
+  fn background_levels_default_to_messages_and_reject_other_projections() {
+    let mut value = json!({"subscription_id":"one","scope":"all"});
+    let legacy = serde_json::from_value::<BackgroundUpdatesRequest>(value.clone()).unwrap();
+    assert_eq!(legacy.level, BackgroundUpdateLevel::Messages);
+    for (label, level) in [
+      ("final", BackgroundUpdateLevel::Final),
+      ("messages", BackgroundUpdateLevel::Messages),
+    ] {
+      value["level"] = json!(label);
+      assert_eq!(
+        serde_json::from_value::<BackgroundUpdatesRequest>(value.clone())
+          .unwrap()
+          .level,
+        level
+      );
+    }
+    for invalid in [json!("steps"), json!("details"), json!("all"), json!(null)] {
+      value["level"] = invalid;
+      assert!(serde_json::from_value::<BackgroundUpdatesRequest>(value.clone()).is_err());
+    }
+  }
+
+  #[test]
+  fn final_and_messages_interests_filter_independently_without_revision_gaps() {
+    let mut store = BackgroundStore::default();
+    let mut baseline = notification("session", Some("Previous final"));
+    baseline["latest_assistant_message"]["delivery"] = json!("final");
+    baseline["is_running"] = json!(false);
+    baseline["question_attention"] = json!({"required_count":0,"available_count":0});
+    store.seed(baseline.clone());
+    let final_ack = store
+      .subscribe(
+        BackgroundUpdatesRequest {
+          level: BackgroundUpdateLevel::Final,
+          ..request("final", BackgroundScope::All, &[])
+        },
+        None,
+      )
+      .unwrap();
+    assert_eq!(final_ack["level"], "final");
+    let messages_ack = store
+      .subscribe(request("messages", BackgroundScope::All, &[]), None)
+      .unwrap();
+    assert_eq!(messages_ack["level"], "messages");
+
+    let mut commentary = baseline.clone();
+    commentary["latest_assistant_message"]["delivery"] = json!("commentary");
+    commentary["latest_assistant_message"]["preview"] = json!("Checking schema");
+    let message_only = store.publish(commentary.clone());
+    assert_eq!(message_only.len(), 1);
+    assert_eq!(message_only[0]["subscription_id"], "messages");
+    assert_eq!(message_only[0]["revision"], "1");
+    assert_eq!(message_only[0]["level"], "messages");
+    assert!(store.publish(commentary.clone()).is_empty());
+
+    commentary["is_running"] = json!(true);
+    commentary["question_attention"] = json!({"required_count":1,"available_count":0});
+    let attention = store.publish(commentary.clone());
+    assert_eq!(attention.len(), 2);
+    let final_update = attention
+      .iter()
+      .find(|update| update["subscription_id"] == "final")
+      .unwrap();
+    assert_eq!(final_update["level"], "final");
+    assert_eq!(final_update["revision"], "1");
+    assert_eq!(final_update["is_running"], true);
+    assert_eq!(final_update["question_attention"]["required_count"], 1);
+    assert!(final_update["latest_assistant_message"].is_null());
+    assert!(
+      final_update["message_revision"].is_null(),
+      "filtered text must not clear the previous preview"
+    );
+    assert_eq!(
+      attention
+        .iter()
+        .find(|update| update["subscription_id"] == "messages")
+        .unwrap()["revision"],
+      "2"
+    );
+    assert!(store.publish(commentary.clone()).is_empty());
+
+    commentary["latest_assistant_message"]["preview"] = json!("Checking indexes");
+    let skipped = store.publish(commentary.clone());
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0]["subscription_id"], "messages");
+    assert_eq!(skipped[0]["revision"], "3");
+
+    let mut completed = baseline;
+    completed["latest_assistant_message"]["preview"] = json!("Schema verified");
+    let final_updates = store.publish(completed);
+    assert_eq!(final_updates.len(), 2);
+    let final_update = final_updates
+      .iter()
+      .find(|update| update["subscription_id"] == "final")
+      .unwrap();
+    assert_eq!(final_update["revision"], "2");
+    assert_eq!(final_update["latest_assistant_message"]["preview"], "Schema verified");
+    assert!(!final_update["message_revision"].is_null());
+    assert_eq!(
+      final_updates
+        .iter()
+        .find(|update| update["subscription_id"] == "messages")
+        .unwrap()["revision"],
+      "4"
+    );
+  }
+
+  #[test]
+  fn final_interest_keeps_authoritative_empty_messages_and_removals() {
+    let mut store = BackgroundStore::default();
+    store.seed(notification("session", Some("Historical commentary")));
+    store
+      .subscribe(
+        BackgroundUpdatesRequest {
+          level: BackgroundUpdateLevel::Final,
+          ..request("final", BackgroundScope::All, &[])
+        },
+        None,
+      )
+      .unwrap();
+    let mut unknown = notification("session", None);
+    unknown["message_revision"] = Value::Null;
+    assert!(store.publish(unknown.clone()).is_empty());
+    let cleared = store.publish(notification("session", None));
+    assert_eq!(cleared.len(), 1);
+    assert_eq!(cleared[0]["revision"], "1");
+    assert!(cleared[0]["latest_assistant_message"].is_null());
+    assert!(!cleared[0]["message_revision"].is_null());
+    unknown["removed"] = json!(true);
+    let removed = store.publish(unknown.clone());
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0]["revision"], "2");
+    assert_eq!(removed[0]["removed"], true);
+    assert!(store.publish(unknown).is_empty());
+  }
+
+  #[test]
+  fn changing_level_resets_generation_without_replaying_prior_messages() {
+    let mut store = BackgroundStore::default();
+    store.seed(notification("session", Some("Historical commentary")));
+    let before = store
+      .subscribe(request("one", BackgroundScope::All, &[]), None)
+      .unwrap();
+    let first = notification("session", Some("Live commentary"));
+    assert_eq!(store.publish(first.clone())[0]["revision"], "1");
+    let final_ack = store
+      .subscribe(
+        BackgroundUpdatesRequest {
+          level: BackgroundUpdateLevel::Final,
+          ..request("one", BackgroundScope::All, &[])
+        },
+        None,
+      )
+      .unwrap();
+    assert_ne!(before["generation"], final_ack["generation"]);
+    assert_eq!(final_ack["revision"], "0");
+    assert!(store.publish(first).is_empty());
+    let suppressed = notification("session", Some("Filtered live commentary"));
+    assert!(store.publish(suppressed.clone()).is_empty());
+    let messages_ack = store
+      .subscribe(request("one", BackgroundScope::All, &[]), None)
+      .unwrap();
+    assert_ne!(final_ack["generation"], messages_ack["generation"]);
+    assert_eq!(messages_ack["revision"], "0");
+    assert!(
+      store.publish(suppressed).is_empty(),
+      "filtered messages stay in the shared silent baseline"
+    );
+    assert_eq!(
+      store.publish(notification("session", Some("New commentary")))[0]["revision"],
+      "1"
+    );
   }
 
   #[test]
