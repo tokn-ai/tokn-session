@@ -130,6 +130,88 @@ impl CodexHistoryFixture {
 }
 
 #[test]
+fn compressed_codex_snapshot_uses_history_reader_and_preserves_logical_paths() {
+  let fixture = CodexHistoryFixture::new();
+  let entry = |path: &PathBuf| CatalogEntry {
+    key: "linked".into(),
+    provider: Provider::Codex,
+    header: serde_json::from_value(serde_json::json!({"id": "linked", "path": path})).unwrap(),
+  };
+  let plain = SessionReader::new(entry(&fixture.base_path), true, fixture.directory.path().into()).unwrap();
+  let initial_ids = plain
+    .snapshot
+    .records
+    .iter()
+    .map(|record| record.record.record_id)
+    .collect::<Vec<_>>();
+  let compressed_path = fixture.base_path.with_extension("jsonl.zst");
+  std::fs::write(
+    &compressed_path,
+    zstd::stream::encode_all(fixture.base.as_bytes(), 0).unwrap(),
+  )
+  .unwrap();
+  std::fs::remove_file(&fixture.base_path).unwrap();
+
+  let mut readers = Vec::new();
+  for path in [&fixture.base_path, &compressed_path] {
+    let mut reader = SessionReader::new(entry(path), true, fixture.directory.path().into()).unwrap();
+    assert!(reader.codex_history.is_some());
+    assert_eq!(CodexHistoryFixture::messages(&reader), ["old hello"]);
+    assert!(reader.snapshot.records.iter().all(|record| &record.path == path));
+    assert!(
+      reader
+        .snapshot
+        .records
+        .iter()
+        .all(|record| record.record.native.is_some())
+    );
+    assert_eq!(
+      reader
+        .snapshot
+        .records
+        .iter()
+        .map(|record| record.record.record_id)
+        .collect::<Vec<_>>(),
+      initial_ids
+    );
+    assert!(!reader.poll().unwrap());
+    readers.push(reader);
+  }
+  std::fs::write(&fixture.base_path, fixture.base.replace("old hello", "new hello")).unwrap();
+  for reader in &mut readers {
+    assert!(reader.poll().unwrap());
+    assert_eq!(CodexHistoryFixture::messages(reader), ["new hello"]);
+    assert!(
+      reader
+        .snapshot
+        .records
+        .iter()
+        .all(|record| record.path == reader.snapshot.entry.header.path)
+    );
+  }
+}
+
+#[test]
+fn compressed_codex_prefix_is_included_in_viewer_snapshot() {
+  let fixture = CodexHistoryFixture::new();
+  let compressed_path = fixture.base_path.with_extension("jsonl.zst");
+  std::fs::write(
+    &compressed_path,
+    zstd::stream::encode_all(fixture.base.as_bytes(), 0).unwrap(),
+  )
+  .unwrap();
+  std::fs::remove_file(&fixture.base_path).unwrap();
+  let mut reader = fixture.reader(false);
+  assert_eq!(CodexHistoryFixture::messages(&reader), ["old hello", "new message"]);
+  assert!(!reader.poll().unwrap());
+  let previous = reader.snapshot.clone();
+  std::fs::write(&compressed_path, b"invalid compressed frame").unwrap();
+  assert!(reader.poll().is_err());
+  assert_eq!(reader.snapshot.revision, previous.revision);
+  assert_eq!(CodexHistoryFixture::messages(&reader), ["old hello", "new message"]);
+}
+
+#[test]
 fn linked_codex_history_survives_appends_and_buffers_partial_rows() {
   use std::io::Write;
   let fixture = CodexHistoryFixture::new();

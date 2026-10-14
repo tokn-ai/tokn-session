@@ -359,6 +359,13 @@ Codex paginated rollouts can reference earlier physical files through
 `session_meta.history_base`, including after a native revert. CLI and viewer
 history assemble these bounded prefixes before the active segment, validating
 both byte and ordinal cutoffs so reverted turns stay excluded.
+Native `.jsonl.zst` archives are discovered alongside plain JSONL. Byte cutoffs
+remain decoded offsets; backward reads share one anonymous decoded file per
+segment/rebuild (128 MiB decoded limit), with inherited segments decoding only
+the retained prefix. Plain siblings take precedence, and stale Desktop JSONL
+paths resolve compressed siblings. Compression preserves record IDs; changed
+compressed sources rebuild atomically. Compression notifications reconcile the
+Codex catalog, and missing plain dependencies re-resolve before reader retry.
 Some persisted Codex rollouts repeat paginated ordinals, and forward
 gaps are accepted like native Codex resume/projection. Distinct physical rows
 remain visible in file order. A revert before a turn may set its exclusive
@@ -1126,7 +1133,7 @@ subtype-specific unknown events.
   corrupt/truncated frames, invalid packed runs, and unsupported format versions
   are reported, never repaired. Relay follows these same logs; DSH SQLite,
   create/append, and input are not implemented.
-- Codex reads JSONL from `sessions` and `archived_sessions` below a valid,
+- Codex reads JSONL and `.jsonl.zst` from `sessions` and `archived_sessions` below a valid,
   non-empty `$CODEX_HOME`, falling back to the platform home directory's
   `.codex`; `--session-dir` still overrides discovery directly.
 - OpenCode uses `--session-dir` first, then `$OPENCODE_DB`; absolute database

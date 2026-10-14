@@ -22,16 +22,16 @@ struct Payload {
 }
 
 pub(super) fn start(
-  segments: &[CodexHistorySegment],
+  files: &mut [File],
   lengths: &[u64],
   turns: usize,
   stats: &mut CodexHistoryReadStats,
 ) -> Result<u64, String> {
   let mut logical = lengths.iter().sum::<u64>();
   let mut remaining = turns;
-  for (segment, length) in segments.iter().zip(lengths).rev() {
+  for (file, length) in files.iter_mut().zip(lengths).rev() {
     logical -= length;
-    let mut lines = ReverseLines::new(&segment.path, *length)?;
+    let mut lines = ReverseLines::new(file, *length);
     while let Some((offset, row)) = lines.next(stats)? {
       stats.boundary_rows_scanned += 1;
       let Ok(probe) = serde_json::from_slice::<Probe>(&row) else {
@@ -66,23 +66,23 @@ pub(super) fn is_turn_start(line: &CodexLine) -> bool {
       .is_some_and(|id| !id.trim().is_empty())
 }
 
-struct ReverseLines {
-  file: File,
+struct ReverseLines<'a> {
+  file: &'a mut File,
   position: u64,
   buffer: Vec<u8>,
   discard_partial: bool,
   first: bool,
 }
 
-impl ReverseLines {
-  fn new(path: &Path, length: u64) -> Result<Self, String> {
-    Ok(Self {
-      file: File::open(path).map_err(|e| e.to_string())?,
+impl<'a> ReverseLines<'a> {
+  fn new(file: &'a mut File, length: u64) -> Self {
+    Self {
+      file,
       position: length,
       buffer: Vec::new(),
       discard_partial: false,
       first: true,
-    })
+    }
   }
 
   fn next(&mut self, stats: &mut CodexHistoryReadStats) -> Result<Option<(u64, Vec<u8>)>, String> {

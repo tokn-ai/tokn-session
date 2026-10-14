@@ -5993,6 +5993,7 @@ dependencies = [
  "tokn-codex-protocol",
  "tokn-session-core",
  "toml 1.1.4+spec-1.1.0",
+ "zstd",
 ]
 
 [[package]]
@@ -6213,6 +6214,7 @@ dependencies = [
  "tokn-session-render",
  "tokn-session-workbuddy",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

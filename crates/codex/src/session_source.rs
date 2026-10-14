@@ -57,7 +57,7 @@ impl CodexSessionSource {
   pub fn session_paths(&self) -> Result<Vec<PathBuf>, String> {
     let mut paths = Vec::new();
     for root in self.session_roots()? {
-      collect_jsonl_files(&root, &mut paths)?;
+      crate::storage::collect_rollouts(&root, &mut paths)?;
     }
     paths.sort();
     if let Ok(home) = default_codex_home()
@@ -147,7 +147,8 @@ impl CodexSessionSource {
   }
 
   pub fn load_session_path(&self, path: &Path) -> Result<LoadedSession, String> {
-    let header = crate::history::history_header(path)?;
+    let path = crate::storage::resolve_path(path);
+    let header = crate::history::history_header(&path)?;
     let RolloutItem::SessionMeta(meta) = header.item() else {
       unreachable!("history header validates session metadata")
     };
@@ -155,15 +156,15 @@ impl CodexSessionSource {
       .history_base()
       .map_err(|err| format!("invalid Codex history base: {err}"))?
       .is_some()
+      || crate::storage::is_compressed(&path)
     {
       return self
-        .load_session_records_path(path, false, 128 * 1024 * 1024)
+        .load_session_records_path(&path, false, 128 * 1024 * 1024)
         .map(Into::into);
     }
-    let mut reference = inspect_session(path)?;
+    let mut reference = inspect_session(&path)?;
     self.apply_indexed_metadata(std::slice::from_mut(&mut reference));
-    let file = File::open(&path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
-    let reader = BufReader::new(file);
+    let reader = crate::storage::reader(&path)?;
     let mut normalizer = CodexNormalizer::new_historical();
     let mut events = Vec::new();
 
@@ -185,13 +186,13 @@ impl CodexSessionSource {
   }
 
   fn resolve_session(&self, id_or_path: &str) -> Result<PathBuf, String> {
-    let candidate = PathBuf::from(id_or_path);
+    let candidate = crate::storage::resolve_path(Path::new(id_or_path));
     if candidate.exists() {
       return Ok(candidate);
     }
 
     let matches: Vec<_> = self
-      .list_sessions()?
+      .list_session_relations()?
       .into_iter()
       .filter(|session| session.id == id_or_path || session.id.starts_with(id_or_path))
       .collect();
@@ -237,21 +238,28 @@ impl CodexSessionSource {
   pub(crate) fn history_roots(&self, path: &Path) -> Result<Vec<PathBuf>, String> {
     if let Ok(home) = default_codex_home()
       && owns_metadata_root(self.session_dir.as_deref(), &home)
+      && let Some(roots) = native_history_roots(&home, path)
     {
-      let roots = vec![home.join("sessions"), home.join("archived_sessions")];
-      let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-      if roots
-        .iter()
-        .any(|root| root.canonicalize().is_ok_and(|root| canonical.starts_with(root)))
-      {
-        return Ok(roots);
-      }
+      return Ok(roots);
     }
     if let Some(root) = &self.session_dir {
       return Ok(vec![root.clone()]);
     }
     Ok(vec![path.parent().unwrap_or(Path::new(".")).to_path_buf()])
   }
+}
+
+fn native_history_roots(home: &Path, path: &Path) -> Option<Vec<PathBuf>> {
+  let roots = vec![home.join("sessions"), home.join("archived_sessions")];
+  // A native catalog or open reader can retain the plain path after Codex
+  // compresses it. Resolve the existing representation before canonicalizing
+  // so symlinked homes still discover prefixes across dates and archives.
+  let resolved = crate::storage::resolve_path(path);
+  let canonical = resolved.canonicalize().unwrap_or(resolved);
+  roots
+    .iter()
+    .any(|root| root.canonicalize().is_ok_and(|root| canonical.starts_with(root)))
+    .then_some(roots)
 }
 
 fn owns_metadata_root(session_dir: Option<&Path>, codex_home: &Path) -> bool {
@@ -519,6 +527,8 @@ fn resolve_metadata_path(value: &OsStr, base: &Path) -> PathBuf {
 }
 
 fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
+  let left = crate::storage::resolve_path(left);
+  let right = crate::storage::resolve_path(right);
   if left == right {
     return true;
   }
@@ -528,27 +538,9 @@ fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
   }
 }
 
-fn collect_jsonl_files(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<(), String> {
-  if !dir.exists() {
-    return Ok(());
-  }
-
-  for entry in std::fs::read_dir(dir).map_err(|err| format!("failed to read {}: {err}", dir.display()))? {
-    let entry = entry.map_err(|err| format!("failed to read entry in {}: {err}", dir.display()))?;
-    let path = entry.path();
-    if path.is_dir() {
-      collect_jsonl_files(&path, paths)?;
-    } else if path.extension().and_then(|value| value.to_str()) == Some("jsonl") {
-      paths.push(path);
-    }
-  }
-  Ok(())
-}
-
 fn inspect_session(path: &Path) -> Result<SessionRef, String> {
   let mut reference = inspect_session_header(path)?;
-  let file = File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
-  let reader = BufReader::new(file);
+  let reader = crate::storage::reader(&reference.path)?;
   let mut message_count = 0;
   let mut history_boundary = CodexHistoryBoundary::new();
   let mut saw_session_meta = false;
@@ -581,17 +573,17 @@ fn inspect_session(path: &Path) -> Result<SessionRef, String> {
 }
 
 pub(crate) fn inspect_session_header(path: &Path) -> Result<SessionRef, String> {
-  let file = File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
-  let reader = BufReader::new(file);
+  let path = crate::storage::resolve_path(path);
+  let reader = crate::storage::reader(&path)?;
   let mut reference = SessionRef {
-    id: session_id_from_path(path),
+    id: session_id_from_path(&path),
     parent_session_id: None,
     agent_path: None,
     agent_nickname: None,
     agent_role: None,
     title: None,
     preview: None,
-    path: path.to_path_buf(),
+    path: path.clone(),
     cwd: None,
     timestamp: None,
     message_count: 0,
@@ -643,8 +635,7 @@ pub(crate) fn inspect_session_header(path: &Path) -> Result<SessionRef, String> 
 }
 
 fn inspect_session_preview(path: &Path) -> Result<Option<String>, String> {
-  let file = File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
-  let reader = BufReader::new(file);
+  let reader = crate::storage::reader(path)?;
   let mut boundary = CodexHistoryBoundary::new();
   let mut saw_session_meta = false;
   let mut scanned = 0;
@@ -821,6 +812,104 @@ mod tests {
   use rusqlite::params;
   use tempfile::tempdir;
   use tokn_session_core::AgentEvent;
+
+  #[cfg(unix)]
+  #[test]
+  fn compressed_plain_alias_under_a_symlinked_home_retains_all_native_history_roots() {
+    let directory = tempdir().unwrap();
+    let home = directory.path().join("home");
+    let alias = directory.path().join("home-alias");
+    std::fs::create_dir_all(home.join("sessions/2026/10/14")).unwrap();
+    std::fs::create_dir_all(home.join("archived_sessions")).unwrap();
+    std::os::unix::fs::symlink(&home, &alias).unwrap();
+    let plain = alias.join("sessions/2026/10/14/head.jsonl");
+    std::fs::write(plain.with_extension("jsonl.zst"), b"stored representation").unwrap();
+
+    assert_eq!(
+      native_history_roots(&alias, &plain),
+      Some(vec![alias.join("sessions"), alias.join("archived_sessions")])
+    );
+    assert!(!plain.exists());
+    assert_eq!(
+      native_history_roots(&alias, &directory.path().join("outside.jsonl")),
+      None
+    );
+  }
+
+  #[test]
+  fn discovers_reads_and_hydrates_compressed_rollouts_without_materializing_them() {
+    let directory = tempdir().unwrap();
+    let plain = directory.path().join("session.jsonl");
+    let compressed = plain.with_extension("jsonl.zst");
+    let bytes = include_bytes!("../fixtures/basic_session.jsonl");
+    std::fs::write(&compressed, zstd::stream::encode_all(bytes.as_slice(), 0).unwrap()).unwrap();
+    let source = CodexSessionSource::new(Some(directory.path().to_path_buf()));
+
+    assert_eq!(source.session_paths().unwrap(), [compressed.clone()]);
+    let reference = source.session_relation_at_path(&plain).unwrap();
+    assert_eq!(reference.path, compressed);
+    assert_eq!(reference.id, "session-fixture");
+    let hydrated = source.hydrate_session_header(header_from_reference(reference)).unwrap();
+    assert_eq!(hydrated.preview.as_deref(), Some("build a tiny test"));
+    let listed = source.list_sessions().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].preview.as_deref(), Some("build a tiny test"));
+
+    let loaded = source.load_session(plain.to_str().unwrap()).unwrap();
+    assert_eq!(loaded.reference.path, compressed);
+    let texts = loaded
+      .events
+      .iter()
+      .filter_map(|event| match event {
+        AgentEvent::Message(message) => Some(message.text.as_str()),
+        _ => None,
+      })
+      .collect::<Vec<_>>();
+    assert!(texts.contains(&"build a tiny test"));
+    assert!(!plain.exists());
+  }
+
+  #[test]
+  fn discovery_prefers_plain_rollouts_over_compressed_siblings() {
+    let directory = tempdir().unwrap();
+    let plain = directory.path().join("session.jsonl");
+    let compressed = plain.with_extension("jsonl.zst");
+    std::fs::write(&plain, include_bytes!("../fixtures/basic_session.jsonl")).unwrap();
+    std::fs::write(&compressed, "stale compressed representation").unwrap();
+    let source = CodexSessionSource::new(Some(directory.path().to_path_buf()));
+
+    assert_eq!(source.session_paths().unwrap(), [plain.clone()]);
+    assert_eq!(source.list_sessions().unwrap().len(), 1);
+    assert_eq!(source.session_relation_at_path(&compressed).unwrap().path, plain);
+  }
+
+  #[test]
+  fn desktop_metadata_matches_a_compressed_rollout_through_its_plain_alias() {
+    let directory = tempdir().unwrap();
+    let plain = directory.path().join("session.jsonl");
+    let compressed = plain.with_extension("jsonl.zst");
+    std::fs::write(
+      &compressed,
+      zstd::stream::encode_all(include_bytes!("../fixtures/basic_session.jsonl").as_slice(), 0).unwrap(),
+    )
+    .unwrap();
+    let connection = Connection::open(directory.path().join(STATE_DB_FILENAME)).unwrap();
+    connection
+      .execute_batch("create table threads (id text, rollout_path text, title text, preview text);")
+      .unwrap();
+    connection
+      .execute(
+        "insert into threads values (?1, ?2, 'Compressed title', 'Compressed preview')",
+        params!["session-fixture", plain.to_str()],
+      )
+      .unwrap();
+    let mut reference = inspect_session_header(&compressed).unwrap();
+    let metadata = indexed_metadata(directory.path(), std::slice::from_ref(&reference));
+    apply_indexed_metadata_to_reference(&mut reference, &metadata["session-fixture"]);
+    assert_eq!(reference.title.as_deref(), Some("Compressed title"));
+    assert_eq!(reference.preview.as_deref(), Some("Compressed preview"));
+    assert_eq!(reference.path, compressed);
+  }
 
   #[test]
   fn first_session_meta_owns_subagent_identity() {

@@ -57,7 +57,7 @@ pub(super) fn retain_current_rollouts(home: &Path, paths: &mut Vec<PathBuf>) {
   let heads = metadata
     .into_iter()
     .filter_map(|(id, metadata)| {
-      let path = metadata.rollout_path?;
+      let path = crate::storage::resolve_path(&metadata.rollout_path?);
       let reference = inspect_session_header(&path).ok()?;
       (reference.id == id).then_some((id, path))
     })
@@ -74,6 +74,33 @@ mod tests {
   use super::*;
 
   const ID: &str = "019ff730-9112-7cc0-92c5-1287c3241472";
+
+  #[test]
+  fn catalog_selects_a_compressed_head_when_desktop_retains_its_plain_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path();
+    let original = home.join(format!("rollout-2026-08-13T02-16-23-{ID}.jsonl.zst"));
+    let current_plain = home.join(format!("rollout-2026-09-18T18-32-33-{ID}_continuation.jsonl"));
+    let current = current_plain.with_extension("jsonl.zst");
+    let header = format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{ID}\"}}}}\n");
+    for path in [&original, &current] {
+      std::fs::write(path, zstd::stream::encode_all(header.as_bytes(), 0).unwrap()).unwrap();
+    }
+    let connection = Connection::open(home.join(STATE_DB_FILENAME)).unwrap();
+    connection
+      .execute_batch("create table threads (id text, rollout_path text, title text);")
+      .unwrap();
+    connection
+      .execute(
+        "insert into threads values (?1, ?2, 'Compressed title')",
+        rusqlite::params![ID, current_plain.to_str()],
+      )
+      .unwrap();
+    let mut paths = vec![original, current.clone()];
+    retain_current_rollouts(home, &mut paths);
+    assert_eq!(paths, [current]);
+    assert!(!current_plain.exists());
+  }
 
   #[test]
   fn catalogs_the_current_segment_without_hiding_unrelated_or_unindexed_files() {
