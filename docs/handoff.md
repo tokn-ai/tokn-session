@@ -50,7 +50,9 @@ first-line preview of the latest cached assistant message from that session, and
 show a small project name. Project-grouped rows show titles only. Previews use existing
 frontend semantic summaries and compact background messages, including
 intermediate assistant messages inside folded work groups. Child/subagent
-sessions have separate previews. The Background updates switch defaults to
+sessions have separate previews. A compact Updates entry in the bottom status
+bar opens the background scope/status popup, keeping the session sidebar focused
+on navigation and remaining available when it is collapsed. The scope defaults to
 All sessions on the connected machine; Sidebar sessions limits it to loaded
 root/child rows. One independent leased interest carries bounded latest-assistant
 and activity projections over WebSocket, Tauri, or Hub/SSE; registration,

@@ -42,9 +42,6 @@ function ViewerContent({ remote, connection, on_open_machines }: ViewerPageProps
       <div className="viewer-shell" data-inspector-open={viewer.inspectorOpen} data-sidebar-collapsed={sidebarCollapsed}>
         <SessionDrawer desktop_hidden={sidebarCollapsed} is_open={viewer.mobileSidebarOpen} on_close={() => viewer.setMobileSidebarOpen(false)}>
           <Sidebar
-            background_updates_scope={viewer.backgroundUpdatesScope}
-            background_updates_status={viewer.backgroundUpdatesStatus}
-            on_background_updates_scope_change={viewer.setBackgroundUpdatesScope}
             order={viewer.sessionOrder}
             on_order_change={viewer.setSessionOrder}
             on_close={() => viewer.setMobileSidebarOpen(false)}
@@ -134,6 +131,9 @@ function ViewerContent({ remote, connection, on_open_machines }: ViewerPageProps
       </div>
 
       <StatusBar
+        background_updates_scope={viewer.backgroundUpdatesScope}
+        background_updates_status={viewer.backgroundUpdatesStatus}
+        on_background_updates_scope_change={viewer.setBackgroundUpdatesScope}
         connection={remote ? connection : <RelayConnection on_open_machines={on_open_machines} />}
         error={viewer.sessionIndexProgressError}
         is_loading={viewer.sessionIndexProgressLoading}

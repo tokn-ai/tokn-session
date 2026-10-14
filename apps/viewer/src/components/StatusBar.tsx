@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState, type ReactNode } from "react";
-import type { SessionIndexProgress, SourceError } from "../lib/types";
+import type { BackgroundUpdatesScope, SessionIndexProgress, SourceError } from "../lib/types";
+import { BackgroundUpdatesControl } from "./BackgroundUpdatesControl";
 import { BellIcon } from "./Icons";
 import {
   describeSessionIndexProgress,
@@ -8,6 +9,9 @@ import {
 } from "./NotificationCenter";
 
 interface StatusBarProps {
+  background_updates_scope?: BackgroundUpdatesScope;
+  background_updates_status?: string | null;
+  on_background_updates_scope_change?: (scope: BackgroundUpdatesScope) => void;
   connection?: ReactNode;
   progress: SessionIndexProgress | null;
   is_loading: boolean;
@@ -73,6 +77,9 @@ function describeStatusAnnouncement(
  * the viewer hook so a background event cannot be lost while it is closed.
  */
 export function StatusBar({
+  background_updates_scope = "all",
+  background_updates_status = null,
+  on_background_updates_scope_change,
   connection,
   progress,
   is_loading,
@@ -100,6 +107,11 @@ export function StatusBar({
     <div className="status-region">
       <footer className="status-bar" data-tone={summary.tone}>
         {connection}
+        {on_background_updates_scope_change ? <BackgroundUpdatesControl
+          scope={background_updates_scope}
+          status={background_updates_status}
+          on_scope_change={on_background_updates_scope_change}
+        /> : null}
 
         <span aria-atomic="true" aria-live="polite" className="sr-only" key={announcement.key} role="status">
           {announcement.text}

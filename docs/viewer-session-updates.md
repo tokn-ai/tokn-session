@@ -88,8 +88,9 @@ replicas own their previews while subscribed, because their source pipeline can
 be ahead of indexing. Subscription changes retain bounded preview text while
 retiring live activity authority; stale IDs/generations are ignored. Gaps and
 reconnects establish a fresh live interest without loading unopened history.
-The scope preference is stored locally. Unsupported hosts show a background
-status message while open sessions continue through the existing path.
+The scope preference is stored locally. The bottom status bar shows a compact
+Updates entry; its popup contains scope choices and status details. Unsupported
+hosts show a warning there while open sessions continue through the existing path.
 Legacy desktop External reader mode has no compact metadata feed and reports
 background updates unavailable; native Local/Automatic mode and encrypted remote
 connections to modern hosts support it.

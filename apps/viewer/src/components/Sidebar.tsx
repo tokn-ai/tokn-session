@@ -5,7 +5,6 @@ import type {
   SessionSummary,
   ViewerProvider,
   SessionOrder,
-  BackgroundUpdatesScope,
 } from "../lib/types";
 import {
   formatRelativeTime,
@@ -19,9 +18,6 @@ import { useSidebarGroups } from "../lib/useSidebarGroups";
 import { LoadingRows } from "./StateView";
 
 interface SidebarProps {
-  background_updates_scope?: BackgroundUpdatesScope;
-  background_updates_status?: string | null;
-  on_background_updates_scope_change?: (scope: BackgroundUpdatesScope) => void;
   order?: SessionOrder;
   on_order_change?: (order: SessionOrder) => void;
   on_close?: () => void;
@@ -240,9 +236,6 @@ function SessionBranch({
 }
 
 export function Sidebar({
-  background_updates_scope = "all",
-  background_updates_status,
-  on_background_updates_scope_change,
   order = "time",
   on_order_change,
   on_close,
@@ -361,15 +354,6 @@ export function Sidebar({
           <button aria-pressed={order === "time"} onClick={() => on_order_change?.("time")} type="button">Time</button>
           <button aria-pressed={order === "project"} onClick={() => on_order_change?.("project")} type="button">Projects</button>
         </div>
-        <label className="sidebar-background-updates">
-          <span>Background updates</span>
-          <select aria-label="Background updates" value={background_updates_scope}
-            onChange={(event) => on_background_updates_scope_change?.(event.currentTarget.value as BackgroundUpdatesScope)}>
-            <option value="all">All sessions</option>
-            <option value="sidebar">Sidebar sessions</option>
-          </select>
-        </label>
-        {background_updates_status ? <p className="sidebar-background-updates__status" role="status">{background_updates_status}</p> : null}
       </div>
 
       {source_errors.length > 0 ? (

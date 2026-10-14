@@ -56,6 +56,24 @@ function renderStatusBar(
 }
 
 describe("StatusBar", () => {
+  it("keeps background scope in the persistent footer alongside connection and notifications", () => {
+    const change = vi.fn();
+    render(<StatusBar
+      connection={<button type="button">This machine</button>}
+      background_updates_scope="sidebar"
+      background_updates_status={null}
+      on_background_updates_scope_change={change}
+      error={null} is_loading={false} is_retrying={false}
+      on_retry={vi.fn()} progress={progress()} source_errors={[]}
+    />);
+    const bar = document.querySelector("footer")!;
+    const trigger = screen.getByRole("button", { name: /Background updates.*Sidebar sessions/ });
+    expect(bar).toContainElement(trigger);
+    expect(bar).toContainElement(screen.getByRole("button", { name: "This machine" }));
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("radio", { name: "All sessions" }));
+    expect(change).toHaveBeenCalledExactlyOnceWith("all");
+  });
   it("shows shared ownership while the first catalog is still pending", () => {
     const shared = progress({ activity: "waiting_for_indexer" });
     shared.catalog.pending_providers = ["codex"];

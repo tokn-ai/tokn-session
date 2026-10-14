@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { BackgroundUpdatesScope, SessionOrder, SessionSummary, ViewerProvider } from "../lib/types";
+import type { SessionOrder, SessionSummary, ViewerProvider } from "../lib/types";
 import { Sidebar } from "./Sidebar";
 
 afterEach(cleanup);
@@ -36,16 +36,10 @@ function renderSidebar(
   error: string | null = null,
   onCollapse?: () => void,
   order: SessionOrder = "time",
-  backgroundScope: BackgroundUpdatesScope = "all",
-  onBackgroundScopeChange?: (scope: BackgroundUpdatesScope) => void,
-  backgroundStatus?: string,
 ) {
   return render(
     <Sidebar
       order={order}
-      background_updates_scope={backgroundScope}
-      on_background_updates_scope_change={onBackgroundScopeChange}
-      background_updates_status={backgroundStatus}
       enabled_providers={new Set(["codex"])}
       error={error}
       has_more={false}
@@ -71,18 +65,6 @@ function renderSidebar(
 }
 
 describe("Sidebar session identity", () => {
-  it("offers all background sessions by default and reports unavailable live updates beside the control", () => {
-    const change = vi.fn();
-    renderSidebar([session()], [], null, undefined, "time", "all", change, "Background updates unavailable on this host. Open sessions still update.");
-    const control = screen.getByRole("combobox", { name: "Background updates" });
-    expect(control).toHaveValue("all");
-    expect(screen.getByRole("option", { name: "All sessions" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "Sidebar sessions" })).toBeInTheDocument();
-    fireEvent.change(control, { target: { value: "sidebar" } });
-    expect(change).toHaveBeenCalledExactlyOnceWith("sidebar");
-    expect(screen.getByRole("status")).toHaveTextContent("Open sessions still update.");
-    expect(screen.getByRole("button", { name: /Codex session/ })).toBeInTheDocument();
-  });
   it("keeps provider controls in a disclosure and delegates desktop collapse", () => {
     const collapse = vi.fn();
     renderSidebar([session()], [], null, collapse);
