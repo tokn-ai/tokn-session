@@ -25,6 +25,53 @@ fn emit<T: serde::Serialize>(events: &broadcast::Sender<ViewerEvent>, event: &st
   Ok(())
 }
 
+/// Establish a silent compact baseline before the first index reconciliation.
+/// This reads only SQLite projections and prevents an initial sibling-index
+/// change from replaying every historical card as if it were a live update.
+async fn seed_runtime_background(service: &ViewerService) {
+  let reader = service.clone();
+  let _ = tokio::task::spawn_blocking(move || {
+    let keys = reader.background_baseline_keys();
+    for notification in reader.session_notifications(&keys) {
+      reader.seed_background_notification(&notification);
+    }
+  })
+  .await;
+}
+
+/// A second viewer follows committed compact metadata instead of reading any
+/// provider history merely to refresh background session cards.
+async fn publish_shared_index_background(
+  service: &ViewerService,
+  events: &broadcast::Sender<ViewerEvent>,
+  include_present: bool,
+) {
+  let subscribed = service.has_background_subscriptions();
+  if !subscribed && !include_present {
+    return;
+  }
+  let reader = service.clone();
+  if let Ok(updates) = tokio::task::spawn_blocking(move || {
+    let keys = reader.background_notification_keys(include_present);
+    // A follower also keeps its source-free fingerprints current without
+    // clients, so a later registration cannot replay changes from before it.
+    reader
+      .session_notifications(&keys)
+      .iter()
+      .flat_map(|notification| reader.publish_background_notification(notification))
+      .collect::<Vec<_>>()
+  })
+  .await
+  {
+    for (index, update) in updates.into_iter().enumerate() {
+      let _ = emit(events, "background-session-updated", update);
+      if (index + 1) % 32 == 0 {
+        tokio::task::yield_now().await;
+      }
+    }
+  }
+}
+
 /// Owns the shared background workers. Adapters subscribe and forward events.
 pub struct ViewerRuntime {
   pub service: ViewerService,
@@ -122,6 +169,9 @@ impl ViewerRuntime {
       if !watcher_startup_guard.is_zero() {
         tokio::time::sleep(watcher_startup_guard).await;
       }
+      if refresh_service.relay.status().settings.mode != crate::relay::RelayMode::External {
+        seed_runtime_background(&refresh_service).await;
+      }
       let mut next_full_catalog_refresh = Instant::now();
       let mut next_unwatched_provider_catalog_refresh = Instant::now();
       let mut next_pending_body_refresh = Instant::now();
@@ -158,6 +208,7 @@ impl ViewerRuntime {
             Ok(None) => {
               match refresh_service.follow_shared_index() {
                 Ok(true) => {
+                  publish_shared_index_background(&refresh_service, &scheduler_events, true).await;
                   let _ = emit(
                     &scheduler_events,
                     "session-index-changed",
@@ -243,6 +294,7 @@ impl ViewerRuntime {
         if work.is_none() && !pending_body_due {
           match refresh_service.observe_shared_index_change() {
             Ok(true) => {
+              publish_shared_index_background(&refresh_service, &scheduler_events, true).await;
               let _ = emit(
                 &scheduler_events,
                 "session-index-changed",
@@ -359,6 +411,11 @@ impl ViewerRuntime {
             }
             let needs_retry = session_index_needs_retry(&refresh);
             if refresh.changed {
+              if refresh.catalog_refresh_required {
+                // The owner already knows changed body keys. Only known
+                // interests need topology reconciliation for removals.
+                publish_shared_index_background(&refresh_service, &scheduler_events, false).await;
+              }
               let mut keys = refresh.updated_session_keys.clone();
               keys.extend(refresh.attention_session_keys.iter().cloned());
               keys.sort();
@@ -372,7 +429,15 @@ impl ViewerRuntime {
                       .iter()
                       .any(|notification| notification["session_key"].as_str() == Some(key))
                   });
+                  let mut published = 0usize;
                   for notification in notifications {
+                    for update in refresh_service.publish_background_notification(&notification) {
+                      let _ = emit(&scheduler_events, "background-session-updated", update);
+                      published += 1;
+                      if published % 32 == 0 {
+                        tokio::task::yield_now().await;
+                      }
+                    }
                     if emit(&scheduler_events, "session-notification", notification).is_err() {
                       refresh.catalog_refresh_required = true;
                     }

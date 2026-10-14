@@ -146,10 +146,12 @@ pub fn allowed_route(method: &str, path: &str, allow_control: bool) -> bool {
       | "/api/v1/load_event_page"
       | "/api/v1/load_session_updates"
       | "/api/v1/subscribe_session"
+      | "/api/v1/subscribe_background_updates"
       | "/api/v1/load_session_backward"
       | "/api/v1/load_session_details"
       | "/api/v1/inspect_session_event"
       | "/api/v1/renew_session_subscriptions"
+      | "/api/v1/renew_background_subscriptions"
       | "/api/v1/update_session_view"
       | "/api/v1/load_event_detail"
       | "/api/v1/load_trajectory_event_page"
@@ -175,10 +177,12 @@ mod tests {
       for path in [
         "/api/v1/load_session_updates",
         "/api/v1/subscribe_session",
+        "/api/v1/subscribe_background_updates",
         "/api/v1/load_session_backward",
         "/api/v1/load_session_details",
         "/api/v1/inspect_session_event",
         "/api/v1/renew_session_subscriptions",
+        "/api/v1/renew_background_subscriptions",
       ] {
         assert!(allowed_route("POST", path, allow_control));
         for method in ["GET", "PUT", "DELETE"] {
