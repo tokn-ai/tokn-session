@@ -193,7 +193,9 @@ function HubHosts({ session, initial_notice, on_authenticated, on_disconnected }
     finally { clearTimeout(timer); logout_client.close(); }
   }
 
-  if (active) return <ViewerPage key={active.host.host_id} remote connection={
+  if (active) return <ViewerPage key={active.host.host_id} remote
+    machine_label={active.host.machine_address ?? active.host.name ?? active.host.host_id}
+    machine_key={`${session.endpoint}/${active.host.host_id}`} connection={
     <RemoteConnection name={`${active.host.machine_address ?? active.host.name}${active.host.access === "view" ? " · View only" : ""}`} hub_url={session.endpoint} state={state}>
       <button onClick={disconnectHost}>Change host</button>
       <button onClick={() => { void logout(); }}>Sign out</button>

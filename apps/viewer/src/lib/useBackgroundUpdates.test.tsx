@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CommandInvoker, EventSubscriber } from "./transport";
 import type { BackgroundSessionUpdate, BackgroundUpdatesRequest, BackgroundUpdatesSubscription } from "./types";
 import { useBackgroundUpdates } from "./useBackgroundUpdates";
+import { readViewerPreferences, updateViewerPreferences } from "./viewerPreferences";
 
 type Handler = (event: { payload: unknown }) => void;
 
@@ -47,6 +48,21 @@ beforeEach(() => { vi.useFakeTimers(); localStorage.clear(); });
 afterEach(() => { cleanup(); localStorage.clear(); vi.useRealTimers(); });
 
 describe("background update interests", () => {
+  it("responds to shared Settings choices without restarting for unrelated display preferences", async () => {
+    const connection = transport();
+    const { result } = renderHook(() => useBackgroundUpdates(connection.invoke, connection.listen, connection.release, ["visible"]));
+    await act(async () => {});
+    const first = connection.requests()[0];
+    await act(async () => updateViewerPreferences({ sidebar_order: "project", show_lifecycle: true, conversation_update_level: "all" }));
+    expect(connection.requests()).toHaveLength(1);
+    expect(connection.release).not.toHaveBeenCalled();
+    await act(async () => updateViewerPreferences({ background_updates_scope: "sidebar", background_update_level: "final" }));
+    expect(result.current).toMatchObject({ scope: "sidebar", level: "final" });
+    expect(connection.requests()).toHaveLength(2);
+    expect(connection.requests()[1]).toMatchObject({ scope: "sidebar", level: "final", session_keys: ["visible"] });
+    expect(connection.release).toHaveBeenCalledExactlyOnceWith("subscribe_background_updates", { request: { ...first, unsubscribe: true } });
+  });
+
   it("defaults to all sessions, without deriving interests or reads from visible rows", async () => {
     const connection = transport();
     const { result, rerender, unmount } = renderHook(({ keys }) => useBackgroundUpdates(connection.invoke, connection.listen, connection.release, keys), {
@@ -78,7 +94,7 @@ describe("background update interests", () => {
     const second = connection.requests()[1];
     expect(second).toMatchObject({ level: "final", scope: "all", session_keys: [] });
     expect(second.subscription_id).not.toBe(first.subscription_id);
-    expect(localStorage.getItem("tokn.viewer.background-update-level")).toBe("final");
+    expect(readViewerPreferences().background_update_level).toBe("final");
     expect(result.current.cache.preview("visible")).toBe("Known reply");
     expect(result.current.cache.activity("visible")).toBeUndefined();
     expect(connection.release).toHaveBeenCalledWith("subscribe_background_updates", { request: { ...first, unsubscribe: true } });
@@ -166,7 +182,7 @@ describe("background update interests", () => {
     const second = connection.requests()[1];
     expect(second).toMatchObject({ scope: "sidebar", session_keys: ["visible"] });
     expect(second.subscription_id).not.toBe(first.subscription_id);
-    expect(localStorage.getItem("tokn.viewer.background-updates")).toBe("sidebar");
+    expect(readViewerPreferences().background_updates_scope).toBe("sidebar");
     expect(result.current.cache.preview("unopened")).toBe("Main assistant reply.");
     expect(result.current.cache.activity("unopened")).toBeUndefined();
     expect(connection.release).toHaveBeenCalledWith("subscribe_background_updates", { request: { ...first, unsubscribe: true } });

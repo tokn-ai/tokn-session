@@ -40,6 +40,7 @@ import type {
   RelayChange,
 } from "./types";
 import { useViewerState } from "./useViewerState";
+import { readViewerPreferences, updateViewerPreferences, VIEWER_PREFERENCES_KEY } from "./viewerPreferences";
 import { ViewerPage } from "../pages/ViewerPage";
 
 vi.mock("../components/RelayConnection", () => ({ RelayConnection: () => null }));
@@ -383,6 +384,24 @@ function ViewerPageCommitProbe() {
 }
 
 describe("sidebar view preference", () => {
+  it("applies Settings ordering while retaining the open projection and background interest", async () => {
+    vi.mocked(listSessions)
+      .mockResolvedValueOnce({ sessions: [session("settings-open")], next_cursor: null, source_errors: [], pending_providers: [] })
+      .mockResolvedValueOnce({ sessions: [session("settings-other")], next_cursor: null, source_errors: [], pending_providers: [] });
+    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, toolEventPage()));
+    const { result } = renderHook(() => useViewerState());
+    await selectListedSession(result, "settings-open");
+    await waitFor(() => expect(result.current.events).toEqual(toolEventPage().events));
+    const historyRequests = vi.mocked(loadSessionUpdates).mock.calls.length;
+    act(() => updateViewerPreferences({ sidebar_order: "project", show_lifecycle: true }));
+    await waitFor(() => expect(result.current.sessions[0]?.session_key).toBe("settings-other"));
+    expect(result.current.sessionOrder).toBe("project");
+    expect(result.current.selectedSession?.session_key).toBe("settings-open");
+    expect(result.current.events).toEqual(toolEventPage().events);
+    expect(loadSessionUpdates).toHaveBeenCalledTimes(historyRequests);
+    expect(subscribeBackgroundUpdates).toHaveBeenCalledOnce();
+  });
+
   it("requests project order and preserves a selection outside the replacement page", async () => {
     vi.mocked(listSessions)
       .mockResolvedValueOnce({ sessions: [session("a")], next_cursor: null, source_errors: [], pending_providers: [] })
@@ -395,7 +414,7 @@ describe("sidebar view preference", () => {
     expect(result.current.selectedSession?.session_key).toBe("a");
     const calls = vi.mocked(listSessions).mock.calls;
     expect(calls[calls.length - 1][0].query.order).toBe("project");
-    expect(localStorage.getItem("tokn.viewer.sidebar-order")).toBe("project");
+    expect(readViewerPreferences().sidebar_order).toBe("project");
   });
 });
 
@@ -2732,7 +2751,7 @@ describe("semantic session delivery", () => {
     expect(request.scope).toEqual({ history: "recent_turns", group_keys: [] });
     if (level !== "steps") {
       expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) => request.level === "steps" && request.unsubscribe)).toBe(true);
-      expect(localStorage.getItem("tokn.viewer.conversation-update-level")).toBe(level);
+      expect(readViewerPreferences().conversation_update_level).toBe(level);
     }
     // Each preset remains live, including Final. A late other-level update
     // must not replace the chosen conversation or its error state.
@@ -2822,8 +2841,24 @@ describe("semantic session delivery", () => {
     const messages = renderHook(() => useViewerState());
     expect(messages.result.current.conversationUpdateLevel).toBe("messages");
     messages.unmount();
+    localStorage.removeItem(VIEWER_PREFERENCES_KEY);
     localStorage.setItem("tokn.viewer.conversation-update-level", "details");
     expect(renderHook(() => useViewerState()).result.current.conversationUpdateLevel).toBe("steps");
+  });
+  it("applies a shared Settings level before loading its projection without losing the open session", async () => {
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("settings-level")], next_cursor: null, source_errors: [], pending_providers: [] });
+    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, {
+      ...toolEventPage(), events: [{ ...toolEventPage().events[0], event_key: request.level }],
+    }));
+    const { result } = renderHook(() => useViewerState());
+    await selectListedSession(result, "settings-level");
+    await waitFor(() => expect(result.current.events[0]?.event_key).toBe("steps"));
+    act(() => updateViewerPreferences({ conversation_update_level: "messages" }));
+    await waitFor(() => expect(result.current.events[0]?.event_key).toBe("messages"));
+    expect(result.current.selectedSessionKey).toBe("settings-level");
+    expect(result.current.conversationUpdateLevel).toBe("messages");
+    expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) => request.level === "steps" && request.unsubscribe)).toBe(true);
+    expect(subscribeBackgroundUpdates).toHaveBeenCalledOnce();
   });
   it("updates a never-opened sidebar session from compact events without loading history", async () => {
     let emit!: (update: import("./types").BackgroundSessionUpdate) => void;

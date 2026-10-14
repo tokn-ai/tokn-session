@@ -5,22 +5,20 @@ import { errorMessage } from "./state";
 import { listenForBackgroundUpdates, listenForTransportReconnect, renewBackgroundSubscriptions, subscribeBackgroundUpdates } from "./tauri";
 import type { CommandInvoker, EventSubscriber } from "./transport";
 import type { BackgroundUpdateLevel, BackgroundUpdatesRequest, BackgroundUpdatesScope } from "./types";
+import { readViewerPreferences, useViewerPreferences } from "./viewerPreferences";
 
-const SCOPE_KEY = "tokn.viewer.background-updates";
-const LEVEL_KEY = "tokn.viewer.background-update-level";
 export function readBackgroundUpdatesScope(): BackgroundUpdatesScope {
-  try { return localStorage.getItem(SCOPE_KEY) === "sidebar" ? "sidebar" : "all"; }
-  catch { return "all"; }
+  return readViewerPreferences().background_updates_scope;
 }
 export function readBackgroundUpdateLevel(): BackgroundUpdateLevel {
-  try { return localStorage.getItem(LEVEL_KEY) === "final" ? "final" : "messages"; }
-  catch { return "messages"; }
+  return readViewerPreferences().background_update_level;
 }
 
 export function useBackgroundUpdates(send: CommandInvoker, subscribe: EventSubscriber,
   release: (command: string, payload: Record<string, unknown>) => Promise<void>, session_keys: string[]) {
-  const [scope, setScope] = useState(readBackgroundUpdatesScope);
-  const [level, setLevel] = useState(readBackgroundUpdateLevel);
+  const { preferences, updatePreferences } = useViewerPreferences();
+  const scope = preferences.background_updates_scope;
+  const level = preferences.background_update_level;
   const [status, setStatus] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
   const [connection, setConnection] = useState(0);
@@ -28,13 +26,11 @@ export function useBackgroundUpdates(send: CommandInvoker, subscribe: EventSubsc
   const keys = scope === "sidebar" ? JSON.stringify([...new Set(session_keys)].sort()) : "[]";
   const requestKeys = useMemo(() => JSON.parse(keys) as string[], [keys]);
   const changeScope = useCallback((value: BackgroundUpdatesScope) => {
-    try { localStorage.setItem(SCOPE_KEY, value); } catch { /* Keep the local control usable. */ }
-    setScope(value);
-  }, []);
+    updatePreferences({ background_updates_scope: value });
+  }, [updatePreferences]);
   const changeLevel = useCallback((value: BackgroundUpdateLevel) => {
-    try { localStorage.setItem(LEVEL_KEY, value); } catch { /* Keep the local control usable. */ }
-    setLevel(value);
-  }, []);
+    updatePreferences({ background_update_level: value });
+  }, [updatePreferences]);
 
   useEffect(() => {
     let disposed = false;

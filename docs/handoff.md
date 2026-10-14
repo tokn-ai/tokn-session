@@ -4,6 +4,19 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
+Settings opens from Machines or the viewer status bar without unmounting the
+conversation or its subscriptions. A bounded versioned viewer-preference store
+migrates the previous grouping/delivery keys and synchronizes quick controls,
+lifecycle visibility, and the settings page across windows. Preferences apply
+immediately and reset independently of trust, identities, caches, and reading
+markers. Selected-machine settings are public metadata, with detected source
+locations resolved without parsing histories. Tauri permits the existing local
+reader Apply and hosting dialog; HTTP/Hub connections remain read-only and
+session shares cannot inspect machine-wide configuration. Dirty reader drafts
+survive live status refreshes; delayed requests stay bound to their original
+machine. Hosting/pairing secrets load only through the existing explicit setup.
+See [settings ownership](viewer-settings.md) for persistence and capabilities.
+
 Version 0.1.1 is being prepared for all 23 publishable crates; the desktop stays
 `publish = false`. Registry dependency versions, package-local docs/licenses and
 test fixtures, and Rust 1.95 declarations are in place. Codex protocol preserves

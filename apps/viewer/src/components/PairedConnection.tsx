@@ -126,7 +126,8 @@ export function PairedConnection({ initial_token }: { initial_token?: string }) 
     <p className="machine-hint">The link keeps access to this local client in your tab’s memory.</p>
   </section></main>;
 
-  if (active) return <ViewerPage key={active.connection_id} remote connection={
+  if (active) return <ViewerPage key={active.connection_id} remote machine_label={`Encrypted host · ${active.host_id}`}
+    machine_key={active.connection_id} connection={
     <RemoteConnection name={`Encrypted host · ${active.host_id}`} state={connection_state}>
       <button disabled={busy} onClick={() => { void action(changeHost); }}>Change host</button>
     </RemoteConnection>

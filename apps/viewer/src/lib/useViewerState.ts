@@ -2,10 +2,11 @@ import { captureTransport, type CommandInvoker, type EventSubscriber } from "./t
 import { SessionDisplayCache } from "./sessionDisplayCache";
 import { useBackgroundUpdates } from "./useBackgroundUpdates";
 import type { ExpandedActivityState } from "./types";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { readReadingPosition, readingEventKey } from "./readingPosition";
 import { refreshEventWindow, loadCompleteTrajectory } from "./liveEvents";
-import { compareProjects, readSessionOrder, saveSessionOrder } from "./sidebarOrder";
+import { compareProjects } from "./sidebarOrder";
+import { useViewerPreferences } from "./viewerPreferences";
 import { useSessionView } from "./useSessionView";
 import {
   acknowledgeSessionAttention as apiAcknowledgeSessionAttention,
@@ -63,16 +64,6 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
     return () => window.clearTimeout(timeout);
   }, [delayMs, value]);
   return debounced;
-}
-
-const CONVERSATION_LEVEL_KEY = "tokn.viewer.conversation-update-level";
-
-function readConversationUpdateLevel(): ConversationUpdateLevel {
-  try {
-    const level = localStorage.getItem(CONVERSATION_LEVEL_KEY);
-    if (level === "final" || level === "messages" || level === "steps" || level === "all") return level;
-  } catch { /* Storage can be unavailable in private browser contexts. */ }
-  return "steps";
 }
 
 const DETAIL_CACHE_LIMIT = 50;
@@ -217,7 +208,9 @@ export function useViewerState() {
     listenForSessionUpdates: (handler: Parameters<typeof apiListenForSessionUpdates>[0]) => apiListenForSessionUpdates(handler, subscribe),
     listenForSessionNotifications: (handler: Parameters<typeof apiListenForSessionNotifications>[0]) => apiListenForSessionNotifications(handler, subscribe),
   }), [send, subscribe]);
-  const [sessionOrder, setSessionOrder] = useState(readSessionOrder);
+  const { preferences, updatePreferences } = useViewerPreferences();
+  const sessionOrder = preferences.sidebar_order;
+  const sessionOrderRef = useRef(sessionOrder);
   const [search, setSearchValue] = useState("");
   const debouncedSearch = useDebouncedValue(search.trim(), 180);
   const [enabledProviders, setEnabledProviders] = useState<Set<ViewerProvider>>(
@@ -236,7 +229,7 @@ export function useViewerState() {
   const sessionChildrenRef = useRef<Map<string, SessionChildrenState>>(new Map());
   const sessionChildrenGeneration = useRef(0);
   const sessionChildRequests = useRef(new Map<string, number>());
-  const [conversationUpdateLevel, setConversationUpdateLevelValue] = useState(readConversationUpdateLevel);
+  const conversationUpdateLevel = preferences.conversation_update_level;
   const conversationUpdateLevelRef = useRef(conversationUpdateLevel);
   const projectionEpoch = useRef(0);
   const [selectedSessionKey, setSelectedSessionKey] = useState<string | null>(null);
@@ -1161,7 +1154,7 @@ export function useViewerState() {
     }
   }, [applyEventSelection, applyExpandedEventKey, clearTrajectoryPages, inspectorOpen]);
 
-  const setConversationUpdateLevel = useCallback((level: ConversationUpdateLevel) => {
+  const applyConversationUpdateLevel = useCallback((level: ConversationUpdateLevel) => {
     if (level === conversationUpdateLevelRef.current) return;
     const previousLevel = conversationUpdateLevelRef.current;
     conversationUpdateLevelRef.current = level;
@@ -1190,9 +1183,18 @@ export function useViewerState() {
       setEventsLoading(!cached);
       setEventsError(null);
     }
-    try { localStorage.setItem(CONVERSATION_LEVEL_KEY, level); } catch { /* Preference remains usable for this viewer. */ }
-    setConversationUpdateLevelValue(level);
   }, []);
+
+  // Settings and the quick control share one preference. Retire the old
+  // projection before passive history/live effects observe the new level.
+  useLayoutEffect(() => {
+    applyConversationUpdateLevel(conversationUpdateLevel);
+  }, [applyConversationUpdateLevel, conversationUpdateLevel]);
+
+  const setConversationUpdateLevel = useCallback((level: ConversationUpdateLevel) => {
+    applyConversationUpdateLevel(level);
+    updatePreferences({ conversation_update_level: level });
+  }, [applyConversationUpdateLevel, updatePreferences]);
 
   const closeInspector = useCallback(() => {
     const trigger = inspectorTriggerRef.current;
@@ -1398,6 +1400,20 @@ export function useViewerState() {
     ?? (selectedSessionMetadata?.session_key === selectedSessionKey ? projectSession(selectedSessionMetadata) : null),
     [displayedSessions, selectedSessionKey, selectedSessionMetadata, projectSession]);
   useSessionView(selectedSessionKey, selectedSession, sessions, sessionChildren);
+
+  const applySessionOrder = useCallback((order: SessionOrder) => {
+    if (order === sessionOrderRef.current) return;
+    sessionOrderRef.current = order;
+    sessionsRequest.current += 1;
+    sessionListInFlight.current = null;
+    sessionListRefreshQueued.current = false;
+    setSessionsLoading(true);
+    setSessionsCursor(null);
+    setSelectedSessionMetadata(selectedSession);
+  }, [selectedSession]);
+  useLayoutEffect(() => {
+    applySessionOrder(sessionOrder);
+  }, [applySessionOrder, sessionOrder]);
 
   const openRelatedSession = useCallback((sourceSessionKey: string, target: SessionSummary) => {
     // The target came from an activity event in this exact source timeline.
@@ -2014,16 +2030,9 @@ export function useViewerState() {
   }, []);
 
   const changeSessionOrder = useCallback((order: SessionOrder) => {
-    if (order === sessionOrder) return;
-    sessionsRequest.current += 1;
-    sessionListInFlight.current = null;
-    sessionListRefreshQueued.current = false;
-    setSessionsLoading(true);
-    setSessionsCursor(null);
-    setSelectedSessionMetadata(selectedSession);
-    setSessionOrder(order);
-    saveSessionOrder(order);
-  }, [sessionOrder, selectedSession]);
+    applySessionOrder(order);
+    updatePreferences({ sidebar_order: order });
+  }, [applySessionOrder, updatePreferences]);
 
   const changeSearch = useCallback((value: string) => {
     setSearchValue(value);

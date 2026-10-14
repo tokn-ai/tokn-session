@@ -285,6 +285,11 @@ fn dispatch(service: &ViewerService, command: &str, payload: Value) -> Result<Va
         .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
     ),
     "get_relay_status" => serde_json::to_value(service.relay.status()),
+    "get_machine_settings" => serde_json::to_value(
+      service
+        .get_machine_settings()
+        .map_err(|e| error(StatusCode::FORBIDDEN, e))?,
+    ),
     _ => return Err(error(StatusCode::NOT_FOUND, "Unknown viewer command")),
   };
   result.map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Could not encode viewer response"))
@@ -327,6 +332,45 @@ mod tests {
   use super::*;
   use axum::body::{Body, to_bytes};
   use tower::ServiceExt;
+
+  #[tokio::test]
+  async fn machine_settings_requires_host_auth_and_remains_read_only() {
+    let directory = tempfile::tempdir().unwrap();
+    let service = ViewerService::native(directory.path().join("index.sqlite")).unwrap();
+    let (events, _) = broadcast::channel(16);
+    let app = router(
+      service,
+      events,
+      Some("machine-token".into()),
+      vec![],
+      CancellationToken::new(),
+    );
+    let request = |authenticated: bool| {
+      let mut request = Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/get_machine_settings")
+        .header(header::CONTENT_TYPE, "application/json");
+      if authenticated {
+        request = request.header(header::AUTHORIZATION, "Bearer machine-token");
+      }
+      request
+        .body(Body::from(
+          r#"{"reader":{"editable":true},"hosting":{"editable":true}}"#,
+        ))
+        .unwrap()
+    };
+    let rejected = app.clone().oneshot(request(false)).await.unwrap();
+    assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+    let response = app.oneshot(request(true)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: Value = serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap()).unwrap();
+    assert_eq!(value["version"], 1);
+    assert_eq!(value["reader"]["editable"], false);
+    assert_eq!(value["sources_editable"], false);
+    assert_eq!(value["hosting"]["editable"], false);
+    assert!(value["reader"]["edit_reason"].is_string());
+    assert_eq!(value["sources"].as_array().unwrap().len(), 6);
+  }
 
   #[tokio::test]
   async fn background_interest_registers_and_renews_without_loading_a_timeline() {

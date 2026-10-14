@@ -60,11 +60,14 @@ async function localTranslation<T>(command: string, payload?: Record<string, unk
 export function getRelayStatus(): Promise<RelayStatus> {
   return invoke<RelayStatus>("get_relay_status");
 }
-export function configureRelay(settings: RelaySettings): Promise<RelayStatus> {
-  return invoke<RelayStatus>("configure_relay", { settings });
+export function configureRelay(settings: RelaySettings, send: CommandInvoker = invoke): Promise<RelayStatus> {
+  return send<RelayStatus>("configure_relay", { settings });
 }
-export function listenForRelayStatus(handler: (status: RelayStatus) => void): Promise<UnlistenFn> {
-  return listen<RelayStatus>("relay-status", (event) => handler(event.payload));
+export function getMachineSettings(send: CommandInvoker = invoke): Promise<import("./types").MachineSettingsSnapshot> {
+  return send("get_machine_settings");
+}
+export function listenForRelayStatus(handler: (status: RelayStatus) => void, subscribe: EventSubscriber = listen): Promise<UnlistenFn> {
+  return subscribe<RelayStatus>("relay-status", (event) => handler(event.payload));
 }
 export function listenForRelayChanges(handler: (change: RelayChange) => void, subscribe: EventSubscriber = listen): Promise<UnlistenFn> {
   return subscribe<RelayChange>("relay-changed", (event) => handler(event.payload));

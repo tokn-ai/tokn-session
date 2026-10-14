@@ -7,6 +7,7 @@ import type { HubMachineSelection, TransportState } from "../lib/types";
 import { ViewerPage } from "../pages/ViewerPage";
 import { RemoteConnection } from "./RemoteConnection";
 import { HostSetup } from "./HostSetup";
+import { SettingsEntry } from "./SettingsEntry";
 import "./HubAccess.css";
 
 type Operation = "loading_hub" | "opening_machine" | "pairing" | "signing_in" | "adding_passkey" | "forgetting";
@@ -154,7 +155,8 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
   }
   const progress = pending && <div className="hub-progress" role="status"><span>{OPERATION_LABELS[pending.kind]}</span>
     {pending.kind !== "forgetting" && <button type="button" onClick={cancel}>Cancel</button>}</div>;
-  if (active) return <ViewerPage key={`${service?.hub_url}/${active.host.host_id}`} remote connection={
+  if (active) return <ViewerPage key={`${service?.hub_url}/${active.host.host_id}`} remote
+    machine_label={hostLabel(active.host)} machine_key={`${service?.hub_url}/${active.host.host_id}`} connection={
     <RemoteConnection name={hostLabel(active.host)} hub_url={service?.hub_url} encrypted state={connection_state} transport={transport}>
       <div className="connection-primary-actions"><button className="connection-panel__primary" onClick={changeHost}>Machines</button></div>
       <div className="connection-secondary-settings">
@@ -167,7 +169,7 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
 
   return <main className="hub-home hub-access"><div className="hub-content">
     <header className="hub-header"><div><p className="hub-eyebrow">Tokn</p><h1>Machines</h1><p>Choose a machine whose sessions you want to open.</p></div>
-      <div className="hub-actions">{!desktop && <a href="/admin">Hub administration</a>}</div>
+      <div className="hub-actions"><SettingsEntry />{!desktop && <a href="/admin">Hub administration</a>}</div>
     </header>
     {desktop && <section className="hub-this-machine" aria-labelledby="this-machine-title">
       <div><h2 id="this-machine-title">This machine</h2><p>Open sessions saved on this computer.</p>{local_error && <p className="hub-error" role="alert">{local_error}</p>}</div>

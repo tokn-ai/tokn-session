@@ -1,11 +1,12 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EventSummary, SessionSummary } from "../lib/types";
 import { Conversation } from "./Conversation";
 
 vi.mock("./SessionComposer", () => ({ SessionComposer: () => null }));
 
 afterEach(cleanup);
+beforeEach(() => localStorage.clear());
 
 const SESSION: SessionSummary = {
   session_key: "codex:root", session_id: "root", parent_session_id: null,
