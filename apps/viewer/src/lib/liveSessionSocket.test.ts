@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { LiveSessionSocket } from "./liveSessionSocket";
-import type { SessionUpdatesRequest } from "./types";
+import type { BackgroundUpdatesRequest, SessionUpdatesRequest } from "./types";
 
 class Socket {
   static instances: Socket[] = [];
@@ -13,13 +13,14 @@ class Socket {
   constructor(readonly url: string) { Socket.instances.push(this); }
   send(value: string) {
     const frame = JSON.parse(value); this.sent.push(frame);
-    if (frame.kind === "subscribe" && this.automatic_ack) queueMicrotask(() => this.frame({ kind: "ack", request_id: frame.request_id, result: {} }));
+    if ((frame.kind === "subscribe" || frame.kind === "subscribe_background") && this.automatic_ack) queueMicrotask(() => this.frame({ kind: "ack", request_id: frame.request_id, result: {} }));
   }
   frame(value: unknown) { this.onmessage?.({ data: JSON.stringify(value) }); }
   open() { this.onopen?.(); this.frame({ kind: "ready" }); }
   close() { this.onclose?.(); }
 }
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); Socket.instances = []; });
+const background: BackgroundUpdatesRequest = { subscription_id: "compact", scope: "sidebar", session_keys: ["one"] };
 const request: SessionUpdatesRequest = { session_key: "one", subscription_id: "subscription", level: "steps", cursor: null, detail_keys: [] };
 
 it("authenticates in a frame, subscribes without HTTP, and renews without requesting data", async () => {
@@ -228,5 +229,131 @@ it("does not release a successor interest when an older unsubscribe acknowledgem
   socket.close(); await vi.advanceTimersByTimeAsync(1000);
   const next = Socket.instances[1]; next.open(); await vi.advanceTimersByTimeAsync(0);
   expect(next.sent.filter((frame) => frame.kind === "subscribe").map((frame) => frame.request)).toEqual([successor]);
+  client.close();
+});
+
+it("uses compact subscriptions without replaying their old identity after reconnect", async () => {
+  vi.useFakeTimers(); vi.stubGlobal("WebSocket", Socket);
+  const emit = vi.fn(), client = new LiveSessionSocket("https://machine", "secret", emit);
+  const ready = client.connect(); Socket.instances[0].open(); await ready;
+  expect(client.isConnected()).toBe(true);
+  await client.subscribe(request);
+  await client.subscribeBackground(background);
+  expect(Socket.instances[0].sent[2]).toMatchObject({ kind: "subscribe_background", request: background });
+  const payload = { subscription_id: "compact", session_key: "one", latest_assistant_message: { preview: "Main reply" } };
+  Socket.instances[0].frame({ kind: "event", event: "background-session-updated", payload });
+  expect(emit).toHaveBeenCalledWith("background-session-updated", payload);
+  Socket.instances[0].close();
+  expect(client.isConnected()).toBe(false);
+  await vi.advanceTimersByTimeAsync(1000);
+  Socket.instances[1].open(); await vi.advanceTimersByTimeAsync(0);
+  expect(Socket.instances[1].sent).toHaveLength(2);
+  expect(Socket.instances[1].sent[1]).toMatchObject({ kind: "subscribe", request });
+  expect(emit).toHaveBeenCalledWith("transport-reconnected", {});
+  const renewed = { ...background, subscription_id: "new-compact" };
+  await client.subscribeBackground(renewed);
+  expect(Socket.instances[1].sent[2]).toMatchObject({ kind: "subscribe_background", request: renewed });
+  client.close();
+});
+
+it("sends compact cleanup before close retires pending requests", async () => {
+  vi.useFakeTimers(); vi.stubGlobal("WebSocket", Socket);
+  const client = new LiveSessionSocket("https://machine", "secret", vi.fn());
+  const ready = client.connect(); Socket.instances[0].open(); await ready;
+  const cleanup = client.subscribeBackground({ ...background, unsubscribe: true });
+  expect(Socket.instances[0].sent[1]).toMatchObject({ kind: "subscribe_background", request: { ...background, unsubscribe: true } });
+  const rejected = expect(cleanup).rejects.toThrow("Machine disconnected");
+  client.close(); await rejected;
+});
+
+it("accepts a full rich inventory plus compact inventory and renews each subscription class independently", async () => {
+  const { client, socket, emit } = await connectedClient();
+  const richIds = [request.subscription_id];
+  for (let index = 1; index < 24; index++) {
+    const subscription_id = `rich-${index}`;
+    richIds.push(subscription_id);
+    await client.subscribe({ ...request, subscription_id });
+  }
+  await client.subscribeBackground(background);
+  const richRenewal = client.renew([...richIds, background.subscription_id]);
+  const compactRenewal = client.renewBackground([background.subscription_id]);
+  socket.frame({ kind: "pong", renewed_ids: richIds, missing_ids: [],
+    renewed_background_ids: [background.subscription_id], missing_background_ids: [] });
+  expect(await richRenewal).toEqual({ renewed_ids: richIds, missing_ids: [background.subscription_id] });
+  await expect(compactRenewal).resolves.toBeUndefined();
+  expect(socket.sent.filter((frame) => frame.kind === "ping")).toHaveLength(1);
+  expect(socket.sent.filter((frame) => frame.kind === "subscribe" || frame.kind === "subscribe_background")).toHaveLength(25);
+  expect(emit).not.toHaveBeenCalled();
+  client.close();
+});
+
+it("retires a missing compact identity without losing or reloading healthy rich interests", async () => {
+  const { client, socket, emit } = await connectedClient();
+  await client.subscribeBackground(background);
+  const richRenewal = client.renew([request.subscription_id]);
+  const compactRenewal = client.renewBackground([background.subscription_id]);
+  const rejected = expect(compactRenewal).rejects.toThrow("Background subscription expired");
+  socket.frame({ kind: "pong", renewed_ids: [request.subscription_id], missing_ids: [],
+    renewed_background_ids: [], missing_background_ids: [background.subscription_id] });
+  expect(await richRenewal).toEqual({ renewed_ids: [request.subscription_id], missing_ids: [] });
+  await rejected;
+  expect(emit.mock.calls).toEqual([
+    ["background-subscriptions-lost", { subscription_ids: [background.subscription_id] }],
+    ["transport-reconnected", { background_subscription_ids: [background.subscription_id] }],
+  ]);
+  socket.frame({ kind: "event", event: "background-session-updated", payload: { subscription_id: background.subscription_id, revision: "stale" } });
+  expect(emit).toHaveBeenCalledTimes(2);
+  expect(socket.sent.filter((frame) => frame.kind === "subscribe")).toHaveLength(1);
+  expect(socket.sent.filter((frame) => frame.kind === "subscribe_background")).toHaveLength(1);
+  await client.subscribeBackground({ ...background, subscription_id: "fresh-compact" });
+  expect(socket.sent[socket.sent.length - 1]).toMatchObject({ kind: "subscribe_background", request: { ...background, subscription_id: "fresh-compact" } });
+  client.close();
+});
+
+it("does not revive compact ownership after a delayed subscribe acknowledgement is superseded by release", async () => {
+  const { client, socket } = await connectedClient();
+  await client.subscribeBackground(background);
+  socket.automatic_ack = false;
+  const updating = client.subscribeBackground({ ...background, scope: "all" });
+  const rejected = expect(updating).rejects.toThrow("Live background subscription superseded");
+  const updateFrame = socket.sent[socket.sent.length - 1];
+  const releasing = client.subscribeBackground({ ...background, unsubscribe: true });
+  const releaseFrame = socket.sent[socket.sent.length - 1];
+  socket.frame({ kind: "ack", request_id: releaseFrame.request_id, result: {} }); await releasing;
+  socket.frame({ kind: "ack", request_id: updateFrame.request_id, result: {} }); await rejected;
+  const renewed = client.renewBackground([background.subscription_id]);
+  const expired = expect(renewed).rejects.toThrow("Background subscription expired");
+  socket.frame({ kind: "pong", renewed_ids: [request.subscription_id], missing_ids: [],
+    renewed_background_ids: [background.subscription_id], missing_background_ids: [] });
+  await expired;
+  client.close();
+});
+
+it("suspends compact ownership immediately on heartbeat timeout before close notification", async () => {
+  const { client, socket, emit } = await connectedClient();
+  await client.subscribeBackground(background);
+  vi.spyOn(socket, "close").mockImplementation(() => {});
+  const renewed = client.renewBackground([background.subscription_id]);
+  const failed = expect(renewed).rejects.toThrow("heartbeat timed out");
+  await vi.advanceTimersByTimeAsync(15_000); await failed;
+  expect(emit).toHaveBeenCalledWith("background-subscriptions-lost", { subscription_ids: [background.subscription_id] });
+  expect(client.isConnected()).toBe(false);
+  socket.onclose?.();
+  expect(emit.mock.calls.filter(([event]) => event === "background-subscriptions-lost")).toHaveLength(1);
+  client.close();
+});
+
+it("rejects an oversized compact inventory even when the rich inventory is valid", async () => {
+  const { client, socket, emit } = await connectedClient();
+  await client.subscribeBackground(background);
+  const richRenewal = client.renew([request.subscription_id]);
+  const compactRenewal = client.renewBackground([background.subscription_id]);
+  const rejectedRich = expect(richRenewal).rejects.toThrow("Live connection interrupted");
+  const rejectedCompact = expect(compactRenewal).rejects.toThrow("Live connection interrupted");
+  socket.frame({ kind: "pong", renewed_ids: [request.subscription_id], missing_ids: [],
+    renewed_background_ids: [background.subscription_id, ...Array.from({ length: 24 }, (_, index) => `other-${index}`)], missing_background_ids: [] });
+  await Promise.all([rejectedRich, rejectedCompact]);
+  expect(emit).toHaveBeenCalledWith("background-subscriptions-lost", { subscription_ids: [background.subscription_id] });
+  expect(client.isConnected()).toBe(false);
   client.close();
 });

@@ -24,8 +24,11 @@ const MEMORY_TARGET: usize = 64 * 1024 * 1024;
 #[serde(rename_all = "snake_case")]
 pub enum UpdateLevel {
   Final,
+  Messages,
   #[default]
   Steps,
+  /// Legacy detail subscriptions remain readable for older clients. New
+  /// consumers fetch details independently of semantic delivery levels.
   Details,
   All,
 }
@@ -108,7 +111,7 @@ fn classify(summary: &Value) -> (&'static str, UpdateLevel) {
       if summary["delivery"] == "final" {
         UpdateLevel::Final
       } else {
-        UpdateLevel::Steps
+        UpdateLevel::Messages
       },
     ),
     "question_reply" => ("user_message", UpdateLevel::Final),
@@ -861,6 +864,16 @@ mod tests {
       subscription(UpdateLevel::Final).update(page(events.clone(), vec![]), events.clone(), vec![], true, None);
     assert_eq!(final_update.items.len(), 4);
     assert!(final_update.items.iter().all(|item| item["level"] == "final"));
+    let messages =
+      subscription(UpdateLevel::Messages).update(page(events.clone(), vec![]), events.clone(), vec![], true, None);
+    assert_eq!(messages.items.len(), 5);
+    assert!(
+      messages
+        .items
+        .iter()
+        .any(|item| item["item_id"] == "step" && item["level"] == "messages")
+    );
+    assert!(!messages.items.iter().any(|item| item["item_id"] == "tool"));
     let steps = subscription(UpdateLevel::Steps).update(page(events.clone(), vec![]), events, vec![], true, None);
     assert_eq!(steps.items.len(), 6);
   }

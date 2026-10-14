@@ -1,12 +1,15 @@
 import { createUuid } from "./id";
-import type { SessionSubscriptionRenewal, SessionUpdatesRequest } from "./types";
+import type { BackgroundUpdatesRequest, SessionSubscriptionRenewal, SessionUpdatesRequest } from "./types";
 
 type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
 type Interest = { request: SessionUpdatesRequest; registration: symbol };
+type BackgroundInterest = { request: BackgroundUpdatesRequest; registration: symbol };
+type LeaseInventory = SessionSubscriptionRenewal & { renewed_background_ids: string[]; missing_background_ids: string[] };
 type PendingPing = {
   subscription_ids: string[];
-  promise: Promise<SessionSubscriptionRenewal>;
-  resolve: (value: SessionSubscriptionRenewal) => void;
+  background_ids: string[];
+  promise: Promise<LeaseInventory>;
+  resolve: (value: LeaseInventory) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 };
@@ -19,6 +22,8 @@ type Frame = {
   error?: string;
   renewed_ids?: unknown;
   missing_ids?: unknown;
+  renewed_background_ids?: unknown;
+  missing_background_ids?: unknown;
 };
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const HEARTBEAT_TIMEOUT_MS = 15_000;
@@ -36,6 +41,8 @@ export class LiveSessionSocket {
   private pendingPing?: PendingPing;
   private interests = new Map<string, Interest>();
   private intents = new Map<string, symbol>();
+  private backgroundInterests = new Map<string, BackgroundInterest>();
+  private backgroundIntents = new Map<string, symbol>();
   private recovering = new Map<string, WebSocket>();
 
   constructor(private endpoint: string, private token: string,
@@ -52,6 +59,8 @@ export class LiveSessionSocket {
     if (request.unsubscribe) this.interests.delete(request.subscription_id);
     else this.interests.set(request.subscription_id, { request: { ...request, history_cursor: undefined }, registration });
   }
+
+  isConnected() { return this.active && !this.closed; }
 
   connect(): Promise<void> {
     if (this.closed) return Promise.reject(new Error("Machine disconnected"));
@@ -90,7 +99,8 @@ export class LiveSessionSocket {
           } else if (frame.kind === "event" && frame.event) {
             const payload = frame.payload as { subscription_id?: unknown } | undefined;
             const id = typeof payload?.subscription_id === "string" ? payload.subscription_id : undefined;
-            if (id && !this.interests.has(id)) return;
+            const interests = frame.event === "background-session-updated" ? this.backgroundInterests : this.interests;
+            if (id && !interests.has(id)) return;
             if (frame.event === "session-resync-required") {
               if (id) this.lost([id]);
               this.emit("transport-reconnected", id ? { subscription_ids: [id] } : frame.payload);
@@ -104,6 +114,8 @@ export class LiveSessionSocket {
         if (this.socket !== socket) return;
         clearTimeout(timer); clearInterval(this.heartbeat);
         this.loseConnection(socket);
+        // Compact interests get a fresh live-only identity after reconnect.
+        this.backgroundInterests.clear();
         this.ready = undefined;
         this.failPing(new Error("Live connection interrupted"));
         this.recovering.clear();
@@ -128,12 +140,44 @@ export class LiveSessionSocket {
       await this.connect();
       if (this.intents.get(id) !== intent) throw new Error("Live subscription superseded");
       const socket = this.socket!;
-      const result = await this.sendSubscription(socket, request);
+      const result = await this.sendSubscription(socket, "subscribe", request);
       if (this.socket !== socket || !this.active || this.closed) throw new Error("Live connection interrupted");
       if (this.intents.get(id) !== intent) throw new Error("Live subscription superseded");
       if (!request.unsubscribe) this.interests.set(id, { request: { ...request, history_cursor: undefined }, registration: intent });
       return result;
     } finally { if (this.intents.get(id) === intent) this.intents.delete(id); }
+  }
+
+  async subscribeBackground(request: BackgroundUpdatesRequest): Promise<unknown> {
+    const id = request.subscription_id, intent = Symbol();
+    this.backgroundIntents.set(id, intent);
+    if (request.unsubscribe) this.backgroundInterests.delete(id);
+    else {
+      const interest = this.backgroundInterests.get(id);
+      if (interest) this.backgroundInterests.set(id, { ...interest, registration: intent });
+    }
+    try {
+      // Cleanup sends synchronously before machine close aborts pending ACKs.
+      if (!this.isConnected()) await this.connect();
+      if (this.backgroundIntents.get(id) !== intent) throw new Error("Live background subscription superseded");
+      const socket = this.socket!;
+      const result = await this.sendSubscription(socket, "subscribe_background", request);
+      if (this.socket !== socket || !this.active || this.closed) throw new Error("Live connection interrupted");
+      if (this.backgroundIntents.get(id) !== intent) throw new Error("Live background subscription superseded");
+      if (!request.unsubscribe) this.backgroundInterests.set(id, { request, registration: intent });
+      return result;
+    } finally { if (this.backgroundIntents.get(id) === intent) this.backgroundIntents.delete(id); }
+  }
+
+  async renewBackground(ids: string[]): Promise<void> {
+    const requested = [...new Set(ids)];
+    if (!requested.length) return;
+    if (!this.isConnected()) throw new Error("Live connection interrupted");
+    const socket = this.socket;
+    const ack = await this.ping();
+    if (this.socket !== socket || !this.isConnected()) throw new Error("Live connection interrupted");
+    const renewed = new Set(ack.renewed_background_ids);
+    if (requested.some((id) => !renewed.has(id) || !this.backgroundInterests.has(id))) throw new Error("Background subscription expired");
   }
 
   /** A successful renewal requires a fresh server pong; HTTP never fetches data. */
@@ -151,29 +195,29 @@ export class LiveSessionSocket {
     };
   }
 
-  private sendSubscription(socket: WebSocket, request: SessionUpdatesRequest): Promise<unknown> {
+  private sendSubscription(socket: WebSocket, kind: "subscribe" | "subscribe_background", request: SessionUpdatesRequest | BackgroundUpdatesRequest): Promise<unknown> {
     if (this.socket !== socket || !this.active || this.closed) return Promise.reject(new Error("Live connection interrupted"));
     const request_id = createUuid();
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(request_id); reject(new Error("Live subscription timed out")); }, 15_000);
       this.pending.set(request_id, { resolve, reject, timer });
-      try { socket.send(JSON.stringify({ kind: "subscribe", request_id, request })); }
+      try { socket.send(JSON.stringify({ kind, request_id, request })); }
       catch { clearTimeout(timer); this.pending.delete(request_id); reject(new Error("Live connection interrupted")); this.loseConnection(socket); socket.close(); }
     });
   }
 
-  private ping(): Promise<SessionSubscriptionRenewal> {
+  private ping(): Promise<LeaseInventory> {
     if (this.pendingPing) return this.pendingPing.promise;
     if (!this.active || this.closed || !this.socket) return Promise.reject(new Error("Live connection interrupted"));
     const socket = this.socket;
     let resolve!: PendingPing["resolve"], reject!: PendingPing["reject"];
-    const promise = new Promise<SessionSubscriptionRenewal>((yes, no) => { resolve = yes; reject = no; });
+    const promise = new Promise<LeaseInventory>((yes, no) => { resolve = yes; reject = no; });
     const timer = setTimeout(() => {
       this.failPing(new Error("Live heartbeat timed out"));
       this.loseConnection(socket);
       socket.close();
     }, HEARTBEAT_TIMEOUT_MS);
-    this.pendingPing = { subscription_ids: [...this.interests.keys()], promise, resolve, reject, timer };
+    this.pendingPing = { subscription_ids: [...this.interests.keys()], background_ids: [...this.backgroundInterests.keys()], promise, resolve, reject, timer };
     try { socket.send(JSON.stringify({ kind: "ping" })); }
     catch { this.failPing(new Error("Live connection interrupted")); this.loseConnection(socket); socket.close(); }
     return promise;
@@ -182,37 +226,50 @@ export class LiveSessionSocket {
   private acceptPong(socket: WebSocket, frame: Frame) {
     const ping = this.pendingPing;
     if (!ping) return;
-    let renewed: Set<string>;
-    if (frame.renewed_ids === undefined && frame.missing_ids === undefined) {
-      // Older hosts acknowledge connection health without lease inventory.
-      renewed = new Set(ping.subscription_ids);
-    } else {
+    const inventory = (renewed_ids: unknown, missing_ids: unknown, ids: string[]) => {
+      // Older hosts acknowledge connection health without an inventory.
+      if (renewed_ids === undefined && missing_ids === undefined) return new Set(ids);
       const valid = (ids: unknown): ids is string[] => Array.isArray(ids) && ids.length <= MAX_INTERESTS && ids.every((id) => typeof id === "string");
-      if (!valid(frame.renewed_ids) || !valid(frame.missing_ids)) throw new Error("Invalid live lease acknowledgement");
-      const missing = new Set(frame.missing_ids);
-      renewed = new Set(frame.renewed_ids.filter((id) => !missing.has(id)));
-    }
+      if (!valid(renewed_ids) || !valid(missing_ids)) throw new Error("Invalid live lease acknowledgement");
+      const missing = new Set(missing_ids);
+      return new Set(renewed_ids.filter((id) => !missing.has(id)));
+    };
+    const renewed = inventory(frame.renewed_ids, frame.missing_ids, ping.subscription_ids);
+    const background = inventory(frame.renewed_background_ids, frame.missing_background_ids, ping.background_ids);
     clearTimeout(ping.timer);
     this.pendingPing = undefined;
     const ack = {
       renewed_ids: ping.subscription_ids.filter((id) => renewed.has(id)),
       missing_ids: ping.subscription_ids.filter((id) => !renewed.has(id)),
+      renewed_background_ids: ping.background_ids.filter((id) => background.has(id)),
+      missing_background_ids: ping.background_ids.filter((id) => !background.has(id)),
     };
     ping.resolve(ack);
     const missing = ack.missing_ids.filter((id) => this.interests.has(id));
     this.lost(missing);
     if (missing.length) this.restore(socket, missing, { subscription_ids: missing });
+    const missingBackground = ack.missing_background_ids.filter((id) => this.backgroundInterests.has(id));
+    for (const id of missingBackground) this.backgroundInterests.delete(id);
+    this.lostBackground(missingBackground);
+    if (missingBackground.length) this.emit("transport-reconnected", { background_subscription_ids: missingBackground });
   }
 
   private lost(ids: string[]) {
     if (ids.length) this.emit("session-subscriptions-lost", { subscription_ids: ids });
   }
 
+  private lostBackground(ids: string[]) {
+    if (ids.length) this.emit("background-subscriptions-lost", { subscription_ids: ids });
+  }
+
   private loseConnection(socket: WebSocket) {
     if (this.socket !== socket || !this.active) return;
     this.active = false;
     clearInterval(this.heartbeat);
-    if (!this.closed) this.lost([...this.interests.keys()]);
+    if (!this.closed) {
+      this.lost([...this.interests.keys()]);
+      this.lostBackground([...this.backgroundInterests.keys()]);
+    }
   }
 
   private restore(socket: WebSocket, ids: string[], payload: unknown) {
@@ -226,7 +283,7 @@ export class LiveSessionSocket {
       if (!ids.length && this.socket === socket && this.active && !this.closed) this.emit("transport-reconnected", payload);
       return;
     }
-    void Promise.all(requests.map((request) => this.sendSubscription(socket, request)))
+    void Promise.all(requests.map((request) => this.sendSubscription(socket, "subscribe", request)))
       .then(() => {
         if (this.socket !== socket || !this.active || this.closed) return;
         if (requests.some((request) => this.interests.has(request.subscription_id))) this.emit("transport-reconnected", payload);
@@ -247,6 +304,6 @@ export class LiveSessionSocket {
     clearTimeout(this.retry); clearInterval(this.heartbeat);
     this.failPing(new Error("Machine disconnected"));
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error("Machine disconnected")); }
-    this.pending.clear(); this.interests.clear(); this.intents.clear(); this.socket?.close();
+    this.pending.clear(); this.interests.clear(); this.intents.clear(); this.backgroundInterests.clear(); this.backgroundIntents.clear(); this.socket?.close();
   }
 }

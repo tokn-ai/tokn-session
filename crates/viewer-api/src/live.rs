@@ -11,6 +11,7 @@ use axum::{
 use serde_json::{Value, json};
 use std::{collections::HashSet, time::Duration};
 use tokn_viewer_core::{
+  background::BackgroundUpdatesRequest,
   runtime::ViewerEvent,
   updates::{SessionSubscriptionRenewal, SessionUpdatesRequest},
 };
@@ -75,6 +76,7 @@ async fn run(mut socket: WebSocket, state: ApiState) {
     return;
   }
   let mut owned = HashSet::<String>::new();
+  let mut owned_background = HashSet::<String>::new();
   static NEXT_CONNECTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
   let owner = format!(
     "socket:{}",
@@ -89,12 +91,32 @@ async fn run(mut socket: WebSocket, state: ApiState) {
         if frame["kind"] == "ping" {
           let ids = owned.iter().cloned().collect::<Vec<_>>();
           let Ok(renewal) = state.service.renew_session_subscriptions_owned(&ids, Some(&owner)) else { break; };
-          if send(&mut socket, renewal_frame(renewal, &mut owned)).await.is_err() { break; }
+          let background_ids = owned_background.iter().cloned().collect::<Vec<_>>();
+          let Ok(background_renewal) = state.service.renew_background_subscriptions_owned(&background_ids, Some(&owner)) else { break; };
+          let mut pong = renewal_frame(renewal, &mut owned);
+          for id in &background_renewal.missing_ids { owned_background.remove(id); }
+          pong["renewed_background_ids"] = json!(background_renewal.renewed_ids);
+          pong["missing_background_ids"] = json!(background_renewal.missing_ids);
+          if send(&mut socket, pong).await.is_err() { break; }
           continue;
         }
-        if frame["kind"] != "subscribe" { break; }
+        if frame["kind"] != "subscribe" && frame["kind"] != "subscribe_background" { break; }
         let request_id = frame["request_id"].clone();
-        let result = match serde_json::from_value::<SessionUpdatesRequest>(frame["request"].clone()) {
+        let result = if frame["kind"] == "subscribe_background" {
+          match serde_json::from_value::<BackgroundUpdatesRequest>(frame["request"].clone()) {
+            Ok(request) if owned_background.len() < 24 || owned_background.contains(&request.subscription_id) => {
+              let id = request.subscription_id.clone();
+              let unsubscribe = request.unsubscribe;
+              let service = state.service.clone();
+              let request_owner = owner.clone();
+              let result = tokio::task::spawn_blocking(move || service.subscribe_background_owned(request, Some(request_owner))).await
+                .map_err(|_| "Background subscription task failed".to_owned()).and_then(|value| value);
+              if result.is_ok() { if unsubscribe { owned_background.remove(&id); } else { owned_background.insert(id); } }
+              result
+            }
+            _ => Err("Invalid background subscription".into()),
+          }
+        } else { match serde_json::from_value::<SessionUpdatesRequest>(frame["request"].clone()) {
           Ok(request) if owned.len() < 24 || owned.contains(&request.subscription_id) => {
             let id = request.subscription_id.clone();
             let unsubscribe = request.unsubscribe;
@@ -106,7 +128,7 @@ async fn run(mut socket: WebSocket, state: ApiState) {
             result
           }
           _ => Err("Invalid session subscription".into()),
-        };
+        } };
         let reply = match result {
           Ok(result) => json!({"kind":"ack","request_id":request_id,"result":result}),
           Err(error) => json!({"kind":"ack","request_id":request_id,"error":error}),
@@ -115,12 +137,13 @@ async fn run(mut socket: WebSocket, state: ApiState) {
       }
       event = receiver.recv() => {
         let Ok(event) = event else { break; };
-        let Some(value) = live_frame(event, &owned) else { continue; };
+        let Some(value) = live_frame(event, &owned, &owned_background) else { continue; };
         if send(&mut socket, value).await.is_err() { break; }
       }
     }
   }
   state.service.release_session_subscriptions(&owner);
+  state.service.release_background_subscriptions(&owner);
 }
 
 fn renewal_frame(renewal: SessionSubscriptionRenewal, owned: &mut HashSet<String>) -> Value {
@@ -130,7 +153,16 @@ fn renewal_frame(renewal: SessionSubscriptionRenewal, owned: &mut HashSet<String
   json!({"kind":"pong","renewed_ids":renewal.renewed_ids,"missing_ids":renewal.missing_ids})
 }
 
-fn live_frame(event: ViewerEvent, owned: &HashSet<String>) -> Option<Value> {
+fn live_frame(event: ViewerEvent, owned: &HashSet<String>, owned_background: &HashSet<String>) -> Option<Value> {
+  if event.event == "background-session-updated" {
+    if !event.payload["subscription_id"]
+      .as_str()
+      .is_some_and(|id| owned_background.contains(id))
+    {
+      return None;
+    }
+    return Some(json!({"kind":"event","event":event.event,"payload":event.payload}));
+  }
   if event.event != "session-updated"
     || !event.payload["subscription_id"]
       .as_str()
@@ -170,7 +202,8 @@ mod tests {
           event: "session-updated".into(),
           payload: json!({"subscription_id":"reclaimed","snapshot":false}),
         },
-        &owned
+        &owned,
+        &HashSet::new()
       )
       .is_none()
     );
@@ -183,12 +216,29 @@ mod tests {
       event: "session-updated".into(),
       payload: json!({"subscription_id":id,"snapshot":snapshot,"items":[{"detail":"large tool output"}],"session_key":"one"}),
     };
-    assert!(live_frame(frame("other", false), &owned).is_none());
-    let update = live_frame(frame("mine", false), &owned).unwrap();
+    assert!(live_frame(frame("other", false), &owned, &HashSet::new()).is_none());
+    let update = live_frame(frame("mine", false), &owned, &HashSet::new()).unwrap();
     assert_eq!(update["event"], "session-updated");
-    let reset = live_frame(frame("mine", true), &owned).unwrap();
+    let reset = live_frame(frame("mine", true), &owned, &HashSet::new()).unwrap();
     assert_eq!(reset["event"], "session-resync-required");
     assert!(reset["payload"].get("items").is_none());
+  }
+
+  #[test]
+  fn background_interests_are_independent_and_never_forward_foreign_or_global_events() {
+    let owned = HashSet::from(["timeline".to_owned()]);
+    let background = HashSet::from(["sidebar".to_owned()]);
+    let frame = |event: &str, id: &str| ViewerEvent {
+      event: event.into(),
+      payload: json!({"subscription_id":id,"session_key":"one","latest_assistant_message":{"preview":"Working"}}),
+    };
+    assert!(live_frame(frame("background-session-updated", "timeline"), &owned, &background).is_none());
+    assert!(live_frame(frame("background-session-updated", "foreign"), &owned, &background).is_none());
+    assert!(live_frame(frame("session-notification", "sidebar"), &owned, &background).is_none());
+    assert!(live_frame(frame("session-updated", "sidebar"), &owned, &background).is_none());
+    let update = live_frame(frame("background-session-updated", "sidebar"), &owned, &background).unwrap();
+    assert_eq!(update["event"], "background-session-updated");
+    assert_eq!(update["payload"]["latest_assistant_message"]["preview"], "Working");
   }
 }
 
@@ -246,7 +296,7 @@ mod socket_tests {
     let pong = socket.next().await.unwrap().unwrap().into_text().unwrap();
     assert_eq!(
       serde_json::from_str::<Value>(&pong).unwrap(),
-      json!({"kind":"pong","renewed_ids":[],"missing_ids":[]})
+      json!({"kind":"pong","renewed_ids":[],"missing_ids":[],"renewed_background_ids":[],"missing_background_ids":[]})
     );
     events
       .send(ViewerEvent {
@@ -273,6 +323,68 @@ mod socket_tests {
     let reply: Value = serde_json::from_str(&reply).unwrap();
     assert_eq!(reply["request_id"], "invalid");
     assert!(reply["error"].is_string());
+    socket
+      .send(WireMessage::Text(
+        json!({
+          "kind":"subscribe_background","request_id":"background","request":{
+            "subscription_id":"sidebar","scope":"all"
+          }
+        })
+        .to_string()
+        .into(),
+      ))
+      .await
+      .unwrap();
+    let reply: Value = serde_json::from_str(&socket.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    assert_eq!(reply["request_id"], "background");
+    assert_eq!(reply["result"]["subscription_id"], "sidebar");
+    assert_eq!(reply["result"]["revision"], "0");
+    assert!(reply["result"].get("items").is_none());
+    // Registering a background interest delivers no history. A compact live
+    // message arrives directly without initializing a timeline revision.
+    events.send(ViewerEvent {
+      event: "background-session-updated".into(),
+      payload: json!({"subscription_id":"sidebar","session_key":"live","latest_assistant_message":{"preview":"Checking"}}),
+    }).unwrap();
+    let message: Value = serde_json::from_str(&socket.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    assert_eq!(message["event"], "background-session-updated");
+    assert_eq!(message["payload"]["latest_assistant_message"]["preview"], "Checking");
+    socket
+      .send(WireMessage::Text(json!({"kind":"ping"}).to_string().into()))
+      .await
+      .unwrap();
+    let pong: Value = serde_json::from_str(&socket.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    assert_eq!(pong["kind"], "pong");
+    assert_eq!(pong["renewed_ids"], json!([]));
+    assert_eq!(pong["missing_ids"], json!([]));
+    assert_eq!(pong["renewed_background_ids"], json!(["sidebar"]));
+    assert_eq!(pong["missing_background_ids"], json!([]));
+    socket
+      .send(WireMessage::Text(
+        json!({
+          "kind":"subscribe_background","request_id":"release","request":{
+            "subscription_id":"sidebar","scope":"all","unsubscribe":true
+          }
+        })
+        .to_string()
+        .into(),
+      ))
+      .await
+      .unwrap();
+    let reply: Value = serde_json::from_str(&socket.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    assert_eq!(reply["request_id"], "release");
+    assert_eq!(reply["result"]["unsubscribed"], true);
+    events
+      .send(ViewerEvent {
+        event: "background-session-updated".into(),
+        payload: json!({"subscription_id":"sidebar","session_key":"live"}),
+      })
+      .unwrap();
+    assert!(
+      tokio::time::timeout(Duration::from_millis(30), socket.next())
+        .await
+        .is_err()
+    );
     socket.close(None).await.unwrap();
     shutdown.cancel();
     server.abort();

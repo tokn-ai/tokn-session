@@ -1,5 +1,5 @@
 import { LiveSessionSocket } from "./liveSessionSocket";
-import type { SessionUpdatesRequest, TransportState } from "./types";
+import type { BackgroundUpdatesRequest, SessionUpdatesRequest, TransportState } from "./types";
 export type UnlistenFn = () => void;
 export type CommandInvoker = <T>(command: string, payload?: Record<string, unknown>) => Promise<T>;
 export type EventSubscriber = <T>(event: string, handler: (event: { payload: T }) => void) => Promise<UnlistenFn>;
@@ -54,7 +54,7 @@ export class RemoteClient {
       // Existing Hub and paired HTTP tunnels cannot upgrade an upstream WebSocket.
       if (health.live_updates && !/\/(?:hosts|paired)\//.test(url.pathname)) client.live = new LiveSessionSocket(client.endpoint, token, (event, payload) => {
         client.emit(event, payload);
-        const targeted = payload && typeof payload === "object" && "subscription_ids" in payload;
+        const targeted = payload && typeof payload === "object" && ("subscription_ids" in payload || "background_subscription_ids" in payload);
         if (event === "transport-reconnected" && !targeted) client.emit("relay-changed", { session_key: null, reset: true });
       });
       return client;
@@ -88,7 +88,9 @@ export class RemoteClient {
   }
   invoke<T>(command: string, payload: unknown = {}): Promise<T> {
     if (command === "subscribe_session" && this.live) return this.live.subscribe((payload as { request: SessionUpdatesRequest }).request) as Promise<T>;
+    if (command === "subscribe_background_updates" && this.live) return this.live.subscribeBackground((payload as { request: BackgroundUpdatesRequest }).request) as Promise<T>;
     if (command === "renew_session_subscriptions" && this.live) return this.live.renew((payload as { ids: string[] }).ids) as Promise<T>;
+    if (command === "renew_background_subscriptions" && this.live) return this.live.renewBackground((payload as { ids: string[] }).ids) as Promise<T>;
     let request: SessionUpdatesRequest | undefined;
     if (this.live && (command === "load_session_backward" || command === "load_session_details")) {
       const value = payload as { request: SessionUpdatesRequest | { kind: string; request: SessionUpdatesRequest } };
@@ -107,7 +109,7 @@ export class RemoteClient {
     handlers.add(observer);
     this.listeners.set(name, handlers);
     this.started ??= new Promise<void>((resolve, reject) => { void this.pump(resolve, reject); });
-    try { await this.started; if (name === "session-updated" && this.live) await this.live.connect(); }
+    try { await this.started; if ((name === "session-updated" || name === "background-session-updated") && this.live) await this.live.connect(); }
     catch (error) { handlers.delete(observer); throw error; }
     return () => { handlers.delete(observer); };
   }
@@ -125,7 +127,7 @@ export class RemoteClient {
       this.lifetime.signal.addEventListener("abort", abort, { once: true });
       let watchdog = setTimeout(abort, 20_000);
       try {
-        const response = await fetch(`${this.endpoint}/api/v1/events${this.live ? "?session_updates=false" : ""}`, {
+        const response = await fetch(`${this.endpoint}/api/v1/events${this.live ? "?session_updates=false&background_updates=false" : ""}`, {
           headers: this.headers(), signal: connection.signal, credentials: "omit", redirect: "error",
         });
         if (!response.ok || !response.body) throw new Error(`Live connection failed (${response.status})`);
@@ -185,6 +187,10 @@ export class RemoteClient {
   // fetch captures the old endpoint and credentials before close clears them.
   async release(command: string, payload?: Record<string, unknown>): Promise<void> {
     if (this.closed) return;
+    if (command === "subscribe_background_updates" && this.live) {
+      if (this.live.isConnected()) await this.live.subscribeBackground((payload as { request: BackgroundUpdatesRequest }).request);
+      return;
+    }
     await fetch(`${this.endpoint}/api/v1/${command}`, {
       method: "POST",
       headers: { ...this.headers(), "Content-Type": "application/json" },

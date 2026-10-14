@@ -1,3 +1,4 @@
+pub(crate) mod background;
 pub(crate) mod events;
 pub(crate) mod host;
 pub(crate) mod hub;

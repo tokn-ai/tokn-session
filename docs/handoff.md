@@ -39,7 +39,7 @@ coverage tracks missing, loading, complete, stale, and failed resources; loaded
 groups receive live appends after collapse. Display details and inspection are
 separate caches. Legacy servers and the existing Hub HTTP tunnel retain SSE
 compatibility; Hub allows the new loading commands. Shared-session authorization
-continues through its legacy scoped commands. Compact attention notifications
+continues through scoped commands and exact-key event filtering. Compact attention notifications
 avoid redundant catalog/timeline reads. See [session delivery](viewer-session-updates.md)
 for ownership, recovery, limits, and remaining source/projection costs.
 
@@ -48,12 +48,31 @@ light/dark colors, larger message text, inline expandable tool activity, and an
 aligned composer. Time-grouped session rows retain the title, show a separate
 first-line preview of the latest cached assistant message from that session, and
 show a small project name. Project-grouped rows show titles only. Previews use existing
-frontend semantic summaries, including intermediate assistant messages inside
-folded work groups. Child/subagent sessions have separate previews. They never
-trigger backend queries, subscriptions, or body backfills. Accepted
-first-screen pages refresh sidebar previews immediately, including legacy pages
-and hosts without running-state fields. Previews disappear with cache eviction
-or invalidation.
+frontend semantic summaries and compact background messages, including
+intermediate assistant messages inside folded work groups. Child/subagent
+sessions have separate previews. A compact live-updates entry in the bottom status
+bar opens a compact popover with segmented session scope, separate delivery
+selectors, and a connection badge, keeping the session sidebar focused
+on navigation and remaining available when it is collapsed. The scope defaults to
+All sessions on the connected machine; Sidebar sessions limits it to loaded
+root/child rows. One independent leased interest carries bounded latest-assistant
+and activity projections over WebSocket, Tauri, or Hub/SSE; registration,
+scope changes, and reconnects never load unopened history. Delivery presets are
+`final`, `messages`, `steps`, and `all`, with `details` retained for compatibility.
+Background delivery defaults to Messages; Final filters intermediate previews
+while keeping question/activity state live. The open conversation defaults to
+Steps and offers all four presets, each with independent cache coverage and
+a backward baseline when switching. Both level preferences persist locally.
+Migration 9 stores compact latest-message metadata from existing normalization
+jobs without requeueing bodies; a second viewer follows SQLite projections.
+The frontend retains up to 2,048 compact previews separately from eight rich
+replicas. Active Messages/Steps/All replicas own their preview while subscribed;
+Final keeps compact intermediate previews authoritative. Late page
+responses cannot replace newer compact updates. Scope changes retain text but
+retire old activity authority. Unknown projections preserve previews; committed
+empty/reset/removal projections clear them. Accepted first-screen pages seed
+previews, including legacy hosts. Shared grants receive only their exact sessions,
+without the owner's read markers or unshared descendant activity.
 Worked/Working disclosures use wrapping activity summaries and
 an indented activity trail. Each turn contains activity groups separated by
 intermediate messages. Inner disclosures summarize actions (commands, reads,

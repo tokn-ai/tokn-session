@@ -14,6 +14,7 @@ dirs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+rusqlite = { version = "0.40", features = ["bundled"] }
 tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
 tokio = { workspace = true, features = ["process"] }
@@ -39,6 +40,5 @@ libc = "0.2"
 notify.workspace = true
 
 [dev-dependencies]
-rusqlite = { version = "0.40", features = ["bundled"] }
 tokio = { workspace = true, features = ["test-util"] }
 zstd = "0.13"

@@ -14,11 +14,43 @@ it("subscribes before backward loading and never fetches a legacy update on mode
   expect(await loadSessionUpdates(request)).toBe(update);
   expect(vi.mocked(invoke).mock.calls.map(([command]) => command)).toEqual(["subscribe_session", "load_session_backward"]);
 });
-it("loads an explicit complete group through details without reading backward", async () => {
-  vi.mocked(invoke).mockResolvedValue(update);
+it("subscribes before loading an explicit complete group without reading backward", async () => {
+  let completeSubscription!: (value: unknown) => void;
+  vi.mocked(invoke).mockReturnValueOnce(new Promise((resolve) => { completeSubscription = resolve; }))
+    .mockResolvedValueOnce(update);
   const group = { ...request, scope: { ...request.scope!, group_keys: ["activity:a"] } };
-  await loadGroupDetails(group);
-  expect(invoke).toHaveBeenCalledExactlyOnceWith("load_session_details", { request: { kind: "group", request: group } });
+  const loading = loadGroupDetails(group);
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("subscribe_session", { request: group });
+  completeSubscription({ revision: "0" });
+  expect(await loading).toBe(update);
+  expect(vi.mocked(invoke).mock.calls).toEqual([
+    ["subscribe_session", { request: group }],
+    ["load_session_details", { request: { kind: "group", request: group } }],
+  ]);
+});
+
+it.each(["subscribe_session", "load_session_details"])("falls back and renews a legacy group when %s is unavailable", async (unavailable) => {
+  const { send, calls } = machineInvoker();
+  const group = { ...request, subscription_id: "legacy-group", scope: { ...request.scope!, group_keys: ["activity:a"] } };
+  if (unavailable === "load_session_details") calls.mockResolvedValueOnce({ revision: "0" });
+  calls.mockRejectedValueOnce(new Error("Unknown viewer API route"))
+    .mockResolvedValueOnce({ ...update, subscription_id: group.subscription_id });
+  await loadGroupDetails(group, send);
+  expect(calls.mock.calls.map(([command]) => command)).toEqual(unavailable === "subscribe_session"
+    ? ["subscribe_session", "load_session_updates"]
+    : ["subscribe_session", "load_session_details", "load_session_updates"]);
+  calls.mockRejectedValueOnce(new Error("Unknown viewer API route"))
+    .mockResolvedValueOnce({ ...update, subscription_id: group.subscription_id, revision: "2" });
+  const renewed = await renewSessionSubscriptions([group.subscription_id], send);
+  expect(renewed.renewed_ids).toEqual([group.subscription_id]);
+  expect(calls).toHaveBeenLastCalledWith("load_session_updates", { request: { ...group, cursor: "1" } });
+  expect(invoke).not.toHaveBeenCalled();
+});
+
+it("does not load a group after its live registration fails for a non-compatibility reason", async () => {
+  vi.mocked(invoke).mockRejectedValueOnce(new Error("Live connection interrupted"));
+  await expect(loadGroupDetails(request)).rejects.toThrow("Live connection interrupted");
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("subscribe_session", { request });
 });
 it("keeps tool display and source inspection requests distinct", async () => {
   vi.mocked(invoke).mockResolvedValue({});
@@ -85,7 +117,7 @@ it("keeps details and inspection compatibility fallbacks on the captured machine
     await load();
   }
   expect(calls.mock.calls.map(([command]) => command)).toEqual([
-    "load_session_details", "load_session_updates",
+    "subscribe_session", "load_session_updates",
     "load_session_details", "load_event_detail",
     "inspect_session_event", "load_event_detail",
   ]);

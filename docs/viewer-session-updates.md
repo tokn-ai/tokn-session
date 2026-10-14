@@ -4,8 +4,12 @@ Viewer-core owns normalized provider history, turn/group membership, stable
 identities, revisions, and live subscription baselines. The frontend owns
 loaded history and per-resource display coverage. Delivery levels are
 projections: they control filtering as well as payload richness. Existing
-`final`, `steps`, `details`, and `all` remain predefined projections; they do
-not describe the frontend's mixed cache contents.
+`final`, `messages`, `steps`, and `all` are predefined projections; they do
+not describe the frontend's mixed cache contents. `final` selects user messages,
+final assistant replies, and attention; `messages` also selects intermediate
+assistant replies; `steps` adds activity summaries; `all` includes every source
+event. The older `details` preset remains compatible, but new clients load
+detail resources independently.
 
 ## Loading and live delivery
 
@@ -14,7 +18,8 @@ The first WebSocket frame authenticates with the existing bearer token; tokens
 never enter URLs. Same-origin and explicitly configured origins are allowed.
 The socket forwards only its registered session updates. Other clients' tool
 payloads are filtered before transfer. Catalog/index/attention notifications
-remain on SSE; modern clients exclude session updates from that stream.
+remain on SSE; modern clients exclude session and background updates from that
+stream when the WebSocket carries them.
 
 `subscribe_session` returns only identity, generation, and revision. It does
 not read or send session history. Initial registration has revision zero and
@@ -36,11 +41,72 @@ Outstanding older questions retain attention context.
 
 The WebSocket carries live diffs only. Source replacements that require a
 snapshot produce a small resync notice; backward HTTP performs recovery.
-Reconnection restores interests and refetches affected display baselines,
-including background final subscriptions. Socket heartbeats renew leases
+Reconnection restores open-session interests and refetches their display
+baselines. Socket heartbeats renew leases
 without fetching data. Connection ownership prevents delayed cleanup from
 an old socket removing interests reclaimed by its replacement. Changing a
 subscription's level establishes a new baseline through backward loading.
+
+## Background messages and session coverage
+
+One independent compact interest covers either **All sessions** on the connected
+machine (the default), or **Sidebar sessions**, the loaded root and child rows.
+This scope is separate from delivery level. The background projection carries
+the session's latest assistant first line, including intermediate replies,
+message identity/delivery/phase, and direct attention/running state. It does not
+carry tools, native records, or child text as the parent's preview.
+Background delivery offers `messages` (the default, including intermediate
+replies) and `final` (only final assistant previews). Question/running state and
+authoritative clearing/removal stay live at both levels. Intermediate-only
+changes do not consume final subscription revisions; activity changes alongside
+an intermediate reply omit message coverage so the previous preview survives.
+
+`subscribe_background_updates` (WebSocket `subscribe_background`) registers
+identity, scope, and background level only. Registration, scope/level changes, and reconnection never
+read history or send a history snapshot. The first live update can advance from
+revision zero without a backward baseline. Each subscription has its own
+generation and decimal revision; updates are complete compact projections,
+with unchanged projections suppressed. Heartbeats renew its 90-second lease.
+Deduplication compares message and activity fields, so a tool-only source
+checkpoint does not repeat an unchanged preview. Unknown staged bodies preserve
+the last known message digest.
+Disconnect releases only interests owned by that connection.
+Expired leases fail renewal so a suspended desktop window can establish a fresh
+interest when it wakes. Read acknowledgements retain the existing durable
+notification/catalog authority; compact snapshots cannot restore a cleared dot.
+
+The indexer's existing normalized body jobs persist this bounded projection in
+the session index. Migration 9 adds it without requeueing old bodies. An unknown
+message has a null `message_revision` and leaves an existing preview intact;
+a committed empty message or removal clears it. Secondary local viewers follow
+committed SQLite projections instead of opening sources for sidebar updates.
+This does not change the indexer's existing source discovery/body work.
+A runtime silently seeds compact SQLite fingerprints at startup, without sending
+them or reading sources. Owner topology recovery checks tracked sessions;
+shared-index followers compare present compact metadata against that baseline.
+Subscription and reconnect therefore do not replay existing sidebar data.
+
+The frontend keeps up to 2,048 compact previews independently of its eight rich
+conversation replicas. Accepted first-screen pages can seed previews, but late
+page responses cannot overwrite newer compact messages. Active semantic replicas
+at Messages/Steps/All own their previews while subscribed, because their source
+pipeline can be ahead of indexing. Subscription changes retain bounded preview text while
+retiring live activity authority; stale IDs/generations are ignored. Gaps and
+reconnects establish a fresh live interest without loading unopened history.
+The scope and level preferences are stored locally. The bottom status bar shows a compact
+live-updates entry; its popup separates session scope, background delivery,
+and open-conversation delivery. The conversation offers `final`, `messages`,
+`steps` (the default), and `all`; changes load the requested projection's
+backward baseline and retain per-resource cache coverage. Unsupported
+hosts show a warning there while open sessions continue through the existing path.
+Legacy desktop External reader mode has no compact metadata feed and reports
+background updates unavailable; native Local/Automatic mode and encrypted remote
+connections to modern hosts support it.
+Messages subscriptions omit the new level field for older-host compatibility.
+Final requires an explicit matching acknowledgement; unsupported hosts report
+the failure without silently reverting to Messages.
+Legacy full-page conversation loading remains available at Steps. Missing
+non-Steps presets report a conversation error rather than showing unfiltered rows.
 
 ## Explicit resources and cache coverage
 
@@ -79,20 +145,29 @@ pages still assemble complete groups atomically before rendering.
 
 The existing Hub and paired HTTP tunnels do not upgrade an upstream WebSocket. They keep
 SSE compatibility and support the new HTTP commands through the route
-allowlist. Read-only shares retain their authorized legacy commands and scoped
-fixed-cadence invalidations. No share gains access to host-wide live streams.
+allowlist. Shared grants clamp background scope to their exact granted session
+keys, namespace subscription identities by principal, and filter events before
+transfer. Owner read markers and unshared descendant activity stay private.
+Scoped fixed-cadence invalidations remain compatible.
 
 Subscriptions expire after 90 seconds and are bounded to 24 entries/64 MiB.
 Renewal acknowledges `renewed_ids` and `missing_ids` without loading bodies;
 expired interests cannot be revived by renewal. Desktop, HTTP, and WebSocket
 clients recover missing identities through registration and a backward baseline.
 WebSocket pongs acknowledge only the connection's still-owned interests.
+Rich `renewed_ids`/`missing_ids` remain separate from compact
+`renewed_background_ids`/`missing_background_ids` inventories.
 All retained frontend interests renew independently of the selected conversation.
 Lost, expired, and source-error leases relinquish sidebar running ownership while
 keeping cached cards available. Focus/resume checks leases; targeted recovery
 leaves healthy sessions alone. Backward responses recheck their captured source
 generation at application, and retired or unseen cross-generation pushes require
 a fresh baseline before replacing authoritative state.
+Compact background interests have an independent 24-entry limit, up to 4,096
+sidebar keys/256 KiB per interest, and 10,000 in-memory deduplication entries.
+Evicted fingerprints spill to a private temporary SQLite file with a bounded
+page cache, so large follower scans do not replay unchanged messages. The spill
+contains session keys and digests, never message text, and is removed on shutdown.
 Frontend display replicas retain eight recent sessions with a 64 MiB target,
 protecting the selected session. Eviction releases every active delivery level;
 late HTTP reads and subscription acknowledgements cannot restore released socket

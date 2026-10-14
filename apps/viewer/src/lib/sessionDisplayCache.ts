@@ -1,6 +1,6 @@
 import { SessionResources } from "./sessionResources";
 import { createUuid } from "./id";
-import type { EventPageResponse, TrajectoryEventPageResponse, SessionUpdate, SessionUpdateItem, SessionUpdatesRequest, SessionUpdateScope, UpdateLevel } from "./types";
+import type { EventPageResponse, EventSummary, TrajectoryEventPageResponse, SessionUpdate, SessionUpdateItem, SessionUpdatesRequest, SessionUpdateScope, UpdateLevel } from "./types";
 
 interface Replica {
   session_key: string;
@@ -9,6 +9,7 @@ interface Replica {
   revision: string;
   items: Map<string, SessionUpdateItem>;
   order: string[];
+  semantic_order: string[];
   event_order: string[];
   page: EventPageResponse & { error?: string };
   bytes: number;
@@ -41,15 +42,24 @@ function weight(value: unknown): number {
   return 8;
 }
 
+function isAssistantFragment(event: EventSummary): boolean {
+  return event.phase === "delta" && (event.provider === "codex" || event.provider === "dsh");
+}
+
+interface AssistantPreviewProjection {
+  preview: string | null;
+  latest_is_fragment: boolean;
+}
+
 /** Each level has independent coverage. A final-only update never advances the
  * steps cursor. Unchanged objects retain their references across updates. */
 export class SessionDisplayCache {
   readonly resources = new SessionResources();
   runningRevision = 0;
   previewRevision = 0;
-  private loadedPreviews = new Map<string, string | null>();
-  coverageVersion(session_key: string) {
-    const replica = this.replicas.get(this.key(session_key, "steps"));
+  private loadedPreviews = new Map<string, AssistantPreviewProjection>();
+  coverageVersion(session_key: string, level: UpdateLevel = "steps") {
+    const replica = this.replicas.get(this.key(session_key, level));
     return replica ? { generation: replica.generation, revision: replica.revision } : {};
   }
   subscriptionIds() { return [...this.subscriptions.values()]; }
@@ -69,6 +79,7 @@ export class SessionDisplayCache {
   private retiredGenerations = new Map<string, Set<string>>();
   private evictedSubscriptions: SessionUpdatesRequest[] = [];
   private acceptedItems = new Map<string, Map<string, SessionUpdateItem>>();
+  private pageLevels = new WeakMap<EventPageResponse, UpdateLevel>();
   private key(session_key: string, level: UpdateLevel) { return JSON.stringify([session_key, level]); }
 
   request(session_key: string, level: UpdateLevel = "all", detail_keys: string[] = []): SessionUpdatesRequest {
@@ -80,8 +91,7 @@ export class SessionDisplayCache {
       this.subscriptions.set(key, subscription_id);
       this.runningRevision += 1;
     }
-    const scope = level === "steps" || level === "details"
-      ? this.scopes.get(session_key) ?? { history: "recent_turns" as const, group_keys: [] } : undefined;
+    const scope = this.scopes.get(session_key) ?? { history: "recent_turns" as const, group_keys: [] };
     return { session_key, level, subscription_id, cursor: this.replicas.get(key)?.revision ?? null, detail_keys,
       ...(scope ? { scope: level === "details" ? { ...scope, group_keys: [] } : scope } : {}) };
   }
@@ -123,7 +133,7 @@ export class SessionDisplayCache {
   /** Indexed attention can lag the source stream. Only a live replica owns
    * running state; retained display content alone must not mask the catalog. */
   liveRunning(session_key: string): boolean | undefined {
-    const subscribed = (["steps", "all", "final"] as const).some((level) => {
+    const subscribed = (["messages", "steps", "all", "final"] as const).some((level) => {
       const key = this.key(session_key, level);
       const replica = this.replicas.get(key);
       return replica && this.subscriptions.get(key) === replica.subscription_id && this.hasLiveLease(replica);
@@ -237,17 +247,40 @@ export class SessionDisplayCache {
     this.running.delete(session_key);
   }
 
+  /** An active semantic replica is fresher than the independently indexed
+   * compact stream. Retained/released timelines do not keep this authority. */
+  liveAssistantPreview(session_key: string): string | null | undefined {
+    const active = (["messages", "steps", "all"] as const).some((level) => {
+      const key = this.key(session_key, level);
+      const replica = this.replicas.get(key);
+      return replica && this.subscriptions.get(key) === replica.subscription_id && this.hasLiveLease(replica);
+    });
+    if (!active) return undefined;
+    const projection = this.assistantPreviewProjection(session_key);
+    // Codex and DSH deltas are fragments, unlike OpenCode/ZCode snapshots.
+    // The compact producer accumulates those fragments with provider context.
+    return projection.latest_is_fragment ? undefined : projection.preview;
+  }
+
   /** Best available assistant line from retained semantic summaries. Reading
    * this projection never subscribes, loads history, or fetches tool details. */
   assistantPreview(session_key: string): string | null {
+    return this.assistantPreviewProjection(session_key).preview;
+  }
+
+  hasFragmentedAssistantPreview(session_key: string): boolean {
+    return this.assistantPreviewProjection(session_key).latest_is_fragment;
+  }
+
+  private assistantPreviewProjection(session_key: string): AssistantPreviewProjection {
     const currentGeneration = this.sourceGeneration(session_key);
     const revision = (replica: Replica) => {
       const value = replica.page.source_revision?.split(":").pop();
       return value && /^\d+$/.test(value) ? BigInt(value) : 0n;
     };
-    const eligible = (["steps", "all", "final"] as const)
+    const eligible = (["messages", "steps", "all", "final"] as const)
       .map((level) => ({ level, replica: this.replicas.get(this.key(session_key, level)) }))
-      .filter((entry): entry is { level: "steps" | "all" | "final"; replica: Replica } => !!entry.replica
+      .filter((entry): entry is { level: "messages" | "steps" | "all" | "final"; replica: Replica } => !!entry.replica
         && (currentGeneration === undefined || sourceGenerationFrom(entry.replica.page.source_revision) === currentGeneration));
     const complete = eligible.filter(({ level }) => level !== "final")
       .sort((left, right) => revision(left.replica) < revision(right.replica) ? 1 : revision(left.replica) > revision(right.replica) ? -1 : 0)[0];
@@ -255,9 +288,11 @@ export class SessionDisplayCache {
     // replicas must not resurrect it; newer final updates can still contribute.
     const replicas = eligible.filter((entry) => entry === complete || (entry.level === "final"
       && (!complete || revision(entry.replica) > revision(complete.replica))));
-    if (eligible.length === 0) return this.loadedPreviews.get(session_key) ?? null;
+    if (eligible.length === 0) return this.loadedPreviews.get(session_key) ?? { preview: null, latest_is_fragment: false };
     let preview: string | null = null;
     let position = -1;
+    let latestPosition = -1;
+    let latest_is_fragment = false;
     for (const { replica } of replicas) {
       // Semantic messages belong to this session even when its display rows
       // fold intermediate replies into work groups. Child sessions have their
@@ -265,32 +300,39 @@ export class SessionDisplayCache {
       const summaries = [...replica.items.values()].flatMap((item) => item.summary ? [item.summary] : []);
       for (const [index, event] of summaries.entries()) {
         if (event.type !== "message" || event.role !== "assistant" || event.is_hidden) continue;
-        const line = event.summary.split(/\r?\n/).find((line) => line.trim())?.replace(/\s+/g, " ").trim();
-        if (!line) continue;
         // Absolute source slots preserve chronology across delivery levels and
         // older-history expansion. Legacy pages retain their local ordering.
         const slot = (event.slot_key ?? event.event_key).match(/(?:^|\.)event\.v1\.([0-9a-f]+)$/);
         const sourcePosition = slot ? Number.parseInt(slot[1], 16) : index;
+        if (sourcePosition >= latestPosition) {
+          latestPosition = sourcePosition;
+          latest_is_fragment = isAssistantFragment(event);
+        }
+        if (isAssistantFragment(event)) continue;
+        const line = event.summary.split(/\r?\n/).find((line) => line.trim())?.replace(/\s+/g, " ").trim();
+        if (!line) continue;
         if (sourcePosition >= position) {
           position = sourcePosition;
           preview = [...line].slice(0, 240).join("");
         }
       }
     }
-    return preview;
+    return { preview, latest_is_fragment };
   }
 
   /** Record already accepted legacy pages; semantic pages are owned by their
    * replicas. Retain only the bounded preview, never another history copy. */
   rememberLoadedPage(session_key: string, page: EventPageResponse) {
     if (this.pageItems.has(page)) return;
-    const event = [...page.events].reverse().find((event) => event.type === "message" && event.role === "assistant" && !event.is_hidden && event.summary.trim());
+    const assistantEvents = [...page.events].reverse().filter((event) => event.type === "message" && event.role === "assistant" && !event.is_hidden);
+    const latest_is_fragment = !!assistantEvents[0] && isAssistantFragment(assistantEvents[0]);
+    const event = assistantEvents.find((event) => !isAssistantFragment(event) && event.summary.trim());
     const line = event?.summary.split(/\r?\n/).find((line) => line.trim())?.replace(/\s+/g, " ").trim();
     const preview = line ? [...line].slice(0, 240).join("") : null;
     const previous = this.loadedPreviews.get(session_key);
     this.loadedPreviews.delete(session_key);
-    this.loadedPreviews.set(session_key, preview);
-    if (previous !== preview) this.previewRevision += 1;
+    this.loadedPreviews.set(session_key, { preview, latest_is_fragment });
+    if (previous?.preview !== preview || previous?.latest_is_fragment !== latest_is_fragment) this.previewRevision += 1;
     while (this.loadedPreviews.size > 8) {
       const oldest = [...this.loadedPreviews.keys()].find((key) => key !== this.selected);
       if (!oldest) break;
@@ -305,20 +347,32 @@ export class SessionDisplayCache {
     this.running.set(session_key, page.is_running);
   }
 
+  private currentResourceReplicas(session_key: string, levels: UpdateLevel[]): Replica[] {
+    const source = this.sourceRevisions.get(session_key);
+    return levels.flatMap((level) => {
+      const key = this.key(session_key, level);
+      const replica = this.replicas.get(key);
+      if (!replica || (source && replica.page.source_revision && source !== replica.page.source_revision)) return [];
+      return [{ replica, active: this.subscriptions.get(key) === replica.subscription_id }];
+    }).sort((left, right) => Number(right.active) - Number(left.active)).map(({ replica }) => replica);
+  }
+
   detail(session_key: string, event_key: string) {
-    return this.replicas.get(this.key(session_key, "steps"))?.items.get(`detail:${event_key}`)?.detail
-      ?? this.replicas.get(this.key(session_key, "all"))?.items.get(`detail:${event_key}`)?.detail
-      ?? this.replicas.get(this.key(session_key, "details"))?.items.get(`detail:${event_key}`)?.detail
+    return this.currentResourceReplicas(session_key, ["all", "steps", "details"])
+      .map((replica) => replica.items.get(`detail:${event_key}`)?.detail).find((detail) => !!detail)
       ?? this.resources.detail(session_key, "tool", event_key);
   }
 
   /** Complete semantic membership; activity disclosures decide which rows to mount. */
   trajectoryGroup(session_key: string, trajectory_key: string): TrajectoryEventPageResponse | null {
-    const replica = this.replicas.get(this.key(session_key, "steps")) ?? this.replicas.get(this.key(session_key, "all"));
+    const replicas = this.currentResourceReplicas(session_key, ["all", "steps"]);
+    const replica = replicas.find((entry) => {
+      const keys = entry?.items.get(trajectory_key)?.summary?.child_keys;
+      return keys && keys.every((key) => entry?.items.get(key)?.summary);
+    });
     const keys = replica?.items.get(trajectory_key)?.summary?.child_keys;
     if (!replica || !keys) return null;
     const events = keys.map((key) => replica.items.get(key)?.summary);
-    if (events.some((event) => !event)) return null;
     return {
       events: events as NonNullable<typeof events[number]>[],
       previous_cursor: null,
@@ -328,9 +382,10 @@ export class SessionDisplayCache {
   }
 
   activityGroupForEvent(session_key: string, event_key: string): string | null {
-    const replica = this.replicas.get(this.key(session_key, "steps"));
-    for (const item of replica?.items.values() ?? []) {
-      if (item.summary?.type === "activity_group" && item.summary.child_keys?.includes(event_key)) return item.item_id;
+    for (const replica of this.currentResourceReplicas(session_key, ["all", "steps"])) {
+      for (const item of replica.items.values()) {
+        if (item.summary?.type === "activity_group" && item.summary.child_keys?.includes(event_key)) return item.item_id;
+      }
     }
     return null;
   }
@@ -344,14 +399,14 @@ export class SessionDisplayCache {
     this.runningRevision += 1;
     this.previewRevision += 1;
     const owners = session_key ? [session_key] : [...new Set([
-      ...this.running.keys(), ...this.loadedPreviews.keys(), ...this.acceptedItems.keys(), ...this.acceptedSources.keys(),
+      ...this.running.keys(), ...this.loadedPreviews.keys(), ...this.acceptedSources.keys(),
       ...this.access.keys(), ...[...this.subscriptions.keys(), ...this.replicas.keys(), ...this.pending.keys()].map((key) => JSON.parse(key)[0] as string),
     ])];
     this.suspendLive(this.requests().filter((request) => owners.includes(request.session_key)).map((request) => request.subscription_id));
     for (const owner of owners) {
       this.running.delete(owner);
       this.loadedPreviews.delete(owner);
-      this.acceptedItems.delete(owner);
+      for (const key of this.acceptedItems.keys()) if (JSON.parse(key)[0] === owner) this.acceptedItems.delete(key);
       this.acceptedSources.delete(owner);
       this.resources.remove(owner);
     }
@@ -360,16 +415,11 @@ export class SessionDisplayCache {
     }
   }
 
-  backgroundRequests(): SessionUpdatesRequest[] {
-    return [...this.subscriptions.keys()].map((key) => JSON.parse(key) as [string, UpdateLevel])
-      .filter(([session_key, level]) => level === "final" && session_key !== this.selected)
-      .slice(-8).map(([session_key, level]) => this.request(session_key, level));
-  }
-
   commit(session_key: string, page: EventPageResponse): ReadonlySet<string> | null {
     const items = this.pageItems.get(page);
     if (!items) return null;
-    const previous = this.acceptedItems.get(session_key);
+    const acceptedKey = this.key(session_key, this.pageLevels.get(page) ?? "steps");
+    const previous = this.acceptedItems.get(acceptedKey);
     const changed = new Set<string>();
     const previousSource = this.acceptedSources.get(session_key);
     if (page.source_revision) {
@@ -381,7 +431,7 @@ export class SessionDisplayCache {
     const changedKey = (key: string, item: SessionUpdateItem) => item.kind === "event" ? null : item.event_key ?? key;
     for (const [key, item] of items) {
       const eventKey = changedKey(key, item);
-      if (eventKey && previous?.get(key) !== item) changed.add(eventKey);
+      if (eventKey && previous && !equal(previous.get(key), item)) changed.add(eventKey);
     }
     for (const [key, item] of previous ?? []) {
       const eventKey = changedKey(key, item);
@@ -389,7 +439,7 @@ export class SessionDisplayCache {
     }
     const details = this.replicas.get(this.key(session_key, "details"));
     for (const key of changed) { details?.items.delete(`detail:${key}`); this.resources.invalidate(session_key, key); }
-    this.acceptedItems.set(session_key, items);
+    this.acceptedItems.set(acceptedKey, items);
     return changed;
   }
 
@@ -445,16 +495,19 @@ export class SessionDisplayCache {
       items.set(item.item_id, retained); bytes += weight(retained);
     }
     const order = update.item_order ?? previous?.order ?? [];
+    const semantic_order = update.semantic_order ?? (update.snapshot || update.item_order != null ? order : previous?.semantic_order ?? order);
+    const display_order = update.level === "messages" || update.level === "final" ? semantic_order : order;
     const event_order = update.event_order ?? previous?.event_order ?? [];
     if (event_order.some((id) => !items.get(id)?.event)) { this.dropReplica(key, update.session_key); return null; }
-    const events = order.map((id) => items.get(id)?.summary).filter((event) => event !== undefined);
+    const events = display_order.map((id) => items.get(id)?.summary).filter((event) => event !== undefined);
     if (update.level === "all" && [...items.values()].some((item) =>
       item.summary?.child_keys?.some((child) => !items.get(child)?.summary))) {
       this.dropReplica(key, update.session_key); return null;
     }
-    if (events.length !== order.length) { this.dropReplica(key, update.session_key); return null; }
-    const page: Replica["page"] = { ...update.state, events };
-    if (update.level === "steps" && update.state.scope) {
+    if (events.length !== display_order.length) { this.dropReplica(key, update.session_key); return null; }
+    const page: Replica["page"] = { ...update.state, events,
+      ...(update.level === "messages" || update.level === "final" ? { total_events: events.length } : {}) };
+    if (update.level !== "details" && update.state.scope) {
       const pendingScope = this.scopes.get(update.session_key);
       this.scopes.set(update.session_key, { ...update.state.scope,
         history: pendingScope?.history === "retained" ? "retained" : update.state.scope.history,
@@ -479,8 +532,9 @@ export class SessionDisplayCache {
     }
     if (update.level !== "details") this.previewRevision += 1;
     this.pageItems.set(page, items);
+    this.pageLevels.set(page, update.level);
     this.replicas.delete(key);
-    this.replicas.set(key, { session_key: update.session_key, subscription_id: update.subscription_id, generation: update.generation, revision: update.revision, items, order, event_order, page, bytes });
+    this.replicas.set(key, { session_key: update.session_key, subscription_id: update.subscription_id, generation: update.generation, revision: update.revision, items, order, semantic_order, event_order, page, bytes });
     if (update.snapshot && this.pending.has(key)) {
       const queued = this.pending.get(key)!;
       this.pending.delete(key);
@@ -501,7 +555,7 @@ export class SessionDisplayCache {
       this.access.delete(oldest);
       this.scopes.delete(oldest);
       this.resources.remove(oldest);
-      this.acceptedItems.delete(oldest);
+      for (const key of this.acceptedItems.keys()) if (JSON.parse(key)[0] === oldest) this.acceptedItems.delete(key);
       this.acceptedSources.delete(oldest);
       this.running.delete(oldest);
       this.sourceRevisions.delete(oldest);

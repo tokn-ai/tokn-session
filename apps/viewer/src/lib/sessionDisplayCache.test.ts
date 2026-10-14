@@ -196,6 +196,88 @@ describe("session display replicas", () => {
     expect(cache.liveRunning("one")).toBeUndefined();
   });
 
+  it("uses semantic message order to expose folded commentary at Messages level", () => {
+    const cache = new SessionDisplayCache();
+    const request = cache.request("one", "messages");
+    const message = summary("commentary", "Intermediate progress.");
+    const final = summary("final", "Final reply.");
+    const page = cache.apply({ ...snapshot(cache, "one", []), ...request,
+      items: [ { item_id: "commentary", kind: "assistant_message", level: "messages", summary: message },
+        { item_id: "final", kind: "assistant_message", level: "final", summary: final } ],
+      item_order: ["final"], semantic_order: ["commentary", "final"] })!;
+    expect(page.events).toEqual([message, final]);
+    expect(page.total_events).toBe(2);
+  });
+
+  it.each([false, true])("recovers Messages running=%s and preview authority after lease expiry or error", (is_running) => {
+    vi.useFakeTimers(); vi.setSystemTime(0);
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one");
+    cache.release("one", "all");
+    const request = cache.request("one", "messages");
+    const update = { ...initial, ...request, state: { ...initial.state, is_running, source_revision: "source:1" } };
+    cache.apply(update);
+    expect(cache.liveRunning("one")).toBe(is_running);
+    expect(cache.liveAssistantPreview("one")).toBe("a");
+    vi.setSystemTime(90_001);
+    expect(cache.liveRunning("one")).toBeUndefined();
+    expect(cache.liveAssistantPreview("one")).toBeUndefined();
+    expect(cache.assistantPreview("one")).toBe("a");
+    expect(cache.liveRecoveryRequests()).toEqual([cache.request("one", "messages")]);
+    cache.apply(update, true);
+    expect(cache.liveRunning("one")).toBe(is_running);
+    expect(cache.liveAssistantPreview("one")).toBe("a");
+    cache.apply({ ...update, revision: "2", state: { ...update.state, error: "Unavailable source" } });
+    expect(cache.liveRunning("one")).toBeUndefined();
+    expect(cache.liveAssistantPreview("one")).toBeUndefined();
+    expect(cache.assistantPreview("one")).toBe("a");
+  });
+
+  it("retains independent resource coverage and history across same-source level changes", () => {
+    const cache = new SessionDisplayCache();
+    const steps = cache.request("one", "steps");
+    const initial = { ...snapshot(cache, "one"), ...steps, state: { ...snapshot(cache, "one").state,
+      source_revision: "source:1", scope: { history: "recent_turns" as const, turn_key: "turn", group_keys: [] } } };
+    cache.commit("one", cache.apply(initial)!);
+    const detail = { event_key: "a", event: { output: "retained" }, native: null, is_hidden: false, tool_output: null };
+    cache.resources.set("one", "tool", "a", { status: "complete" }, detail);
+    cache.resources.set("one", "inspect", "a", { status: "complete" }, detail);
+    cache.resources.set("one", "group", "activity:a", { status: "complete" });
+    cache.includeGroup("one", "activity:a");
+    cache.includeHistory("one");
+    cache.release("one", "steps");
+    const final = cache.request("one", "final");
+    expect(final.scope).toEqual({ history: "retained", turn_key: "turn", group_keys: ["activity:a"] });
+    expect([...cache.commit("one", cache.apply({ ...initial, ...final, items: [], item_order: [] })!)!]).toEqual([]);
+    expect(cache.resources.detail("one", "tool", "a")).toBe(detail);
+    expect(cache.resources.detail("one", "inspect", "a")).toBe(detail);
+    expect(cache.resources.coverage("one", "group", "activity:a").status).toBe("complete");
+  });
+  it("uses fresh All groups and details instead of a released complete Steps replica", () => {
+    const cache = new SessionDisplayCache();
+    const steps = cache.request("one", "steps");
+    const group = { ...summary("activity:group"), type: "activity_group", child_keys: ["a"] };
+    const detail = { event_key: "a", event: { output: "old" }, native: null, is_hidden: false, tool_output: null };
+    const initial: SessionUpdate = { ...snapshot(cache, "one"), ...steps,
+      items: [ { item_id: group.event_key, kind: "work_summary", level: "steps", summary: group },
+        { item_id: "a", kind: "tool_summary", level: "steps", summary: summary("a", "old row") },
+        { item_id: "detail:a", kind: "detail", level: "details", event_key: "a", detail } ],
+      item_order: [group.event_key], state: { ...snapshot(cache, "one").state, is_running: true, source_revision: "source:1" } };
+    cache.apply(initial);
+    cache.release("one", "steps");
+    const all = cache.request("one", "all");
+    const fresh = { ...detail, event: { output: "new" } };
+    cache.apply({ ...initial, ...all, items: [
+      { item_id: group.event_key, kind: "work_summary", level: "steps", summary: { ...group, child_keys: ["a", "b"] } },
+      { item_id: "a", kind: "tool_summary", level: "steps", summary: summary("a", "new row") },
+      { item_id: "b", kind: "tool_summary", level: "steps", summary: summary("b") },
+      { item_id: "detail:a", kind: "detail", level: "details", event_key: "a", detail: fresh } ],
+      state: { ...initial.state, source_revision: "source:2" } });
+    expect(cache.trajectoryGroup("one", group.event_key)?.events.map((event) => event.summary)).toEqual(["new row", "b"]);
+    expect(cache.activityGroupForEvent("one", "b")).toBe(group.event_key);
+    expect(cache.detail("one", "a")).toEqual(fresh);
+  });
+
   it("orders running state by source revision across delivery levels and releases ownership", () => {
     const cache = new SessionDisplayCache();
     const initial = snapshot(cache, "one");
@@ -214,6 +296,56 @@ describe("session display replicas", () => {
     cache.invalidate("one");
     expect(cache.liveRunning("one")).toBeUndefined();
   });
+  it("accepts commentary previews and running state from messages coverage and releases live authority", () => {
+    const cache = new SessionDisplayCache();
+    const request = cache.request("one", "messages");
+    const initial = { ...snapshot(cache, "one", ["event.v1.2"]), ...request };
+    initial.items[0] = { item_id: "event.v1.2", kind: "assistant_message", level: "messages",
+      summary: { ...summary("event.v1.2", "Newest commentary.\nDetails"), delivery: "commentary" } };
+    initial.state.is_running = true;
+    initial.state.source_revision = "source:10";
+    cache.apply(initial);
+    expect(cache.assistantPreview("one")).toBe("Newest commentary.");
+    expect(cache.liveAssistantPreview("one")).toBe("Newest commentary.");
+    expect(cache.liveRunning("one")).toBe(true);
+    const all = cache.request("one", "all");
+    cache.apply({ ...initial, ...all, items: [{ ...initial.items[0], summary: summary("event.v1.2", "Older full coverage.") }],
+      state: { ...initial.state, is_running: false, source_revision: "source:9" } });
+    expect(cache.assistantPreview("one")).toBe("Newest commentary.");
+    expect(cache.liveRunning("one")).toBe(true);
+    cache.release("one", "all");
+    cache.release("one", "messages");
+    expect(cache.liveAssistantPreview("one")).toBeUndefined();
+    expect(cache.liveRunning("one")).toBeUndefined();
+    expect(cache.assistantPreview("one")).toBe("Newest commentary.");
+  });
+
+  it.each(["codex", "dsh", "opencode", "zcode"] as const)("uses provider-aware delta preview authority for %s", (provider) => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one", ["event.v1.1", "event.v1.2", "event.v1.3"]);
+    const fragments = provider === "codex" || provider === "dsh";
+    initial.items[0].summary = { ...summary("event.v1.1", "Last full response."), provider };
+    initial.items[1].summary = { ...summary("event.v1.2", fragments ? " working" : "Still working"), provider, phase: "delta" };
+    initial.items[2].summary = { ...summary("event.v1.3", fragments ? "..." : "Still working..."), provider, phase: "delta" };
+    cache.apply(initial);
+    expect(cache.assistantPreview("one")).toBe(fragments ? "Last full response." : "Still working...");
+    expect(cache.liveAssistantPreview("one")).toBe(fragments ? undefined : "Still working...");
+    expect(cache.hasFragmentedAssistantPreview("one")).toBe(fragments);
+  });
+
+  it.each(["codex", "dsh"] as const)("never treats legacy %s fragments as complete preview lines", (provider) => {
+    const cache = new SessionDisplayCache();
+    const page = { events: [{ ...summary("event.v1.1", "Last full response."), provider },
+      { ...summary("event.v1.2", " working"), provider, phase: "delta" },
+      { ...summary("event.v1.3", "..."), provider, phase: "delta" }], total_events: 3,
+      next_cursor: null, previous_cursor: null, history_status: "complete" as const };
+    cache.rememberLoadedPage("one", page);
+    expect(cache.assistantPreview("one")).toBe("Last full response.");
+    expect(cache.hasFragmentedAssistantPreview("one")).toBe(true);
+    cache.rememberLoadedPage("fragment-only", { ...page, events: page.events.slice(1) });
+    expect(cache.assistantPreview("fragment-only")).toBeNull();
+  });
+
   it("retains bounded previews from loaded legacy pages and invalidates them", () => {
     const cache = new SessionDisplayCache();
     const page = { events: [summary("event.v1.1", "\nLoaded reply.\nDetails")], total_events: 1,
@@ -349,9 +481,10 @@ describe("session display replicas", () => {
     const initial = snapshot(cache, "old");
     cache.apply(initial);
     cache.includeHistory("old"); cache.includeGroup("old", "group-old");
-    const steps = cache.request("old", "steps"), final = cache.request("old", "final"), details = cache.request("old", "details");
+    const steps = cache.request("old", "steps"), final = cache.request("old", "final"), messages = cache.request("old", "messages"), details = cache.request("old", "details");
     cache.apply({ ...initial, ...steps });
     cache.apply({ ...initial, ...final });
+    cache.apply({ ...initial, ...messages });
     // A pending interest has no replica yet and still needs remote release.
     cache.apply({ ...initial, ...details, snapshot: false, base_revision: "1", revision: "2" });
     const expected = cache.requests().map((request) => ({ ...request, unsubscribe: true }));
