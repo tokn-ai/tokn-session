@@ -6044,6 +6044,7 @@ dependencies = [
  "tokio-util",
  "tokn-hub-client-core",
  "tokn-hub-transport",
+ "tokn-session-storage",
  "tower",
  "tower-http",
  "url",
@@ -6116,6 +6117,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokn-session-storage"
+version = "0.1.1"
+dependencies = [
+ "dirs 6.0.0",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "tokn-session-viewer"
 version = "0.1.1"
 dependencies = [
@@ -6137,6 +6149,7 @@ dependencies = [
  "tokn-hub-remote",
  "tokn-session-hub",
  "tokn-session-relay",
+ "tokn-session-storage",
  "tokn-viewer-api",
  "tokn-viewer-core",
  "url",
@@ -6212,6 +6225,7 @@ dependencies = [
  "tokn-session-pi",
  "tokn-session-relay",
  "tokn-session-render",
+ "tokn-session-storage",
  "tokn-session-workbuddy",
  "uuid",
  "zstd",

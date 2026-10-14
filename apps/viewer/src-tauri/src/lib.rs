@@ -1,8 +1,11 @@
 mod commands;
+mod device_preferences;
 mod external_host;
 mod hub_passkey;
 mod local_host;
 mod local_viewer;
+mod native_remote;
+mod relay_settings;
 mod translation;
 use tauri::Manager;
 pub use tokn_session_relay::stdio as relay_child;
@@ -14,19 +17,21 @@ pub fn run() {
     .plugin(tauri_plugin_opener::init())
     .setup(|app| {
       app.manage(local_viewer::LocalViewer::default());
-      app.manage(local_host::LocalHost::new(
-        dirs::home_dir()
-          .ok_or("Cannot resolve host state directory")?
-          .join(".tokn/hub"),
-      ));
-      app.manage(tokn_hub_remote::RemoteManager::new(
+      let paths = tokn_session_storage::SessionPaths::discover()?;
+      app.manage(local_host::LocalHost::unified(paths.clone()));
+      app.manage(native_remote::NativeRemote::new(
+        paths,
         app.path().app_config_dir()?.join("hub-client"),
       ));
+      app.manage(device_preferences::DevicePreferences::default());
       app.manage(hub_passkey::PasskeyCallbacks::default());
       Ok(())
     })
     .invoke_handler(tauri::generate_handler![
       commands::local::initialize_local_viewer,
+      commands::preferences::initialize_device_preferences,
+      commands::preferences::write_viewer_preferences,
+      commands::preferences::write_machine_preferences,
       commands::host::local_host_status,
       commands::host::local_host_start,
       commands::host::local_host_stop,
@@ -80,7 +85,7 @@ pub fn run() {
       if matches!(event, tauri::RunEvent::Exit) {
         tauri::async_runtime::block_on(app.state::<local_host::LocalHost>().shutdown(app));
         tauri::async_runtime::block_on(app.state::<local_viewer::LocalViewer>().shutdown());
-        tauri::async_runtime::block_on(app.state::<tokn_hub_remote::RemoteManager>().close_all());
+        tauri::async_runtime::block_on(app.state::<native_remote::NativeRemote>().shutdown());
         tauri::async_runtime::block_on(app.state::<hub_passkey::PasskeyCallbacks>().cancel_all());
       }
     });

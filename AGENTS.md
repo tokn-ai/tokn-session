@@ -57,6 +57,7 @@ The core abstraction is `AgentEvent`: provider-native historical sessions and li
 - `crates/hub-client-core`: shared native/WASM pairing and Noise encryption without networking.
 - `crates/hub-transport`: bounded ordered record interface and native WebRTC carrier.
 - `crates/hub-remote`: native direct-to-Hub client, remembered identities, requests, and live events.
+- `crates/storage`: shared native paths, bounded private configuration files, and conservative offline bundle migration.
 - `crates/viewer-core`: shared viewer domain, index scheduler, snapshot/follow readers, and Relay supervision.
 - `crates/viewer-api`: HTTP/SSE adapter and optional static web UI host for browser clients.
 - `apps/viewer`: shared React UI; local desktop uses viewer-core, remote app/browser clients reach the host through encrypted Hub tunnels.

@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { NativePreferenceStore } from "./nativePreferenceStore";
 import type { ViewerPreferences } from "./types";
 
 export const VIEWER_PREFERENCES_KEY = "tokn.viewer.preferences.v1";
@@ -24,7 +25,7 @@ let cached: ViewerPreferences | undefined;
 let storageFingerprint: string | undefined;
 let awaitingStorageBaseline = false;
 
-function decodePreferences(value: unknown): ViewerPreferences | null {
+export function decodeViewerPreferences(value: unknown): ViewerPreferences | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   if (record.version !== 1
@@ -53,6 +54,8 @@ function samePreferences(left: ViewerPreferences, right: ViewerPreferences): boo
     && left.show_lifecycle === right.show_lifecycle;
 }
 
+export const nativeViewerPreferences = new NativePreferenceStore<ViewerPreferences>(samePreferences, notifyListeners);
+
 function readStorage(): { fingerprint: string; preferences: ViewerPreferences; migrate: boolean } | null {
   try {
     const saved = localStorage.getItem(VIEWER_PREFERENCES_KEY);
@@ -61,7 +64,7 @@ function readStorage(): { fingerprint: string; preferences: ViewerPreferences; m
         return { fingerprint: "oversized", preferences: DEFAULT_VIEWER_PREFERENCES, migrate: false };
       }
       let preferences: ViewerPreferences | null = null;
-      try { preferences = decodePreferences(JSON.parse(saved)); } catch { /* Malformed display defaults are recoverable. */ }
+      try { preferences = decodeViewerPreferences(JSON.parse(saved)); } catch { /* Malformed display defaults are recoverable. */ }
       return { fingerprint: JSON.stringify([saved]), preferences: preferences ?? DEFAULT_VIEWER_PREFERENCES, migrate: false };
     }
     const legacy = LEGACY_KEYS.map((key) => {
@@ -93,6 +96,8 @@ function savePreferences(preferences: ViewerPreferences): boolean {
 }
 
 export function readViewerPreferences(): ViewerPreferences {
+  const native = nativeViewerPreferences.read();
+  if (native) return native;
   const stored = readStorage();
   if (stored && awaitingStorageBaseline) {
     // The user edited while both reads and writes were unavailable. The first
@@ -111,14 +116,27 @@ export function readViewerPreferences(): ViewerPreferences {
   return cached;
 }
 
+/** Only recognized bounded display data is sent during native initialization. */
+export function readViewerPreferencesForNativeImport(): ViewerPreferences | null {
+  try {
+    const saved = localStorage.getItem(VIEWER_PREFERENCES_KEY);
+    if (saved !== null) return saved.length <= MAX_PREFERENCES_LENGTH ? decodeViewerPreferences(JSON.parse(saved)) : null;
+    return readStorage()?.preferences ?? null;
+  } catch { return null; }
+}
+
 function notifyListeners() {
   for (const listener of listeners) listener();
 }
 
 export function updateViewerPreferences(changes: Partial<ViewerPreferences>) {
   const current = readViewerPreferences();
-  const next = decodePreferences({ ...current, ...changes, version: 1 });
+  const next = decodeViewerPreferences({ ...current, ...changes, version: 1 });
   if (!next || samePreferences(current, next)) return;
+  if (nativeViewerPreferences.read()) {
+    nativeViewerPreferences.update(next);
+    return;
+  }
   cached = Object.freeze(next);
   const saved = savePreferences(next);
   // A failed write keeps this window's changes in memory until persisted data
@@ -131,6 +149,10 @@ export function updateViewerPreferences(changes: Partial<ViewerPreferences>) {
 }
 
 export function resetViewerPreferences() {
+  if (nativeViewerPreferences.read()) {
+    nativeViewerPreferences.update({ ...DEFAULT_VIEWER_PREFERENCES });
+    return;
+  }
   const current = readViewerPreferences();
   const changed = !samePreferences(current, DEFAULT_VIEWER_PREFERENCES);
   cached = changed ? DEFAULT_VIEWER_PREFERENCES : current;
@@ -142,6 +164,7 @@ export function resetViewerPreferences() {
 }
 
 function onStorage(event: StorageEvent) {
+  if (nativeViewerPreferences.read()) return;
   if (event.key !== null && event.key !== VIEWER_PREFERENCES_KEY && !LEGACY_KEYS.some((key) => key === event.key)) return;
   try { if (event.storageArea && event.storageArea !== localStorage) return; }
   catch { return; }

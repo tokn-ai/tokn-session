@@ -93,19 +93,23 @@ fn prepare(
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
   }
   let service = ViewerService::native(index_path)?;
-  let settings = settings_path.and_then(|path| relay::read_settings(&path));
+  let settings = settings_path.and_then(|path| crate::relay_settings::load(&path));
   Ok((service, settings))
 }
 
 async fn start(app: AppHandle) -> Result<StartedViewer, String> {
-  let settings_path = app
+  let legacy_settings = app
     .path()
     .app_config_dir()
     .map(|path| path.join("relay.json"))
     .map_err(|error| error.to_string());
-  let (service, settings) = tokio::task::spawn_blocking(move || prepare(session_index_path()?, settings_path))
-    .await
-    .map_err(|error| format!("Local session initialization task failed: {error}"))??;
+  let (service, settings) = tokio::task::spawn_blocking(move || {
+    let settings_path = legacy_settings
+      .and_then(|legacy| crate::relay_settings::resolve(&tokn_session_storage::SessionPaths::discover()?, &legacy));
+    prepare(session_index_path()?, settings_path)
+  })
+  .await
+  .map_err(|error| format!("Local session initialization task failed: {error}"))??;
   // Configure before starting index workers, so saved External settings cannot
   // briefly trigger native discovery while the local view is opening.
   match settings {

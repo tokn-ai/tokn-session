@@ -80,6 +80,7 @@ struct Connection {
 #[derive(Clone)]
 pub struct RemoteManager {
   state_dir: PathBuf,
+  require_existing: bool,
   connections: Arc<Mutex<HashMap<String, Arc<Connection>>>>,
   authentications: Arc<Mutex<HashMap<String, Arc<Authentication>>>>,
 }
@@ -88,18 +89,36 @@ impl RemoteManager {
   pub fn new(state_dir: PathBuf) -> Self {
     Self {
       state_dir,
+      require_existing: false,
       connections: Arc::new(Mutex::new(HashMap::new())),
       authentications: Arc::new(Mutex::new(HashMap::new())),
+    }
+  }
+
+  /// Preserve an existing desktop bundle while its offline migration is pending.
+  pub fn existing(state_dir: PathBuf) -> Self {
+    Self {
+      require_existing: true,
+      ..Self::new(state_dir)
     }
   }
 
   async fn stored(&self, hub_url: &str) -> Result<(Url, ClientStore, Arc<NoiseIdentity>), String> {
     let hub = canonical_hub(hub_url)?;
     let state_dir = self.state_dir.clone();
+    let require_existing = self.require_existing;
     let hub_copy = hub.clone();
     let (store, identity) = tokio::task::spawn_blocking(move || {
-      let store = ClientStore::load_or_create(&state_dir, &hub_copy)?;
-      let identity = Arc::new(NoiseIdentity::load_or_create(&store.identity_file())?);
+      let store = if require_existing {
+        ClientStore::load_existing(&state_dir, &hub_copy)?
+      } else {
+        ClientStore::load_or_create(&state_dir, &hub_copy)?
+      };
+      let identity = Arc::new(if require_existing {
+        NoiseIdentity::load(&store.identity_file())?
+      } else {
+        NoiseIdentity::load_or_create(&store.identity_file())?
+      });
       Ok::<_, String>((store, identity))
     })
     .await

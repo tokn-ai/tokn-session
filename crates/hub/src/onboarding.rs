@@ -139,6 +139,39 @@ fn validate_host_access(state: &HostAccess) -> Result<(), String> {
   Ok(())
 }
 
+/// Read-only validation for moving a complete bundle. A valid legacy SHA1
+/// record may move unchanged; upgrading its authenticator remains explicit.
+pub fn validate_host_access_for_storage(path: &Path) -> Result<(), String> {
+  let value: serde_json::Value = read_required(path)?;
+  if value["version"] == 1 {
+    legacy_host_access(value).map(|_| ())
+  } else {
+    host_access(path).map(|_| ())
+  }
+}
+
+fn legacy_host_access(mut value: serde_json::Value) -> Result<HostAccess, String> {
+  if value["version"] != 1 {
+    return Err("Unsupported host pairing state".into());
+  }
+  TotpSecret::from_base32(value["totp_secret"].as_str().ok_or("Invalid legacy authenticator")?)?;
+  let devices: BTreeMap<String, u64> =
+    serde_json::from_value(value["devices"].clone()).map_err(|_| "Invalid legacy devices")?;
+  if devices.len() > MAX_DEVICES {
+    return Err("Invalid legacy devices".into());
+  }
+  for key in devices.keys() {
+    decode_public_key(key)?;
+  }
+  // Decode the remaining fields with the current schema while keeping the
+  // original seed, replay state, passkeys, and file entirely unchanged.
+  value["version"] = serde_json::json!(2);
+  value["devices"] = serde_json::json!({});
+  let state: HostAccess = serde_json::from_value(value).map_err(|_| "Invalid legacy host pairing state")?;
+  validate_host_access(&state)?;
+  Ok(state)
+}
+
 /// Setup only; importing a seed never overwrites existing trust or replay state.
 pub fn initialize_host_access(path: &Path, secret: &TotpSecret) -> Result<(), String> {
   let _lock = lock(path)?;
@@ -166,29 +199,14 @@ pub fn initialize_host_access(path: &Path, secret: &TotpSecret) -> Result<(), St
 /// seed, and removes legacy device grants whose client type cannot be proven.
 pub fn upgrade_authenticator(path: &Path) -> Result<(), String> {
   let _lock = lock(path)?;
-  let mut value: serde_json::Value = read_required(path)?;
+  let value: serde_json::Value = read_required(path)?;
   if value["version"] == 2 {
     host_access(path)?;
     return Ok(());
   }
-  if value["version"] != 1 {
-    return Err("Unsupported host pairing state".into());
-  }
-  TotpSecret::from_base32(value["totp_secret"].as_str().ok_or("Invalid legacy authenticator")?)?;
-  let devices: BTreeMap<String, u64> =
-    serde_json::from_value(value["devices"].clone()).map_err(|_| "Invalid legacy devices")?;
-  if devices.len() > MAX_DEVICES {
-    return Err("Invalid legacy devices".into());
-  }
-  for key in devices.keys() {
-    decode_public_key(key)?;
-  }
-  value["version"] = serde_json::json!(2);
-  value["devices"] = serde_json::json!({});
-  value["totp_secret"] = serde_json::json!(TotpSecret::generate().to_base32());
-  value["last_used_step"] = serde_json::Value::Null;
-  let state: HostAccess = serde_json::from_value(value).map_err(|_| "Invalid legacy host pairing state")?;
-  validate_host_access(&state)?;
+  let mut state = legacy_host_access(value)?;
+  state.totp_secret = TotpSecret::generate().to_base32();
+  state.last_used_step = None;
   write_atomic(path, &state)
 }
 
@@ -444,6 +462,41 @@ pub struct ClientStore {
 }
 
 impl ClientStore {
+  /// Validate an existing bundle without generating keys or taking a new lock.
+  /// Callers that migrate/write state must already hold its ownership lock.
+  pub fn validate_existing(state_dir: &Path) -> Result<(), String> {
+    let state: ClientHosts = read_required(&state_dir.join("client-hosts.json"))?;
+    validate_client_state(&state)?;
+    crate::secure::NoiseIdentity::load(&state_dir.join("client-noise.key"))?;
+    Ok(())
+  }
+
+  /// Open an existing identity/trust bundle without generating missing keys.
+  /// Used by upgraded desktops that continue using unmigrated legacy storage.
+  pub fn load_existing(state_dir: &Path, hub: &Url) -> Result<Self, String> {
+    let store = Self {
+      state_dir: state_dir.into(),
+      hub: canonical_hub(hub)?,
+    };
+    let path = store.path();
+    let mut lock_name = path.as_os_str().to_owned();
+    lock_name.push(".lock");
+    let lock_path = PathBuf::from(lock_name);
+    reject_symlink(&lock_path)?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
+    nofollow(&mut options);
+    let lock = options.open(&lock_path).map_err(
+      |_| "Saved desktop client ownership lock is missing; restore the complete client bundle before reconnecting",
+    )?;
+    validate_private(&lock)?;
+    lock
+      .try_lock()
+      .map_err(|_| "Saved desktop client state is being updated; retry shortly")?;
+    Self::validate_existing(state_dir)?;
+    Ok(store)
+  }
+
   pub fn load_or_create(state_dir: &Path, hub: &Url) -> Result<Self, String> {
     let store = Self {
       state_dir: state_dir.into(),
@@ -991,6 +1044,27 @@ mod tests {
     let second = ClientStore::load_or_create(second_dir.path(), &hub).unwrap();
     fs::remove_file(second.identity_file()).unwrap();
     assert!(ClientStore::load_or_create(second_dir.path(), &hub).is_err());
+  }
+
+  #[test]
+  fn existing_client_never_generates_or_repairs_an_incomplete_bundle() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("client");
+    let hub = Url::parse("https://hub.example").unwrap();
+    assert!(ClientStore::load_existing(&root, &hub).is_err());
+    assert!(!root.exists());
+    let store = ClientStore::load_or_create(&root, &hub).unwrap();
+    let before = fs::read(store.identity_file()).unwrap();
+    let existing = ClientStore::load_existing(&root, &hub).unwrap();
+    assert!(existing.hosts().unwrap().is_empty());
+    assert_eq!(fs::read(store.identity_file()).unwrap(), before);
+    fs::remove_file(store.path()).unwrap();
+    assert!(ClientStore::load_existing(&root, &hub).is_err());
+    assert!(!store.path().exists());
+    assert_eq!(fs::read(store.identity_file()).unwrap(), before);
+    fs::remove_file(store.identity_file()).unwrap();
+    assert!(ClientStore::load_existing(&root, &hub).is_err());
+    assert!(!store.identity_file().exists());
   }
 
   #[test]

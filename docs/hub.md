@@ -115,8 +115,8 @@ after revocation; their UUID mapping cannot be reassigned. See
 [readable machine addresses](hub-pairing.md#readable-machine-addresses).
 
 The Hub persists public passkey credentials and approved hosts in
-`~/.tokn/hub/state.sqlite` (`--state-path` overrides it). The connector generates
-and persists its Ed25519 private key in `~/.tokn/hub/host.key`
+`~/.tokn/sessions/hub/state.sqlite` (`--state-path` overrides it). The connector generates
+and persists its Ed25519 private key in `~/.tokn/sessions/hub/host.key`
 (`--identity-file` overrides it). Use a separate identity file for each Hub.
 On Unix, state/key files are restricted to their owner. Protect and back up
 these files using the host's normal account/storage controls.

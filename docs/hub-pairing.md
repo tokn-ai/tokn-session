@@ -134,7 +134,7 @@ while the disclosure stays open. Hiding it or closing the dialog removes the pai
 the display; it is never saved to browser storage or sent through the Hub.
 The QR and URI contain a secret and belong only on the hosting device.
 
-The app and CLI share `~/.tokn/hub` configuration, keys, and paired-device trust.
+The app and CLI share `~/.tokn/sessions/hub` configuration, keys, and paired-device trust.
 An existing online connector or an ownership lock held by another updated
 process, or a loaded background API, blocks app hosting with a clear error.
 The app only stops verified services when explicitly requested in the dialog. A saved host needs a reachable saved Hub
@@ -200,12 +200,15 @@ use `no-referrer`. Ceremony options travel in a URL fragment that the page clear
 
 ## Host configuration and revocation
 
-Host state defaults to `~/.tokn/hub`; use `--state-dir PATH` consistently for a
+Host state defaults to `~/.tokn/sessions/hub`; use `--state-dir PATH` consistently for a
 separate installation. Host files include `host.json`, `host-enrollment.key`,
 `host-noise.key`, and `host-access.json` (authenticator, authorized devices,
 passkeys, and persisted attempt limits). Back up identity and trust state with
 the device's storage controls. Corrupt, missing, or insecure saved state fails
 closed; Unix private files must have mode 0600 and belong to the current user.
+Existing `~/.tokn/hub` and desktop-client bundles require the explicit offline
+[native storage migration](native-storage.md); it preserves identity, trust,
+and legacy launcher access without regenerating keys.
 
 Authorized devices can view all host sessions. Agent input requires the host's
 saved control setting:

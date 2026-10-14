@@ -1,0 +1,18 @@
+[package]
+name = "tokn-session-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Shared native storage paths and conservative offline migrations."
+readme = "README.md"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

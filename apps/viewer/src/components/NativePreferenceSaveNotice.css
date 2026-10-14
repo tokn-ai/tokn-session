@@ -1,0 +1,45 @@
+.native-preferences-notice {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  width: min(580px, calc(100% - 32px));
+  padding: 14px 16px;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--danger);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  font-size: 13px;
+  z-index: 100;
+}
+
+.native-preferences-notice[data-placement="workspace"] {
+  position: fixed;
+  right: 16px;
+  top: 16px;
+}
+
+.native-preferences-notice[data-placement="settings"] {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+}
+
+body:has(.settings-dialog[open]) .native-preferences-notice[data-placement="workspace"] {
+  display: none;
+}
+
+.native-preferences-notice p {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.native-preferences-notice button {
+  flex-shrink: 0;
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  cursor: pointer;
+}
