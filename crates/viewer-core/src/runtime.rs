@@ -5,7 +5,7 @@ use crate::{
 };
 use std::{
   collections::{BTreeMap, BTreeSet},
-  path::{Path, PathBuf},
+  path::PathBuf,
   time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::broadcast;
@@ -873,14 +873,13 @@ fn index_wake_from_watcher(
   }
 }
 
-fn session_index_path_for_home(home: &Path) -> PathBuf {
-  home.join(".tokn").join("sessions").join("index.sqlite")
+#[cfg(test)]
+fn session_index_path_for_home(home: &std::path::Path) -> PathBuf {
+  tokn_session_storage::SessionPaths::from_home(home).index_path()
 }
 
 pub fn session_index_path() -> Result<PathBuf, String> {
-  dirs::home_dir()
-    .map(|home| session_index_path_for_home(&home))
-    .ok_or_else(|| "could not resolve the user home directory for the session index".to_owned())
+  Ok(tokn_session_storage::SessionPaths::discover()?.index_path())
 }
 
 #[cfg(test)]

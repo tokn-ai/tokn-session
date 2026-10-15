@@ -14,6 +14,7 @@ use tokn_session_hub::{
   secure::{Grant, GrantScope, NoiseIdentity, OwnerIdentity},
   secure_client::{self, ClientConfig},
   server::{self, HubState},
+  storage,
   store::Store,
 };
 use url::Url;
@@ -37,6 +38,13 @@ enum KeyKind {
 
 #[derive(Subcommand)]
 enum Command {
+  /// Move legacy Hub and desktop-client state into ~/.tokn/sessions.
+  MigrateStorage {
+    /// Confirm all Hub servers, connectors, and desktop apps are stopped.
+    /// Old versions do not hold lifetime locks; stop background launchers too.
+    #[arg(long)]
+    offline: bool,
+  },
   /// Serve the Hub API and viewer. Use HTTPS termination for remote access.
   Serve {
     #[arg(long, default_value = "127.0.0.1:5559")]
@@ -194,14 +202,33 @@ async fn main() {
 }
 
 fn default_path(file: &str) -> Result<PathBuf, String> {
-  dirs::home_dir()
-    .map(|home| home.join(".tokn/hub").join(file))
-    .ok_or_else(|| "Cannot resolve home directory; specify an explicit state/key path".into())
+  Ok(storage::default_state_dir()?.join(file))
+}
+
+fn state_dir_or_default(state_dir: Option<PathBuf>) -> Result<PathBuf, String> {
+  match state_dir {
+    Some(path) => Ok(path),
+    None => storage::default_state_dir(),
+  }
+}
+
+fn state_file_or_default(state_dir: Option<&Path>, file: &str) -> Result<PathBuf, String> {
+  match state_dir {
+    Some(path) => Ok(path.join(file)),
+    None => default_path(file),
+  }
 }
 
 async fn run(args: Args) -> Result<(), String> {
   let shutdown = CancellationToken::new();
   match args.command {
+    Command::MigrateStorage { offline } => {
+      let paths = tokn_session_storage::SessionPaths::discover()?;
+      let hub_dir = storage::migrate_legacy_storage(&paths, offline)?;
+      let client_dir = storage::migrate_legacy_desktop_client(&paths, &storage::legacy_desktop_client_dir()?, offline)?;
+      println!("{}", json!({ "hub_dir": hub_dir, "desktop_client_dir": client_dir }));
+      Ok(())
+    }
     Command::Serve {
       bind,
       public_url,
@@ -267,7 +294,7 @@ async fn run(args: Args) -> Result<(), String> {
         if identity_file.is_some() {
           return Err("Paired mode manages its own keys; use --state-dir to choose their location".into());
         }
-        let state_dir = state_dir.unwrap_or(default_path("")?);
+        let state_dir = state_dir_or_default(state_dir)?;
         let lease = connector::HostLease::acquire(&state_dir.join("host-enrollment.key"))?;
         let config = cli_onboarding::prepare_host(cli_onboarding::HostOptions {
           hub,
@@ -286,16 +313,15 @@ async fn run(args: Args) -> Result<(), String> {
         signal.abort();
         return result;
       }
-      let state_dir = state_dir.unwrap_or(default_path("")?);
       let key_file = match identity_file {
         Some(path) => path,
-        None => state_dir.join("host.key"),
+        None => state_file_or_default(state_dir.as_deref(), "host.key")?,
       };
       let secure = match owner_public_key {
         Some(owner_public_key) => Some(SecureHostConfig {
           noise_key_file: match noise_key_file {
             Some(path) => path,
-            None => state_dir.join("host-noise.key"),
+            None => state_file_or_default(state_dir.as_deref(), "host-noise.key")?,
           },
           owner_public_key,
           revocations_file,
@@ -334,11 +360,11 @@ async fn run(args: Args) -> Result<(), String> {
       web_root,
       insecure_loopback,
     } => {
-      let state_dir = state_dir.unwrap_or(default_path("")?);
       if grant_file.is_none() {
         if identity_file.is_some() {
           return Err("Paired mode manages its own identity; use --state-dir to choose its location".into());
         }
+        let state_dir = state_dir_or_default(state_dir)?;
         let (hub_url, insecure_loopback) = cli_onboarding::prepare_client(&state_dir, hub, insecure_loopback)?;
         let signal = shutdown_signal(shutdown.clone());
         let result = client_onboarding::run_paired(
@@ -358,7 +384,7 @@ async fn run(args: Args) -> Result<(), String> {
       }
       let identity_file = match identity_file {
         Some(path) => path,
-        None => state_dir.join("client-noise.key"),
+        None => state_file_or_default(state_dir.as_deref(), "client-noise.key")?,
       };
       let signal = shutdown_signal(shutdown.clone());
       let result = secure_client::run(
@@ -383,7 +409,7 @@ async fn run(args: Args) -> Result<(), String> {
       import_file,
       export_file,
     } => {
-      let state_dir = state_dir.unwrap_or(default_path("")?);
+      let state_dir = state_dir_or_default(state_dir)?;
       if upgrade_sha256 {
         use std::io::IsTerminal;
         if export_file.is_none() && !std::io::stderr().is_terminal() {
@@ -396,7 +422,7 @@ async fn run(args: Args) -> Result<(), String> {
       cli_onboarding::authenticator(&state_dir, import_file, export_file)
     }
     Command::Devices { state_dir } => {
-      let state_dir = state_dir.unwrap_or(default_path("")?);
+      let state_dir = state_dir_or_default(state_dir)?;
       println!(
         "{}",
         serde_json::to_string_pretty(&onboarding::devices(&state_dir.join("host-access.json"))?)
@@ -405,7 +431,7 @@ async fn run(args: Args) -> Result<(), String> {
       Ok(())
     }
     Command::ForgetDevice { state_dir, public_key } => {
-      let state_dir = state_dir.unwrap_or(default_path("")?);
+      let state_dir = state_dir_or_default(state_dir)?;
       onboarding::remove_device(&state_dir.join("host-access.json"), &public_key)?;
       println!("{}", json!({ "revoked_device": public_key }));
       Ok(())
@@ -573,6 +599,17 @@ fn revoke(path: &Path, grant_id: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn explicit_state_paths_are_resolved_without_consulting_defaults() {
+    let path = PathBuf::from("explicit/private/state");
+    assert_eq!(state_dir_or_default(Some(path.clone())).unwrap(), path);
+    assert_eq!(
+      state_file_or_default(Some(&path), "host.key").unwrap(),
+      path.join("host.key")
+    );
+    assert!(Args::try_parse_from(["hub", "migrate-storage", "--offline"]).is_ok());
+  }
 
   #[test]
   fn connect_defaults_to_pairing_and_legacy_control_requires_full_scope() {

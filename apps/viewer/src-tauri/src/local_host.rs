@@ -110,6 +110,7 @@ impl Drop for RunningHost {
 
 pub struct LocalHost {
   state_dir: PathBuf,
+  paths: Option<tokn_session_storage::SessionPaths>,
   operation: AsyncMutex<Option<RunningHost>>,
   status: Arc<Mutex<HostStatus>>,
   closed: AtomicBool,
@@ -118,17 +119,38 @@ impl LocalHost {
   pub fn new(state_dir: PathBuf) -> Self {
     Self {
       state_dir,
+      paths: None,
       operation: AsyncMutex::new(None),
       status: Arc::new(Mutex::new(HostStatus::default())),
       closed: AtomicBool::new(false),
     }
+  }
+  pub fn unified(paths: tokn_session_storage::SessionPaths) -> Self {
+    Self {
+      paths: Some(paths.clone()),
+      ..Self::new(paths.hub_dir())
+    }
+  }
+  async fn storage_path(&self, writable: bool) -> Result<PathBuf, String> {
+    let Some(paths) = self.paths.clone() else {
+      return Ok(self.state_dir.clone());
+    };
+    tokio::task::spawn_blocking(move || {
+      if writable {
+        tokn_session_hub::storage::default_state_dir_for_paths(&paths)
+      } else {
+        tokn_session_hub::storage::inspect_state_dir_for_paths(&paths)
+      }
+    })
+    .await
+    .map_err(|_| "Host storage resolution task failed")?
   }
   pub async fn status(&self) -> Result<HostStatus, String> {
     let running = self.operation.lock().await;
     if running.is_some() {
       return Ok(self.status.lock().unwrap().clone());
     }
-    detected_status(self.state_dir.clone()).await
+    detected_status(self.storage_path(false).await?).await
   }
 
   pub async fn start(&self, app: AppHandle, request: StartHostRequest) -> Result<HostStatus, String> {
@@ -139,7 +161,8 @@ impl LocalHost {
     if running.is_some() {
       return Err("Stop app hosting before changing its settings".into());
     }
-    let path = self.state_dir.clone();
+    let state_dir = self.storage_path(true).await?;
+    let path = state_dir.clone();
     let (lease, previous) = tokio::task::spawn_blocking(move || {
       let lease = HostLease::acquire(&path.join("host-enrollment.key"))?;
       let previous = HostProfile::load(&path.join("host.json"))?;
@@ -147,7 +170,7 @@ impl LocalHost {
     })
     .await
     .map_err(|_| "Host ownership task failed")??;
-    let background = crate::external_host::inspect(&self.state_dir, previous.as_ref()).await?;
+    let background = crate::external_host::inspect(&state_dir, previous.as_ref()).await?;
     if background.has_loaded() || background.api.error.is_some() || background.connector.error.is_some() {
       return Err("Stop background hosting services, or resolve their status errors, before hosting in the app".into());
     }
@@ -164,7 +187,7 @@ impl LocalHost {
     let mut random = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut random);
     let token = STANDARD.encode(random);
-    let path = self.state_dir.clone();
+    let path = state_dir;
     let config_token = token.clone();
     let prepared = tokio::task::spawn_blocking(move || {
       host_setup::prepare_host(HostOptions {
@@ -269,7 +292,8 @@ impl LocalHost {
     self.manage_background(app, true).await
   }
   async fn manage_background(&self, app: &AppHandle, remove: bool) -> Result<HostStatus, String> {
-    let observed = detected_status(self.state_dir.clone()).await?;
+    let state_dir = self.storage_path(false).await?;
+    let observed = detected_status(state_dir.clone()).await?;
     if !(if remove {
       observed.external_remove_supported
     } else {
@@ -280,14 +304,14 @@ impl LocalHost {
           .into(),
       );
     }
-    let path = self.state_dir.join("host.json");
+    let path = state_dir.join("host.json");
     let profile = tokio::task::spawn_blocking(move || HostProfile::load(&path))
       .await
       .map_err(|_| "Host configuration task failed")??;
-    let result = crate::external_host::manage(&self.state_dir, profile.as_ref(), remove).await;
+    let result = crate::external_host::manage(&state_dir, profile.as_ref(), remove).await;
     // Always publish observed partial progress, including a failed second stop
     // or removal. Never retain the old all-running view after one service stops.
-    let mut status = detected_status(self.state_dir.clone()).await?;
+    let mut status = detected_status(state_dir).await?;
     if let Err(error) = &result {
       status.error = Some(error.clone());
     }
@@ -306,7 +330,7 @@ impl LocalHost {
     let _ = self.stop(app).await;
   }
   pub async fn pairing(&self) -> Result<HostPairing, String> {
-    let path = self.state_dir.clone();
+    let path = self.storage_path(false).await?;
     tokio::task::spawn_blocking(move || pairing(&path))
       .await
       .map_err(|_| "Pairing display task failed")?
@@ -465,6 +489,25 @@ mod tests {
     assert!(pairing(directory.path()).is_err());
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
   }
+  #[tokio::test]
+  async fn unified_host_inspects_legacy_ownership_and_blocks_writes_until_migration() {
+    let home = tempfile::tempdir().unwrap();
+    let paths = tokn_session_storage::SessionPaths::from_home(home.path());
+    let legacy = paths.legacy_hub_dir();
+    setup(&legacy);
+    let key = legacy.join("host-enrollment.key");
+    let lease = HostLease::acquire(&key).unwrap();
+    let local = LocalHost::unified(paths.clone());
+    assert!(matches!(local.status().await.unwrap().phase, HostPhase::External));
+    assert_eq!(local.storage_path(false).await.unwrap(), legacy);
+    assert!(local.storage_path(true).await.unwrap_err().contains("migrate-storage"));
+    assert!(!paths.hub_dir().exists());
+    drop(lease);
+    tokn_session_hub::storage::migrate_legacy_storage(&paths, true).unwrap();
+    assert_eq!(local.storage_path(false).await.unwrap(), paths.hub_dir());
+    assert_eq!(local.storage_path(true).await.unwrap(), paths.hub_dir());
+  }
+
   #[tokio::test]
   async fn external_lock_is_detected_without_contacting_hub_or_changing_state() {
     let directory = tempfile::tempdir().unwrap();

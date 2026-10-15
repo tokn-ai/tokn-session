@@ -1,4 +1,4 @@
-use tauri::{Manager, State};
+use tauri::State;
 
 use crate::{
   local_viewer::LocalViewer,
@@ -18,13 +18,11 @@ pub async fn configure_relay(
 ) -> Result<RelayStatus, String> {
   let service = state.service(&app).await?;
   let _guard = service.relay.configure_lock.lock().await;
-  let path = app
-    .path()
-    .app_config_dir()
-    .map_err(|e| e.to_string())?
+  let path = tokn_session_storage::SessionPaths::discover()?
+    .viewer_dir()
     .join("relay.json");
   let saved = settings.clone();
-  tauri::async_runtime::spawn_blocking(move || crate::relay::write_settings(&path, &saved))
+  tauri::async_runtime::spawn_blocking(move || crate::relay_settings::save(&path, &saved))
     .await
     .map_err(|e| e.to_string())??;
   service.relay.configure(settings)?;

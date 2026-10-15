@@ -5,12 +5,16 @@ mounted viewer, current conversation, resource coverage, and live interests.
 
 ## Viewing device
 
-`ViewerPreferences` is a versioned, bounded record in
+`ViewerPreferences` is a versioned, bounded record. Desktop writes
+`~/.tokn/sessions/viewer/preferences.json`; browsers use origin-local
 `tokn.viewer.preferences.v1`. It contains sidebar grouping, lifecycle visibility,
 background session scope, background delivery, and conversation delivery.
 The store migrates the four previous preference keys and synchronizes React
-consumers in the same window and through browser storage events. Unavailable
-storage retains in-memory edits. A reset only restores these display defaults.
+consumers in the same window and through browser storage events. Desktop loads
+native preferences before mounting the workspace, imports the legacy WebView
+record only when no native file exists, and saves through ordered native commands.
+Native save failures retain edits with an explicit Retry notice; invalid native
+files fail visibly without being overwritten. A reset only restores display defaults.
 
 The settings page and existing quick controls share this store. An unrelated
 preference does not restart subscriptions or reload history. Changing delivery
@@ -27,7 +31,7 @@ errors remain visible. External Relays may use different source locations.
 Custom source overrides are not implemented by this page.
 
 Local Tauri snapshots permit the existing validated `configure_relay` command,
-which saves desktop reader settings, reconfigures the reader, and reconciles the
+which saves `~/.tokn/sessions/viewer/relay.json`, reconfigures the reader, and reconciles the
 index. Reader drafts require Apply; live status events do not overwrite unsaved
 edits. Hooks register status listeners before reading a baseline and guard late
 reads/writes with machine-bound transports and lifecycle generations.
@@ -48,3 +52,6 @@ the page identifies the selected machine and explains this limit.
 Saved hosting settings, runtime status, host identity, and device trust remain
 separate. “Host this computer” on Machines continues to refer to the viewing
 computer, including while another machine is selected.
+
+See [native storage](native-storage.md) for the directory layout, native machine
+bookmarks, preserved client/host identities, and offline legacy Hub migration.

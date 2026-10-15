@@ -11,5 +11,6 @@ pub mod secure;
 pub mod secure_client;
 pub mod secure_scope;
 pub mod server;
+pub mod storage;
 pub mod store;
 pub mod tunnel;
