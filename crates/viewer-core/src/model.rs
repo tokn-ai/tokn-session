@@ -241,7 +241,9 @@ pub struct BodyIndexProgress {
   /// remain pending and are counted again in `failed_jobs`.
   pub pending_jobs: usize,
   pub failed_jobs: usize,
+  /// Successfully committed session baselines in the current bounded batch.
   pub completed_in_run: usize,
+  /// Discarded attempts in the current batch, separate from completed work.
   pub stale_in_run: usize,
   pub batch_size: usize,
   pub providers: Vec<ProviderBody>,
@@ -251,13 +253,13 @@ pub struct BodyIndexProgress {
 #[serde(rename_all = "snake_case")]
 pub struct ProviderBody {
   pub provider: ViewerProvider,
-  /// Work in the current catalog baseline. A catalog change that stages body
-  /// work establishes a new baseline; body-only passes retain it and can grow
-  /// it if new staged work appears.
+  /// Present session baselines in the current catalog, completed or queued.
+  /// New/removed sessions change this total; source revisions can requeue
+  /// completed work without changing the number of present sessions.
   pub total_jobs: usize,
-  /// Jobs durably handled since the current catalog baseline. This is derived
-  /// from the staged source cursor, so another process's completion survives a
-  /// restart and an exhausted durable queue reaches `total_jobs / total_jobs`.
+  /// Present sessions with a durably completed baseline. Unchanged catalogs
+  /// and process restarts retain these completions; discarded attempts do
+  /// not contribute to the count.
   pub completed_jobs: usize,
   /// Remaining queued or retryable work. A nonzero count does not imply this
   /// provider is active; compare `BodyIndexProgress.active_provider`.
