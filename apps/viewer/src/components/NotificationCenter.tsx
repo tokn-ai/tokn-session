@@ -396,8 +396,8 @@ export function NotificationCenter({
               <dd>{progress.body.pending_jobs} pending</dd>
             </div>
             <div>
-              <dt>This run</dt>
-              <dd>{progress.body.completed_in_run} indexed{progress.body.stale_in_run > 0 ? ` · ${progress.body.stale_in_run} changed` : ""}</dd>
+              <dt>This batch</dt>
+              <dd>{progress.body.completed_in_run} indexed{progress.body.stale_in_run > 0 ? ` · ${progress.body.stale_in_run} outdated attempts` : ""}</dd>
             </div>
           </dl>
         ) : null}

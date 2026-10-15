@@ -1005,7 +1005,15 @@ provider scan.
 session row for diagnostics and future read-only consumers.
 
 After cataloging, reconciliation backfills bodies, bounded presentation
-metadata, and attention in newest-first batches. Codex and Pi session roots use
+metadata, and attention in newest-first batches of at most eight attempts.
+Provider fractions count present sessions with durable body baselines, including
+completed sources, so unchanged catalogs and restarts retain progress. Source
+changes can requeue sessions and removals reduce the inventory. Discarded stale
+attempts remain separate from completions; the notification's “This batch” metric
+describes only the current or latest pass. Live catalog activity preserves the
+body deadline, and an overdue body pass runs before more catalog/file work after
+allowing one full recovery catalog. Compressed archive eligibility is unchanged.
+Codex and Pi session roots use
 the cross-platform `notify` watcher: an ordinary data or metadata change to an
 already indexed JSONL file reads only that file's header and stages only its
 body source. Notifications coalesce for 200 ms (with a one-second maximum
@@ -1032,10 +1040,10 @@ asynchronous startup; an existing SQLite sidebar remains immediately usable.
 OpenCode, ZCode, WorkBuddy, and DSH retain a ten-second *provider-local*
 catalog cadence, and a Codex/Pi root with no working native registration joins
 that subset. This preserves their update latency without repeatedly discovering
-large watched rollout trees. While eligible rows remain unbaselined, a one-second
-body-only pass advances the next batch without rediscovering the whole provider.
+large watched rollout trees. While eligible rows remain unbaselined, a five-second
+body-only cadence advances the next batch without rediscovering the whole provider.
 Active Codex/Pi JSONL uses retained incremental readers; cold backfill keeps its
-quiet-period and size limits. A body failure remains visible but is not retried every second;
+quiet-period and size limits. A body failure remains visible but is not retried each batch;
 a source-generation change or explicit retry makes it eligible again. When no
 body work is eligible, the one-second lease tick checks only SQLite's cheap data
 version and does not enumerate the index.

@@ -373,9 +373,9 @@ export interface SessionIndexBodyProviderProgress {
   provider: ViewerProvider;
   pending_jobs: number;
   failed_jobs: number;
-  /** Completed detail loads in the provider's current catalog baseline. */
+  /** Present sessions whose detail baseline is durably current. */
   completed_jobs: number;
-  /** Total detail loads in the provider's current catalog baseline. */
+  /** Present sessions with a current or pending detail baseline. */
   total_jobs: number;
 }
 
@@ -383,7 +383,9 @@ export interface SessionIndexBodyProgress {
   active_provider: ViewerProvider | null;
   pending_jobs: number;
   failed_jobs: number;
+  /** Successful commits in the current or most recent refresh batch. */
   completed_in_run: number;
+  /** Outdated attempts in that batch; these do not count as completed jobs. */
   stale_in_run: number;
   batch_size: number;
   providers: SessionIndexBodyProviderProgress[];

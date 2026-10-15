@@ -174,7 +174,6 @@ impl ViewerRuntime {
       }
       let mut next_full_catalog_refresh = Instant::now();
       let mut next_unwatched_provider_catalog_refresh = Instant::now();
-      let mut next_pending_body_refresh = Instant::now();
       let mut consecutive_catalog_retries = 0_u8;
       let mut consecutive_unwatched_provider_catalog_retries = 0_u8;
       let mut consecutive_changed_file_retries = 0_u8;
@@ -183,7 +182,10 @@ impl ViewerRuntime {
       let mut next_changed_file_retry = None;
       let mut lease = None;
       let mut retry_generation = 0;
-      let mut has_pending_body_jobs = refresh_service.session_index_progress().body.pending_jobs > 0;
+      let mut pending_bodies = PendingBodySchedule::new(
+        refresh_service.session_index_progress().body.pending_jobs > 0,
+        Instant::now(),
+      );
       loop {
         // An explicitly external viewer must not monopolize the native index
         // lease while sourcing all its catalogs from a different server.
@@ -204,6 +206,7 @@ impl ViewerRuntime {
             Ok(Some(owner)) => {
               lease = Some(std::sync::Arc::new(owner));
               next_full_catalog_refresh = Instant::now();
+              pending_bodies.require_initial_catalog();
             }
             Ok(None) => {
               match refresh_service.follow_shared_index() {
@@ -262,8 +265,15 @@ impl ViewerRuntime {
         let catalog_due = now >= next_full_catalog_refresh;
         let unwatched_provider_catalog_due = now >= next_unwatched_provider_catalog_refresh;
         let changed_file_retry_due = next_changed_file_retry.is_some_and(|deadline| now >= deadline);
-        let pending_body_due = has_pending_body_jobs && now >= next_pending_body_refresh;
-        let work = if catalog_due {
+        let pending_body_due = pending_bodies.is_due(now);
+        let full_catalog_requested =
+          catalog_due || matches!(pending_wake.as_ref(), Some(SessionIndexWake::FullCatalog));
+        let body_before_catalog = pending_bodies.should_run_before_catalog(now, full_catalog_requested);
+        let work = if body_before_catalog {
+          // Leave all catalog/file requests queued while this bounded body
+          // pass runs. A busy live source must not starve older histories.
+          None
+        } else if catalog_due {
           // A full pass subsumes any queued single-file checks.
           pending_wake = None;
           delayed_changed_file_wake = None;
@@ -322,6 +332,7 @@ impl ViewerRuntime {
         }
         let full_catalog = matches!(work.as_ref(), Some(SessionIndexWork::FullCatalog));
         let provider_catalog = matches!(work.as_ref(), Some(SessionIndexWork::ProviderCatalog(_)));
+        let body_refresh = work.is_none();
         let service = refresh_service.clone();
         let worker_lease = lease.clone();
         let result = tokio::task::spawn_blocking(move || {
@@ -336,6 +347,11 @@ impl ViewerRuntime {
           }
         })
         .await;
+        if body_refresh {
+          // Failures also receive a cooldown, without changing the catalog
+          // retry deadlines established by their own passes.
+          pending_bodies.finish_body_refresh(Instant::now());
+        }
         match result {
           Ok(Ok(mut refresh)) => {
             // A full catalog is the deliberate recovery path for watcher
@@ -405,10 +421,7 @@ impl ViewerRuntime {
             } else if !full_catalog {
               consecutive_changed_file_retries = 0;
             }
-            has_pending_body_jobs = refresh.has_pending_body_jobs;
-            if has_pending_body_jobs {
-              next_pending_body_refresh = Instant::now() + INDEX_PENDING_BODY_REFRESH_INTERVAL;
-            }
+            pending_bodies.update_pending(refresh.has_pending_body_jobs, Instant::now());
             let needs_retry = session_index_needs_retry(&refresh);
             if refresh.changed {
               if refresh.catalog_refresh_required {
@@ -454,11 +467,9 @@ impl ViewerRuntime {
             let until_changed_file_retry = next_changed_file_retry
               .map(|deadline| deadline.saturating_duration_since(Instant::now()))
               .unwrap_or(until_catalog);
-            let body_or_catalog_delay = if has_pending_body_jobs {
-              INDEX_PENDING_BODY_REFRESH_INTERVAL.min(until_catalog)
-            } else {
-              until_catalog
-            };
+            let body_or_catalog_delay = pending_bodies
+              .delay(Instant::now())
+              .map_or(until_catalog, |body| body.min(until_catalog));
             let delay = body_or_catalog_delay.min(until_changed_file_retry);
             if needs_retry {
               refresh_service.settle_session_index_waiting_to_retry_after_refresh(retry_at_ms_after(delay));
@@ -499,13 +510,16 @@ impl ViewerRuntime {
                 consecutive_unwatched_provider_catalog_retries = 0;
                 next_unwatched_provider_catalog_refresh = Instant::now() + INDEX_UNWATCHED_PROVIDER_CATALOG_INTERVAL;
               }
-            } else {
+            } else if !body_refresh {
               consecutive_changed_file_retries = 0;
               next_full_catalog_refresh = Instant::now() + INDEX_CATALOG_RETRY_INTERVAL;
             }
-            let delay = next_full_catalog_refresh
+            let catalog_delay = next_full_catalog_refresh
               .saturating_duration_since(Instant::now())
               .min(next_unwatched_provider_catalog_refresh.saturating_duration_since(Instant::now()));
+            let delay = pending_bodies
+              .delay(Instant::now())
+              .map_or(catalog_delay, |body| body.min(catalog_delay));
             refresh_service.settle_session_index_worker_error_after_refresh(
               IndexWorkerError::RefreshFailed,
               retry_at_ms_after(delay),
@@ -544,13 +558,16 @@ impl ViewerRuntime {
                 consecutive_unwatched_provider_catalog_retries = 0;
                 next_unwatched_provider_catalog_refresh = Instant::now() + INDEX_UNWATCHED_PROVIDER_CATALOG_INTERVAL;
               }
-            } else {
+            } else if !body_refresh {
               consecutive_changed_file_retries = 0;
               next_full_catalog_refresh = Instant::now() + INDEX_CATALOG_RETRY_INTERVAL;
             }
-            let delay = next_full_catalog_refresh
+            let catalog_delay = next_full_catalog_refresh
               .saturating_duration_since(Instant::now())
               .min(next_unwatched_provider_catalog_refresh.saturating_duration_since(Instant::now()));
+            let delay = pending_bodies
+              .delay(Instant::now())
+              .map_or(catalog_delay, |body| body.min(catalog_delay));
             refresh_service
               .settle_session_index_worker_error_after_refresh(IndexWorkerError::TaskFailed, retry_at_ms_after(delay));
             if let Some(wake) = wait_for_session_index_work(
@@ -602,6 +619,63 @@ const MAX_CONSECUTIVE_CHANGED_FILE_RETRIES: u8 = 3;
 // as filesystem writes so streaming events do not each start an index pass.
 const RELAY_INDEX_QUIET_PERIOD: Duration = Duration::from_millis(200);
 const RELAY_INDEX_MAX_BATCH_AGE: Duration = Duration::from_secs(1);
+
+/// Body work owns its deadline independently of live catalog activity. An
+/// initial or explicit full catalog may go first once, but repeated recovery
+/// requests must then yield a slot to an already overdue body pass.
+struct PendingBodySchedule {
+  pending: bool,
+  next_refresh: Instant,
+  yielded_to_catalog: bool,
+}
+
+impl PendingBodySchedule {
+  fn new(pending: bool, now: Instant) -> Self {
+    Self {
+      pending,
+      next_refresh: now,
+      yielded_to_catalog: false,
+    }
+  }
+
+  fn is_due(&self, now: Instant) -> bool {
+    self.pending && now >= self.next_refresh
+  }
+
+  fn require_initial_catalog(&mut self) {
+    self.yielded_to_catalog = false;
+  }
+
+  fn should_run_before_catalog(&mut self, now: Instant, full_catalog_requested: bool) -> bool {
+    if !self.is_due(now) {
+      return false;
+    }
+    if full_catalog_requested && !self.yielded_to_catalog {
+      self.yielded_to_catalog = true;
+      return false;
+    }
+    true
+  }
+
+  fn finish_body_refresh(&mut self, now: Instant) {
+    self.next_refresh = now + INDEX_PENDING_BODY_REFRESH_INTERVAL;
+    self.yielded_to_catalog = false;
+  }
+
+  fn update_pending(&mut self, pending: bool, now: Instant) {
+    if pending && !self.pending {
+      self.next_refresh = now + INDEX_PENDING_BODY_REFRESH_INTERVAL;
+    }
+    if !pending {
+      self.yielded_to_catalog = false;
+    }
+    self.pending = pending;
+  }
+
+  fn delay(&self, now: Instant) -> Option<Duration> {
+    self.pending.then(|| self.next_refresh.saturating_duration_since(now))
+  }
+}
 
 fn retry_at_ms_after(delay: Duration) -> Option<i64> {
   SystemTime::now()
@@ -887,15 +961,88 @@ mod tests {
   use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
   };
 
   use super::{
-    IndexRefresh, SessionIndexWake, full_catalog_needs_prompt_retry, index_wake_from_relay,
-    index_wake_from_watch_request, merge_session_index_wake, session_index_needs_retry, session_index_path_for_home,
-    wait_for_session_index_work, watcher_wake_after_backend_failure,
+    INDEX_PENDING_BODY_REFRESH_INTERVAL, IndexRefresh, PendingBodySchedule, SessionIndexWake,
+    full_catalog_needs_prompt_retry, index_wake_from_relay, index_wake_from_watch_request, merge_session_index_wake,
+    session_index_needs_retry, session_index_path_for_home, wait_for_session_index_work,
+    watcher_wake_after_backend_failure,
   };
   use crate::{model::ViewerProvider, watcher::WatchRequest};
+
+  #[test]
+  fn live_catalog_refreshes_do_not_postpone_queued_bodies() {
+    let started = Instant::now();
+    let mut schedule = PendingBodySchedule::new(false, started);
+    schedule.update_pending(true, started);
+    for seconds in 1..5 {
+      let now = started + Duration::from_secs(seconds);
+      schedule.update_pending(true, now);
+      assert!(!schedule.should_run_before_catalog(now, false));
+      assert_eq!(schedule.delay(now), Some(Duration::from_secs(5 - seconds)));
+    }
+    let due = started + INDEX_PENDING_BODY_REFRESH_INTERVAL;
+    schedule.update_pending(true, due);
+    assert!(schedule.should_run_before_catalog(due, false));
+  }
+
+  #[test]
+  fn initial_catalog_precedes_bodies_but_repeated_full_catalogs_must_yield() {
+    let started = Instant::now();
+    let mut schedule = PendingBodySchedule::new(true, started);
+    assert!(!schedule.should_run_before_catalog(started, true));
+
+    // Even a long initial scan leaves the already queued body pass due.
+    let catalog_finished = started + Duration::from_secs(20);
+    schedule.update_pending(true, catalog_finished);
+    assert!(schedule.should_run_before_catalog(catalog_finished, true));
+
+    schedule.finish_body_refresh(catalog_finished);
+    assert!(!schedule.should_run_before_catalog(catalog_finished, true));
+    let due = catalog_finished + INDEX_PENDING_BODY_REFRESH_INTERVAL;
+    assert!(!schedule.should_run_before_catalog(due, true));
+    assert!(schedule.should_run_before_catalog(due, true));
+
+    // Taking over the index lease always reconciles the catalog first,
+    // including after this runtime previously yielded a recovery slot.
+    schedule.require_initial_catalog();
+    assert!(!schedule.should_run_before_catalog(due, true));
+  }
+
+  #[test]
+  fn failed_body_attempts_keep_their_cooldown_during_catalog_retries() {
+    let started = Instant::now();
+    let mut schedule = PendingBodySchedule::new(true, started);
+    assert!(schedule.should_run_before_catalog(started, false));
+    schedule.finish_body_refresh(started);
+
+    for seconds in 1..5 {
+      let now = started + Duration::from_secs(seconds);
+      schedule.update_pending(true, now);
+      assert!(!schedule.should_run_before_catalog(now, true));
+      assert_eq!(schedule.delay(now), Some(Duration::from_secs(5 - seconds)));
+    }
+    let due = started + INDEX_PENDING_BODY_REFRESH_INTERVAL;
+    assert!(schedule.is_due(due));
+  }
+
+  #[test]
+  fn newly_discovered_work_gets_its_own_body_deadline() {
+    let started = Instant::now();
+    let mut schedule = PendingBodySchedule::new(true, started);
+    assert!(!schedule.should_run_before_catalog(started, true));
+    schedule.update_pending(false, started);
+    assert_eq!(schedule.delay(started), None);
+
+    let discovered = started + Duration::from_secs(30);
+    schedule.update_pending(true, discovered);
+    assert_eq!(schedule.delay(discovered), Some(INDEX_PENDING_BODY_REFRESH_INTERVAL));
+    let due = discovered + INDEX_PENDING_BODY_REFRESH_INTERVAL;
+    assert!(!schedule.should_run_before_catalog(due, true));
+    assert!(schedule.should_run_before_catalog(due, true));
+  }
 
   #[tokio::test]
   async fn session_updates_do_not_repeat_status_but_errors_and_recovery_do() {
