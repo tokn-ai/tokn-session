@@ -524,10 +524,10 @@ fn body_queue_progress(jobs: &[PendingBodyJob]) -> (usize, usize, Vec<ProviderBo
   (pending_jobs, failed_jobs, providers)
 }
 
-/// Builds a durable per-provider body-progress summary from staged source
-/// aggregates. The v3 cursor generation keeps the fraction stable across
-/// bounded batches and process restarts without loading or sorting historical
-/// session metadata.
+/// Builds a durable per-provider body-progress summary from current source
+/// aggregates. Present baselined rows remain complete after a source leaves
+/// the pending queue; cursor generations are concurrency tokens, not counts
+/// of sessions that still belong to the current catalog.
 fn indexed_body_queue_progress(counts: &[StagedSessionBaselineSourceCount]) -> (usize, Vec<ProviderBody>) {
   let mut providers = ViewerProvider::ALL
     .into_iter()
@@ -548,14 +548,15 @@ fn indexed_body_queue_progress(counts: &[StagedSessionBaselineSourceCount]) -> (
       // longer supports. Its scheduler would ignore the row too.
       continue;
     };
-    let completed_jobs = staged_body_cursor_parts(&count.source_cursor, INDEX_PENDING_BODY_CURSOR_PREFIX)
-      .and_then(|(generation, _)| usize::try_from(generation).ok())
-      // Legacy staged cursors have no durable completion generation. They are
-      // only retained for an upgrade path, so use their durable body state as
-      // the conservative fallback.
-      .unwrap_or_else(|| count.present_sessions.saturating_sub(count.pending_sessions));
+    let completed_jobs = count.present_sessions.saturating_sub(count.pending_sessions);
+    // An inconsistent completed source can retain an unbaselined row until
+    // the next catalog repairs it. Only staged cursors can produce jobs, so
+    // do not announce that row as queued before the scheduler can load it.
+    let pending_jobs = pending_body_raw_cursor(&count.source_cursor)
+      .map(|_| count.pending_sessions)
+      .unwrap_or_default();
     provider.completed_jobs = provider.completed_jobs.saturating_add(completed_jobs);
-    provider.pending_jobs = provider.pending_jobs.saturating_add(count.pending_sessions);
+    provider.pending_jobs = provider.pending_jobs.saturating_add(pending_jobs);
     provider.total_jobs = provider.completed_jobs.saturating_add(provider.pending_jobs);
   }
   let pending_jobs = providers.iter().map(|provider| provider.pending_jobs).sum();
@@ -981,7 +982,12 @@ impl ViewerService {
   fn staged_body_progress_counts(&self) -> Result<Vec<StagedSessionBaselineSourceCount>, String> {
     self
       .session_index
-      .staged_session_baseline_source_counts(&[INDEX_PENDING_BODY_CURSOR_PREFIX, LEGACY_PENDING_BODY_CURSOR_PREFIX])
+      .staged_session_baseline_source_counts(&[
+        INDEX_PENDING_BODY_CURSOR_PREFIX,
+        INDEX_COMPLETED_BODY_CURSOR_PREFIX,
+        LEGACY_PENDING_BODY_CURSOR_PREFIX,
+        LEGACY_COMPLETED_BODY_CURSOR_PREFIX,
+      ])
       .map(|counts| {
         counts
           .into_iter()
@@ -1099,10 +1105,12 @@ impl ViewerService {
     });
   }
 
-  fn record_body_progress_stale(&self, job: &PendingBodyJob) {
+  fn record_body_progress_stale(&self) {
     self.index_progress.update(|progress| {
       progress.body.stale_in_run = progress.body.stale_in_run.saturating_add(1);
-      record_body_progress_handled(&mut progress.body, job);
+      // A discarded attempt never committed its baseline. Keep the durable
+      // fraction unchanged until reconciliation observes the current source
+      // or another process's successful completion.
     });
   }
 
@@ -1667,8 +1675,8 @@ impl ViewerService {
   /// Commits only provider catalogs and returns before any session body is
   /// loaded. The Tauri scheduler uses this path on its normal cadence so a
   /// cold index can notify the sidebar as soon as each complete catalog
-  /// sentinel is durable; body reconciliation follows in later one-second
-  /// passes.
+  /// sentinel is durable; body reconciliation follows in later bounded
+  /// passes on the scheduler's five-second cadence.
   pub(crate) fn refresh_session_catalog(&self) -> Result<IndexRefresh, String> {
     let _refresh_gate = self
       .index_refresh_gate
@@ -1840,7 +1848,7 @@ impl ViewerService {
         Ok(BodyJobRefresh::Stale) => {
           processed += 1;
           self.clear_failed_body_job(&job);
-          self.record_body_progress_stale(&job);
+          self.record_body_progress_stale();
           // A stale body job commonly means another viewer process committed
           // the same source while this process was loading it. Request a
           // sidebar reread so this window observes that durable winner's
@@ -1871,7 +1879,7 @@ impl ViewerService {
       }
     }
     // A catalog failure skips that provider for this full pass, but its prior
-    // staged work still keeps the one-second body scheduler alive. The next
+    // staged work still keeps the bounded body scheduler alive. The next
     // body-only pass can make progress without waiting for another catalog.
     let remaining_jobs = self.pending_body_jobs(&HashSet::new())?;
     self.replace_body_progress_queue(&remaining_jobs)?;
@@ -6486,7 +6494,7 @@ mod tests {
     assert_eq!(
       repository.header_calls.load(Ordering::SeqCst),
       ViewerProvider::ALL.len() * 2,
-      "a one-second body-only pass must not rediscover the catalog"
+      "a body-only pass must not rediscover the catalog"
     );
     assert!(
       index
@@ -7925,9 +7933,8 @@ mod tests {
     );
     assert_eq!(first_body_batch.body.providers[0].pending_jobs, 1);
 
-    // The staged v3 cursor stores the completed generation. A new viewer
-    // process must therefore retain this exact bounded-batch fraction without
-    // rereading provider headers or bodies.
+    // Durable baseline rows preserve this exact bounded-batch fraction in a
+    // new viewer without rereading provider headers or bodies.
     let header_calls_before_reopen = repository.header_calls.load(Ordering::SeqCst);
     let load_calls_before_reopen = repository.load_calls.load(Ordering::SeqCst);
     let reopened = ViewerService::new_with_index(repository.clone(), Arc::clone(&index));
@@ -7971,6 +7978,171 @@ mod tests {
       INDEX_BODY_SCAN_BATCH_SIZE + 1
     );
     assert_eq!(completed_progress.body.providers[0].pending_jobs, 0);
+
+    completed_reopen
+      .refresh_session_catalog()
+      .expect("an unchanged completed catalog should refresh");
+    assert_eq!(
+      completed_reopen.session_index_progress().body.providers,
+      complete.body.providers,
+      "completed sources must stay in the totals after their cursor leaves the staged queue"
+    );
+    let cataloged_reopen = ViewerService::new_with_index(repository.clone(), Arc::clone(&index));
+    assert_eq!(
+      cataloged_reopen.session_index_progress().body.providers,
+      complete.body.providers,
+      "completed catalog totals must survive a second process reopening the index"
+    );
+    assert_eq!(
+      repository.load_calls.load(Ordering::SeqCst),
+      INDEX_BODY_SCAN_BATCH_SIZE + 1
+    );
+  }
+
+  #[test]
+  fn stale_body_attempts_do_not_publish_false_progress() {
+    let directory = tempfile::tempdir().expect("temporary directory should exist");
+    let path = directory.path().join("stale-progress.jsonl");
+    std::fs::write(&path, "initial source").expect("fixture source should be written");
+    let repository = indexing_repository(vec![IndexedLoadSpec {
+      header: indexed_header(path.clone(), "stale-progress", None),
+      messages: vec![indexed_message(Role::User, MessageDelivery::Unspecified)],
+    }]);
+    let service = ViewerService::new_with_index(
+      repository.clone(),
+      Arc::new(SessionIndex::open_in_memory().expect("test index should open")),
+    );
+    service
+      .refresh_session_catalog()
+      .expect("catalog should stage the body");
+    let jobs = service
+      .pending_body_jobs(&HashSet::new())
+      .expect("body should be queued");
+    let before = service.session_index_progress().body.providers;
+    std::fs::write(&path, "a new source revision before the queued body could be loaded")
+      .expect("fixture source should change");
+
+    assert!(matches!(
+      service
+        .refresh_pending_body_job(&jobs[0])
+        .expect("a changed source should stay quiet"),
+      BodyJobRefresh::Stale
+    ));
+    service.record_body_progress_stale();
+    let during = service.session_index_progress();
+    assert_eq!(during.body.stale_in_run, 1);
+    assert_eq!(during.body.completed_in_run, 0);
+    assert_eq!(
+      during.body.providers, before,
+      "even the transient published fraction must stay durable"
+    );
+    assert_eq!(during.body.pending_jobs, 1);
+    assert_eq!(repository.load_calls.load(Ordering::SeqCst), 0);
+
+    service
+      .replace_body_progress_queue(&jobs)
+      .expect("durable progress should reconcile");
+    assert_eq!(service.session_index_progress().body.providers, before);
+  }
+
+  #[test]
+  fn body_progress_uses_current_baselines_for_current_and_legacy_cursor_formats() {
+    for (cursor, expected) in [
+      (format!("{INDEX_PENDING_BODY_CURSOR_PREFIX}99.raw"), (2, 1, 3)),
+      (format!("{LEGACY_PENDING_BODY_CURSOR_PREFIX}raw"), (2, 1, 3)),
+      (completed_body_cursor("raw"), (2, 0, 2)),
+      (format!("{LEGACY_COMPLETED_BODY_CURSOR_PREFIX}raw"), (2, 0, 2)),
+    ] {
+      // Cursor generations can exceed the current inventory after removals
+      // or activity upgrades. A completed cursor with an unbaselined row is
+      // repaired by cataloging before that row can join the pending queue.
+      let counts = [StagedSessionBaselineSourceCount {
+        provider: ViewerProvider::Codex.as_str().to_string(),
+        source_cursor: cursor.clone(),
+        present_sessions: 3,
+        pending_sessions: 1,
+      }];
+      let (pending_jobs, providers) = indexed_body_queue_progress(&counts);
+      let codex = &providers[0];
+      assert_eq!(
+        (codex.completed_jobs, codex.pending_jobs, codex.total_jobs),
+        expected,
+        "current baseline rows must define the fraction for {cursor}"
+      );
+      assert_eq!(pending_jobs, expected.1);
+    }
+  }
+
+  #[test]
+  fn shared_source_progress_counts_current_baselines_after_membership_changes() {
+    let directory = tempfile::tempdir().expect("temporary directory should exist");
+    let path = directory.path().join("opencode.db");
+    std::fs::write(&path, "fixture shared database").expect("fixture source should be written");
+    let specs = ["removed", "retained"]
+      .into_iter()
+      .map(|id| IndexedLoadSpec {
+        header: indexed_header(path.clone(), id, None),
+        messages: vec![indexed_message(Role::User, MessageDelivery::Unspecified)],
+      })
+      .collect();
+    let repository = indexing_repository_for(ViewerProvider::OpenCode, specs);
+    let index = Arc::new(SessionIndex::open_in_memory().expect("test index should open"));
+    let service = ViewerService::new_with_index(repository.clone(), Arc::clone(&index));
+    service
+      .refresh_session_index()
+      .expect("original shared rows should complete");
+    service
+      .refresh_session_catalog()
+      .expect("completed cursor should leave the staged queue");
+
+    // Membership/presentation can be refined without changing the source's
+    // opaque revision. The new source generation starts at zero, while the
+    // retained row is already complete and the removed row is tombstoned.
+    let added = IndexedLoadSpec {
+      header: indexed_header(path.clone(), "added", None),
+      messages: vec![indexed_message(Role::User, MessageDelivery::Unspecified)],
+    };
+    repository.listings.lock().unwrap().insert(
+      ViewerProvider::OpenCode,
+      vec![indexed_header(path.clone(), "retained", None), added.header.clone()],
+    );
+    repository
+      .loads
+      .lock()
+      .unwrap()
+      .insert(locator_for_header(ViewerProvider::OpenCode, &added.header), Ok(added));
+    service
+      .refresh_session_catalog()
+      .expect("shared membership should refresh");
+    let progress = service.session_index_progress();
+    let shared = &progress.body.providers[2];
+    assert_eq!(shared.provider, ViewerProvider::OpenCode);
+    assert_eq!(
+      (shared.completed_jobs, shared.pending_jobs, shared.total_jobs),
+      (1, 1, 2)
+    );
+    let source_key = index_source_key_for_path(ViewerProvider::OpenCode, &path).unwrap();
+    let source = index.source_state(&source_key).unwrap().unwrap();
+    assert!(
+      source
+        .cursor
+        .starts_with(&format!("{INDEX_PENDING_BODY_CURSOR_PREFIX}0."))
+    );
+    let removed_key = IndexedSessionKey::new(source_key.provider, source_key.source_key, "removed");
+    assert!(!index.session(&removed_key).unwrap().unwrap().present);
+
+    let reopened = ViewerService::new_with_index(repository, Arc::clone(&index));
+    assert_eq!(
+      reopened.session_index_progress().body.providers,
+      progress.body.providers
+    );
+    reopened
+      .refresh_pending_session_index()
+      .expect("new shared row should complete");
+    let completed = reopened.session_index_progress();
+    assert_eq!(completed.body.providers[2].completed_jobs, 2);
+    assert_eq!(completed.body.providers[2].pending_jobs, 0);
+    assert_eq!(completed.body.providers[2].total_jobs, 2);
   }
 
   #[test]
