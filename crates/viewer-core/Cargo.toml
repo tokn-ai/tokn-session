@@ -25,6 +25,7 @@ tokn-session-opencode.workspace = true
 tokn-session-client.workspace = true
 tokn-session-core.workspace = true
 tokn-session-index.workspace = true
+tokn-session-storage.workspace = true
 tokn-session-render.workspace = true
 tokn-session-pi.workspace = true
 tokn-session-dsh.workspace = true

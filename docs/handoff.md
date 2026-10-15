@@ -4,6 +4,16 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
+Native storage defaults share `~/.tokn/sessions` through the storage crate:
+the index stays in place, Hub state moves under `hub`, the desktop client keeps
+its separate identity in `hub/desktop-client`, and native viewer preferences,
+machine bookmarks, and reader settings live under `viewer`. Desktop hydration
+precedes workspace startup and browser storage remains origin-local. Legacy
+Hub bundles require explicit offline migration; complete bundle relocation and
+compatibility aliases preserve identity and ownership locks. Existing external
+hosting remains inspectable/stoppable while migration is pending. See
+[native storage](native-storage.md) for migration and override behavior.
+
 Settings opens from Machines or the viewer status bar without unmounting the
 conversation or its subscriptions. A bounded versioned viewer-preference store
 migrates the previous grouping/delivery keys and synchronizes quick controls,
@@ -17,7 +27,7 @@ survive live status refreshes; delayed requests stay bound to their original
 machine. Hosting/pairing secrets load only through the existing explicit setup.
 See [settings ownership](viewer-settings.md) for persistence and capabilities.
 
-Version 0.1.1 is being prepared for all 23 publishable crates; the desktop stays
+Version 0.1.1 is being prepared for all 24 publishable crates; the desktop stays
 `publish = false`. Registry dependency versions, package-local docs/licenses and
 test fixtures, and Rust 1.95 declarations are in place. Codex protocol preserves
 the published 0.1.0 enum/struct shapes through additive metadata accessors.
@@ -237,7 +247,7 @@ Unknown services stay manual. Definition, loaded arguments, and the complete lau
 shape are verified before either service changes; partial failures publish current status. Status checks inspect ownership locks and the saved Hub for
 older connectors; the Hub’s explicit 502 “Host is offline” response is offline,
 while unrelated gateway failures remain unavailable. Visible
-clients refresh status every 15 seconds and on focus. It reuses `~/.tokn/hub` trust, offers Hub/name and
+clients refresh status every 15 seconds and on focus. It reuses `~/.tokn/sessions/hub` trust, offers Hub/name and
 remote-input settings, Start/Stop, status events, and an on-demand pairing
 reference/QR/URI/current-code display. Secrets stay in the local command response
 and are cleared from display when hidden. A token-protected ephemeral loopback
@@ -443,7 +453,7 @@ External snapshot server retains its independent catalog and presentation cache
 for explicitly configured provider roots.
 
 Viewer mode (`automatic`/`external`/`local`), external endpoint, and optional
-native inclusion persist in app config `relay.json`. Missing settings default
+native inclusion persist in `~/.tokn/sessions/viewer/relay.json`. Missing settings default
 to Automatic with native off; legacy enabled connections migrate to External,
 explicit disabled choices to Local. Automatic uses provider-owned root
 resolution and environment overrides. Codex's explicitly resolved active/archive

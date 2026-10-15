@@ -223,7 +223,7 @@ never stopped. See [session update delivery](viewer-session-updates.md) for the
 viewer contract and cache ownership.
 
 The panel persists `mode` (`automatic`, `external`, or `local`), external
-`endpoint`, and `include_native` in app config `relay.json`. Native is off by
+`endpoint`, and `include_native` in `~/.tokn/sessions/viewer/relay.json`. Native is off by
 default and optional for Automatic; External uses the service's capability.
 Legacy `enabled: true` settings migrate to External with the same endpoint;
 explicitly disabled settings migrate to Local. Missing settings use Automatic.

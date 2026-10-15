@@ -148,22 +148,40 @@ mod macos {
     let Some(home) = root.parent().and_then(Path::parent).and_then(Path::parent) else {
       return false;
     };
-    let token = format!(
-      "export TOKN_VIEWER_TOKEN=\"$(cat {}/.tokn/hub/viewer.token)\"",
-      home.display()
-    );
+    let paths = tokn_session_storage::SessionPaths::from_home(home);
+    let tokens = [paths.legacy_hub_dir(), paths.hub_dir()].map(|state| {
+      format!(
+        "export TOKN_VIEWER_TOKEN=\"$(cat {})\"",
+        state.join("viewer.token").display()
+      )
+    });
+    // The deployed legacy command omitted --state-dir. New launchers may pin
+    // either recognized directory explicitly; all other shell/argv changes
+    // remain unrecognized so the app cannot stop an unrelated service.
+    let mut commands = vec![expected.clone()];
+    if kind == Kind::Connector {
+      for state in [paths.legacy_hub_dir(), paths.hub_dir()] {
+        commands.push(format!(
+          "{} --state-dir {} ;;",
+          expected.trim_end_matches(" ;;"),
+          state.display()
+        ));
+      }
+    }
     let lines: Vec<_> = script.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     lines.len() == 8
       && lines[0] == "#!/bin/sh"
       && lines[1] == "set -eu"
-      && lines[2] == token
+      && tokens.iter().any(|token| lines[2] == token)
       && lines[3] == "case \"${1-}\" in"
       && lines[6] == "*) exit 2 ;;"
       && lines[7] == "esac"
-      && lines[match kind {
-        Kind::Api => 4,
-        Kind::Connector => 5,
-      }] == expected
+      && commands.iter().any(|expected| {
+        lines[match kind {
+          Kind::Api => 4,
+          Kind::Connector => 5,
+        }] == expected
+      })
   }
   fn not_loaded(output: &std::process::Output, label: &str) -> bool {
     let error = String::from_utf8_lossy(&output.stderr);
@@ -233,7 +251,8 @@ mod macos {
   }
   async fn services(state_dir: &Path, profile: Option<&HostProfile>) -> Result<Vec<Service>, String> {
     let home = dirs::home_dir().ok_or("Cannot resolve service directory")?;
-    if state_dir != home.join(".tokn/hub") {
+    let paths = tokn_session_storage::SessionPaths::from_home(&home);
+    if state_dir != paths.legacy_hub_dir() && state_dir != paths.hub_dir() {
       return Ok(Vec::new());
     }
     let (connector, api) = tokio::join!(
@@ -391,6 +410,28 @@ mod macos {
         assert!(!matches_definition(&definition, runner, other));
         assert!(!matches_loaded(&text, plist, runner, other));
       }
+    }
+    #[test]
+    fn recognized_storage_paths_support_both_launcher_generations() {
+      let root = Path::new("/test/.local/share/tokn-host");
+      for token in ["/test/.tokn/hub", "/test/.tokn/sessions/hub"] {
+        let original = launcher().replace("/test/.tokn/hub/viewer.token", &format!("{token}/viewer.token"));
+        for state in [None, Some("/test/.tokn/hub"), Some("/test/.tokn/sessions/hub")] {
+          let script = match state {
+            Some(state) => original.replace("--allow-control ;;", &format!("--allow-control --state-dir {state} ;;")),
+            None => original.clone(),
+          };
+          for kind in [Kind::Api, Kind::Connector] {
+            assert!(matches_launcher(&script, root, kind, Some(&profile())));
+          }
+        }
+      }
+      assert!(!matches_launcher(
+        &launcher().replace("/test/.tokn/hub/viewer.token", "/other/viewer.token"),
+        root,
+        Kind::Api,
+        None
+      ));
     }
     fn service(kind: Kind) -> Service {
       Service {

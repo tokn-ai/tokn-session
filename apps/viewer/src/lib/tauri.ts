@@ -27,6 +27,11 @@ import type {
   TranslationStatus,
   TranslateTextRequest,
   TranslateTextResponse,
+  DevicePreferencesSnapshot,
+  InitializeDevicePreferencesRequest,
+  MachinePreferences,
+  NativePreferenceUpdate,
+  ViewerPreferences,
 } from "./types";
 
 export function getSessionInputStatus(request: SessionInputStatusRequest): Promise<SessionInputStatus> {
@@ -37,6 +42,36 @@ export function getSessionInputStatus(request: SessionInputStatusRequest): Promi
 export async function initializeLocalViewer(): Promise<void> {
   if (!isDesktop()) throw new Error("This machine is available in the desktop app.");
   await (await import("@tauri-apps/api/core")).invoke<void>("initialize_local_viewer");
+}
+
+async function nativeDeviceCommand<T>(command: string, payload: Record<string, unknown>): Promise<T> {
+  if (!isDesktop()) throw new Error("Native device preferences are available in the desktop app.");
+  return (await import("@tauri-apps/api/core")).invoke<T>(command, payload);
+}
+
+export function initializeDevicePreferences(request: InitializeDevicePreferencesRequest): Promise<DevicePreferencesSnapshot> {
+  return nativeDeviceCommand("initialize_device_preferences", { request });
+}
+
+export function writeViewerPreferences(preferences: ViewerPreferences, write_id: string): Promise<NativePreferenceUpdate<ViewerPreferences>> {
+  return nativeDeviceCommand("write_viewer_preferences", { preferences, write_id });
+}
+
+export function writeMachinePreferences(preferences: MachinePreferences, write_id: string): Promise<NativePreferenceUpdate<MachinePreferences>> {
+  return nativeDeviceCommand("write_machine_preferences", { preferences, write_id });
+}
+
+async function nativeDeviceListener<T>(name: string, handler: (preferences: T) => void): Promise<UnlistenFn> {
+  if (!isDesktop()) throw new Error("Native device preferences are available in the desktop app.");
+  return (await import("@tauri-apps/api/event")).listen<T>(name, (event) => handler(event.payload));
+}
+
+export function listenForViewerPreferences(handler: (preferences: NativePreferenceUpdate<ViewerPreferences>) => void): Promise<UnlistenFn> {
+  return nativeDeviceListener("viewer-preferences-changed", handler);
+}
+
+export function listenForMachinePreferences(handler: (preferences: NativePreferenceUpdate<MachinePreferences>) => void): Promise<UnlistenFn> {
+  return nativeDeviceListener("machine-preferences-changed", handler);
 }
 
 export function submitSessionInput(request: SubmitSessionInputRequest): Promise<SubmitSessionInputResponse> {

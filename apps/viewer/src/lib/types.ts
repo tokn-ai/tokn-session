@@ -38,6 +38,26 @@ export interface ViewerPreferences {
   show_lifecycle: boolean;
 }
 
+/** Native viewing-device configuration, independent of the selected machine. */
+export interface DevicePreferencesSnapshot {
+  version: 1;
+  revision: number;
+  viewer_preferences: ViewerPreferences;
+  machine_preferences: MachinePreferences;
+}
+
+/** Ordered updates within this desktop app, shared across its native windows. */
+export interface NativePreferenceUpdate<T> {
+  revision: number;
+  write_id: string;
+  preferences: T;
+}
+
+export interface InitializeDevicePreferencesRequest {
+  viewer_preferences: ViewerPreferences | null;
+  machine_preferences: MachinePreferences | null;
+}
+
 export interface SavedHubHost {
   host_id: string;
   host_public_key: string;

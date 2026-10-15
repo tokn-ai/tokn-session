@@ -91,8 +91,15 @@ pub fn prepare_host(options: HostOptions) -> Result<PreparedHost, String> {
   let key_file = options.state_dir.join("host-enrollment.key");
   let noise_key_file = options.state_dir.join("host-noise.key");
   let state_file = options.state_dir.join("host-access.json");
-  if previous.is_none() && [&key_file, &noise_key_file].iter().any(|path| path.exists()) {
-    return Err("Host configuration is missing for existing keys; restore host.json before reconnecting".into());
+  if previous.is_none() {
+    for path in [&key_file, &noise_key_file, &state_file] {
+      if path.try_exists().map_err(|error| error.to_string())? {
+        return Err(
+          "Host configuration is missing for existing identity or pairing state; restore host.json before reconnecting"
+            .into(),
+        );
+      }
+    }
   }
   let config = ConnectorConfig {
     hub_url: hub,
@@ -230,6 +237,30 @@ pub async fn existing_host_online(profile: &HostProfile) -> Result<bool, String>
 mod tests {
   use super::*;
   use axum::{Router, extract::WebSocketUpgrade, http::StatusCode, response::IntoResponse, routing::get};
+
+  #[test]
+  fn orphan_pairing_state_cannot_start_with_new_host_keys() {
+    let directory = tempfile::tempdir().unwrap();
+    let access = directory.path().join("host-access.json");
+    onboarding::initialize_host_access(&access, &TotpSecret::generate()).unwrap();
+    let original = fs::read(&access).unwrap();
+    let result = prepare_host(HostOptions {
+      hub: Some(Url::parse("https://hub.example").unwrap()),
+      name: None,
+      viewer_url: None,
+      passkey_origin: None,
+      state_dir: directory.path().to_owned(),
+      totp_secret_file: None,
+      viewer_token: None,
+      allow_control: None,
+      insecure_loopback: false,
+      ice_servers: None,
+    });
+    assert!(result.err().unwrap().contains("restore host.json"));
+    assert_eq!(fs::read(&access).unwrap(), original);
+    assert!(!directory.path().join("host-enrollment.key").exists());
+    assert!(!directory.path().join("host-noise.key").exists());
+  }
 
   #[tokio::test]
   async fn hub_offline_response_is_distinct_from_gateway_failure() {

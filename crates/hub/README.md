@@ -14,6 +14,19 @@ pairing, and authorization modules as a Rust library. `connect` publishes a
 host backed by a separately running `tokn-viewer-api`; `client` opens a paired
 host through a local browser endpoint.
 
+Native defaults use `~/.tokn/sessions/hub`; desktop client identities remain
+separate under `hub/desktop-client`. Explicit state/key paths still take
+precedence. For an existing `~/.tokn/hub` or desktop client bundle, first stop
+Hub servers, connectors, desktop apps, and their background launchers, then run:
+
+```sh
+tokn-session-hub migrate-storage --offline
+```
+
+On Unix this moves complete private bundles and leaves compatibility aliases,
+so old launchers reach the same identities and connector locks. Conflicting
+stores are never merged. Retry the same command after an interrupted migration.
+
 Browser assets are built separately and are not embedded in the crate.
 Use `serve --web-root /path/to/viewer/dist` to serve a compiled viewer, or
 `serve --api-only` to run without the UI. `client --web-root` selects its local

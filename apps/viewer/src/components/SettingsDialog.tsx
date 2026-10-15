@@ -5,6 +5,7 @@ import { useMachineSettings } from "../lib/useMachineSettings";
 import { useViewerPreferences } from "../lib/viewerPreferences";
 import { SettingsPage } from "../pages/SettingsPage";
 import { MachineHostingSettings } from "./MachineHostingSettings";
+import { NativePreferenceSaveNotice } from "./NativePreferenceSaveNotice";
 import "./SettingsDialog.css";
 
 interface SettingsDialogProps {
@@ -45,5 +46,6 @@ export function SettingsDialog({ remote, machine_label, machine_key, connected =
         {machine.settings?.hosting.reason ?? "Hosting management is unavailable through this connection. Open this machine’s desktop app to manage hosting."}
       </p>}</div>}
     />
+    <NativePreferenceSaveNotice placement="settings" />
   </dialog>, document.body);
 }

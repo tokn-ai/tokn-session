@@ -189,16 +189,27 @@ fn load_key(path: &Path) -> Result<SigningKey, String> {
       let mut data = Vec::new();
       file.take(4097).read_to_end(&mut data).map_err(|e| e.to_string())?;
       let stored: KeyFile = serde_json::from_slice(&data).map_err(|_| "Invalid host key file")?;
-      if stored.version != protocol::VERSION {
-        return Err("Unsupported host key file version".into());
-      }
-      let bytes: [u8; 32] = protocol::decode(&stored.secret_key, 32)?
-        .try_into()
-        .map_err(|_| "Invalid host private key")?;
-      Ok(SigningKey::from_bytes(&bytes))
+      decode_key(stored)
     }
     Err(error) => Err(format!("Could not create host key: {error}")),
   }
+}
+
+fn decode_key(stored: KeyFile) -> Result<SigningKey, String> {
+  if stored.version != protocol::VERSION {
+    return Err("Unsupported host key file version".into());
+  }
+  let bytes: [u8; 32] = protocol::decode(&stored.secret_key, 32)?
+    .try_into()
+    .map_err(|_| "Invalid host private key")?;
+  Ok(SigningKey::from_bytes(&bytes))
+}
+
+/// Validate an enrollment/signing identity without creating a missing key.
+pub fn validate_existing_identity(path: &Path) -> Result<(), String> {
+  let stored = tokn_session_storage::read_private_json::<KeyFile>(path, 4096)?
+    .ok_or_else(|| format!("Saved host identity is missing: {}", path.display()))?;
+  decode_key(stored).map(|_| ())
 }
 
 pub fn initialize_identity(path: &Path) -> Result<(), String> {

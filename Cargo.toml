@@ -14,6 +14,7 @@ members = [
   "crates/dsh-protocol",
   "crates/dsh",
   "crates/session-index",
+  "crates/storage",
   "crates/client",
   "crates/render",
   "crates/cli",
@@ -63,5 +64,6 @@ tokn-session-workbuddy = { version = "0.1.1", path = "crates/workbuddy" }
 tokn-session-relay = { version = "0.1.1", path = "crates/relay" }
 tokn-session-render = { version = "0.1.1", path = "crates/render" }
 tokn-session-index = { version = "0.1.1", path = "crates/session-index" }
+tokn-session-storage = { version = "0.1.1", path = "crates/storage" }
 tokn-viewer-core = { version = "0.1.1", path = "crates/viewer-core" }
 zeromq = "0.6.0"
