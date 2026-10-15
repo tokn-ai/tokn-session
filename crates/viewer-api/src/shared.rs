@@ -497,6 +497,7 @@ mod tests {
       "submit_session_question_answers",
       "retry_session_index",
       "configure_relay",
+      "get_machine_settings",
       "shared",
     ] {
       assert!(prepare(&mut request(command, json!({}))).is_err());

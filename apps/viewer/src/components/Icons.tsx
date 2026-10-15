@@ -120,6 +120,13 @@ export function BellIcon(props: IconProps) {
   );
 }
 
+export function SettingsIcon(props: IconProps) {
+  return <IconBase {...props}>
+    <path d="M9.5 3h5l.5 2.2 2 .9 2-1.1 2.5 4.2-1.6 1.6v2.4l1.6 1.6-2.5 4.2-2-1.1-2 .9-.5 2.2h-5L9 18.8l-2-.9-2 1.1-2.5-4.2L4.1 13.2v-2.4L2.5 9.2 5 5l2 1.1 2-.9Z" stroke="currentColor" strokeLinejoin="round" strokeWidth="1.5" />
+    <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.5" />
+  </IconBase>;
+}
+
 export function MoreIcon(props: IconProps) {
   return (
     <IconBase {...props}>

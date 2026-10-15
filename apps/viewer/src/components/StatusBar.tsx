@@ -1,7 +1,7 @@
-import { useCallback, useRef, useState, type ReactNode } from "react";
+import { useCallback, useRef, useState, type ReactNode, type RefObject } from "react";
 import type { BackgroundUpdateLevel, BackgroundUpdatesScope, ConversationUpdateLevel, SessionIndexProgress, SourceError } from "../lib/types";
 import { BackgroundUpdatesControl } from "./BackgroundUpdatesControl";
-import { BellIcon } from "./Icons";
+import { BellIcon, SettingsIcon } from "./Icons";
 import {
   describeSessionIndexProgress,
   isTargetedCatalog,
@@ -9,6 +9,8 @@ import {
 } from "./NotificationCenter";
 
 interface StatusBarProps {
+  on_open_settings?: () => void;
+  settings_trigger_ref?: RefObject<HTMLButtonElement | null>;
   background_updates_scope?: BackgroundUpdatesScope;
   background_updates_level?: BackgroundUpdateLevel;
   conversation_update_level?: ConversationUpdateLevel;
@@ -82,6 +84,8 @@ function describeStatusAnnouncement(
  * the viewer hook so a background event cannot be lost while it is closed.
  */
 export function StatusBar({
+  on_open_settings,
+  settings_trigger_ref,
   background_updates_scope = "all",
   background_updates_level = "messages",
   conversation_update_level = "steps",
@@ -127,6 +131,10 @@ export function StatusBar({
           on_level_change={on_background_updates_level_change}
           on_conversation_level_change={on_conversation_update_level_change}
         /> : null}
+
+        {on_open_settings && <button aria-label="Open settings" aria-haspopup="dialog"
+          className="status-bar__settings" onClick={on_open_settings} ref={settings_trigger_ref}
+          title="Settings" type="button"><SettingsIcon /></button>}
 
         <span aria-atomic="true" aria-live="polite" className="sr-only" key={announcement.key} role="status">
           {announcement.text}

@@ -28,6 +28,16 @@ export interface MachinePreferences {
   hub_urls: string[];
 }
 
+/** Display defaults owned by this viewing device, never by a session host. */
+export interface ViewerPreferences {
+  version: 1;
+  sidebar_order: SessionOrder;
+  background_updates_scope: BackgroundUpdatesScope;
+  background_update_level: BackgroundUpdateLevel;
+  conversation_update_level: ConversationUpdateLevel;
+  show_lifecycle: boolean;
+}
+
 export interface SavedHubHost {
   host_id: string;
   host_public_key: string;
@@ -295,6 +305,20 @@ export interface RelayStatus {
   phase: "local" | "starting" | "connecting" | "live" | "reconnecting" | "retrying" | "failed";
   native: boolean;
   error: string | null;
+}
+
+/** Machine-owned metadata, never viewer preferences or pairing credentials. */
+export interface MachineSettingsSnapshot {
+  version: 1;
+  reader: { status: RelayStatus; editable: boolean; edit_reason: string | null };
+  sources: {
+    provider: ViewerProvider;
+    locations: { path: string; kind: "directory" | "database"; exists: boolean }[];
+    error: string | null;
+  }[];
+  sources_editable: boolean;
+  sources_edit_reason: string | null;
+  hosting: { available: boolean; editable: boolean; reason: string | null };
 }
 export interface RelayChange { session_key: string | null; reset: boolean; }
 

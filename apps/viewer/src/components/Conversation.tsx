@@ -1,7 +1,8 @@
 import type { ExpandedActivityState } from "../lib/types";
-import { useLayoutEffect, useState } from "react";
+import { useLayoutEffect } from "react";
 import { readingEventKey } from "../lib/readingPosition";
 import { useTimelineScroll } from "../lib/useTimelineScroll";
+import { useViewerPreferences } from "../lib/viewerPreferences";
 import { isBookkeepingEvent } from "../lib/eventFilter";
 import type {
   EventDetail,
@@ -123,7 +124,8 @@ export function Conversation({
   on_retry,
   on_retry_expanded_detail,
 }: ConversationProps) {
-  const [hideLifecycle, setHideLifecycle] = useState(true);
+  const { preferences, updatePreferences } = useViewerPreferences();
+  const hideLifecycle = !preferences.show_lifecycle;
   const visibleEvents = hideLifecycle ? events.filter((event) => !isBookkeepingEvent(event)) : events;
   const hiddenCount = events.length - visibleEvents.length;
   const scroll = useTimelineScroll({
@@ -226,7 +228,7 @@ export function Conversation({
           aria-pressed={hideLifecycle}
           className="conversation__filter"
           disabled={!session}
-          onClick={() => setHideLifecycle((hidden) => !hidden)}
+          onClick={() => updatePreferences({ show_lifecycle: hideLifecycle })}
           title={hideLifecycle
             ? "Show lifecycle events and mid-turn usage again."
             : "Hide routine lifecycle, session, configuration, and metadata events without content, plus mid-turn usage. Keep end-of-turn usage and meaningful activity."}

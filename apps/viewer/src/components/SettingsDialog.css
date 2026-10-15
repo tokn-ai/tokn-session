@@ -1,0 +1,78 @@
+.settings-dialog {
+  width: min(980px, calc(100vw - 32px));
+  height: min(760px, calc(100dvh - 32px));
+  max-width: none;
+  max-height: none;
+  margin: auto;
+  padding: 0;
+  overflow: hidden;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+}
+
+.settings-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.25);
+  backdrop-filter: blur(3px);
+}
+
+.settings-entry {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 8px 11px;
+  color: var(--text-soft);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.settings-entry svg {
+  width: 15px;
+  height: 15px;
+}
+
+.settings-entry:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.settings-hosting__status {
+  font-weight: 600;
+}
+
+.settings-hosting__summary {
+  display: grid;
+  gap: 12px;
+  margin: 20px 0;
+}
+
+.settings-hosting__summary > div {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.settings-hosting__summary dt {
+  color: var(--text-muted);
+}
+
+.settings-hosting__summary dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 600px) {
+  .settings-dialog {
+    width: 100vw;
+    height: 100dvh;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+  }
+}
