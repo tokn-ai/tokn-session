@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { Conversation } from "../components/Conversation";
 import { RelayConnection } from "../components/RelayConnection";
 import { Inspector } from "../components/Inspector";
@@ -8,20 +8,26 @@ import { StatusBar } from "../components/StatusBar";
 import { QuestionAnswersProvider } from "../components/QuestionAnswersProvider";
 import { TranslationProvider } from "../components/TranslationProvider";
 import { useViewerState } from "../lib/useViewerState";
+import { SettingsDialog } from "../components/SettingsDialog";
 
 interface ViewerPageProps {
   remote?: boolean;
   connection?: ReactNode;
   on_open_machines?: () => void;
+  machine_label?: string;
+  machine_key?: string;
 }
 
-export function ViewerPage({ remote = false, connection, on_open_machines }: ViewerPageProps) {
-  return <TranslationProvider><QuestionAnswersProvider><ViewerContent remote={remote} connection={connection} on_open_machines={on_open_machines} /></QuestionAnswersProvider></TranslationProvider>;
+export function ViewerPage({ remote = false, connection, on_open_machines, machine_label, machine_key }: ViewerPageProps) {
+  return <TranslationProvider><QuestionAnswersProvider><ViewerContent remote={remote} connection={connection} on_open_machines={on_open_machines}
+    machine_label={machine_label} machine_key={machine_key} /></QuestionAnswersProvider></TranslationProvider>;
 }
 
-function ViewerContent({ remote, connection, on_open_machines }: ViewerPageProps) {
+function ViewerContent({ remote = false, connection, on_open_machines, machine_label = remote ? "Selected machine" : "This computer", machine_key = remote ? "remote" : "local" }: ViewerPageProps) {
   const viewer = useViewerState();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsTrigger = useRef<HTMLButtonElement>(null);
 
   function openSessions() {
     if (window.matchMedia("(max-width: 860px)").matches) {
@@ -131,6 +137,8 @@ function ViewerContent({ remote, connection, on_open_machines }: ViewerPageProps
       </div>
 
       <StatusBar
+        on_open_settings={() => setSettingsOpen(true)}
+        settings_trigger_ref={settingsTrigger}
         background_updates_scope={viewer.backgroundUpdatesScope}
         background_updates_level={viewer.backgroundUpdatesLevel}
         background_updates_status={viewer.backgroundUpdatesStatus}
@@ -147,6 +155,8 @@ function ViewerContent({ remote, connection, on_open_machines }: ViewerPageProps
         progress={viewer.sessionIndexProgress}
         source_errors={viewer.sourceErrors}
       />
+      {settingsOpen && <SettingsDialog key={machine_key} remote={remote} machine_label={machine_label}
+        machine_key={machine_key} return_focus={settingsTrigger} on_close={() => setSettingsOpen(false)} />}
     </div>
   );
 }

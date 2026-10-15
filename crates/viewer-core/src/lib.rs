@@ -18,6 +18,7 @@ mod service_metadata;
 pub mod service_protocol;
 pub mod service_server;
 mod service_source;
+pub mod settings;
 pub mod updates;
 mod watcher;
 pub use service::ViewerService;

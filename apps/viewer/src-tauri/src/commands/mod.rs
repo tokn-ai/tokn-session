@@ -7,4 +7,5 @@ pub(crate) mod input;
 pub(crate) mod local;
 pub(crate) mod relay;
 pub(crate) mod sessions;
+pub(crate) mod settings;
 pub(crate) mod translation;

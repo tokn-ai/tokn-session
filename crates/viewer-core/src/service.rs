@@ -5397,7 +5397,7 @@ fn provider_for_event(event: &AgentEvent) -> ViewerProvider {
   viewer_provider(provider)
 }
 
-fn viewer_provider(provider: Provider) -> ViewerProvider {
+pub(crate) fn viewer_provider(provider: Provider) -> ViewerProvider {
   match provider {
     Provider::Codex => ViewerProvider::Codex,
     Provider::Pi => ViewerProvider::Pi,

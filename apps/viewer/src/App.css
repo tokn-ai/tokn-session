@@ -200,6 +200,7 @@ button:disabled {
 
 .status-bar__index,
 .status-bar__connection,
+.status-bar__settings,
 .status-bar__updates {
   position: relative;
   display: inline-flex;
@@ -223,6 +224,7 @@ button:disabled {
 
 .status-bar__index:hover,
 .status-bar__index[aria-expanded="true"],
+.status-bar__settings:hover,
 .status-bar__connection:hover,
 .status-bar__connection[aria-expanded="true"],
 .status-bar__updates:hover,
@@ -233,6 +235,18 @@ button:disabled {
 
 .status-bar__index svg {
   flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+}
+
+.status-bar__settings {
+  flex: 0 0 auto;
+  min-width: 34px;
+  justify-content: center;
+  color: var(--text-soft);
+}
+
+.status-bar__settings svg {
   width: 15px;
   height: 15px;
 }
@@ -3786,7 +3800,7 @@ button:disabled {
 @media (max-width: 860px) {
   .status-bar { gap: 6px; padding-inline: 6px; }
   .relay-connection { max-width: 42vw; }
-  .status-bar__connection, .status-bar__index, .status-bar__updates { min-height: 40px; }
+  .status-bar__connection, .status-bar__index, .status-bar__updates, .status-bar__settings { min-height: 40px; }
   .session-composer textarea { min-height: 64px; padding-right: 18px; }
   .session-composer__send { width: 40px; height: 40px; }
 }

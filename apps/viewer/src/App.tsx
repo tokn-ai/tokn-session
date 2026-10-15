@@ -9,6 +9,7 @@ import { detectHub, hubErrorMessage, type HubStatus } from "./lib/hub";
 import { HubAccess } from "./components/HubAccess";
 import { NativePasskey } from "./components/NativePasskey";
 import { DesktopWorkspace } from "./pages/DesktopWorkspace";
+import { SettingsEntry } from "./components/SettingsEntry";
 
 function BrowserViewer({ initial_token }: { initial_token?: string }) {
   const [endpoint, setEndpoint] = useState(() => window.location.origin);
@@ -42,7 +43,7 @@ function BrowserViewer({ initial_token }: { initial_token?: string }) {
     } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(false); }
   }
-  if (client) return <ViewerPage remote connection={
+  if (client) return <ViewerPage key={client.endpoint} remote machine_label={client.endpoint} machine_key={client.endpoint} connection={
     <RemoteConnection name={client.endpoint} state={state}>
       <button onClick={() => { selectMachine(); setClient(undefined); setState("connecting"); }}>Change machine</button>
     </RemoteConnection>
@@ -58,6 +59,7 @@ function BrowserViewer({ initial_token }: { initial_token?: string }) {
       <p className="machine-hint">The token is kept only for this connection.</p>
       {error && <p role="alert">{error}</p>}
       <button disabled={busy}>{busy ? "Connecting…" : "Connect"}</button>
+      <SettingsEntry />
     </form>
   </main>;
 }

@@ -68,6 +68,7 @@ pub fn run() {
       commands::input::get_session_question_status,
       commands::input::submit_session_question_answers,
       commands::relay::get_relay_status,
+      commands::settings::get_machine_settings,
       commands::relay::configure_relay,
       commands::translation::get_translation_status,
       commands::translation::translate_text,

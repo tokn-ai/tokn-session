@@ -1,9 +1,9 @@
 import type { SessionOrder, SessionSummary } from "./types";
 import { groupSessions } from "./state";
+import { readViewerPreferences, updateViewerPreferences } from "./viewerPreferences";
 
 export const RECENT_WINDOW_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * RECENT_WINDOW_MS;
-const ORDER_KEY = "tokn.viewer.sidebar-order";
 
 export interface SessionGroup {
   key: string;
@@ -98,11 +98,9 @@ export function sidebarGroups(sessions: SessionSummary[], order: SessionOrder, r
 }
 
 export function readSessionOrder(): SessionOrder {
-  try { return localStorage.getItem(ORDER_KEY) === "project" ? "project" : "time"; }
-  catch { return "time"; }
+  return readViewerPreferences().sidebar_order;
 }
 
 export function saveSessionOrder(order: SessionOrder) {
-  try { localStorage.setItem(ORDER_KEY, order); }
-  catch { /* The view remains usable when storage is unavailable. */ }
+  updateViewerPreferences({ sidebar_order: order });
 }
