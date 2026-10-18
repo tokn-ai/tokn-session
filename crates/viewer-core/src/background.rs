@@ -180,6 +180,16 @@ pub(crate) struct BackgroundStore {
   spill: Option<FingerprintSpill>,
   failure: Option<String>,
   clock: u64,
+  #[cfg(test)]
+  work_stats: BackgroundWorkStats,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct BackgroundWorkStats {
+  pub reconciliation_key_queries: usize,
+  pub reconciliation_keys: usize,
+  pub fingerprint_checks: usize,
 }
 
 impl Default for BackgroundStore {
@@ -198,6 +208,8 @@ impl BackgroundStore {
       spill: None,
       failure: None,
       clock: 0,
+      #[cfg(test)]
+      work_stats: BackgroundWorkStats::default(),
     }
   }
 
@@ -309,6 +321,10 @@ impl BackgroundStore {
 
   fn remember(&mut self, key: String, notification: &Value) -> Result<ObservationChanges, String> {
     self.ensure_healthy()?;
+    #[cfg(test)]
+    {
+      self.work_stats.fingerprint_checks += 1;
+    }
     let mut message_fingerprint = (!notification["message_revision"].is_null())
       .then(|| Sha256::digest(notification["latest_assistant_message"].to_string().as_bytes()).into());
     let activity_fingerprint = Sha256::digest(json!({
@@ -529,11 +545,20 @@ impl ViewerService {
     })
   }
 
+  #[cfg(test)]
+  pub(crate) fn background_work_stats(&self) -> BackgroundWorkStats {
+    self.background.lock().map(|store| store.work_stats).unwrap_or_default()
+  }
+
   /// Called only by an index follower/topology recovery, never by subscribe.
   pub(crate) fn background_notification_keys(&self, include_present: bool) -> Vec<String> {
     let (all, mut keys) = match self.background.lock() {
       Ok(mut store) => {
         store.prune();
+        #[cfg(test)]
+        {
+          store.work_stats.reconciliation_key_queries += 1;
+        }
         // Follower fingerprints cover the machine independently of delivery
         // scope, so widening Sidebar to All cannot replay earlier changes.
         let all = include_present
@@ -556,10 +581,15 @@ impl ViewerService {
     if all && include_present {
       keys.extend(self.background_baseline_keys());
     }
-    keys
+    let keys = keys
       .into_iter()
       .filter(|key| self.check_session_scope(key).is_ok())
-      .collect()
+      .collect::<Vec<_>>();
+    #[cfg(test)]
+    if let Ok(mut store) = self.background.lock() {
+      store.work_stats.reconciliation_keys += keys.len();
+    }
+    keys
   }
 
   /// Source-free startup fingerprints avoid replaying unchanged metadata to a
