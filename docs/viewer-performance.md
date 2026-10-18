@@ -185,6 +185,32 @@ sidebar listings and existing body-job metadata reads.
 cargo test -p tokn-viewer-core benchmark_background_append_publication --lib -- --ignored --nocapture
 ```
 
+## Pending-body source races
+
+Follow-up profiling of the rebuilt debug viewer on 2026-10-18 still measured
+high native CPU: 31.6 CPU seconds over 40 seconds in one observation and 27.2
+over 40 seconds in another. WebContent was mostly idle. Stack samples caught
+complete catalog scans and compact recovery, rather than ordinary targeted
+publication alone. A watcher probe with the same session roots and lifecycle
+parents observed only targeted JSONL changes and unrelated parent events during
+the second window; it did not observe a full-catalog request. This does not rule
+out service-level recovery after a new-file hint.
+
+A pending body job can outlive its captured file revision. Treating that case
+as a competing index commit published a full compact reconciliation while
+leaving the obsolete job queued, allowing the same work to repeat on every
+body retry. Known Codex/Pi JSONL source races now request one targeted header
+restage without publishing stale notification state. A newer index generation,
+uncertain identity, or unsupported source retains the conservative recovery
+path. Regressions cover races before and during loading, successful restaging,
+and competing-writer recovery.
+
+After the development viewer rebuilt and restarted, a quiescent-Cargo window
+used 0.65 CPU seconds over 45.01 seconds (1.44% of one core). All observed
+watcher callbacks in that window were outside session roots. This is evidence
+of a low steady state after the fix, not a controlled streaming before/after
+comparison; the restart and natural source workload also changed.
+
 ## Remaining work
 
 - Session residency and turn windows now bound retained histories; see

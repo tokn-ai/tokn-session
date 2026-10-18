@@ -100,6 +100,9 @@ Ordinary known-file appends keep sidebar metadata refresh separate from compact
 topology recovery. Body updates publish only the changed sessions and canonical
 ancestors, using one provider metadata snapshot. Full catalog, relationship,
 relocation, and shared-index recovery still reconcile compact interests.
+Pending Codex/Pi body jobs whose files advanced request a targeted header
+restage without replaying compact recovery; a competing index generation keeps
+the conservative recovery path. See [read performance](viewer-performance.md).
 Worked/Working disclosures use wrapping activity summaries and
 an indented activity trail. Each turn contains activity groups separated by
 intermediate messages. Inner disclosures summarize actions (commands, reads,

@@ -613,8 +613,11 @@ struct CatalogRefresh {
 enum BodyJobRefresh {
   /// The source is still changing. Leave it queued until it has been quiet.
   Deferred,
-  /// The job no longer matches the current catalog or provider source. A
-  /// subsequent catalog pass will create the next safe job.
+  /// Provider bytes advanced without a competing indexed source generation.
+  /// A targeted catalog check can restage file-backed sources safely.
+  SourceChanged,
+  /// The indexed source or session changed while this job was in flight.
+  /// Reconcile the winning metadata before publishing another body update.
   Stale,
   /// The source body committed successfully.
   Updated {
@@ -1552,6 +1555,13 @@ impl ViewerService {
       refresh
         .attention_session_keys
         .extend(body_refresh.refresh.attention_session_keys);
+      for (provider, paths) in body_refresh.refresh.retry_changed_file_paths {
+        refresh
+          .retry_changed_file_paths
+          .entry(provider)
+          .or_default()
+          .extend(paths);
+      }
       refresh.has_pending_body_jobs = body_refresh.refresh.has_pending_body_jobs;
       refresh.attention_session_keys.sort();
       refresh.attention_session_keys.dedup();
@@ -1738,15 +1748,29 @@ impl ViewerService {
       self.set_body_active_provider(job.provider);
       match self.refresh_pending_body_job(&job) {
         Ok(BodyJobRefresh::Deferred) => continue,
-        Ok(BodyJobRefresh::Stale) => {
+        Ok(BodyJobRefresh::SourceChanged)
+          if matches!(job.provider, ViewerProvider::Codex | ViewerProvider::Pi)
+            && is_targeted_file_path(&job.locator.source_path) =>
+        {
           processed += 1;
           self.clear_failed_body_job(&job);
           self.record_body_progress_stale();
-          // A stale body job commonly means another viewer process committed
-          // the same source while this process was loading it. Request a
-          // sidebar reread so this window observes that durable winner's
-          // title, preview, or attention revision. Source-file churn can also
-          // reach this path; an extra SQLite-only reread is harmless.
+          // A normal append can outrun the staged source both before and
+          // during decoding. Restage just that file instead of repeatedly
+          // reconciling every compact interest against the same old cursor.
+          refresh
+            .retry_changed_file_paths
+            .entry(job.provider)
+            .or_default()
+            .insert(job.locator.source_path.clone());
+        }
+        Ok(BodyJobRefresh::SourceChanged | BodyJobRefresh::Stale) => {
+          processed += 1;
+          self.clear_failed_body_job(&job);
+          self.record_body_progress_stale();
+          // Another indexed generation can carry unknown title, preview,
+          // membership or attention changes. Other providers and compressed
+          // files also retain this conservative recovery path.
           refresh.changed = true;
           refresh.catalog_refresh_required = true;
           refresh.background_reconciliation_required = true;
@@ -2635,7 +2659,7 @@ impl ViewerService {
       return Ok(BodyJobRefresh::Stale);
     }
     if source_cursor(job.provider, &job.locator.source_path)? != job.raw_cursor {
-      return Ok(BodyJobRefresh::Stale);
+      return self.classify_body_source_change(job);
     }
     match self.repository.session_body_indexing(&job.locator)? {
       policy @ (SessionBodyIndexing::Deferred | SessionBodyIndexing::CatalogOnly) => {
@@ -2695,7 +2719,7 @@ impl ViewerService {
       || existing.preview != existing.catalog_preview.clone().or(presentation.preview.clone());
     let attention_marker = Some(activity.marker());
     if source_cursor(job.provider, &job.locator.source_path)? != job.raw_cursor {
-      return Ok(BodyJobRefresh::Stale);
+      return self.classify_body_source_change(job);
     }
 
     // Completion writes attention plus bounded presentation captured from the
@@ -2763,6 +2787,21 @@ impl ViewerService {
         ..Default::default()
       },
       next_source,
+    })
+  }
+
+  fn classify_body_source_change(&self, job: &PendingBodyJob) -> Result<BodyJobRefresh, String> {
+    // This extra lookup runs only on a source-file race. A writer can advance
+    // both the source bytes and the index while decoding; preserve full
+    // reconciliation for that winner instead of treating it as an append.
+    let current_source = self
+      .session_index
+      .source_state(&job.source.key)
+      .map_err(|error| format!("failed to recheck indexed body job source: {error}"))?;
+    Ok(if current_source.as_ref() == Some(&job.source) {
+      BodyJobRefresh::SourceChanged
+    } else {
+      BodyJobRefresh::Stale
     })
   }
 
@@ -6817,69 +6856,80 @@ mod tests {
 
   #[test]
   fn concurrent_body_completion_requests_a_sidebar_reread_for_the_other_process() {
-    let directory = tempfile::tempdir().expect("temporary directory should exist");
-    let path = directory.path().join("concurrent-body.jsonl");
-    std::fs::write(&path, "stable source bytes").expect("fixture source should be written");
-    let mut header = indexed_header(path, "concurrent-body", None);
-    header.title = None;
-    let locator = locator_for_header(ViewerProvider::Codex, &header);
-    let mut loaded_header = header.clone();
-    loaded_header.title = Some("winner body title".to_owned());
-    let body_spec = IndexedLoadSpec {
-      header: loaded_header,
-      messages: vec![indexed_message(Role::User, MessageDelivery::Unspecified)],
-    };
-    let index = Arc::new(SessionIndex::open_in_memory().expect("test index should open"));
-    let catalog_service = ViewerService::new_with_index(
-      indexing_repository(vec![IndexedLoadSpec {
-        header: header.clone(),
+    for change_source in [false, true] {
+      let directory = tempfile::tempdir().expect("temporary directory should exist");
+      let path = directory.path().join("concurrent-body.jsonl");
+      std::fs::write(&path, "stable source bytes").expect("fixture source should be written");
+      let mut header = indexed_header(path, "concurrent-body", None);
+      header.title = None;
+      let locator = locator_for_header(ViewerProvider::Codex, &header);
+      let mut loaded_header = header.clone();
+      loaded_header.title = Some("winner body title".to_owned());
+      let body_spec = IndexedLoadSpec {
+        header: loaded_header,
         messages: vec![indexed_message(Role::User, MessageDelivery::Unspecified)],
-      }]),
-      Arc::clone(&index),
-    );
-    catalog_service
-      .refresh_provider_catalog(ViewerProvider::Codex)
-      .expect("catalog should stage the body job");
+      };
+      let index = Arc::new(SessionIndex::open_in_memory().expect("test index should open"));
+      let catalog_service = ViewerService::new_with_index(
+        indexing_repository(vec![IndexedLoadSpec {
+          header: header.clone(),
+          messages: vec![indexed_message(Role::User, MessageDelivery::Unspecified)],
+        }]),
+        Arc::clone(&index),
+      );
+      catalog_service
+        .refresh_provider_catalog(ViewerProvider::Codex)
+        .expect("catalog should stage the body job");
 
-    let (load_started, load_waiter) = std::sync::mpsc::channel();
-    let (resume_sender, resume_load) = std::sync::mpsc::channel();
-    let stale_service = ViewerService::new_with_index(
-      Arc::new(BlockingBodyRepository {
-        header: header.clone(),
-        loaded: body_spec.clone(),
-        load_started,
-        resume_load: Mutex::new(resume_load),
-      }),
-      Arc::clone(&index),
-    );
-    let stale_body_service = stale_service.clone();
-    let stale_body_refresh = std::thread::spawn(move || stale_body_service.refresh_pending_session_index());
-    load_waiter
-      .recv_timeout(std::time::Duration::from_secs(1))
-      .expect("first process should pause during its body load");
+      let (load_started, load_waiter) = std::sync::mpsc::channel();
+      let (resume_sender, resume_load) = std::sync::mpsc::channel();
+      let stale_service = ViewerService::new_with_index(
+        Arc::new(BlockingBodyRepository {
+          header: header.clone(),
+          loaded: body_spec.clone(),
+          load_started,
+          resume_load: Mutex::new(resume_load),
+        }),
+        Arc::clone(&index),
+      );
+      let stale_body_service = stale_service.clone();
+      let stale_body_refresh = std::thread::spawn(move || stale_body_service.refresh_pending_session_index());
+      load_waiter
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("first process should pause during its body load");
 
-    let winner_service = ViewerService::new_with_index(indexing_repository(vec![body_spec]), Arc::clone(&index));
-    assert!(
-      winner_service
-        .refresh_pending_session_index()
-        .expect("winning body completion should commit")
-        .changed
-    );
-    resume_sender.send(()).expect("stale body load should resume");
-    let stale_refresh = stale_body_refresh
-      .join()
-      .expect("stale body thread should not panic")
-      .expect("stale body completion should stay quiet");
-    assert!(
-      stale_refresh.changed,
-      "the stale process must refresh its sidebar from the winner's shared index commit"
-    );
+      let winner_service = ViewerService::new_with_index(indexing_repository(vec![body_spec]), Arc::clone(&index));
+      assert!(
+        winner_service
+          .refresh_pending_session_index()
+          .expect("winning body completion should commit")
+          .changed
+      );
+      // Even when the provider also advances, the competing index generation
+      // must keep the full recovery signal for its unknown winning metadata.
+      if change_source {
+        std::fs::write(&header.path, "source advanced after the winning index commit")
+          .expect("fixture source should change");
+      }
+      resume_sender.send(()).expect("stale body load should resume");
+      let stale_refresh = stale_body_refresh
+        .join()
+        .expect("stale body thread should not panic")
+        .expect("stale body completion should stay quiet");
+      assert!(
+        stale_refresh.changed,
+        "the stale process must refresh its sidebar from the winner's shared index commit"
+      );
+      assert!(stale_refresh.catalog_refresh_required);
+      assert!(stale_refresh.background_reconciliation_required);
+      assert!(stale_refresh.retry_changed_file_paths.is_empty());
 
-    let stored = index
-      .session(&index_session_key(&locator).expect("index key should encode"))
-      .expect("index query should work")
-      .expect("winner session should remain indexed");
-    assert_eq!(stored.title.as_deref(), Some("winner body title"));
+      let stored = index
+        .session(&index_session_key(&locator).expect("index key should encode"))
+        .expect("index query should work")
+        .expect("winner session should remain indexed");
+      assert_eq!(stored.title.as_deref(), Some("winner body title"));
+    }
   }
 
   #[test]
@@ -7901,6 +7951,133 @@ mod tests {
     );
   }
 
+  #[tokio::test]
+  async fn source_write_races_restage_only_the_changed_file_without_compact_recovery() {
+    use crate::background::BackgroundUpdatesRequest;
+    use crate::runtime::publish_index_refresh;
+
+    for provider in [ViewerProvider::Codex, ViewerProvider::Pi] {
+      for during_load in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let specs = [("parent", None), ("child", Some("parent")), ("unrelated", None)]
+          .into_iter()
+          .map(|(id, parent)| {
+            let path = directory.path().join(format!("{id}.jsonl"));
+            std::fs::write(&path, "baseline fixture bytes").unwrap();
+            IndexedLoadSpec {
+              header: indexed_header(path, id, parent),
+              messages: vec![indexed_message(Role::User, MessageDelivery::Unspecified)],
+            }
+          })
+          .collect::<Vec<_>>();
+        let child = specs[1].header.clone();
+        let locator = locator_for_header(provider, &child);
+        let key = encode_session_key(&locator).unwrap();
+        let parent_key = encode_session_key(&locator_for_header(provider, &specs[0].header)).unwrap();
+        let repository = indexing_repository_for(provider, specs);
+        let index = Arc::new(SessionIndex::open_in_memory().unwrap());
+        let service = ViewerService::new_with_index(repository.clone(), index.clone());
+        service.refresh_session_index().unwrap();
+        for notification in service.session_notifications(&service.background_baseline_keys()) {
+          service.seed_background_notification(&notification);
+        }
+        service
+          .subscribe_background(
+            serde_json::from_value::<BackgroundUpdatesRequest>(json!({"subscription_id":"all"})).unwrap(),
+          )
+          .unwrap();
+
+        std::fs::write(&child.path, "source revision staged by the watcher").unwrap();
+        service
+          .refresh_changed_file_catalogs(BTreeMap::from([(provider, BTreeSet::from([child.path.clone()]))]))
+          .unwrap();
+        repository.loads.lock().unwrap().insert(
+          locator.clone(),
+          Ok(IndexedLoadSpec {
+            header: child.clone(),
+            messages: vec![
+              indexed_message(Role::User, MessageDelivery::Unspecified),
+              indexed_message(Role::Assistant, MessageDelivery::Final),
+            ],
+          }),
+        );
+        if during_load {
+          *repository.mutate_source_on_next_load.lock().unwrap() = Some(child.path.clone());
+        } else {
+          std::fs::write(&child.path, "source advanced before the queued body read").unwrap();
+        }
+
+        let before = service.background_work_stats();
+        let refresh = service.refresh_pending_session_index_automated().unwrap();
+        assert!(!refresh.changed);
+        assert!(!refresh.catalog_refresh_required);
+        assert!(!refresh.background_reconciliation_required);
+        assert!(refresh.has_pending_body_jobs);
+        assert!(refresh.updated_session_keys.is_empty());
+        assert_eq!(
+          refresh.retry_changed_file_paths,
+          BTreeMap::from([(provider, BTreeSet::from([child.path.clone()]))])
+        );
+        let retry_paths = refresh.retry_changed_file_paths.clone();
+        let (events, mut receiver) = tokio::sync::broadcast::channel(32);
+        publish_index_refresh(&service, &events, refresh).await;
+        assert_eq!(service.background_work_stats(), before);
+        assert!(receiver.try_recv().is_err());
+        let stale = index.session(&index_session_key(&locator).unwrap()).unwrap().unwrap();
+        assert!(!stale.attention_baselined);
+        assert!(!stale.has_unread());
+
+        let restaged = service.refresh_changed_file_catalogs(retry_paths).unwrap();
+        assert!(!restaged.background_reconciliation_required);
+        publish_index_refresh(&service, &events, restaged).await;
+        assert_eq!(service.background_work_stats(), before);
+        let completed = service.refresh_pending_session_index_automated().unwrap();
+        assert!(!completed.background_reconciliation_required);
+        assert!(completed.retry_changed_file_paths.is_empty());
+        assert_eq!(completed.updated_session_keys, [key.clone()]);
+        publish_index_refresh(&service, &events, completed).await;
+        let after = service.background_work_stats();
+        assert_eq!(after.reconciliation_key_queries, before.reconciliation_key_queries);
+        assert_eq!(after.reconciliation_keys, before.reconciliation_keys);
+        assert_eq!(after.fingerprint_checks - before.fingerprint_checks, 2);
+        let mut background_keys = BTreeSet::new();
+        while let Ok(event) = receiver.try_recv() {
+          if event.event == "background-session-updated" {
+            background_keys.insert(event.payload["session_key"].as_str().unwrap().to_owned());
+          }
+        }
+        assert!(background_keys.contains(&key));
+        assert!(background_keys.is_subset(&BTreeSet::from([key, parent_key])));
+        let stored = index.session(&index_session_key(&locator).unwrap()).unwrap().unwrap();
+        assert!(stored.attention_baselined);
+        assert!(stored.has_unread());
+        let settled = service.refresh_pending_session_index_automated().unwrap();
+        assert!(!settled.changed);
+        assert!(!settled.has_pending_body_jobs);
+        assert!(settled.retry_changed_file_paths.is_empty());
+      }
+    }
+  }
+
+  #[test]
+  fn changed_compressed_body_source_keeps_conservative_recovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("compressed.jsonl.zst");
+    std::fs::write(&path, "fixture source revision").unwrap();
+    let repository = indexing_repository(vec![IndexedLoadSpec {
+      header: indexed_header(path.clone(), "compressed", None),
+      messages: Vec::new(),
+    }]);
+    let service = ViewerService::new_with_index(repository, Arc::new(SessionIndex::open_in_memory().unwrap()));
+    service.refresh_session_catalog().unwrap();
+    std::fs::write(&path, "fixture source advanced after catalog staging").unwrap();
+    let refresh = service.refresh_pending_session_index_automated().unwrap();
+    assert!(refresh.changed);
+    assert!(refresh.catalog_refresh_required);
+    assert!(refresh.background_reconciliation_required);
+    assert!(refresh.retry_changed_file_paths.is_empty());
+  }
+
   #[test]
   fn stale_body_attempts_do_not_publish_false_progress() {
     let directory = tempfile::tempdir().expect("temporary directory should exist");
@@ -7928,7 +8105,7 @@ mod tests {
       service
         .refresh_pending_body_job(&jobs[0])
         .expect("a changed source should stay quiet"),
-      BodyJobRefresh::Stale
+      BodyJobRefresh::SourceChanged
     ));
     service.record_body_progress_stale();
     let during = service.session_index_progress();
