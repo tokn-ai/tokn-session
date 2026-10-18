@@ -96,6 +96,10 @@ retire old activity authority. Unknown projections preserve previews; committed
 empty/reset/removal projections clear them. Accepted first-screen pages seed
 previews, including legacy hosts. Shared grants receive only their exact sessions,
 without the owner's read markers or unshared descendant activity.
+Ordinary known-file appends keep sidebar metadata refresh separate from compact
+topology recovery. Body updates publish only the changed sessions and canonical
+ancestors, using one provider metadata snapshot. Full catalog, relationship,
+relocation, and shared-index recovery still reconcile compact interests.
 Worked/Working disclosures use wrapping activity summaries and
 an indented activity trail. Each turn contains activity groups separated by
 intermediate messages. Inner disclosures summarize actions (commands, reads,

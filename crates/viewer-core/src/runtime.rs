@@ -72,6 +72,54 @@ async fn publish_shared_index_background(
   }
 }
 
+/// Sidebar metadata can change without changing session membership. Only
+/// explicit recovery reconciles all compact interests; ordinary source
+/// updates publish their changed sessions and canonical ancestors directly.
+pub(crate) async fn publish_index_refresh(
+  service: &ViewerService,
+  events: &broadcast::Sender<ViewerEvent>,
+  mut refresh: IndexRefresh,
+) {
+  if !refresh.changed {
+    return;
+  }
+  if refresh.background_reconciliation_required {
+    publish_shared_index_background(service, events, false).await;
+  }
+  let mut keys = refresh.updated_session_keys.clone();
+  keys.extend(refresh.attention_session_keys.iter().cloned());
+  keys.sort();
+  keys.dedup();
+  if !keys.is_empty() {
+    let reader = service.clone();
+    let expected_notifications = keys.clone();
+    match tokio::task::spawn_blocking(move || reader.session_notifications(&keys)).await {
+      Ok(notifications) => {
+        refresh.catalog_refresh_required |= expected_notifications.iter().any(|key| {
+          !notifications
+            .iter()
+            .any(|notification| notification["session_key"].as_str() == Some(key))
+        });
+        let mut published = 0usize;
+        for notification in notifications {
+          for update in service.publish_background_notification(&notification) {
+            let _ = emit(events, "background-session-updated", update);
+            published += 1;
+            if published % 32 == 0 {
+              tokio::task::yield_now().await;
+            }
+          }
+          if emit(events, "session-notification", notification).is_err() {
+            refresh.catalog_refresh_required = true;
+          }
+        }
+      }
+      Err(_) => refresh.catalog_refresh_required = true,
+    }
+  }
+  let _ = emit(events, "session-index-changed", refresh);
+}
+
 /// Owns the shared background workers. Adapters subscribe and forward events.
 pub struct ViewerRuntime {
   pub service: ViewerService,
@@ -353,7 +401,7 @@ impl ViewerRuntime {
           pending_bodies.finish_body_refresh(Instant::now());
         }
         match result {
-          Ok(Ok(mut refresh)) => {
+          Ok(Ok(refresh)) => {
             // A full catalog is the deliberate recovery path for watcher
             // gaps and provider topology changes. Its normal cadence starts
             // after the potentially slow scan returns; ordinary writes use
@@ -423,43 +471,7 @@ impl ViewerRuntime {
             }
             pending_bodies.update_pending(refresh.has_pending_body_jobs, Instant::now());
             let needs_retry = session_index_needs_retry(&refresh);
-            if refresh.changed {
-              if refresh.catalog_refresh_required {
-                // The owner already knows changed body keys. Only known
-                // interests need topology reconciliation for removals.
-                publish_shared_index_background(&refresh_service, &scheduler_events, false).await;
-              }
-              let mut keys = refresh.updated_session_keys.clone();
-              keys.extend(refresh.attention_session_keys.iter().cloned());
-              keys.sort();
-              keys.dedup();
-              let service = refresh_service.clone();
-              let expected_notifications = keys.clone();
-              match tokio::task::spawn_blocking(move || service.session_notifications(&keys)).await {
-                Ok(notifications) => {
-                  refresh.catalog_refresh_required |= expected_notifications.iter().any(|key| {
-                    !notifications
-                      .iter()
-                      .any(|notification| notification["session_key"].as_str() == Some(key))
-                  });
-                  let mut published = 0usize;
-                  for notification in notifications {
-                    for update in refresh_service.publish_background_notification(&notification) {
-                      let _ = emit(&scheduler_events, "background-session-updated", update);
-                      published += 1;
-                      if published % 32 == 0 {
-                        tokio::task::yield_now().await;
-                      }
-                    }
-                    if emit(&scheduler_events, "session-notification", notification).is_err() {
-                      refresh.catalog_refresh_required = true;
-                    }
-                  }
-                }
-                Err(_) => refresh.catalog_refresh_required = true,
-              }
-              let _ = emit(&scheduler_events, "session-index-changed", refresh);
-            }
+            publish_index_refresh(&refresh_service, &scheduler_events, refresh).await;
             let until_full_catalog = next_full_catalog_refresh.saturating_duration_since(Instant::now());
             let until_unwatched_provider_catalog =
               next_unwatched_provider_catalog_refresh.saturating_duration_since(Instant::now());
@@ -971,6 +983,45 @@ mod tests {
     watcher_wake_after_backend_failure,
   };
   use crate::{model::ViewerProvider, watcher::WatchRequest};
+
+  #[tokio::test]
+  async fn sidebar_metadata_refresh_does_not_reconcile_all_compact_interests() {
+    let directory = tempfile::tempdir().unwrap();
+    let service = crate::ViewerService::native(directory.path().join("index.sqlite")).unwrap();
+    service
+      .subscribe_background(crate::background::BackgroundUpdatesRequest {
+        subscription_id: "all".into(),
+        scope: crate::background::BackgroundScope::All,
+        level: crate::background::BackgroundUpdateLevel::Messages,
+        session_keys: Vec::new(),
+        unsubscribe: false,
+      })
+      .unwrap();
+    service.seed_background_notification(&serde_json::json!({
+      "session_key":"remembered", "message_revision":"source:1", "latest_assistant_message":null,
+      "is_running":false,
+    }));
+    let before = service.background_work_stats();
+    let (events, mut receiver) = tokio::sync::broadcast::channel(8);
+
+    super::publish_index_refresh(
+      &service,
+      &events,
+      IndexRefresh {
+        changed: true,
+        catalog_refresh_required: true,
+        ..Default::default()
+      },
+    )
+    .await;
+
+    assert_eq!(service.background_work_stats(), before);
+    let event = receiver.try_recv().unwrap();
+    assert_eq!(event.event, "session-index-changed");
+    assert_eq!(event.payload["catalog_refresh_required"], true);
+    assert!(event.payload.get("background_reconciliation_required").is_none());
+    assert!(receiver.try_recv().is_err());
+  }
 
   #[test]
   fn live_catalog_refreshes_do_not_postpone_queued_bodies() {

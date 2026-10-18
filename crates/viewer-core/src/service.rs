@@ -37,6 +37,7 @@ mod agent_activity;
 mod compaction;
 mod event_filter;
 mod input;
+mod notifications;
 mod question_display;
 mod question_input;
 mod trajectory_state;
@@ -92,6 +93,8 @@ pub struct ViewerService {
   question_claims: Arc<Mutex<question_input::QuestionClaims>>,
   pub(crate) updates: Arc<Mutex<crate::updates::UpdateStore>>,
   pub(crate) background: Arc<Mutex<crate::background::BackgroundStore>>,
+  #[cfg(test)]
+  notification_work_stats: Arc<Mutex<notifications::NotificationWorkStats>>,
   /// Per-request metadata projection. The adapter still owns grant verification,
   /// command permissions, and stream lifetime; never install this on a worker.
   pub(crate) session_scope: Option<Arc<HashSet<String>>>,
@@ -392,6 +395,11 @@ pub(crate) struct IndexRefresh {
   pub changed: bool,
   /// False only when compact notifications cover every changed sidebar field.
   pub catalog_refresh_required: bool,
+  /// Full compact reconciliation is only needed when session membership or
+  /// relationships may have changed without an exact set of affected keys.
+  /// A sidebar metadata refresh alone does not invalidate every live session.
+  #[serde(skip)]
+  pub background_reconciliation_required: bool,
   /// Opaque session keys whose newly indexed eligible messages should refresh
   /// an already-visible newest event page. This deliberately excludes ordinary
   /// metadata updates so an unrelated source scan cannot reset the timeline a
@@ -444,6 +452,7 @@ pub(crate) enum SessionIndexWake {
 struct ProviderIndexRefresh {
   changed: bool,
   presentation_changed: bool,
+  background_reconciliation_required: bool,
   attention_session_keys: Vec<String>,
   retry_catalog_soon: bool,
   retry_changed_file_paths: BTreeSet<PathBuf>,
@@ -690,6 +699,8 @@ impl ViewerService {
       loaded_session_cache: Arc::new(Mutex::new(None)),
       updates: Arc::new(Mutex::new(crate::updates::UpdateStore::default())),
       background: Arc::new(Mutex::new(crate::background::BackgroundStore::default())),
+      #[cfg(test)]
+      notification_work_stats: Arc::new(Mutex::new(notifications::NotificationWorkStats::default())),
       input_broker: crate::input::InputBroker::default(),
       question_claims: Arc::new(Mutex::new(question_input::QuestionClaims::default())),
       session_scope: None,
@@ -1320,126 +1331,6 @@ impl ViewerService {
     Ok(ListSessionChildrenResponse { sessions, next_cursor })
   }
 
-  /// Refresh changed rows and their canonical ancestors from one metadata
-  /// snapshot per provider. Descendant activity must clear on a collapsed row
-  /// without waiting for another full sidebar catalog read.
-  pub(crate) fn session_notifications(&self, keys: &[String]) -> Vec<serde_json::Value> {
-    let mut requested = HashMap::<ViewerProvider, HashSet<SessionLocator>>::new();
-    for key in keys {
-      if self.check_session_scope(key).is_ok()
-        && let Ok(locator) = decode_session_key(key)
-      {
-        requested.entry(locator.provider).or_default().insert(locator);
-      }
-    }
-    let mut notifications = BTreeMap::new();
-    for (provider, locators) in requested {
-      let Ok(Some(inventory)) = self.indexed_session_inventory(provider) else {
-        continue;
-      };
-      // One compact batch also includes tombstones. All-session interests must
-      // not turn each notification into another SQLite round trip.
-      let indexed = if self.relay.external_catalog_covers(provider) {
-        HashMap::new()
-      } else {
-        let Ok(rows) = self.session_index.list_all_sessions_for_provider(provider.as_str()) else {
-          continue;
-        };
-        rows
-          .into_iter()
-          .map(|row| (row.key.clone(), row))
-          .collect::<HashMap<_, _>>()
-      };
-      let notification = |key: String, attention: SessionAttention| {
-        // Each row carries its own compact body projection and source checkpoint.
-        // Ancestor attention propagation must never carry the child's message.
-        let message = decode_session_key(&key)
-          .ok()
-          .and_then(|locator| index_session_key(&locator).ok())
-          .and_then(|indexed_key| indexed.get(&indexed_key))
-          .filter(|row| row.attention_baselined)
-          .and_then(|row| {
-            let compact = row.latest_message.as_ref()?;
-            let value = serde_json::from_str::<Value>(compact).ok()?;
-            let revision = format!(
-              "index-message.v1.{}.{:x}",
-              row.source_generation,
-              Sha256::digest(row.source_cursor.as_bytes())
-            );
-            Some((value, revision))
-          });
-        json!({
-          "session_key": key, "has_unread": attention.has_unread,
-          "unread_final_count": attention.unread_final_count, "is_running": attention.is_running,
-          "has_running_descendant": attention.has_running_descendant,
-          "question_attention": attention.question_attention,
-          "latest_assistant_message": message.as_ref().map(|(value, _)| value),
-          "message_revision": message.as_ref().map(|(_, revision)| revision),
-        })
-      };
-      // A duplicate source can change while another source owns its canonical
-      // identity. Still acknowledge that requested record; only the canonical
-      // relation graph is allowed to propagate activity to ancestors.
-      for header in &inventory.headers {
-        let locator = locator_for_header(provider, header);
-        if locators.contains(&locator)
-          && let Ok(key) = encode_session_key(&locator)
-        {
-          let attention = inventory.direct_attention.get(&locator).copied().unwrap_or_default();
-          notifications.insert(key.clone(), notification(key, attention));
-        }
-      }
-      let relations = session_relation_index(provider, inventory.headers, &mut Vec::new());
-      let attention = session_relation_attention(provider, &relations, &inventory.direct_attention);
-      let mut affected = BTreeSet::new();
-      for (index, header) in relations.headers.iter().enumerate() {
-        if !locators.contains(&locator_for_header(provider, header)) {
-          continue;
-        }
-        let mut next = Some(index);
-        while let Some(index) = next {
-          if !affected.insert(index) {
-            break;
-          }
-          next = relations.parent_indices[index];
-        }
-      }
-      for index in affected {
-        if let Ok(key) = encode_session_key(&locator_for_header(provider, &relations.headers[index])) {
-          notifications.insert(key.clone(), notification(key, attention[index]));
-        }
-      }
-      if !self.relay.external_catalog_covers(provider) {
-        for locator in &locators {
-          let Ok(key) = encode_session_key(locator) else {
-            continue;
-          };
-          if notifications.contains_key(&key) {
-            continue;
-          }
-          let Ok(indexed_key) = index_session_key(locator) else {
-            continue;
-          };
-          // An available committed provider catalog proves deletion. A source
-          // read failure or unavailable external catalog does not.
-          if indexed.get(&indexed_key).is_none_or(|row| !row.present) {
-            notifications.insert(
-              key.clone(),
-              json!({
-                "session_key": key, "removed": true,
-                "latest_assistant_message": null, "message_revision": "removed",
-                "has_unread": false, "unread_final_count": 0, "is_running": false,
-                "has_running_descendant": false,
-                "question_attention": {"required_count": 0, "available_count": 0},
-              }),
-            );
-          }
-        }
-      }
-    }
-    notifications.into_values().collect()
-  }
-
   pub fn validate_session_key(&self, key: &str) -> Result<(), String> {
     self.check_session_scope(key)?;
     let locator = decode_session_key(key)?;
@@ -1654,6 +1545,7 @@ impl ViewerService {
       let mut refresh = catalog_refresh.refresh;
       refresh.changed |= body_refresh.refresh.changed;
       refresh.catalog_refresh_required |= body_refresh.refresh.catalog_refresh_required;
+      refresh.background_reconciliation_required |= body_refresh.refresh.background_reconciliation_required;
       refresh
         .updated_session_keys
         .extend(body_refresh.refresh.updated_session_keys);
@@ -1791,6 +1683,7 @@ impl ViewerService {
         Ok(provider_refresh) => {
           refresh.changed |= provider_refresh.changed;
           refresh.catalog_refresh_required |= provider_refresh.changed;
+          refresh.background_reconciliation_required |= provider_refresh.changed;
           refresh.retry_catalog_soon |= provider_refresh.retry_catalog_soon;
           refresh
             .attention_session_keys
@@ -1856,6 +1749,7 @@ impl ViewerService {
           // reach this path; an extra SQLite-only reread is harmless.
           refresh.changed = true;
           refresh.catalog_refresh_required = true;
+          refresh.background_reconciliation_required = true;
         }
         Ok(BodyJobRefresh::Updated {
           provider_refresh,
@@ -1866,6 +1760,7 @@ impl ViewerService {
           self.record_body_progress_completion(&job);
           refresh.changed |= provider_refresh.changed;
           refresh.catalog_refresh_required |= provider_refresh.presentation_changed;
+          refresh.background_reconciliation_required |= provider_refresh.background_reconciliation_required;
           refresh.updated_session_keys.push(encode_session_key(&job.locator)?);
           refresh.changed = true;
           attention_session_keys.extend(provider_refresh.attention_session_keys);
@@ -1941,6 +1836,7 @@ impl ViewerService {
     let shared_change = self.observe_shared_index_change()?;
     refresh.changed |= shared_change;
     refresh.catalog_refresh_required |= shared_change;
+    refresh.background_reconciliation_required |= shared_change;
     Ok(refresh)
   }
 
@@ -2364,6 +2260,7 @@ impl ViewerService {
     let mut replacements = Vec::new();
     let mut retry_catalog_soon = false;
     let mut retry_changed_file_paths = BTreeSet::new();
+    let mut background_reconciliation_required = false;
     let indexed_at_ms = current_time_ms();
 
     for path in paths {
@@ -2482,6 +2379,7 @@ impl ViewerService {
       }
 
       let metadata = catalog_session_metadata(&source_key, header, Some(&existing), true, true)?;
+      background_reconciliation_required |= metadata.parent_session_id != existing.parent_session_id;
       replacements.push(
         SourceReplacement::new(
           SourceState::new(source_key, pending_body_cursor(&cursor), indexed_at_ms),
@@ -2502,6 +2400,7 @@ impl ViewerService {
       Ok(_) => Ok(ProviderIndexRefresh {
         changed: true,
         presentation_changed: false,
+        background_reconciliation_required,
         attention_session_keys: Vec::new(),
         retry_catalog_soon,
         retry_changed_file_paths,
@@ -2510,6 +2409,7 @@ impl ViewerService {
         // A sibling viewer committed a newer indexed source. Reread SQLite
         // and use the full topology path before replacing anything else.
         changed: true,
+        background_reconciliation_required: true,
         retry_catalog_soon: true,
         ..Default::default()
       }),
@@ -2555,6 +2455,7 @@ impl ViewerService {
         )?;
         refresh.changed |= provider_refresh.changed;
         refresh.catalog_refresh_required |= provider_refresh.changed;
+        refresh.background_reconciliation_required |= provider_refresh.background_reconciliation_required;
         refresh.retry_catalog_soon |= provider_refresh.retry_catalog_soon;
         refresh
           .attention_session_keys
@@ -5880,6 +5781,7 @@ fn truncate_with_flag(value: String, max_chars: usize) -> (String, bool) {
 #[cfg(test)]
 mod tests {
   mod activity_backfill;
+  mod background_performance;
   mod communications;
   mod event_filter;
   mod history_cache;
