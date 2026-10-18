@@ -145,6 +145,72 @@ Run it with:
 cargo test -p tokn-viewer-core benchmark_journal_initial_load_and_appends --lib -- --ignored --nocapture
 ```
 
+## Compact background publication
+
+Two live macOS stack samples on 2026-10-18 caught the debug viewer repeatedly
+reconciling compact metadata for all remembered sessions during ordinary chat
+updates. The index held 14,555 rows. One shared-reconciliation worker appeared
+in 2,652/3,651 and 5,231/6,369 wall sample units, principally in whole-provider
+metadata reads, session-key construction, and JSON/SHA-256 fingerprints. These
+are stack exposure counts, not CPU percentages.
+
+Known-file staging set the sidebar's `catalog_refresh_required` flag, which also
+triggered full compact recovery. The default All scope expanded that recovery
+to every startup fingerprint. Sidebar refresh and compact recovery now have
+separate signals: ordinary header staging does no compact work, and completed
+bodies publish only their changed sessions and canonical ancestors. Membership,
+relationship, relocation, and shared-index recovery retain full reconciliation.
+Notifications derive present inventory, attention, messages, and tombstones from
+one provider row snapshot instead of decoding provider metadata twice.
+
+A synthetic debug benchmark compares the former All-fanout policy with targeted
+publication in the same executable. Both arms use the updated one-snapshot
+projector, identical cached fingerprints, and one append to a temporary source;
+fixture setup and body indexing are excluded. Five trials alternate arm order:
+
+| Indexed sessions | Former All fanout, median | Targeted publication, median |
+| --- | ---: | ---: |
+| 1,004 | 222 ms | 24.8 ms |
+| 5,004 | 1,215 ms | 134 ms |
+
+The regression asserts three fingerprint checks (child, parent, grandparent)
+at both catalog sizes, zero compact work during header staging, one provider
+metadata snapshot per body notification batch, and no historical replay.
+Separate recovery cases preserve reparenting and removal behavior. This is a
+publication-component comparison, not a whole-app CPU or release-build result.
+The metadata snapshot and relation graph still scale with provider size, as do
+sidebar listings and existing body-job metadata reads.
+
+```sh
+cargo test -p tokn-viewer-core benchmark_background_append_publication --lib -- --ignored --nocapture
+```
+
+## Pending-body source races
+
+Follow-up profiling of the rebuilt debug viewer on 2026-10-18 still measured
+high native CPU: 31.6 CPU seconds over 40 seconds in one observation and 27.2
+over 40 seconds in another. WebContent was mostly idle. Stack samples caught
+complete catalog scans and compact recovery, rather than ordinary targeted
+publication alone. A watcher probe with the same session roots and lifecycle
+parents observed only targeted JSONL changes and unrelated parent events during
+the second window; it did not observe a full-catalog request. This does not rule
+out service-level recovery after a new-file hint.
+
+A pending body job can outlive its captured file revision. Treating that case
+as a competing index commit published a full compact reconciliation while
+leaving the obsolete job queued, allowing the same work to repeat on every
+body retry. Known Codex/Pi JSONL source races now request one targeted header
+restage without publishing stale notification state. A newer index generation,
+uncertain identity, or unsupported source retains the conservative recovery
+path. Regressions cover races before and during loading, successful restaging,
+and competing-writer recovery.
+
+After the development viewer rebuilt and restarted, a quiescent-Cargo window
+used 0.65 CPU seconds over 45.01 seconds (1.44% of one core). All observed
+watcher callbacks in that window were outside session roots. This is evidence
+of a low steady state after the fix, not a controlled streaming before/after
+comparison; the restart and natural source workload also changed.
+
 ## Remaining work
 
 - Session residency and turn windows now bound retained histories; see
