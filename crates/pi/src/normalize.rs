@@ -2,9 +2,9 @@ use serde_json::Value;
 
 use crate::event::{PiContentBlock, PiMessage, PiMessageItem, PiSessionItem, PiSessionLine, PiUserContent};
 use tokn_session_core::{
-  AgentEvent, ErrorEvent, MessageDelivery, MessageEvent, Phase, Provider, ProviderChanged, ReasoningEvent, Role,
-  SessionStarted, ToolCallEvent, ToolRecordKind, ToolTransport, UnknownEvent, UsageKind, tool_kind_for_name,
-  tool_summary_for_input, tool_summary_for_io,
+  AgentEvent, ErrorEvent, MessageDelivery, MessageEvent, MetadataEvent, MetadataKind, Phase, Provider, ProviderChanged,
+  ReasoningEvent, Role, SessionStarted, ToolCallEvent, ToolRecordKind, ToolTransport, UnknownEvent, UsageKind,
+  tool_kind_for_name, tool_summary_for_input, tool_summary_for_io,
 };
 
 pub struct PiNormalizer {
@@ -130,6 +130,10 @@ fn normalize_message(
         )
       })
   });
+  let outcome = match &message {
+    PiMessage::Assistant(message) => normalize_assistant_outcome(session_id.clone(), &meta, message, &native),
+    _ => Vec::new(),
+  };
   let mut events = match message {
     PiMessage::User(message) => normalize_user_message(session_id, &meta, message),
     PiMessage::Assistant(message) => normalize_assistant_message(session_id, &meta, message),
@@ -144,6 +148,12 @@ fn normalize_message(
       meta.timestamp,
     )],
   };
+  if !outcome.is_empty() {
+    // An empty failed/cancelled response has a known disposition. Keep any
+    // unsupported content, but don't also manufacture an empty unknown event.
+    events.retain(|event| !matches!(event, AgentEvent::Unknown(event) if event.native.is_none()));
+    events.extend(outcome);
+  }
   if let Some(accounting) = accounting {
     // A usage-only assistant record is still useful; don't manufacture unknown
     // content for a valid empty response. Unsupported content remains visible.
@@ -152,6 +162,54 @@ fn normalize_message(
     }
     events.push(accounting);
   }
+  events
+}
+
+fn normalize_assistant_outcome(
+  session_id: Option<String>,
+  meta: &PiMessageMeta,
+  message: &crate::event::PiAssistantMessage,
+  native: &Value,
+) -> Vec<AgentEvent> {
+  let cancelled = message.stop_reason.as_deref() == Some("aborted");
+  let error = message
+    .error_message
+    .as_deref()
+    .filter(|message| !message.trim().is_empty());
+  if !cancelled && message.stop_reason.as_deref() != Some("error") && error.is_none() {
+    return Vec::new();
+  }
+  let timestamp = meta
+    .timestamp
+    .clone()
+    .or_else(|| message.timestamp.map(|value| value.to_string()));
+  let mut events = Vec::new();
+  if !cancelled {
+    events.push(AgentEvent::Error(ErrorEvent {
+      provider: Provider::Pi,
+      session_id: session_id.clone(),
+      message: error.unwrap_or("Pi assistant response failed").to_string(),
+      timestamp: timestamp.clone(),
+    }));
+  }
+  // ErrorEvent has no native/message identity fields. Preserve the exact
+  // envelope alongside the visible error (or cancellation diagnostic), including
+  // id/parentId, provider/model, stopReason, and unmodeled provider diagnostics.
+  // Pi assistant entries have no authoritative turn ID for Lifecycle events.
+  events.push(AgentEvent::Metadata(MetadataEvent {
+    provider: Provider::Pi,
+    session_id,
+    kind: MetadataKind::Diagnostic,
+    native_type: "message".into(),
+    summary: if cancelled {
+      "Pi assistant response cancelled"
+    } else {
+      "Pi assistant response failed"
+    }
+    .into(),
+    native: native.clone(),
+    timestamp,
+  }));
   events
 }
 

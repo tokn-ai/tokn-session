@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { SessionSummary } from "./types";
+import type { RegisteredProject, SessionSummary } from "./types";
 import { reconcileRecent, sidebarGroups } from "./sidebarOrder";
 
 function session(session_key: string, updated_at_ms: number | null, overrides: Partial<SessionSummary> = {}): SessionSummary {
@@ -14,6 +14,18 @@ function session(session_key: string, updated_at_ms: number | null, overrides: P
 const keys = (entries: { session_key: string }[]) => entries.map((entry) => entry.session_key);
 
 describe("sidebar ordering", () => {
+  it("retains registered empty projects and merges worktree folders into their existing repository group", () => {
+    const project = (project_id: string, folder_path: string, group_key = "/repo"): RegisteredProject => ({ project_id, group_key, folder_path, name: "Repo", created_at_ms: 10, available: true });
+    const sessions = [session("existing", 500, { project_key: "/repo", cwd: "/repo", project: "Existing repository" })];
+    const projects = [project("root", "/repo"), project("worktree", "/trees/task/repo"), project("empty", "/new", "/new")];
+    const groups = sidebarGroups(sessions, "project", [], Date.now(), projects);
+    expect(groups).toHaveLength(2);
+    expect(groups[0].project).toBe("Existing repository");
+    expect(groups[0].registered_projects?.map((entry) => entry.project_id)).toEqual(["root", "worktree"]);
+    expect(keys(groups[0].sessions)).toEqual(["existing"]);
+    expect(groups[1].sessions).toEqual([]);
+    expect(sidebarGroups(sessions, "time", [], Date.now(), projects).flatMap((group) => group.sessions)).toEqual(sessions);
+  });
   it("freezes recent activity, prepends arrivals, and appends older page loads", () => {
     const now = Date.now();
     const a = session("a", now - 1000);

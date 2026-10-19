@@ -32,7 +32,34 @@ import type {
   MachinePreferences,
   NativePreferenceUpdate,
   ViewerPreferences,
+  RegisteredProject, ProjectWorkspaceSnapshot, RegisterProjectRequest, CreateProjectSessionRequest,
+  ManagedSessionRequest, ManagedSessionSnapshot, ManagedSessionDialogResponse,
 } from "./types";
+
+export function listRegisteredProjects(send: CommandInvoker = invoke): Promise<ProjectWorkspaceSnapshot> {
+  return send("list_registered_projects");
+}
+export function registerProject(request: RegisterProjectRequest, send: CommandInvoker = invoke): Promise<RegisteredProject> {
+  return send("register_project", { request });
+}
+export function createProjectSession(request: CreateProjectSessionRequest, send: CommandInvoker = invoke): Promise<ManagedSessionSnapshot> {
+  return send("create_project_session", { request });
+}
+export function getManagedSession(request: ManagedSessionRequest, send: CommandInvoker = invoke): Promise<ManagedSessionSnapshot | null> {
+  return send("get_managed_session", { request });
+}
+export function stopManagedSession(request: ManagedSessionRequest, send: CommandInvoker = invoke): Promise<ManagedSessionSnapshot> {
+  return send("stop_managed_session", { request });
+}
+export function resumeManagedSession(request: ManagedSessionRequest, send: CommandInvoker = invoke): Promise<ManagedSessionSnapshot> {
+  return send("resume_managed_session", { request });
+}
+export function respondManagedSessionDialog(request: ManagedSessionDialogResponse, send: CommandInvoker = invoke): Promise<ManagedSessionSnapshot> {
+  return send("respond_managed_session_dialog", { request });
+}
+export function listenForManagedSessionChanges(handler: (snapshot: ManagedSessionSnapshot) => void, subscribe: EventSubscriber = listen): Promise<UnlistenFn> {
+  return subscribe<ManagedSessionSnapshot>("managed-session-changed", (event) => handler(event.payload));
+}
 
 export function getSessionInputStatus(request: SessionInputStatusRequest): Promise<SessionInputStatus> {
   return invoke<SessionInputStatus>("get_session_input_status", { request });

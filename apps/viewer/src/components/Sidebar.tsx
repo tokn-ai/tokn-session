@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import type {
   SessionChildrenState,
   SourceError,
   SessionSummary,
   ViewerProvider,
   SessionOrder,
+  RegisteredProject,
 } from "../lib/types";
 import {
   formatRelativeTime,
@@ -18,6 +19,12 @@ import { useSidebarGroups } from "../lib/useSidebarGroups";
 import { LoadingRows } from "./StateView";
 
 interface SidebarProps {
+  registered_projects?: RegisteredProject[];
+  workspace_available?: boolean;
+  workspace_notice?: string | null;
+  on_workspace_retry?: () => void;
+  on_add_project?: () => void;
+  on_new_session?: (group_key?: string) => void;
   order?: SessionOrder;
   on_order_change?: (order: SessionOrder) => void;
   on_close?: () => void;
@@ -60,6 +67,7 @@ interface SessionBranchProps {
 }
 
 const PROVIDER_FILTERS: ViewerProvider[] = ["codex", "pi", "opencode", "zcode", "workbuddy", "dsh"];
+const NO_PROJECTS: RegisteredProject[] = [];
 
 function subagentCountLabel(count: number): string {
   return `${count} subagent${count === 1 ? "" : "s"}`;
@@ -236,6 +244,12 @@ function SessionBranch({
 }
 
 export function Sidebar({
+  registered_projects = NO_PROJECTS,
+  workspace_available = false,
+  workspace_notice,
+  on_workspace_retry,
+  on_add_project,
+  on_new_session,
   order = "time",
   on_order_change,
   on_close,
@@ -261,7 +275,9 @@ export function Sidebar({
   on_retry,
   on_load_more,
 }: SidebarProps) {
-  const groups = useSidebarGroups(sessions, order);
+  const visible_projects = useMemo(() => registered_projects.filter((project) => !search.trim()
+    || `${project.name} ${project.folder_path}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())), [registered_projects, search]);
+  const groups = useSidebarGroups(sessions, order, visible_projects);
   const noProviders = enabled_providers.size === 0;
   const isIndexingCatalog = pending_providers.length > 0;
   const indexingLabel = pendingProviderLabel(pending_providers);
@@ -309,6 +325,12 @@ export function Sidebar({
       </header>
 
       <div className="sidebar__controls">
+        {on_add_project || on_new_session ? <div className="workspace-actions">
+          <button type="button" disabled={!workspace_available || !registered_projects.some((project) => project.available)} onClick={() => on_new_session?.()}>New Pi session</button>
+          <button type="button" disabled={!workspace_available} onClick={on_add_project}>Add project</button>
+        </div> : null}
+        {workspace_notice ? <p className="workspace-sidebar-notice" role="status">{workspace_notice}
+          {on_workspace_retry ? <button className="text-button" type="button" onClick={on_workspace_retry}>Retry projects</button> : null}</p> : null}
         <div className="sidebar__filter-heading">
           {search || enabled_providers.size !== PROVIDER_FILTERS.length ? (
             <button className="text-button" type="button" onClick={() => {
@@ -405,7 +427,7 @@ export function Sidebar({
           </div>
         ) : null}
 
-        {!is_loading && !error && sessions.length === 0 ? (
+        {!is_loading && !error && sessions.length === 0 && groups.length === 0 ? (
           <div className="sidebar-state">
             <strong>
               {noProviders
@@ -440,8 +462,12 @@ export function Sidebar({
               <span className="session-group__count" title={`${group.sessions.length} loaded sessions`}>
                 {group.sessions.length}
               </span>
+              {group.registered_projects && on_new_session ? <button type="button" className="session-group__new"
+                aria-label={`New Pi session in ${group.project}`} disabled={!workspace_available || !group.registered_projects.some((project) => project.available)}
+                onClick={() => on_new_session(group.key)}>+</button> : null}
             </h2>
             <div className="session-group__items">
+              {group.sessions.length === 0 ? <p className="workspace-empty-project">No sessions yet</p> : null}
               {group.sessions.map((session) => (
                 <SessionBranch
                   order={order}

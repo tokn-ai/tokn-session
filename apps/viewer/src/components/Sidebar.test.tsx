@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ComponentProps } from "react";
 import type { SessionOrder, SessionSummary, ViewerProvider } from "../lib/types";
 import { Sidebar } from "./Sidebar";
 
@@ -36,6 +37,7 @@ function renderSidebar(
   error: string | null = null,
   onCollapse?: () => void,
   order: SessionOrder = "time",
+  extra: Partial<ComponentProps<typeof Sidebar>> = {},
 ) {
   return render(
     <Sidebar
@@ -60,11 +62,22 @@ function renderSidebar(
       sessions={sessions}
       source_errors={[]}
       pending_providers={pendingProviders}
+      {...extra}
     />,
   );
 }
 
 describe("Sidebar session identity", () => {
+  it("keeps an empty registered project visible and starts from its repository group", () => {
+    const start = vi.fn();
+    renderSidebar([], [], null, undefined, "project", { workspace_available: true, on_new_session: start,
+      registered_projects: [{ project_id: "saved", group_key: "/repo", folder_path: "/trees/task/repo", name: "Saved repo", created_at_ms: 1, available: true }] });
+    expect(screen.getByText("No sessions yet")).toBeInTheDocument();
+    expect(screen.queryByText("No sessions found")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "New Pi session in Saved repo" }));
+    expect(start).toHaveBeenCalledExactlyOnceWith("/repo");
+    expect(screen.queryByRole("button", { name: /, Pi session / })).not.toBeInTheDocument();
+  });
   it("keeps provider controls in a disclosure and delegates desktop collapse", () => {
     const collapse = vi.fn();
     renderSidebar([session()], [], null, collapse);

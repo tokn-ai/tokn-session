@@ -14,7 +14,11 @@
 //! callers also attach the cursor observed before scanning as an optimistic
 //! precondition, so a stale scan cannot overwrite a newer replacement.
 
+mod managed_admissions;
+mod migration_compatibility;
 mod projects;
+mod registered_projects;
+pub use registered_projects::RegisteredProjectRecord;
 
 use std::{
   collections::{HashMap, HashSet},
@@ -29,6 +33,11 @@ use rusqlite::{Connection, ErrorCode, OptionalExtension, Transaction, Transactio
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const APPLICATION_ID: i32 = 0x544f_4b4e; // "TOKN"
+const MIGRATION_LEDGER_SQL: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
+       version INTEGER PRIMARY KEY,
+       checksum TEXT NOT NULL,
+       applied_at_ms INTEGER NOT NULL
+     );";
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE sources (
@@ -275,6 +284,38 @@ FROM sessions AS session
 INNER JOIN sources AS source ON source.id = session.source_id;
 "#;
 
+// Explicit launch folders remain separate from inferred repository grouping.
+// Several registered worktrees may share one durable project anchor.
+const MIGRATION_010: &str = r#"
+CREATE TABLE registered_projects (
+  project_id TEXT PRIMARY KEY NOT NULL CHECK(length(project_id) BETWEEN 1 AND 128),
+  group_key TEXT NOT NULL REFERENCES projects(project_key),
+  folder_path TEXT UNIQUE NOT NULL CHECK(length(folder_path) > 0),
+  name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 160),
+  created_at_ms INTEGER NOT NULL
+);
+CREATE INDEX registered_projects_by_group ON registered_projects(group_key);
+"#;
+
+const MIGRATION_011: &str = r#"
+CREATE TABLE managed_session_admissions (
+  provider TEXT NOT NULL,
+  source_key TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  project_id TEXT NOT NULL REFERENCES registered_projects(project_id),
+  PRIMARY KEY(provider, source_key, session_id)
+);
+
+CREATE TRIGGER revoke_deleted_managed_admission
+AFTER DELETE ON sessions
+BEGIN
+  DELETE FROM managed_session_admissions
+  WHERE provider = (SELECT provider FROM sources WHERE id = OLD.source_id)
+    AND source_key = (SELECT source_key FROM sources WHERE id = OLD.source_id)
+    AND session_id = OLD.session_id;
+END;
+"#;
+
 #[derive(Clone, Debug)]
 pub struct ProjectGroup {
   pub project_key: String,
@@ -323,6 +364,14 @@ const MIGRATIONS: &[Migration] = &[
     version: 9,
     sql: MIGRATION_009,
   },
+  Migration {
+    version: 10,
+    sql: MIGRATION_010,
+  },
+  Migration {
+    version: 11,
+    sql: MIGRATION_011,
+  },
 ];
 
 /// Errors returned by [`SessionIndex`].
@@ -334,6 +383,10 @@ pub enum SessionIndexError {
   ConnectionPoisoned,
   /// A replacement does not describe one complete source snapshot.
   InvalidReplacement(String),
+  /// A registered launch folder contains invalid bounded metadata.
+  InvalidProject(String),
+  /// A managed session admission does not match a present indexed session.
+  InvalidAdmission(String),
   /// A previously applied migration no longer matches the embedded migration.
   MigrationChecksumMismatch {
     version: i64,
@@ -361,6 +414,8 @@ impl fmt::Display for SessionIndexError {
       Self::Sqlite(error) => write!(formatter, "SQLite index error: {error}"),
       Self::ConnectionPoisoned => formatter.write_str("SQLite index connection lock was poisoned"),
       Self::InvalidReplacement(message) => write!(formatter, "invalid source replacement: {message}"),
+      Self::InvalidProject(message) => write!(formatter, "invalid registered project: {message}"),
+      Self::InvalidAdmission(message) => write!(formatter, "invalid managed session admission: {message}"),
       Self::MigrationChecksumMismatch {
         version,
         expected,
@@ -1501,13 +1556,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
   // just before the first process applies an ALTER TABLE, then fail on a
   // duplicate column after it acquires its own transaction.
   let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-  transaction.execute_batch(
-    "CREATE TABLE IF NOT EXISTS schema_migrations (
-       version INTEGER PRIMARY KEY,
-       checksum TEXT NOT NULL,
-       applied_at_ms INTEGER NOT NULL
-     );",
-  )?;
+  transaction.execute_batch(MIGRATION_LEDGER_SQL)?;
 
   let applied = {
     let mut statement = transaction.prepare("SELECT version, checksum FROM schema_migrations ORDER BY version ASC")?;
@@ -1523,6 +1572,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
     )));
   }
 
+  let mut combined_project_migration = false;
   for (index, (version, found_checksum)) in applied.iter().enumerate() {
     let migration = MIGRATIONS
       .get(index)
@@ -1537,6 +1587,10 @@ fn migrate(connection: &mut Connection) -> Result<()> {
 
     let expected_checksum = migration_checksum(migration.sql);
     if *found_checksum != expected_checksum {
+      if migration_compatibility::is_combined_project_migration(*version, found_checksum) {
+        combined_project_migration = true;
+        continue;
+      }
       return Err(SessionIndexError::MigrationChecksumMismatch {
         version: *version,
         expected: expected_checksum,
@@ -1545,7 +1599,20 @@ fn migrate(connection: &mut Connection) -> Result<()> {
     }
   }
 
-  for migration in MIGRATIONS.iter().skip(applied.len()) {
+  // Validate the entire ledger before adopting this one known development
+  // schema. An unrelated checksum mismatch must leave its ledger untouched.
+  let applied_count = if combined_project_migration {
+    if applied.len() != 10 {
+      return Err(SessionIndexError::MigrationHistoryInvalid(
+        "combined migration 10 must be the final recorded migration".into(),
+      ));
+    }
+    migration_compatibility::adopt_combined_project_migration(&transaction)?;
+    11
+  } else {
+    applied.len()
+  };
+  for migration in MIGRATIONS.iter().skip(applied_count) {
     transaction.execute_batch(migration.sql)?;
     transaction.execute(
       "INSERT INTO schema_migrations(version, checksum, applied_at_ms) VALUES(?1, ?2, ?3)",
@@ -1803,6 +1870,23 @@ fn replace_source_in_transaction(
       }
     }
   }
+
+  // Replacements temporarily mark every source row absent before upserting
+  // retained identities. Revoke admissions only after final membership is
+  // known, so an ordinary append preserves the same session's admission.
+  transaction.execute(
+    "DELETE FROM managed_session_admissions
+     WHERE provider = ?1 AND source_key = ?2
+       AND NOT EXISTS(SELECT 1 FROM sessions AS session
+         WHERE session.source_id = ?3
+           AND session.session_id = managed_session_admissions.session_id
+           AND session.present = 1)",
+    params![
+      replacement.source.key.provider,
+      replacement.source.key.source_key,
+      source_id
+    ],
+  )?;
 
   Ok(summary)
 }
@@ -2418,6 +2502,8 @@ mod tests {
         (7, migration_checksum(MIGRATION_007)),
         (8, migration_checksum(MIGRATION_008)),
         (9, migration_checksum(MIGRATION_009)),
+        (10, migration_checksum(MIGRATION_010)),
+        (11, migration_checksum(MIGRATION_011)),
       ]
     );
   }
@@ -2695,7 +2781,7 @@ mod tests {
       .expect("migration query should run")
       .collect::<rusqlite::Result<Vec<_>>>()
       .expect("migration versions should decode");
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
   }
 
   #[test]

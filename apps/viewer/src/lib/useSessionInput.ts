@@ -25,7 +25,7 @@ function emptyInput(): InputState {
 }
 
 /** Keep drafts and in-flight results attached to their original session. */
-export function useSessionInput(session_key: string | null, on_accepted?: (session_key: string) => void) {
+export function useSessionInput(session_key: string | null, on_accepted?: (session_key: string) => void, refresh_key = 0) {
   const states = useRef(new Map<string, InputState>());
   const mounted = useRef(false);
   const acceptedHandler = useRef(on_accepted);
@@ -65,7 +65,7 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
 
   useEffect(() => {
     if (session_key) void checkAvailability(session_key);
-  }, [session_key, checkAvailability]);
+  }, [session_key, checkAvailability, refresh_key]);
 
   const state = (session_key && states.current.get(session_key)) || emptyInput();
   const maxLength = state.availability?.max_length ?? DEFAULT_MAX_LENGTH;

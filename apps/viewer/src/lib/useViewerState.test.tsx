@@ -388,6 +388,33 @@ function ViewerPageCommitProbe() {
 }
 
 describe("sidebar view preference", () => {
+  it("keeps a created session open through background refreshes with all providers hidden", async () => {
+    let emitIndexChange: ((change: SessionIndexChangedEvent) => void) | undefined;
+    vi.mocked(listenForSessionIndexChanges).mockImplementation((handler) => {
+      emitIndexChange = handler;
+      return Promise.resolve(vi.fn());
+    });
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [], next_cursor: null, source_errors: [], pending_providers: [] });
+    vi.mocked(loadEventPage).mockResolvedValue(toolEventPage());
+    const { result } = renderHook(() => useViewerState());
+    await waitFor(() => expect(result.current.sessionsLoading).toBe(false));
+    act(() => { for (const provider of result.current.enabledProviders) result.current.toggleProvider(provider); });
+    await waitFor(() => expect(result.current.enabledProviders.size).toBe(0));
+    const created = { ...session("pi:created"), provider: "pi" as const };
+    act(() => result.current.openCreatedSession(created));
+    await waitFor(() => expect(result.current.selectedSession).toEqual(created));
+    expect(result.current.sessions).toEqual([]);
+    act(() => emitIndexChange?.({ changed: true, attention_session_keys: [] }));
+    act(() => result.current.retrySessions());
+    expect(result.current.selectedSessionKey).toBe(created.session_key);
+    expect(result.current.selectedSession).toEqual(created);
+    act(() => result.current.toggleProvider("pi"));
+    await waitFor(() => expect(result.current.selectedSessionKey).toBeNull());
+    act(() => result.current.openCreatedSession(created));
+    expect(result.current.selectedSessionKey).toBe(created.session_key);
+    act(() => result.current.toggleProvider("pi"));
+    await waitFor(() => expect(result.current.selectedSessionKey).toBeNull());
+  });
   it("applies Settings ordering while retaining the open projection and background interest", async () => {
     vi.mocked(listSessions)
       .mockResolvedValueOnce({ sessions: [session("settings-open")], next_cursor: null, source_errors: [], pending_providers: [] })

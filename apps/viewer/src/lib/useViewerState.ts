@@ -1634,7 +1634,9 @@ export function useViewerState() {
       setSessionsError(null);
       setSourceErrors([]);
       setPendingProviders([]);
-      applySessionSelection(null);
+      // An explicitly opened created session can sit outside sidebar filters.
+      // Background refreshes retain it; changing filters still clears it.
+      if (filtersChanged) applySessionSelection(null);
       return;
     }
 
@@ -2208,6 +2210,19 @@ export function useViewerState() {
     setMobileSidebarOpen(false);
   }, [applySessionSelection]);
 
+  const openCreatedSession = useCallback((session: SessionSummary) => {
+    // Creation supplies a verified native row, even when the current sidebar
+    // filter/page does not contain it. Retire a pre-creation catalog request
+    // before opening its exact history; normal query changes still apply.
+    sessionsRequest.current += 1;
+    sessionListInFlight.current = null;
+    sessionListRefreshQueued.current = false;
+    pendingQuestionSession.current = null;
+    applySessionSelection(session.session_key, session);
+    setMobileSidebarOpen(false);
+    setSessionsAttempt((attempt) => attempt + 1);
+  }, [applySessionSelection]);
+
   const openQuestion = useCallback((eventKey: string) => {
     manualExpansion.current = true;
     expansionRevision.current += 1;
@@ -2445,6 +2460,7 @@ export function useViewerState() {
     selectedSession,
     selectedSessionKey,
     selectSession,
+    openCreatedSession,
     sessionsLoading,
     sessionsLoadingMore,
     sessionsError,
