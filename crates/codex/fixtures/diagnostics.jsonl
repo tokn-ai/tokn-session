@@ -1,0 +1,15 @@
+{"type":"session_meta","timestamp":"2026-10-20T00:00:00Z","payload":{"id":"diagnostics-session","cwd":"/fixture"}}
+{"type":"event_msg","timestamp":"2026-10-20T00:00:01Z","payload":{"type":"task_started","turn_id":"failed-turn"}}
+{"type":"event_msg","timestamp":"2026-10-20T00:00:02Z","payload":{"type":"warning","message":"Falling back from WebSockets to HTTPS transport"}}
+{"type":"event_msg","timestamp":"2026-10-20T00:00:03Z","payload":{"type":"guardian_warning","message":"Approval service is temporarily unavailable"}}
+{"type":"event_msg","timestamp":"2026-10-20T00:00:04Z","payload":{"type":"stream_error","message":"Reconnecting... 1/5","codex_error_info":{"response_stream_disconnected":{"http_status_code":503}},"additional_details":"Synthetic stream disconnect"}}
+{"type":"event_msg","timestamp":"2026-10-20T00:00:05Z","payload":{"type":"error","message":"Synthetic provider quota exceeded","codex_error_info":"usage_limit_exceeded","future_diagnostic":{"request_id":"request-1"}}}
+{"type":"event_msg","timestamp":"2026-10-20T00:00:06Z","payload":{"type":"task_complete","turn_id":"failed-turn","error":{"message":"Synthetic provider quota exceeded","codex_error_info":"usage_limit_exceeded"}}}
+{"type":"event_msg","timestamp":"2026-10-20T00:00:07Z","payload":{"type":"task_started","turn_id":"cancelled-turn"}}
+{"type":"event_msg","timestamp":"2026-10-20T00:00:08Z","payload":{"type":"turn_aborted","turn_id":"cancelled-turn","reason":"interrupted"}}
+{"type":"event_msg","timestamp":"2026-10-20T00:00:09Z","payload":{"type":"task_started","turn_id":"completed-turn"}}
+{"type":"event_msg","timestamp":"2026-10-20T00:00:10Z","payload":{"type":"task_complete","turn_id":"completed-turn","error":null}}
+{"type":"response_item","timestamp":"2026-10-20T00:00:11Z","payload":{"type":"image_generation_call","id":"image-failed","status":"failed","error":{"message":"Synthetic image service failure"}}}
+{"type":"response_item","timestamp":"2026-10-20T00:00:12Z","payload":{"type":"image_generation_call","id":"image-pending","status":"in_progress"}}
+{"type":"response_item","timestamp":"2026-10-20T00:00:13Z","payload":{"type":"tool_search_output","id":"search-failed","call_id":"call-failed","status":"failed","execution":"client","tools":[],"error":{"message":"Synthetic tool discovery failure"}}}
+{"type":"response_item","timestamp":"2026-10-20T00:00:14Z","payload":{"type":"tool_search_output","id":"search-pending","call_id":"call-pending","status":"in_progress","execution":"client","tools":[]}}

@@ -60,15 +60,31 @@ impl PiNormalizer {
         })]
       }
       PiSessionItem::Message(event) => normalize_message(self.session_id.clone(), event, native, line_timestamp),
-      PiSessionItem::Error(event) => vec![AgentEvent::Error(ErrorEvent {
-        provider: Provider::Pi,
-        session_id: self.session_id.clone(),
-        message: event
+      PiSessionItem::Error(event) => {
+        let timestamp = event.timestamp.or(line_timestamp);
+        let message = event
           .message
-          .or_else(|| event.error.map(|value| value.to_string()))
-          .unwrap_or_else(|| "unknown pi error".to_string()),
-        timestamp: event.timestamp.or(line_timestamp),
-      })],
+          .filter(|message| !message.trim().is_empty())
+          .or_else(|| event.error.and_then(error_payload_text))
+          .unwrap_or_else(|| "unknown pi error".to_string());
+        vec![
+          AgentEvent::Error(ErrorEvent {
+            provider: Provider::Pi,
+            session_id: self.session_id.clone(),
+            message,
+            timestamp: timestamp.clone(),
+          }),
+          AgentEvent::Metadata(MetadataEvent {
+            provider: Provider::Pi,
+            session_id: self.session_id.clone(),
+            kind: MetadataKind::Diagnostic,
+            native_type: "error".into(),
+            summary: "Pi session error".into(),
+            native,
+            timestamp,
+          }),
+        ]
+      }
       PiSessionItem::Compaction(_)
       | PiSessionItem::BranchSummary(_)
       | PiSessionItem::Custom(_)
@@ -136,7 +152,7 @@ fn normalize_message(
   };
   let mut events = match message {
     PiMessage::User(message) => normalize_user_message(session_id, &meta, message),
-    PiMessage::Assistant(message) => normalize_assistant_message(session_id, &meta, message),
+    PiMessage::Assistant(message) => normalize_assistant_message(session_id, &meta, message, !outcome.is_empty()),
     PiMessage::ToolResult(message) => normalize_tool_result_message(session_id, &meta, message),
     PiMessage::Unknown(message) => vec![unknown_event(
       session_id,
@@ -305,6 +321,7 @@ fn normalize_assistant_message(
   session_id: Option<String>,
   meta: &PiMessageMeta,
   message: crate::event::PiAssistantMessage,
+  has_outcome: bool,
 ) -> Vec<AgentEvent> {
   let timestamp = meta
     .timestamp
@@ -316,21 +333,24 @@ fn normalize_assistant_message(
     match block {
       PiContentBlock::Text(content) => {
         let native = json_value(&content);
-        if let Some(text) = content.text.filter(|text| !text.is_empty()) {
-          events.push(message_event(
+        match content.text {
+          Some(text) if !text.is_empty() => events.push(message_event(
             session_id.clone(),
             meta,
             Role::Assistant,
             text,
             timestamp.clone(),
-          ));
-        } else {
-          events.push(unknown_event(
+          )),
+          // Pi's run-failure handler emits an empty recognized text block.
+          // The outcome diagnostic preserves it without inventing unknown
+          // content. Missing/malformed text and unsupported blocks still surface.
+          Some(_) if has_outcome => {}
+          _ => events.push(unknown_event(
             session_id.clone(),
             Some("message.content.text".to_string()),
             Some(native),
             timestamp.clone(),
-          ));
+          )),
         }
       }
       PiContentBlock::Thinking(content) => {
@@ -504,6 +524,16 @@ fn unknown_event(
 
 fn present_text(text: String) -> Option<String> {
   (!text.is_empty()).then_some(text)
+}
+
+fn error_payload_text(value: Value) -> Option<String> {
+  match value {
+    Value::String(text) => (!text.trim().is_empty()).then_some(text),
+    Value::Number(number) => Some(number.to_string()),
+    Value::Object(fields) if !fields.is_empty() => Some(Value::Object(fields).to_string()),
+    Value::Array(items) if !items.is_empty() => Some(Value::Array(items).to_string()),
+    _ => None,
+  }
 }
 
 fn prefixed_type(prefix: &str, native_type: Option<&str>) -> Option<String> {

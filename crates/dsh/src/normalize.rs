@@ -11,6 +11,8 @@ use tokn_session_core::{
   tool_kind_for_optional_name, tool_summary_for_io,
 };
 
+mod turn_end;
+
 /// Historical log view, not a reconstruction of the compacted model surface.
 /// Assembled messages replace their redundant stream deltas for display, while
 /// unfinished steps still expose their partial text and reasoning.
@@ -252,28 +254,26 @@ impl Normalizer {
         time,
       )],
       SessionEvent::TurnEnd(event) => {
-        let reason = &native["data"]["reason"];
-        let outcome = match event.data.reason.kind.as_str() {
-          "completed" => LifecycleOutcome::Completed,
-          "aborted" if valid_cancel_cause(&reason["reason"]) => LifecycleOutcome::Cancelled,
-          "interrupted" => LifecycleOutcome::Interrupted,
-          "blocked" => LifecycleOutcome::Blocked,
-          "max-tokens" => LifecycleOutcome::TokenLimit,
-          "error" if reason["error"]["message"].is_string() && reason["error"]["code"].is_string() => {
-            LifecycleOutcome::Failed
-          }
-          _ => return vec![self.unknown(native, time)],
+        let Some(ending) = turn_end::parse(&native["data"]) else {
+          return vec![self.unknown(native, time)];
         };
         let mut events = Vec::new();
-        if matches!(outcome, LifecycleOutcome::Failed) {
+        if let Some(message) = ending.error_message {
           events.push(AgentEvent::Error(ErrorEvent {
             provider: Provider::Dsh,
             session_id: Some(self.session_id.clone()),
-            message: reason["error"]["message"].as_str().unwrap().to_string(),
+            message: message.to_string(),
             timestamp: time.clone(),
           }));
         }
-        events.push(self.lifecycle(event.data.turn, None, Phase::Finished, Some(outcome), native, time));
+        events.push(self.lifecycle(
+          event.data.turn,
+          None,
+          Phase::Finished,
+          Some(ending.outcome),
+          native,
+          time,
+        ));
         events
       }
       SessionEvent::RequestContext(event) => vec![self.metadata(
@@ -575,14 +575,6 @@ impl Normalizer {
 
 fn arguments(raw: &str) -> Value {
   serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
-}
-
-fn valid_cancel_cause(cause: &Value) -> bool {
-  match cause["kind"].as_str() {
-    Some("user" | "parent" | "disposed" | "legacy") => true,
-    Some("hook") => cause["reason"].is_string(),
-    _ => false,
-  }
 }
 
 fn valid_surface(native: &Value) -> bool {

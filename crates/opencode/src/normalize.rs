@@ -2,9 +2,9 @@ use crate::row::{OpenCodeMessageRow, OpenCodePartRow, OpenCodeSessionEntryRow, O
 use serde_json::{Value, json};
 use tokn_opencode_protocol::v1::{MessageItem, PartItem, TokenUsage, ToolState, ToolStateItem};
 use tokn_session_core::{
-  AgentEvent, ErrorEvent, MessageDelivery, MessageEvent, MessageProvenance, MetadataEvent, MetadataKind, Phase,
-  Provider, ProviderChanged, ReasoningEvent, Role, SessionStarted, ToolCallEvent, ToolRecordKind, ToolTransport,
-  UnknownEvent, UsageEvent, UsageKind, tool_kind_for_optional_name, tool_summary_for_io,
+  AgentEvent, MessageDelivery, MessageEvent, MessageProvenance, MetadataEvent, MetadataKind, Phase, Provider,
+  ProviderChanged, ReasoningEvent, Role, SessionStarted, ToolCallEvent, ToolRecordKind, ToolTransport, UnknownEvent,
+  UsageEvent, UsageKind, tool_kind_for_optional_name, tool_summary_for_io,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,14 +111,6 @@ impl OpenCodeNormalizer {
         events.extend(self.text_message(id, parent_id, Role::User, provenance, time_created, parts));
       }
       MessageItem::Assistant(message) => {
-        if let Some(error) = message.error {
-          events.push(AgentEvent::Error(ErrorEvent {
-            provider: self.provider,
-            session_id: Some(self.session_id.clone()),
-            message: error_message(error),
-            timestamp: timestamp(time_created),
-          }));
-        }
         events.extend(self.normalize_assistant_turn(
           &id,
           &message.parent_id,
@@ -129,6 +121,11 @@ impl OpenCodeNormalizer {
           true,
           parts,
         ));
+        // The terminal response outcome must follow its own partial content
+        // and accounting, or reasoning/tool parts can revive active state.
+        if let Some(error) = message.error {
+          events.extend(self.normalize_error(&id, &native, &error, time_created));
+        }
       }
       MessageItem::Unknown(item) if item.native_type.as_deref() == Some("system") => {
         events.extend(self.text_message(id, parent_id, Role::System, provenance, time_created, parts));
@@ -138,14 +135,7 @@ impl OpenCodeNormalizer {
         events.push(self.unknown_message(item, time_created));
       }
       MessageItem::Unknown(item) if item.native_type.as_deref() == Some("assistant") => {
-        if let Some(error) = item.native.get("error").filter(|error| !error.is_null()).cloned() {
-          events.push(AgentEvent::Error(ErrorEvent {
-            provider: self.provider,
-            session_id: Some(self.session_id.clone()),
-            message: error_message(error),
-            timestamp: timestamp(time_created),
-          }));
-        }
+        let error = item.native.get("error").filter(|error| !error.is_null()).cloned();
         let recovered_tokens = recover_token_usage(&native);
         events.extend(self.normalize_assistant_turn(
           &id,
@@ -158,6 +148,9 @@ impl OpenCodeNormalizer {
           parts,
         ));
         events.push(self.unknown_message(item, time_created));
+        if let Some(error) = error {
+          events.extend(self.normalize_error(&id, &native, &error, time_created));
+        }
       }
       MessageItem::Unknown(item) => {
         events.push(self.unknown_message(item, time_created));
@@ -165,6 +158,35 @@ impl OpenCodeNormalizer {
     }
 
     events
+  }
+
+  fn normalize_error(
+    &self,
+    message_id: &str,
+    data: &Value,
+    error: &Value,
+    time_created: Option<i64>,
+  ) -> Vec<AgentEvent> {
+    // SQLite keeps message identity outside data. Preserve both the original
+    // envelope and relational ID when projecting an ErrorEvent without ID fields.
+    let native = json!({"id":message_id, "data":data});
+    crate::errors::normalize(
+      self.provider,
+      Some(self.session_id.clone()),
+      error,
+      "message.error",
+      native.clone(),
+      timestamp(time_created),
+    )
+    .unwrap_or_else(|| {
+      vec![unknown_event(
+        self.provider,
+        Some(self.session_id.clone()),
+        Some("message.error".into()),
+        Some(native),
+        timestamp(time_created),
+      )]
+    })
   }
 
   pub(crate) fn normalize_session_entry(&mut self, row: OpenCodeSessionEntryRow) -> AgentEvent {
@@ -652,6 +674,13 @@ pub(crate) fn tool_event(
       present_output(None, state.error.map(Value::String), state.metadata, state.raw),
       Some(true),
     ),
+    ToolStateItem::Unknown(_) if native["status"] == "error" => (
+      ToolRecordKind::Snapshot,
+      Phase::Finished,
+      native.get("input").cloned(),
+      Some(native.clone()),
+      Some(true),
+    ),
     ToolStateItem::Unknown(_) => (
       ToolRecordKind::Snapshot,
       Phase::Updated,
@@ -709,16 +738,6 @@ fn metadata_exit_is_error(metadata: Option<&Value>) -> bool {
     .and_then(|metadata| metadata.get("exit"))
     .and_then(Value::as_i64)
     .is_some_and(|exit| exit != 0)
-}
-
-fn error_message(value: Value) -> String {
-  value
-    .get("data")
-    .and_then(|data| data.get("message"))
-    .and_then(Value::as_str)
-    .or_else(|| value.get("message").and_then(Value::as_str))
-    .map(str::to_string)
-    .unwrap_or_else(|| value.to_string())
 }
 
 pub(crate) fn timestamp(value: Option<i64>) -> Option<String> {

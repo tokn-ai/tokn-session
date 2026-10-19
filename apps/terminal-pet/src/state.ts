@@ -172,12 +172,12 @@ export class PetStore {
   }
 
   ingest(relay: RelayEvent, nowMs = Date.now()): void {
-    // Accounting and context updates are observations, not user/agent activity.
-    // Ignoring them here also avoids creating a new focus row from metadata alone.
+    // Passive accounting/context records do not renew activity. A validated
+    // response cancellation is terminal even when its provider has no turn ID.
     if (
       relay.event.type === "usage"
       || relay.event.type === "compaction"
-      || relay.event.type === "metadata"
+      || (relay.event.type === "metadata" && !isResponseCancelled(relay.event))
       || asObject(relay.event.provenance)?.display === false
       || (
         relay.event.provider === "pi"
@@ -503,6 +503,16 @@ export class PetStore {
         activity.pending_interactions.delete(asString(event.request_id) ?? "question_request");
         this.#markProgress(activity, nowMs);
         return;
+      case "lifecycle":
+        if (isTurnInterruption(event)) {
+          this.#markInterrupted(activity, nowMs, event.outcome === "cancelled" ? "Cancelled" : "Interrupted");
+        }
+        return;
+      case "metadata":
+        if (isResponseCancelled(event)) {
+          this.#markInterrupted(activity, nowMs, cancellationLabel(event));
+        }
+        return;
       case "error":
         if (isInterruptedError(event)) {
           this.#markInterrupted(activity, nowMs);
@@ -696,11 +706,11 @@ export class PetStore {
     activity.running_until = nowMs;
   }
 
-  #markInterrupted(activity: SessionActivity, nowMs: number): void {
+  #markInterrupted(activity: SessionActivity, nowMs: number, label = "Interrupted"): void {
     this.#clearTransientState(activity, nowMs);
     activity.completed_at = nowMs;
     activity.outcome = "interrupted";
-    activity.label = "Interrupted";
+    activity.label = label;
   }
 
   #expireLeases(activity: SessionActivity, nowMs: number): void {
@@ -1041,6 +1051,43 @@ function isInterruptedError(event: AgentEvent): boolean {
     && asString(event.message)?.trim().toLowerCase() === "interrupted";
 }
 
+function isTurnInterruption(event: AgentEvent): boolean {
+  return event.type === "lifecycle"
+    && event.scope === "turn"
+    && event.phase === "finished"
+    && !!asString(event.turn_id)?.trim()
+    && (event.outcome === "interrupted" || event.outcome === "cancelled");
+}
+
+// Match native discriminators, never a diagnostic's display summary or prose.
+// Keep this aligned with AgentEvent::is_response_cancelled in the Rust core.
+function isResponseCancelled(event: AgentEvent): boolean {
+  if (event.type !== "metadata" || event.kind !== "diagnostic") return false;
+  const native = asObject(event.native);
+  if (event.provider === "codex") {
+    const turn_id = native && Object.hasOwn(native, "turn_id") ? native.turn_id : native?.turnId;
+    return event.native_type === "event_msg.turn_aborted"
+      && native?.type === "turn_aborted"
+      && ["interrupted", "replaced", "review_ended", "budget_limited"].includes(asString(native.reason) ?? "")
+      && (turn_id === undefined || turn_id === null || (typeof turn_id === "string" && !!turn_id.trim()));
+  }
+  if (event.provider === "pi" && event.native_type === "message" && native?.type === "message") {
+    const message = asObject(native?.message);
+    return message?.role === "assistant" && message.stopReason === "aborted";
+  }
+  if (event.provider === "opencode" || event.provider === "zcode") {
+    const data = event.native_type === "message.error" ? asObject(native?.data) : undefined;
+    const error = data?.role === "assistant" ? asObject(data.error)
+      : event.native_type === "error" && native?.type === "error" ? asObject(native.error) : undefined;
+    return error?.name === "MessageAbortedError";
+  }
+  return false;
+}
+
+function cancellationLabel(event: AgentEvent): string {
+  return event.provider === "codex" ? "Interrupted" : "Cancelled";
+}
+
 function newSessionActivity(relay: RelayEvent, nowMs: number): SessionActivity {
   return {
     topic: relay.topic,
@@ -1284,6 +1331,12 @@ export function describeEvent(event: AgentEvent): string {
       return describeTool(event);
     case "error":
       return asString(event.message) ?? "Blocked";
+    case "lifecycle":
+      return isTurnInterruption(event)
+        ? event.outcome === "cancelled" ? "Cancelled" : "Interrupted"
+        : event.type;
+    case "metadata":
+      return isResponseCancelled(event) ? cancellationLabel(event) : event.type;
     case "goal_updated":
       return "Goal updated";
     case "agent_activity": {
@@ -1361,6 +1414,10 @@ function describeActivity(event: AgentEvent): ActivityDescription {
     }
     case "session_started":
       return { kind: "lifecycle", label };
+    case "lifecycle":
+      return { kind: "lifecycle", label };
+    case "metadata":
+      return { kind: isResponseCancelled(event) ? "lifecycle" : "activity", label };
     case "provider_changed":
     case "session_settings_applied":
       return { kind: "provider", label };

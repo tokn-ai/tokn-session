@@ -244,6 +244,11 @@ impl WorkBuddyNormalizer {
     };
     let mut events = Vec::new();
     let text = content_text(&item.content);
+    let error = item
+      .provider_data
+      .as_ref()
+      .and_then(|data| data.get("error"))
+      .and_then(provider_error_message);
     if !text.is_empty() {
       events.push(AgentEvent::Message(MessageEvent {
         provenance: None,
@@ -275,7 +280,7 @@ impl WorkBuddyNormalizer {
         Some(native.clone()),
         timestamp.clone(),
       ));
-    } else if events.is_empty() {
+    } else if events.is_empty() && error.is_none() {
       events.push(unknown_event(
         Some(session_id.clone()),
         Some("message".to_string()),
@@ -283,20 +288,23 @@ impl WorkBuddyNormalizer {
         timestamp.clone(),
       ));
     }
-    if let Some(error) = item
-      .provider_data
-      .as_ref()
-      .and_then(|data| data.get("error"))
-      .filter(|error| !error.is_null())
-    {
+    if let Some(message) = error {
       events.push(AgentEvent::Error(ErrorEvent {
         provider: Provider::WorkBuddy,
+        session_id: Some(session_id.clone()),
+        message,
+        timestamp: timestamp.clone(),
+      }));
+      // ErrorEvent cannot hold the native message identity or provider flags.
+      // Preserve the exact record, including empty assistant bodies, alongside
+      // its visible diagnostic rather than losing retry/network attribution.
+      events.push(AgentEvent::Metadata(MetadataEvent {
+        provider: Provider::WorkBuddy,
         session_id: Some(session_id),
-        message: error
-          .get("message")
-          .and_then(Value::as_str)
-          .map(str::to_string)
-          .unwrap_or_else(|| error.to_string()),
+        kind: MetadataKind::Diagnostic,
+        native_type: "message".into(),
+        summary: "WorkBuddy provider request failed".into(),
+        native,
         timestamp,
       }));
     }
@@ -352,6 +360,41 @@ impl WorkBuddyNormalizer {
       ));
     }
     events
+  }
+}
+
+const MAX_ERROR_MESSAGE_CHARS: usize = 4000;
+
+fn provider_error_message(error: &Value) -> Option<String> {
+  if !meaningful_error(error) {
+    return None;
+  }
+  let text = match error {
+    Value::String(text) => text.trim().to_string(),
+    Value::Bool(true) => "WorkBuddy provider request failed".into(),
+    Value::Object(object) => object
+      .get("message")
+      .and_then(Value::as_str)
+      .and_then(non_blank)
+      .map(str::to_string)
+      .unwrap_or_else(|| error.to_string()),
+    _ => error.to_string(),
+  };
+  let mut chars = text.chars();
+  let mut bounded = chars.by_ref().take(MAX_ERROR_MESSAGE_CHARS).collect::<String>();
+  if chars.next().is_some() {
+    bounded.push_str("… [truncated]");
+  }
+  Some(bounded)
+}
+
+fn meaningful_error(value: &Value) -> bool {
+  match value {
+    Value::Null | Value::Bool(false) => false,
+    Value::String(text) => !text.trim().is_empty(),
+    Value::Array(values) => values.iter().any(meaningful_error),
+    Value::Object(values) => values.values().any(meaningful_error),
+    Value::Number(_) | Value::Bool(true) => true,
   }
 }
 
@@ -651,6 +694,11 @@ mod tests {
       if message.text.starts_with("Authentication required"))));
     assert!(events.iter().any(|event| matches!(event, AgentEvent::Error(error)
       if error.message.starts_with("Authentication required"))));
+    assert!(events.iter().any(|event| matches!(event, AgentEvent::Metadata(metadata)
+      if matches!(metadata.kind, tokn_session_core::MetadataKind::Diagnostic)
+        && metadata.native["id"] == "a50df043-e1c0-4691-b3d0-8f5ca503c7e8"
+        && metadata.native["parentId"] == "0484b091-c6d5-4621-b623-3777eb42e1b0"
+        && metadata.native["providerData"]["error"]["isRetryable"] == false)));
 
     let future = serde_json::from_value(serde_json::json!({
       "type": "future_record",
@@ -662,5 +710,113 @@ mod tests {
     assert!(matches!(&events[..], [AgentEvent::Unknown(event)]
       if event.native_type.as_deref() == Some("future_record")
         && event.native.as_ref().and_then(|native| native["payload"]["answer"].as_i64()) == Some(42)));
+  }
+
+  #[test]
+  fn empty_assistant_failures_keep_structured_diagnostics_and_identity() {
+    let native = serde_json::json!({
+      "id":"failed-message", "parentId":"parent-message", "timestamp":42,
+      "sessionId":"errors", "type":"message", "role":"assistant", "status":"incomplete", "content":[],
+      "providerData":{"error":{"message":"Connection failed", "isNetworkError":true,"isRetryable":true,
+        "details":{"status":503,"requestId":"request"}}, "requestModelId":"provider:model"}
+    });
+    let mut normalizer = WorkBuddyNormalizer::new("errors".into());
+    let events = normalizer.normalize_line(serde_json::from_value(native.clone()).unwrap());
+    assert_eq!(
+      events
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::Error(_)))
+        .count(),
+      1
+    );
+    assert!(events.iter().any(|event| matches!(event, AgentEvent::Error(error)
+      if error.message == "Connection failed" && error.timestamp.as_deref() == Some("42"))));
+    assert!(events.iter().any(|event| matches!(event, AgentEvent::Metadata(metadata)
+      if metadata.native == native && metadata.timestamp.as_deref() == Some("42"))));
+    assert!(
+      !events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::Message(_) | AgentEvent::Unknown(_)))
+    );
+  }
+
+  #[test]
+  fn pseudoerrors_do_not_turn_successful_messages_into_failures() {
+    for error in [
+      serde_json::Value::Null,
+      serde_json::json!(false),
+      serde_json::json!(" \n "),
+      serde_json::json!({}),
+      serde_json::json!([]),
+      serde_json::json!({"message":"", "isNetworkError":false, "details":[]}),
+      serde_json::json!([false, null, {}]),
+    ] {
+      let mut normalizer = WorkBuddyNormalizer::new("errors".into());
+      let events = normalizer.normalize_line(
+        serde_json::from_value(serde_json::json!({
+          "type":"message", "role":"assistant", "status":"completed",
+          "content":[{"type":"output_text", "text":"This reply discusses an error without reporting one."}],
+          "providerData":{"error":error}
+        }))
+        .unwrap(),
+      );
+      assert!(
+        matches!(&events[..], [AgentEvent::Message(message)]
+        if message.text == "This reply discusses an error without reporting one."),
+        "{events:?}"
+      );
+    }
+  }
+
+  #[test]
+  fn partial_replies_usage_and_non_message_error_details_survive() {
+    let native = serde_json::json!({
+      "type":"message", "id":"partial", "parentId":"user", "role":"assistant", "status":"incomplete",
+      "content":[{"type":"output_text","text":"A partial reply"}],
+      "providerData":{"error":{"cause":{"code":"CONNECTION_RESET","message":"stream failed"}},
+        "rawUsage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}
+    });
+    let mut normalizer = WorkBuddyNormalizer::new("errors".into());
+    let events = normalizer.normalize_line(serde_json::from_value(native.clone()).unwrap());
+    assert!(events.iter().any(|event| matches!(event, AgentEvent::Message(message)
+      if message.text == "A partial reply" && message.message_id.as_deref() == Some("partial"))));
+    assert!(events.iter().any(|event| matches!(event, AgentEvent::Error(error)
+      if error.message.contains("CONNECTION_RESET") && error.message.contains("stream failed"))));
+    assert!(
+      events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::Metadata(metadata) if metadata.native == native))
+    );
+    assert!(events.iter().any(|event| matches!(event, AgentEvent::Usage(usage)
+      if usage.input_tokens == 10 && usage.output_tokens == 2 && usage.message_id.as_deref() == Some("partial"))));
+  }
+
+  #[test]
+  fn recursively_empty_errors_stay_non_errors_across_nesting_depths() {
+    for depth in [0, 7, 8, 9, 16, 64] {
+      let mut error = serde_json::json!({"message":" ","network":false,"details":[null,{}]});
+      for _ in 0..depth {
+        error = serde_json::json!({"cause":error});
+      }
+      assert_eq!(super::provider_error_message(&error), None, "depth {depth}");
+    }
+  }
+
+  #[test]
+  fn tool_failures_and_cancellations_remain_tool_results_without_provider_errors() {
+    for (status, exit_code, expected_error) in [("completed", 0, false), ("completed", 9, true), ("cancelled", 0, true)]
+    {
+      let mut normalizer = WorkBuddyNormalizer::new("tools".into());
+      let events = normalizer.normalize_line(
+        serde_json::from_value(serde_json::json!({
+          "type":"function_call_result", "callId":"call", "name":"Bash", "status":status,
+          "output":{"type":"text","text":"tool output"},
+          "providerData":{"toolResult":{"rawResponse":{"exitCode":exit_code}}}
+        }))
+        .unwrap(),
+      );
+      assert!(matches!(&events[..], [AgentEvent::ToolCall(tool)]
+        if tool.is_error == Some(expected_error) && matches!(tool.phase, Phase::Finished)));
+    }
   }
 }

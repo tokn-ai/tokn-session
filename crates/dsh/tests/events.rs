@@ -108,6 +108,187 @@ fn lifecycle_preserves_outcomes_and_does_not_claim_step_success() {
 }
 
 #[test]
+fn native_legacy_turn_endings_preserve_failures_cancellations_and_raw_attribution() {
+  // These are the precise pre-react-loop shapes migrated by the pinned DSH
+  // session-persistence coordinator, alongside the current error contract.
+  let cases = [
+    (
+      json!({"kind":"error","step":1,"failure":{"message":"old provider failure","code":"SERVER"}}),
+      "failed",
+      Some("old provider failure"),
+    ),
+    (
+      json!({"kind":"error","step":1,"message":"old thrown value"}),
+      "failed",
+      Some("old thrown value"),
+    ),
+    (
+      json!({"kind":"error","step":0,"message":"old coded error","code":"CODED"}),
+      "failed",
+      Some("old coded error"),
+    ),
+    (
+      json!({"kind":"error","step":0,"failure":{"message":"rate limited","code":"RATE_LIMIT","status":429,"providerRetryAfterMs":1000,"requestId":"request-1"}}),
+      "failed",
+      Some("rate limited"),
+    ),
+    (json!({"kind":"aborted"}), "cancelled", None),
+    (json!({"kind":"disposed"}), "cancelled", None),
+    (
+      json!({"kind":"error","error":{"message":"current failure","code":"HTTP","requestId":"current-request"}}),
+      "failed",
+      Some("current failure"),
+    ),
+    (json!({"kind":"aborted","reason":{"kind":"user"}}), "cancelled", None),
+  ];
+  let records = cases
+    .iter()
+    .enumerate()
+    .map(|(index, (reason, _, _))| record("turn/end", index as u64, json!({"turn":index + 1,"reason":reason})))
+    .collect::<Vec<_>>();
+  let events = normalize(records.clone());
+  let lifecycle = events
+    .iter()
+    .filter(|event| event["type"] == "lifecycle")
+    .collect::<Vec<_>>();
+  assert_eq!(lifecycle.len(), cases.len());
+  let errors = events
+    .iter()
+    .filter(|event| event["type"] == "error")
+    .collect::<Vec<_>>();
+  assert_eq!(
+    errors.len(),
+    cases.iter().filter(|(_, _, message)| message.is_some()).count()
+  );
+  for (index, ((_, outcome, message), original)) in cases.iter().zip(&records).enumerate() {
+    assert_eq!(lifecycle[index]["outcome"], *outcome);
+    assert_eq!(lifecycle[index]["scope"], "turn");
+    assert_eq!(lifecycle[index]["turn_id"], (index + 1).to_string());
+    assert_eq!(lifecycle[index]["native"], *original);
+    if let Some(message) = message {
+      assert_eq!(
+        errors
+          .iter()
+          .filter(|error| error["timestamp"] == original["time"].as_u64().unwrap().to_string())
+          .count(),
+        1
+      );
+      assert!(errors.iter().any(|error| error["message"] == *message));
+    }
+  }
+  assert!(!events.iter().any(|event| event["type"] == "unknown"));
+}
+
+#[test]
+fn malformed_or_unfamiliar_legacy_endings_remain_unknown_without_inferred_errors() {
+  let reasons = [
+    json!({"kind":"error","message":"no step"}),
+    json!({"kind":"error","step":-1,"message":"bad step"}),
+    json!({"kind":"error","step":1,"message":"bad code","code":42}),
+    json!({"kind":"error","step":1,"failure":{"message":"bad request","code":"HTTP","requestId":42}}),
+    json!({"kind":"error","step":1,"failure":{"message":"future failure","code":"HTTP","future":true}}),
+    json!({"kind":"error","step":1,"message":"ambiguous","failure":{"message":"other","code":"HTTP"}}),
+    json!({"kind":"error","step":1,"message":"legacy fallback forbidden","error":false}),
+    json!({"kind":"aborted","reason":null}),
+    json!({"kind":"disposed","future":true}),
+  ];
+  let mut records = reasons
+    .into_iter()
+    .enumerate()
+    .map(|(index, reason)| record("turn/end", index as u64, json!({"turn":1,"reason":reason})))
+    .collect::<Vec<_>>();
+  records.push(record("turn/end", 20, json!({"turn":0,"reason":{"kind":"aborted"}})));
+  records.push(record(
+    "turn/end",
+    21,
+    json!({"turn":1,"reason":{"kind":"aborted"},"future":true}),
+  ));
+  for turn in [json!(0), json!(9_007_199_254_740_992_u64)] {
+    records.push(record(
+      "turn/end",
+      22,
+      json!({"turn":turn,"reason":{"kind":"error","error":{"message":"bad turn","code":"HTTP"}}}),
+    ));
+    records.push(record(
+      "turn/end",
+      23,
+      json!({"turn":turn,"reason":{"kind":"completed"}}),
+    ));
+  }
+  let events = normalize(records.clone());
+  assert_eq!(events.len(), records.len());
+  for (event, record) in events.iter().zip(records) {
+    assert_eq!(event["type"], "unknown");
+    assert_eq!(event["native"], record);
+  }
+}
+
+#[test]
+fn blank_current_and_legacy_failures_use_codes_or_a_visible_fallback() {
+  let cases = [
+    (
+      json!({"kind":"error","error":{"message":" \n ","code":" HTTP "}}),
+      "HTTP",
+    ),
+    (
+      json!({"kind":"error","error":{"message":"","code":" "}}),
+      "DSH turn failed",
+    ),
+    (
+      json!({"kind":"error","step":1,"failure":{"message":" ","code":" RATE_LIMIT "}}),
+      "RATE_LIMIT",
+    ),
+    (
+      json!({"kind":"error","step":1,"failure":{"message":"","code":""}}),
+      "DSH turn failed",
+    ),
+    (
+      json!({"kind":"error","step":1,"message":" \n ","code":" CODED "}),
+      "CODED",
+    ),
+    (json!({"kind":"error","step":1,"message":" "}), "DSH turn failed"),
+  ];
+  for (reason, expected) in cases {
+    let original = record("turn/end", 1, json!({"turn":1,"reason":reason}));
+    let events = normalize(vec![original.clone()]);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["type"], "error");
+    assert_eq!(events[0]["message"], expected);
+    assert_eq!(events[1]["type"], "lifecycle");
+    assert_eq!(events[1]["outcome"], "failed");
+    assert_eq!(events[1]["native"], original);
+  }
+}
+
+#[test]
+fn aborted_tool_results_preserve_native_failure_identity_without_provider_errors() {
+  for (index, code) in ["TOOL_ABORTED", "TOOL_ABORTED_BEFORE_DISPATCH"].iter().enumerate() {
+    let events = normalize(vec![
+      record(
+        "tool/call",
+        0,
+        json!({"turn":1,"step":1,"callId":"call","name":"read_file","arguments":"{}"}),
+      ),
+      record(
+        "tool/result",
+        1,
+        json!({"turn":1,"step":1,
+        "message":{"id":"result","role":"user","source":{"kind":"tool","callId":"call"},
+          "content":[{"type":"tool-result","toolCallId":"call","isError":true,"content":[{"type":"text","text":"tool call aborted"}]}]},
+        "error":{"name":"AbortError","code":code},"meta":{"index":index}}),
+      ),
+    ]);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1]["type"], "tool_call");
+    assert_eq!(events[1]["phase"], "finished");
+    assert_eq!(events[1]["is_error"], true);
+    assert_eq!(events[1]["tool_call_id"], "call");
+    assert_eq!(events[1]["output"]["error"]["code"], *code);
+    assert_eq!(events[1]["output"]["meta"]["index"], index);
+  }
+}
+
+#[test]
 fn usage_prefers_assembled_snapshots_and_includes_cache_once() {
   let authoritative = json!({"inputTokens":10,"outputTokens":5,"cacheReadTokens":20,"cacheWriteTokens":3,"reasoningTokens":2,"future":true});
   let events = normalize(vec![
@@ -234,7 +415,11 @@ fn unfamiliar_and_malformed_records_remain_unknown_with_exact_native() {
     future,
     record("turn/start", 1, json!({"turn":"one"})),
     record("turn/end", 2, json!({"turn":1,"reason":{"kind":"future"}})),
-    record("turn/end", 3, json!({"turn":1,"reason":{"kind":"aborted"}})),
+    record(
+      "turn/end",
+      3,
+      json!({"turn":1,"reason":{"kind":"aborted","future":true}}),
+    ),
     record("turn/end", 4, json!({"turn":1,"reason":{"kind":"error","error":false}})),
     record("session/title", 5, json!({"title":"missing attribution"})),
     record("permission/preset", 6, json!({"preset":42})),

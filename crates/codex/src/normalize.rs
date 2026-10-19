@@ -1,6 +1,7 @@
 mod async_replies;
 mod code_mode;
 mod communication;
+mod diagnostics;
 mod item_lifecycle;
 mod questions;
 mod turn_lifecycle;
@@ -641,18 +642,27 @@ fn normalize_response_item(
         timestamp,
       })]
     }
-    ResponseItem::ToolSearchOutput(item) => vec![tool_output_event(
-      session_id,
-      item.id,
-      item.call_id,
-      Some("tool_search".to_string()),
-      json!({
-        "status": item.status,
-        "execution": item.execution,
-        "tools": item.tools,
-      }),
-      timestamp,
-    )],
+    ResponseItem::ToolSearchOutput(item) => {
+      let (_, phase, is_error) = standalone_tool_call_lifecycle(item.status.as_deref());
+      let native = (is_error == Some(true)).then(|| json_value(&item));
+      let mut event = tool_output_event(
+        session_id,
+        item.id,
+        item.call_id,
+        Some("tool_search".to_string()),
+        json!({"status":item.status,"execution":item.execution,"tools":item.tools}),
+        timestamp,
+      );
+      if let AgentEvent::ToolCall(event) = &mut event {
+        event.phase = phase;
+        event.is_error = is_error;
+        event.native = native;
+        if phase != Phase::Finished {
+          event.record_kind = ToolRecordKind::Snapshot;
+        }
+      }
+      vec![event]
+    }
     ResponseItem::WebSearchCall(item) => {
       let (record_kind, phase, is_error) = standalone_tool_call_lifecycle(item.status.as_deref());
       let input = item.action.unwrap_or(Value::Null);
@@ -677,26 +687,30 @@ fn normalize_response_item(
         timestamp,
       })]
     }
-    ResponseItem::ImageGenerationCall(item) => vec![AgentEvent::ToolCall(ToolCallEvent {
-      provider: Provider::Codex,
-      session_id,
-      turn_id: None,
-      message_id: item.id,
-      parent_id: None,
-      record_kind: ToolRecordKind::Snapshot,
-      tool_call_id: None,
-      provider_tool_name: None,
-      tool_name: Some("image_generation".to_string()),
-      tool_kind: ToolKind::Unknown,
-      transport: None,
-      summary: None,
-      phase: Phase::Finished,
-      input: item.revised_prompt.map(Value::String),
-      output: item.result.map(Value::String),
-      is_error: None,
-      native: None,
-      timestamp,
-    })],
+    ResponseItem::ImageGenerationCall(item) => {
+      let (record_kind, phase, is_error) = standalone_tool_call_lifecycle(item.status.as_deref());
+      let native = (is_error == Some(true)).then(|| json_value(&item));
+      vec![AgentEvent::ToolCall(ToolCallEvent {
+        provider: Provider::Codex,
+        session_id,
+        turn_id: None,
+        message_id: item.id,
+        parent_id: None,
+        record_kind,
+        tool_call_id: None,
+        provider_tool_name: None,
+        tool_name: Some("image_generation".to_string()),
+        tool_kind: ToolKind::Unknown,
+        transport: None,
+        summary: None,
+        phase,
+        input: item.revised_prompt.map(Value::String),
+        output: item.result.map(Value::String),
+        is_error,
+        native,
+        timestamp,
+      })]
+    }
     ResponseItem::AdditionalTools(_)
     | ResponseItem::Compaction(_)
     | ResponseItem::CompactionTrigger(_)
@@ -768,7 +782,20 @@ fn normalize_event_message(
   let payload = item.native;
   match item.event_type.as_deref() {
     Some(kind @ ("task_started" | "turn_started" | "task_complete" | "turn_complete")) => {
-      vec![turn_lifecycle::normalize(session_id, &payload, kind, timestamp)]
+      let mut events = Vec::new();
+      if matches!(kind, "task_complete" | "turn_complete") {
+        if let Some(error) = payload.get("error").filter(|error| !error.is_null()) {
+          events.extend(diagnostics::error(
+            session_id.clone(),
+            error,
+            &payload,
+            kind,
+            timestamp.clone(),
+          ));
+        }
+      }
+      events.push(turn_lifecycle::normalize(session_id, &payload, kind, timestamp));
+      events
     }
     Some("user_message") => string_field(&payload, "message")
       .map(|text| {
@@ -824,15 +851,29 @@ fn normalize_event_message(
     Some("patch_apply_begin") => normalize_patch_begin(session_id, &payload, timestamp),
     Some("patch_apply_end") => normalize_patch_end(session_id, &payload, timestamp),
     Some("view_image_tool_call") => normalize_view_image(session_id, &payload, timestamp),
-    Some("error" | "warning" | "guardian_warning" | "stream_error") => normalize_error(session_id, &payload, timestamp),
+    Some("error") => diagnostics::error(session_id, &payload, &payload, "error", timestamp),
+    Some(kind @ ("warning" | "guardian_warning" | "stream_error")) => {
+      diagnostics::notice(session_id, &payload, kind, timestamp)
+    }
     Some("turn_aborted") => {
-      let mut events = normalize_turn_aborted(session_id.clone(), &payload, timestamp.clone());
-      events.push(turn_lifecycle::normalize(
-        session_id,
-        &payload,
-        "turn_aborted",
-        timestamp,
-      ));
+      let Some(turn_id) = diagnostics::abort_turn_id(&payload) else {
+        return vec![unknown_event(
+          session_id,
+          Some("event_msg.turn_aborted".into()),
+          Some(payload),
+          timestamp,
+        )];
+      };
+      let has_turn_id = turn_id.is_some();
+      let mut events = diagnostics::interrupted(session_id.clone(), &payload, timestamp.clone());
+      if has_turn_id {
+        events.push(turn_lifecycle::normalize(
+          session_id,
+          &payload,
+          "turn_aborted",
+          timestamp,
+        ));
+      }
       events
     }
     Some("thread_settings_applied") => {
@@ -1132,32 +1173,6 @@ fn normalize_view_image(session_id: Option<String>, payload: &Value, timestamp: 
     output: None,
     is_error: None,
     native: None,
-    timestamp,
-  })]
-}
-
-fn normalize_error(session_id: Option<String>, payload: &Value, timestamp: Option<String>) -> Vec<AgentEvent> {
-  string_field(payload, "message")
-    .map(|message| {
-      vec![AgentEvent::Error(ErrorEvent {
-        provider: Provider::Codex,
-        session_id,
-        message,
-        timestamp,
-      })]
-    })
-    .unwrap_or_default()
-}
-
-fn normalize_turn_aborted(session_id: Option<String>, payload: &Value, timestamp: Option<String>) -> Vec<AgentEvent> {
-  let message = payload
-    .get("reason")
-    .map(display_json_value)
-    .unwrap_or_else(|| "turn aborted".to_string());
-  vec![AgentEvent::Error(ErrorEvent {
-    provider: Provider::Codex,
-    session_id,
-    message,
     timestamp,
   })]
 }
@@ -1468,10 +1483,6 @@ fn mcp_result_is_error(result: &Value) -> bool {
     })
     .and_then(Value::as_bool)
     .unwrap_or(false)
-}
-
-fn display_json_value(value: &Value) -> String {
-  value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string())
 }
 
 fn json_value(value: impl serde::Serialize) -> Value {

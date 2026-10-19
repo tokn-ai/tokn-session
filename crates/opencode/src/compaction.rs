@@ -58,7 +58,16 @@ pub(crate) fn normalize(
     .join("\n");
   let mut events = Vec::new();
   if summary_message && markers.is_empty() {
-    let state = if raw.get("error").is_some_and(|e| !e.is_null()) {
+    let error = raw.get("error").filter(|error| !error.is_null());
+    let detail = error.and_then(crate::errors::classify);
+    if error.is_some() && detail.is_none() {
+      // The IR has no unknown compaction outcome. Preserve the complete row
+      // without claiming completion/failure from an unsupported error value.
+      return Some(vec![unknown(serde_json::to_value(row).unwrap(), "compaction.summary")]);
+    }
+    let state = if detail.as_ref().is_some_and(|error| error.cancelled) {
+      State::Interrupted
+    } else if detail.is_some() {
       State::Failed
     } else if raw["finish"].as_str().is_some_and(|s| !s.is_empty()) {
       State::Completed
@@ -75,10 +84,21 @@ pub(crate) fn normalize(
     event.timestamp = row.time_created.map(|time| time.to_string());
     event.source_refs.push(row.id.clone());
     event.context.summary_message_ids.push(row.id.clone());
-    if state == State::Failed {
-      event.reason = string(&raw["error"], "message").or_else(|| string(&raw["error"]["data"], "message"));
+    if let Some(error) = &detail {
+      event.reason = Some(error.message.clone());
     }
-    return Some(vec![AgentEvent::Compaction(event)]);
+    events.push(AgentEvent::Compaction(event));
+    if let Some(error) = detail {
+      events.push(crate::errors::diagnostic(
+        provider,
+        Some(session_id.into()),
+        &error,
+        "message.error",
+        serde_json::json!({"id":row.id, "data":raw}),
+        row.time_created.map(|time| time.to_string()),
+      ));
+    }
+    return Some(events);
   }
   for part in markers {
     let native = part.data.native();
@@ -227,7 +247,7 @@ mod tests {
       vec![],
     ));
     assert!(
-      matches!(&events[..], [AgentEvent::Compaction(e)] if e.state == State::Failed && e.reason.as_deref() == Some("cancelled"))
+      matches!(&events[..], [AgentEvent::Compaction(e), AgentEvent::Metadata(_)] if e.state == State::Failed && e.reason.as_deref() == Some("cancelled"))
     );
     for bad in [json!({"type":"compaction"}), json!({"type":"compaction","auto":"yes"})] {
       let events = normalizer.normalize_message(row("broken", json!({"role":"user"}), vec![bad]));

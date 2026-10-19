@@ -23,6 +23,47 @@ pub enum AgentEvent {
 }
 
 impl AgentEvent {
+  /// A provider-recorded assistant response cancellation. Diagnostic text is
+  /// never evidence: only the native discriminator of supported providers is.
+  /// Unsuccessful tool results do not terminate the containing response.
+  pub fn is_response_cancelled(&self) -> bool {
+    let Self::Metadata(event) = self else {
+      return false;
+    };
+    if !matches!(event.kind, MetadataKind::Diagnostic) {
+      return false;
+    }
+    match event.provider {
+      Provider::Codex => {
+        event.native_type == "event_msg.turn_aborted"
+          && event.native["type"] == "turn_aborted"
+          && matches!(
+            event.native["reason"].as_str(),
+            Some("interrupted" | "replaced" | "review_ended" | "budget_limited")
+          )
+          && event
+            .native
+            .get("turn_id")
+            .or_else(|| event.native.get("turnId"))
+            .is_none_or(|id| id.is_null() || id.as_str().is_some_and(|id| !id.trim().is_empty()))
+      }
+      Provider::Pi => {
+        event.native_type == "message"
+          && event.native["type"] == "message"
+          && event.native["message"]["role"] == "assistant"
+          && event.native["message"]["stopReason"] == "aborted"
+      }
+      Provider::OpenCode | Provider::ZCode => match event.native_type.as_str() {
+        "message.error" => {
+          event.native["data"]["role"] == "assistant" && event.native["data"]["error"]["name"] == "MessageAbortedError"
+        }
+        "error" => event.native["type"] == "error" && event.native["error"]["name"] == "MessageAbortedError",
+        _ => false,
+      },
+      _ => false,
+    }
+  }
+
   /// Human-facing consumers honor explicit visibility even when a hidden Pi
   /// extension message has an unsupported shape. Machine export stays lossless.
   pub fn is_hidden(&self) -> bool {
@@ -747,6 +788,123 @@ fn joined_string_array_field(value: &Value, field: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn response_cancellation_requires_exact_provider_diagnostic_and_native_discriminator() {
+    let pi = serde_json::json!({"type":"message", "message":{"role":"assistant", "stopReason":"aborted"}});
+    let historical =
+      serde_json::json!({"id":"message", "data":{"role":"assistant", "error":{"name":"MessageAbortedError"}}});
+    let live = serde_json::json!({"type":"error", "error":{"name":"MessageAbortedError"}});
+    let diagnostic = |provider, native_type: &str, native: Value| {
+      AgentEvent::Metadata(MetadataEvent {
+        provider,
+        session_id: None,
+        kind: MetadataKind::Diagnostic,
+        native_type: native_type.into(),
+        summary: "arbitrary wording".into(),
+        native,
+        timestamp: None,
+      })
+    };
+    assert!(diagnostic(Provider::Pi, "message", pi.clone()).is_response_cancelled());
+    for reason in ["interrupted", "replaced", "review_ended", "budget_limited"] {
+      assert!(
+        diagnostic(
+          Provider::Codex,
+          "event_msg.turn_aborted",
+          serde_json::json!({"type":"turn_aborted", "reason":reason})
+        )
+        .is_response_cancelled()
+      );
+    }
+    for id in [serde_json::json!(null), serde_json::json!("turn")] {
+      assert!(
+        diagnostic(
+          Provider::Codex,
+          "event_msg.turn_aborted",
+          serde_json::json!({"type":"turn_aborted", "reason":"interrupted", "turn_id":id})
+        )
+        .is_response_cancelled()
+      );
+    }
+    for key in ["turn_id", "turnId"] {
+      for id in [
+        serde_json::json!(""),
+        serde_json::json!(" "),
+        serde_json::json!(false),
+        serde_json::json!(42),
+      ] {
+        let mut native = serde_json::json!({"type":"turn_aborted", "reason":"interrupted"});
+        native[key] = id;
+        assert!(!diagnostic(Provider::Codex, "event_msg.turn_aborted", native).is_response_cancelled());
+      }
+    }
+    for provider in [Provider::OpenCode, Provider::ZCode] {
+      assert!(diagnostic(provider, "message.error", historical.clone()).is_response_cancelled());
+      assert!(diagnostic(provider, "error", live.clone()).is_response_cancelled());
+    }
+    for event in [
+      diagnostic(Provider::Codex, "message", pi.clone()),
+      diagnostic(
+        Provider::Codex,
+        "turn_aborted",
+        serde_json::json!({"type":"turn_aborted", "reason":"interrupted"}),
+      ),
+      diagnostic(
+        Provider::Codex,
+        "event_msg.turn_aborted",
+        serde_json::json!({"type":"warning", "reason":"interrupted"}),
+      ),
+      diagnostic(
+        Provider::Codex,
+        "event_msg.turn_aborted",
+        serde_json::json!({"type":"turn_aborted", "reason":"future_reason", "message":"interrupted"}),
+      ),
+      diagnostic(
+        Provider::Codex,
+        "event_msg.turn_aborted",
+        serde_json::json!({"type":"turn_aborted", "reason":null, "message":"interrupted"}),
+      ),
+      diagnostic(Provider::WorkBuddy, "error", live.clone()),
+      diagnostic(Provider::Dsh, "message.error", historical.clone()),
+      diagnostic(Provider::Pi, "retry", pi.clone()),
+      diagnostic(Provider::OpenCode, "retry", live.clone()),
+      diagnostic(Provider::ZCode, "tool.error", historical.clone()),
+      diagnostic(
+        Provider::Pi,
+        "message",
+        serde_json::json!({"type":"message", "message":{"role":"toolResult", "stopReason":"aborted"}}),
+      ),
+      diagnostic(
+        Provider::Pi,
+        "message",
+        serde_json::json!({"type":"message", "message":{"role":"assistant", "stopReason":"error", "errorMessage":"aborted"}}),
+      ),
+      diagnostic(
+        Provider::OpenCode,
+        "message.error",
+        serde_json::json!({"data":{"role":"tool", "error":{"name":"MessageAbortedError"}}}),
+      ),
+      diagnostic(
+        Provider::ZCode,
+        "message.error",
+        serde_json::json!({"data":{"role":"assistant", "error":{"name":"APIError", "data":{"message":"cancelled"}}}}),
+      ),
+      diagnostic(
+        Provider::OpenCode,
+        "error",
+        serde_json::json!({"type":"tool_use", "error":{"name":"MessageAbortedError"}}),
+      ),
+    ] {
+      assert!(!event.is_response_cancelled(), "{event:?}");
+    }
+    let mut event = diagnostic(Provider::Pi, "message", pi);
+    let AgentEvent::Metadata(metadata) = &mut event else {
+      unreachable!()
+    };
+    metadata.kind = MetadataKind::Session;
+    assert!(!event.is_response_cancelled());
+  }
 
   #[test]
   fn redacted_reasoning_remains_visible() {

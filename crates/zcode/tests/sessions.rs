@@ -85,6 +85,64 @@ fn serializes_the_provider_as_zcode() {
   assert_eq!(serde_json::to_value(Provider::ZCode).unwrap(), "zcode");
 }
 
+#[test]
+fn shared_error_normalization_preserves_zcode_identity_and_native_records() {
+  let (_directory, database) = fixture_database();
+  let connection = Connection::open(&database).unwrap();
+  let records = [
+    (
+      "failed",
+      serde_json::json!({"name":"AiSdkModelAdapterError", "data":{"message":"Connection failed", "code":"synthetic"}}),
+    ),
+    (
+      "cancelled",
+      serde_json::json!({"name":"MessageAbortedError", "data":{"message":"Stopped"}}),
+    ),
+  ];
+  let mut expected = Vec::new();
+  for (offset, (id, error)) in records.into_iter().enumerate() {
+    let data = serde_json::json!({"role":"assistant", "parentID":"msg_user", "error":error,
+      "semantics":{"kind":"assistant_response", "transcriptVisibility":"visible"}});
+    connection
+      .execute(
+        "INSERT INTO message VALUES(?1, 'sess_zcode', ?2, ?3, ?4)",
+        rusqlite::params![id, 2000 + offset as i64, data.to_string(), 4 + offset as i64],
+      )
+      .unwrap();
+    expected.push(serde_json::json!({"id":id, "data":data}));
+  }
+  drop(connection);
+  let loaded = ZCodeSessionSource::new(Some(database))
+    .load_session_exact("sess_zcode")
+    .unwrap();
+  let errors: Vec<_> = loaded
+    .events
+    .iter()
+    .filter_map(|event| match event {
+      AgentEvent::Error(error) => Some(error),
+      _ => None,
+    })
+    .collect();
+  assert_eq!(errors.len(), 1);
+  assert_eq!(errors[0].provider, Provider::ZCode);
+  assert_eq!(errors[0].message, "Connection failed");
+  let diagnostics: Vec<_> = loaded
+    .events
+    .iter()
+    .filter_map(|event| match event {
+      AgentEvent::Metadata(diagnostic) if diagnostic.native_type == "message.error" => Some(diagnostic),
+      _ => None,
+    })
+    .collect();
+  assert_eq!(diagnostics.len(), 2);
+  for (diagnostic, native) in diagnostics.iter().zip(expected) {
+    assert_eq!(diagnostic.provider, Provider::ZCode);
+    assert_eq!(diagnostic.session_id.as_deref(), Some("sess_zcode"));
+    assert_eq!(diagnostic.native, native);
+  }
+  assert_eq!(diagnostics[1].summary, "Provider response interrupted");
+}
+
 fn event_provider(event: &AgentEvent) -> Provider {
   match event {
     AgentEvent::SessionStarted(event) => event.provider,
