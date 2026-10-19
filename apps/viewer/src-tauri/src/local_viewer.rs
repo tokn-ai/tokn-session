@@ -81,6 +81,7 @@ impl StartedViewer {
       background.runtime.take();
       let _ = (&mut background.forwarding).await;
     }
+    self.service.shutdown_managed_sessions().await;
     self.service.relay.shutdown().await;
   }
 }

@@ -4,11 +4,12 @@ import { useSessionInput } from "../lib/useSessionInput";
 import type { SessionSummary } from "../lib/types";
 import { providerLabel } from "../lib/state";
 
-export function SessionComposer({ session, on_accepted }: {
+export function SessionComposer({ session, on_accepted, input_refresh_key }: {
   session: SessionSummary | null;
   on_accepted?: (session_key: string) => void;
+  input_refresh_key?: number;
 }) {
-  const input = useSessionInput(session?.session_key ?? null, on_accepted);
+  const input = useSessionInput(session?.session_key ?? null, on_accepted, input_refresh_key);
   const inputId = useId();
   const textarea = useRef<HTMLTextAreaElement>(null);
   const [focused_session, setFocusedSession] = useState<string | null>(null);

@@ -1,5 +1,5 @@
 import type { ExpandedActivityState } from "../lib/types";
-import { useLayoutEffect } from "react";
+import { useLayoutEffect, type ReactNode } from "react";
 import { readingEventKey } from "../lib/readingPosition";
 import { useTimelineScroll } from "../lib/useTimelineScroll";
 import { useViewerPreferences } from "../lib/viewerPreferences";
@@ -26,6 +26,8 @@ import { LoadingRows, StateView } from "./StateView";
 import { SessionComposer } from "./SessionComposer";
 
 interface ConversationProps {
+  managed_controls?: ReactNode;
+  input_refresh_key?: number;
   outstanding_questions?: OutstandingQuestion[];
   question_navigation?: { event_key: string; revision: number } | null;
   on_question_open?: (event_key: string) => void;
@@ -76,6 +78,8 @@ interface ConversationProps {
 }
 
 export function Conversation({
+  managed_controls,
+  input_refresh_key,
   outstanding_questions = [],
   question_navigation,
   on_question_open,
@@ -249,6 +253,8 @@ export function Conversation({
           <InspectorIcon />
         </button>
       </header>
+
+      {managed_controls}
 
       {outstanding_questions.length > 0 ? <div className="question-attention" role="status" aria-label="Unanswered questions">
         {outstanding_questions.map((question) => <button type="button" key={question.event_key}
@@ -446,7 +452,7 @@ export function Conversation({
           </button>
         ) : null}
       </div>
-      <SessionComposer session={session} on_accepted={on_input_accepted} />
+      <SessionComposer session={session} on_accepted={on_input_accepted} input_refresh_key={input_refresh_key} />
     </main>
   );
 }

@@ -37,6 +37,7 @@ mod agent_activity;
 mod compaction;
 mod event_filter;
 mod input;
+mod managed_sessions;
 mod notifications;
 mod question_display;
 mod question_input;
@@ -90,6 +91,7 @@ pub struct ViewerService {
   failed_body_jobs: Arc<Mutex<HashMap<(SourceKey, String), FailedBodyJob>>>,
   loaded_session_cache: Arc<Mutex<Option<CachedSession>>>,
   input_broker: crate::input::InputBroker,
+  pub(crate) managed_pi: crate::managed_pi::ManagedPiSessions,
   question_claims: Arc<Mutex<question_input::QuestionClaims>>,
   pub(crate) updates: Arc<Mutex<crate::updates::UpdateStore>>,
   pub(crate) background: Arc<Mutex<crate::background::BackgroundStore>>,
@@ -667,6 +669,13 @@ impl ViewerService {
       .map_err(|error| format!("failed to open the viewer session index: {error}"))?;
     let mut service = Self::with_repository(Arc::new(NativeRepository::default()), Arc::new(session_index));
     service.indexer_lock = Some(crate::indexer::IndexerLock::new(index_path.as_ref())?);
+    let managed_state = index_path
+      .as_ref()
+      .parent()
+      .unwrap_or_else(|| Path::new("."))
+      .join("viewer/managed-sessions.json");
+    service.managed_pi = crate::managed_pi::ManagedPiSessions::new(Some(managed_state))
+      .unwrap_or_else(crate::managed_pi::ManagedPiSessions::disabled);
     Ok(service)
   }
 
@@ -705,6 +714,8 @@ impl ViewerService {
       #[cfg(test)]
       notification_work_stats: Arc::new(Mutex::new(notifications::NotificationWorkStats::default())),
       input_broker: crate::input::InputBroker::default(),
+      managed_pi: crate::managed_pi::ManagedPiSessions::new(None)
+        .unwrap_or_else(crate::managed_pi::ManagedPiSessions::disabled),
       question_claims: Arc::new(Mutex::new(question_input::QuestionClaims::default())),
       session_scope: None,
     };
@@ -2266,15 +2277,33 @@ impl ViewerService {
       });
     }
 
-    // A targeted write can only refine an already complete provider catalog.
-    // Publishing a partial initial catalog would make the sidebar look empty
-    // or incomplete while a root is still being discovered.
-    if self
+    // Targeted writes normally refine a complete provider catalog. Explicitly
+    // admitted managed Pi files can advance independently without claiming
+    // that the rest of their provider has finished discovery.
+    let provider_ready = self
       .session_index
       .source_state(&index_catalog_source_key(provider))
       .map_err(|error| format!("failed to read the {provider:?} index baseline: {error}"))?
-      .is_none()
-    {
+      .is_some();
+    let mut explicit_managed_sources = !provider_ready && provider == ViewerProvider::Pi;
+    if explicit_managed_sources {
+      for path in paths {
+        let source = index_source_key_for_path(provider, path)?;
+        let member = self
+          .session_index
+          .unique_present_session_for_source(&source)
+          .map_err(|error| error.to_string())?;
+        if let Some(member) = member {
+          explicit_managed_sources &= self
+            .session_index
+            .has_managed_session_admission(&member.key)
+            .map_err(|error| error.to_string())?;
+        } else {
+          explicit_managed_sources = false;
+        }
+      }
+    }
+    if !provider_ready && !explicit_managed_sources {
       return Ok(ProviderIndexRefresh {
         retry_catalog_soon: true,
         ..Default::default()
@@ -3873,7 +3902,15 @@ fn source_cursor(provider: ViewerProvider, source_path: &Path) -> Result<String,
     .map(file_revision_cursor)
     .collect::<Vec<_>>()
     .join("|");
-  Ok(format!("source-revision.v1.{files}"))
+  // Pi assistant errors used to disappear during normalization, leaving old
+  // activity projections running. Restage only Pi bodies once to recover
+  // their persisted outcomes; unrelated providers keep their existing cursor.
+  let prefix = if provider == ViewerProvider::Pi {
+    "source-revision.pi.v2"
+  } else {
+    "source-revision.v1"
+  };
+  Ok(format!("{prefix}.{files}"))
 }
 
 fn file_revision_cursor(revision: &Option<FileRevision>) -> String {

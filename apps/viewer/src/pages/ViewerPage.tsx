@@ -9,6 +9,9 @@ import { QuestionAnswersProvider } from "../components/QuestionAnswersProvider";
 import { TranslationProvider } from "../components/TranslationProvider";
 import { useViewerState } from "../lib/useViewerState";
 import { SettingsDialog } from "../components/SettingsDialog";
+import { ManagedPiDialog, ManagedSessionControls, NewSessionDialog, RegisterProjectDialog } from "../components/ProjectWorkspace";
+import { useProjectWorkspace } from "../lib/useProjectWorkspace";
+import { isDesktop } from "../lib/transport";
 
 interface ViewerPageProps {
   remote?: boolean;
@@ -27,7 +30,22 @@ function ViewerContent({ remote = false, connection, on_open_machines, machine_l
   const viewer = useViewerState();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [projectOpen, setProjectOpen] = useState(false);
+  const [newSessionOpen, setNewSessionOpen] = useState(false);
+  const [preferredGroupKey, setPreferredGroupKey] = useState<string | undefined>();
+  const localWorkspace = !remote && isDesktop();
+  const workspace = useProjectWorkspace({ enabled: localWorkspace, machine_key: machine_key!,
+    selected_session_key: viewer.selectedSessionKey,
+    on_created: (session) => { viewer.openCreatedSession(session); setNewSessionOpen(false); },
+  });
+  const pendingDialog = workspace.pending_dialog_session;
   const settingsTrigger = useRef<HTMLButtonElement>(null);
+
+  function newSession(group_key?: string) {
+    workspace.beginCreation();
+    setPreferredGroupKey(group_key);
+    setNewSessionOpen(true);
+  }
 
   function openSessions() {
     if (window.matchMedia("(max-width: 860px)").matches) {
@@ -48,6 +66,12 @@ function ViewerContent({ remote = false, connection, on_open_machines, machine_l
       <div className="viewer-shell" data-inspector-open={viewer.inspectorOpen} data-sidebar-collapsed={sidebarCollapsed}>
         <SessionDrawer desktop_hidden={sidebarCollapsed} is_open={viewer.mobileSidebarOpen} on_close={() => viewer.setMobileSidebarOpen(false)}>
           <Sidebar
+            registered_projects={workspace.workspace?.projects}
+            workspace_available={localWorkspace && workspace.workspace?.available === true}
+            workspace_notice={workspace.error ?? workspace.workspace?.unavailable_reason}
+            on_workspace_retry={workspace.error ? workspace.retry : undefined}
+            on_add_project={localWorkspace ? () => setProjectOpen(true) : undefined}
+            on_new_session={localWorkspace ? newSession : undefined}
             order={viewer.sessionOrder}
             on_order_change={viewer.setSessionOrder}
             on_close={() => viewer.setMobileSidebarOpen(false)}
@@ -76,6 +100,9 @@ function ViewerContent({ remote = false, connection, on_open_machines, machine_l
         </SessionDrawer>
 
         <Conversation
+          input_refresh_key={workspace.input_refresh_key}
+          managed_controls={<ManagedSessionControls snapshot={workspace.managed} busy={workspace.controlling}
+            error={workspace.control_error} on_control={(kind, snapshot) => { void workspace.control(kind, snapshot); }} />}
           outstanding_questions={viewer.outstandingQuestions}
           question_navigation={viewer.questionNavigation}
           on_question_open={viewer.openQuestion}
@@ -157,6 +184,21 @@ function ViewerContent({ remote = false, connection, on_open_machines, machine_l
       />
       {settingsOpen && <SettingsDialog key={machine_key} remote={remote} machine_label={machine_label}
         machine_key={machine_key} return_focus={settingsTrigger} on_close={() => setSettingsOpen(false)} />}
+      {localWorkspace ? <>
+        <RegisterProjectDialog key={`project:${machine_key}`} open={projectOpen} on_close={() => setProjectOpen(false)}
+          on_register={workspace.addProject} on_registered={() => { setProjectOpen(false); viewer.setSessionOrder("project"); }} />
+        <NewSessionDialog key={`session:${machine_key}`} open={newSessionOpen} projects={workspace.workspace?.projects ?? []}
+          preferred_group_key={preferredGroupKey} snapshot={workspace.creation} creating={workspace.creating}
+          uncertain={workspace.creation_uncertain}
+          error={workspace.creation_error} control_error={workspace.creation_control_error} controlling={workspace.controlling}
+          on_create={workspace.createSession} on_stop={(snapshot) => { void workspace.control("stop", snapshot); }}
+          on_open={workspace.openCreation} on_close={() => { workspace.dismissCreation(); setNewSessionOpen(false); }} />
+        {!newSessionOpen && workspace.creation && !workspace.creation.session && !["failed", "stopped"].includes(workspace.creation.status) ?
+          <button className="workspace-pending-session" type="button" onClick={() => setNewSessionOpen(true)}>Pi session starting · View</button> : null}
+        {pendingDialog ? <ManagedPiDialog key={`${pendingDialog.request_id}:${pendingDialog.pending_dialog!.dialog_id}`}
+          snapshot={pendingDialog} busy={workspace.controlling} error={workspace.dialog_error}
+          on_respond={(response) => { void workspace.respond(response); }} /> : null}
+      </> : null}
     </div>
   );
 }

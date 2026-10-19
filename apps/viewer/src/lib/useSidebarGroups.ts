@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { SessionOrder, SessionSummary } from "./types";
+import type { RegisteredProject, SessionOrder, SessionSummary } from "./types";
 import { reconcileRecent, sidebarGroups, type RecentEntry } from "./sidebarOrder";
 
-export function useSidebarGroups(sessions: SessionSummary[], order: SessionOrder) {
+const NO_PROJECTS: RegisteredProject[] = [];
+export function useSidebarGroups(sessions: SessionSummary[], order: SessionOrder, projects: RegisteredProject[] = NO_PROJECTS) {
   const [now, setNow] = useState(Date.now);
   const recent = useRef<RecentEntry[]>([]);
   useEffect(() => {
@@ -14,5 +15,5 @@ export function useSidebarGroups(sessions: SessionSummary[], order: SessionOrder
   const next = useMemo(() => reconcileRecent(recent.current, sessions, now), [sessions, now]);
   // Publish only committed ranks, keeping renders and StrictMode retries pure.
   useEffect(() => { recent.current = next; }, [next]);
-  return useMemo(() => sidebarGroups(sessions, order, next, now), [sessions, order, next, now]);
+  return useMemo(() => sidebarGroups(sessions, order, next, now, projects), [sessions, order, next, now, projects]);
 }

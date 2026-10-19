@@ -139,6 +139,28 @@ impl ViewerRuntime {
   pub fn start(service: ViewerService) -> Self {
     let (events, _) = broadcast::channel(128);
     let mut tasks = Vec::new();
+    let mut managed_changes = service.managed_pi.subscribe();
+    let managed_service = service.clone();
+    let managed_events = events.clone();
+    tasks.push(tokio::spawn(async move {
+      loop {
+        let snapshot = match managed_changes.recv().await {
+          Ok(snapshot) => snapshot,
+          Err(broadcast::error::RecvError::Lagged(_)) => continue,
+          Err(_) => return,
+        };
+        let mut pending = snapshot.clone();
+        match managed_service.enrich_managed_session(snapshot).await {
+          Ok(snapshot) => {
+            let _ = emit(&managed_events, "managed-session-changed", snapshot);
+          }
+          Err(error) => {
+            pending.message = Some(error);
+            let _ = emit(&managed_events, "managed-session-changed", pending);
+          }
+        }
+      }
+    }));
     let relay = service.relay.clone();
     let mut changes = relay.changes.subscribe();
     let relay_events = events.clone();

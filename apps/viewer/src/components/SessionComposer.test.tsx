@@ -41,6 +41,20 @@ afterEach(() => {
 });
 
 describe("SessionComposer", () => {
+  it("refreshes availability after an explicit Pi resume without losing a draft", async () => {
+    const pi = { ...SESSION, provider: "pi" as const, session_key: "pi:owned" };
+    const { rerender } = render(<SessionComposer session={pi} input_refresh_key={0} />);
+    await ready();
+    draft("Continue the task");
+    vi.mocked(getSessionInputStatus).mockResolvedValueOnce({ ...AVAILABLE, available: false, message: "Pi stopped" });
+    rerender(<SessionComposer session={pi} input_refresh_key={1} />);
+    await screen.findByText("Pi stopped");
+    expect(textbox()).toBeDisabled();
+    rerender(<SessionComposer session={pi} input_refresh_key={2} />);
+    await ready();
+    expect(textbox()).toHaveValue("Continue the task");
+    expect(submitSessionInput).not.toHaveBeenCalled();
+  });
   it("shows no input and makes no availability request without a selected session", () => {
     render(<SessionComposer session={null} />);
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();

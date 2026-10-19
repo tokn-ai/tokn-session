@@ -10,6 +10,23 @@ impl ViewerService {
     &self,
     request: SessionInputStatusRequest,
   ) -> Result<SessionInputStatus, String> {
+    if self.session_scope.is_none()
+      && self.relay.status().settings.mode != crate::relay::RelayMode::External
+      && let Some(status) = self.managed_pi.input_status(&request.session_key)
+    {
+      return Ok(match status {
+        Ok(message) => SessionInputStatus {
+          available: true,
+          message,
+          max_length: MAX_INPUT_LENGTH,
+        },
+        Err(error) => SessionInputStatus {
+          available: false,
+          message: error.message,
+          max_length: MAX_INPUT_LENGTH,
+        },
+      });
+    }
     let service = self.clone();
     let target = tokio::task::spawn_blocking(move || service.resolve_input_target(&request.session_key))
       .await
@@ -37,6 +54,36 @@ impl ViewerService {
     mut request: SubmitSessionInputRequest,
   ) -> Result<SubmitSessionInputResponse, String> {
     input::validate_request(&mut request)?;
+    if self.session_scope.is_none()
+      && self.relay.status().settings.mode != crate::relay::RelayMode::External
+      && let Some(status) = self.managed_pi.input_status(&request.session_key)
+    {
+      if let Err(error) = status {
+        return Ok(SubmitSessionInputResponse {
+          request_id: request.request_id,
+          status: InputDeliveryStatus::NotSent,
+          message: error.message,
+        });
+      }
+      let locator = decode_session_key(&request.session_key)?;
+      let target = InputTarget {
+        provider: locator.provider,
+        session_id: locator.session_id,
+        session_file: locator.source_path,
+      };
+      let manager = self.managed_pi.clone();
+      let session_key = request.session_key.clone();
+      let request_id = request.request_id.clone();
+      let text = request.text.clone();
+      return Ok(
+        self
+          .input_broker
+          .submit_custom(&target, request, async move {
+            manager.submit_owned_input(&session_key, &request_id, &text).await
+          })
+          .await,
+      );
+    }
     let service = self.clone();
     let key = request.session_key.clone();
     let target = tokio::task::spawn_blocking(move || service.resolve_input_target(&key))

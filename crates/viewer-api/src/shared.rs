@@ -498,6 +498,13 @@ mod tests {
       "retry_session_index",
       "configure_relay",
       "get_machine_settings",
+      "list_registered_projects",
+      "register_project",
+      "create_project_session",
+      "get_managed_session",
+      "stop_managed_session",
+      "resume_managed_session",
+      "respond_managed_session_dialog",
       "shared",
     ] {
       assert!(prepare(&mut request(command, json!({}))).is_err());
