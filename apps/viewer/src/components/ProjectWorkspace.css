@@ -33,5 +33,6 @@
 .managed-session-controls { padding: 8px 20px; font-size: 12px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
 .managed-session-controls > span:first-child { color: var(--text-soft); }
 .managed-session-controls button { padding: 4px 9px; }
+.managed-session-failure { display: flex; flex-basis: 100%; flex-wrap: wrap; gap: 4px 8px; padding-left: 9px; border-left: 2px solid currentColor; line-height: 1.5; }
 .workspace-pending-session { position: fixed; right: 20px; bottom: 44px; z-index: 10; border: 1px solid var(--border-strong); border-radius: 8px; padding: 10px 14px; color: var(--text); background: var(--surface-raised); box-shadow: var(--shadow); cursor: pointer; }
 @media (max-width: 600px) { .workspace-dialog { padding: 18px; } }

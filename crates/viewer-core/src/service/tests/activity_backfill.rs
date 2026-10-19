@@ -62,6 +62,79 @@ fn indexed_row(index: &SessionIndex, provider: ViewerProvider, header: &SessionH
 }
 
 #[test]
+fn pi_outcome_upgrade_restages_unchanged_history_once_without_new_unread_replies() {
+  struct PiHistory {
+    header: SessionHeader,
+    loads: std::sync::atomic::AtomicUsize,
+  }
+  impl ViewerRepository for PiHistory {
+    fn list_session_headers(&self, provider: ViewerProvider) -> Result<Vec<SessionHeader>, String> {
+      Ok(if provider == ViewerProvider::Pi {
+        vec![self.header.clone()]
+      } else {
+        vec![]
+      })
+    }
+    fn load_session(&self, locator: &SessionLocator) -> Result<LoadedSession, String> {
+      self.loads.fetch_add(1, Ordering::SeqCst);
+      tokn_session_pi::PiSessionSource::new(None).load_session_path(&locator.source_path)
+    }
+  }
+
+  let directory = tempfile::tempdir().unwrap();
+  let path = directory.path().join("failed-pi.jsonl");
+  let lines = [
+    json!({"type":"session", "version":3, "id":"failed-pi", "timestamp":"2026-10-19T00:00:00Z", "cwd":"/project"}),
+    json!({"type":"message", "id":"user", "timestamp":"2026-10-19T00:00:01Z", "message":{"role":"user", "content":[{"type":"text", "text":"Hello"}]}}),
+    json!({"type":"message", "id":"failed", "parentId":"user", "timestamp":"2026-10-19T00:00:02Z", "message":{"role":"assistant", "content":[], "stopReason":"error", "errorMessage":"Connection error.", "usage":{"input":0,"output":0}}}),
+  ];
+  std::fs::write(&path, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
+  let header = indexed_header(path.clone(), "failed-pi", None);
+  let index = Arc::new(SessionIndex::open_in_memory().unwrap());
+  let source = index_source_key_for_path(ViewerProvider::Pi, &path).unwrap();
+  // The old Pi cursor shared the physical-file version used by Codex. Other
+  // providers must retain that exact version to avoid unrelated body replay.
+  let old_raw = source_cursor(ViewerProvider::Codex, &path).unwrap();
+  assert!(old_raw.starts_with("source-revision.v1."));
+  assert_ne!(source_cursor(ViewerProvider::Pi, &path).unwrap(), old_raw);
+  let metadata = session_metadata_from_header(
+    &source,
+    header.clone(),
+    Some("session-activity.v4.0.1.0.0".into()),
+    true,
+  )
+  .unwrap();
+  index
+    .replace_sources(&[SourceReplacement::new(
+      SourceState::new(source, completed_body_cursor(&old_raw), 0),
+      vec![metadata],
+    )])
+    .unwrap();
+  let key = index_session_key(&locator_for_header(ViewerProvider::Pi, &header)).unwrap();
+  let seen_revision = index.session(&key).unwrap().unwrap().attention_revision;
+  assert!(index.mark_seen_through(&key, seen_revision, 123).unwrap());
+  let repository = Arc::new(PiHistory {
+    header: header.clone(),
+    loads: Default::default(),
+  });
+  let service = ViewerService::new_with_index(repository.clone(), index.clone());
+  service.refresh_session_index().unwrap();
+  let repaired = indexed_row(&index, ViewerProvider::Pi, &header);
+  let activity = Activity::from_marker(repaired.attention_marker.as_deref()).unwrap();
+  assert!(!activity.running);
+  assert_eq!(activity.final_count, 0);
+  assert_eq!(repaired.seen_at_ms, Some(123));
+  assert_eq!(repaired.attention_revision, repaired.seen_attention_revision);
+  assert_eq!(repository.loads.load(Ordering::SeqCst), 1);
+  service.refresh_session_index().unwrap();
+  assert_eq!(
+    repository.loads.load(Ordering::SeqCst),
+    1,
+    "unchanged Pi history is upgraded only once"
+  );
+}
+
+#[test]
 fn cold_large_source_completion_reconciles_activity_after_an_offline_append() {
   for provider in [ViewerProvider::Codex, ViewerProvider::Pi] {
     let directory = tempfile::tempdir().unwrap();

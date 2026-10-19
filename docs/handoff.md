@@ -37,6 +37,12 @@ real Pi history is verified and indexed. Owned sessions support message input,
 Stop, explicit Resume, and bounded native extension dialogs; private receipts
 and process leases preserve ownership across restarts. HTTP, Hub, session shares,
 and External reader mode do not expose project/session creation or management.
+Pi assistant failures produce visible error events and preserve native diagnostic
+records. Managed turn errors remain separate from process status, so an idle
+process can accept input after a provider failure. Pi source cursors restage old
+body projections once to recover suppressed failures; other providers retain
+their existing revisions. Managed Pi also honors inherited `SSL_CERT_FILE` when
+`NODE_EXTRA_CA_CERTS` is unset.
 See [viewer projects](viewer-projects.md) for scope, settings, storage, and limits.
 
 Version 0.1.1 is being prepared for all 24 publishable crates; the desktop stays

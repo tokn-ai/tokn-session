@@ -280,6 +280,8 @@ export interface ManagedSessionSnapshot {
   session_key: string | null;
   session: SessionSummary | null;
   message: string | null;
+  /** A provider turn failure can leave its RPC process healthy and idle. */
+  last_turn_error?: string | null;
   pending_dialog: ManagedSessionDialog | null;
 }
 export interface ManagedSessionRequest { request_id?: string | null; session_key?: string | null }

@@ -87,6 +87,8 @@ pub struct ManagedSessionSnapshot {
   /// Present only after validating and indexing Pi's durable history file.
   pub session: Option<crate::model::SessionSummary>,
   pub message: Option<String>,
+  /// Latest settled provider-turn failure; the owned runtime can remain ready.
+  pub last_turn_error: Option<String>,
   pub pending_dialog: Option<ManagedSessionDialog>,
 }
 

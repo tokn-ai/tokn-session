@@ -226,6 +226,12 @@ does not publish extension messages. Hidden messages do not count toward the
 relay's recent-message replay window. Recognized branch summaries,
 labels, session names, leaf changes, and active tools are metadata.
 
+Pi assistant `stopReason: error` or a nonempty `errorMessage` produces an error
+event even when the response has no content. Partial content and usage remain
+visible, with a diagnostic metadata record preserving the native message and
+its IDs. An aborted response produces cancellation metadata rather than a
+provider error; these persisted records do not establish a native turn boundary.
+
 Codex turn context, world state, inter-agent communication metadata,
 and rollbacks are metadata. Compaction summaries are
 not final assistant replies. Historical subagent ownership filtering runs

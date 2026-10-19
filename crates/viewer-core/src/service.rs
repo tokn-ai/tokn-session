@@ -3902,7 +3902,15 @@ fn source_cursor(provider: ViewerProvider, source_path: &Path) -> Result<String,
     .map(file_revision_cursor)
     .collect::<Vec<_>>()
     .join("|");
-  Ok(format!("source-revision.v1.{files}"))
+  // Pi assistant errors used to disappear during normalization, leaving old
+  // activity projections running. Restage only Pi bodies once to recover
+  // their persisted outcomes; unrelated providers keep their existing cursor.
+  let prefix = if provider == ViewerProvider::Pi {
+    "source-revision.pi.v2"
+  } else {
+    "source-revision.v1"
+  };
+  Ok(format!("{prefix}.{files}"))
 }
 
 fn file_revision_cursor(revision: &Option<FileRevision>) -> String {

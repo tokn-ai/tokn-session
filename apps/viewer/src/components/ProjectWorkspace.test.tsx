@@ -74,6 +74,43 @@ describe("project workspace dialogs", () => {
     expect(control).toHaveBeenCalledWith("resume", stopped);
   });
 
+  it("shows a failed turn on a healthy idle Pi process without offering Resume", () => {
+    render(<ManagedSessionControls snapshot={snapshot({ status: "idle", last_turn_error: "Connection error" })}
+      busy={false} error={null} on_control={vi.fn()} />);
+    expect(screen.getByRole("alert", { name: "Last turn failed" })).toHaveTextContent("Connection error");
+    expect(screen.getByRole("status")).toHaveTextContent("Pi · Idle");
+    expect(screen.queryByText("Pi · Ready")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Resume Pi" })).not.toBeInTheDocument();
+  });
+
+  it("retains Resume for a stopped process with a failed last turn", () => {
+    const control = vi.fn();
+    const stopped = snapshot({ status: "stopped", last_turn_error: "Connection error" });
+    render(<ManagedSessionControls snapshot={stopped} busy={false} error={null} on_control={control} />);
+    expect(screen.getByRole("alert", { name: "Last turn failed" })).toHaveTextContent("Connection error");
+    fireEvent.click(screen.getByRole("button", { name: "Resume Pi" }));
+    expect(control).toHaveBeenCalledWith("resume", stopped);
+  });
+
+  it("clears the failed-turn alert when a new turn starts and retains Stop", () => {
+    const control = vi.fn();
+    const { rerender } = render(<ManagedSessionControls snapshot={snapshot({ status: "idle", last_turn_error: "Connection error" })}
+      busy={false} error={null} on_control={control} />);
+    const running = snapshot({ revision: 2, status: "running", last_turn_error: null });
+    rerender(<ManagedSessionControls snapshot={running} busy={false} error={null} on_control={control} />);
+    expect(screen.queryByRole("alert", { name: "Last turn failed" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    expect(control).toHaveBeenCalledWith("stop", running);
+    rerender(<ManagedSessionControls snapshot={snapshot({ revision: 3, status: "idle" })} busy={false} error={null} on_control={control} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Pi · Ready");
+  });
+
+  it("keeps a failed first turn visible while waiting to open its persisted history", () => {
+    render(<NewSessionDialog open projects={[project()]} snapshot={snapshot({ status: "idle", last_turn_error: "Connection error" })}
+      creating={false} error={null} control_error={null} controlling={false} on_close={vi.fn()} on_create={vi.fn()} on_stop={vi.fn()} on_open={vi.fn()} />);
+    expect(screen.getByRole("alert", { name: "Last turn failed" })).toHaveTextContent("Connection error");
+  });
+
   it("cancels confirmation explicitly and never grants through dismissal", () => {
     const respond = vi.fn();
     render(<ManagedPiDialog snapshot={snapshot({ pending_dialog: { dialog_id: "permission", kind: "confirm", title: "Allow operation?", message: "Pi extension asks for access", options: [], initial_value: null } })}

@@ -20,6 +20,8 @@ pub(super) struct Receipt {
   pub session_file: Option<PathBuf>,
   pub session_key: Option<String>,
   pub message: Option<String>,
+  #[serde(default)]
+  pub last_turn_error: Option<String>,
   #[serde(skip)]
   pub dialog: Option<ManagedSessionDialog>,
 }
@@ -37,6 +39,7 @@ impl Receipt {
       session_file: None,
       session_key: None,
       message: None,
+      last_turn_error: None,
       dialog: None,
     }
   }
@@ -52,6 +55,7 @@ impl Receipt {
       session_key: self.session_key.clone(),
       session: None,
       message: self.message.clone(),
+      last_turn_error: self.last_turn_error.clone(),
       pending_dialog: self.dialog.clone(),
     }
   }

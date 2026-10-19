@@ -35,6 +35,7 @@ session_file = root / 'synthetic-history.jsonl'
 streaming = False
 pending = 0
 waiting = None
+prompt_count = 0
 
 def record(value):
     with (root / 'fake-log.jsonl').open('a') as log:
@@ -54,6 +55,12 @@ def reply(command, success=True, data=None):
 def persist():
     if not session_file.exists():
         session_file.write_text(json.dumps({'type': 'session', 'version': 3, 'id': session_id, 'cwd': str(root), 'timestamp': '2026-01-01T00:00:00.000Z'}) + '\n')
+
+def assistant_outcome(stop_reason, error=None):
+    message = {'role': 'assistant', 'content': [], 'api': 'synthetic-api', 'provider': 'synthetic-provider', 'model': 'synthetic-model', 'stopReason': stop_reason, 'timestamp': 0}
+    if error is not None:
+        message['errorMessage'] = error
+    emit({'type': 'message_end', 'message': message})
 
 record({'kind': 'launch', 'args': sys.argv[1:], 'pid': os.getpid()})
 mode = config['mode']
@@ -76,11 +83,15 @@ for line in sys.stdin:
             persist()
         reply(command, data={'sessionId': session_id, 'sessionFile': str(session_file), 'isStreaming': streaming, 'isCompacting': False, 'pendingMessageCount': pending})
     elif kind == 'prompt':
+        prompt_count += 1
         text = command['message']
         if text == 'exit-before-ack':
             sys.exit(25)
         if text == 'reject-follow-up':
             reply(command, success=False)
+            if mode == 'provider_error_pending':
+                streaming = False
+                emit({'type': 'agent_settled'})
             continue
         if text.startswith('dialog:'):
             method = text.split(':', 1)[1]
@@ -103,6 +114,25 @@ for line in sys.stdin:
         streaming = True
         reply(command)
         emit({'type': 'agent_start'})
+        if prompt_count == 1 and mode in ('provider_error', 'provider_error_pending', 'retry_success', 'retry_exhausted', 'compaction_error'):
+            assistant_outcome('error', 'synthetic provider failure')
+            if mode == 'provider_error_pending':
+                continue
+            emit({'type': 'agent_end', 'messages': [], 'willRetry': mode in ('retry_success', 'retry_exhausted')})
+            if mode == 'retry_success':
+                emit({'type': 'auto_retry_start', 'attempt': 1, 'maxAttempts': 3, 'delayMs': 1, 'errorMessage': 'synthetic provider failure'})
+                emit({'type': 'agent_start'})
+                assistant_outcome('stop')
+                emit({'type': 'auto_retry_end', 'success': True, 'attempt': 1})
+                emit({'type': 'agent_end', 'messages': [], 'willRetry': False})
+            elif mode == 'retry_exhausted':
+                emit({'type': 'auto_retry_start', 'attempt': 1, 'maxAttempts': 1, 'delayMs': 1, 'errorMessage': 'synthetic provider failure'})
+                emit({'type': 'auto_retry_end', 'success': False, 'attempt': 1, 'finalError': 'synthetic retries exhausted'})
+            elif mode == 'compaction_error':
+                emit({'type': 'compaction_start', 'reason': 'overflow'})
+                emit({'type': 'compaction_end', 'reason': 'overflow', 'aborted': False, 'willRetry': False, 'errorMessage': 'synthetic compaction failure'})
+            streaming = False
+            emit({'type': 'agent_settled'})
     elif kind == 'extension_ui_response':
         if waiting is not None:
             persist()
@@ -111,6 +141,10 @@ for line in sys.stdin:
     elif kind == 'abort':
         streaming = False
         pending = 0
+        if mode == 'stop_aborted':
+            assistant_outcome('aborted', 'synthetic abort detail')
+            emit({'type': 'auto_retry_end', 'success': False, 'attempt': 1, 'finalError': 'Retry cancelled'})
+            emit({'type': 'compaction_end', 'reason': 'overflow', 'aborted': True, 'willRetry': False})
         emit({'type': 'agent_settled'})
         reply(command)
 record({'kind': 'stdin_closed'})
@@ -660,6 +694,152 @@ record({'kind': 'stdin_closed'})
     fixture
       .wait_for(|snapshot| snapshot.status == ManagedSessionStatus::Running && snapshot.message.is_some())
       .await;
+    fixture.manager.shutdown().await;
+  }
+
+  #[tokio::test]
+  async fn provider_failure_stays_idle_and_available_and_survives_restart_until_new_admission() {
+    let mut fixture = Fixture::new("provider_error", "synthetic provider failure prompt");
+    fixture.create().await;
+    let failed_turn = fixture
+      .wait_for(|snapshot| {
+        snapshot.status == ManagedSessionStatus::Idle
+          && snapshot.session_key.is_some()
+          && snapshot.last_turn_error.as_deref() == Some("synthetic provider failure")
+      })
+      .await;
+    let key = failed_turn.session_key.unwrap();
+    assert!(fixture.manager.input_status(&key).unwrap().is_ok());
+    let rejected = fixture
+      .manager
+      .submit_owned_input(&key, &uuid::Uuid::new_v4().to_string(), "reject-follow-up")
+      .await
+      .unwrap_err();
+    assert!(!rejected.may_have_been_sent);
+    assert_eq!(
+      fixture.snapshot().last_turn_error.as_deref(),
+      Some("synthetic provider failure")
+    );
+    fixture.manager.shutdown().await;
+    fixture.wait_reaped().await;
+
+    fixture.manager =
+      ManagedPiSessions::with_executable(Some(fixture.state_path.clone()), fixture.executable.clone()).unwrap();
+    assert_eq!(
+      fixture.snapshot().last_turn_error.as_deref(),
+      Some("synthetic provider failure")
+    );
+    fixture.manager.resume(fixture.identity()).await.unwrap();
+    fixture
+      .wait_for(|snapshot| snapshot.status == ManagedSessionStatus::Idle)
+      .await;
+    assert_eq!(
+      fixture.snapshot().last_turn_error.as_deref(),
+      Some("synthetic provider failure")
+    );
+    assert!(fixture.manager.input_status(&key).unwrap().is_ok());
+    assert!(matches!(
+      fixture
+        .manager
+        .submit_owned_input(&key, &uuid::Uuid::new_v4().to_string(), "handled")
+        .await
+        .unwrap(),
+      Admission::Started
+    ));
+    fixture
+      .wait_for(|snapshot| snapshot.status == ManagedSessionStatus::Idle && snapshot.last_turn_error.is_none())
+      .await;
+    assert_eq!(fixture.snapshot().session_key.as_deref(), Some(key.as_str()));
+    fixture.manager.shutdown().await;
+  }
+
+  #[tokio::test]
+  async fn successful_retry_clears_the_failed_assistant_outcome_before_settlement() {
+    let fixture = Fixture::new("retry_success", "synthetic retry prompt");
+    let mut updates = fixture.manager.subscribe();
+    fixture.create().await;
+    fixture
+      .wait_for(|snapshot| snapshot.status == ManagedSessionStatus::Idle && snapshot.session_key.is_some())
+      .await;
+    assert!(fixture.snapshot().last_turn_error.is_none());
+    while let Ok(snapshot) = updates.try_recv() {
+      assert!(
+        snapshot.last_turn_error.is_none(),
+        "retry error escaped as a settled turn error"
+      );
+    }
+    assert_eq!(
+      fixture.log().iter().filter(|value| value["kind"] == "launch").count(),
+      1
+    );
+    fixture.manager.shutdown().await;
+  }
+
+  #[tokio::test]
+  async fn rejected_busy_follow_up_preserves_the_assistant_error_pending_settlement() {
+    let fixture = Fixture::new("provider_error_pending", "synthetic pending failure prompt");
+    fixture.create().await;
+    let key = fixture.persisted().await.session_key.unwrap();
+    assert!(fixture.snapshot().last_turn_error.is_none());
+    let rejected = fixture
+      .manager
+      .submit_owned_input(&key, &uuid::Uuid::new_v4().to_string(), "reject-follow-up")
+      .await
+      .unwrap_err();
+    assert!(!rejected.may_have_been_sent);
+    let follow_up = fixture.wait_log(|value| value["message"] == "reject-follow-up").await;
+    assert_eq!(follow_up["streamingBehavior"], "followUp");
+    fixture
+      .wait_for(|snapshot| {
+        snapshot.status == ManagedSessionStatus::Idle
+          && snapshot.last_turn_error.as_deref() == Some("synthetic provider failure")
+      })
+      .await;
+    assert!(fixture.manager.input_status(&key).unwrap().is_ok());
+    fixture.manager.shutdown().await;
+  }
+
+  #[tokio::test]
+  async fn retry_exhaustion_and_compaction_failure_keep_the_runtime_available() {
+    for (mode, expected) in [
+      ("retry_exhausted", "synthetic retries exhausted"),
+      ("compaction_error", "synthetic compaction failure"),
+    ] {
+      let fixture = Fixture::new(mode, "synthetic recovery failure prompt");
+      fixture.create().await;
+      let failed_turn = fixture
+        .wait_for(|snapshot| {
+          snapshot.status == ManagedSessionStatus::Idle
+            && snapshot.session_key.is_some()
+            && snapshot.last_turn_error.as_deref() == Some(expected)
+        })
+        .await;
+      assert!(
+        fixture
+          .manager
+          .input_status(failed_turn.session_key.as_deref().unwrap())
+          .unwrap()
+          .is_ok()
+      );
+      fixture.manager.shutdown().await;
+    }
+  }
+
+  #[tokio::test]
+  async fn explicit_stop_does_not_publish_abort_retry_or_compaction_cancellation_as_failure() {
+    let fixture = Fixture::new("stop_aborted", "synthetic cancellable prompt");
+    fixture.create().await;
+    let key = fixture.persisted().await.session_key.unwrap();
+    fixture.manager.stop(fixture.identity()).await.unwrap();
+    let stopped_turn = fixture
+      .wait_for(|snapshot| snapshot.status == ManagedSessionStatus::Idle)
+      .await;
+    assert!(stopped_turn.last_turn_error.is_none());
+    assert!(fixture.manager.input_status(&key).unwrap().is_ok());
+    assert_eq!(
+      fixture.log().iter().filter(|value| value["kind"] == "launch").count(),
+      1
+    );
     fixture.manager.shutdown().await;
   }
 }

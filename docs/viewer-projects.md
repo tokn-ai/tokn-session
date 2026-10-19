@@ -53,6 +53,12 @@ queue. The durable Pi history remains the displayed transcript.
 The controls distinguish `starting`, `running`, `idle` (shown as **Ready**),
 `stopping`, `stopped`, and `failed`.
 
+Provider failures appear in the conversation and as **Last turn failed** in
+the controls. Pi can remain idle and accept another message after a failed
+request. Retries finish before the controls report the final outcome; a later
+successful reply clears that error. Resuming a process alone preserves the
+previous turn's failure because it does not retry the prompt.
+
 - **Stop** aborts the current turn and cancels its pending dialog. After a
   history file exists, Pi stays owned and ready for another message.
 - Before Pi has persisted any history, **Stop** ends the provisional process.
@@ -87,6 +93,11 @@ executable, for example `/absolute/path/to/pi`. This value is an executable path
 only, not a shell command or a place to append arguments. The viewer supplies
 the RPC and resume arguments itself. A desktop app launched from the system UI
 may inherit a different environment from a terminal.
+
+For TLS connections, an explicit `NODE_EXTRA_CA_CERTS` setting takes precedence.
+When it is absent, the viewer forwards a nonempty inherited `SSL_CERT_FILE` to
+Node's extra CA setting for managed Pi processes. This honors an already
+configured certificate bundle while keeping certificate verification enabled.
 
 ## Storage and limits
 

@@ -10,6 +10,7 @@ use crate::{
 use serde_json::{Value, json};
 use std::{
   collections::HashMap,
+  ffi::{OsStr, OsString},
   fs::File,
   path::PathBuf,
   process::Stdio,
@@ -29,6 +30,7 @@ const RPC_DEADLINE: Duration = Duration::from_secs(15);
 const PROMPT_DEADLINE: Duration = Duration::from_secs(300);
 const WRITE_DEADLINE: Duration = Duration::from_secs(3);
 const DIALOG_DEADLINE: Duration = Duration::from_secs(120);
+const MAX_TURN_ERROR_BYTES: usize = 2048;
 
 pub(super) enum Command {
   Prompt {
@@ -141,6 +143,9 @@ struct Actor {
   shutdown_reply: Option<oneshot::Sender<()>>,
   stop_reply: Option<oneshot::Sender<Result<(), String>>>,
   exit_requested: bool,
+  pending_outcome: Option<Option<String>>,
+  awaiting_new_turn: bool,
+  stop_requested: bool,
 }
 
 impl Actor {
@@ -166,6 +171,11 @@ impl Actor {
       .stdout(Stdio::piped())
       .stderr(Stdio::piped())
       .kill_on_drop(true);
+    let node_extra_ca_certs = std::env::var_os("NODE_EXTRA_CA_CERTS");
+    let ssl_cert_file = std::env::var_os("SSL_CERT_FILE");
+    if let Some(path) = inherited_node_ca_fallback(node_extra_ca_certs.as_deref(), ssl_cert_file.as_deref()) {
+      command.env("NODE_EXTRA_CA_CERTS", path);
+    }
     if resume {
       command.arg("--session").arg(receipt.session_file.as_ref().unwrap());
     }
@@ -181,23 +191,10 @@ impl Actor {
       loop {
         match reader.read_frame().await {
           Ok(Some(value)) => {
-            let kind = value.get("type").and_then(Value::as_str).unwrap_or_default();
-            if matches!(
-              kind,
-              "response"
-                | "agent_start"
-                | "agent_end"
-                | "agent_settled"
-                | "compaction_start"
-                | "compaction_end"
-                | "auto_compaction_start"
-                | "auto_compaction_end"
-                | "auto_retry_start"
-                | "auto_retry_end"
-                | "extension_ui_request"
-            ) && send.send(Ok(value)).await.is_err()
-            {
-              break;
+            if let Some(metadata) = project_frame(value) {
+              if send.send(Ok(metadata)).await.is_err() {
+                break;
+              }
             }
           }
           Ok(None) => {
@@ -242,6 +239,9 @@ impl Actor {
       shutdown_reply: None,
       stop_reply: None,
       exit_requested: false,
+      pending_outcome: None,
+      awaiting_new_turn: false,
+      stop_requested: false,
     })
   }
 
@@ -266,6 +266,8 @@ impl Actor {
         command = commands.recv() => match command {
           Some(Command::Prompt {request_id, text, reply}) => self.prompt(request_id, text, Some(reply)).await?,
           Some(Command::Abort(reply)) => {
+            self.stop_requested = true;
+            self.awaiting_new_turn = false;
             self.initial_prompt = None;
             self.cancel_dialog("Pi dialog was cancelled by Stop").await?;
             self.update(|receipt| { receipt.status = ManagedSessionStatus::Stopping; receipt.message = Some("Stopping the current Pi turn".into()); }).await?;
@@ -364,6 +366,12 @@ impl Actor {
             if !success && initial {
               return Err(error);
             }
+            if success && !busy {
+              self.confirm_new_turn().await?;
+            }
+            if !success && !busy {
+              self.awaiting_new_turn = false;
+            }
             if !success {
               self
                 .update(|receipt| {
@@ -377,6 +385,9 @@ impl Actor {
             self.request_state(false).await?;
           }
           PendingKind::Abort(reply) => {
+            if !success {
+              self.stop_requested = false;
+            }
             self.probe_file().await?;
             if success && self.receipt.session_key.is_none() {
               self.stop_reply = Some(reply);
@@ -392,6 +403,7 @@ impl Actor {
         }
       }
       "agent_start" => {
+        self.confirm_new_turn().await?;
         self.checking_idle = false;
         if let Some(state) = &mut self.state {
           state.is_streaming = true;
@@ -409,18 +421,61 @@ impl Actor {
           state.is_compacting = false;
           state.pending_message_count = 0;
         }
-        self.phase(ManagedSessionStatus::Idle).await?;
+        self.settle_turn().await?;
         self.request_state(false).await?;
       }
       "agent_end" if !self.saw_settled => {
         self.checking_idle = true;
       }
+      "message_end" => {
+        self.confirm_new_turn().await?;
+        match value.get("stop_reason").and_then(Value::as_str) {
+          Some("aborted") if self.stop_requested => {
+            self.pending_outcome = None;
+          }
+          Some("aborted") => {}
+          Some("error") => {
+            self.pending_outcome = Some(Some(
+              turn_error(value.get("error_message")).unwrap_or_else(|| "Pi could not complete this response.".into()),
+            ));
+          }
+          _ => {
+            self.pending_outcome = Some(turn_error(value.get("error_message")));
+          }
+        }
+      }
+      "auto_retry_end" => {
+        if self.stop_requested {
+          return Ok(());
+        }
+        match value.get("success").and_then(Value::as_bool) {
+          Some(true) => {
+            self.pending_outcome = Some(None);
+          }
+          Some(false) => {
+            if let Some(error) = turn_error(value.get("final_error")) {
+              self.pending_outcome = Some(Some(error));
+            }
+          }
+          None => {}
+        }
+        if !self.saw_settled {
+          self.checking_idle = true;
+        }
+      }
       "compaction_start" | "auto_compaction_start" | "auto_retry_start" => {
         self.checking_idle = false;
         self.phase(ManagedSessionStatus::Running).await?;
       }
-      "compaction_end" | "auto_compaction_end" | "auto_retry_end" if !self.saw_settled => {
-        self.checking_idle = true;
+      "compaction_end" | "auto_compaction_end" => {
+        if !self.stop_requested && value.get("aborted").and_then(Value::as_bool) != Some(true) {
+          if let Some(error) = turn_error(value.get("error_message")) {
+            self.pending_outcome = Some(Some(error));
+          }
+        }
+        if !self.saw_settled {
+          self.checking_idle = true;
+        }
       }
       "extension_ui_request" => self.dialog(value).await?,
       _ => {}
@@ -474,6 +529,10 @@ impl Actor {
       .state
       .as_ref()
       .is_some_and(|state| state.is_streaming || state.is_compacting || state.pending_message_count > 0);
+    if !busy {
+      self.awaiting_new_turn = true;
+      self.stop_requested = false;
+    }
     self.recent.insert(request_id.clone(), (fingerprint, None));
     let mut command = json!({"type":"prompt","message":text});
     if busy {
@@ -593,10 +652,45 @@ impl Actor {
       .is_some_and(|state| !state.is_streaming && !state.is_compacting && state.pending_message_count == 0);
     if idle {
       self.checking_idle = false;
-      self.phase(ManagedSessionStatus::Idle).await
+      self.settle_turn().await
     } else {
       self.phase(ManagedSessionStatus::Running).await
     }
+  }
+
+  async fn confirm_new_turn(&mut self) -> Result<(), String> {
+    if !self.awaiting_new_turn {
+      return Ok(());
+    }
+    self.awaiting_new_turn = false;
+    if self.receipt.last_turn_error.is_some() {
+      self
+        .update(|receipt| {
+          receipt.last_turn_error = None;
+        })
+        .await?;
+    }
+    Ok(())
+  }
+
+  async fn settle_turn(&mut self) -> Result<(), String> {
+    let pending = self.pending_outcome.take();
+    let error = if self.stop_requested {
+      self.receipt.last_turn_error.clone()
+    } else {
+      pending.unwrap_or_else(|| self.receipt.last_turn_error.clone())
+    };
+    self.stop_requested = false;
+    if self.receipt.status != ManagedSessionStatus::Idle || self.receipt.last_turn_error != error {
+      self
+        .update(|receipt| {
+          receipt.status = ManagedSessionStatus::Idle;
+          receipt.message = None;
+          receipt.last_turn_error = error;
+        })
+        .await?;
+    }
+    Ok(())
   }
 
   async fn phase(&mut self, status: ManagedSessionStatus) -> Result<(), String> {
@@ -761,5 +855,133 @@ async fn finish(inner: &Weak<Inner>, id: &str, generation: u64, error: Option<St
   let mut records = inner.records.lock().unwrap();
   if let Some(record) = records.get_mut(id).filter(|record| record.generation == generation) {
     record.sender = None;
+  }
+}
+
+/// Retain only coarse lifecycle metadata across the bounded actor channel.
+/// Token events and completed assistant/tool bodies belong to native history.
+fn project_frame(value: Value) -> Option<Value> {
+  let kind = value.get("type").and_then(Value::as_str)?;
+  match kind {
+    "response" | "extension_ui_request" => Some(value),
+    "message_end" => {
+      let message = value.get("message")?;
+      if message.get("role").and_then(Value::as_str) != Some("assistant") {
+        return None;
+      }
+      Some(
+        json!({"type":"message_end", "stop_reason":message.get("stopReason").and_then(Value::as_str).map(|reason| reason.chars().take(128).collect::<String>()), "error_message":turn_error(message.get("errorMessage"))}),
+      )
+    }
+    "auto_retry_end" => Some(
+      json!({"type":"auto_retry_end", "success":value.get("success").and_then(Value::as_bool), "final_error":turn_error(value.get("finalError"))}),
+    ),
+    "compaction_end" | "auto_compaction_end" => Some(
+      json!({"type":kind, "aborted":value.get("aborted").and_then(Value::as_bool), "error_message":turn_error(value.get("errorMessage"))}),
+    ),
+    "agent_start"
+    | "agent_end"
+    | "agent_settled"
+    | "compaction_start"
+    | "auto_compaction_start"
+    | "auto_retry_start" => Some(json!({"type":kind})),
+    _ => None,
+  }
+}
+
+fn turn_error(value: Option<&Value>) -> Option<String> {
+  let text = value.and_then(Value::as_str)?.trim();
+  if text.is_empty() {
+    return None;
+  }
+  let mut end = text.len().min(MAX_TURN_ERROR_BYTES);
+  while !text.is_char_boundary(end) {
+    end -= 1;
+  }
+  Some(text[..end].to_owned())
+}
+
+/// Node does not automatically use SSL_CERT_FILE. Preserve an explicit Node
+/// setting, including an empty one, while honoring the host's configured CA
+/// bundle when Node has no setting of its own.
+fn inherited_node_ca_fallback(node_extra_ca_certs: Option<&OsStr>, ssl_cert_file: Option<&OsStr>) -> Option<OsString> {
+  if node_extra_ca_certs.is_some() {
+    return None;
+  }
+  ssl_cert_file.filter(|path| !path.is_empty()).map(OsStr::to_os_string)
+}
+
+#[cfg(test)]
+mod certificate_tests {
+  use super::*;
+
+  #[test]
+  fn only_an_absent_node_setting_inherits_a_nonempty_host_bundle() {
+    let host_bundle = OsStr::new("/configured CA bundle.pem");
+    assert_eq!(
+      inherited_node_ca_fallback(None, Some(host_bundle)),
+      Some(host_bundle.to_owned())
+    );
+    assert_eq!(
+      inherited_node_ca_fallback(Some(OsStr::new("/node-specific.pem")), Some(host_bundle)),
+      None
+    );
+    assert_eq!(
+      inherited_node_ca_fallback(Some(OsStr::new("")), Some(host_bundle)),
+      None
+    );
+    assert_eq!(inherited_node_ca_fallback(None, Some(OsStr::new(""))), None);
+    assert_eq!(inherited_node_ca_fallback(None, None), None);
+    assert_eq!(
+      inherited_node_ca_fallback(Some(OsStr::new("/node-specific.pem")), None),
+      None
+    );
+  }
+}
+
+#[cfg(test)]
+mod projection_tests {
+  use super::*;
+
+  #[test]
+  fn projection_discards_tokens_and_bodies_but_keeps_bounded_turn_failure() {
+    for kind in ["message_start", "message_update", "tool_execution_update", "turn_end"] {
+      assert!(
+        project_frame(
+          json!({"type":kind,"message":{"role":"assistant","content":[{"type":"text","text":"private body"}]}})
+        )
+        .is_none()
+      );
+    }
+    let projected = project_frame(json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"private body"}],"stopReason":"error","errorMessage":"x".repeat(MAX_TURN_ERROR_BYTES + 10)}})).unwrap();
+    assert_eq!(projected["stop_reason"], "error");
+    assert_eq!(projected["error_message"].as_str().unwrap().len(), MAX_TURN_ERROR_BYTES);
+    assert!(!projected.to_string().contains("private body"));
+    assert_eq!(
+      project_frame(json!({"type":"agent_end","messages":[{"text":"private body"}]})).unwrap(),
+      json!({"type":"agent_end"})
+    );
+    assert!(
+      project_frame(json!({"type":"message_end","message":{"role":"user","errorMessage":"not an assistant failure"}}))
+        .is_none()
+    );
+  }
+
+  #[test]
+  fn projection_keeps_retry_and_compaction_failure_evidence_only() {
+    assert_eq!(
+      project_frame(
+        json!({"type":"auto_retry_end","success":false,"finalError":"quota exceeded","messages":["private body"]})
+      )
+      .unwrap(),
+      json!({"type":"auto_retry_end","success":false,"final_error":"quota exceeded"})
+    );
+    assert_eq!(
+      project_frame(
+        json!({"type":"compaction_end","aborted":true,"errorMessage":"cancelled","result":{"summary":"private body"}})
+      )
+      .unwrap(),
+      json!({"type":"compaction_end","aborted":true,"error_message":"cancelled"})
+    );
   }
 }

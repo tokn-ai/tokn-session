@@ -5,6 +5,13 @@ import { errorMessage } from "../lib/state";
 import { CloseIcon } from "./Icons";
 import "./ProjectWorkspace.css";
 
+function LastTurnFailure({ message }: { message?: string | null }) {
+  if (!message?.trim()) return null;
+  return <div className="managed-session-failure workspace-error" role="alert" aria-label="Last turn failed">
+    <strong>Last turn failed</strong><span>{message}</span>
+  </div>;
+}
+
 function WorkspaceDialog({ title, open = true, on_close, children }: {
   title: string; open?: boolean; on_close: () => void; children: ReactNode;
 }) {
@@ -89,6 +96,7 @@ export function NewSessionDialog({ open, projects, preferred_group_key, snapshot
       <label>First message<textarea autoFocus rows={6} required value={prompt} disabled={pending || uncertain} onChange={(event) => setPrompt(event.target.value)} placeholder="What would you like Pi to do?" /></label>
       {pending ? <p className="workspace-progress" role="status"><span className="inline-spinner" />{snapshot?.status === "stopping" ? "Stopping Pi…" : "Starting Pi… Waiting for its conversation to be saved."}</p> : null}
       {snapshot?.message ? <p className={snapshot.status === "failed" ? "workspace-error" : "workspace-notice"} role={snapshot.status === "failed" ? "alert" : "status"}>{snapshot.message}</p> : null}
+      <LastTurnFailure message={snapshot?.last_turn_error} />
       {error || control_error ? <p className="workspace-error" role="alert">{error ?? control_error}</p> : null}
       <footer>
         <button type="button" onClick={on_close}>Close</button>
@@ -107,11 +115,13 @@ export function ManagedSessionControls({ snapshot, busy, error, on_control }: {
   if (!snapshot) return null;
   const active = ["starting", "running", "stopping"].includes(snapshot.status);
   const resumable = snapshot.status === "stopped" || snapshot.status === "failed";
+  const has_turn_error = !!snapshot.last_turn_error?.trim();
   return <div className="managed-session-controls" aria-label="Pi session controls">
-    <span role="status">Pi · {snapshot.status === "idle" ? "Ready" : snapshot.status.charAt(0).toUpperCase() + snapshot.status.slice(1)}</span>
+    <span role="status">Pi · {snapshot.status === "idle" && !has_turn_error ? "Ready" : snapshot.status.charAt(0).toUpperCase() + snapshot.status.slice(1)}</span>
     {active ? <button type="button" disabled={busy || snapshot.status === "stopping"} onClick={() => on_control("stop", snapshot)}>Stop</button> : null}
     {resumable ? <button type="button" disabled={busy} onClick={() => on_control("resume", snapshot)}>{busy ? "Resuming…" : "Resume Pi"}</button> : null}
     {error || snapshot.status === "failed" && snapshot.message ? <span className="workspace-error" role="alert">{error ?? snapshot.message}</span> : null}
+    <LastTurnFailure message={snapshot.last_turn_error} />
   </div>;
 }
 
