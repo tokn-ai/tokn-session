@@ -53,6 +53,42 @@ describe("PetStore", () => {
     expect(store.snapshot(101).state).toBe("idle");
   });
 
+  test("hidden ZCode errors do not create activity, expose messages, or renew leases", () => {
+    for (const visibility of ["transcriptVisibility", "uiVisibility"]) {
+      const store = new PetStore(policy);
+      const hidden = relayEvent({
+        type: "error", provider: "zcode", message: "Hidden provider request failure",
+        native: { data: { semantics: { [visibility]: "hidden" } } }
+      }, "zcode.hidden");
+      store.ingest(hidden, 0);
+      expect(store.snapshot(0).total_sessions).toBe(0);
+
+      store.ingest(relayEvent({
+        type: "message", provider: "zcode", role: "user", phase: "finished", text: "real work"
+      }, hidden.topic), 0);
+      const before = store.snapshot(1);
+      store.ingest(hidden, 50);
+      expect(store.snapshot(50)).toEqual(before);
+      expect(store.snapshot(101).state).toBe("idle");
+    }
+  });
+
+  test("visible ZCode errors and other providers' error semantics still become blocked", () => {
+    for (const [provider, semantics] of [
+      ["zcode", { transcriptVisibility: "visible", uiVisibility: "visible" }],
+      ["zcode", { transcriptVisibility: true, uiVisibility: "future" }],
+      ["opencode", { transcriptVisibility: "hidden", uiVisibility: "hidden" }]
+    ] as const) {
+      const store = new PetStore(policy);
+      store.ingest(relayEvent({
+        type: "error", provider, message: "Visible provider request failure", native: { data: { semantics } }
+      }, `${provider}.visible`), 0);
+      expect(store.snapshot(20).focus).toMatchObject({
+        state: "blocked", current_activity: { kind: "error", detail: "Visible provider request failure" }
+      });
+    }
+  });
+
   test("moves from user work to debounced ready and then idle", () => {
     const store = new PetStore(policy);
     store.ingest(relayEvent({
@@ -261,6 +297,88 @@ describe("PetStore", () => {
         recently_completed: true
       })
     ]);
+  });
+
+  test("normalized turn interruptions end pending work without an error event", () => {
+    for (const outcome of ["interrupted", "cancelled"]) {
+      const store = new PetStore(policy);
+      store.ingest(relayEvent({ type: "tool_call", tool_call_id: "active", phase: "started" }), 0);
+      store.ingest(relayEvent({ type: "question_request", request_id: "question", is_blocking: true }), 1);
+      expect(store.snapshot(2).state).toBe("needs_input");
+      store.ingest(relayEvent({
+        type: "lifecycle", scope: "turn", turn_id: "turn-1", phase: "finished", outcome
+      }), 10);
+      expect(store.snapshot(40).focus).toMatchObject({
+        state: "idle", outcome: "interrupted", completed_at: 10, recently_completed: true,
+        label: outcome === "cancelled" ? "Cancelled" : "Interrupted"
+      });
+    }
+  });
+
+  test("warnings and retry diagnostics keep current work active", () => {
+    const store = new PetStore(policy);
+    store.ingest(relayEvent({ type: "message", role: "user", text: "Continue", phase: "finished" }), 0);
+    for (const native_type of ["event_msg.warning", "event_msg.guardian_warning", "event_msg.stream_error"]) {
+      store.ingest(relayEvent({ type: "metadata", native_type, kind: "diagnostic", summary: "Retrying" }), 10);
+    }
+    expect(store.snapshot(40).state).toBe("running");
+    store.ingest(relayEvent({ type: "error", message: "Retries exhausted" }), 50);
+    expect(store.snapshot(71).state).toBe("blocked");
+  });
+
+  test("native response cancellations clear pending work without a failure", () => {
+    const cancellations = [
+      ...["interrupted", "replaced", "review_ended", "budget_limited"].map((reason) => ({
+        provider: "codex", native_type: "event_msg.turn_aborted", native: { type: "turn_aborted", reason }
+      })),
+      { provider: "pi", native_type: "message", native: { type: "message", message: { role: "assistant", stopReason: "aborted" } } },
+      ...["opencode", "zcode"].flatMap((provider) => [
+        { provider, native_type: "message.error", native: { data: { role: "assistant", error: { name: "MessageAbortedError" } } } },
+        { provider, native_type: "error", native: { type: "error", error: { name: "MessageAbortedError" } } }
+      ])
+    ];
+    for (const cancellation of cancellations) {
+      const store = new PetStore(policy);
+      store.ingest(relayEvent({ type: "tool_call", tool_call_id: "active", phase: "started" }), 0);
+      store.ingest(relayEvent({ type: "question_request", request_id: "question", is_blocking: true }), 1);
+      store.ingest(relayEvent({ type: "metadata", kind: "diagnostic", ...cancellation }), 10);
+      expect(store.snapshot(40).focus).toMatchObject({
+        state: "idle", outcome: "interrupted", completed_at: 10,
+        label: cancellation.provider === "codex" ? "Interrupted" : "Cancelled"
+      });
+    }
+  });
+
+  test("cancellation prose and tool diagnostics do not stop the response", () => {
+    const store = new PetStore(policy);
+    store.ingest(relayEvent({ type: "message", role: "user", text: "Continue", phase: "finished" }), 0);
+    for (const event of [
+      { provider: "pi", native_type: "message", native: { type: "message", message: { role: "toolResult", stopReason: "aborted" } } },
+      { provider: "pi", native_type: "message", native: { message: { role: "assistant", stopReason: "aborted" } } },
+      { provider: "pi", native_type: "message", native: { type: "custom_message", message: { role: "assistant", stopReason: "aborted" } } },
+      { provider: "opencode", native_type: "tool", native: { error: { name: "MessageAbortedError" } } },
+      { provider: "opencode", native_type: "error", native: { type: "error", error: { name: "APIError", data: { message: "cancelled" } } } },
+      { provider: "opencode", native_type: "error", native: { error: { name: "MessageAbortedError" } } },
+      { provider: "opencode", native_type: "error", native: { type: "tool_use", error: { name: "MessageAbortedError" } } },
+      { provider: "codex", native_type: "event_msg.turn_aborted", native: { type: "turn_aborted", reason: "future_reason" } },
+      { provider: "codex", native_type: "event_msg.turn_aborted", native: { reason: "interrupted" } },
+      ...["turn_id", "turnId"].flatMap((key) => ["", " ", false, 42].map((id) => ({
+        provider: "codex", native_type: "event_msg.turn_aborted", native: { type: "turn_aborted", reason: "interrupted", [key]: id }
+      }))),
+      { provider: "codex", native_type: "error", native: { error: { name: "MessageAbortedError" } } }
+    ]) store.ingest(relayEvent({ type: "metadata", kind: "diagnostic", summary: "Response cancelled", ...event }), 10);
+    expect(store.snapshot(40).state).toBe("running");
+  });
+
+  test("step completion and malformed cancellation do not finish the turn", () => {
+    const store = new PetStore(policy);
+    store.ingest(relayEvent({ type: "message", role: "user", text: "Continue", phase: "finished" }), 0);
+    for (const event of [
+      { type: "lifecycle", scope: "step", turn_id: "turn", phase: "finished", outcome: "cancelled" },
+      { type: "lifecycle", scope: "turn", turn_id: "", phase: "finished", outcome: "cancelled" },
+      { type: "lifecycle", scope: "turn", turn_id: "turn", phase: "started", outcome: "cancelled" }
+    ]) store.ingest(relayEvent(event), 10);
+    expect(store.snapshot(40).state).toBe("running");
   });
 
   test("prioritizes needs input and clears it when work resumes", () => {

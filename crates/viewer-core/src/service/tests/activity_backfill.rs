@@ -62,6 +62,142 @@ fn indexed_row(index: &SessionIndex, provider: ViewerProvider, header: &SessionH
 }
 
 #[test]
+fn outcome_recovery_cursors_are_scoped_to_the_affected_providers() {
+  let directory = tempfile::tempdir().unwrap();
+  let path = directory.path().join("source.jsonl");
+  std::fs::write(&path, "unchanged source").unwrap();
+  for (provider, prefix) in [
+    (ViewerProvider::Codex, "source-revision.v1."),
+    (ViewerProvider::Pi, "source-revision.pi.v3."),
+    (ViewerProvider::OpenCode, "source-revision.opencode.v2."),
+    (ViewerProvider::ZCode, "source-revision.zcode.v2."),
+    (ViewerProvider::WorkBuddy, "source-revision.workbuddy.v2."),
+    (ViewerProvider::Dsh, "source-revision.dsh.v2."),
+  ] {
+    assert!(
+      source_cursor(provider, &path).unwrap().starts_with(prefix),
+      "{provider:?}"
+    );
+  }
+}
+
+#[test]
+fn provider_outcome_upgrade_repairs_unchanged_activity_once_without_unread_replies() {
+  struct ProviderHistory {
+    provider: ViewerProvider,
+    header: SessionHeader,
+    loads: std::sync::atomic::AtomicUsize,
+  }
+  impl ViewerRepository for ProviderHistory {
+    fn list_session_headers(&self, provider: ViewerProvider) -> Result<Vec<SessionHeader>, String> {
+      Ok(if provider == self.provider {
+        vec![self.header.clone()]
+      } else {
+        vec![]
+      })
+    }
+    fn load_session(&self, locator: &SessionLocator) -> Result<LoadedSession, String> {
+      self.loads.fetch_add(1, Ordering::SeqCst);
+      match self.provider {
+        ViewerProvider::Pi => tokn_session_pi::PiSessionSource::new(None).load_session_path(&locator.source_path),
+        ViewerProvider::WorkBuddy => {
+          tokn_session_workbuddy::WorkBuddySessionSource::new(None).load_session_path(&locator.source_path)
+        }
+        ViewerProvider::Dsh => tokn_session_dsh::DshSessionSource::new(None).load_session_path(&locator.source_path),
+        _ => unreachable!(),
+      }
+    }
+  }
+
+  let cases = [
+    (
+      ViewerProvider::Pi,
+      "cancelled-pi",
+      false,
+      vec![
+        json!({"type":"session", "version":3, "id":"cancelled-pi", "timestamp":"2026-10-19T00:00:00Z"}),
+        json!({"type":"message", "id":"thinking", "message":{"role":"assistant", "content":[{"type":"thinking", "thinking":"Preparing an answer"}], "stopReason":"toolUse"}}),
+        json!({"type":"message", "id":"cancelled", "parentId":"thinking", "message":{"role":"assistant", "content":[{"type":"text", "text":""}], "stopReason":"aborted", "errorMessage":"Request aborted"}}),
+      ],
+    ),
+    (
+      ViewerProvider::WorkBuddy,
+      "active-workbuddy",
+      true,
+      vec![
+        json!({"type":"message", "id":"user", "sessionId":"active-workbuddy", "role":"user", "timestamp":1000, "content":[{"type":"input_text", "text":"Hello"}]}),
+        json!({"type":"reasoning", "id":"reasoning", "sessionId":"active-workbuddy", "timestamp":1001, "content":[], "rawContent":[{"type":"reasoning_text", "text":"Preparing an answer"}]}),
+        // A false error value used to terminate otherwise active reasoning.
+        json!({"type":"message", "id":"pending", "sessionId":"active-workbuddy", "role":"assistant", "status":"incomplete", "timestamp":1002, "content":[], "providerData":{"error":false}}),
+      ],
+    ),
+    (
+      ViewerProvider::Dsh,
+      "failed-dsh",
+      false,
+      vec![
+        json!({"type":"session", "version":0, "id":"failed-dsh", "createdAt":1000, "delegationDepth":0}),
+        json!({"type":"turn/start", "seq":0, "time":1001, "data":{"turn":1}}),
+        // The native persistence coordinator accepts this legacy error shape.
+        json!({"type":"turn/end", "seq":1, "time":1002, "data":{"turn":1, "reason":{"kind":"error", "step":0, "message":"Connection failed"}}}),
+      ],
+    ),
+  ];
+  for (provider, id, expected_running, lines) in cases {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join(format!("{id}.jsonl"));
+    std::fs::write(&path, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
+    let header = indexed_header(path.clone(), id, None);
+    let index = Arc::new(SessionIndex::open_in_memory().unwrap());
+    let source = index_source_key_for_path(provider, &path).unwrap();
+    let current_raw = source_cursor(provider, &path).unwrap();
+    let old_raw = if provider == ViewerProvider::Pi {
+      current_raw.replacen("source-revision.pi.v3.", "source-revision.pi.v2.", 1)
+    } else {
+      // These providers previously used the physical-file v1 cursor.
+      source_cursor(ViewerProvider::Codex, &path).unwrap()
+    };
+    assert_ne!(current_raw, old_raw);
+    let metadata = session_metadata_from_header(
+      &source,
+      header.clone(),
+      Some(format!("session-activity.v4.0.{}.0.0", u8::from(!expected_running))),
+      true,
+    )
+    .unwrap();
+    index
+      .replace_sources(&[SourceReplacement::new(
+        SourceState::new(source, completed_body_cursor(&old_raw), 0),
+        vec![metadata],
+      )])
+      .unwrap();
+    let key = index_session_key(&locator_for_header(provider, &header)).unwrap();
+    let seen_revision = index.session(&key).unwrap().unwrap().attention_revision;
+    assert!(index.mark_seen_through(&key, seen_revision, 123).unwrap());
+    let repository = Arc::new(ProviderHistory {
+      provider,
+      header: header.clone(),
+      loads: Default::default(),
+    });
+    let service = ViewerService::new_with_index(repository.clone(), index.clone());
+    service.refresh_session_index().unwrap();
+    let repaired = indexed_row(&index, provider, &header);
+    let activity = Activity::from_marker(repaired.attention_marker.as_deref()).unwrap();
+    assert_eq!(activity.running, expected_running, "{provider:?}");
+    assert_eq!(activity.final_count, 0);
+    assert_eq!(repaired.seen_at_ms, Some(123));
+    assert_eq!(repaired.attention_revision, repaired.seen_attention_revision);
+    assert_eq!(repository.loads.load(Ordering::SeqCst), 1);
+    service.refresh_session_index().unwrap();
+    assert_eq!(
+      repository.loads.load(Ordering::SeqCst),
+      1,
+      "{provider:?} upgrades only once"
+    );
+  }
+}
+
+#[test]
 fn pi_outcome_upgrade_restages_unchanged_history_once_without_new_unread_replies() {
   struct PiHistory {
     header: SessionHeader,
@@ -92,11 +228,12 @@ fn pi_outcome_upgrade_restages_unchanged_history_once_without_new_unread_replies
   let header = indexed_header(path.clone(), "failed-pi", None);
   let index = Arc::new(SessionIndex::open_in_memory().unwrap());
   let source = index_source_key_for_path(ViewerProvider::Pi, &path).unwrap();
-  // The old Pi cursor shared the physical-file version used by Codex. Other
-  // providers must retain that exact version to avoid unrelated body replay.
-  let old_raw = source_cursor(ViewerProvider::Codex, &path).unwrap();
+  // The initial Pi failure recovery must still accept the pre-upgrade v1
+  // cursor, independently of other providers' normalization revisions.
+  let current_raw = source_cursor(ViewerProvider::Pi, &path).unwrap();
+  let old_raw = current_raw.replacen("source-revision.pi.v3.", "source-revision.v1.", 1);
   assert!(old_raw.starts_with("source-revision.v1."));
-  assert_ne!(source_cursor(ViewerProvider::Pi, &path).unwrap(), old_raw);
+  assert_ne!(current_raw, old_raw);
   let metadata = session_metadata_from_header(
     &source,
     header.clone(),

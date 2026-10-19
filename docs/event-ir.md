@@ -179,9 +179,9 @@ unknown blocking is **Question available**. A reply resolves only its exact
 question IDs with recorded answers, including explicit empty strings; empty
 answer arrays do not resolve questions. Reading a session does not resolve them.
 Turn completion/interruption, a superseding turn, a final assistant reply, or a
-provider error retires remaining questions. This projection retains at most 256
-request identities. Historical cards remain after their attention retires;
-approval handling and live answering remain separate work.
+provider error or validated response cancellation retires remaining questions.
+This projection retains at most 256 request identities. Historical cards remain
+after their attention retires; approval handling and live answering remain separate work.
 
 The viewer keeps requests outside work trajectories and shows Markdown prompts,
 static choice lists, and free-text/secret markers. It does not infer current
@@ -232,6 +232,41 @@ visible, with a diagnostic metadata record preserving the native message and
 its IDs. An aborted response produces cancellation metadata rather than a
 provider error; these persisted records do not establish a native turn boundary.
 
+Request failures use `error`; warnings, reconnect attempts, and cancellations
+use diagnostic metadata or native lifecycle outcomes. Failed tools keep their
+own `is_error` flag without manufacturing a request failure. Partial replies,
+reasoning, and usage survive terminal errors, and terminal outcomes follow the
+content from the same native record. Repeated native failures are not deduplicated
+by message text. Diagnostic metadata and lifecycle/tool native payloads preserve
+provider codes, retry flags, and native correlation fields. Errors also carry
+their own optional `native` payload, so inspecting an error does not depend on
+neighboring diagnostic records or enabling full Relay native snapshots. Older
+serialized errors without `native` still decode; Rust struct literals must now
+provide `native: None` or the originating provider record. The Inspector separates
+this payload from normalized JSON and applies its existing size bounds. Pi native
+error/diagnostic envelopes omit provider-redacted thinking; explicitly hidden
+ZCode error records retain machine data but remain hidden in human views.
+Malformed or unsupported records remain visible as unknown.
+
+| Provider | Error and cancellation handling |
+| --- | --- |
+| Pi | Assistant failures and legacy session errors stay visible with native diagnostics. Empty recognized failure text blocks do not add spurious unknown events. |
+| Codex | Terminal errors and nested completion errors remain visible; failed completions have failed lifecycle outcomes. Warnings, stream retries, and the native nonterminal rollback/steering rejection codes are diagnostics. Aborts retain interruption diagnostics and lifecycle outcomes when an ID exists. Explicit image/tool-search failure statuses remain tool errors. |
+| OpenCode / ZCode | Historical and live errors share classification. Only the native `MessageAbortedError` tag means cancellation; cancelled summaries are interrupted compactions. Blank structured errors use a useful fallback. |
+| WorkBuddy | Meaningful `providerData.error` values produce errors with exact native diagnostics. False, blank, and recursively empty values do not. Assistant content and usage remain intact. |
+| DSH | Current and precisely supported legacy turn endings preserve failed/cancelled lifecycle outcomes. Blank failure messages fall back to their code or a generic label. Invalid turn identities and unsupported shapes stay unknown. |
+
+Pi and OpenCode/ZCode cancellation diagnostics lack authoritative turn IDs;
+Codex aborts may also omit their optional ID.
+`AgentEvent::is_response_cancelled` recognizes only their native response
+discriminators so activity and question consumers can retire pending work
+without inventing lifecycle identities. Tool cancellations and diagnostic prose
+do not end the containing response.
+
+The additive Codex completion-error, nonterminal error-code, and optional abort-ID
+shapes were checked against upstream checkout `cf7e9cfe6a`, newer than the pinned
+`2351d9e1b6` source. The tolerant decoder accepts them without a vendor update.
+
 Codex turn context, world state, inter-agent communication metadata,
 and rollbacks are metadata. Compaction summaries are
 not final assistant replies. Historical subagent ownership filtering runs
@@ -242,11 +277,14 @@ a session's source for otherwise unattributed messages.
 
 DSH produces lifecycle, usage, metadata, and provenance. Codex preserves
 task/turn start, completion, and abort as turn-scoped lifecycle with native
-turn IDs; missing IDs remain unknown rather than fabricated. Abort retains its
-existing error event as well. Pi, Codex, and
+turn IDs; required missing IDs remain unknown rather than fabricated. Valid
+aborts without their optional ID retain diagnostic metadata only. Aborts retain
+native diagnostics without a provider error. Pi, Codex, and
 OpenCode all normalize usage; Pi and Codex also adopt metadata, and Pi supplies
 extension provenance.
-Terminal Pet ignores compaction, usage, metadata, and hidden content for activity/focus and
-lease handling. Authoritative Pet runtime state remains follow-up work;
+Terminal Pet ignores compaction, usage, passive metadata, and hidden content for
+activity/focus and lease handling. Validated response cancellations and turn
+interruption/cancellation lifecycle records clear pending work as neutral
+outcomes. Broader authoritative Pet runtime state remains follow-up work;
 Pi historical logs do not contain the live agent/turn boundaries, so
 those require a separate bridge feature. DSH relay/input remain separate work.

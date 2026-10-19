@@ -27,6 +27,8 @@ pub(super) fn normalize(
       None
     } else if kind == "turn_aborted" {
       Some(LifecycleOutcome::Interrupted)
+    } else if let Some(error) = payload.get("error").filter(|error| !error.is_null()) {
+      diagnostics::error_message(error).map(|_| LifecycleOutcome::Failed)
     } else {
       Some(LifecycleOutcome::Completed)
     },
@@ -48,7 +50,10 @@ mod tests {
       "turn_complete",
       "turn_aborted",
     ] {
-      let payload = json!({"type": kind, "turn_id": "turn-1", "future": 42});
+      let mut payload = json!({"type": kind, "turn_id": "turn-1", "future": 42});
+      if kind == "turn_aborted" {
+        payload["reason"] = json!("interrupted");
+      }
       let event = normalize_event_message(
         Some("session".into()),
         EventMessage {

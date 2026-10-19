@@ -122,6 +122,10 @@ impl Activity {
     if event.is_hidden() {
       return;
     }
+    let response_cancelled = event.is_response_cancelled();
+    if response_cancelled {
+      self.assistant_stream = None;
+    }
     match event {
       AgentEvent::Lifecycle(lifecycle) if lifecycle.phase == Phase::Started => self.assistant_stream = None,
       AgentEvent::Message(message) if message.role == Role::User => self.assistant_stream = None,
@@ -170,6 +174,10 @@ impl Activity {
         self.running = true
       }
       AgentEvent::Reasoning(_) => self.running = true,
+      _ if response_cancelled => {
+        self.running = false;
+        self.active_turn = None;
+      }
       AgentEvent::Error(_) => {
         self.running = false;
         self.active_turn = None;
@@ -444,6 +452,214 @@ mod tests {
       native: json!({}),
       timestamp: None,
     })
+  }
+
+  fn pending_codex_response() -> (tokn_session_codex::normalize::CodexNormalizer, Activity) {
+    let mut normalizer = tokn_session_codex::normalize::CodexNormalizer::new();
+    let mut activity = Activity::default();
+    for payload in [
+      json!({"type":"task_started", "turn_id":"turn"}),
+      json!({"type":"request_user_input", "call_id":"request", "turn_id":"turn", "questions":[
+        {"id":"question", "header":"Choice", "question":"Which option?"}
+      ]}),
+    ] {
+      for event in normalizer.normalize(serde_json::from_value(json!({"type":"event_msg", "payload":payload})).unwrap())
+      {
+        activity.observe(&event);
+      }
+    }
+    assert!(activity.running);
+    assert_eq!(activity.question_attention.required_count, 1);
+    (normalizer, activity)
+  }
+
+  #[test]
+  fn normalized_codex_abort_without_turn_identity_stops_activity_and_retires_questions() {
+    for reason in ["interrupted", "replaced", "review_ended", "budget_limited"] {
+      for explicit_null in [false, true] {
+        let (mut normalizer, mut activity) = pending_codex_response();
+        let mut payload = json!({"type":"turn_aborted", "reason":reason});
+        if explicit_null {
+          payload["turn_id"] = serde_json::Value::Null;
+        }
+        let events =
+          normalizer.normalize(serde_json::from_value(json!({"type":"event_msg", "payload":payload})).unwrap());
+        assert!(matches!(&events[..], [AgentEvent::Metadata(event)]
+          if matches!(event.kind, tokn_session_core::MetadataKind::Diagnostic)));
+        assert!(events[0].is_response_cancelled());
+        for event in events {
+          activity.observe(&event);
+        }
+        assert!(!activity.running);
+        assert!(activity.active_turn.is_none());
+        assert_eq!(activity.question_attention, Default::default());
+        assert_eq!(activity.final_count, 0);
+      }
+    }
+  }
+
+  #[test]
+  fn normalized_codex_control_errors_leave_the_active_response_and_questions_pending() {
+    for code in [
+      json!("thread_rollback_failed"),
+      json!({"active_turn_not_steerable":{"turn_kind":"review"}}),
+      json!({"active_turn_not_steerable":{"turn_kind":"compact"}}),
+    ] {
+      let (mut normalizer, mut activity) = pending_codex_response();
+      let events = normalizer.normalize(
+        serde_json::from_value(json!({
+          "type":"event_msg", "payload":{"type":"error", "message":"Request rejected", "codex_error_info":code}
+        }))
+        .unwrap(),
+      );
+      assert!(matches!(&events[..], [AgentEvent::Metadata(event)]
+        if matches!(event.kind, tokn_session_core::MetadataKind::Diagnostic)));
+      for event in events {
+        assert!(!event.is_response_cancelled());
+        activity.observe(&event);
+      }
+      assert!(activity.running);
+      assert_eq!(activity.active_turn.as_deref(), Some("turn"));
+      assert_eq!(activity.question_attention.required_count, 1);
+      assert_eq!(activity.final_count, 0);
+    }
+  }
+
+  #[test]
+  fn normalized_pi_cancellation_stops_partial_reasoning_and_tool_activity() {
+    let mut normalizer = tokn_session_pi::normalize::PiNormalizer::new();
+    normalizer.normalize(serde_json::from_value(json!({"type":"session", "id":"session"})).unwrap());
+    let events = normalizer.normalize(
+      serde_json::from_value(json!({
+        "type":"message", "id":"assistant", "parentId":"user", "message":{
+          "role":"assistant", "content":[{"type":"thinking", "thinking":"Partial reasoning"},
+            {"type":"toolCall", "id":"call", "name":"read", "arguments":{"path":"file"}}],
+          "stopReason":"aborted", "errorMessage":"Request aborted."
+        }
+      }))
+      .unwrap(),
+    );
+    let mut activity = Activity::default();
+    let mut saw_work = false;
+    for event in events {
+      activity.observe(&event);
+      if matches!(event, AgentEvent::Reasoning(_) | AgentEvent::ToolCall(_)) {
+        assert!(activity.running);
+        saw_work = true;
+      }
+    }
+    assert!(saw_work);
+    assert!(!activity.running);
+    assert!(activity.active_turn.is_none());
+    assert!(activity.assistant_stream.is_none());
+    assert_eq!(activity.final_count, 0);
+  }
+
+  #[test]
+  fn normalized_opencode_and_zcode_reasoning_only_errors_and_cancellations_end_activity() {
+    for zcode in [false, true] {
+      for cancelled in [false, true] {
+        for recovered in [false, true] {
+          let directory = tempfile::tempdir().unwrap();
+          let path = directory.path().join("db.sqlite");
+          let connection = rusqlite::Connection::open(&path).unwrap();
+          connection.execute_batch(
+            "CREATE TABLE session(id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT, time_created INTEGER, time_updated INTEGER);
+             CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+             INSERT INTO session VALUES('session', NULL, '/synthetic/project', 'Errors', 100, 101);
+             INSERT INTO part VALUES('reasoning', 'assistant', 'session', 101, '{\"type\":\"reasoning\",\"text\":\"Partial reasoning\"}');",
+          ).unwrap();
+          let mut data = json!({"role":"assistant", "parentID":"user", "error":{
+            "name":if cancelled {"MessageAbortedError"} else {"APIError"}, "data":{"message":"terminal outcome"}
+          }});
+          if recovered {
+            data["providerID"] = json!(42);
+          }
+          connection
+            .execute(
+              "INSERT INTO message VALUES('assistant', 'session', 101, ?1)",
+              [data.to_string()],
+            )
+            .unwrap();
+          drop(connection);
+          let source = if zcode {
+            tokn_session_opencode::OpenCodeSessionSource::for_zcode(Some(path))
+          } else {
+            tokn_session_opencode::OpenCodeSessionSource::new(Some(path))
+          };
+          let loaded = source.load_session_exact("session").unwrap();
+          let mut activity = Activity::default();
+          let mut saw_reasoning = false;
+          for event in &loaded.events {
+            activity.observe(event);
+            if matches!(event, AgentEvent::Reasoning(_)) {
+              assert!(activity.running);
+              saw_reasoning = true;
+            }
+          }
+          assert!(saw_reasoning);
+          assert!(
+            !activity.running,
+            "zcode={zcode}, cancelled={cancelled}, recovered={recovered}"
+          );
+          assert!(activity.active_turn.is_none());
+          assert!(activity.assistant_stream.is_none());
+          assert_eq!(activity.final_count, 0);
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn warnings_retries_and_unsuccessful_tools_do_not_cancel_response_activity() {
+    let mut activity = Activity::default();
+    activity.observe(&lifecycle("existing-turn", LifecycleScope::Turn, Phase::Started));
+    activity.observe(&text_message(Provider::Codex, None, Phase::Delta, "Partial reply"));
+    for native_type in ["warning", "retry", "message.error"] {
+      let diagnostic: AgentEvent = serde_json::from_value(json!({
+        "type":"metadata", "provider":"opencode", "session_id":"session", "kind":"diagnostic",
+        "native_type":native_type, "summary":"response cancelled", "native":{
+          "data":{"role":"assistant", "error":{"name":"APIError", "data":{"message":"retrying"}}}
+        }, "timestamp":null
+      }))
+      .unwrap();
+      activity.observe(&diagnostic);
+      assert!(activity.running);
+      assert_eq!(activity.active_turn.as_deref(), Some("existing-turn"));
+      assert!(activity.assistant_stream.is_some());
+    }
+    let tool = tokn_session_opencode::OpenCodeLiveNormalizer::normalize_line(
+      &json!({
+        "type":"tool_use", "sessionID":"session", "part":{"type":"tool", "tool":"bash", "callID":"call",
+          "state":{"status":"error", "error":"Tool execution aborted", "metadata":{"interrupted":true}}}
+      })
+      .to_string(),
+    )
+    .unwrap();
+    for event in tool {
+      let tokn_session_core::LiveSessionEvent::Event(event) = event else {
+        panic!("expected normalized tool")
+      };
+      activity.observe(&event);
+      assert!(activity.running);
+    }
+    let cancellation = tokn_session_opencode::OpenCodeLiveNormalizer::normalize_line(
+      &json!({
+        "type":"error", "sessionID":"session", "error":{"name":"MessageAbortedError", "data":{"message":"Stopped"}}
+      })
+      .to_string(),
+    )
+    .unwrap();
+    for event in cancellation {
+      let tokn_session_core::LiveSessionEvent::Event(event) = event else {
+        panic!("expected cancellation diagnostic")
+      };
+      activity.observe(&event);
+    }
+    assert!(!activity.running);
+    assert!(activity.active_turn.is_none());
+    assert!(activity.assistant_stream.is_none());
   }
 
   #[test]

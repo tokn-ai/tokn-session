@@ -1,8 +1,7 @@
 use serde_json::Value;
 use tokn_opencode_protocol::run::{RunEvent, RunLine};
 use tokn_session_core::{
-  AgentEvent, ErrorEvent, LiveSessionEvent, MessageDelivery, MessageEvent, Phase, Provider, ReasoningEvent, Role,
-  UnknownEvent,
+  AgentEvent, LiveSessionEvent, MessageDelivery, MessageEvent, Phase, Provider, ReasoningEvent, Role, UnknownEvent,
 };
 
 use crate::normalize::{timestamp, tool_event, usage_event};
@@ -61,12 +60,22 @@ impl OpenCodeLiveNormalizer {
           raw_timestamp,
         ))]
       }
-      RunEvent::Error(error) => vec![wrap_agent_event(AgentEvent::Error(ErrorEvent {
-        provider: Provider::OpenCode,
-        session_id,
-        message: error_message(error.error),
-        timestamp: timestamp(raw_timestamp),
-      }))],
+      RunEvent::Error(error) => match crate::errors::normalize(
+        Provider::OpenCode,
+        session_id.clone(),
+        &error.error,
+        "error",
+        native.clone(),
+        timestamp(raw_timestamp),
+      ) {
+        Some(events) => events.into_iter().map(wrap_agent_event).collect(),
+        None => vec![unknown_live_event(
+          session_id,
+          Some("error".into()),
+          native,
+          raw_timestamp,
+        )],
+      },
       RunEvent::StepStart(_) => vec![unknown_live_event(
         session_id,
         Some("step_start".to_string()),
@@ -124,17 +133,6 @@ fn unknown_live_event(
     native: Some(native),
     timestamp: timestamp(raw_timestamp),
   })
-}
-
-fn error_message(value: Value) -> String {
-  value
-    .get("data")
-    .and_then(|data| data.get("message"))
-    .and_then(Value::as_str)
-    .or_else(|| value.get("message").and_then(Value::as_str))
-    .or_else(|| value.as_str())
-    .map(str::to_string)
-    .unwrap_or_else(|| value.to_string())
 }
 
 #[cfg(test)]
