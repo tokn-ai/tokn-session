@@ -13,16 +13,42 @@ private struct TranslationInput: Decodable {
 private struct TranslationOutput: Encodable {
   let texts: [String]?
   let error: String?
+  let recovery: String?
 }
 
-private func complete(_ token: UInt64, _ callback: Completion, texts: [String]? = nil, error: String? = nil) {
-  let result = TranslationOutput(texts: texts, error: error)
+private func complete(
+  _ token: UInt64, _ callback: Completion,
+  texts: [String]? = nil, error: String? = nil, recovery: String? = nil
+) {
+  let result = TranslationOutput(texts: texts, error: error, recovery: recovery)
   guard let data = try? JSONEncoder().encode(result), let json = String(data: data, encoding: .utf8) else {
     "{\"error\":\"Could not encode the translation result.\"}".withCString { callback(token, $0) }
     return
   }
   // Rust copies this JSON during the call; no Swift-owned pointer escapes.
   json.withCString { callback(token, $0) }
+}
+
+struct TranslationFailure {
+  let error: String
+  let recovery: String?
+}
+
+@available(macOS 15.0, *)
+func translationFailure(for error: any Error) -> TranslationFailure {
+  let description = error is CancellationError ? "Translation cancelled." : "Apple Translation: \(error.localizedDescription)"
+  var details = [description]
+  if let reason = (error as NSError).localizedFailureReason?.trimmingCharacters(in: .whitespacesAndNewlines),
+     !reason.isEmpty, !description.localizedCaseInsensitiveContains(reason) {
+    details.append(reason)
+  }
+  // Missing language models can surface as this public engine error, but it
+  // also covers other failures. Offer settings without claiming a diagnosis.
+  let recovery = TranslationError.internalError ~= error ? "translation_settings" : nil
+  if recovery != nil {
+    details.append("Check or download the source and target languages in macOS Translation settings, then retry.")
+  }
+  return TranslationFailure(error: details.joined(separator: "\n"), recovery: recovery)
 }
 
 @available(macOS 15.0, *)
@@ -236,17 +262,16 @@ private final class TranslationJob {
         }
       }
       finish(texts: plan.reassemble(output))
-    } catch is CancellationError {
-      finish(error: "Translation cancelled.")
     } catch {
-      finish(error: "Apple Translation: \(error.localizedDescription)")
+      let failure = translationFailure(for: error)
+      finish(error: failure.error, recovery: failure.recovery)
     }
   }
 
-  func finish(texts: [String]? = nil, error: String? = nil) {
+  func finish(texts: [String]? = nil, error: String? = nil, recovery: String? = nil) {
     guard !finished else { return }
     finished = true
-    complete(token, callback, texts: texts, error: error)
+    complete(token, callback, texts: texts, error: error, recovery: recovery)
     if let observer = close_observer {
       NotificationCenter.default.removeObserver(observer)
       close_observer = nil

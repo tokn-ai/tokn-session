@@ -36,7 +36,29 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
             {event.is_hidden ? "Hidden extension message" : event.summary || event.title}
           </div>
         )}
-        {translation.error ? <p className="message-translation__error" role="alert">{translation.error}</p> : null}
+        {translation.error ? (
+          <div className="message-translation__error" role="alert">
+            <span>{translation.error}</span>
+            {translation.can_open_settings ? (
+              <>
+                {" "}
+                <button
+                  className="message-translation__settings"
+                  disabled={translation.settings_loading}
+                  onClick={() => { void translation.openSettings(); }}
+                  type="button"
+                >
+                  {translation.settings_loading ? "Opening Translation Settings…" : "Open Translation Settings"}
+                </button>
+              </>
+            ) : null}
+            {translation.settings_error ? (
+              <p className="message-translation__settings-error">
+                {translation.settings_error} Open System Settings → General → Language &amp; Region → Translation Languages.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
         <div className="message-event__actions">
           {canTranslate ? (
             <>

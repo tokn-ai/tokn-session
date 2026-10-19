@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { browserTranslationEngine } from "../lib/browserTranslation";
-import { cancelTranslation, getTranslationStatus, loadEventDetail, translateText } from "../lib/tauri";
+import { cancelTranslation, getTranslationStatus, loadEventDetail, openTranslationSettings, translateText } from "../lib/tauri";
 import type { TranslationJob, TranslationProgress } from "../lib/translationEngine";
 import { isDesktop } from "../lib/transport";
 import type { EventDetail, EventSummary, TranslateTextResponse, TrajectoryEventPageState } from "../lib/types";
@@ -13,6 +13,7 @@ vi.mock("../lib/tauri", () => ({
   cancelTranslation: vi.fn(),
   getTranslationStatus: vi.fn(),
   loadEventDetail: vi.fn(),
+  openTranslationSettings: vi.fn(),
   translateText: vi.fn(),
 }));
 vi.mock("../lib/transport", () => ({ isDesktop: vi.fn() }));
@@ -92,6 +93,7 @@ beforeEach(() => {
   vi.mocked(loadEventDetail).mockResolvedValue(detail());
   vi.mocked(translateText).mockResolvedValue({ texts: ["中文译文。"] });
   vi.mocked(cancelTranslation).mockResolvedValue();
+  vi.mocked(openTranslationSettings).mockResolvedValue();
   vi.mocked(browserTranslationEngine.getStatus).mockResolvedValue({ available: true, reason: null });
   browser_translate.mockResolvedValue(["浏览器译文。"]);
   vi.mocked(browserTranslationEngine.start).mockImplementation((on_progress) => {
@@ -380,6 +382,103 @@ describe("message translation flow", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("This response has changed.");
     expect(screen.getByText("Original response.")).toBeInTheDocument();
     expect(translateText).not.toHaveBeenCalled();
+  });
+});
+
+describe("native translation recovery", () => {
+  const model_failure = {
+    message: "Apple Translation: Unable to Translate (offline models unavailable). Check or download the source and target languages in macOS Translation settings, then retry.",
+    recovery: "translation_settings",
+  };
+
+  it("offers native settings for model failures and disables duplicate launches while opening", async () => {
+    const pending = deferred<void>();
+    vi.mocked(translateText).mockRejectedValueOnce(model_failure);
+    vi.mocked(openTranslationSettings).mockReturnValueOnce(pending.promise);
+    render(card(message()));
+    await startTranslation();
+    expect(await screen.findByRole("alert")).toHaveTextContent(model_failure.message);
+    expect(screen.getByRole("alert")).toHaveTextContent("Check or download the source and target languages");
+    expect(screen.getByText("Original response.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open Translation Settings" }));
+    const opening = screen.getByRole("button", { name: "Opening Translation Settings…" });
+    expect(opening).toBeDisabled();
+    fireEvent.click(opening);
+    expect(openTranslationSettings).toHaveBeenCalledTimes(1);
+    await act(async () => pending.resolve());
+    expect(screen.getByRole("button", { name: "Open Translation Settings" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Retry translation" })).toBeEnabled();
+    expect(screen.getByRole("alert")).toHaveTextContent(model_failure.message);
+  });
+
+  it.each([
+    "Translation cancelled.",
+    new Error("Language download failed."),
+    { message: "This language is unsupported.", recovery: null },
+    { message: "Unknown recovery.", recovery: "open_url" },
+  ])("keeps generic and nonrecoverable failures read-only: %j", async (failure) => {
+    vi.mocked(translateText).mockRejectedValueOnce(failure);
+    render(card(message()));
+    await startTranslation();
+    await screen.findByRole("alert");
+    expect(screen.queryByRole("button", { name: "Open Translation Settings" })).not.toBeInTheDocument();
+    expect(openTranslationSettings).not.toHaveBeenCalled();
+  });
+
+  it("never offers native settings for a browser or history-load failure", async () => {
+    vi.mocked(isDesktop).mockReturnValue(false);
+    browser_translate.mockRejectedValueOnce(model_failure);
+    const view = render(card(message()));
+    await startTranslation();
+    await screen.findByRole("alert");
+    expect(screen.queryByRole("button", { name: "Open Translation Settings" })).not.toBeInTheDocument();
+    view.unmount();
+
+    vi.mocked(isDesktop).mockReturnValue(true);
+    vi.mocked(loadEventDetail).mockRejectedValueOnce(model_failure);
+    render(card(message()));
+    await startTranslation();
+    await screen.findByRole("alert");
+    expect(screen.queryByRole("button", { name: "Open Translation Settings" })).not.toBeInTheDocument();
+    expect(openTranslationSettings).not.toHaveBeenCalled();
+  });
+
+  it("retains Apple's failure and retry after launch failure, with a manual settings path", async () => {
+    vi.mocked(translateText).mockRejectedValueOnce(model_failure);
+    vi.mocked(openTranslationSettings).mockRejectedValueOnce(new Error("Could not open Translation Settings."));
+    render(card(message()));
+    await startTranslation();
+    fireEvent.click(await screen.findByRole("button", { name: "Open Translation Settings" }));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Could not open Translation Settings."));
+    expect(screen.getByRole("alert")).toHaveTextContent(model_failure.message);
+    expect(screen.getByRole("alert")).toHaveTextContent("System Settings → General → Language & Region → Translation Languages");
+    expect(screen.getByText("Original response.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open Translation Settings" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Retry translation" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open Translation Settings" })).not.toBeInTheDocument();
+    expect(await screen.findByText("中文译文。")).toBeInTheDocument();
+  });
+
+  it.each(["session", "content", "retry", "unmount"])("ignores a late settings launch failure after %s", async (change) => {
+    const pending = deferred<void>();
+    vi.mocked(translateText).mockRejectedValueOnce(model_failure);
+    vi.mocked(openTranslationSettings).mockReturnValueOnce(pending.promise);
+    const event = message();
+    const view = render(card(event));
+    await startTranslation();
+    fireEvent.click(await screen.findByRole("button", { name: "Open Translation Settings" }));
+    if (change === "unmount") view.unmount();
+    else if (change === "session") view.rerender(card(event, "session.v1.second"));
+    else if (change === "content") view.rerender(card(message({ summary: "Updated response." })));
+    else {
+      fireEvent.click(screen.getByRole("button", { name: "Retry translation" }));
+      await screen.findByText("中文译文。");
+    }
+    await act(async () => pending.reject(new Error("Stale launch failure.")));
+    expect(screen.queryByText(/Stale launch failure/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    if (change === "retry") expect(screen.getByText("中文译文。")).toBeInTheDocument();
   });
 });
 

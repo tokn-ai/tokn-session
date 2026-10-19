@@ -85,6 +85,7 @@ pub fn run() {
       commands::translation::get_translation_status,
       commands::translation::translate_text,
       commands::translation::cancel_translation,
+      commands::translation::open_translation_settings,
     ])
     .build(tauri::generate_context!())
     .expect("error while building tokn session viewer")

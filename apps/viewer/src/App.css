@@ -1997,6 +1997,26 @@ button:disabled {
   overflow-wrap: anywhere;
 }
 
+.message-translation__settings {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--focus);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.message-translation__settings:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.message-translation__settings-error {
+  margin: 4px 0 0;
+}
+
 .event-full-content-hint {
   color: var(--focus);
   font-size: 9.5px;

@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { loadEventDetail } from "./tauri";
 import { translateMarkdown } from "./markdownTranslation";
-import type { TranslationEngine, TranslationJob, TranslationProgress } from "./translationEngine";
-import type { EventSummary } from "./types";
+import { NativeTranslationError, normalizeTranslationFailure, type TranslationEngine, type TranslationJob, type TranslationProgress } from "./translationEngine";
+import type { EventSummary, TranslationRecovery } from "./types";
 
 interface TranslationSource {
   session_key: string | undefined;
@@ -19,6 +19,9 @@ interface TranslationState {
   show_translation: boolean;
   loading: boolean;
   error: string | null;
+  recovery: TranslationRecovery | null;
+  settings_loading: boolean;
+  settings_error: string | null;
   progress: TranslationProgress | null;
 }
 
@@ -38,7 +41,10 @@ export function useMessageTranslation(event: EventSummary, sessionKey?: string, 
     event.is_hidden, event.role, contentRevision, truncatedObservation]);
   const currentSource = useRef(source);
   currentSource.current = source;
+  const currentEngine = useRef(engine);
+  currentEngine.current = engine;
   const active = useRef<{ source: TranslationSource; job: TranslationJob | null } | null>(null);
+  const settingsRequest = useRef<object | null>(null);
   const [state, setState] = useState<TranslationState | null>(null);
   const visible = state?.source === source ? state : null;
 
@@ -49,7 +55,10 @@ export function useMessageTranslation(event: EventSummary, sessionKey?: string, 
   }
 
   useEffect(() => {
-    return () => { abortActive(); };
+    return () => {
+      abortActive();
+      settingsRequest.current = null;
+    };
   }, [source, engine]);
 
   function cancel() {
@@ -61,8 +70,10 @@ export function useMessageTranslation(event: EventSummary, sessionKey?: string, 
     if (!engine || !sessionKey || active.current || event.is_hidden || event.role !== "assistant" || !event.summary.trim()) return;
     const request = { source, job: null as TranslationJob | null };
     active.current = request;
+    settingsRequest.current = null;
     const isCurrent = () => active.current === request && currentSource.current === source;
-    setState({ source, original: null, translated: null, show_translation: false, loading: true, error: null, progress: null });
+    setState({ source, original: null, translated: null, show_translation: false, loading: true, error: null,
+      recovery: null, settings_loading: false, settings_error: null, progress: null });
     try {
       // Model preparation starts in the click handler while user activation is
       // still available, before the potentially slow history request.
@@ -93,7 +104,8 @@ export function useMessageTranslation(event: EventSummary, sessionKey?: string, 
         if (!isCurrent()) throw new Error("Translation cancelled.");
         return response;
       });
-      if (isCurrent()) setState({ source, original, translated, show_translation: true, loading: false, error: null, progress: null });
+      if (isCurrent()) setState({ source, original, translated, show_translation: true, loading: false, error: null,
+        recovery: null, settings_loading: false, settings_error: null, progress: null });
     } catch (error) {
       if (isCurrent()) setState((previous) => ({
         source,
@@ -101,12 +113,35 @@ export function useMessageTranslation(event: EventSummary, sessionKey?: string, 
         translated: null,
         show_translation: false,
         loading: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: normalizeTranslationFailure(error).message,
+        recovery: error instanceof NativeTranslationError ? error.recovery : null,
+        settings_loading: false,
+        settings_error: null,
         progress: null,
       }));
     } finally {
       if (active.current === request) active.current = null;
       request.job?.dispose();
+    }
+  }
+
+  async function openSettings() {
+    if (visible?.recovery !== "translation_settings" || !engine?.openSettings || settingsRequest.current) return;
+    const request = {};
+    settingsRequest.current = request;
+    const isCurrent = () => settingsRequest.current === request
+      && currentSource.current === source && currentEngine.current === engine;
+    setState((previous) => previous?.source === source ? { ...previous, settings_loading: true, settings_error: null } : previous);
+    try {
+      await engine.openSettings();
+    } catch (error) {
+      if (isCurrent()) setState((previous) => previous?.source === source
+        ? { ...previous, settings_error: normalizeTranslationFailure(error).message } : previous);
+    } finally {
+      if (isCurrent()) {
+        settingsRequest.current = null;
+        setState((previous) => previous?.source === source ? { ...previous, settings_loading: false } : previous);
+      }
     }
   }
 
@@ -116,9 +151,13 @@ export function useMessageTranslation(event: EventSummary, sessionKey?: string, 
     translated: visible?.translated !== null && visible?.translated !== undefined,
     showing_translation: visible?.show_translation ?? false,
     error: visible?.error ?? null,
+    can_open_settings: visible?.recovery === "translation_settings" && Boolean(engine?.openSettings),
+    settings_loading: visible?.settings_loading ?? false,
+    settings_error: visible?.settings_error ?? null,
     progress: visible?.progress ?? null,
     translate,
     cancel,
+    openSettings,
     toggle: () => setState((previous) => previous?.source === source && previous.translated !== null
       ? { ...previous, show_translation: !previous.show_translation }
       : previous),

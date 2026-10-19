@@ -79,6 +79,11 @@ Apple's prompt to download language packs. No LLM or API key is needed. **Cancel
 stops a pending request, and **Show original** switches back without another
 translation. Translation is currently available in the Mac desktop app only.
 
+Internal engine errors offer **Open Translation Settings** to check language
+downloads on the viewing Mac. If downloaded languages still fail, remove and
+download them again in **System Settings → General → Language & Region →
+Translation Languages**, then retry translation.
+
 The viewer loads the full response before translating. It translates prose
 inside Markdown while preserving code, URLs, lists, tables, and other markup;
 formatting boundaries can limit sentence context. The original session and
