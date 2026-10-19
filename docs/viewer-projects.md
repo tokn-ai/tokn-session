@@ -91,7 +91,11 @@ may inherit a different environment from a terminal.
 ## Storage and limits
 
 Project registrations live in the shared session index (`registered_projects`,
-migration 10). Managed ownership receipts default to
+migration 10). Migration 11 adds the derived managed-session admission index.
+Existing registrations and session metadata survive both upgrades; the known
+development build that combined these schemas is adopted transactionally after
+schema verification. Unknown migration checksums continue to block startup.
+Managed ownership receipts default to
 `~/.tokn/sessions/viewer/managed-sessions.json`; with a custom index path, they
 live in `viewer/managed-sessions.json` under the index's parent directory.
 Per-request `managed-pi-<request-id>.lease` files live beside the receipts.

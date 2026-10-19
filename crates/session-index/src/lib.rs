@@ -15,6 +15,7 @@
 //! precondition, so a stale scan cannot overwrite a newer replacement.
 
 mod managed_admissions;
+mod migration_compatibility;
 mod projects;
 mod registered_projects;
 pub use registered_projects::RegisteredProjectRecord;
@@ -32,6 +33,11 @@ use rusqlite::{Connection, ErrorCode, OptionalExtension, Transaction, Transactio
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const APPLICATION_ID: i32 = 0x544f_4b4e; // "TOKN"
+const MIGRATION_LEDGER_SQL: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
+       version INTEGER PRIMARY KEY,
+       checksum TEXT NOT NULL,
+       applied_at_ms INTEGER NOT NULL
+     );";
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE sources (
@@ -289,7 +295,9 @@ CREATE TABLE registered_projects (
   created_at_ms INTEGER NOT NULL
 );
 CREATE INDEX registered_projects_by_group ON registered_projects(group_key);
+"#;
 
+const MIGRATION_011: &str = r#"
 CREATE TABLE managed_session_admissions (
   provider TEXT NOT NULL,
   source_key TEXT NOT NULL,
@@ -359,6 +367,10 @@ const MIGRATIONS: &[Migration] = &[
   Migration {
     version: 10,
     sql: MIGRATION_010,
+  },
+  Migration {
+    version: 11,
+    sql: MIGRATION_011,
   },
 ];
 
@@ -1544,13 +1556,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
   // just before the first process applies an ALTER TABLE, then fail on a
   // duplicate column after it acquires its own transaction.
   let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-  transaction.execute_batch(
-    "CREATE TABLE IF NOT EXISTS schema_migrations (
-       version INTEGER PRIMARY KEY,
-       checksum TEXT NOT NULL,
-       applied_at_ms INTEGER NOT NULL
-     );",
-  )?;
+  transaction.execute_batch(MIGRATION_LEDGER_SQL)?;
 
   let applied = {
     let mut statement = transaction.prepare("SELECT version, checksum FROM schema_migrations ORDER BY version ASC")?;
@@ -1566,6 +1572,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
     )));
   }
 
+  let mut combined_project_migration = false;
   for (index, (version, found_checksum)) in applied.iter().enumerate() {
     let migration = MIGRATIONS
       .get(index)
@@ -1580,6 +1587,10 @@ fn migrate(connection: &mut Connection) -> Result<()> {
 
     let expected_checksum = migration_checksum(migration.sql);
     if *found_checksum != expected_checksum {
+      if migration_compatibility::is_combined_project_migration(*version, found_checksum) {
+        combined_project_migration = true;
+        continue;
+      }
       return Err(SessionIndexError::MigrationChecksumMismatch {
         version: *version,
         expected: expected_checksum,
@@ -1588,7 +1599,20 @@ fn migrate(connection: &mut Connection) -> Result<()> {
     }
   }
 
-  for migration in MIGRATIONS.iter().skip(applied.len()) {
+  // Validate the entire ledger before adopting this one known development
+  // schema. An unrelated checksum mismatch must leave its ledger untouched.
+  let applied_count = if combined_project_migration {
+    if applied.len() != 10 {
+      return Err(SessionIndexError::MigrationHistoryInvalid(
+        "combined migration 10 must be the final recorded migration".into(),
+      ));
+    }
+    migration_compatibility::adopt_combined_project_migration(&transaction)?;
+    11
+  } else {
+    applied.len()
+  };
+  for migration in MIGRATIONS.iter().skip(applied_count) {
     transaction.execute_batch(migration.sql)?;
     transaction.execute(
       "INSERT INTO schema_migrations(version, checksum, applied_at_ms) VALUES(?1, ?2, ?3)",
@@ -2479,6 +2503,7 @@ mod tests {
         (8, migration_checksum(MIGRATION_008)),
         (9, migration_checksum(MIGRATION_009)),
         (10, migration_checksum(MIGRATION_010)),
+        (11, migration_checksum(MIGRATION_011)),
       ]
     );
   }
@@ -2756,7 +2781,7 @@ mod tests {
       .expect("migration query should run")
       .collect::<rusqlite::Result<Vec<_>>>()
       .expect("migration versions should decode");
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
   }
 
   #[test]

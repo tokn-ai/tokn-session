@@ -30,7 +30,9 @@ See [settings ownership](viewer-settings.md) for persistence and capabilities.
 The local desktop can register existing project folders and start viewer-owned
 Pi RPC sessions with a first prompt. Migration 10 stores canonical launch
 folders separately from inferred project groups, including empty projects and
-distinct worktrees sharing one group. New conversations open only after their
+distinct worktrees sharing one group. Migration 11 adds managed-session admission;
+upgrades preserve the original migration 10 and transactionally adopt the one
+known development build that combined both schemas. New conversations open only after their
 real Pi history is verified and indexed. Owned sessions support message input,
 Stop, explicit Resume, and bounded native extension dialogs; private receipts
 and process leases preserve ownership across restarts. HTTP, Hub, session shares,
