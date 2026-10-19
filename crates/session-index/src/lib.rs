@@ -14,7 +14,10 @@
 //! callers also attach the cursor observed before scanning as an optimistic
 //! precondition, so a stale scan cannot overwrite a newer replacement.
 
+mod managed_admissions;
 mod projects;
+mod registered_projects;
+pub use registered_projects::RegisteredProjectRecord;
 
 use std::{
   collections::{HashMap, HashSet},
@@ -275,6 +278,36 @@ FROM sessions AS session
 INNER JOIN sources AS source ON source.id = session.source_id;
 "#;
 
+// Explicit launch folders remain separate from inferred repository grouping.
+// Several registered worktrees may share one durable project anchor.
+const MIGRATION_010: &str = r#"
+CREATE TABLE registered_projects (
+  project_id TEXT PRIMARY KEY NOT NULL CHECK(length(project_id) BETWEEN 1 AND 128),
+  group_key TEXT NOT NULL REFERENCES projects(project_key),
+  folder_path TEXT UNIQUE NOT NULL CHECK(length(folder_path) > 0),
+  name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 160),
+  created_at_ms INTEGER NOT NULL
+);
+CREATE INDEX registered_projects_by_group ON registered_projects(group_key);
+
+CREATE TABLE managed_session_admissions (
+  provider TEXT NOT NULL,
+  source_key TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  project_id TEXT NOT NULL REFERENCES registered_projects(project_id),
+  PRIMARY KEY(provider, source_key, session_id)
+);
+
+CREATE TRIGGER revoke_deleted_managed_admission
+AFTER DELETE ON sessions
+BEGIN
+  DELETE FROM managed_session_admissions
+  WHERE provider = (SELECT provider FROM sources WHERE id = OLD.source_id)
+    AND source_key = (SELECT source_key FROM sources WHERE id = OLD.source_id)
+    AND session_id = OLD.session_id;
+END;
+"#;
+
 #[derive(Clone, Debug)]
 pub struct ProjectGroup {
   pub project_key: String,
@@ -323,6 +356,10 @@ const MIGRATIONS: &[Migration] = &[
     version: 9,
     sql: MIGRATION_009,
   },
+  Migration {
+    version: 10,
+    sql: MIGRATION_010,
+  },
 ];
 
 /// Errors returned by [`SessionIndex`].
@@ -334,6 +371,10 @@ pub enum SessionIndexError {
   ConnectionPoisoned,
   /// A replacement does not describe one complete source snapshot.
   InvalidReplacement(String),
+  /// A registered launch folder contains invalid bounded metadata.
+  InvalidProject(String),
+  /// A managed session admission does not match a present indexed session.
+  InvalidAdmission(String),
   /// A previously applied migration no longer matches the embedded migration.
   MigrationChecksumMismatch {
     version: i64,
@@ -361,6 +402,8 @@ impl fmt::Display for SessionIndexError {
       Self::Sqlite(error) => write!(formatter, "SQLite index error: {error}"),
       Self::ConnectionPoisoned => formatter.write_str("SQLite index connection lock was poisoned"),
       Self::InvalidReplacement(message) => write!(formatter, "invalid source replacement: {message}"),
+      Self::InvalidProject(message) => write!(formatter, "invalid registered project: {message}"),
+      Self::InvalidAdmission(message) => write!(formatter, "invalid managed session admission: {message}"),
       Self::MigrationChecksumMismatch {
         version,
         expected,
@@ -1804,6 +1847,23 @@ fn replace_source_in_transaction(
     }
   }
 
+  // Replacements temporarily mark every source row absent before upserting
+  // retained identities. Revoke admissions only after final membership is
+  // known, so an ordinary append preserves the same session's admission.
+  transaction.execute(
+    "DELETE FROM managed_session_admissions
+     WHERE provider = ?1 AND source_key = ?2
+       AND NOT EXISTS(SELECT 1 FROM sessions AS session
+         WHERE session.source_id = ?3
+           AND session.session_id = managed_session_admissions.session_id
+           AND session.present = 1)",
+    params![
+      replacement.source.key.provider,
+      replacement.source.key.source_key,
+      source_id
+    ],
+  )?;
+
   Ok(summary)
 }
 
@@ -2418,6 +2478,7 @@ mod tests {
         (7, migration_checksum(MIGRATION_007)),
         (8, migration_checksum(MIGRATION_008)),
         (9, migration_checksum(MIGRATION_009)),
+        (10, migration_checksum(MIGRATION_010)),
       ]
     );
   }
@@ -2695,7 +2756,7 @@ mod tests {
       .expect("migration query should run")
       .collect::<rusqlite::Result<Vec<_>>>()
       .expect("migration versions should decode");
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   }
 
   #[test]

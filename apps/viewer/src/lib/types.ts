@@ -243,6 +243,54 @@ export interface SessionSummary {
 
 export type SessionOrder = "time" | "project";
 
+export interface RegisteredProject {
+  project_id: string;
+  group_key: string;
+  folder_path: string;
+  name: string;
+  created_at_ms: number;
+  available: boolean;
+}
+
+export interface ProjectWorkspaceSnapshot {
+  available: boolean;
+  unavailable_reason: string | null;
+  projects: RegisteredProject[];
+}
+
+export interface RegisterProjectRequest { folder_path: string; name?: string | null }
+export interface CreateProjectSessionRequest { request_id: string; project_id: string; prompt: string }
+export interface SessionCreationError { message: string; may_have_started: boolean }
+export type ManagedSessionStatus = "starting" | "running" | "idle" | "stopping" | "stopped" | "failed";
+export interface ManagedSessionDialog {
+  dialog_id: string;
+  kind: string;
+  title: string;
+  message: string | null;
+  options: string[];
+  initial_value: string | null;
+}
+export interface ManagedSessionSnapshot {
+  revision: number;
+  request_id: string;
+  project_id: string;
+  provider: string;
+  status: ManagedSessionStatus;
+  session_id: string | null;
+  session_key: string | null;
+  session: SessionSummary | null;
+  message: string | null;
+  pending_dialog: ManagedSessionDialog | null;
+}
+export interface ManagedSessionRequest { request_id?: string | null; session_key?: string | null }
+export interface ManagedSessionDialogResponse {
+  request_id: string;
+  dialog_id: string;
+  value?: string | null;
+  confirmed?: boolean | null;
+  cancelled: boolean;
+}
+
 export interface SessionListQuery {
   order?: SessionOrder;
   providers?: ViewerProvider[];

@@ -1,4 +1,4 @@
-import type { SessionOrder, SessionSummary } from "./types";
+import type { RegisteredProject, SessionOrder, SessionSummary } from "./types";
 import { groupSessions } from "./state";
 import { readViewerPreferences, updateViewerPreferences } from "./viewerPreferences";
 
@@ -9,6 +9,7 @@ export interface SessionGroup {
   key: string;
   project: string;
   sessions: SessionSummary[];
+  registered_projects?: RegisteredProject[];
 }
 
 export interface RecentEntry {
@@ -69,8 +70,21 @@ export function reconcileRecent(previous: RecentEntry[], sessions: SessionSummar
   ];
 }
 
-export function sidebarGroups(sessions: SessionSummary[], order: SessionOrder, recent: RecentEntry[], now: number): SessionGroup[] {
-  if (order === "project") return groupSessions([...sessions].sort(compareProjects));
+export function sidebarGroups(sessions: SessionSummary[], order: SessionOrder, recent: RecentEntry[], now: number, projects: RegisteredProject[] = []): SessionGroup[] {
+  if (order === "project") {
+    const groups: SessionGroup[] = groupSessions([...sessions].sort(compareProjects));
+    const by_key = new Map(groups.map((group) => [group.key, group]));
+    for (const project of [...projects].sort((left, right) => right.created_at_ms - left.created_at_ms)) {
+      let group = by_key.get(project.group_key);
+      if (!group) {
+        group = { key: project.group_key, project: project.name, sessions: [] };
+        by_key.set(project.group_key, group);
+        groups.push(group);
+      }
+      (group.registered_projects ??= []).push(project);
+    }
+    return groups;
+  }
   const today = new Date(now);
   today.setHours(0, 0, 0, 0);
   const yesterday = new Date(today);

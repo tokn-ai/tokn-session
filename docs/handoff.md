@@ -27,6 +27,16 @@ survive live status refreshes; delayed requests stay bound to their original
 machine. Hosting/pairing secrets load only through the existing explicit setup.
 See [settings ownership](viewer-settings.md) for persistence and capabilities.
 
+The local desktop can register existing project folders and start viewer-owned
+Pi RPC sessions with a first prompt. Migration 10 stores canonical launch
+folders separately from inferred project groups, including empty projects and
+distinct worktrees sharing one group. New conversations open only after their
+real Pi history is verified and indexed. Owned sessions support message input,
+Stop, explicit Resume, and bounded native extension dialogs; private receipts
+and process leases preserve ownership across restarts. HTTP, Hub, session shares,
+and External reader mode do not expose project/session creation or management.
+See [viewer projects](viewer-projects.md) for scope, settings, storage, and limits.
+
 Version 0.1.1 is being prepared for all 24 publishable crates; the desktop stays
 `publish = false`. Registry dependency versions, package-local docs/licenses and
 test fixtures, and Rust 1.95 declarations are in place. Codex protocol preserves
@@ -831,8 +841,9 @@ Root Codex tasks use the owning Desktop IPC client without a CLI fallback;
 text inputs include `text_elements: []`, which the Desktop renderer requires
 even though app-server accepts its omission. Without it, a turn can execute and
 persist successfully while its optimistic Desktop view crashes.
-Pi uses its exact live session's opt-in input bridge, starting idle turns or
-queueing busy follow-ups. Other providers, Codex subagents, and External snapshot
+Existing Pi sessions use their exact live session's opt-in input bridge;
+locally created viewer-owned Pi sessions use their managed RPC process. Both
+start idle turns or queue busy follow-ups. Other providers, Codex subagents, and External snapshot
 mode are unavailable. Catalog membership and a fresh source header validate
 every target. Availability checks do not submit input. Drafts stay in memory
 per session; Cmd/Ctrl+Enter sends. Admission clears the draft, while uncertain
@@ -1519,8 +1530,9 @@ OpenCode has the first live-output normalizer: `OpenCodeLiveNormalizer` parses `
   delivery acknowledgement; subscribers that are disconnected can miss events.
 - The terminal pet cannot distinguish every runtime state authoritatively until
   provider task lifecycle and interaction events are represented in `AgentEvent`.
-- Viewer message input requires a live Codex Desktop owner or Pi bridge;
-  historical sessions are not resumed through a fallback process.
+- Viewer message input requires a live Codex Desktop owner, Pi bridge, or a
+  locally created viewer-owned Pi runtime. Only viewer-owned Pi histories offer
+  explicit Resume; arbitrary historical sessions have no fallback process.
   Without a Relay connection, selected
   timelines refresh from the durable index and historical source reads. Relay
   snapshot/follow supports all six providers; it is not an agent-control
