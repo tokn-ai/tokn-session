@@ -6,6 +6,34 @@ use serde::{Deserialize, Serialize};
 const MAX_TEXTS: usize = 128;
 const MAX_INPUT_BYTES: usize = 64 * 1024;
 
+/// A local recovery action suggested by the native translation engine.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranslationRecovery {
+  TranslationSettings,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+pub struct TranslationFailure {
+  pub message: String,
+  pub recovery: Option<TranslationRecovery>,
+}
+
+impl From<String> for TranslationFailure {
+  fn from(message: String) -> Self {
+    Self {
+      message,
+      recovery: None,
+    }
+  }
+}
+
+impl From<&str> for TranslationFailure {
+  fn from(message: &str) -> Self {
+    message.to_owned().into()
+  }
+}
+
 #[derive(Debug, Serialize)]
 pub struct TranslationStatus {
   pub available: bool,
@@ -70,10 +98,10 @@ pub fn status() -> TranslationStatus {
 pub async fn translate(
   window: tauri::WebviewWindow,
   request: TranslationRequest,
-) -> Result<TranslationResponse, String> {
+) -> Result<TranslationResponse, TranslationFailure> {
   request.validate()?;
   if let Some(reason) = status().reason {
-    return Err(reason);
+    return Err(reason.into());
   }
   #[cfg(target_os = "macos")]
   return apple::translate(window, request).await;
@@ -82,6 +110,37 @@ pub async fn translate(
     let _ = (window, request);
     Err("Apple Translation is unavailable on this platform.".into())
   }
+}
+
+/// Open only this device's fixed settings destination, independently of the
+/// selected session host. Never accept an arbitrary URL from the WebView.
+pub async fn open_settings() -> Result<(), String> {
+  #[cfg(target_os = "macos")]
+  {
+    use std::process::Stdio;
+
+    // The reveal key is supported by the macOS 15+ Localization extension.
+    // Older/different Settings layouts can still open the containing pane.
+    for destination in [
+      "x-apple.systempreferences:com.apple.Localization-Settings.extension?translation",
+      "x-apple.systempreferences:com.apple.Localization-Settings.extension",
+    ] {
+      let result = tokio::process::Command::new("/usr/bin/open")
+        .arg(destination)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .status()
+        .await;
+      if result.is_ok_and(|status| status.success()) {
+        return Ok(());
+      }
+    }
+    Err("Could not open Translation Settings.".into())
+  }
+  #[cfg(not(target_os = "macos"))]
+  Err("Translation Settings are available in the Mac desktop app.".into())
 }
 
 pub fn cancel(window: tauri::WebviewWindow, request_id: &str) -> Result<(), String> {
@@ -126,5 +185,22 @@ mod tests {
       assert!(validate_request_id(id).is_err());
     }
     assert!(validate_request_id("message_123-456").is_ok());
+  }
+
+  #[test]
+  fn recovery_metadata_is_explicit_and_preserves_plain_failures() {
+    let plain: TranslationFailure = "Translation cancelled.".into();
+    assert_eq!(
+      serde_json::to_value(plain).unwrap(),
+      serde_json::json!({ "message": "Translation cancelled.", "recovery": null })
+    );
+    let recoverable = TranslationFailure {
+      message: "Check downloaded languages.".into(),
+      recovery: Some(TranslationRecovery::TranslationSettings),
+    };
+    assert_eq!(
+      serde_json::to_value(recoverable).unwrap(),
+      serde_json::json!({ "message": "Check downloaded languages.", "recovery": "translation_settings" })
+    );
   }
 }
