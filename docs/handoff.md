@@ -55,6 +55,12 @@ Codex retains its physical revision to avoid replaying the historical catalog.
 Rich histories always use current normalization; unchanged cached Codex sidebar
 activity is not proactively recomputed. See [event IR](event-ir.md).
 
+Errors carry an optional native record for direct Inspector access, including
+when full Relay native snapshots are disabled. Legacy serialized errors still
+decode; Rust `ErrorEvent` literals require the new `native` field. Pi envelopes
+omit redacted thinking and hidden ZCode errors remain hidden. Inspector requests
+and caches stay separate from display details even after live subscriptions stop.
+
 Version 0.1.1 is being prepared for all 24 publishable crates; the desktop stays
 `publish = false`. Registry dependency versions, package-local docs/licenses and
 test fixtures, and Rust 1.95 declarations are in place. Codex protocol preserves

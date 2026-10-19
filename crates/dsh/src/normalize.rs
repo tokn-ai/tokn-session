@@ -263,6 +263,7 @@ impl Normalizer {
             provider: Provider::Dsh,
             session_id: Some(self.session_id.clone()),
             message: message.to_string(),
+            native: Some(native.clone()),
             timestamp: time.clone(),
           }));
         }

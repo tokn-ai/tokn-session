@@ -293,11 +293,11 @@ impl WorkBuddyNormalizer {
         provider: Provider::WorkBuddy,
         session_id: Some(session_id.clone()),
         message,
+        native: Some(native.clone()),
         timestamp: timestamp.clone(),
       }));
-      // ErrorEvent cannot hold the native message identity or provider flags.
-      // Preserve the exact record, including empty assistant bodies, alongside
-      // its visible diagnostic rather than losing retry/network attribution.
+      // Keep the diagnostic observation alongside the visible failure, including
+      // empty assistant bodies and retry/network attribution.
       events.push(AgentEvent::Metadata(MetadataEvent {
         provider: Provider::WorkBuddy,
         session_id: Some(session_id),
@@ -730,7 +730,8 @@ mod tests {
       1
     );
     assert!(events.iter().any(|event| matches!(event, AgentEvent::Error(error)
-      if error.message == "Connection failed" && error.timestamp.as_deref() == Some("42"))));
+      if error.message == "Connection failed" && error.timestamp.as_deref() == Some("42")
+        && error.native.as_ref() == Some(&native))));
     assert!(events.iter().any(|event| matches!(event, AgentEvent::Metadata(metadata)
       if metadata.native == native && metadata.timestamp.as_deref() == Some("42"))));
     assert!(
@@ -738,6 +739,26 @@ mod tests {
         .iter()
         .any(|event| matches!(event, AgentEvent::Message(_) | AgentEvent::Unknown(_)))
     );
+  }
+
+  #[test]
+  fn repeated_failures_preserve_their_own_exact_native_envelope() {
+    let mut normalizer = WorkBuddyNormalizer::new("errors".into());
+    for id in ["first", "second"] {
+      let native = serde_json::json!({
+        "type":"message", "id":id, "parentId":format!("parent-{id}"),
+        "sessionId":"errors", "role":"assistant", "status":"incomplete", "content":[],
+        "providerData":{"error":{"message":"Connection failed", "details":{
+          "code":"CONNECTION_RESET", "requestId":format!("request-{id}")
+        }}}
+      });
+      let events = normalizer.normalize_line(serde_json::from_value(native.clone()).unwrap());
+      assert!(
+        matches!(&events[..], [AgentEvent::Error(error), AgentEvent::Metadata(diagnostic)]
+        if error.message == "Connection failed" && error.native.as_ref() == Some(&native)
+          && diagnostic.native == native)
+      );
+    }
   }
 
   #[test]

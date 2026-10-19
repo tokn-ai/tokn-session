@@ -796,7 +796,8 @@ export function useViewerState() {
   }, []);
 
   const requestInspection = useCallback((sessionKey: string, eventKey: string) => {
-    if (!semanticLive.current.has(sessionKey)) return requestDetail(sessionKey, eventKey);
+    // Inspection owns source/native data even while live delivery is suspended.
+    // Display payloads may intentionally omit native records and cannot satisfy it.
     const cached = displayCache.current.resources.detail(sessionKey, "inspect", eventKey);
     if (cached) return Promise.resolve(cached);
     const cacheKey = `inspect:${sessionKey}:${eventKey}`;
@@ -816,7 +817,7 @@ export function useViewerState() {
     }).finally(() => { if (detailLoads.current.get(cacheKey) === request) detailLoads.current.delete(cacheKey); });
     detailLoads.current.set(cacheKey, request);
     return request;
-  }, [requestDetail]);
+  }, []);
 
   const invalidateEventDetails = useCallback((retainVisible: boolean) => {
     detailGeneration.current += 1;
@@ -1980,9 +1981,7 @@ export function useViewerState() {
     if (detailOwnerKeyRef.current !== cacheKey) setDetail(null);
     detailOwnerKeyRef.current = cacheKey;
     setDetailOwnerKey(cacheKey);
-    const cached = semanticLive.current.has(selectedSessionKey)
-      ? displayCache.current.resources.detail(selectedSessionKey, "inspect", selectedEventKey)
-      : readCachedDetail(detailCache.current, cacheKey);
+    const cached = displayCache.current.resources.detail(selectedSessionKey, "inspect", selectedEventKey);
     if (cached) {
       setDetail(cached);
       setDetailLoading(false);

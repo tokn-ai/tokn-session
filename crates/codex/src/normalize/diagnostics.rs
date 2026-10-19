@@ -38,6 +38,7 @@ pub(super) fn error(
       provider: Provider::Codex,
       session_id: session_id.clone(),
       message,
+      native: Some(native.clone()),
       timestamp: timestamp.clone(),
     }),
     metadata(session_id, native, kind, "Codex error".into(), timestamp),

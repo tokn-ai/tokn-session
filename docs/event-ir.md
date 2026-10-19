@@ -238,8 +238,15 @@ own `is_error` flag without manufacturing a request failure. Partial replies,
 reasoning, and usage survive terminal errors, and terminal outcomes follow the
 content from the same native record. Repeated native failures are not deduplicated
 by message text. Diagnostic metadata and lifecycle/tool native payloads preserve
-provider codes, retry flags, and native correlation fields without extending the
-shared error schema. Malformed or unsupported records remain visible as unknown.
+provider codes, retry flags, and native correlation fields. Errors also carry
+their own optional `native` payload, so inspecting an error does not depend on
+neighboring diagnostic records or enabling full Relay native snapshots. Older
+serialized errors without `native` still decode; Rust struct literals must now
+provide `native: None` or the originating provider record. The Inspector separates
+this payload from normalized JSON and applies its existing size bounds. Pi native
+error/diagnostic envelopes omit provider-redacted thinking; explicitly hidden
+ZCode error records retain machine data but remain hidden in human views.
+Malformed or unsupported records remain visible as unknown.
 
 | Provider | Error and cancellation handling |
 | --- | --- |

@@ -53,6 +53,42 @@ describe("PetStore", () => {
     expect(store.snapshot(101).state).toBe("idle");
   });
 
+  test("hidden ZCode errors do not create activity, expose messages, or renew leases", () => {
+    for (const visibility of ["transcriptVisibility", "uiVisibility"]) {
+      const store = new PetStore(policy);
+      const hidden = relayEvent({
+        type: "error", provider: "zcode", message: "Hidden provider request failure",
+        native: { data: { semantics: { [visibility]: "hidden" } } }
+      }, "zcode.hidden");
+      store.ingest(hidden, 0);
+      expect(store.snapshot(0).total_sessions).toBe(0);
+
+      store.ingest(relayEvent({
+        type: "message", provider: "zcode", role: "user", phase: "finished", text: "real work"
+      }, hidden.topic), 0);
+      const before = store.snapshot(1);
+      store.ingest(hidden, 50);
+      expect(store.snapshot(50)).toEqual(before);
+      expect(store.snapshot(101).state).toBe("idle");
+    }
+  });
+
+  test("visible ZCode errors and other providers' error semantics still become blocked", () => {
+    for (const [provider, semantics] of [
+      ["zcode", { transcriptVisibility: "visible", uiVisibility: "visible" }],
+      ["zcode", { transcriptVisibility: true, uiVisibility: "future" }],
+      ["opencode", { transcriptVisibility: "hidden", uiVisibility: "hidden" }]
+    ] as const) {
+      const store = new PetStore(policy);
+      store.ingest(relayEvent({
+        type: "error", provider, message: "Visible provider request failure", native: { data: { semantics } }
+      }, `${provider}.visible`), 0);
+      expect(store.snapshot(20).focus).toMatchObject({
+        state: "blocked", current_activity: { kind: "error", detail: "Visible provider request failure" }
+      });
+    }
+  });
+
   test("moves from user work to debounced ready and then idle", () => {
     const store = new PetStore(policy);
     store.ingest(relayEvent({

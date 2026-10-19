@@ -178,6 +178,7 @@ export class PetStore {
       relay.event.type === "usage"
       || relay.event.type === "compaction"
       || (relay.event.type === "metadata" && !isResponseCancelled(relay.event))
+      || isHiddenZcodeError(relay.event)
       || asObject(relay.event.provenance)?.display === false
       || (
         relay.event.provider === "pi"
@@ -1057,6 +1058,12 @@ function isTurnInterruption(event: AgentEvent): boolean {
     && event.phase === "finished"
     && !!asString(event.turn_id)?.trim()
     && (event.outcome === "interrupted" || event.outcome === "cancelled");
+}
+
+function isHiddenZcodeError(event: AgentEvent): boolean {
+  if (event.type !== "error" || event.provider !== "zcode") return false;
+  const semantics = asObject(asObject(asObject(event.native)?.data)?.semantics);
+  return semantics?.transcriptVisibility === "hidden" || semantics?.uiVisibility === "hidden";
 }
 
 // Match native discriminators, never a diagnostic's display summary or prose.

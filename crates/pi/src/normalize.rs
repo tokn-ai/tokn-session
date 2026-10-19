@@ -72,6 +72,7 @@ impl PiNormalizer {
             provider: Provider::Pi,
             session_id: self.session_id.clone(),
             message,
+            native: Some(native.clone()),
             timestamp: timestamp.clone(),
           }),
           AgentEvent::Metadata(MetadataEvent {
@@ -199,18 +200,20 @@ fn normalize_assistant_outcome(
     .timestamp
     .clone()
     .or_else(|| message.timestamp.map(|value| value.to_string()));
+  let native = assistant_diagnostic_native(native);
   let mut events = Vec::new();
   if !cancelled {
     events.push(AgentEvent::Error(ErrorEvent {
       provider: Provider::Pi,
       session_id: session_id.clone(),
       message: error.unwrap_or("Pi assistant response failed").to_string(),
+      native: Some(native.clone()),
       timestamp: timestamp.clone(),
     }));
   }
-  // ErrorEvent has no native/message identity fields. Preserve the exact
-  // envelope alongside the visible error (or cancellation diagnostic), including
-  // id/parentId, provider/model, stopReason, and unmodeled provider diagnostics.
+  // Retain the existing diagnostic alongside the visible error (or cancellation),
+  // including id/parentId, provider/model, stopReason, and provider diagnostics.
+  // Both payloads omit provider-withheld thinking content.
   // Pi assistant entries have no authoritative turn ID for Lifecycle events.
   events.push(AgentEvent::Metadata(MetadataEvent {
     provider: Provider::Pi,
@@ -223,10 +226,30 @@ fn normalize_assistant_outcome(
       "Pi assistant response failed"
     }
     .into(),
-    native: native.clone(),
+    native,
     timestamp,
   }));
   events
+}
+
+fn assistant_diagnostic_native(native: &Value) -> Value {
+  let mut native = native.clone();
+  if let Some(content) = native
+    .get_mut("message")
+    .and_then(|message| message.get_mut("content"))
+    .and_then(Value::as_array_mut)
+  {
+    for block in content {
+      if block.get("type").and_then(Value::as_str) == Some("thinking")
+        && block.get("redacted").and_then(Value::as_bool) == Some(true)
+      {
+        // Keep only the explicit marker: unknown fields may carry additional
+        // withheld payload just as thinking/thinkingSignature/data do.
+        *block = serde_json::json!({"type":"thinking", "redacted":true});
+      }
+    }
+  }
+  native
 }
 
 struct PiMessageMeta {

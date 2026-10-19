@@ -5802,12 +5802,12 @@ fn native_detail(event: &AgentEvent) -> Option<Value> {
     AgentEvent::Usage(event) => Some(event.native.clone()),
     AgentEvent::Metadata(event) => Some(event.native.clone()),
     AgentEvent::Unknown(event) => event.native.clone(),
+    AgentEvent::Error(event) => event.native.clone(),
     AgentEvent::SessionStarted(_)
     | AgentEvent::ProviderChanged(_)
     | AgentEvent::GoalUpdated(_)
     | AgentEvent::ToolCall(_)
-    | AgentEvent::Compaction(_)
-    | AgentEvent::Error(_) => None,
+    | AgentEvent::Compaction(_) => None,
   }
 }
 
@@ -5862,6 +5862,7 @@ mod tests {
   mod activity_backfill;
   mod background_performance;
   mod communications;
+  mod error_inspection;
   mod event_filter;
   mod history_cache;
   mod latest_message;
@@ -9661,6 +9662,7 @@ mod tests {
           provider: Provider::Codex,
           session_id: Some("fixture".to_string()),
           message: "command failed".to_string(),
+          native: None,
           timestamp: None,
         }),
         "2026-09-01T00:04:00Z",
@@ -11603,6 +11605,7 @@ mod tests {
       provider: Provider::Codex,
       session_id: Some("fixture".to_string()),
       message: "e".repeat(MAX_TECHNICAL_SUMMARY_CHARS + 1),
+      native: None,
       timestamp: None,
     });
     let summary = event_summary(std::slice::from_ref(&event), 0, &event);

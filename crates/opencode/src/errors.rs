@@ -37,6 +37,7 @@ pub(crate) fn normalize(
       provider,
       session_id: session_id.clone(),
       message: error.message.clone(),
+      native: Some(native.clone()),
       timestamp: timestamp.clone(),
     }));
   }

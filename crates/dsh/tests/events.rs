@@ -166,17 +166,52 @@ fn native_legacy_turn_endings_preserve_failures_cancellations_and_raw_attributio
     assert_eq!(lifecycle[index]["turn_id"], (index + 1).to_string());
     assert_eq!(lifecycle[index]["native"], *original);
     if let Some(message) = message {
-      assert_eq!(
-        errors
-          .iter()
-          .filter(|error| error["timestamp"] == original["time"].as_u64().unwrap().to_string())
-          .count(),
-        1
-      );
-      assert!(errors.iter().any(|error| error["message"] == *message));
+      let matching = errors
+        .iter()
+        .filter(|error| error["timestamp"] == original["time"].as_u64().unwrap().to_string())
+        .collect::<Vec<_>>();
+      assert_eq!(matching.len(), 1);
+      assert_eq!(matching[0]["message"], *message);
+      assert_eq!(matching[0]["native"], *original);
     }
   }
   assert!(!events.iter().any(|event| event["type"] == "unknown"));
+}
+
+#[test]
+fn repeated_failure_messages_keep_their_exact_turn_end_records() {
+  let first = record(
+    "turn/end",
+    4,
+    json!({"turn":3,"reason":{"kind":"error","error":{
+      "message":"request failed","code":"HTTP","requestId":"request-first"}}}),
+  );
+  let cancelled = record(
+    "turn/end",
+    5,
+    json!({"turn":4,"reason":{"kind":"aborted","reason":{"kind":"user"}}}),
+  );
+  let mut second = record(
+    "turn/end",
+    6,
+    json!({"turn":5,"reason":{"kind":"error","error":{
+      "message":"request failed","code":"RATE_LIMIT","requestId":"request-second"}}}),
+  );
+  // Neither the visible message nor the timestamp identifies a source record.
+  second["time"] = first["time"].clone();
+  let events = normalize(vec![first.clone(), cancelled.clone(), second.clone()]);
+  assert_eq!(events.len(), 5);
+  for (error, lifecycle, original) in [(&events[0], &events[1], &first), (&events[3], &events[4], &second)] {
+    assert_eq!(error["type"], "error");
+    assert_eq!(error["message"], "request failed");
+    assert_eq!(error["native"], *original);
+    assert_eq!(lifecycle["type"], "lifecycle");
+    assert_eq!(lifecycle["outcome"], "failed");
+    assert_eq!(lifecycle["native"], error["native"]);
+  }
+  assert_eq!(events[2]["type"], "lifecycle");
+  assert_eq!(events[2]["outcome"], "cancelled");
+  assert_eq!(events[2]["native"], cancelled);
 }
 
 #[test]

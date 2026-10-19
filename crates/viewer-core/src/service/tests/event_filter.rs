@@ -265,6 +265,7 @@ fn usage_and_content_variants_never_become_bookkeeping_even_when_empty() {
       provider: Provider::Codex,
       session_id: None,
       message: "failure".into(),
+      native: None,
       timestamp: None,
     }),
     AgentEvent::Unknown(UnknownEvent {

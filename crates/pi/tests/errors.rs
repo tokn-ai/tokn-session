@@ -58,6 +58,7 @@ fn connection_errors_remain_visible_in_history_and_incremental_normalization() {
       assert!(matches!(error.provider, Provider::Pi));
       assert_eq!(error.session_id.as_deref(), Some("pi-errors"));
       assert_eq!(error.message, "Connection error.");
+      assert_eq!(error.native.as_ref(), Some(&native));
       assert_eq!(error.timestamp.as_deref(), native["timestamp"].as_str());
       assert!(matches!(diagnostic.kind, MetadataKind::Diagnostic));
       assert_eq!(diagnostic.native, native);
@@ -99,6 +100,7 @@ fn failed_response_without_usage_retains_the_exact_native_message() {
     panic!("expected visible error and native diagnostic")
   };
   assert_eq!(error.message, "Connection error.");
+  assert_eq!(error.native.as_ref(), Some(&native));
   assert_eq!(diagnostic.native, native);
   assert_eq!(diagnostic.native["id"], "assistant-1");
   assert_eq!(diagnostic.native["parentId"], "user-1");
@@ -150,6 +152,7 @@ fn partial_response_and_usage_survive_a_model_failure() {
   assert_eq!(message.message_id.as_deref(), Some("assistant-1"));
   assert_eq!(message.parent_id.as_deref(), Some("user-1"));
   assert_eq!(error.message, "Connection interrupted.");
+  assert_eq!(error.native.as_ref(), Some(&native));
   assert_eq!(diagnostic.native, native);
   assert_eq!(usage.message_id, message.message_id);
   assert_eq!(usage.input_tokens, 12);
@@ -353,6 +356,7 @@ fn legacy_error_records_choose_nonblank_text_and_keep_the_exact_envelope() {
       panic!("expected one visible error plus native diagnostic: {events:?}")
     };
     assert_eq!(error.message, expected);
+    assert_eq!(error.native.as_ref(), Some(&native));
     assert_eq!(error.session_id.as_deref(), Some("pi-errors"));
     assert_eq!(error.timestamp.as_deref(), native["timestamp"].as_str());
     assert!(matches!(diagnostic.kind, MetadataKind::Diagnostic));
@@ -418,6 +422,18 @@ fn separate_identical_failed_attempts_survive_a_later_success() {
     })
     .collect();
   assert_eq!(ids, ["attempt-1", "attempt-2"]);
+  let failed_records: Vec<_> = events
+    .iter()
+    .filter_map(|event| match event {
+      AgentEvent::Error(event) => event.native.as_ref(),
+      _ => None,
+    })
+    .collect();
+  assert_eq!(failed_records.len(), 2);
+  assert_eq!(failed_records[0]["id"], "attempt-1");
+  assert_eq!(failed_records[0]["parentId"], "user-1");
+  assert_eq!(failed_records[1]["id"], "attempt-2");
+  assert_eq!(failed_records[1]["parentId"], "attempt-1");
   assert!(matches!(events.last(), Some(AgentEvent::Message(event)) if event.text == "Recovered reply."));
   assert!(
     !events
@@ -454,5 +470,71 @@ fn tool_error_flags_remain_operation_outcomes_instead_of_provider_errors() {
       result.output.as_ref().unwrap()["details"]["error"],
       "diagnostic payload"
     );
+  }
+}
+
+#[test]
+fn redacted_thinking_is_withheld_from_failure_and_cancellation_native_payloads() {
+  for reason in ["error", "aborted"] {
+    let (native, events) = normalize(json!({
+      "role":"assistant", "provider":"synthetic-provider", "model":"synthetic-model",
+      "stopReason":reason, "errorMessage":"Synthetic connection failure", "errorCode":"connection_reset",
+      "diagnostics":{"code":"SYNTHETIC_FAILURE", "request_id":"synthetic-request"},
+      "content":[
+        {"type":"thinking", "redacted":true,
+          "thinking":"withheld-thinking", "thinkingSignature":"withheld-thinking-signature",
+          "text":"withheld-text", "signature":"withheld-signature", "data":"withheld-data",
+          "future_payload":{"secret":"withheld-future-payload"}},
+        {"type":"thinking", "redacted":false, "thinking":"Visible reasoning",
+          "thinkingSignature":"visible-signature", "future_payload":{"safe":true}},
+        {"type":"text", "text":"Partial visible reply."},
+        {"type":"future_block", "safe_payload":42}
+      ],
+      "usage":{"input":4,"output":2,"totalTokens":6}
+    }));
+    let mut expected = native.clone();
+    expected["message"]["content"][0] = json!({"type":"thinking", "redacted":true});
+    let diagnostic = events
+      .iter()
+      .find_map(|event| match event {
+        AgentEvent::Metadata(event) => Some(event),
+        _ => None,
+      })
+      .unwrap();
+    assert_eq!(diagnostic.native, expected);
+    let errors: Vec<_> = events
+      .iter()
+      .filter_map(|event| match event {
+        AgentEvent::Error(event) => Some(event),
+        _ => None,
+      })
+      .collect();
+    if reason == "error" {
+      let [error] = &errors[..] else {
+        panic!("expected exactly one visible failure")
+      };
+      assert_eq!(error.message, "Synthetic connection failure");
+      assert_eq!(error.native.as_ref(), Some(&expected));
+    } else {
+      assert!(errors.is_empty());
+    }
+    for payload in std::iter::once(&diagnostic.native).chain(errors.iter().filter_map(|error| error.native.as_ref())) {
+      let serialized = serde_json::to_string(payload).unwrap();
+      assert!(
+        !serialized.contains("withheld-"),
+        "withheld thinking leaked through native diagnostics"
+      );
+      assert_eq!(payload["id"], "assistant-1");
+      assert_eq!(payload["parentId"], "user-1");
+      assert_eq!(payload["message"]["errorCode"], "connection_reset");
+      assert_eq!(payload["message"]["diagnostics"]["code"], "SYNTHETIC_FAILURE");
+      assert_eq!(payload["message"]["content"][1], native["message"]["content"][1]);
+      assert_eq!(payload["message"]["content"][2], native["message"]["content"][2]);
+      assert_eq!(payload["message"]["content"][3], native["message"]["content"][3]);
+    }
+    assert!(
+      matches!(events.first(), Some(AgentEvent::Reasoning(event)) if event.redacted == Some(true) && event.text.is_none())
+    );
+    assert!(matches!(events.last(), Some(AgentEvent::Usage(event)) if event.total_tokens == Some(6)));
   }
 }

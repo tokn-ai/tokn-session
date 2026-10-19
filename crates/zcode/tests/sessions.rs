@@ -92,7 +92,11 @@ fn shared_error_normalization_preserves_zcode_identity_and_native_records() {
   let records = [
     (
       "failed",
-      serde_json::json!({"name":"AiSdkModelAdapterError", "data":{"message":"Connection failed", "code":"synthetic"}}),
+      serde_json::json!({"name":"AiSdkModelAdapterError", "data":{"message":"Connection failed", "code":"first"}}),
+    ),
+    (
+      "failed-again",
+      serde_json::json!({"name":"AiSdkModelAdapterError", "data":{"message":"Connection failed", "code":"second"}}),
     ),
     (
       "cancelled",
@@ -101,7 +105,7 @@ fn shared_error_normalization_preserves_zcode_identity_and_native_records() {
   ];
   let mut expected = Vec::new();
   for (offset, (id, error)) in records.into_iter().enumerate() {
-    let data = serde_json::json!({"role":"assistant", "parentID":"msg_user", "error":error,
+    let data = serde_json::json!({"role":"assistant", "parentID":format!("parent-{id}"), "error":error,
       "semantics":{"kind":"assistant_response", "transcriptVisibility":"visible"}});
     connection
       .execute(
@@ -123,9 +127,12 @@ fn shared_error_normalization_preserves_zcode_identity_and_native_records() {
       _ => None,
     })
     .collect();
-  assert_eq!(errors.len(), 1);
-  assert_eq!(errors[0].provider, Provider::ZCode);
-  assert_eq!(errors[0].message, "Connection failed");
+  assert_eq!(errors.len(), 2);
+  for (error, native) in errors.iter().zip(&expected) {
+    assert_eq!(error.provider, Provider::ZCode);
+    assert_eq!(error.message, "Connection failed");
+    assert_eq!(error.native.as_ref(), Some(native));
+  }
   let diagnostics: Vec<_> = loaded
     .events
     .iter()
@@ -134,13 +141,13 @@ fn shared_error_normalization_preserves_zcode_identity_and_native_records() {
       _ => None,
     })
     .collect();
-  assert_eq!(diagnostics.len(), 2);
+  assert_eq!(diagnostics.len(), 3);
   for (diagnostic, native) in diagnostics.iter().zip(expected) {
     assert_eq!(diagnostic.provider, Provider::ZCode);
     assert_eq!(diagnostic.session_id.as_deref(), Some("sess_zcode"));
     assert_eq!(diagnostic.native, native);
   }
-  assert_eq!(diagnostics[1].summary, "Provider response interrupted");
+  assert_eq!(diagnostics[2].summary, "Provider response interrupted");
 }
 
 fn event_provider(event: &AgentEvent) -> Provider {

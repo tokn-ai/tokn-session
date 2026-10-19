@@ -74,9 +74,27 @@ impl AgentEvent {
         .native
         .as_ref()
         .is_some_and(|native| native["type"] == "custom_message" && native["display"] == false),
+      Self::Error(event) if matches!(event.provider, Provider::ZCode) => {
+        event.native.as_ref().is_some_and(zcode_error_is_hidden)
+      }
+      Self::Metadata(event)
+        if matches!(event.provider, Provider::ZCode)
+          && matches!(event.kind, MetadataKind::Diagnostic)
+          && event.native_type == "message.error" =>
+      {
+        zcode_error_is_hidden(&event.native)
+      }
       _ => false,
     }
   }
+}
+
+fn zcode_error_is_hidden(native: &Value) -> bool {
+  native
+    .pointer("/data/semantics/transcriptVisibility")
+    .and_then(Value::as_str)
+    == Some("hidden")
+    || native.pointer("/data/semantics/uiVisibility").and_then(Value::as_str) == Some("hidden")
 }
 
 #[derive(Debug, Serialize, Clone, Deserialize)]
@@ -293,6 +311,10 @@ pub struct ErrorEvent {
   pub provider: Provider,
   pub session_id: Option<String>,
   pub message: String,
+  /// The provider record that produced this failure, with provider-redacted
+  /// reasoning omitted. Older serialized events may not carry native detail.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub native: Option<Value>,
   pub timestamp: Option<String>,
 }
 
@@ -904,6 +926,22 @@ mod tests {
     };
     metadata.kind = MetadataKind::Session;
     assert!(!event.is_response_cancelled());
+  }
+
+  #[test]
+  fn error_native_is_optional_for_legacy_wire_events_and_preserved_when_present() {
+    let legacy = serde_json::json!({
+      "type":"error", "provider":"pi", "session_id":"session", "message":"Connection failed", "timestamp":null
+    });
+    let event: AgentEvent = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(matches!(&event, AgentEvent::Error(error) if error.native.is_none()));
+    assert_eq!(serde_json::to_value(event).unwrap(), legacy);
+
+    let mut current = legacy;
+    current["native"] = serde_json::json!({"id":"failed", "parentId":"user", "error":{"code":"ECONNRESET"}});
+    let event: AgentEvent = serde_json::from_value(current.clone()).unwrap();
+    assert!(matches!(&event, AgentEvent::Error(error) if error.native.as_ref() == current.get("native")));
+    assert_eq!(serde_json::to_value(event).unwrap(), current);
   }
 
   #[test]

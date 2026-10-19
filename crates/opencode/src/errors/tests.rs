@@ -31,8 +31,7 @@ fn row(data: Value, parts: Vec<Value>) -> OpenCodeMessageRow {
 #[test]
 fn historical_failures_preserve_content_usage_native_and_provider_identity() {
   for provider in [Provider::OpenCode, Provider::ZCode] {
-    let error =
-      json!({"name":"APIError", "data":{"message":"Connection error.", "statusCode":503, "isRetryable":true}});
+    let error = json!({"name":"APIError", "data":{"message":"Connection error.", "code":"CONNECTION_RESET", "statusCode":503, "isRetryable":true}});
     let data = json!({"role":"assistant", "parentID":"parent-1", "error":error,
       "tokens":{"input":10,"output":2,"cache":{"read":3,"write":0}}});
     let mut normalizer = OpenCodeNormalizer::with_provider("session-1".into(), provider);
@@ -48,6 +47,7 @@ fn historical_failures_preserve_content_usage_native_and_provider_identity() {
     };
     assert_eq!(failure.provider, provider);
     assert_eq!(failure.message, "Connection error.");
+    assert_eq!(failure.native, Some(json!({"id":"message-1", "data":data})));
     assert_eq!(diagnostic.provider, provider);
     assert_eq!(diagnostic.native, json!({"id":"message-1", "data":data}));
     assert_eq!(message.message_id.as_deref(), Some("message-1"));
@@ -57,6 +57,23 @@ fn historical_failures_preserve_content_usage_native_and_provider_identity() {
     assert_eq!(usage.message_id, message.message_id);
     assert_eq!(usage.input_tokens, 13);
     assert_eq!(usage.output_tokens, 2);
+  }
+}
+
+#[test]
+fn explicitly_hidden_zcode_errors_and_diagnostics_keep_machine_native_details() {
+  for field in ["transcriptVisibility", "uiVisibility"] {
+    let mut data = json!({"role":"assistant", "error":{"name":"APIError", "data":{"message":"failed"}},
+      "semantics":{}, "privatePayload":"hidden source content"});
+    data["semantics"][field] = json!("hidden");
+    let mut normalizer = OpenCodeNormalizer::with_provider("session-1".into(), Provider::ZCode);
+    let events = normalizer.normalize_message(row(data.clone(), vec![]));
+    let native = json!({"id":"message-1", "data":data});
+    assert!(
+      matches!(&events[..], [AgentEvent::Error(failure), AgentEvent::Metadata(diagnostic)]
+      if failure.native.as_ref() == Some(&native) && diagnostic.native == native)
+    );
+    assert!(events.iter().all(AgentEvent::is_hidden));
   }
 }
 
@@ -106,12 +123,14 @@ fn blank_errors_have_useful_fallbacks_and_repeated_records_are_not_deduplicated(
   ] {
     let mut normalizer = OpenCodeNormalizer::new("session-1".into());
     for id in ["first", "second"] {
-      let mut record = message(error.clone(), vec![]);
+      let data = json!({"role":"assistant", "parentID":format!("parent-{id}"), "error":error});
+      let mut record = row(data.clone(), vec![]);
       record.id = id.into();
       let events = normalizer.normalize_message(record);
       assert!(
         matches!(&events[..], [AgentEvent::Error(failure), AgentEvent::Metadata(diagnostic)]
-        if failure.message == expected && diagnostic.native["id"] == id)
+        if failure.message == expected && diagnostic.native["id"] == id
+          && failure.native.as_ref() == Some(&json!({"id":id, "data":data})))
       );
     }
   }
@@ -130,8 +149,9 @@ fn recovered_assistant_errors_do_not_duplicate_and_invalid_errors_remain_lossles
     1
   );
   assert!(
-    matches!(&events[..], [AgentEvent::Unknown(_), AgentEvent::Error(_), AgentEvent::Metadata(diagnostic)]
-    if diagnostic.native == json!({"id":"message-1", "data":data}))
+    matches!(&events[..], [AgentEvent::Unknown(_), AgentEvent::Error(failure), AgentEvent::Metadata(diagnostic)]
+    if diagnostic.native == json!({"id":"message-1", "data":data})
+      && failure.native.as_ref() == Some(&diagnostic.native))
   );
   assert!(normalizer.normalize_message(message(Value::Null, vec![])).is_empty());
   for error in [json!(false), json!(42), json!([])] {
@@ -201,29 +221,38 @@ fn malformed_summary_errors_keep_the_entire_row_without_claiming_a_compaction_ou
 #[test]
 fn live_errors_and_cancellations_preserve_the_full_run_envelope() {
   for (error, failure) in [
-    (json!({"name":"APIError", "data":{"message":"failed"}}), true),
+    (
+      json!({"name":"APIError", "data":{"message":"failed", "code":"CONNECTION_RESET"}}),
+      true,
+    ),
     (
       json!({"name":"MessageAbortedError", "data":{"message":"Stopped"}}),
       false,
     ),
     (json!({"name":"MessageOutputLengthError", "data":{}}), true),
   ] {
-    let native = json!({"type":"error", "sessionID":"session-1", "timestamp":100,
-      "messageID":"message-1", "parentID":"parent-1", "error":error, "future":true});
-    let events = OpenCodeLiveNormalizer::normalize_line(&native.to_string()).unwrap();
-    assert_eq!(
-      events
+    for id in ["first", "second"] {
+      let native = json!({"type":"error", "sessionID":"session-1", "timestamp":100,
+        "messageID":id, "parentID":format!("parent-{id}"), "error":error, "future":true});
+      let events = OpenCodeLiveNormalizer::normalize_line(&native.to_string()).unwrap();
+      let failures = events
         .iter()
-        .filter(|event| matches!(event, LiveSessionEvent::Event(AgentEvent::Error(_))))
-        .count(),
-      usize::from(failure)
-    );
-    let Some(LiveSessionEvent::Event(AgentEvent::Metadata(diagnostic))) = events.last() else {
-      panic!("expected native diagnostic")
-    };
-    assert_eq!(diagnostic.native, native);
-    assert_eq!(diagnostic.provider, Provider::OpenCode);
-    assert_eq!(diagnostic.session_id.as_deref(), Some("session-1"));
+        .filter_map(|event| match event {
+          LiveSessionEvent::Event(AgentEvent::Error(error)) => Some(error),
+          _ => None,
+        })
+        .collect::<Vec<_>>();
+      assert_eq!(failures.len(), usize::from(failure));
+      for failure in failures {
+        assert_eq!(failure.native.as_ref(), Some(&native));
+      }
+      let Some(LiveSessionEvent::Event(AgentEvent::Metadata(diagnostic))) = events.last() else {
+        panic!("expected native diagnostic")
+      };
+      assert_eq!(diagnostic.native, native);
+      assert_eq!(diagnostic.provider, Provider::OpenCode);
+      assert_eq!(diagnostic.session_id.as_deref(), Some("session-1"));
+    }
   }
   for error in [Value::Null, json!(42), json!(false), json!([])] {
     let native = json!({"type":"error", "sessionID":"session-1", "error":error});
@@ -285,7 +314,8 @@ fn sqlite_history_dispatch_keeps_errors_without_optional_native_loading() {
   let source = OpenCodeSessionSource::new(Some(database));
   let loaded = source.load_session_exact("session-1").unwrap();
   assert!(
-    matches!(&loaded.events[..], [AgentEvent::SessionStarted(_), AgentEvent::Error(_), AgentEvent::Metadata(diagnostic)]
-    if diagnostic.native == json!({"id":"message-1", "data":native}))
+    matches!(&loaded.events[..], [AgentEvent::SessionStarted(_), AgentEvent::Error(failure), AgentEvent::Metadata(diagnostic)]
+    if diagnostic.native == json!({"id":"message-1", "data":native})
+      && failure.native.as_ref() == Some(&diagnostic.native))
   );
 }

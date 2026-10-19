@@ -14,3 +14,7 @@ The crate also assembles correlated tool and compaction observations into
 operations. Provider-native details remain available for inspection; unknown
 records are preserved so new provider shapes can be discovered. Filesystem
 readers and provider dispatch live in the other `tokn-session` crates.
+
+`ErrorEvent.native` optionally preserves the originating provider record for
+inspection. Older serialized errors without this field still decode; Rust
+struct literals must specify `native: None` when no provider payload is available.

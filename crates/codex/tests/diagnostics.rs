@@ -93,7 +93,30 @@ fn nested_terminal_errors_have_failed_lifecycle_and_visible_diagnostics_in_both_
       let payload = json!({"type":kind,"turn_id":"turn","error":{"message":"Synthetic failure","codex_error_info":{"http_connection_failed":{"http_status_code":502}}},"duration_ms":1});
       let events = line(&mut normalizer(paginated), event(payload.clone()));
       assert!(
-        matches!(&events[..], [AgentEvent::Error(error), AgentEvent::Metadata(diagnostic), AgentEvent::Lifecycle(lifecycle)] if error.message == "Synthetic failure" && diagnostic.native == payload && matches!(lifecycle.outcome, Some(LifecycleOutcome::Failed)) && lifecycle.native == payload && lifecycle.turn_id == "turn")
+        matches!(&events[..], [AgentEvent::Error(error), AgentEvent::Metadata(diagnostic), AgentEvent::Lifecycle(lifecycle)] if error.message == "Synthetic failure" && error.native.as_ref() == Some(&payload) && diagnostic.native == payload && matches!(lifecycle.outcome, Some(LifecycleOutcome::Failed)) && lifecycle.native == payload && lifecycle.turn_id == "turn")
+      );
+    }
+  }
+}
+
+#[test]
+fn native_error_payloads_preserve_record_identity_and_repeated_failure_messages() {
+  let payloads = [
+    json!({"type":"error", "id":"record-1", "parent_id":"parent-1", "turn_id":"turn-1", "message":"Repeated failure", "codex_error_info":{"http_connection_failed":{"http_status_code":502}}, "future":{"request_id":"request-1"}}),
+    json!({"type":"error", "id":"record-2", "parent_id":"parent-2", "turn_id":"turn-2", "message":"Repeated failure", "codex_error_info":"usage_limit_exceeded", "future":{"request_id":"request-2"}}),
+  ];
+  for paginated in [false, true] {
+    let mut normalizer = normalizer(paginated);
+    let events: Vec<_> = payloads
+      .iter()
+      .flat_map(|payload| line(&mut normalizer, event(payload.clone())))
+      .collect();
+    assert_eq!(events.len(), 4, "native detail does not add diagnostic rows");
+    for (batch, payload) in events.chunks_exact(2).zip(&payloads) {
+      assert!(
+        matches!(batch, [AgentEvent::Error(error), AgentEvent::Metadata(diagnostic)]
+        if error.message == "Repeated failure" && error.session_id.as_deref() == Some("session")
+          && error.native.as_ref() == Some(payload) && diagnostic.native == *payload)
       );
     }
   }
