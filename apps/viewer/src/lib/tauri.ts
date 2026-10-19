@@ -90,6 +90,11 @@ export function cancelTranslation(requestId: string): Promise<void> {
   return localTranslation<void>("cancel_translation", { request_id: requestId });
 }
 
+export async function openTranslationSettings(): Promise<void> {
+  if (!isDesktop()) throw new Error("Translation Settings are available in the macOS desktop app.");
+  await (await import("@tauri-apps/api/core")).invoke<void>("open_translation_settings");
+}
+
 async function localTranslation<T>(command: string, payload?: Record<string, unknown>): Promise<T> {
   // Translation belongs to the viewing device even when session data is remote.
   if (isDesktop()) return (await import("@tauri-apps/api/core")).invoke<T>(command,payload);

@@ -11,13 +11,13 @@ use std::{
 use serde::Deserialize;
 use tokio::sync::oneshot;
 
-use super::{TranslationRequest, TranslationResponse};
+use super::{TranslationFailure, TranslationRecovery, TranslationRequest, TranslationResponse};
 
 const TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const CANCELLATION_TTL: Duration = Duration::from_secs(60);
 const MAX_CANCELLATIONS: usize = 512;
-type TranslationResult = Result<TranslationResponse, String>;
+type TranslationResult = Result<TranslationResponse, TranslationFailure>;
 
 struct Pending {
   request_id: String,
@@ -102,6 +102,7 @@ pub fn available() -> bool {
 struct BridgeResponse {
   texts: Option<Vec<String>>,
   error: Option<String>,
+  recovery: Option<TranslationRecovery>,
 }
 
 extern "C" fn completed(token: u64, json: *const c_char) {
@@ -127,7 +128,10 @@ fn decode_response(bytes: &[u8], text_count: usize) -> TranslationResult {
   let response: BridgeResponse =
     serde_json::from_slice(bytes).map_err(|_| "Apple Translation returned an invalid result.".to_string())?;
   if let Some(error) = response.error {
-    return Err(error);
+    return Err(TranslationFailure {
+      message: error,
+      recovery: response.recovery,
+    });
   }
   match response.texts {
     Some(texts) if texts.len() == text_count && texts.iter().all(|text| !text.trim().is_empty()) => {
@@ -273,6 +277,26 @@ mod tests {
     assert!(decode_response(br#"{"texts":[" "],"error":null}"#, 1).is_err());
     assert!(decode_response(b"not JSON", 1).is_err());
     assert!(decode_response(br#"{"error":"Language download cancelled."}"#, 1).is_err());
+  }
+
+  #[test]
+  fn preserves_native_recovery_metadata_without_guessing_from_error_text() {
+    let failure = decode_response(
+      br#"{"error":"Apple Translation: Unable to Translate","recovery":"translation_settings"}"#,
+      1,
+    )
+    .unwrap_err();
+    assert_eq!(failure.recovery, Some(TranslationRecovery::TranslationSettings));
+    assert_eq!(failure.message, "Apple Translation: Unable to Translate");
+
+    let legacy = decode_response(br#"{"error":"Apple Translation: Unable to Translate"}"#, 1).unwrap_err();
+    assert_eq!(legacy.recovery, None);
+    assert!(
+      decode_response(br#"{"error":"Failure","recovery":"arbitrary_url"}"#, 1)
+        .unwrap_err()
+        .recovery
+        .is_none()
+    );
   }
 
   #[test]

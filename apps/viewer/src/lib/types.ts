@@ -83,6 +83,14 @@ export interface TranslationStatus {
   reason: string | null;
 }
 
+export type TranslationRecovery = "translation_settings";
+
+/** Native failures may offer a local recovery action without inferring one from text. */
+export interface TranslationFailure {
+  message: string;
+  recovery: TranslationRecovery | null;
+}
+
 export interface TranslateTextRequest {
   request_id: string;
   texts: string[];
