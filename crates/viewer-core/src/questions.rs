@@ -35,6 +35,10 @@ impl Questions {
     if event.is_hidden() {
       return;
     }
+    if event.is_response_cancelled() {
+      self.retire();
+      return;
+    }
     match event {
       AgentEvent::QuestionRequest(question) if question.phase == Phase::Finished => {
         let Some(id) = question.request_id.as_ref() else {
@@ -272,5 +276,105 @@ mod tests {
       .unwrap();
     state.observe(final_reply, 4);
     assert_eq!(state.first_index(), None);
+  }
+
+  #[test]
+  fn native_response_cancellations_retire_questions_without_recording_answers() {
+    let mut codex = tokn_session_codex::normalize::CodexNormalizer::new();
+    let mut pi = tokn_session_pi::normalize::PiNormalizer::new();
+    let mut cancellations = pi.normalize(
+      serde_json::from_value(json!({
+        "type":"message", "message":{"role":"assistant", "content":[], "stopReason":"aborted"}
+      }))
+      .unwrap(),
+    );
+    for reason in ["interrupted", "replaced", "review_ended", "budget_limited"] {
+      cancellations.extend(
+        codex.normalize(
+          serde_json::from_value(json!({"type":"event_msg", "payload":{"type":"turn_aborted", "reason":reason}}))
+            .unwrap(),
+        ),
+      );
+    }
+    cancellations.extend(
+      tokn_session_opencode::OpenCodeLiveNormalizer::normalize_line(
+        &json!({
+          "type":"error", "error":{"name":"MessageAbortedError", "data":{"message":"Stopped"}}
+        })
+        .to_string(),
+      )
+      .unwrap()
+      .into_iter()
+      .map(|event| match event {
+        tokn_session_core::LiveSessionEvent::Event(event) => event,
+        _ => panic!("expected native cancellation diagnostic"),
+      }),
+    );
+    for cancellation in cancellations {
+      assert!(cancellation.is_response_cancelled());
+      let mut state = Questions::default();
+      state.observe(&request("pending", Some(true)), 10);
+      assert_eq!(state.pending_ids("pending"), ["q1", "q2"]);
+      state.observe(&cancellation, 11);
+      assert!(state.pending_ids("pending").is_empty());
+      assert!(state.first_index().is_none());
+      assert!(state.active_turn.is_none());
+      assert_eq!(state.summary(), QuestionAttention::default());
+    }
+  }
+
+  #[test]
+  fn normalized_codex_control_errors_do_not_retire_pending_questions() {
+    for code in [
+      json!("thread_rollback_failed"),
+      json!({"active_turn_not_steerable":{"turn_kind":"review"}}),
+      json!({"active_turn_not_steerable":{"turn_kind":"compact"}}),
+    ] {
+      let mut state = Questions::default();
+      state.observe(&turn("t", Phase::Started), 9);
+      state.observe(&request("pending", Some(true)), 10);
+      let mut codex = tokn_session_codex::normalize::CodexNormalizer::new();
+      let events = codex.normalize(
+        serde_json::from_value(json!({
+          "type":"event_msg", "payload":{"type":"error", "message":"Request rejected", "codex_error_info":code}
+        }))
+        .unwrap(),
+      );
+      assert!(matches!(&events[..], [AgentEvent::Metadata(event)]
+        if matches!(event.kind, tokn_session_core::MetadataKind::Diagnostic)));
+      for event in events {
+        state.observe(&event, 11);
+      }
+      assert_eq!(state.pending_ids("pending"), ["q1", "q2"]);
+      assert_eq!(state.summary().required_count, 2);
+      assert_eq!(state.first_index(), Some(10));
+      assert_eq!(state.active_turn.as_deref(), Some("t"));
+    }
+  }
+
+  #[test]
+  fn diagnostic_wording_retry_and_tool_cancellation_leave_questions_pending() {
+    let mut state = Questions::default();
+    state.observe(&request("pending", Some(true)), 10);
+    for native_type in ["warning", "retry", "message.error"] {
+      let diagnostic = serde_json::from_value(json!({
+        "type":"metadata", "provider":"opencode", "session_id":"s", "kind":"diagnostic",
+        "native_type":native_type, "summary":"cancelled", "timestamp":null,
+        "native":{"data":{"role":"assistant", "error":{"name":"APIError", "data":{"message":"retrying"}}}}
+      }))
+      .unwrap();
+      state.observe(&diagnostic, 11);
+      assert_eq!(state.summary().required_count, 2);
+    }
+    let tools = tokn_session_opencode::OpenCodeLiveNormalizer::normalize_line(&json!({
+      "type":"tool_use", "part":{"type":"tool", "state":{"status":"error", "error":"aborted", "metadata":{"interrupted":true}}}
+    }).to_string()).unwrap();
+    for event in tools {
+      let tokn_session_core::LiveSessionEvent::Event(event) = event else {
+        panic!("expected normalized tool")
+      };
+      state.observe(&event, 12);
+    }
+    assert_eq!(state.summary().required_count, 2);
   }
 }

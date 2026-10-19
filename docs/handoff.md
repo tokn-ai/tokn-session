@@ -39,11 +39,27 @@ and process leases preserve ownership across restarts. HTTP, Hub, session shares
 and External reader mode do not expose project/session creation or management.
 Pi assistant failures produce visible error events and preserve native diagnostic
 records. Managed turn errors remain separate from process status, so an idle
-process can accept input after a provider failure. Pi source cursors restage old
-body projections once to recover suppressed failures; other providers retain
-their existing revisions. Managed Pi also honors inherited `SSL_CERT_FILE` when
-`NODE_EXTRA_CA_CERTS` is unset.
+process can accept input after a provider failure. Managed Pi also honors
+inherited `SSL_CERT_FILE` when `NODE_EXTRA_CA_CERTS` is unset.
 See [viewer projects](viewer-projects.md) for scope, settings, storage, and limits.
+
+All six normalizers distinguish request errors from warnings, retries, tool
+failures, and cancellations, preserving partial content, usage, and native
+diagnostics. Codex nested completion errors are failed turns; OpenCode/ZCode
+terminal diagnostics follow their content; WorkBuddy ignores empty pseudoerrors;
+DSH supports the native loader's precise legacy turn endings. Validated cancellation
+diagnostics retire viewer activity/questions without inventing turn IDs, and
+Terminal Pet treats cancellations/interruption as neutral
+outcomes. Non-Codex source cursors restage existing activity projections once;
+Codex retains its physical revision to avoid replaying the historical catalog.
+Rich histories always use current normalization; unchanged cached Codex sidebar
+activity is not proactively recomputed. See [event IR](event-ir.md).
+
+Errors carry an optional native record for direct Inspector access, including
+when full Relay native snapshots are disabled. Legacy serialized errors still
+decode; Rust `ErrorEvent` literals require the new `native` field. Pi envelopes
+omit redacted thinking and hidden ZCode errors remain hidden. Inspector requests
+and caches stay separate from display details even after live subscriptions stop.
 
 Version 0.1.1 is being prepared for all 24 publishable crates; the desktop stays
 `publish = false`. Registry dependency versions, package-local docs/licenses and

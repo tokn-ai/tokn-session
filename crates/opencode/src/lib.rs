@@ -1,4 +1,5 @@
 mod compaction;
+mod errors;
 mod live;
 mod normalize;
 mod row;

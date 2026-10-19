@@ -984,6 +984,7 @@ describe("useViewerState Relay updates", () => {
     vi.mocked(loadEventPage).mockResolvedValue(timelinePage);
     vi.mocked(loadTrajectoryEventPage).mockResolvedValue(trajectoryChildPage());
     vi.mocked(loadEventDetail).mockResolvedValue(existing);
+    vi.mocked(inspectSessionEvent).mockResolvedValue(existing);
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "live");
     await waitFor(() => expect(result.current.events).toHaveLength(1));
@@ -1003,6 +1004,7 @@ describe("useViewerState Relay updates", () => {
 
     const failed = deferred<EventDetail>();
     vi.mocked(loadEventDetail).mockReturnValue(failed.promise);
+    vi.mocked(inspectSessionEvent).mockReturnValue(failed.promise);
     act(() => emit?.({ session_key: "live", reset: false }));
     await waitFor(() => {
       expect(loadEventDetail).toHaveBeenCalledTimes(2);
@@ -1017,6 +1019,7 @@ describe("useViewerState Relay updates", () => {
 
     const fresh = deferred<EventDetail>();
     vi.mocked(loadEventDetail).mockReturnValue(fresh.promise);
+    vi.mocked(inspectSessionEvent).mockReturnValue(fresh.promise);
     act(() => emit?.({ session_key: "live", reset: false }));
     await waitFor(() => expect(loadEventDetail).toHaveBeenCalledTimes(3));
     expect(currentDetail()).toEqual(existing);
@@ -1025,7 +1028,10 @@ describe("useViewerState Relay updates", () => {
     await waitFor(() => expect(currentDetail()).toEqual(replacement));
     expect(currentLoading()).toBe(false);
     expect(currentError()).toBeNull();
-    if (!isTrajectory) expect(result.current.detail).toEqual(replacement);
+    if (!isTrajectory) {
+      expect(result.current.detail).toEqual(replacement);
+      expect(inspectSessionEvent).toHaveBeenCalledTimes(3);
+    }
   });
 
   it("drops retained detail when the owner or snapshot generation changes", async () => {
@@ -2182,6 +2188,9 @@ describe("useViewerState expanded tool detail", () => {
     vi.mocked(loadEventDetail)
       .mockImplementationOnce(() => stale.promise)
       .mockImplementationOnce(() => fresh.promise);
+    vi.mocked(inspectSessionEvent)
+      .mockImplementationOnce(() => stale.promise)
+      .mockImplementationOnce(() => fresh.promise);
     const { result } = renderHook(() => useViewerState());
 
     await selectListedSession(result, "codex:session-1");
@@ -2189,6 +2198,7 @@ describe("useViewerState expanded tool detail", () => {
     act(() => result.current.selectEvent("event.v1.1"));
     act(() => result.current.toggleEventExpanded("event.v1.1"));
     await waitFor(() => expect(loadEventDetail).toHaveBeenCalledTimes(1));
+    expect(inspectSessionEvent).toHaveBeenCalledOnce();
 
     act(() => result.current.retryEvents());
     await waitFor(() => expect(loadEventPage).toHaveBeenCalledTimes(2));
@@ -2224,6 +2234,7 @@ describe("useViewerState expanded tool detail", () => {
       expect(result.current.detail?.tool_output?.sections[0]?.text).toBe("fresh output");
     });
     expect(loadEventDetail).toHaveBeenCalledTimes(2);
+    expect(inspectSessionEvent).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -2237,8 +2248,10 @@ describe("useViewerState expanded reasoning detail", () => {
       .mockResolvedValueOnce(reasoningEventPage({ type: "compaction", title: "Compacting…", reasoning: null, compaction }))
       .mockResolvedValue(reasoningEventPage({ type: "compaction", title: "Context compacted", reasoning: null,
         compaction: { ...compaction, state: "completed", has_summary: true } }));
-    vi.mocked(loadEventDetail).mockResolvedValue({ event_key: "event.v1.reasoning",
-      event: { type: "compaction", summary: "Retained decisions" }, native: null, is_hidden: false, tool_output: null });
+    const detail: EventDetail = { event_key: "event.v1.reasoning",
+      event: { type: "compaction", summary: "Retained decisions" }, native: null, is_hidden: false, tool_output: null };
+    vi.mocked(loadEventDetail).mockResolvedValue(detail);
+    vi.mocked(inspectSessionEvent).mockResolvedValue(detail);
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "codex:compaction");
     await waitFor(() => expect(result.current.events).toHaveLength(1));
@@ -2251,9 +2264,10 @@ describe("useViewerState expanded reasoning detail", () => {
     act(() => result.current.selectEvent("event.v1.reasoning"));
     await waitFor(() => expect(result.current.detail?.event).toMatchObject({ type: "compaction" }));
     expect(loadEventDetail).toHaveBeenCalledOnce();
+    expect(inspectSessionEvent).toHaveBeenCalledOnce();
   });
 
-  it("loads readable reasoning only after expansion and shares the detail cache", async () => {
+  it("loads readable reasoning only after expansion and inspects it independently", async () => {
     vi.mocked(listSessions).mockResolvedValue({
       sessions: [session("codex:reasoning")],
       next_cursor: null,
@@ -2261,13 +2275,15 @@ describe("useViewerState expanded reasoning detail", () => {
       pending_providers: [],
     });
     vi.mocked(loadEventPage).mockResolvedValue(reasoningEventPage());
-    vi.mocked(loadEventDetail).mockResolvedValue({
+    const detail: EventDetail = {
       event_key: "event.v1.reasoning",
       event: { type: "reasoning", summary: "Inspect the source" },
       native: null,
       is_hidden: false,
       tool_output: null,
-    });
+    };
+    vi.mocked(loadEventDetail).mockResolvedValue(detail);
+    vi.mocked(inspectSessionEvent).mockResolvedValue(detail);
     const { result } = renderHook(() => useViewerState());
 
     await selectListedSession(result, "codex:reasoning");
@@ -2281,6 +2297,7 @@ describe("useViewerState expanded reasoning detail", () => {
     act(() => result.current.selectEvent("event.v1.reasoning"));
     await waitFor(() => expect(result.current.detail?.event).toMatchObject({ type: "reasoning" }));
     expect(loadEventDetail).toHaveBeenCalledOnce();
+    expect(inspectSessionEvent).toHaveBeenCalledOnce();
   });
 
   it("does not request opaque, redacted, or hidden reasoning detail", async () => {
@@ -2409,7 +2426,7 @@ describe("useViewerState agent communication detail", () => {
     });
   });
 
-  it.each(["question_request", "question_reply"])("loads historical %s detail after expansion and shares it with Inspector", async (type) => {
+  it.each(["question_request", "question_reply"])("loads historical %s detail after expansion and inspects it independently", async (type) => {
     const page = communicationPage();
     page.events = [{ ...page.events[0], type, agent_activity: null, title: "Questions" }];
     const recorded: EventDetail = { ...communicationDetail(), event: {
@@ -2419,6 +2436,7 @@ describe("useViewerState agent communication detail", () => {
     } };
     vi.mocked(loadEventPage).mockResolvedValue(page);
     vi.mocked(loadEventDetail).mockResolvedValue(recorded);
+    vi.mocked(inspectSessionEvent).mockResolvedValue(recorded);
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "codex:communication");
     await waitFor(() => expect(result.current.events).toHaveLength(1));
@@ -2427,6 +2445,7 @@ describe("useViewerState agent communication detail", () => {
     act(() => result.current.selectEvent("event.v1.communication"));
     await waitFor(() => expect(result.current.detail).toEqual(recorded));
     expect(loadEventDetail).toHaveBeenCalledOnce();
+    expect(inspectSessionEvent).toHaveBeenCalledOnce();
   });
 
   it.each(["question_reply", "message"])("clears question badges from resolved %s pages despite a stale catalog", async (type) => {
@@ -2492,10 +2511,11 @@ describe("useViewerState agent communication detail", () => {
     expect(result.current.questionNavigation).toBeNull();
   });
 
-  it("loads after expansion, retries failures, and shares detail with Inspector", async () => {
+  it("loads after expansion, retries failures, and inspects communication independently", async () => {
     vi.mocked(loadEventPage).mockResolvedValue(communicationPage());
     vi.mocked(loadEventDetail).mockRejectedValueOnce(new Error("Snapshot changed"))
       .mockResolvedValue(communicationDetail());
+    vi.mocked(inspectSessionEvent).mockResolvedValue(communicationDetail());
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "codex:communication");
     await waitFor(() => expect(result.current.events).toHaveLength(1));
@@ -2508,6 +2528,7 @@ describe("useViewerState agent communication detail", () => {
     act(() => result.current.selectEvent("event.v1.communication"));
     await waitFor(() => expect(result.current.detail).toEqual(communicationDetail()));
     expect(loadEventDetail).toHaveBeenCalledTimes(2);
+    expect(inspectSessionEvent).toHaveBeenCalledOnce();
   });
 
   it.each(["encrypted", "hidden"])("does not request %s message content on expansion", async (kind) => {
@@ -2566,6 +2587,9 @@ describe("useViewerState whole-turn trajectories", () => {
     });
     vi.mocked(loadEventPage).mockResolvedValue(trajectoryEventPage());
     vi.mocked(loadTrajectoryEventPage).mockResolvedValue(trajectoryChildPage());
+    vi.mocked(inspectSessionEvent).mockResolvedValue({
+      ...toolDetail("inspected nested output"), event_key: "event.v1.trajectory-tool", native: { id: "native-tool" },
+    });
     vi.mocked(loadEventDetail).mockResolvedValue({
       event_key: "event.v1.trajectory-tool",
       event: { type: "tool_call" },
@@ -2617,8 +2641,10 @@ describe("useViewerState whole-turn trajectories", () => {
     act(() => result.current.selectEvent("event.v1.trajectory-tool"));
     await waitFor(() => {
       expect(result.current.selectedEvent?.event_key).toBe("event.v1.trajectory-tool");
+      expect(result.current.detail?.native).toEqual({ id: "native-tool" });
     });
     expect(loadEventDetail).toHaveBeenCalledOnce();
+    expect(inspectSessionEvent).toHaveBeenCalledOnce();
   });
 
   it("ignores a stale child page after the selected session changes", async () => {
@@ -3272,6 +3298,46 @@ describe("semantic session delivery", () => {
     expect(result.current.expandedDetail?.tool_output?.sections[0].text).toBe("display payload");
     expect(loadToolDetails).toHaveBeenCalledOnce();
     expect(inspectSessionEvent).toHaveBeenCalledOnce();
+  });
+
+  it("keeps source inspection independent of cached display detail after subscription loss", async () => {
+    let lose: ((loss: { subscription_ids: string[] }) => void) | undefined;
+    vi.mocked(listenForSubscriptionLoss).mockImplementation((handler) => { lose = handler; return Promise.resolve(vi.fn()); });
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
+    const page = toolEventPage();
+    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    vi.mocked(loadToolDetails).mockResolvedValueOnce(toolDetail("display without native"));
+    const inspection = deferred<EventDetail>();
+    vi.mocked(inspectSessionEvent).mockReturnValueOnce(inspection.promise)
+      .mockResolvedValueOnce({ ...toolDetail("inspected"), native: { id: "native-error-42", error: "Provider request failed" } });
+    const { result } = renderHook(() => useViewerState());
+    await selectListedSession(result, "live");
+    await waitFor(() => expect(result.current.events).toEqual(page.events));
+    act(() => result.current.toggleEventExpanded(page.events[0].event_key));
+    await waitFor(() => expect(result.current.expandedDetail?.tool_output?.sections[0].text).toBe("display without native"));
+    const request = vi.mocked(loadSessionUpdates).mock.calls.find(([request]) => request.level === "steps")![0];
+    // Recovery stays pending so the lost live lease cannot choose the display
+    // cache as a substitute for independently requested source inspection.
+    vi.mocked(loadSessionUpdates).mockImplementation(() => new Promise(() => {}));
+    act(() => lose?.({ subscription_ids: [request.subscription_id] }));
+    act(() => result.current.selectEvent(page.events[0].event_key));
+    await waitFor(() => expect(inspectSessionEvent).toHaveBeenCalledOnce());
+    expect(result.current.detail).toBeNull();
+    expect(result.current.detailLoading).toBe(true);
+    expect(result.current.expandedDetail?.native).toBeNull();
+    await act(async () => { inspection.reject(new Error("Inspection source unavailable")); });
+    await waitFor(() => expect(result.current.detailError).toBe("Inspection source unavailable"));
+    expect(result.current.detailLoading).toBe(false);
+    expect(result.current.expandedDetail?.tool_output?.sections[0].text).toBe("display without native");
+    act(() => result.current.retryDetail());
+    await waitFor(() => expect(result.current.detail?.native).toEqual({ id: "native-error-42", error: "Provider request failed" }));
+    expect(inspectSessionEvent).toHaveBeenCalledTimes(2);
+    expect(loadToolDetails).toHaveBeenCalledOnce();
+    expect(loadEventDetail).not.toHaveBeenCalled();
+    act(() => result.current.closeInspector());
+    act(() => result.current.toggleInspector());
+    await waitFor(() => expect(result.current.detail?.native).toEqual({ id: "native-error-42", error: "Provider request failed" }));
+    expect(inspectSessionEvent).toHaveBeenCalledTimes(2);
   });
 
   it("uses dedicated inspection, invalidates it on live changes, and never subscribes to details", async () => {

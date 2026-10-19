@@ -3902,13 +3902,16 @@ fn source_cursor(provider: ViewerProvider, source_path: &Path) -> Result<String,
     .map(file_revision_cursor)
     .collect::<Vec<_>>()
     .join("|");
-  // Pi assistant errors used to disappear during normalization, leaving old
-  // activity projections running. Restage only Pi bodies once to recover
-  // their persisted outcomes; unrelated providers keep their existing cursor.
-  let prefix = if provider == ViewerProvider::Pi {
-    "source-revision.pi.v2"
-  } else {
-    "source-revision.v1"
+  // Recover persisted activity once where corrected failure/cancellation
+  // normalization can change running or question state. Codex's existing
+  // explicit turn endings already terminate activity, so keep its cursor.
+  let prefix = match provider {
+    ViewerProvider::Pi => "source-revision.pi.v3",
+    ViewerProvider::OpenCode => "source-revision.opencode.v2",
+    ViewerProvider::ZCode => "source-revision.zcode.v2",
+    ViewerProvider::WorkBuddy => "source-revision.workbuddy.v2",
+    ViewerProvider::Dsh => "source-revision.dsh.v2",
+    ViewerProvider::Codex => "source-revision.v1",
   };
   Ok(format!("{prefix}.{files}"))
 }
@@ -5799,12 +5802,12 @@ fn native_detail(event: &AgentEvent) -> Option<Value> {
     AgentEvent::Usage(event) => Some(event.native.clone()),
     AgentEvent::Metadata(event) => Some(event.native.clone()),
     AgentEvent::Unknown(event) => event.native.clone(),
+    AgentEvent::Error(event) => event.native.clone(),
     AgentEvent::SessionStarted(_)
     | AgentEvent::ProviderChanged(_)
     | AgentEvent::GoalUpdated(_)
     | AgentEvent::ToolCall(_)
-    | AgentEvent::Compaction(_)
-    | AgentEvent::Error(_) => None,
+    | AgentEvent::Compaction(_) => None,
   }
 }
 
@@ -5859,6 +5862,7 @@ mod tests {
   mod activity_backfill;
   mod background_performance;
   mod communications;
+  mod error_inspection;
   mod event_filter;
   mod history_cache;
   mod latest_message;
@@ -9658,6 +9662,7 @@ mod tests {
           provider: Provider::Codex,
           session_id: Some("fixture".to_string()),
           message: "command failed".to_string(),
+          native: None,
           timestamp: None,
         }),
         "2026-09-01T00:04:00Z",
@@ -11600,6 +11605,7 @@ mod tests {
       provider: Provider::Codex,
       session_id: Some("fixture".to_string()),
       message: "e".repeat(MAX_TECHNICAL_SUMMARY_CHARS + 1),
+      native: None,
       timestamp: None,
     });
     let summary = event_summary(std::slice::from_ref(&event), 0, &event);
