@@ -8,6 +8,7 @@ mod protocol;
 mod runtimes;
 
 use crate::{
+  images::ResolvedImage,
   input::{Admission, DeliveryError, MAX_INPUT_LENGTH},
   workspace::{
     CreateProjectSessionRequest, ManagedSessionDialogResponse, ManagedSessionRequest, ManagedSessionSnapshot,
@@ -60,6 +61,7 @@ struct Record {
   started_at_ms: Option<i64>,
   termination: Option<CancellationToken>,
   restarting: Option<watch::Receiver<bool>>,
+  images_available: bool,
 }
 
 impl Record {
@@ -75,6 +77,7 @@ impl Record {
       started_at_ms: None,
       termination: None,
       restarting: None,
+      images_available: false,
     }
   }
 }
@@ -90,6 +93,7 @@ enum WorkerState {
 pub(crate) struct OwnedInputStatus {
   pub message: String,
   pub resume_required: bool,
+  pub images_available: bool,
 }
 
 impl ManagedPiSessions {
@@ -164,15 +168,25 @@ impl ManagedPiSessions {
     })
   }
 
+  #[cfg(test)]
   pub(crate) async fn create(
     &self,
     request: CreateProjectSessionRequest,
     project: RegisteredProject,
   ) -> Result<ManagedSessionSnapshot, String> {
+    self.create_with_images(request, project, Vec::new()).await
+  }
+
+  pub(crate) async fn create_with_images(
+    &self,
+    request: CreateProjectSessionRequest,
+    project: RegisteredProject,
+    images: Vec<ResolvedImage>,
+  ) -> Result<ManagedSessionSnapshot, String> {
     let manager = self.clone();
     // Client cancellation must not abandon an admitted creation between its
     // durable receipt and process startup. Repeating the UUID only observes it.
-    tokio::spawn(async move { manager.create_inner(request, project).await })
+    tokio::spawn(async move { manager.create_inner(request, project, images).await })
       .await
       .map_err(|error| error.to_string())?
   }
@@ -181,9 +195,19 @@ impl ManagedPiSessions {
     &self,
     request: CreateProjectSessionRequest,
     project: RegisteredProject,
+    images: Vec<ResolvedImage>,
   ) -> Result<ManagedSessionSnapshot, String> {
     self.available()?;
     validate_creation_request(&request)?;
+    if request.image_ids.len() != images.len()
+      || request
+        .image_ids
+        .iter()
+        .zip(&images)
+        .any(|(id, image)| id != &image.image_id)
+    {
+      return Err("Image attachments did not match the creation request".into());
+    }
     if let Some(snapshot) = self.creation_receipt(&request)? {
       return Ok(snapshot);
     }
@@ -224,7 +248,7 @@ impl ManagedPiSessions {
       return duplicate(&admitted, &receipt);
     }
     if let Err(error) = self
-      .start(request.request_id.clone(), Some(request.prompt), false)
+      .start(request.request_id.clone(), Some((request.prompt, images)), false)
       .await
     {
       self
@@ -336,6 +360,7 @@ impl ManagedPiSessions {
             "Send a message to this viewer-owned Pi session".into()
           },
           resume_required,
+          images_available: !resume_required && record.images_available,
         })
       })
   }
@@ -371,14 +396,27 @@ impl ManagedPiSessions {
     Some(validation.map(|_| status).map_err(DeliveryError::not_sent))
   }
 
+  #[cfg(test)]
   pub(crate) async fn submit_owned_input(
     &self,
     session_key: &str,
     request_id: &str,
     text: &str,
   ) -> Result<Admission, DeliveryError> {
+    self
+      .submit_owned_input_images(session_key, request_id, text, Vec::new())
+      .await
+  }
+
+  pub(crate) async fn submit_owned_input_images(
+    &self,
+    session_key: &str,
+    request_id: &str,
+    text: &str,
+    images: Vec<ResolvedImage>,
+  ) -> Result<Admission, DeliveryError> {
     validate_uuid(request_id, "message request")
-      .and_then(|()| validate_text(text))
+      .and_then(|()| validate_message(text, !images.is_empty()))
       .map_err(DeliveryError::not_sent)?;
     let request = ManagedSessionRequest {
       request_id: None,
@@ -420,6 +458,7 @@ impl ManagedPiSessions {
       sender.send(actor::Command::Prompt {
         request_id: request_id.into(),
         text: text.into(),
+        images,
         reply,
       }),
     )
@@ -491,7 +530,7 @@ impl ManagedPiSessions {
     Ok((id, sender, state))
   }
 
-  async fn start(&self, id: String, prompt: Option<String>, resume: bool) -> Result<(), String> {
+  async fn start(&self, id: String, prompt: Option<(String, Vec<ResolvedImage>)>, resume: bool) -> Result<(), String> {
     let gate = self.start_gate(&id)?;
     let _guard = self.admission_gate(&id, gate).await?;
     self.start_locked(id, prompt, resume).await
@@ -510,7 +549,12 @@ impl ManagedPiSessions {
 
   /// The per-session gate serializes startup and prompt admission with idle
   /// retirement. Never hold the records mutex across filesystem or RPC waits.
-  async fn start_locked(&self, id: String, prompt: Option<String>, resume: bool) -> Result<(), String> {
+  async fn start_locked(
+    &self,
+    id: String,
+    prompt: Option<(String, Vec<ResolvedImage>)>,
+    resume: bool,
+  ) -> Result<(), String> {
     self.available()?;
     let validation = {
       let records = self.inner.records.lock().unwrap();
@@ -551,6 +595,7 @@ impl ManagedPiSessions {
       record.worker_pid = None;
       record.started_at_ms = None;
       record.termination = Some(termination.clone());
+      record.images_available = false;
       (record.receipt.clone(), record.generation)
     };
     if let Err(error) = self.inner.publish(receipt.clone()).await {
@@ -689,7 +734,12 @@ fn creation_fingerprint(request: &CreateProjectSessionRequest, folder: &str) -> 
   Ok(format!(
     "{:x}",
     Sha256::digest(
-      serde_json::to_vec(&(&request.project_id, folder, &request.prompt)).map_err(|error| error.to_string())?
+      if request.image_ids.is_empty() {
+        serde_json::to_vec(&(&request.project_id, folder, &request.prompt))
+      } else {
+        serde_json::to_vec(&(&request.project_id, folder, &request.prompt, &request.image_ids))
+      }
+      .map_err(|error| error.to_string())?
     )
   ))
 }
@@ -718,11 +768,12 @@ fn validate_uuid(value: &str, kind: &str) -> Result<(), String> {
 
 pub(crate) fn validate_creation_request(request: &CreateProjectSessionRequest) -> Result<(), String> {
   validate_uuid(&request.request_id, "creation request")?;
-  validate_text(&request.prompt)
+  crate::input::validate_image_ids(&request.image_ids)?;
+  validate_message(&request.prompt, !request.image_ids.is_empty())
 }
 
-fn validate_text(value: &str) -> Result<(), String> {
-  if value.trim().is_empty() {
+fn validate_message(value: &str, has_images: bool) -> Result<(), String> {
+  if value.trim().is_empty() && !has_images {
     return Err("Message cannot be empty".into());
   }
   if value.chars().count() > MAX_INPUT_LENGTH {

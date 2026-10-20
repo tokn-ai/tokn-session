@@ -87,10 +87,18 @@ for line in sys.stdin:
             record({'kind': 'state_waiting', 'pid': os.getpid()})
             while not (root / 'allow-state').exists():
                 time.sleep(0.01)
+        invalid = root / 'invalid-state'
+        if invalid.exists():
+            fault = invalid.read_text()
+            response = {'type':'response', 'id':command['id'], 'command':'wrong-command' if fault == 'command' else 'get_state', 'success':'invalid' if fault == 'flag' else True}
+            if fault == 'data':
+                response['data'] = {'sessionId': False}
+            emit(response)
+            continue
         if mode == 'deferred' and (root / 'allow-persist').exists():
             persist()
         reported_id = '00000000-0000-4000-8000-000000000001' if mode == 'wrong_identity' else session_id
-        state = {'sessionId': reported_id, 'sessionFile': str(session_file), 'isStreaming': streaming, 'isCompacting': compacting, 'pendingMessageCount': pending}
+        state = {'sessionId': reported_id, 'sessionFile': str(session_file), 'isStreaming': streaming, 'isCompacting': compacting, 'pendingMessageCount': pending, 'model': {'input': ['text', 'image'] if mode == 'vision' and not (root / 'text-only').exists() else ['text']}}
         if mode == 'idle_probe_start' and state_count >= 3 and not streaming:
             streaming = True
             record({'kind': 'idle_probe_work', 'pid': os.getpid()})
@@ -250,6 +258,7 @@ if mode == 'ignore_eof':
         request_id: uuid::Uuid::new_v4().to_string(),
         project_id,
         prompt: prompt.into(),
+        image_ids: Vec::new(),
       };
       Self {
         manager,
@@ -1029,6 +1038,216 @@ if mode == 'ignore_eof':
     assert_eq!(fixture.snapshot().status, ManagedSessionStatus::Running);
     fixture.manager.shutdown().await;
     fixture.wait_reaped().await;
+  }
+
+  fn image(id: &str) -> ResolvedImage {
+    ResolvedImage {
+      image_id: id.into(),
+      mime_type: "image/png".into(),
+      sha256: "synthetic-image-hash".into(),
+      path: "/private/viewer/owned-image.png".into(),
+      bytes: Arc::new(vec![1, 2, 3]),
+    }
+  }
+
+  #[tokio::test]
+  async fn image_send_after_idle_resume_rechecks_the_model_and_preserves_attachment_receipts() {
+    let mut fixture = Fixture::with_idle_timeout("vision", "handled");
+    let creation_image_id = uuid::Uuid::new_v4().to_string();
+    fixture.request.image_ids = vec![creation_image_id.clone()];
+    fixture
+      .manager
+      .create_with_images(
+        fixture.request.clone(),
+        fixture.project.clone(),
+        vec![image(&creation_image_id)],
+      )
+      .await
+      .unwrap();
+    let key = fixture.idle().await.session_key.unwrap();
+    assert!(fixture.manager.input_status(&key).unwrap().unwrap().images_available);
+    fixture.expired().await;
+    let stopped = fixture.manager.checked_input_status(&key).await.unwrap().unwrap();
+    assert!(stopped.resume_required);
+    assert!(
+      !stopped.images_available,
+      "a stopped worker has no verified current model"
+    );
+    assert_eq!(fixture.launches().len(), 1);
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let attachment = image(&uuid::Uuid::new_v4().to_string());
+    std::fs::write(fixture.folder().join("text-only"), "").unwrap();
+    let error = fixture
+      .manager
+      .submit_owned_input_images(&key, &request_id, "", vec![attachment.clone()])
+      .await
+      .unwrap_err();
+    assert!(!error.may_have_been_sent);
+    assert!(error.message.contains("does not support image"));
+    assert_eq!(fixture.prompts(), ["handled"]);
+    let launches = fixture.launches();
+    assert_eq!(launches.len(), 2);
+    assert_eq!(
+      launches[1]["args"],
+      json!([
+        "--mode",
+        "rpc",
+        "--session",
+        fixture.folder().join("synthetic-history.jsonl")
+      ])
+    );
+    assert!(!fixture.manager.input_status(&key).unwrap().unwrap().images_available);
+
+    std::fs::remove_file(fixture.folder().join("text-only")).unwrap();
+    for _ in 0..2 {
+      assert!(matches!(
+        fixture
+          .manager
+          .submit_owned_input_images(&key, &request_id, "", vec![attachment.clone()])
+          .await
+          .unwrap(),
+        Admission::Started
+      ));
+    }
+    let mut changed = attachment;
+    changed.sha256 = "different-image-hash".into();
+    let error = fixture
+      .manager
+      .submit_owned_input_images(&key, &request_id, "", vec![changed])
+      .await
+      .unwrap_err();
+    assert!(!error.may_have_been_sent);
+    assert!(error.message.contains("different content"));
+    let prompts: Vec<_> = fixture
+      .log()
+      .into_iter()
+      .filter(|value| value["type"] == "prompt")
+      .collect();
+    assert_eq!(
+      prompts.len(),
+      2,
+      "the old prompt and accepted image must each be written once"
+    );
+    assert_eq!(prompts[1]["pid"], launches[1]["pid"]);
+    assert_eq!(prompts[1]["message"], "");
+    assert_eq!(
+      prompts[1]["images"],
+      json!([{"type":"image", "data":"AQID", "mimeType":"image/png"}])
+    );
+    assert!(fixture.manager.input_status(&key).unwrap().unwrap().images_available);
+    assert_eq!(fixture.launches().len(), 2);
+    fixture.manager.shutdown().await;
+    fixture.wait_reaped().await;
+  }
+
+  #[tokio::test]
+  async fn image_only_creation_and_follow_up_use_native_images_and_fresh_model_capabilities() {
+    let mut fixture = Fixture::new("vision", "");
+    let image_id = uuid::Uuid::new_v4().to_string();
+    fixture.request.image_ids = vec![image_id.clone()];
+    fixture
+      .manager
+      .create_with_images(fixture.request.clone(), fixture.project.clone(), vec![image(&image_id)])
+      .await
+      .unwrap();
+    let ready = fixture
+      .wait_for(|snapshot| snapshot.session_key.is_some() && snapshot.status == ManagedSessionStatus::Running)
+      .await;
+    let key = ready.session_key.unwrap();
+    assert!(fixture.manager.input_status(&key).unwrap().unwrap().images_available);
+    let first = fixture
+      .log()
+      .into_iter()
+      .find(|value| value["type"] == "prompt")
+      .unwrap();
+    assert_eq!(first["message"], "");
+    assert_eq!(
+      first["images"],
+      json!([{"type":"image", "data":"AQID", "mimeType":"image/png"}])
+    );
+    let followup_id = uuid::Uuid::new_v4().to_string();
+    for _ in 0..2 {
+      assert!(matches!(
+        fixture
+          .manager
+          .submit_owned_input_images(&key, &followup_id, "caption", vec![image(&image_id)])
+          .await
+          .unwrap(),
+        Admission::QueuedFollowUp
+      ));
+    }
+    let prompts: Vec<_> = fixture
+      .log()
+      .into_iter()
+      .filter(|value| value["type"] == "prompt")
+      .collect();
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts[1]["streamingBehavior"], "followUp");
+    // Recheck model capabilities immediately before each image prompt, even if
+    // the status previously advertised a vision model.
+    std::fs::write(fixture.folder().join("text-only"), "").unwrap();
+    let error = fixture
+      .manager
+      .submit_owned_input_images(&key, &uuid::Uuid::new_v4().to_string(), "", vec![image(&image_id)])
+      .await
+      .unwrap_err();
+    assert!(!error.may_have_been_sent);
+    assert!(error.message.contains("does not support image"));
+    assert!(!fixture.manager.input_status(&key).unwrap().unwrap().images_available);
+    assert_eq!(
+      fixture.log().iter().filter(|value| value["type"] == "prompt").count(),
+      2
+    );
+    fixture.manager.shutdown().await;
+  }
+
+  #[tokio::test]
+  async fn malformed_image_preflight_is_a_definite_non_send() {
+    for fault in ["command", "flag", "data", "missing-data"] {
+      // A handled first prompt settles with no further pending state probes.
+      let fixture = Fixture::new("vision", "handled");
+      fixture.create().await;
+      let ready = fixture
+        .wait_for(|snapshot| snapshot.session_key.is_some() && snapshot.status == ManagedSessionStatus::Idle)
+        .await;
+      let key = ready.session_key.unwrap();
+      std::fs::write(fixture.folder().join("invalid-state"), fault).unwrap();
+      let error = fixture
+        .manager
+        .submit_owned_input_images(
+          &key,
+          &uuid::Uuid::new_v4().to_string(),
+          "caption",
+          vec![image("synthetic")],
+        )
+        .await
+        .unwrap_err();
+      assert!(!error.may_have_been_sent, "{fault} preflight did not write a prompt");
+      assert_eq!(
+        fixture.log().iter().filter(|value| value["type"] == "prompt").count(),
+        1
+      );
+      fixture.manager.shutdown().await;
+    }
+  }
+
+  #[tokio::test]
+  async fn initial_images_never_fall_back_to_text_when_model_is_not_vision_capable() {
+    let mut fixture = Fixture::new("normal", "caption");
+    let image_id = uuid::Uuid::new_v4().to_string();
+    fixture.request.image_ids = vec![image_id.clone()];
+    fixture
+      .manager
+      .create_with_images(fixture.request.clone(), fixture.project.clone(), vec![image(&image_id)])
+      .await
+      .unwrap();
+    let failed = fixture
+      .wait_for(|snapshot| snapshot.status == ManagedSessionStatus::Failed)
+      .await;
+    assert!(failed.message.unwrap().contains("does not support image"));
+    assert!(!fixture.log().iter().any(|value| value["type"] == "prompt"));
+    fixture.manager.shutdown().await;
   }
 
   #[tokio::test]

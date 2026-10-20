@@ -40,9 +40,26 @@ impl ViewerService {
       .await
       .map_err(|_| SessionCreationError::not_started("Could not validate the project folder"))?
       .map_err(SessionCreationError::not_started)?;
+    let images = if request.image_ids.is_empty() {
+      Vec::new()
+    } else {
+      let store = self.images.clone();
+      let target = crate::images::ImageTarget::Project {
+        project_id: request.project_id.clone(),
+      };
+      let ids = request.image_ids.clone();
+      tokio::task::spawn_blocking(move || {
+        // Managed Pi embeds bytes in its RPC prompt; the creation task owns
+        // those bytes and does not require a permanent host file.
+        store.resolve(&target, &ids)
+      })
+      .await
+      .map_err(|_| SessionCreationError::not_started("Could not load image attachments"))?
+      .map_err(SessionCreationError::not_started)?
+    };
     let snapshot = self
       .managed_pi
-      .create(request, project)
+      .create_with_images(request, project, images)
       .await
       .map_err(SessionCreationError::uncertain)?;
     self
@@ -424,6 +441,7 @@ for line in sys.stdin:
       request_id: uuid::Uuid::new_v4().to_string(),
       project_id: project.project_id,
       prompt: "first prompt".into(),
+      image_ids: Vec::new(),
     };
     service.create_project_session(creation.clone()).await.unwrap();
     let identity = ManagedSessionRequest {
@@ -457,6 +475,7 @@ for line in sys.stdin:
       session_key: key.clone(),
       request_id: uuid::Uuid::new_v4().to_string(),
       text: "follow-up".into(),
+      image_ids: Vec::new(),
     };
     for _ in 0..2 {
       assert_eq!(
@@ -509,6 +528,7 @@ for line in sys.stdin:
       session_key: key.clone(),
       request_id: uuid::Uuid::new_v4().to_string(),
       text: "after restart".into(),
+      image_ids: Vec::new(),
     };
     assert_eq!(
       service.submit_session_input(next).await.unwrap().status,
@@ -663,6 +683,7 @@ for line in sys.stdin:
           request_id: uuid::Uuid::new_v4().to_string(),
           project_id: project.project_id,
           prompt: "hello".into(),
+          image_ids: Vec::new(),
         })
         .await
         .is_err()
@@ -704,6 +725,7 @@ for line in sys.stdin:
         request_id: uuid::Uuid::new_v4().to_string(),
         project_id: project.project_id.clone(),
         prompt,
+        image_ids: Vec::new(),
       };
       let error = service.create_project_session(request.clone()).await.unwrap_err();
       assert!(!error.may_have_started);

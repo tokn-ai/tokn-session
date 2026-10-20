@@ -5,6 +5,8 @@ import { errorMessage } from "../lib/state";
 import { CloseIcon } from "./Icons";
 import { ActionNotificationHost } from "./ActionNotifications";
 import "./ProjectWorkspace.css";
+import { ImageAttachmentPreviews, ImageAttachmentPicker, imageDrop, imagePaste } from "./ImageAttachments";
+import { addImageDrafts, disposeImageDrafts, DEFAULT_IMAGE_LIMITS, type ImageDraft } from "../lib/imageDrafts";
 
 function LastTurnFailure({ message }: { message?: string | null }) {
   if (!message?.trim()) return null;
@@ -70,13 +72,20 @@ export function RegisterProjectDialog({ open, on_close, on_register, on_register
 export function NewSessionDialog({ open, projects, preferred_group_key, snapshot, creating, uncertain = false, error, control_error, controlling, on_close, on_create, on_stop, on_open }: {
   open: boolean; projects: RegisteredProject[]; preferred_group_key?: string;
   snapshot: ManagedSessionSnapshot | null; creating: boolean; uncertain?: boolean; error: string | null; control_error: string | null; controlling: boolean;
-  on_close: () => void; on_create: (project_id: string, prompt: string) => Promise<void>;
+  on_close: () => void; on_create: (project_id: string, prompt: string, images?: ImageDraft[]) => Promise<void>;
   on_stop: (snapshot: ManagedSessionSnapshot) => void; on_open: () => void;
 }) {
   const [project_id, setProjectId] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [images, setImages] = useState<ImageDraft[]>([]);
+  const [image_error, setImageError] = useState<string | null>(null);
+  const image_ref = useRef(images);
+  image_ref.current = images;
+  useEffect(() => () => disposeImageDrafts(image_ref.current), []);
   const was_open = useRef(false);
-  useEffect(() => { if (snapshot?.session) setPrompt(""); }, [snapshot?.session?.session_key]);
+  useEffect(() => { if (snapshot?.session) {
+    setPrompt(""); disposeImageDrafts(image_ref.current); setImages([]); setImageError(null);
+  } }, [snapshot?.session?.session_key]);
   useEffect(() => {
     if (open && !was_open.current && !snapshot && !uncertain) {
       const preferred = projects.find((project) => project.available && project.group_key === preferred_group_key)
@@ -87,15 +96,31 @@ export function NewSessionDialog({ open, projects, preferred_group_key, snapshot
   }, [open, preferred_group_key, projects, snapshot, uncertain]);
   const pending = creating || !!snapshot && snapshot.status !== "failed" && snapshot.status !== "stopped" && !snapshot.session;
   const selected = projects.find((project) => project.project_id === project_id);
+  const addImages = (files: File[]) => {
+    if (pending || uncertain) return;
+    const result = addImageDrafts(image_ref.current, files, DEFAULT_IMAGE_LIMITS);
+    setImages(result.images); setImageError(result.error);
+  };
   return <WorkspaceDialog title="New Pi session" open={open} on_close={on_close}>
-    <form onSubmit={(event) => { event.preventDefault(); void on_create(project_id, prompt); }}>
+    <form onSubmit={(event) => { event.preventDefault();
+      if (images.length) void on_create(project_id, prompt, images); else void on_create(project_id, prompt);
+    }} onPaste={(event) => { if (!pending && !uncertain) imagePaste(event, addImages); }}
+      onDragOver={(event) => { if (!pending && !uncertain && event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
+      onDrop={(event) => { if (!pending && !uncertain) imageDrop(event, addImages); }}>
       <p>Pi uses your existing model and authentication settings on this machine.</p>
       <label>Project folder<select required disabled={pending || uncertain} value={project_id} onChange={(event) => setProjectId(event.target.value)}>
         <option value="" disabled>Choose a folder</option>
         {projects.map((project) => <option key={project.project_id} value={project.project_id} disabled={!project.available}>{project.name} · {project.folder_path}{project.available ? "" : " (unavailable)"}</option>)}
       </select></label>
       {selected ? <p className="workspace-folder">{selected.folder_path}</p> : null}
-      <label>First message<textarea autoFocus rows={6} required value={prompt} disabled={pending || uncertain} onChange={(event) => setPrompt(event.target.value)} placeholder="What would you like Pi to do?" /></label>
+      <ImageAttachmentPreviews images={images} disabled={pending || uncertain} on_remove={(draft_id) => {
+        if (pending || uncertain) return;
+        disposeImageDrafts(images.filter((image) => image.draft_id === draft_id));
+        setImages(images.filter((image) => image.draft_id !== draft_id)); setImageError(null);
+      }} />
+      <label>First message<textarea autoFocus rows={6} required={!images.length} value={prompt} disabled={pending || uncertain} onChange={(event) => setPrompt(event.target.value)} placeholder="What would you like Pi to do?" /></label>
+      <ImageAttachmentPicker image_count={images.length} limits={DEFAULT_IMAGE_LIMITS} disabled={pending || uncertain} on_add={addImages} />
+      {image_error ? <p className="workspace-error" role="alert">{image_error}</p> : null}
       {pending ? <p className="workspace-progress" role="status"><span className="inline-spinner" />{snapshot?.status === "stopping" ? "Stopping Pi…" : "Starting Pi… Waiting for its conversation to be saved."}</p> : null}
       {snapshot?.message ? <p className={snapshot.status === "failed" ? "workspace-error" : "workspace-notice"} role={snapshot.status === "failed" ? "alert" : "status"}>{snapshot.message}</p> : null}
       <LastTurnFailure message={snapshot?.last_turn_error} />
@@ -104,7 +129,7 @@ export function NewSessionDialog({ open, projects, preferred_group_key, snapshot
         <button type="button" onClick={on_close}>Close</button>
         {snapshot && !snapshot.session && !["failed", "stopped"].includes(snapshot.status) ? <button type="button" disabled={controlling || snapshot.status === "stopping"} onClick={() => on_stop(snapshot)}>Stop</button> : null}
         {snapshot?.session ? <button type="button" onClick={on_open}>Open conversation</button>
-          : <button type="submit" disabled={pending || !uncertain && (!selected?.available || !prompt.trim())}>{uncertain ? "Check session start" : error || snapshot?.status === "failed" || snapshot?.status === "stopped" ? "Try again" : "Start Pi session"}</button>}
+          : <button type="submit" disabled={pending || !uncertain && (!selected?.available || (!prompt.trim() && !images.length))}>{uncertain ? "Check session start" : error || snapshot?.status === "failed" || snapshot?.status === "stopped" ? "Try again" : "Start Pi session"}</button>}
       </footer>
     </form>
   </WorkspaceDialog>;

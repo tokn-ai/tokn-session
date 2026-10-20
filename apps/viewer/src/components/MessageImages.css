@@ -1,0 +1,23 @@
+.image-attachments { display: grid; gap: 8px; }
+.image-attachments__previews { display: flex; flex-wrap: wrap; gap: 8px; padding: 0; margin: 0; list-style: none; }
+.image-attachments__previews li { position: relative; width: 88px; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; background: var(--surface); }
+.image-attachments__previews img { display: block; width: 88px; height: 70px; object-fit: cover; }
+.image-attachments__previews li > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px 5px; font-size: 10px; }
+.image-attachments__previews li > button { position: absolute; right: 3px; top: 3px; border: 0; border-radius: 50%; width: 22px; height: 22px; padding: 0; background: #171717d9; color: white; font-size: 18px; line-height: 1; }
+.image-attachments__add { justify-self: start; display: inline-flex; gap: 5px; align-items: center; border: 0; background: transparent; color: var(--text-muted); padding: 4px 0; font: inherit; font-size: 12px; }
+.image-attachments__add > span { font-size: 18px; }
+.session-composer__box > .image-attachments__previews { margin: 14px 18px 0; }
+.session-composer__box > .image-attachments { padding: 0 12px 8px; }
+.message-images { display: flex; flex-wrap: wrap; gap: 9px; margin: 10px 0 2px; }
+.message-event[data-role="user"] .message-images { margin: 0 0 10px; }
+.message-image { display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 110px; min-height: 92px; max-width: min(280px, 100%); overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.message-image > button { display: block; padding: 0; border: 0; background: transparent; width: 100%; }
+.message-image img { display: block; max-width: 100%; max-height: 180px; object-fit: contain; margin: auto; }
+.message-image__status { padding: 12px; font-size: 12px; color: var(--text-muted); text-align: center; }
+.message-image__status button { margin-top: 5px; }
+.image-preview { padding: 0; max-width: min(94vw, 1200px); max-height: 92vh; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); color: var(--text); }
+.image-preview::backdrop { background: #000b; }
+.image-preview header { display: flex; gap: 24px; justify-content: space-between; align-items: center; padding: 10px 14px; }
+.image-preview header > span { overflow-wrap: anywhere; }
+.image-preview__body { display: flex; align-items: center; justify-content: center; min-width: min(70vw, 320px); min-height: 140px; }
+.image-preview__body img { display: block; max-width: 90vw; max-height: 78vh; object-fit: contain; }

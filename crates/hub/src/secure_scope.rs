@@ -29,7 +29,9 @@ pub async fn forward(
       ) && !(config.allow_control && grant.allow_control)
       {
         let body = serde_json::to_vec(&json!({
-          "available": false, "message": "This grant allows viewing only", "max_length": 0, "question_ids": []
+          "available": false, "message": "This grant allows viewing only", "max_length": 0, "question_ids": [],
+            "images_available": false, "max_images": 0, "max_image_bytes": 0,
+            "max_total_image_bytes": 0, "image_mime_types": []
         }))
         .map_err(|_| "Could not encode input status")?;
         return Ok(reqwest::Response::from(
@@ -47,7 +49,11 @@ pub async fn forward(
       let command = path.strip_prefix("/api/v1/").ok_or("Route unavailable")?;
       if matches!(
         command,
-        "submit_session_input" | "submit_session_question_answers" | "retry_session_index"
+        "submit_session_input"
+          | "submit_session_question_answers"
+          | "retry_session_index"
+          | "upload_image_chunk"
+          | "release_image_upload"
       ) {
         return Err("This session share is read-only".into());
       }

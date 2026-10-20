@@ -267,7 +267,7 @@ export interface ProjectWorkspaceSnapshot {
 }
 
 export interface RegisterProjectRequest { folder_path: string; name?: string | null }
-export interface CreateProjectSessionRequest { request_id: string; project_id: string; prompt: string }
+export interface CreateProjectSessionRequest { request_id: string; project_id: string; prompt: string; image_ids?: string[] }
 export interface SessionCreationError { message: string; may_have_started: boolean }
 export type ManagedSessionStatus = "starting" | "running" | "idle" | "stopping" | "stopped" | "failed";
 export interface ManagedSessionDialog {
@@ -318,12 +318,19 @@ export interface SessionInputStatus {
   resume_required?: boolean;
   /** Maximum number of Unicode code points in one message. */
   max_length: number;
+  /** Omitted by older hosts, which must remain text-only. */
+  images_available?: boolean;
+  max_images?: number;
+  max_image_bytes?: number;
+  max_total_image_bytes?: number;
+  image_mime_types?: string[];
 }
 
 export interface SubmitSessionInputRequest {
   session_key: string;
   request_id: string;
   text: string;
+  image_ids?: string[];
 }
 
 export interface SubmitSessionInputResponse {
@@ -549,7 +556,44 @@ export interface QuestionSelectionSummary {
   written_answer_truncated?: boolean;
 }
 
+export interface MessageImageSummary {
+  image_id: string;
+  mime_type: string | null;
+  name: string | null;
+  availability: "available" | "unavailable";
+}
+
+export interface LoadSessionImageRequest {
+  session_key: string;
+  event_key: string;
+  image_id: string;
+  variant: "thumbnail" | "full";
+}
+export interface LoadSessionImageResponse {
+  mime_type: string;
+  data_base64: string;
+  width: number | null;
+  height: number | null;
+}
+export type ImageUploadTarget = { type: "session"; session_key: string } | { type: "project"; project_id: string };
+export interface UploadImageChunkRequest {
+  target: ImageUploadTarget;
+  upload_id: string;
+  offset: number;
+  total_bytes: number;
+  mime_type: string;
+  name: string | null;
+  data_base64: string;
+}
+export interface UploadImageChunkResponse {
+  upload_id: string;
+  received_bytes: number;
+  image_id: string | null;
+}
+export interface ReleaseImageUploadRequest { target: ImageUploadTarget; upload_id: string }
+
 export interface EventSummary {
+  images?: MessageImageSummary[];
   question_selections?: QuestionSelectionSummary[];
   child_keys?: string[];
   delivery?: "commentary" | "final" | "unspecified";

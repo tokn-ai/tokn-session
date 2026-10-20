@@ -2,9 +2,9 @@ use serde_json::Value;
 
 use crate::event::{PiContentBlock, PiMessage, PiMessageItem, PiSessionItem, PiSessionLine, PiUserContent};
 use tokn_session_core::{
-  AgentEvent, ErrorEvent, MessageDelivery, MessageEvent, MetadataEvent, MetadataKind, Phase, Provider, ProviderChanged,
-  ReasoningEvent, Role, SessionStarted, ToolCallEvent, ToolRecordKind, ToolTransport, UnknownEvent, UsageKind,
-  tool_kind_for_name, tool_summary_for_input, tool_summary_for_io,
+  AgentEvent, ErrorEvent, MessageDelivery, MessageEvent, MessageImage, MessageImageSource, MetadataEvent, MetadataKind,
+  Phase, Provider, ProviderChanged, ReasoningEvent, Role, SessionStarted, ToolCallEvent, ToolRecordKind, ToolTransport,
+  UnknownEvent, UsageKind, tool_kind_for_name, tool_summary_for_input, tool_summary_for_io,
 };
 
 pub struct PiNormalizer {
@@ -278,7 +278,7 @@ fn normalize_user_message(
       timestamp.clone(),
     )),
     PiUserContent::Blocks(blocks) => {
-      for block in blocks {
+      for (index, block) in blocks.into_iter().enumerate() {
         match block {
           PiContentBlock::Text(content) => {
             let native = json_value(&content);
@@ -300,15 +300,11 @@ fn normalize_user_message(
             }
           }
           PiContentBlock::Image(content) => {
-            events.push(unknown_event(
-              session_id.clone(),
-              Some("message.content.image".to_string()),
-              Some(serde_json::json!({
-                "type": "image",
-                "mime_type": content.mime_type,
-              })),
-              timestamp.clone(),
-            ));
+            let mut event = message_event(session_id.clone(), meta, Role::User, String::new(), timestamp.clone());
+            if let AgentEvent::Message(message) = &mut event {
+              message.images.push(recorded_image(index, content));
+            }
+            events.push(event);
           }
           PiContentBlock::Unknown(content) => events.push(unknown_event(
             session_id.clone(),
@@ -337,7 +333,7 @@ fn normalize_user_message(
     )),
   }
 
-  ensure_message_events(events, session_id, timestamp)
+  ensure_message_events(combine_message_blocks(events), session_id, timestamp)
 }
 
 fn normalize_assistant_message(
@@ -352,7 +348,7 @@ fn normalize_assistant_message(
     .or_else(|| message.timestamp.map(|value| value.to_string()));
   let mut events = Vec::new();
 
-  for block in message.content {
+  for (index, block) in message.content.into_iter().enumerate() {
     match block {
       PiContentBlock::Text(content) => {
         let native = json_value(&content);
@@ -429,15 +425,19 @@ fn normalize_assistant_message(
           timestamp: timestamp.clone(),
         }));
       }
-      PiContentBlock::Image(content) => events.push(unknown_event(
-        session_id.clone(),
-        Some("message.content.image".to_string()),
-        Some(serde_json::json!({
-          "type": "image",
-          "mime_type": content.mime_type,
-        })),
-        timestamp.clone(),
-      )),
+      PiContentBlock::Image(content) => {
+        let mut event = message_event(
+          session_id.clone(),
+          meta,
+          Role::Assistant,
+          String::new(),
+          timestamp.clone(),
+        );
+        if let AgentEvent::Message(message) = &mut event {
+          message.images.push(recorded_image(index, content));
+        }
+        events.push(event);
+      }
       PiContentBlock::Unknown(content) => events.push(unknown_event(
         session_id.clone(),
         prefixed_type("message.content", content.native_type.as_deref()),
@@ -447,7 +447,40 @@ fn normalize_assistant_message(
     }
   }
 
-  ensure_message_events(events, session_id, timestamp)
+  ensure_message_events(combine_message_blocks(events), session_id, timestamp)
+}
+
+fn recorded_image(index: usize, content: tokn_pi_protocol::ImageContent) -> MessageImage {
+  MessageImage {
+    image_id: format!("image.v1.{index}"),
+    mime_type: content.mime_type,
+    name: None,
+    source: content
+      .data
+      .filter(|data| !data.is_empty())
+      .map(|data| MessageImageSource::Base64 { data })
+      .unwrap_or(MessageImageSource::Unavailable { reference: None }),
+  }
+}
+
+fn combine_message_blocks(events: Vec<AgentEvent>) -> Vec<AgentEvent> {
+  let mut combined = Vec::with_capacity(events.len());
+  for event in events {
+    if let AgentEvent::Message(message) = &event
+      && let Some(AgentEvent::Message(previous)) = combined.last_mut()
+      && previous.message_id == message.message_id
+      && previous.role == message.role
+    {
+      if !previous.text.is_empty() && !message.text.is_empty() {
+        previous.text.push('\n');
+      }
+      previous.text.push_str(&message.text);
+      previous.images.extend(message.images.iter().cloned());
+    } else {
+      combined.push(event);
+    }
+  }
+  combined
 }
 
 fn normalize_tool_result_message(
@@ -503,6 +536,7 @@ fn message_event(
   timestamp: Option<String>,
 ) -> AgentEvent {
   AgentEvent::Message(MessageEvent {
+    images: Vec::new(),
     provenance: None,
     provider: Provider::Pi,
     session_id,
@@ -574,6 +608,36 @@ fn json_value(value: impl serde::Serialize) -> Value {
 mod tests {
   use super::*;
   use tokn_session_core::{ToolKind, ToolSummary};
+
+  #[test]
+  fn image_only_and_mixed_messages_preserve_images_without_tool_reordering() {
+    let events = normalize_fixture(
+      r#"{"type":"session","id":"pi"}
+{"type":"message","id":"user","message":{"role":"user","content":[{"type":"image","mimeType":"image/png","data":"YQ=="}]}}
+{"type":"message","id":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"caption"},{"type":"image","mimeType":"image/jpeg","data":"Yg=="},{"type":"toolCall","id":"call","name":"read","arguments":{}},{"type":"image","mimeType":"image/png"}]}}"#,
+    );
+    let [
+      AgentEvent::SessionStarted(_),
+      AgentEvent::Message(user),
+      AgentEvent::Message(assistant),
+      AgentEvent::ToolCall(_),
+      AgentEvent::Message(after),
+    ] = &events[..]
+    else {
+      panic!("unexpected image projections: {events:?}")
+    };
+    assert!(user.text.is_empty());
+    assert_eq!(user.images[0].image_id, "image.v1.0");
+    assert!(matches!(&user.images[0].source, MessageImageSource::Base64 { data } if data == "YQ=="));
+    assert_eq!(assistant.text, "caption");
+    assert_eq!(assistant.images[0].mime_type.as_deref(), Some("image/jpeg"));
+    assert_eq!(assistant.images[0].image_id, "image.v1.1");
+    assert_eq!(after.images[0].image_id, "image.v1.3");
+    assert!(matches!(
+      &after.images[0].source,
+      MessageImageSource::Unavailable { reference: None }
+    ));
+  }
 
   #[test]
   fn normalizes_basic_fixture_without_stopping_at_unknown_roles() {

@@ -4,6 +4,7 @@ use super::{
   protocol::{RpcReader, RpcState, StderrTail, parse_extension_dialog, parse_state},
 };
 use crate::{
+  images::ResolvedImage,
   input::{Admission, DeliveryError},
   workspace::{ManagedSessionDialogResponse, ManagedSessionStatus},
 };
@@ -37,6 +38,7 @@ pub(super) enum Command {
   Prompt {
     request_id: String,
     text: String,
+    images: Vec<ResolvedImage>,
     reply: oneshot::Sender<Result<Admission, DeliveryError>>,
   },
   Abort(oneshot::Sender<Result<(), String>>),
@@ -46,6 +48,12 @@ pub(super) enum Command {
 enum PendingKind {
   State {
     initial: bool,
+  },
+  ImagePreflight {
+    request_id: String,
+    text: String,
+    images: Vec<ResolvedImage>,
+    reply: oneshot::Sender<Result<Admission, DeliveryError>>,
   },
   Prompt {
     request_id: String,
@@ -67,7 +75,7 @@ pub(super) async fn run(
   executable: PathBuf,
   receipt: Receipt,
   generation: u64,
-  prompt: Option<String>,
+  prompt: Option<(String, Vec<ResolvedImage>)>,
   resume: bool,
   mut commands: mpsc::Receiver<Command>,
   worker_state: watch::Sender<WorkerState>,
@@ -117,6 +125,11 @@ pub(super) async fn run(
           "Pi exited before acknowledging the message; check its history before retrying",
         )));
       }
+      PendingKind::ImagePreflight { reply, .. } => {
+        let _ = reply.send(Err(DeliveryError::not_sent(
+          "Pi stopped while checking image input support",
+        )));
+      }
       PendingKind::Abort(reply) => {
         let _ = reply.send(Err("Pi stopped before acknowledging Stop".into()));
       }
@@ -163,7 +176,7 @@ struct Actor {
   stderr: Arc<Mutex<StderrTail>>,
   pending: HashMap<String, Pending>,
   recent: HashMap<String, (String, Option<Result<Admission, DeliveryError>>)>,
-  initial_prompt: Option<String>,
+  initial_prompt: Option<(String, Vec<ResolvedImage>)>,
   state: Option<RpcState>,
   saw_settled: bool,
   checking_idle: bool,
@@ -186,7 +199,7 @@ impl Actor {
     executable: PathBuf,
     receipt: Receipt,
     generation: u64,
-    prompt: Option<String>,
+    prompt: Option<(String, Vec<ResolvedImage>)>,
     resume: bool,
     worker_state: watch::Sender<WorkerState>,
     termination: CancellationToken,
@@ -340,17 +353,25 @@ impl Actor {
           self.idle_since = None;
           self.idle_probe = false;
           match command {
-          Some(Command::Prompt {request_id, text, reply}) => {
-            if self.inner.upgrade().is_none_or(|inner| inner.shutting_down.load(std::sync::atomic::Ordering::Acquire)) {
+          Some(Command::Prompt {request_id, text, images, reply}) => {
+            if self.termination.is_cancelled() || self.inner.upgrade().is_none_or(|inner| inner.shutting_down.load(std::sync::atomic::Ordering::Acquire)) {
               let _ = reply.send(Err(DeliveryError::not_sent("Managed Pi runtime is shutting down")));
+            } else if images.is_empty() {
+              self.prompt(request_id, text, images, Some(reply)).await?;
             } else {
-              self.prompt(request_id, text, Some(reply)).await?;
+              self.send("get_state", json!({"type":"get_state"}), PendingKind::ImagePreflight { request_id, text, images, reply }).await?;
             }
           },
           Some(Command::Abort(reply)) => {
             self.stop_requested = true;
             self.awaiting_new_turn = false;
             self.initial_prompt = None;
+            let image_checks: Vec<_> = self.pending.iter().filter_map(|(id, pending)| matches!(pending.kind, PendingKind::ImagePreflight { .. }).then(|| id.clone())).collect();
+            for id in image_checks {
+              if let Some(Pending { kind: PendingKind::ImagePreflight { reply, .. }, .. }) = self.pending.remove(&id) {
+                let _ = reply.send(Err(DeliveryError::not_sent("Image message was cancelled by Stop before submission")));
+              }
+            }
             self.cancel_dialog("Pi dialog was cancelled by Stop").await?;
             self.update(|receipt| { receipt.status = ManagedSessionStatus::Stopping; receipt.message = Some("Stopping the current Pi turn".into()); }).await?;
             self.send("abort", json!({"type":"abort"}), PendingKind::Abort(reply)).await?;
@@ -388,7 +409,10 @@ impl Actor {
         let Some(id) = value.get("id").and_then(Value::as_str) else {
           return Err("Pi RPC response has no correlation ID".into());
         };
-        let Some(pending) = self.pending.remove(id) else {
+        // Keep preflight replies in the pending map until the envelope is
+        // validated. Teardown can then distinguish an unsent image check from
+        // a prompt whose bytes already crossed the process boundary.
+        let Some(pending) = self.pending.get(id) else {
           return Ok(());
         };
         if value.get("command").and_then(Value::as_str) != Some(pending.command) {
@@ -405,27 +429,20 @@ impl Actor {
           .chars()
           .take(2048)
           .collect::<String>();
+        let pending = self.pending.remove(id).expect("validated pending response");
         match pending.kind {
           PendingKind::State { initial } => {
             if !success {
               return Err(error);
             }
             let state = parse_state(value.get("data").ok_or("Pi get_state response has no data")?)?;
-            if let Some(expected) = self
-              .state
-              .as_ref()
-              .map(|state| state.session_id.as_str())
-              .or(self.receipt.session_id.as_deref())
-            {
-              if state.session_id != expected {
-                return Err("Pi resumed a different session identity".into());
-              }
-            }
-            self.state = Some(state);
+            self.accept_state(state)?;
             self.probe_file().await?;
             if initial {
-              if let Some(prompt) = self.initial_prompt.take() {
-                self.prompt(self.receipt.request_id.clone(), prompt, None).await?;
+              if let Some((prompt, images)) = self.initial_prompt.take() {
+                self
+                  .prompt(self.receipt.request_id.clone(), prompt, images, None)
+                  .await?;
               } else {
                 self.set_phase_from_state().await?;
               }
@@ -433,6 +450,33 @@ impl Actor {
             } else if self.checking_idle || self.idle_probe {
               self.set_phase_from_state().await?;
             }
+          }
+          PendingKind::ImagePreflight {
+            request_id,
+            text,
+            images,
+            reply,
+          } => {
+            if !success {
+              let _ = reply.send(Err(DeliveryError::not_sent(error)));
+              return Ok(());
+            }
+            let state = match value
+              .get("data")
+              .ok_or_else(|| "Pi get_state response has no data".to_string())
+              .and_then(parse_state)
+            {
+              Ok(state) => state,
+              Err(error) => {
+                let _ = reply.send(Err(DeliveryError::not_sent(error.clone())));
+                return Err(error);
+              }
+            };
+            if let Err(error) = self.accept_state(state) {
+              let _ = reply.send(Err(DeliveryError::not_sent(error.clone())));
+              return Err(error);
+            }
+            self.prompt(request_id, text, images, Some(reply)).await?;
           }
           PendingKind::Prompt {
             request_id,
@@ -575,10 +619,37 @@ impl Actor {
     Ok(())
   }
 
+  fn accept_state(&mut self, state: RpcState) -> Result<(), String> {
+    if let Some(expected) = self
+      .state
+      .as_ref()
+      .map(|state| state.session_id.as_str())
+      .or(self.receipt.session_id.as_deref())
+    {
+      if state.session_id != expected {
+        return Err("Pi resumed a different session identity".into());
+      }
+    }
+    if let Some(inner) = self.inner.upgrade() {
+      if let Some(record) = inner
+        .records
+        .lock()
+        .unwrap()
+        .get_mut(&self.receipt.request_id)
+        .filter(|record| record.generation == self.generation)
+      {
+        record.images_available = state.images_available;
+      }
+    }
+    self.state = Some(state);
+    Ok(())
+  }
+
   async fn prompt(
     &mut self,
     request_id: String,
     text: String,
+    images: Vec<ResolvedImage>,
     reply: Option<oneshot::Sender<Result<Admission, DeliveryError>>>,
   ) -> Result<(), String> {
     if self.termination.is_cancelled()
@@ -593,7 +664,23 @@ impl Actor {
       return Ok(());
     }
     use sha2::{Digest, Sha256};
-    let fingerprint = format!("{:x}", Sha256::digest(text.as_bytes()));
+    let fingerprint = if images.is_empty() {
+      format!("{:x}", Sha256::digest(text.as_bytes()))
+    } else {
+      format!(
+        "{:x}",
+        Sha256::digest(
+          serde_json::to_vec(&(
+            &text,
+            images
+              .iter()
+              .map(|image| (&image.image_id, &image.sha256))
+              .collect::<Vec<_>>()
+          ))
+          .map_err(|error| error.to_string())?
+        )
+      )
+    };
     if let Some((existing, result)) = self.recent.get(&request_id) {
       let result = if existing != &fingerprint {
         Err(DeliveryError::not_sent(
@@ -617,6 +704,14 @@ impl Actor {
       }
       return Ok(());
     }
+    if !images.is_empty() && self.state.as_ref().is_none_or(|state| !state.images_available) {
+      let message = "The active Pi model does not support image input. Choose an image-capable model and retry.";
+      if let Some(reply) = reply {
+        let _ = reply.send(Err(DeliveryError::not_sent(message)));
+        return Ok(());
+      }
+      return Err(message.into());
+    }
     if self.recent.len() >= 1024 {
       if let Some(reply) = reply {
         let _ = reply.send(Err(DeliveryError::not_sent(
@@ -638,6 +733,10 @@ impl Actor {
     }
     self.recent.insert(request_id.clone(), (fingerprint, None));
     let mut command = json!({"type":"prompt","message":text});
+    if !images.is_empty() {
+      use base64::Engine;
+      command["images"] = json!(images.iter().map(|image| json!({"type":"image", "data": base64::engine::general_purpose::STANDARD.encode(image.bytes.as_slice()), "mimeType":image.mime_type})).collect::<Vec<_>>());
+    }
     if busy {
       command["streamingBehavior"] = json!("followUp");
     }
@@ -657,10 +756,24 @@ impl Actor {
 
   async fn send(&mut self, command: &'static str, mut value: Value, kind: PendingKind) -> Result<(), String> {
     if self.pending.len() >= 32 {
-      return Err("Pi RPC pending request limit reached".into());
+      let error = "Pi RPC pending request limit reached";
+      reject_before_send(kind, error);
+      return Err(error.into());
     }
     let id = uuid::Uuid::new_v4().to_string();
     value["id"] = json!(id);
+    let bytes = match encode_command(value) {
+      Ok(bytes) => bytes,
+      Err(error) => {
+        reject_before_send(kind, &error);
+        return Err(error);
+      }
+    };
+    if self.stdin.is_none() {
+      let error = "Pi RPC stdin is closed";
+      reject_before_send(kind, error);
+      return Err(error.into());
+    }
     // Insert before writing: a partial pipe write is uncertain and must never
     // be automatically repeated by the host.
     let timeout = if command == "prompt" {
@@ -676,12 +789,14 @@ impl Actor {
         kind,
       },
     );
-    self.write(value).await
+    self.write_bytes(bytes).await
   }
 
   async fn write(&mut self, value: Value) -> Result<(), String> {
-    let mut bytes = serde_json::to_vec(&value).map_err(|error| error.to_string())?;
-    bytes.push(b'\n');
+    self.write_bytes(encode_command(value)?).await
+  }
+
+  async fn write_bytes(&mut self, bytes: Vec<u8>) -> Result<(), String> {
     let stdin = self.stdin.as_mut().ok_or("Pi RPC stdin is closed")?;
     tokio::time::timeout(WRITE_DEADLINE, stdin.write_all(&bytes))
       .await
@@ -1000,6 +1115,29 @@ impl Actor {
   }
 }
 
+/// These failures occur before a provider prompt can be written. Reporting
+/// uncertainty would unnecessarily lock an editable draft after a failed check.
+fn reject_before_send(kind: PendingKind, message: &str) {
+  match kind {
+    PendingKind::ImagePreflight { reply, .. } | PendingKind::Prompt { reply: Some(reply), .. } => {
+      let _ = reply.send(Err(DeliveryError::not_sent(message)));
+    }
+    PendingKind::Abort(reply) => {
+      let _ = reply.send(Err(message.into()));
+    }
+    PendingKind::State { .. } | PendingKind::Prompt { reply: None, .. } => {}
+  }
+}
+
+fn encode_command(value: Value) -> Result<Vec<u8>, String> {
+  let mut bytes = serde_json::to_vec(&value).map_err(|error| error.to_string())?;
+  bytes.push(b'\n');
+  if bytes.len() > super::protocol::MAX_FRAME_BYTES {
+    return Err("Pi RPC request exceeds the 34 MiB limit".into());
+  }
+  Ok(bytes)
+}
+
 async fn finish(
   inner: &Weak<Inner>,
   id: &str,
@@ -1033,6 +1171,7 @@ async fn finish(
     record.worker_pid = None;
     record.started_at_ms = None;
     record.termination = None;
+    record.images_available = false;
   }
   Some(receipt.snapshot())
 }
@@ -1188,5 +1327,35 @@ mod projection_tests {
       .unwrap(),
       json!({"type":"compaction_end","aborted":true,"error_message":"cancelled"})
     );
+  }
+}
+
+#[cfg(test)]
+mod delivery_preflight_tests {
+  use super::*;
+
+  #[test]
+  fn rejected_image_checks_and_unwritten_prompts_are_definite_non_sends() {
+    for check_only in [true, false] {
+      let (reply, mut receive) = oneshot::channel();
+      let pending = if check_only {
+        PendingKind::ImagePreflight {
+          request_id: "request".into(),
+          text: "caption".into(),
+          images: Vec::new(),
+          reply,
+        }
+      } else {
+        PendingKind::Prompt {
+          request_id: "request".into(),
+          reply: Some(reply),
+          busy: false,
+        }
+      };
+      reject_before_send(pending, "Pi RPC pending request limit reached");
+      let error = receive.try_recv().unwrap().unwrap_err();
+      assert!(!error.may_have_been_sent);
+      assert!(error.message.contains("pending request limit"));
+    }
   }
 }

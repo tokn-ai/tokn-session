@@ -203,18 +203,19 @@ fn normalize_user_item(
   let message_id = string_field(item, "id")?;
   let content = item.get("content")?.as_array()?;
   let mut text = String::new();
-  for entry in content {
+  let mut images = Vec::new();
+  for (index, entry) in content.iter().enumerate() {
     match entry.get("type").and_then(Value::as_str) {
       Some("text") => text.push_str(entry.get("text")?.as_str()?),
-      Some("image") if string_field(entry, "image_url").is_some() => {}
-      Some("local_image" | "local_audio") if string_field(entry, "path").is_some() => {}
+      Some("image" | "local_image") => images.push(super::images::content_image(entry, index)?),
+      Some("local_audio") if string_field(entry, "path").is_some() => {}
       Some("audio") if string_field(entry, "audio_url").is_some() => {}
       Some("skill" | "mention") if string_field(entry, "name").is_some() && string_field(entry, "path").is_some() => {}
       Some(_) => return None,
       None => return None,
     }
   }
-  if text.is_empty() || matches!(phase, Phase::Started) {
+  if (text.is_empty() && images.is_empty()) || matches!(phase, Phase::Started) {
     return Some(vec![item_lifecycle_metadata(
       session_id,
       lifecycle_type,
@@ -228,14 +229,11 @@ fn normalize_user_item(
       timestamp,
     )]);
   }
-  Some(vec![message_event(
-    session_id,
-    Some(message_id),
-    Role::User,
-    phase,
-    text,
-    timestamp,
-  )])
+  let mut event = message_event(session_id, Some(message_id), Role::User, phase, text, timestamp);
+  if let AgentEvent::Message(message) = &mut event {
+    message.images = images;
+  }
+  Some(vec![event])
 }
 
 fn normalize_canonical_agent_message(
@@ -283,6 +281,7 @@ fn normalize_canonical_agent_message(
     )]);
   }
   Some(vec![AgentEvent::Message(MessageEvent {
+    images: Vec::new(),
     provenance: None,
     provider: Provider::Codex,
     session_id,

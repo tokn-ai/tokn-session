@@ -14,54 +14,52 @@ impl ViewerService {
       && self.relay.status().settings.mode != crate::relay::RelayMode::External
       && let Some(status) = self.managed_pi.checked_input_status(&request.session_key).await
     {
-      return Ok(match status {
-        Ok(status) => SessionInputStatus {
-          available: true,
+      let resume_required = status.as_ref().is_ok_and(|status| status.resume_required);
+      return Ok(input_status_response(
+        status.map(|status| input::InputCapability {
           message: status.message,
-          max_length: MAX_INPUT_LENGTH,
-          resume_required: status.resume_required,
-        },
-        Err(error) => SessionInputStatus {
-          available: false,
-          message: error.message,
-          max_length: MAX_INPUT_LENGTH,
-          resume_required: false,
-        },
-      });
+          images_available: status.images_available,
+        }),
+        resume_required,
+      ));
     }
     let service = self.clone();
     let target = tokio::task::spawn_blocking(move || service.resolve_input_target(&request.session_key))
       .await
       .map_err(|_| "Could not check session input")?;
     let status = match target {
-      Ok(target) => input::status(&target).await.map_err(|error| error.message),
-      Err(error) => Err(error),
+      Ok(target) => input::status(&target).await,
+      Err(error) => Err(input::DeliveryError::not_sent(error)),
     };
-    Ok(match status {
-      Ok(message) => SessionInputStatus {
-        available: true,
-        message,
-        max_length: MAX_INPUT_LENGTH,
-        resume_required: false,
-      },
-      Err(message) => SessionInputStatus {
-        available: false,
-        message,
-        max_length: MAX_INPUT_LENGTH,
-        resume_required: false,
-      },
-    })
+    Ok(input_status_response(status, false))
   }
 
   pub async fn submit_session_input(
     &self,
     mut request: SubmitSessionInputRequest,
   ) -> Result<SubmitSessionInputResponse, String> {
-    input::validate_request(&mut request)?;
+    if let Err(message) = input::validate_request(&mut request) {
+      // Validation never admits or modifies a broker receipt. A previous
+      // uncertain token remains recorded and cannot be replayed by this error.
+      return Ok(SubmitSessionInputResponse {
+        request_id: request.request_id,
+        status: InputDeliveryStatus::NotSent,
+        message,
+      });
+    }
     if self.session_scope.is_none()
       && self.relay.status().settings.mode != crate::relay::RelayMode::External
       && let Some(status) = self.managed_pi.input_status(&request.session_key)
     {
+      let locator = decode_session_key(&request.session_key)?;
+      let target = InputTarget {
+        provider: locator.provider,
+        session_id: locator.session_id,
+        session_file: locator.source_path,
+      };
+      if let Some(receipt) = self.input_broker.receipt(&target, &request) {
+        return Ok(receipt);
+      }
       if let Err(error) = status {
         return Ok(SubmitSessionInputResponse {
           request_id: request.request_id,
@@ -69,11 +67,18 @@ impl ViewerService {
           message: error.message,
         });
       }
-      let locator = decode_session_key(&request.session_key)?;
-      let target = InputTarget {
-        provider: locator.provider,
-        session_id: locator.session_id,
-        session_file: locator.source_path,
+      let images = match self
+        .resolve_message_images(&request.session_key, &request.image_ids, target.provider)
+        .await
+      {
+        Ok(images) => images,
+        Err(message) => {
+          return Ok(SubmitSessionInputResponse {
+            request_id: request.request_id,
+            status: InputDeliveryStatus::NotSent,
+            message,
+          });
+        }
       };
       let manager = self.managed_pi.clone();
       let session_key = request.session_key.clone();
@@ -83,7 +88,9 @@ impl ViewerService {
         self
           .input_broker
           .submit_custom(&target, request, async move {
-            manager.submit_owned_input(&session_key, &request_id, &text).await
+            manager
+              .submit_owned_input_images(&session_key, &request_id, &text, images)
+              .await
           })
           .await,
       );
@@ -103,7 +110,50 @@ impl ViewerService {
         });
       }
     };
-    Ok(self.input_broker.submit(target, request).await)
+    if let Some(receipt) = self.input_broker.receipt(&target, &request) {
+      return Ok(receipt);
+    }
+    let images = match self
+      .resolve_message_images(&request.session_key, &request.image_ids, target.provider)
+      .await
+    {
+      Ok(images) => images,
+      Err(message) => {
+        return Ok(SubmitSessionInputResponse {
+          request_id: request.request_id,
+          status: InputDeliveryStatus::NotSent,
+          message,
+        });
+      }
+    };
+    Ok(self.input_broker.submit_images(target, request, images).await)
+  }
+
+  async fn resolve_message_images(
+    &self,
+    session_key: &str,
+    image_ids: &[String],
+    provider: ViewerProvider,
+  ) -> Result<Vec<crate::images::ResolvedImage>, String> {
+    if image_ids.is_empty() {
+      return Ok(Vec::new());
+    }
+    let store = self.images.clone();
+    let target = crate::images::ImageTarget::Session {
+      session_key: session_key.into(),
+    };
+    let ids = image_ids.to_vec();
+    tokio::task::spawn_blocking(move || {
+      let images = store.resolve(&target, &ids)?;
+      // Codex reads these paths after IPC admission. Pi receives embedded
+      // bytes owned by detached delivery work, so its staging can expire.
+      if provider == ViewerProvider::Codex {
+        store.retain(&ids)?;
+      }
+      Ok(images)
+    })
+    .await
+    .map_err(|_| "Could not load image attachments".to_string())?
   }
 
   pub(super) fn resolve_input_target(&self, session_key: &str) -> Result<InputTarget, String> {
@@ -158,6 +208,33 @@ impl ViewerService {
 mod tests {
   use super::*;
 
+  #[test]
+  fn input_status_preserves_image_support_independently_of_worker_resume() {
+    for (images_available, resume_required) in [(true, true), (false, true), (true, false)] {
+      let status = input_status_response(
+        Ok(input::InputCapability {
+          message: "Ready for a new message".into(),
+          images_available,
+        }),
+        resume_required,
+      );
+      let wire = serde_json::to_value(status).unwrap();
+      assert_eq!(wire["available"], true);
+      assert_eq!(wire["images_available"], images_available);
+      if resume_required {
+        assert_eq!(wire["resume_required"], true);
+      } else {
+        assert!(wire.get("resume_required").is_none());
+      }
+      assert!(!wire["image_mime_types"].as_array().unwrap().is_empty());
+    }
+    let unavailable = input_status_response(Err(input::DeliveryError::not_sent("Worker unavailable")), true);
+    assert!(!unavailable.available);
+    assert!(!unavailable.images_available);
+    assert!(!unavailable.resume_required);
+    assert_eq!(unavailable.message, "Worker unavailable");
+  }
+
   struct HeaderRepository(Mutex<SessionHeader>);
 
   impl ViewerRepository for HeaderRepository {
@@ -205,6 +282,99 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn only_codex_paths_require_permanent_retention_before_delivery() {
+    use crate::images::{ImageTarget, ReleaseImageUploadRequest, UploadImageChunkRequest};
+    use base64::Engine;
+    for provider in [ViewerProvider::Codex, ViewerProvider::Pi] {
+      let root = tempfile::tempdir().unwrap();
+      let service = ViewerService::native(root.path().join("index.sqlite")).unwrap();
+      let target = ImageTarget::Session {
+        session_key: "synthetic-session".into(),
+      };
+      let mut encoded = std::io::Cursor::new(Vec::new());
+      image::DynamicImage::new_rgb8(1, 1)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .unwrap();
+      let bytes = encoded.into_inner();
+      let upload_id = uuid::Uuid::new_v4().to_string();
+      let uploaded = service
+        .images
+        .upload(UploadImageChunkRequest {
+          target: target.clone(),
+          upload_id: upload_id.clone(),
+          offset: 0,
+          total_bytes: bytes.len(),
+          mime_type: "image/png".into(),
+          name: None,
+          data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        })
+        .unwrap();
+      let ids = vec![uploaded.image_id.unwrap()];
+      let resolved = service
+        .resolve_message_images("synthetic-session", &ids, provider)
+        .await
+        .unwrap();
+      service
+        .images
+        .release(ReleaseImageUploadRequest {
+          target: target.clone(),
+          upload_id,
+        })
+        .unwrap();
+      assert_eq!(
+        resolved[0].bytes.as_slice(),
+        bytes.as_slice(),
+        "Pi delivery retains bytes independently of its staged file"
+      );
+      assert_eq!(
+        service.images.resolve(&target, &ids).is_ok(),
+        provider == ViewerProvider::Codex
+      );
+      assert_eq!(resolved[0].path.exists(), provider == ViewerProvider::Codex);
+    }
+  }
+
+  #[tokio::test]
+  async fn invalid_input_is_not_sent_and_does_not_replace_an_uncertain_receipt() {
+    let root = tempfile::tempdir().unwrap();
+    let service = ViewerService::native(root.path().join("index.sqlite")).unwrap();
+    let target = InputTarget {
+      provider: ViewerProvider::Codex,
+      session_id: "owned".into(),
+      session_file: root.path().join("session.jsonl"),
+    };
+    let request = SubmitSessionInputRequest {
+      session_key: "owned-session".into(),
+      request_id: uuid::Uuid::new_v4().to_string(),
+      text: "caption".into(),
+      image_ids: vec![uuid::Uuid::new_v4().to_string()],
+    };
+    service
+      .input_broker
+      .submit_custom(&target, request.clone(), async {
+        Err(input::DeliveryError::uncertain("connection ended after writing"))
+      })
+      .await;
+    let mut invalid = request.clone();
+    invalid.image_ids = vec!["/client/path.png".into()];
+    assert_eq!(
+      service.submit_session_input(invalid).await.unwrap().status,
+      InputDeliveryStatus::NotSent
+    );
+    assert_eq!(
+      service.input_broker.receipt(&target, &request).unwrap().status,
+      InputDeliveryStatus::Unknown
+    );
+    let result = service
+      .input_broker
+      .submit_custom(&target, request, async {
+        panic!("uncertain receipt must never replay")
+      })
+      .await;
+    assert_eq!(result.status, InputDeliveryStatus::Unknown);
+  }
+
+  #[tokio::test]
   async fn unsupported_and_forged_targets_are_unavailable_without_delivery() {
     let root = tempfile::tempdir().unwrap();
     let service = ViewerService::native(root.path().join("index.sqlite")).unwrap();
@@ -220,9 +390,34 @@ mod tests {
         session_key: "forged-key".into(),
         request_id: uuid::Uuid::new_v4().to_string(),
         text: "hello".into(),
+        image_ids: Vec::new(),
       })
       .await
       .unwrap();
     assert_eq!(result.status, InputDeliveryStatus::NotSent);
+  }
+}
+
+fn input_status_response(
+  status: Result<input::InputCapability, input::DeliveryError>,
+  resume_required: bool,
+) -> SessionInputStatus {
+  let (available, message, images_available) = match status {
+    Ok(capability) => (true, capability.message, capability.images_available),
+    Err(error) => (false, error.message, false),
+  };
+  SessionInputStatus {
+    available,
+    message,
+    max_length: MAX_INPUT_LENGTH,
+    resume_required: available && resume_required,
+    images_available,
+    max_images: crate::images::MAX_IMAGES,
+    max_image_bytes: crate::images::MAX_IMAGE_BYTES,
+    max_total_image_bytes: crate::images::MAX_TOTAL_IMAGE_BYTES,
+    image_mime_types: crate::images::IMAGE_MIME_TYPES
+      .iter()
+      .map(|mime| (*mime).into())
+      .collect(),
   }
 }

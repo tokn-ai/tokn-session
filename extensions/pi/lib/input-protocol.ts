@@ -27,6 +27,14 @@ export interface PiInputTextContent {
   text: string;
 }
 
+export interface PiInputImageContent {
+  type: "image";
+  data: string;
+  mimeType: string;
+}
+
+export type PiInputContent = PiInputTextContent | PiInputImageContent;
+
 export type PiInputBridgeRequest =
   | {
       protocol: typeof PI_INPUT_PROTOCOL_VERSION;
@@ -46,7 +54,7 @@ export type PiInputBridgeRequest =
       session_file: string;
       instance_id: string;
       delivery: PiInputDelivery;
-      content: PiInputTextContent[];
+      content: PiInputContent[];
     };
 
 export type PiInputBridgeResponse =
@@ -58,6 +66,7 @@ export type PiInputBridgeResponse =
       session_file: string;
       instance_id: string;
       state: "idle" | "busy";
+      images_available?: boolean;
     }
   | {
       protocol: typeof PI_INPUT_PROTOCOL_VERSION;

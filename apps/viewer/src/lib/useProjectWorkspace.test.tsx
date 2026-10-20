@@ -224,3 +224,74 @@ describe("local project workspace", () => {
     expect(result.current.pending_dialog_session).toBeNull();
   });
 });
+
+it("uploads an image-only Pi prompt once and retains its IDs across an uncertain start", async () => {
+  const host = connection(); const original = host.invoke.getMockImplementation()!;
+  let creates = 0;
+  host.invoke.mockImplementation(async (command, payload) => {
+    if (command === "upload_image_chunk") {
+      const request = payload?.request as { upload_id: string; total_bytes: number };
+      return { upload_id: request.upload_id, received_bytes: request.total_bytes, image_id: "pi-image" };
+    }
+    if (command === "create_project_session") {
+      creates += 1;
+      if (creates === 1) throw new Error("Acknowledgement lost");
+    }
+    return original(command, payload);
+  });
+  const images = [{ draft_id: "draft", url: "blob:draft", file: new File(["image"], "screen.png", { type: "image/png" }) }];
+  const { result } = renderHook(() => useProjectWorkspace(options(), host.transport));
+  await waitFor(() => expect(result.current.workspace?.available).toBe(true));
+  await act(async () => { await result.current.createSession("project", "", images); });
+  expect(result.current.creation_uncertain).toBe(true);
+  expect(host.invoke.mock.calls.filter(([command]) => command === "release_image_upload")).toHaveLength(0);
+  await act(async () => { await result.current.createSession("project", "", images); });
+  const requests = host.invoke.mock.calls.filter(([command]) => command === "create_project_session");
+  expect(requests).toHaveLength(2);
+  expect(requests[0][1]?.request).toEqual(requests[1][1]?.request);
+  expect(requests[0][1]?.request).toMatchObject({ project_id: "project", prompt: "", image_ids: ["pi-image"] });
+  expect(host.invoke.mock.calls.filter(([command]) => command === "upload_image_chunk")).toHaveLength(1);
+  expect(host.invoke.mock.calls.filter(([command]) => command === "release_image_upload")).toHaveLength(1);
+});
+
+it("releases project staging tokens after a definite creation rejection", async () => {
+  const host = connection(); const original = host.invoke.getMockImplementation()!;
+  host.invoke.mockImplementation(async (command, payload) => {
+    if (command === "upload_image_chunk") {
+      const request = payload?.request as { upload_id: string; total_bytes: number };
+      return { upload_id: request.upload_id, received_bytes: request.total_bytes, image_id: "pi-image" };
+    }
+    if (command === "release_image_upload") return undefined;
+    if (command === "create_project_session") throw { message: "Model unavailable", may_have_started: false };
+    return original(command, payload);
+  });
+  const images = [{ draft_id: "draft", url: "blob:draft", file: new File(["image"], "a.png", { type: "image/png" }) }];
+  const { result } = renderHook(() => useProjectWorkspace(options(), host.transport));
+  await waitFor(() => expect(result.current.workspace?.available).toBe(true));
+  await act(async () => { await result.current.createSession("project", "", images); });
+  expect(result.current.creation_uncertain).toBe(false);
+  expect(result.current.creation_error).toBe("Model unavailable");
+  const upload = host.invoke.mock.calls.find(([command]) => command === "upload_image_chunk")![1]!.request as { upload_id: string };
+  expect(host.invoke).toHaveBeenCalledWith("release_image_upload", { request: { target: { type: "project", project_id: "project" }, upload_id: upload.upload_id } });
+});
+
+it("releases an abandoned project upload without starting a provider session", async () => {
+  const host = connection(); const original = host.invoke.getMockImplementation()!;
+  const chunk = deferred<{ upload_id: string; received_bytes: number; image_id: string }>();
+  host.invoke.mockImplementation(async (command, payload) => {
+    if (command === "upload_image_chunk") return chunk.promise;
+    if (command === "release_image_upload") return undefined;
+    return original(command, payload);
+  });
+  const images = [{ draft_id: "draft", url: "blob:draft", file: new File(["image"], "a.png", { type: "image/png" }) }];
+  const { result, unmount } = renderHook(() => useProjectWorkspace(options(), host.transport));
+  await waitFor(() => expect(result.current.workspace?.available).toBe(true));
+  let pending!: Promise<void>;
+  act(() => { pending = result.current.createSession("project", "", images); });
+  await waitFor(() => expect(host.invoke.mock.calls.some(([command]) => command === "upload_image_chunk")).toBe(true));
+  const request = host.invoke.mock.calls.find(([command]) => command === "upload_image_chunk")![1]!.request as { upload_id: string; total_bytes: number };
+  unmount();
+  expect(host.invoke).toHaveBeenCalledWith("release_image_upload", { request: { target: { type: "project", project_id: "project" }, upload_id: request.upload_id } });
+  await act(async () => { chunk.resolve({ upload_id: request.upload_id, received_bytes: request.total_bytes, image_id: "unused" }); await pending; });
+  expect(host.invoke.mock.calls.filter(([command]) => command === "create_project_session")).toHaveLength(0);
+});

@@ -36,6 +36,7 @@ use crate::repository::{NativeRepository, SessionBodyIndexing, ViewerRepository}
 mod agent_activity;
 mod compaction;
 mod event_filter;
+mod image_resources;
 mod input;
 mod managed_sessions;
 mod notifications;
@@ -92,6 +93,7 @@ pub struct ViewerService {
   failed_body_jobs: Arc<Mutex<HashMap<(SourceKey, String), FailedBodyJob>>>,
   loaded_session_cache: Arc<Mutex<Option<CachedSession>>>,
   input_broker: crate::input::InputBroker,
+  pub(crate) images: crate::images::ImageStore,
   pub(crate) managed_pi: crate::managed_pi::ManagedPiSessions,
   question_claims: Arc<Mutex<question_input::QuestionClaims>>,
   pub(crate) updates: Arc<Mutex<crate::updates::UpdateStore>>,
@@ -677,6 +679,15 @@ impl ViewerService {
       .join("viewer/managed-sessions.json");
     service.managed_pi = crate::managed_pi::ManagedPiSessions::new(Some(managed_state))
       .unwrap_or_else(crate::managed_pi::ManagedPiSessions::disabled);
+    let image_root = index_path
+      .as_ref()
+      .parent()
+      .unwrap_or_else(|| Path::new("."))
+      .join("viewer/images");
+    // An unusable attachment directory must not prevent opening text history.
+    // Uploads report the storage error through their own action state.
+    service.images = crate::images::ImageStore::persistent(image_root.clone())
+      .unwrap_or_else(|_| crate::images::ImageStore::configured(image_root));
     Ok(service)
   }
 
@@ -715,6 +726,7 @@ impl ViewerService {
       #[cfg(test)]
       notification_work_stats: Arc::new(Mutex::new(notifications::NotificationWorkStats::default())),
       input_broker: crate::input::InputBroker::default(),
+      images: crate::images::ImageStore::temporary().expect("temporary image storage should be available"),
       managed_pi: crate::managed_pi::ManagedPiSessions::new(None)
         .unwrap_or_else(crate::managed_pi::ManagedPiSessions::disabled),
       question_claims: Arc::new(Mutex::new(question_input::QuestionClaims::default())),
@@ -3250,13 +3262,18 @@ fn source_event_detail(event_key: String, event: &AgentEvent) -> Result<EventDet
     .transpose()?;
   let mut normalized =
     serde_json::to_value(event).map_err(|error| format!("failed to serialize normalized event: {error}"))?;
+  if matches!(event, AgentEvent::Message(message) if !message.images.is_empty()) {
+    normalized["images"] =
+      serde_json::to_value(image_resources::message_images(event)).map_err(|_| "Could not serialize image metadata")?;
+  }
   remove_embedded_native(&mut normalized);
   let normalized = bounded_detail_value(normalized, "normalized_event")?;
   let content_revision = match event {
+    AgentEvent::Message(message) if !message.images.is_empty() => Some(image_resources::message_revision(message)),
     AgentEvent::Message(message)
       if message.role == Role::Assistant && message.text.chars().count() > MAX_MESSAGE_SUMMARY_CHARS =>
     {
-      Some(message_content_revision(&message.text))
+      Some(image_resources::message_revision(message))
     }
     _ => None,
   };
@@ -3431,8 +3448,12 @@ fn tool_operation_native_detail(operation: &ToolOperation, events: &[AgentEvent]
 }
 
 fn tool_operation_output_preview(operation: &ToolOperation) -> Option<ToolOutputPreview> {
-  let output = operation.output.as_ref().filter(|value| !value.is_null())?;
-  let sections = project_output(output, 0);
+  let mut output = operation.output.as_ref().filter(|value| !value.is_null())?.clone();
+  crate::images::sanitize_display_value(&mut output);
+  if operation.tool_name.as_deref() == Some("image_generation") {
+    return None;
+  }
+  let sections = project_output(&output, 0);
   let source_event_index = *operation.source_event_indices.first()?;
   (!sections.is_empty()).then(|| bound_tool_output(sections, source_event_index))
 }
@@ -4657,6 +4678,7 @@ fn trajectory_event_summary(trajectory: &Trajectory, events: &[AgentEvent]) -> E
   let summary = trajectory_summary(&card);
 
   EventSummary {
+    images: Vec::new(),
     child_keys: Some(
       trajectory
         .entries
@@ -4928,10 +4950,15 @@ fn event_summary_with_delegation_targets(
     MAX_TECHNICAL_SUMMARY_CHARS
   };
   let (summary, summary_truncated) = truncate_with_flag(summary, summary_max_chars);
-  let content_revision = if summary_truncated {
+  let content_revision = if !hidden && matches!(event, AgentEvent::Message(message) if !message.images.is_empty()) {
+    match event {
+      AgentEvent::Message(message) => Some(image_resources::message_revision(message)),
+      _ => None,
+    }
+  } else if summary_truncated {
     match event {
       AgentEvent::Message(message) if !hidden && message.role == Role::Assistant => {
-        Some(message_content_revision(&message.text))
+        Some(image_resources::message_revision(message))
       }
       _ => None,
     }
@@ -4947,6 +4974,7 @@ fn event_summary_with_delegation_targets(
     })
     .flatten();
   EventSummary {
+    images: image_resources::message_images(event),
     child_keys: None,
     slot_key: None,
     event_key: encode_event_key(index),
@@ -4996,6 +5024,7 @@ fn tool_operation_event_summary(source_event_index: usize, operation: &ToolOpera
   let (summary, summary_truncated) =
     truncate_with_flag(tool_operation_summary(operation, &tool), MAX_TECHNICAL_SUMMARY_CHARS);
   EventSummary {
+    images: Vec::new(),
     child_keys: None,
     slot_key: None,
     event_key: encode_event_key(source_event_index),
@@ -5469,8 +5498,12 @@ fn tool_output_preview(events: &[AgentEvent], index: usize) -> Option<ToolOutput
 }
 
 fn projected_event_output(event: &ToolCallEvent) -> Option<Vec<ToolOutputSection>> {
-  let output = event.output.as_ref().filter(|value| !value.is_null())?;
-  let sections = project_output(output, 0);
+  if event.tool_name.as_deref() == Some("image_generation") {
+    return None;
+  }
+  let mut output = event.output.as_ref().filter(|value| !value.is_null())?.clone();
+  crate::images::sanitize_display_value(&mut output);
+  let sections = project_output(&output, 0);
   (!sections.is_empty()).then_some(sections)
 }
 
@@ -5827,10 +5860,11 @@ fn bounded_detail_value(value: Value, representation: &'static str) -> Result<Va
 }
 
 fn bounded_detail_value_with_limit(
-  value: Value,
+  mut value: Value,
   representation: &'static str,
   limit_bytes: usize,
 ) -> Result<Value, String> {
+  crate::images::sanitize_display_value(&mut value);
   let original_size_bytes = serde_json::to_vec(&value)
     .map_err(|error| format!("failed to size {representation} detail: {error}"))?
     .len();
@@ -5961,6 +5995,7 @@ mod tests {
           .enumerate()
           .map(|(index, message)| {
             AgentEvent::Message(MessageEvent {
+              images: Vec::new(),
               provenance: message.hidden.then(|| MessageProvenance {
                 source: json!({"fixture": true}),
                 display: Some(false),
@@ -10211,6 +10246,7 @@ mod tests {
       timestamp: None,
     });
     let hidden_message = AgentEvent::Message(MessageEvent {
+      images: Vec::new(),
       provenance: Some(MessageProvenance {
         source: json!({"kind": "fixture"}),
         display: Some(false),
@@ -10932,6 +10968,7 @@ mod tests {
         None,
       ),
       AgentEvent::Message(MessageEvent {
+        images: Vec::new(),
         provenance: None,
         provider: Provider::Codex,
         session_id: Some("fixture".to_string()),
@@ -11986,6 +12023,7 @@ mod tests {
   fn oversized_detail_representations_are_replaced_with_bounded_json_placeholders() {
     let oversized = "x".repeat(MAX_DETAIL_VALUE_BYTES + 1);
     let event = AgentEvent::Message(MessageEvent {
+      images: Vec::new(),
       provenance: Some(MessageProvenance {
         source: json!({"kind": "fixture"}),
         display: None,
@@ -12037,6 +12075,7 @@ mod tests {
       (0..count)
         .map(|index| {
           AgentEvent::Message(MessageEvent {
+            images: Vec::new(),
             provenance: None,
             provider: Provider::Codex,
             session_id: Some("fixture".to_string()),
@@ -12059,6 +12098,7 @@ mod tests {
 
   pub(super) fn message_event_with_role(text: &str, role: Role, delivery: MessageDelivery) -> AgentEvent {
     AgentEvent::Message(MessageEvent {
+      images: Vec::new(),
       provenance: None,
       provider: Provider::Codex,
       session_id: Some("fixture".to_string()),
@@ -12238,6 +12278,7 @@ mod tests {
 
   fn hidden_message_session() -> LoadedSession {
     loaded_session(vec![AgentEvent::Message(MessageEvent {
+      images: Vec::new(),
       provenance: Some(MessageProvenance {
         source: json!({"kind": "extension"}),
         display: Some(false),
