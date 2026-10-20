@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
-  AgentEvent, Phase, Provider, ToolCallEvent, ToolKind, ToolRecordKind, ToolSummary, ToolTransport,
+  AgentEvent, Phase, Provider, RecordedImage, ToolCallEvent, ToolKind, ToolRecordKind, ToolSummary, ToolTransport,
   tool_kind_for_optional_name, tool_summary_for_kind_io,
 };
 
@@ -70,6 +70,15 @@ impl ToolOperationStatus {
   }
 }
 
+/// One image owned by the latest output record of an assembled operation.
+/// Its source position is required to resolve the image against the exact record.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ToolOperationImage {
+  pub source_event_index: usize,
+  #[serde(flatten)]
+  pub image: RecordedImage,
+}
+
 /// One logical tool operation assembled from one or more source records.
 ///
 /// The semantic fields are intentionally value-level, rather than provider
@@ -89,6 +98,8 @@ pub struct ToolOperation {
   pub summary: Option<ToolSummary>,
   pub input: Option<Value>,
   pub output: Option<Value>,
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub images: Vec<ToolOperationImage>,
   pub is_error: Option<bool>,
   pub status: ToolOperationStatus,
   pub started_at: Option<String>,
@@ -278,6 +289,7 @@ impl ToolOperationAssembler {
       summary: event.summary.clone(),
       input: event.input.clone(),
       output: event.output.clone(),
+      images: source_images(source_event_index, event),
       is_error: event.is_error,
       status: status_for_first_record(event),
       started_at: event.timestamp.clone(),
@@ -323,6 +335,11 @@ impl ToolOperationAssembler {
     }
     if event.output.is_some() {
       operation.output = event.output.clone();
+    }
+    if event.output.is_some() || !event.images.is_empty() {
+      // A new output owns its complete image set, including an explicitly
+      // empty output. Status-only progress must not retire an earlier image.
+      operation.images = source_images(source_event_index, event);
     }
     if event.is_error.is_some() {
       operation.is_error = event.is_error;
@@ -394,6 +411,18 @@ pub fn assemble_tool_operations(events: &[AgentEvent]) -> Vec<ToolOperation> {
     assembler.ingest(source_event_index, event);
   }
   assembler.into_operations()
+}
+
+fn source_images(source_event_index: usize, event: &ToolCallEvent) -> Vec<ToolOperationImage> {
+  event
+    .images
+    .iter()
+    .cloned()
+    .map(|image| ToolOperationImage {
+      source_event_index,
+      image,
+    })
+    .collect()
 }
 
 fn source_event_key(source_event_index: usize, event: &ToolCallEvent) -> ToolSourceEventKey {
@@ -572,6 +601,7 @@ mod tests {
     output: Option<Value>,
   ) -> AgentEvent {
     AgentEvent::ToolCall(ToolCallEvent {
+      images: Vec::new(),
       provider: Provider::Codex,
       session_id: Some("session-1".to_string()),
       turn_id: Some("turn-1".to_string()),
@@ -595,6 +625,132 @@ mod tests {
       native: None,
       timestamp: None,
     })
+  }
+
+  fn image_tool(record_kind: ToolRecordKind, call_id: Option<&str>, output: Option<Value>, ids: &[&str]) -> AgentEvent {
+    let mut event = tool(record_kind, call_id, None, output);
+    let AgentEvent::ToolCall(tool) = &mut event else {
+      unreachable!()
+    };
+    tool.images = ids
+      .iter()
+      .map(|id| RecordedImage {
+        image_id: (*id).into(),
+        mime_type: Some("image/png".into()),
+        name: None,
+        source: crate::RecordedImageSource::Base64 {
+          data: format!("payload-{id}"),
+        },
+      })
+      .collect();
+    event
+  }
+
+  #[test]
+  fn latest_output_replaces_images_but_status_only_progress_preserves_them() {
+    let mut assembler = ToolOperationAssembler::new();
+    assembler.ingest(0, &tool(ToolRecordKind::Invocation, Some("call-1"), None, None));
+    assembler.ingest(
+      1,
+      &image_tool(
+        ToolRecordKind::Progress,
+        Some("call-1"),
+        Some(json!("first output")),
+        &["first"],
+      ),
+    );
+    assembler.ingest(2, &image_tool(ToolRecordKind::Progress, Some("call-1"), None, &[]));
+    let operation = &assembler.operations()[0];
+    assert_eq!(operation.images[0].image.image_id, "first");
+    assert_eq!(operation.images[0].source_event_index, 1);
+
+    assembler.ingest(
+      3,
+      &image_tool(
+        ToolRecordKind::Progress,
+        Some("call-1"),
+        None,
+        &["replacement", "second"],
+      ),
+    );
+    let operation = &assembler.operations()[0];
+    assert_eq!(
+      operation
+        .images
+        .iter()
+        .map(|image| image.image.image_id.as_str())
+        .collect::<Vec<_>>(),
+      ["replacement", "second"]
+    );
+    assert!(operation.images.iter().all(|image| image.source_event_index == 3));
+    let serialized = serde_json::to_value(operation).unwrap();
+    assert_eq!(serialized["images"][0]["source_event_index"], 3);
+    assert_eq!(serialized["images"][0]["image_id"], "replacement");
+    assert!(
+      serialized["images"][0].get("image").is_none(),
+      "recorded image fields stay flattened"
+    );
+
+    assembler.ingest(
+      4,
+      &image_tool(ToolRecordKind::Progress, Some("call-1"), Some(json!("")), &[]),
+    );
+    assert!(
+      assembler.operations()[0].images.is_empty(),
+      "an explicit output without images clears earlier attachments"
+    );
+    assert!(
+      serde_json::to_value(&assembler.operations()[0])
+        .unwrap()
+        .get("images")
+        .is_none()
+    );
+    assembler.ingest(5, &image_tool(ToolRecordKind::Result, Some("call-1"), None, &["final"]));
+    let operation = &assembler.operations()[0];
+    assert!(operation.is_finished());
+    assert_eq!(operation.images[0].image.image_id, "final");
+    assert_eq!(operation.images[0].source_event_index, 5);
+  }
+
+  #[test]
+  fn image_only_tool_results_remain_completed_and_keep_their_source_record() {
+    let events = [image_tool(
+      ToolRecordKind::Result,
+      Some("image-call"),
+      None,
+      &["image.v1.0"],
+    )];
+    let operations = assemble_tool_operations(&events);
+    assert_eq!(operations.len(), 1);
+    assert!(operations[0].is_finished());
+    assert!(operations[0].output.is_none());
+    assert_eq!(operations[0].images.len(), 1);
+    assert_eq!(operations[0].images[0].source_event_index, 0);
+  }
+
+  #[test]
+  fn image_ids_never_join_outputs_to_a_different_call_or_guess_an_orphan_owner() {
+    let events = [
+      tool(ToolRecordKind::Invocation, Some("first-call"), None, None),
+      tool(ToolRecordKind::Invocation, Some("second-call"), None, None),
+      image_tool(ToolRecordKind::Result, Some("second-call"), None, &["image.v1.0"]),
+      image_tool(ToolRecordKind::Result, None, None, &["image.v1.0"]),
+      image_tool(ToolRecordKind::Result, Some("first-call"), None, &["image.v1.0"]),
+    ];
+    let operations = assemble_tool_operations(&events);
+    assert_eq!(operations.len(), 3);
+    assert_eq!(operations[0].tool_call_id.as_deref(), Some("first-call"));
+    assert_eq!(operations[0].images[0].source_event_index, 4);
+    assert_eq!(operations[1].tool_call_id.as_deref(), Some("second-call"));
+    assert_eq!(operations[1].images[0].source_event_index, 2);
+    assert!(matches!(
+      operations[2].id,
+      ToolOperationId::Uncorrelated {
+        source_event_index: 3,
+        ..
+      }
+    ));
+    assert_eq!(operations[2].images[0].source_event_index, 3);
   }
 
   #[test]

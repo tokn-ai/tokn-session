@@ -161,6 +161,21 @@ mod tests {
   }
 
   #[test]
+  fn live_completed_tool_images_use_the_same_typed_projection_as_history() {
+    let events = OpenCodeLiveNormalizer::normalize_line(r#"{"type":"tool_use","sessionID":"session","part":{"id":"tool","messageID":"assistant","type":"tool","tool":"render","state":{"status":"completed","output":"saved","attachments":[{"type":"file","id":"image","mime":"image/png","url":"data:image/png;base64,YQ=="}]}}}"#).unwrap();
+    let [LiveSessionEvent::Event(AgentEvent::ToolCall(tool))] = &events[..] else {
+      panic!("expected live tool result")
+    };
+    assert_eq!(tool.images.len(), 1);
+    assert_eq!(tool.images[0].image_id, "image");
+    assert!(matches!(
+      &tool.images[0].source,
+      tokn_session_core::RecordedImageSource::DataUrl { .. }
+    ));
+    assert_eq!(tool.output.as_ref().unwrap()["output"], "saved");
+  }
+
+  #[test]
   fn normalizes_tool_use_line_to_semantic_tool_event() {
     let events = OpenCodeLiveNormalizer::normalize_line(
       r#"{"type":"tool_use","timestamp":1710000000001,"sessionID":"ses_123","part":{"id":"tool_1","sessionID":"ses_123","messageID":"msg_2","type":"tool","tool":"bash","state":{"status":"completed","input":{"command":"cargo test"},"output":"ok","metadata":{"exit":0}}}}"#,

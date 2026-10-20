@@ -465,8 +465,8 @@ pub struct QuestionSelectionSummary {
 
 #[derive(Debug, Serialize)]
 pub struct EventSummary {
-  #[serde(default, skip_serializing_if = "Vec::is_empty")]
-  pub images: Vec<crate::images::MessageImageSummary>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub images: Option<Vec<crate::images::MessageImageSummary>>,
   /// Recorded selections only; absent when no reply can be correlated safely.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub question_selections: Option<Vec<QuestionSelectionSummary>>,

@@ -3,7 +3,7 @@ use crate::images::{
   self, ImageAvailability, ImageTarget, LoadSessionImageRequest, MessageImageSummary, ReleaseImageUploadRequest,
   SessionImage, UploadImageChunkRequest, UploadImageChunkResponse,
 };
-use tokn_session_core::{MessageImage, MessageImageSource};
+use tokn_session_core::{RecordedImage, RecordedImageSource};
 
 impl ViewerService {
   /// Image bytes are an explicit resource read, never part of delivery levels.
@@ -14,18 +14,14 @@ impl ViewerService {
     let identity = self.window_identity(&locator, &loaded, request.event_key.starts_with("window.v1."))?;
     let local = identity.local_key(&request.event_key)?;
     let index = decode_event_key(&local)?;
-    let event = loaded.events.get(index).ok_or("Image message is no longer available")?;
+    let event = loaded.events.get(index).ok_or("Image event is no longer available")?;
     if event.is_hidden() {
-      return Err("Image message is unavailable".into());
+      return Err("Image event is unavailable".into());
     }
-    let AgentEvent::Message(message) = event else {
-      return Err("This event has no message images".into());
-    };
-    let mut matching = message
-      .images
+    let mut matching = recorded_images(event)
       .iter()
       .filter(|image| display_image_id(&image.image_id) == request.image_id);
-    let image = matching.next().ok_or("Image is no longer available in this message")?;
+    let image = matching.next().ok_or("Image is no longer available in this event")?;
     if matching.next().is_some() {
       return Err("Image identity is ambiguous".into());
     }
@@ -81,19 +77,116 @@ impl ViewerService {
   }
 }
 
-pub(super) fn message_images(event: &AgentEvent) -> Vec<MessageImageSummary> {
-  let AgentEvent::Message(message) = event else {
-    return Vec::new();
-  };
+pub(super) fn event_images(event: &AgentEvent) -> Vec<MessageImageSummary> {
   if event.is_hidden() {
     return Vec::new();
   }
-  message.images.iter().take(64).map(image_summary).collect()
+  recorded_images(event).iter().take(64).map(image_summary).collect()
 }
 
-fn image_summary(image: &MessageImage) -> MessageImageSummary {
+pub(super) fn summary_images(event: &AgentEvent) -> Option<Vec<MessageImageSummary>> {
+  if !event.is_hidden() && (matches!(event, AgentEvent::ToolCall(_)) || !recorded_images(event).is_empty()) {
+    Some(event_images(event))
+  } else {
+    None
+  }
+}
+
+fn recorded_images(event: &AgentEvent) -> &[RecordedImage] {
+  match event {
+    AgentEvent::Message(message) => &message.images,
+    AgentEvent::ToolCall(tool) => &tool.images,
+    _ => &[],
+  }
+}
+
+pub(super) fn operation_images(operation: &ToolOperation) -> Vec<MessageImageSummary> {
+  operation
+    .images
+    .iter()
+    .take(64)
+    .map(|image| {
+      let mut summary = image_summary(&image.image);
+      summary.source_event_key = Some(encode_event_key(image.source_event_index));
+      summary
+    })
+    .collect()
+}
+
+pub(super) fn event_image_revision(event: &AgentEvent) -> Option<String> {
+  (!event.is_hidden() && !recorded_images(event).is_empty())
+    .then(|| image_revision(recorded_images(event)))
+    .flatten()
+}
+
+pub(super) fn operation_image_revision(operation: &ToolOperation) -> Option<String> {
+  if operation.images.is_empty() {
+    return None;
+  }
+  // Source keys already identify the owning records. Excluding window-local
+  // positions here preserves the resource revision when older history prepends.
+  image_revision(&operation.images.iter().map(|entry| &entry.image).collect::<Vec<_>>())
+}
+
+pub(super) fn display_tool_output<'a>(
+  output: &Value,
+  tool_name: Option<&str>,
+  images: impl IntoIterator<Item = &'a RecordedImage>,
+) -> Value {
+  let mut output = output.clone();
+  if tool_name == Some("image_generation") {
+    let images = images.into_iter().collect::<Vec<_>>();
+    let is_image_data = |value: &Value| {
+      value.as_str().is_some_and(|text| {
+        images.iter().any(|image| match &image.source {
+          RecordedImageSource::Base64 { data } => text == data,
+          RecordedImageSource::DataUrl { url } => text == url,
+          _ => false,
+        })
+      })
+    };
+    if is_image_data(&output) {
+      return Value::Null;
+    }
+    if let Value::Object(object) = &mut output {
+      if object.get("result").is_some_and(is_image_data) {
+        object.remove("result");
+        // The card already owns operation status; image-only results need no
+        // duplicate JSON box. Other text/error fields remain visible.
+        object.remove("status");
+      }
+      object.remove("saved_path");
+      object.remove("savedPath");
+    }
+  }
+  images::sanitize_display_value(&mut output);
+  output
+}
+
+struct ImageDigest<'a>(&'a mut Sha256);
+
+impl std::io::Write for ImageDigest<'_> {
+  fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+    self.0.update(bytes);
+    Ok(bytes.len())
+  }
+  fn flush(&mut self) -> std::io::Result<()> {
+    Ok(())
+  }
+}
+
+fn image_revision(images: &(impl Serialize + ?Sized)) -> Option<String> {
+  let mut digest = Sha256::new();
+  // Stream into the digest rather than allocating another base64-sized buffer
+  // for every semantic/detail projection of an output image.
+  serde_json::to_writer(ImageDigest(&mut digest), images).ok()?;
+  Some(format!("{:x}", digest.finalize()))
+}
+
+fn image_summary(image: &RecordedImage) -> MessageImageSummary {
   MessageImageSummary {
     image_id: display_image_id(&image.image_id),
+    source_event_key: None,
     mime_type: image
       .mime_type
       .as_ref()
@@ -106,7 +199,7 @@ fn image_summary(image: &MessageImage) -> MessageImageSummary {
         .take(255)
         .collect()
     }),
-    availability: if matches!(image.source, MessageImageSource::Unavailable { .. }) {
+    availability: if matches!(image.source, RecordedImageSource::Unavailable { .. }) {
       ImageAvailability::Unavailable
     } else {
       ImageAvailability::Available
@@ -131,9 +224,7 @@ pub(super) fn message_revision(message: &tokn_session_core::MessageEvent) -> Str
   digest.update([0]);
   // The identity includes source content without publishing it. A changed
   // attachment at a reused legacy event position invalidates frontend blobs.
-  if let Ok(bytes) = serde_json::to_vec(&message.images) {
-    digest.update(bytes);
-  }
+  let _ = serde_json::to_writer(ImageDigest(&mut digest), &message.images);
   format!("{:x}", digest.finalize())
 }
 

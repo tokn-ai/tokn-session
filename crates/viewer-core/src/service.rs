@@ -3261,13 +3261,13 @@ fn source_event_detail(event_key: String, event: &AgentEvent) -> Result<EventDet
     .transpose()?;
   let mut normalized =
     serde_json::to_value(event).map_err(|error| format!("failed to serialize normalized event: {error}"))?;
-  if matches!(event, AgentEvent::Message(message) if !message.images.is_empty()) {
-    normalized["images"] =
-      serde_json::to_value(image_resources::message_images(event)).map_err(|_| "Could not serialize image metadata")?;
+  if let Some(images) = image_resources::summary_images(event) {
+    normalized["images"] = serde_json::to_value(images).map_err(|_| "Could not serialize image metadata")?;
   }
   remove_embedded_native(&mut normalized);
   let normalized = bounded_detail_value(normalized, "normalized_event")?;
   let content_revision = match event {
+    AgentEvent::ToolCall(_) => image_resources::event_image_revision(event),
     AgentEvent::Message(message) if !message.images.is_empty() => Some(image_resources::message_revision(message)),
     AgentEvent::Message(message)
       if message.role == Role::Assistant && message.text.chars().count() > MAX_MESSAGE_SUMMARY_CHARS =>
@@ -3293,6 +3293,8 @@ fn tool_operation_detail(
 ) -> Result<EventDetail, String> {
   let mut normalized = serde_json::to_value(operation)
     .map_err(|error| format!("failed to serialize normalized tool operation: {error}"))?;
+  normalized["images"] = serde_json::to_value(image_resources::operation_images(operation))
+    .map_err(|_| "Could not serialize tool image metadata")?;
   remove_embedded_native(&mut normalized);
   let normalized = bounded_detail_value(normalized, "normalized_tool_operation")?;
   let native = tool_operation_native_detail(operation, events)
@@ -3303,7 +3305,7 @@ fn tool_operation_detail(
   Ok(EventDetail {
     event_key,
     event: normalized,
-    content_revision: None,
+    content_revision: image_resources::operation_image_revision(operation),
     native,
     is_hidden: false,
     tool_output,
@@ -3447,11 +3449,11 @@ fn tool_operation_native_detail(operation: &ToolOperation, events: &[AgentEvent]
 }
 
 fn tool_operation_output_preview(operation: &ToolOperation) -> Option<ToolOutputPreview> {
-  let mut output = operation.output.as_ref().filter(|value| !value.is_null())?.clone();
-  crate::images::sanitize_display_value(&mut output);
-  if operation.tool_name.as_deref() == Some("image_generation") {
-    return None;
-  }
+  let output = image_resources::display_tool_output(
+    operation.output.as_ref().filter(|value| !value.is_null())?,
+    operation.tool_name.as_deref(),
+    operation.images.iter().map(|entry| &entry.image),
+  );
   let sections = project_output(&output, 0);
   let source_event_index = *operation.source_event_indices.first()?;
   (!sections.is_empty()).then(|| bound_tool_output(sections, source_event_index))
@@ -4677,7 +4679,7 @@ fn trajectory_event_summary(trajectory: &Trajectory, events: &[AgentEvent]) -> E
   let summary = trajectory_summary(&card);
 
   EventSummary {
-    images: Vec::new(),
+    images: None,
     child_keys: Some(
       trajectory
         .entries
@@ -4949,7 +4951,9 @@ fn event_summary_with_delegation_targets(
     MAX_TECHNICAL_SUMMARY_CHARS
   };
   let (summary, summary_truncated) = truncate_with_flag(summary, summary_max_chars);
-  let content_revision = if !hidden && matches!(event, AgentEvent::Message(message) if !message.images.is_empty()) {
+  let content_revision = if matches!(event, AgentEvent::ToolCall(_)) {
+    image_resources::event_image_revision(event)
+  } else if !hidden && matches!(event, AgentEvent::Message(message) if !message.images.is_empty()) {
     match event {
       AgentEvent::Message(message) => Some(image_resources::message_revision(message)),
       _ => None,
@@ -4973,7 +4977,7 @@ fn event_summary_with_delegation_targets(
     })
     .flatten();
   EventSummary {
-    images: image_resources::message_images(event),
+    images: image_resources::summary_images(event),
     child_keys: None,
     slot_key: None,
     event_key: encode_event_key(index),
@@ -5023,7 +5027,7 @@ fn tool_operation_event_summary(source_event_index: usize, operation: &ToolOpera
   let (summary, summary_truncated) =
     truncate_with_flag(tool_operation_summary(operation, &tool), MAX_TECHNICAL_SUMMARY_CHARS);
   EventSummary {
-    images: Vec::new(),
+    images: Some(image_resources::operation_images(operation)),
     child_keys: None,
     slot_key: None,
     event_key: encode_event_key(source_event_index),
@@ -5042,7 +5046,7 @@ fn tool_operation_event_summary(source_event_index: usize, operation: &ToolOpera
     title,
     summary,
     summary_truncated,
-    content_revision: None,
+    content_revision: image_resources::operation_image_revision(operation),
     is_hidden: false,
     is_bookkeeping: false,
     // Preserve an unspecified provider error state. A failed assembled
@@ -5497,11 +5501,11 @@ fn tool_output_preview(events: &[AgentEvent], index: usize) -> Option<ToolOutput
 }
 
 fn projected_event_output(event: &ToolCallEvent) -> Option<Vec<ToolOutputSection>> {
-  if event.tool_name.as_deref() == Some("image_generation") {
-    return None;
-  }
-  let mut output = event.output.as_ref().filter(|value| !value.is_null())?.clone();
-  crate::images::sanitize_display_value(&mut output);
+  let output = image_resources::display_tool_output(
+    event.output.as_ref().filter(|value| !value.is_null())?,
+    event.tool_name.as_deref(),
+    event.images.iter(),
+  );
   let sections = project_output(&output, 0);
   (!sections.is_empty()).then_some(sections)
 }
@@ -10785,6 +10789,7 @@ mod tests {
   #[test]
   fn substantive_events_are_exposed_as_a_synthetic_trajectory() {
     let tool = AgentEvent::ToolCall(ToolCallEvent {
+      images: Vec::new(),
       provider: Provider::Codex,
       session_id: Some("fixture".to_string()),
       turn_id: None,
@@ -12241,6 +12246,7 @@ mod tests {
       _ => None,
     };
     AgentEvent::ToolCall(ToolCallEvent {
+      images: Vec::new(),
       provider,
       session_id: Some("fixture".to_string()),
       turn_id: None,

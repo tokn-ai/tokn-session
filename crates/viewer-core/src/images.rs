@@ -80,6 +80,10 @@ pub struct SessionImage {
 #[derive(Clone, Debug, Serialize)]
 pub struct MessageImageSummary {
   pub image_id: String,
+  /// Exact source record owning this resource when its card is assembled
+  /// from several tool events. Absent for ordinary message/raw source rows.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub source_event_key: Option<String>,
   pub mime_type: Option<String>,
   pub name: Option<String>,
   pub availability: ImageAvailability,
@@ -530,67 +534,5 @@ pub(crate) fn read_source(image: &tokn_session_core::MessageImage) -> Result<Vec
 /// Binary bodies are explicit resources; even an `all` native projection must
 /// not ship them repeatedly inside its ordinary JSON details.
 pub(crate) fn sanitize_display_value(value: &mut serde_json::Value) {
-  use serde_json::Value;
-  match value {
-    Value::Object(object) => {
-      let generation = object.get("type").and_then(Value::as_str).is_some_and(|kind| {
-        matches!(
-          kind,
-          "image_generation_call" | "ImageGeneration" | "image_gen.generation"
-        )
-      }) || object.get("tool_name").and_then(Value::as_str) == Some("image_generation");
-      if generation {
-        for key in ["result", "output"] {
-          if object.contains_key(key) {
-            object.insert(key.into(), Value::String("[Image resource omitted]".into()));
-          }
-        }
-      }
-      let image = object.get("type").and_then(Value::as_str).is_some_and(|kind| {
-        matches!(
-          kind,
-          "image"
-            | "input_image"
-            | "output_image"
-            | "local_image"
-            | "localImage"
-            | "image_url"
-            | "data_url"
-            | "base64"
-            | "local_file"
-        )
-      });
-      if image {
-        for key in ["data", "url", "image_url", "path"] {
-          if object.contains_key(key) {
-            object.insert(key.into(), Value::String("[Image resource omitted]".into()));
-          }
-        }
-      }
-      for (key, child) in object.iter_mut() {
-        if matches!(key.as_str(), "images" | "local_images") {
-          if let Value::Array(values) = child {
-            for value in values {
-              if value.is_string() {
-                *value = Value::String("[Image resource omitted]".into());
-              } else {
-                sanitize_display_value(value);
-              }
-            }
-            continue;
-          }
-        }
-        sanitize_display_value(child);
-      }
-    }
-    Value::Array(values) => {
-      for child in values {
-        sanitize_display_value(child);
-      }
-    }
-    Value::String(text) if text.starts_with("data:image/") => {
-      *text = "[Image resource omitted]".into();
-    }
-    _ => {}
-  }
+  tokn_session_core::omit_image_resources(value);
 }

@@ -683,6 +683,10 @@ pub(crate) fn tool_event(
   time_created: Option<i64>,
 ) -> AgentEvent {
   let (state, native) = state.into_parts();
+  let images = match &state {
+    ToolStateItem::Completed(state) => attachment_images(state.attachments.as_deref()),
+    _ => Vec::new(),
+  };
   let (record_kind, phase, input, output, is_error) = match state {
     ToolStateItem::Pending(state) => {
       let input = match (state.input, state.raw) {
@@ -734,6 +738,7 @@ pub(crate) fn tool_event(
   };
 
   AgentEvent::ToolCall(ToolCallEvent {
+    images,
     provider,
     session_id: Some(session_id),
     turn_id: None,
@@ -753,6 +758,39 @@ pub(crate) fn tool_event(
     native: Some(native),
     timestamp: timestamp(time_created),
   })
+}
+
+fn attachment_images(attachments: Option<&[Value]>) -> Vec<tokn_session_core::RecordedImage> {
+  attachments
+    .into_iter()
+    .flatten()
+    .enumerate()
+    .filter_map(|(index, value)| {
+      // Completed-tool attachments use the same file-part wire shape as
+      // message files. Keep unsupported attachments in ToolCallEvent.native.
+      if value.get("type").and_then(Value::as_str) != Some("file") {
+        return None;
+      }
+      let image_id = format!("image.v1.{index}");
+      match serde_json::from_value::<tokn_opencode_protocol::v1::FilePart>(value.clone()) {
+        Ok(file) if is_image_file(&file) => Some(recorded_file_image(file, image_id)),
+        Err(_)
+          if value
+            .get("mime")
+            .and_then(Value::as_str)
+            .is_some_and(|mime| mime.starts_with("image/")) =>
+        {
+          Some(tokn_session_core::RecordedImage {
+            image_id: value.get("id").and_then(Value::as_str).unwrap_or(&image_id).to_owned(),
+            mime_type: value.get("mime").and_then(Value::as_str).map(str::to_owned),
+            name: value.get("filename").and_then(Value::as_str).map(str::to_owned),
+            source: tokn_session_core::RecordedImageSource::Unavailable { reference: None },
+          })
+        }
+        _ => None,
+      }
+    })
+    .collect()
 }
 
 fn present_output(
@@ -852,6 +890,61 @@ mod tests {
 
   use super::OpenCodeNormalizer;
   use crate::row::{OpenCodeMessageRow, OpenCodePartRow};
+
+  #[test]
+  fn opencode_and_zcode_completed_tools_retain_typed_image_attachments_and_native_unknowns() {
+    for provider in [
+      tokn_session_core::Provider::OpenCode,
+      tokn_session_core::Provider::ZCode,
+    ] {
+      let attachments = json!([
+        {"type":"file", "id":"inline", "mime":"image/png", "filename":"render.png", "url":"data:image/png;base64,YQ=="},
+        {"type":"file", "mime":"application/pdf", "url":"file:///tmp/document.pdf"},
+        {"type":"file", "mime":"image/png", "url":"file:///tmp/local%20image.png"},
+        {"type":"file", "mime":"image/png", "url":"https://example.com/remote.png"},
+        {"type":"file", "mime":"image/png", "url":123},
+        {"type":"future_attachment", "opaque":true}
+      ]);
+      let mut normalizer = OpenCodeNormalizer::with_provider("session".into(), provider);
+      let events = normalizer.normalize_message(message_row(
+        "assistant",
+        json!({"role":"assistant"}),
+        vec![part_row(
+          "tool",
+          json!({
+            "type":"tool", "callID":"call", "tool":"render", "state":{
+              "status":"completed", "input":{}, "output":"rendered", "metadata":{"exit":1}, "attachments":attachments
+            }
+          }),
+        )],
+      ));
+      let [AgentEvent::ToolCall(tool)] = &events[..] else {
+        panic!("expected a tool result, not assistant messages")
+      };
+      assert_eq!(tool.provider, provider);
+      assert_eq!(tool.tool_call_id.as_deref(), Some("call"));
+      assert_eq!(
+        tool
+          .images
+          .iter()
+          .map(|image| image.image_id.as_str())
+          .collect::<Vec<_>>(),
+        ["inline", "image.v1.2", "image.v1.3", "image.v1.4"]
+      );
+      assert_eq!(tool.images[0].name.as_deref(), Some("render.png"));
+      assert!(
+        matches!(&tool.images[1].source, tokn_session_core::RecordedImageSource::LocalFile { path } if path.to_str() == Some("/tmp/local image.png"))
+      );
+      assert!(
+        tool.images[2..]
+          .iter()
+          .all(|image| matches!(image.source, tokn_session_core::RecordedImageSource::Unavailable { .. }))
+      );
+      assert_eq!(tool.is_error, Some(true));
+      assert_eq!(tool.output.as_ref().unwrap()["output"], "rendered");
+      assert_eq!(tool.native.as_ref().unwrap()["attachments"], attachments);
+    }
+  }
 
   #[test]
   fn opencode_and_zcode_image_files_are_messages_and_opaque_references_stay_unavailable() {

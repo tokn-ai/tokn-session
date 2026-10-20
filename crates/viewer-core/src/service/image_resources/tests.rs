@@ -6,7 +6,7 @@ use crate::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokn_session_core::MessageProvenance;
+use tokn_session_core::{MessageImage, MessageImageSource, MessageProvenance, ToolRecordKind};
 
 struct ImageRepository {
   sessions: HashMap<String, LoadedSession>,
@@ -215,7 +215,7 @@ fn hidden_unavailable_and_ambiguous_recorded_images_never_return_bytes() {
       source_event_seqs: None,
     });
   }
-  assert!(message_images(&hidden).is_empty());
+  assert!(event_images(&hidden).is_empty());
   let (service, key, _, _) = fixture(vec![hidden]);
   assert!(
     service
@@ -227,7 +227,7 @@ fn hidden_unavailable_and_ambiguous_recorded_images_never_return_bytes() {
     reference: Some("https://example.com/image.png".into()),
   });
   assert!(matches!(
-    message_images(&unavailable)[0].availability,
+    event_images(&unavailable)[0].availability,
     ImageAvailability::Unavailable
   ));
   let (service, key, _, _) = fixture(vec![unavailable]);
@@ -299,11 +299,191 @@ fn display_image_metadata_is_bounded_independently_of_native_names() {
     message.images[0].mime_type = Some("image/not-real".into());
     message.images[0].image_id = "i".repeat(4096);
   }
-  let summary = message_images(&event).pop().unwrap();
+  let summary = event_images(&event).pop().unwrap();
   assert!(summary.mime_type.is_none());
   let name = summary.name.unwrap();
   assert!(name.chars().count() <= 255);
   assert!(!name.chars().any(char::is_control));
   assert!(summary.image_id.len() < 256);
   assert_eq!(summary.image_id, display_image_id(&"i".repeat(4096)));
+}
+
+fn output_tool(kind: ToolRecordKind, images: Vec<RecordedImage>, output: Option<Value>) -> AgentEvent {
+  AgentEvent::ToolCall(ToolCallEvent {
+    images,
+    provider: Provider::Codex,
+    session_id: Some("fixture".into()),
+    turn_id: None,
+    message_id: None,
+    parent_id: None,
+    record_kind: kind,
+    tool_call_id: Some("image-call".into()),
+    provider_tool_name: Some("image_generation".into()),
+    tool_name: Some("image_generation".into()),
+    tool_kind: ToolKind::Unknown,
+    transport: None,
+    summary: None,
+    phase: Phase::Finished,
+    input: None,
+    output,
+    is_error: Some(false),
+    native: None,
+    timestamp: None,
+  })
+}
+
+fn output_image(bytes: &[u8]) -> RecordedImage {
+  RecordedImage {
+    image_id: "image.v1.0".into(),
+    mime_type: Some("image/png".into()),
+    name: None,
+    source: RecordedImageSource::Base64 {
+      data: STANDARD.encode(bytes),
+    },
+  }
+}
+
+#[test]
+fn assembled_tool_images_read_their_exact_source_and_keep_binary_out_of_projections() {
+  let bytes = png();
+  let encoded = STANDARD.encode(&bytes);
+  let mut events = vec![
+    output_tool(ToolRecordKind::Invocation, Vec::new(), None),
+    output_tool(ToolRecordKind::Result, vec![output_image(&bytes)], Some(json!(encoded))),
+  ];
+  if let AgentEvent::ToolCall(tool) = &mut events[1] {
+    tool.native = Some(json!({"type":"image_generation_end", "result":encoded,
+      "saved_path":"/private/generated-output.png", "status":"completed"}));
+  }
+  let operations = assemble_tool_operations(&events);
+  assert_eq!(operations.len(), 1);
+  let operation = &operations[0];
+  let summary = tool_operation_event_summary(0, operation);
+  let image = &summary.images.as_ref().unwrap()[0];
+  assert_eq!(image.source_event_key.as_deref(), Some(encode_event_key(1).as_str()));
+  let revision = summary.content_revision.clone().unwrap();
+  let detail = tool_operation_detail(encode_event_key(0), operation, &events).unwrap();
+  assert_eq!(detail.content_revision.as_deref(), Some(revision.as_str()));
+  let serialized = serde_json::to_string(&detail).unwrap();
+  assert!(!serialized.contains(&encoded));
+  assert!(!serialized.contains("/private/generated-output.png"));
+  assert!(detail.event["images"][0].get("source").is_none());
+
+  let (service, key, other, _) = fixture(events);
+  let request = LoadSessionImageRequest {
+    session_key: key.clone(),
+    event_key: image.source_event_key.clone().unwrap(),
+    image_id: image.image_id.clone(),
+    variant: ImageVariant::Full,
+  };
+  assert_eq!(
+    STANDARD
+      .decode(service.load_session_image(request.clone()).unwrap().data_base64)
+      .unwrap(),
+    bytes
+  );
+  let mut wrong = request.clone();
+  wrong.event_key = encode_event_key(0);
+  assert!(
+    service.load_session_image(wrong).is_err(),
+    "invocation cannot impersonate its result record"
+  );
+  let shared = service.scoped_to_sessions(std::slice::from_ref(&key)).unwrap();
+  assert!(shared.load_session_image(request.clone()).is_ok());
+  let mut wrong = request;
+  wrong.session_key = other;
+  assert!(shared.load_session_image(wrong).is_err());
+  let all = service
+    .load_session_updates(
+      serde_json::from_value(json!({
+        "session_key":key, "subscription_id":"tool-images", "level":"all", "cursor":null
+      }))
+      .unwrap(),
+    )
+    .unwrap();
+  let all = serde_json::to_string(&all).unwrap();
+  assert!(!all.contains(&encoded));
+  assert!(!all.contains("/private/generated-output.png"));
+}
+
+#[test]
+fn newer_tool_output_does_not_replace_a_recorded_image_resource_or_resurrect_a_removed_one() {
+  let first = png();
+  let mut second = std::io::Cursor::new(Vec::new());
+  image::DynamicImage::new_rgb8(3, 3)
+    .write_to(&mut second, image::ImageFormat::Png)
+    .unwrap();
+  let second = second.into_inner();
+  let events = vec![
+    output_tool(ToolRecordKind::Invocation, Vec::new(), None),
+    output_tool(
+      ToolRecordKind::Progress,
+      vec![output_image(&first)],
+      Some(json!("first")),
+    ),
+    output_tool(
+      ToolRecordKind::Result,
+      vec![output_image(&second)],
+      Some(json!("second")),
+    ),
+  ];
+  let operations = assemble_tool_operations(&events);
+  let summary = tool_operation_event_summary(0, &operations[0]);
+  assert_eq!(
+    summary.images.as_ref().unwrap()[0].source_event_key.as_deref(),
+    Some(encode_event_key(2).as_str())
+  );
+  assert_ne!(event_image_revision(&events[1]), event_image_revision(&events[2]));
+  let (service, key, _, _) = fixture(events.clone());
+  let read = |index| {
+    service
+      .load_session_image(LoadSessionImageRequest {
+        session_key: key.clone(),
+        event_key: encode_event_key(index),
+        image_id: "image.v1.0".into(),
+        variant: ImageVariant::Full,
+      })
+      .unwrap()
+  };
+  assert_eq!(STANDARD.decode(read(1).data_base64).unwrap(), first);
+  assert_eq!(STANDARD.decode(read(2).data_base64).unwrap(), second);
+  let mut cleared = events;
+  if let AgentEvent::ToolCall(tool) = &mut cleared[2] {
+    tool.images.clear();
+  }
+  let operations = assemble_tool_operations(&cleared);
+  let summary = tool_operation_event_summary(0, &operations[0]);
+  assert!(
+    summary.images.unwrap().is_empty(),
+    "empty image coverage is authoritative"
+  );
+  assert!(summary.content_revision.is_none());
+}
+
+#[test]
+fn generation_previews_omit_pixels_but_preserve_text_and_errors() {
+  let image = output_image(&png());
+  let RecordedImageSource::Base64 { data } = &image.source else {
+    unreachable!()
+  };
+  assert!(display_tool_output(&json!(data), Some("image_generation"), [&image]).is_null());
+  assert_eq!(
+    display_tool_output(
+      &json!({"status":"completed", "result":data, "saved_path":"/private/output.png"}),
+      Some("image_generation"),
+      [&image]
+    ),
+    json!({})
+  );
+  let result = display_tool_output(
+    &json!({"status":"failed", "result":"Could not generate the image", "error":"Quota exhausted"}),
+    Some("image_generation"),
+    [&image],
+  );
+  assert_eq!(result["error"], "Quota exhausted");
+  assert_eq!(result["result"], "Could not generate the image");
+  assert_eq!(
+    display_tool_output(&json!("Rendering failed"), Some("image_generation"), [&image]),
+    "Rendering failed"
+  );
 }

@@ -320,6 +320,13 @@ impl WindowIdentity {
         *key = self.key(key);
       }
     }
+    if let Some(images) = &mut summary.images {
+      for image in images {
+        if let Some(key) = &mut image.source_event_key {
+          *key = self.key(key);
+        }
+      }
+    }
     summary.event_key = self.key(&summary.event_key);
     summary
   }
@@ -328,6 +335,15 @@ impl WindowIdentity {
     detail.event_key = self.key(&detail.event_key);
     if let Some(output) = &mut detail.tool_output {
       output.source_event_key = self.key(&output.source_event_key);
+    }
+    if let Some(images) = detail.event.get_mut("images").and_then(Value::as_array_mut) {
+      for image in images {
+        if let Some(key) = image.get_mut("source_event_key")
+          && let Some(text) = key.as_str()
+        {
+          *key = Value::String(self.key(text));
+        }
+      }
     }
     // Translate only viewer-owned envelopes; provider payloads can contain
     // identically named fields with unrelated meanings and remain untouched.
@@ -407,6 +423,41 @@ mod tests {
   use crate::relay::{RelayMode, RelaySettings};
   use std::{io::Write, time::Duration};
   use tokn_session_relay::{ProviderRoot, RelayConfig};
+
+  #[test]
+  fn image_resource_source_keys_keep_generation_and_absolute_offsets() {
+    let events: Vec<AgentEvent> = serde_json::from_value(json!([{
+      "type":"tool_call", "provider":"codex", "tool_kind":"unknown", "phase":"finished", "output":"output",
+      "images":[{"image_id":"image.v1.0", "mime_type":"image/png", "name":null,
+        "source":{"type":"base64", "data":"YQ=="}}]
+    }]))
+    .unwrap();
+    let operations = assemble_tool_operations(&events);
+    let identity = WindowIdentity {
+      event_offset: 12,
+      generation: Some("image-window".into()),
+    };
+    let summary = identity.summary(tool_operation_event_summary(0, &operations[0]));
+    let source_key = summary.images.unwrap()[0].source_event_key.clone().unwrap();
+    assert_eq!(source_key, identity.key(&encode_event_key(0)));
+    assert_eq!(identity.local_key(&source_key).unwrap(), encode_event_key(0));
+    let detail = identity.detail(
+      tool_operation_detail(encode_event_key(0), &operations[0], &events).unwrap(),
+      true,
+    );
+    assert_eq!(detail.event["images"][0]["source_event_key"], source_key);
+    let other = WindowIdentity {
+      event_offset: 12,
+      generation: Some("different".into()),
+    };
+    assert!(other.local_key(&source_key).is_err());
+    let mut shifted = operations[0].clone();
+    shifted.images[0].source_event_index += 20;
+    assert_eq!(
+      image_resources::operation_image_revision(&shifted),
+      image_resources::operation_image_revision(&operations[0])
+    );
+  }
 
   #[test]
   fn update_payload_running_follows_source_events_without_turn_lifecycle_records() {

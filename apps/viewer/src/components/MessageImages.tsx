@@ -16,11 +16,15 @@ function ImageResource({ session_key, event_key, revision, image, full = false, 
   const container = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(full || typeof IntersectionObserver === "undefined");
   const [retry, setRetry] = useState(0);
-  const [result, setResult] = useState<{ url: string | null; error: string | null }>({ url: null, error: null });
+
   // Image-bearing rows capture the selected host, never a global URL from Markdown.
   const current = currentImageCache();
-  const source = useMemo(() => ({ session_key, event_key, image_id: image.image_id, variant: full ? "full" as const : "thumbnail" as const }),
-    [session_key, event_key, image.image_id, full]);
+  const source_event_key = image.source_event_key ?? event_key;
+  const source = useMemo(() => ({ session_key, event_key: source_event_key, image_id: image.image_id, variant: full ? "full" as const : "thumbnail" as const }),
+    [session_key, source_event_key, image.image_id, full]);
+  const observation = useMemo(() => ({ source, revision, cache: current.cache }), [source, revision, current.cache]);
+  const [result, setResult] = useState<{ observation: typeof observation; url: string | null; error: string | null } | null>(null);
+  const visible_result = result?.observation === observation ? result : null;
   useEffect(() => {
     if (visible || !container.current) return;
     const observer = new IntersectionObserver((entries) => { if (entries.some((entry) => entry.isIntersecting)) setVisible(true); }, { rootMargin: "160px" });
@@ -28,20 +32,20 @@ function ImageResource({ session_key, event_key, revision, image, full = false, 
     return () => observer.disconnect();
   }, [visible]);
   useEffect(() => {
-    setResult({ url: null, error: null });
+    setResult({ observation, url: null, error: null });
     if (!visible || image.availability !== "available") return;
     let cancelled = false;
     const resource = current.cache.acquire(source, revision);
-    void resource.ready.then((url) => { if (!cancelled) setResult({ url, error: null }); })
-      .catch((failure) => { if (!cancelled) setResult({ url: null, error: errorMessage(failure) }); });
+    void resource.ready.then((url) => { if (!cancelled) setResult({ observation, url, error: null }); })
+      .catch((failure) => { if (!cancelled) setResult({ observation, url: null, error: errorMessage(failure) }); });
     return () => { cancelled = true; resource.release(); };
-  }, [current.cache, image.availability, revision, source, visible, retry]);
+  }, [current.cache, image.availability, revision, source, visible, retry, observation]);
   const label = image.name || "Recorded image";
   return <div ref={container} className={full ? "image-preview__body" : "message-image"}>
     {image.availability !== "available" ? <span className="message-image__status">{label}<br />Image unavailable</span>
-      : result.url ? full ? <img src={result.url} alt={label} />
-        : <button aria-label={`Preview ${label}`} onClick={on_open} type="button"><img src={result.url} alt={label} /></button>
-        : <span className="message-image__status" role="status">{result.error ? <>{label}<br />{result.error}<br /><button type="button" className="text-button" onClick={() => setRetry((value) => value + 1)}>Retry image</button></> : visible ? "Loading image…" : "Image"}</span>}
+      : visible_result?.url ? full ? <img src={visible_result.url} alt={label} />
+        : <button aria-label={`Preview ${label}`} onClick={on_open} type="button"><img src={visible_result.url} alt={label} /></button>
+        : <span className="message-image__status" role="status">{visible_result?.error ? <>{label}<br />{visible_result.error}<br /><button type="button" className="text-button" onClick={() => setRetry((value) => value + 1)}>Retry image</button></> : visible ? "Loading image…" : "Image"}</span>}
   </div>;
 }
 
@@ -58,14 +62,15 @@ function ImagePreview({ on_close, ...props }: ImageProps & { on_close: () => voi
   </dialog>, document.body);
 }
 
-export function MessageImages({ session_key, event_key, revision = null, images }: {
-  session_key: string; event_key: string; revision?: string | null; images: MessageImageSummary[];
+export function MessageImages({ session_key, event_key, revision = null, images, aria_label = "Message images" }: {
+  session_key: string; event_key: string; revision?: string | null; images: MessageImageSummary[]; aria_label?: string;
 }) {
   const [preview, setPreview] = useState<string | null>(null);
-  const selected = images.find((image) => image.image_id === preview);
+  const imageKey = (image: MessageImageSummary) => JSON.stringify([image.source_event_key ?? event_key, image.image_id]);
+  const selected = images.find((image) => imageKey(image) === preview);
   useEffect(() => { setPreview(null); }, [session_key, event_key, revision]);
-  return <div className="message-images" aria-label="Message images">
-    {images.map((image) => <ImageResource key={image.image_id} session_key={session_key} event_key={event_key} revision={revision} image={image} on_open={() => setPreview(image.image_id)} />)}
+  return <div className="message-images" aria-label={aria_label}>
+    {images.map((image) => <ImageResource key={imageKey(image)} session_key={session_key} event_key={event_key} revision={revision} image={image} on_open={() => setPreview(imageKey(image))} />)}
     {selected ? <ImagePreview session_key={session_key} event_key={event_key} revision={revision} image={selected} on_close={() => setPreview(null)} /> : null}
   </div>;
 }

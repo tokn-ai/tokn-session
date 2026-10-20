@@ -7,6 +7,16 @@ and opaque provider references retain an unavailable/error placeholder. The host
 never fetches a recorded remote URL. Image normalization records references without
 reading their files.
 
+Expanded tool cards also show recorded output images: Codex image generation,
+MCP and structured image results, Pi tool-result image blocks, and OpenCode/ZCode
+tool attachments. These resources stay with the tool operation; they do not
+create assistant messages, sidebar previews, or unread final replies. Image-only
+results retain thumbnails and unavailable placeholders alongside ordinary text,
+error, and shell output. Collapsed tool cards do not load image bytes.
+
+Markdown image references still render as placeholders. The viewer does not
+infer local files or fetch remote images from arbitrary assistant/tool prose.
+
 The session composer and local **New Pi Session** dialog accept file picking,
 clipboard images, and drag/drop, with removable previews and image-only submission.
 Existing Codex Desktop and Pi input transports handle sending. Codex uses validated
@@ -29,7 +39,7 @@ Image bytes are separate resources, independent of timeline delivery levels:
 
 - `load_session_image` takes `session_key`, `event_key`, `image_id`, and
   `variant` (`thumbnail` or `full`). The host resolves the image from that exact
-  visible message, checks session access, and returns MIME type, base64 data,
+  visible message or tool result, checks session access, and returns MIME type, base64 data,
   width, and height. Clients cannot supply a path or URL to read.
 - `upload_image_chunk` takes a session/project target, UUID `upload_id`, byte
   `offset`, declared total size/MIME/name, and base64 data. Chunks contain at most
@@ -45,7 +55,12 @@ Hub request limits. Session timelines and display details carry compact image
 metadata, without retransmitting image bytes or exposing source paths. The
 frontend has a separate per-machine blob cache bounded to 64 resources and
 40 MiB, with de-duplicated reads, pinned visible resources, and URL cleanup on
-transport closure. Its keys include the message content revision and variant.
+transport closure. Its keys include the content revision and variant. An assembled
+tool image has a `source_event_key` pointing to the exact result record owning
+its bytes. The viewer keeps generation and absolute source positions consistent
+across history pagination; older raw output records remain independently readable.
+Tool summaries explicitly carry an empty image list when an output has no images,
+preventing stale expanded details from restoring removed attachments.
 
 ## Storage and delivery
 

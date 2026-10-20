@@ -149,7 +149,7 @@ pub struct MessageEvent {
   pub phase: Phase,
   pub text: String,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
-  pub images: Vec<crate::MessageImage>,
+  pub images: Vec<crate::RecordedImage>,
   pub timestamp: Option<String>,
 }
 
@@ -292,6 +292,9 @@ pub struct ToolCallEvent {
   pub phase: Phase,
   pub input: Option<Value>,
   pub output: Option<Value>,
+  /// Recorded output image references. Resolving their bytes is a separate read.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub images: Vec<crate::RecordedImage>,
   pub is_error: Option<bool>,
   /// Lossless provider payload for this record. Semantic input/output may be
   /// projected from it, but consumers can still inspect the original wrapper.

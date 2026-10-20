@@ -405,6 +405,7 @@ fn normalize_assistant_message(
           continue;
         };
         events.push(AgentEvent::ToolCall(ToolCallEvent {
+          images: Vec::new(),
           provider: Provider::Pi,
           session_id: session_id.clone(),
           turn_id: None,
@@ -492,6 +493,15 @@ fn normalize_tool_result_message(
     .timestamp
     .clone()
     .or_else(|| message.timestamp.map(|value| value.to_string()));
+  let images = message
+    .content
+    .iter()
+    .enumerate()
+    .filter_map(|(index, content)| match content {
+      PiContentBlock::Image(content) => Some(recorded_image(index, content.clone())),
+      _ => None,
+    })
+    .collect();
   let content = Value::Array(message.content.into_iter().map(json_value).collect());
   let details = message.details;
   let output = match details.as_ref() {
@@ -504,6 +514,7 @@ fn normalize_tool_result_message(
   let tool_name = message.tool_name;
 
   vec![AgentEvent::ToolCall(ToolCallEvent {
+    images,
     provider: Provider::Pi,
     session_id,
     turn_id: None,
@@ -755,6 +766,31 @@ mod tests {
   }
 
   #[test]
+  fn tool_result_images_preserve_order_and_missing_data_without_becoming_assistant_messages() {
+    let events = normalize_fixture(
+      r#"{"type":"session","id":"pi-session"}
+{"type":"message","id":"tool","message":{"role":"toolResult","toolCallId":"call","toolName":"read","isError":true,"content":[{"type":"image","mimeType":"image/png","data":"YQ=="},{"type":"text","text":"caption"},{"type":"image","mimeType":"image/png"},{"type":"future_block","opaque":true}]}}"#,
+    );
+    let [AgentEvent::SessionStarted(_), AgentEvent::ToolCall(tool)] = &events[..] else {
+      panic!("expected only a tool result")
+    };
+    assert_eq!(
+      tool
+        .images
+        .iter()
+        .map(|image| image.image_id.as_str())
+        .collect::<Vec<_>>(),
+      ["image.v1.0", "image.v1.2"]
+    );
+    assert!(matches!(
+      &tool.images[1].source,
+      tokn_session_core::RecordedImageSource::Unavailable { .. }
+    ));
+    assert_eq!(tool.is_error, Some(true));
+    assert_eq!(tool.output.as_ref().unwrap()[3]["opaque"], true);
+  }
+
+  #[test]
   fn tool_result_preserves_content_block_casing_and_extra_fields() {
     let events = normalize_fixture(
       r#"{"type":"session","id":"pi-session"}
@@ -765,6 +801,11 @@ mod tests {
       panic!("expected tool result");
     };
     let output = result.output.as_ref().expect("tool result should retain output");
+    assert_eq!(result.images.len(), 1);
+    assert_eq!(result.images[0].image_id, "image.v1.0");
+    assert!(
+      matches!(&result.images[0].source, tokn_session_core::RecordedImageSource::Base64 { data } if data == "aGVsbG8=")
+    );
     assert_eq!(output["content"][0]["mimeType"], "image/png");
     assert!(output["content"][0].get("mime_type").is_none());
     assert_eq!(output["content"][0]["providerMetadata"]["assetId"], "asset-1");

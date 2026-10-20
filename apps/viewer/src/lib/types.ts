@@ -530,6 +530,8 @@ export interface QuestionSelectionSummary {
 }
 
 export interface MessageImageSummary {
+  /** Raw owner of an image projected into a grouped tool operation. */
+  source_event_key?: string;
   image_id: string;
   mime_type: string | null;
   name: string | null;
