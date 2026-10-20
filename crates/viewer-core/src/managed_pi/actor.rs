@@ -1,5 +1,5 @@
 use super::{
-  Inner,
+  Inner, WorkerState,
   persistence::{Receipt, validate_session},
   protocol::{RpcReader, RpcState, StderrTail, parse_extension_dialog, parse_state},
 };
@@ -21,9 +21,10 @@ use std::{
 use tokio::{
   io::{AsyncReadExt, AsyncWriteExt},
   process::{Child, ChildStdin},
-  sync::{mpsc, oneshot},
+  sync::{OwnedMutexGuard, mpsc, oneshot, watch},
   time::{Instant, MissedTickBehavior},
 };
+use tokio_util::sync::CancellationToken;
 
 const RPC_DEADLINE: Duration = Duration::from_secs(15);
 // Prompt preflight may legitimately await extension input or compaction before
@@ -42,7 +43,6 @@ pub(super) enum Command {
   },
   Abort(oneshot::Sender<Result<(), String>>),
   Dialog(ManagedSessionDialogResponse, oneshot::Sender<Result<(), String>>),
-  Shutdown(oneshot::Sender<()>),
 }
 
 enum PendingKind {
@@ -78,16 +78,44 @@ pub(super) async fn run(
   prompt: Option<(String, Vec<ResolvedImage>)>,
   resume: bool,
   mut commands: mpsc::Receiver<Command>,
+  worker_state: watch::Sender<WorkerState>,
+  termination: CancellationToken,
 ) {
   let id = receipt.request_id.clone();
-  let mut actor = match Actor::spawn(inner.clone(), executable, receipt, generation, prompt, resume).await {
+  let mut actor = match Actor::spawn(
+    inner.clone(),
+    executable,
+    receipt,
+    generation,
+    prompt,
+    resume,
+    worker_state.clone(),
+    termination,
+  )
+  .await
+  {
     Ok(actor) => actor,
     Err(error) => {
-      finish(&inner, &id, generation, Some(error)).await;
+      commands.close();
+      worker_state.send_replace(WorkerState::Closing(Some(error.clone())));
+      let _retirement = retirement_gate(&inner, &id).await;
+      reject_queued_commands(&mut commands, &error);
+      let finished = finish(&inner, &id, generation, Some(error.clone())).await;
+      drop(lease);
+      worker_state.send_replace(WorkerState::Stopped(Some(error)));
+      publish_finished(&inner, finished);
       return;
     }
   };
   let result = actor.run(&mut commands).await;
+  commands.close();
+  worker_state.send_replace(WorkerState::Closing(result.as_ref().err().cloned()));
+  // Wake startup waiters before acquiring their admission gate. All exits hold
+  // it through cleanup, including failures and viewer shutdown.
+  if actor.retirement.is_none() {
+    actor.retirement = retirement_gate(&inner, &id).await;
+  }
+  reject_queued_commands(&mut commands, "Pi stopped before receiving the message");
   // Pending deliveries are uncertain after writing, even when the subprocess
   // exits before its correlated response arrives.
   for (_, pending) in actor.pending.drain() {
@@ -120,17 +148,17 @@ pub(super) async fn run(
   let _ = tokio::time::timeout(Duration::from_millis(100), &mut actor.stderr_reader).await;
   actor.stderr_reader.abort();
   let error = result.err().map(|error| actor.exit_message(error));
-  let shutdown = actor.shutdown_reply.take();
   let stopped = actor.stop_reply.take();
   // Keep the per-session lease until its final durable revision is visible.
   // Otherwise a new owner could resume from the previous revision while this
   // actor is still publishing its terminal metadata.
-  finish(&inner, &id, generation, error).await;
+  let finished = finish(&inner, &id, generation, error.clone()).await;
+  let retirement = actor.retirement.take();
   drop(actor);
   drop(lease);
-  if let Some(reply) = shutdown {
-    let _ = reply.send(());
-  }
+  worker_state.send_replace(WorkerState::Stopped(error));
+  publish_finished(&inner, finished);
+  drop(retirement);
   if let Some(reply) = stopped {
     let _ = reply.send(Ok(()));
   }
@@ -153,12 +181,16 @@ struct Actor {
   saw_settled: bool,
   checking_idle: bool,
   dialog_deadline: Option<Instant>,
-  shutdown_reply: Option<oneshot::Sender<()>>,
   stop_reply: Option<oneshot::Sender<Result<(), String>>>,
   exit_requested: bool,
   pending_outcome: Option<Option<String>>,
   awaiting_new_turn: bool,
   stop_requested: bool,
+  worker_state: watch::Sender<WorkerState>,
+  idle_since: Option<Instant>,
+  idle_probe: bool,
+  retirement: Option<OwnedMutexGuard<()>>,
+  termination: CancellationToken,
 }
 
 impl Actor {
@@ -169,6 +201,8 @@ impl Actor {
     generation: u64,
     prompt: Option<(String, Vec<ResolvedImage>)>,
     resume: bool,
+    worker_state: watch::Sender<WorkerState>,
+    termination: CancellationToken,
   ) -> Result<Self, String> {
     if inner
       .upgrade()
@@ -195,6 +229,22 @@ impl Actor {
     let mut child = command.spawn().map_err(|error| {
       format!("Could not start Pi: {error}. Install Pi or set TOKN_SESSION_PI_EXECUTABLE to its executable path.")
     })?;
+    if let Some(owner) = inner.upgrade() {
+      let snapshot = {
+        let mut records = owner.records.lock().unwrap();
+        records
+          .get_mut(&receipt.request_id)
+          .filter(|record| record.generation == generation)
+          .map(|record| {
+            record.worker_pid = child.id();
+            record.started_at_ms = Some(crate::runtimes::now_ms());
+            record.receipt.snapshot()
+          })
+      };
+      if let Some(snapshot) = snapshot {
+        let _ = owner.events.send(snapshot);
+      }
+    }
     let stdin = child.stdin.take().ok_or("Pi stdin is unavailable")?;
     let stdout = child.stdout.take().ok_or("Pi stdout is unavailable")?;
     let mut stderr_stream = child.stderr.take().ok_or("Pi stderr is unavailable")?;
@@ -249,12 +299,16 @@ impl Actor {
       saw_settled: false,
       checking_idle: false,
       dialog_deadline: None,
-      shutdown_reply: None,
       stop_reply: None,
       exit_requested: false,
       pending_outcome: None,
       awaiting_new_turn: false,
       stop_requested: false,
+      worker_state,
+      idle_since: None,
+      idle_probe: false,
+      retirement: None,
+      termination,
     })
   }
 
@@ -267,18 +321,42 @@ impl Actor {
       return Ok(());
     }
     self.request_state(true).await?;
+    let mut shutdown = self
+      .inner
+      .upgrade()
+      .ok_or("Managed Pi runtime has stopped")?
+      .shutdown
+      .subscribe();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
+      let stopping = *shutdown.borrow_and_update();
+      if stopping || self.termination.is_cancelled() {
+        self.begin_shutdown().await;
+        return Ok(());
+      }
       tokio::select! {
+        _ = self.termination.cancelled() => {
+          self.begin_shutdown().await;
+          return Ok(());
+        },
+        _ = shutdown.changed() => {
+          self.begin_shutdown().await;
+          return Ok(());
+        },
         frame = self.frames.recv() => match frame {
           Some(Ok(value)) => {self.frame(value).await?; if self.exit_requested {return Ok(());}},
           Some(Err(error)) => return Err(error),
           None => return Err("Pi RPC reader stopped".into()),
         },
-        command = commands.recv() => match command {
+        command = commands.recv() => {
+          self.idle_since = None;
+          self.idle_probe = false;
+          match command {
           Some(Command::Prompt {request_id, text, images, reply}) => {
-            if images.is_empty() {
+            if self.termination.is_cancelled() || self.inner.upgrade().is_none_or(|inner| inner.shutting_down.load(std::sync::atomic::Ordering::Acquire)) {
+              let _ = reply.send(Err(DeliveryError::not_sent("Managed Pi runtime is shutting down")));
+            } else if images.is_empty() {
               self.prompt(request_id, text, images, Some(reply)).await?;
             } else {
               self.send("get_state", json!({"type":"get_state"}), PendingKind::ImagePreflight { request_id, text, images, reply }).await?;
@@ -299,21 +377,30 @@ impl Actor {
             self.send("abort", json!({"type":"abort"}), PendingKind::Abort(reply)).await?;
           }
           Some(Command::Dialog(response, reply)) => { let result = self.respond(response).await; let _ = reply.send(result); }
-          Some(Command::Shutdown(reply)) => {
-            self.shutdown_reply = Some(reply);
-            let _ = self.cancel_dialog("Pi runtime is stopping").await;
-            let _ = self.write(json!({"type":"abort","id":uuid::Uuid::new_v4().to_string()})).await;
-            drop(self.stdin.take());
-            return Ok(());
-          }
           None => return Ok(()),
-        },
+        }},
         _ = tick.tick() => self.tick().await?,
         exit = self.child.wait() => {
           return match exit { Ok(status) if status.success() => Ok(()), Ok(status) => Err(format!("Pi exited with {status}")), Err(error) => Err(error.to_string()) };
         }
       }
+      if self.retire_if_idle(commands).await? {
+        return Ok(());
+      }
     }
+  }
+
+  async fn begin_shutdown(&mut self) {
+    // Shutdown has its own signal and a shared write budget, so full command
+    // queues or an extension dialog cannot postpone closing the worker's stdin.
+    let _ = tokio::time::timeout(WRITE_DEADLINE, async {
+      let _ = self.cancel_dialog("Pi runtime is stopping").await;
+      let _ = self
+        .write(json!({"type":"abort","id":uuid::Uuid::new_v4().to_string()}))
+        .await;
+    })
+    .await;
+    drop(self.stdin.take());
   }
 
   async fn frame(&mut self, value: Value) -> Result<(), String> {
@@ -359,7 +446,8 @@ impl Actor {
               } else {
                 self.set_phase_from_state().await?;
               }
-            } else if self.checking_idle {
+              self.worker_state.send_replace(WorkerState::Ready);
+            } else if self.checking_idle || self.idle_probe {
               self.set_phase_from_state().await?;
             }
           }
@@ -564,6 +652,17 @@ impl Actor {
     images: Vec<ResolvedImage>,
     reply: Option<oneshot::Sender<Result<Admission, DeliveryError>>>,
   ) -> Result<(), String> {
+    if self.termination.is_cancelled()
+      || self
+        .inner
+        .upgrade()
+        .is_none_or(|inner| inner.shutting_down.load(std::sync::atomic::Ordering::Acquire))
+    {
+      if let Some(reply) = reply {
+        let _ = reply.send(Err(DeliveryError::not_sent("Managed Pi runtime is shutting down")));
+      }
+      return Ok(());
+    }
     use sha2::{Digest, Sha256};
     let fingerprint = if images.is_empty() {
       format!("{:x}", Sha256::digest(text.as_bytes()))
@@ -732,6 +831,66 @@ impl Actor {
       self.request_state(false).await?;
     }
     Ok(())
+  }
+
+  async fn retire_if_idle(&mut self, commands: &mut mpsc::Receiver<Command>) -> Result<bool, String> {
+    let eligible = self.receipt.status == ManagedSessionStatus::Idle
+      && self.receipt.session_key.is_some()
+      && self
+        .state
+        .as_ref()
+        .is_some_and(|state| !state.is_streaming && !state.is_compacting && state.pending_message_count == 0)
+      && self.receipt.dialog.is_none()
+      && self.initial_prompt.is_none()
+      && !self.awaiting_new_turn
+      && !self.checking_idle
+      && self.pending_outcome.is_none()
+      && !self.stop_requested;
+    if !eligible || !commands.is_empty() || (!self.pending.is_empty() && !self.idle_probe) {
+      self.idle_since = None;
+      self.idle_probe = false;
+      return Ok(false);
+    }
+    // Preserve the deadline while checking native state once more. This also
+    // catches work queued by an extension without an incoming viewer command.
+    if !self.pending.is_empty() {
+      return Ok(false);
+    }
+    if !self.frames.is_empty() {
+      return Ok(false);
+    }
+    let Some(inner) = self.inner.upgrade() else {
+      return Ok(true);
+    };
+    let since = self.idle_since.get_or_insert_with(Instant::now);
+    if since.elapsed() < inner.idle_timeout {
+      return Ok(false);
+    }
+    if !self.idle_probe {
+      self.idle_probe = true;
+      self.request_state(false).await?;
+      return Ok(false);
+    }
+    let gate = inner
+      .records
+      .lock()
+      .unwrap()
+      .get(&self.receipt.request_id)
+      .map(|record| record.start_gate.clone());
+    let Some(gate) = gate else {
+      return Ok(true);
+    };
+    let Ok(guard) = gate.try_lock_owned() else {
+      return Ok(false);
+    };
+    // Send holds this same gate through queue admission. Closing an empty
+    // receiver under it cannot strand a message that has already been admitted.
+    if !commands.is_empty() || !self.frames.is_empty() {
+      return Ok(false);
+    }
+    commands.close();
+    self.retirement = Some(guard);
+    Ok(true)
   }
 
   async fn probe_file(&mut self) -> Result<(), String> {
@@ -979,24 +1138,67 @@ fn encode_command(value: Value) -> Result<Vec<u8>, String> {
   Ok(bytes)
 }
 
-async fn finish(inner: &Weak<Inner>, id: &str, generation: u64, error: Option<String>) {
+async fn finish(
+  inner: &Weak<Inner>,
+  id: &str,
+  generation: u64,
+  error: Option<String>,
+) -> Option<crate::workspace::ManagedSessionSnapshot> {
   let Some(inner) = inner.upgrade() else {
-    return;
+    return None;
   };
-  let _ = inner
-    .mutate(id, generation, |receipt| {
-      receipt.status = if error.is_some() {
-        ManagedSessionStatus::Failed
-      } else {
-        ManagedSessionStatus::Stopped
-      };
-      receipt.message = error;
-      receipt.dialog = None;
-    })
-    .await;
+  let receipt = {
+    let records = inner.records.lock().unwrap();
+    let record = records.get(id).filter(|record| record.generation == generation)?;
+    let mut receipt = record.receipt.clone();
+    receipt.status = if error.is_some() {
+      ManagedSessionStatus::Failed
+    } else {
+      ManagedSessionStatus::Stopped
+    };
+    receipt.message = error;
+    receipt.dialog = None;
+    receipt.revision = receipt.revision.saturating_add(1);
+    receipt
+  };
+  let store = inner.store.clone();
+  let saved = receipt.clone();
+  let _ = tokio::task::spawn_blocking(move || store.save(saved)).await;
   let mut records = inner.records.lock().unwrap();
   if let Some(record) = records.get_mut(id).filter(|record| record.generation == generation) {
+    record.receipt = receipt.clone();
     record.sender = None;
+    record.worker_pid = None;
+    record.started_at_ms = None;
+    record.termination = None;
+    record.images_available = false;
+  }
+  Some(receipt.snapshot())
+}
+
+async fn retirement_gate(inner: &Weak<Inner>, id: &str) -> Option<OwnedMutexGuard<()>> {
+  let gate = inner.upgrade()?.records.lock().unwrap().get(id)?.start_gate.clone();
+  Some(gate.lock_owned().await)
+}
+
+fn reject_queued_commands(commands: &mut mpsc::Receiver<Command>, message: &str) {
+  while let Ok(command) = commands.try_recv() {
+    match command {
+      Command::Prompt { reply, .. } => {
+        let _ = reply.send(Err(DeliveryError::not_sent(message)));
+      }
+      Command::Abort(reply) | Command::Dialog(_, reply) => {
+        let _ = reply.send(Err("Pi runtime has stopped".into()));
+      }
+    }
+  }
+}
+
+fn publish_finished(inner: &Weak<Inner>, snapshot: Option<crate::workspace::ManagedSessionSnapshot>) {
+  // A stopped event can immediately trigger an input-capability check. Publish
+  // only after releasing the process lease so that check can safely resume.
+  if let (Some(inner), Some(snapshot)) = (inner.upgrade(), snapshot) {
+    let _ = inner.events.send(snapshot);
   }
 }
 

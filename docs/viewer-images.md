@@ -16,6 +16,11 @@ sending; old bridges without the capability field remain text-only. New managed
 Pi sessions check the actual model after startup. Unsupported images produce an
 explicit failure rather than silently sending only their caption.
 
+Stopped viewer-owned Pi sessions expose no image capability until Resume verifies
+the current model; status inspection never starts a worker. Image-bearing requests
+preserve their attachments through automatic resume and recheck model support
+before sending.
+
 ## Limits and resources
 
 PNG, JPEG, WebP, and GIF are supported. Input accepts at most four images, 8 MiB

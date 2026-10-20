@@ -2,6 +2,7 @@ import { useEffect, useId, useState, type ReactNode } from "react";
 import { BellIcon, ChevronIcon, CloseIcon, PanelIcon, TechnicalIcon } from "../components/Icons";
 import { providerLabel } from "../lib/state";
 import type { MachineSettingsSnapshot, RelaySettings, RelayStatus, ViewerPreferences } from "../lib/types";
+import { RuntimeSettings } from "../components/RuntimeSettings";
 import "./SettingsPage.css";
 
 export interface SettingsPageProps {
@@ -20,7 +21,7 @@ export interface SettingsPageProps {
   hosting: ReactNode;
 }
 
-type SettingsSection = "viewer" | "sources" | "hosting";
+type SettingsSection = "viewer" | "sources" | "hosting" | "runtimes";
 
 const READER_PHASES: Record<RelayStatus["phase"], string> = {
   local: "Local history", starting: "Starting", connecting: "Connecting", live: "Live",
@@ -160,9 +161,10 @@ export function SettingsPage({ on_close, machine_label, machine_key, machine_con
     { key: "viewer", label: "Viewer preferences", detail: "This device", icon: <PanelIcon /> },
     { key: "sources", label: "Sources & reader", detail: machine_label, icon: <TechnicalIcon /> },
     { key: "hosting", label: "Hosting & access", detail: machine_label, icon: <BellIcon /> },
+    { key: "runtimes", label: "Runtimes", detail: "This viewer", icon: <TechnicalIcon /> },
   ];
   return <div className="settings-page">
-    <header className="settings-page__header"><div><h1>Settings</h1><p>Preferences for this device and the selected machine.</p></div><button aria-label="Close settings" className="icon-button" onClick={on_close} type="button"><CloseIcon /></button></header>
+    <header className="settings-page__header"><h1>Settings</h1><button aria-label="Close settings" className="icon-button" onClick={on_close} type="button"><CloseIcon /></button></header>
     <div className="settings-page__layout">
       <nav aria-label="Settings sections" className="settings-page__nav">
         {sections.map((item) => <button aria-controls={`${id}-${item.key}`} aria-current={section === item.key ? "page" : undefined} className="settings-page__nav-item" key={item.key} onClick={() => setSection(item.key)} type="button">{item.icon}<span><strong>{item.label}</strong><small>{item.detail}</small></span></button>)}
@@ -181,6 +183,9 @@ export function SettingsPage({ on_close, machine_label, machine_key, machine_con
         <section aria-labelledby={`${id}-hosting-title`} className="settings-page__section" hidden={section !== "hosting"} id={`${id}-hosting`}>
           <div className="settings-page__section-heading"><span className="settings-page__scope">{machine_label}</span><h2 id={`${id}-hosting-title`}>Hosting & access</h2><p>Availability and access for the selected machine.</p></div>
           {hosting ?? <div className="settings-page__card"><p className="settings-page__notice">{settings?.hosting.reason ?? "Hosting settings are unavailable on this machine."}</p></div>}
+        </section>
+        <section aria-labelledby={`${id}-runtimes-title`} className="settings-page__section" hidden={section !== "runtimes"} id={`${id}-runtimes`}>
+          <RuntimeSettings active={section === "runtimes"} heading_id={`${id}-runtimes-title`} />
         </section>
       </div>
     </div>

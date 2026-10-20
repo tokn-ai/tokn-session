@@ -6225,6 +6225,7 @@ dependencies = [
  "tokn-viewer-api",
  "tokn-viewer-core",
  "url",
+ "uuid",
  "zeroize",
 ]
 

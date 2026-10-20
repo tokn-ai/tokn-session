@@ -38,6 +38,10 @@ function creationFailure(value: unknown): SessionCreationError | null {
   return typeof failure.message === "string" && typeof failure.may_have_started === "boolean"
     ? { message: failure.message, may_have_started: failure.may_have_started } : null;
 }
+function inputCapabilityClass(snapshot: ManagedSessionSnapshot): string {
+  if (snapshot.status === "stopped" || snapshot.status === "failed") return "saved";
+  return snapshot.status === "stopping" ? "stopping" : "live";
+}
 
 /** Local commands, completion, and cleanup remain attached to one machine lifetime. */
 export function useProjectWorkspace(options: WorkspaceOptions, transport_override?: WorkspaceTransport) {
@@ -82,7 +86,10 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
       ? { ...snapshot, session: old.session } : snapshot;
     snapshots.current.set(next.request_id, next);
     setPendingDialogSession([...snapshots.current.values()].find((entry) => entry.pending_dialog) ?? null);
-    if (next.session_key && next.session_key === current.current.selected_session_key) setManaged(next);
+    if (next.session_key && next.session_key === current.current.selected_session_key) {
+      setManaged(next);
+      if (!old || inputCapabilityClass(old) !== inputCapabilityClass(next)) setInputRefreshKey((value) => value + 1);
+    }
     const pending = attempt.current;
     if (pending?.request.request_id !== next.request_id) return;
     setCreation(next);

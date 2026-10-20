@@ -279,6 +279,7 @@ impl RemoteManager {
     }
     connections.insert(info.connection_id.clone(), connection.clone());
     drop(connections);
+    connection.runtime_changed();
     tokio::spawn(direct::upgrade(connection));
     Ok(info)
   }
@@ -291,6 +292,21 @@ impl RemoteManager {
       .get(connection_id)
       .cloned()
       .ok_or("Machine connection is closed".into())
+  }
+
+  /// Active registrations only; this does not load identities, probe hosts, or
+  /// infer stream health from the selected physical carrier.
+  pub async fn list_connections(&self) -> Vec<ConnectionInfo> {
+    let connections = self.connections.lock().await;
+    let mut result: Vec<_> = connections
+      .values()
+      .map(|connection| ConnectionInfo {
+        transport: connection.direct.changes.borrow().clone(),
+        ..connection.info.clone()
+      })
+      .collect();
+    result.sort_by(|a, b| a.connection_id.cmp(&b.connection_id));
+    result
   }
 
   pub async fn request(&self, connection_id: &str, command: &str, payload: Value) -> Result<Value, String> {
@@ -313,6 +329,7 @@ impl RemoteManager {
     if let Some(connection) = connection {
       connection.cancellation.cancel();
       connection.direct.close().await;
+      connection.runtime_changed();
     }
   }
 
@@ -327,6 +344,7 @@ impl RemoteManager {
     for connection in connections {
       connection.cancellation.cancel();
       connection.direct.close().await;
+      connection.runtime_changed();
     }
     let authentications: Vec<_> = self
       .authentications
@@ -502,6 +520,10 @@ impl Authentication {
 }
 
 impl Connection {
+  fn runtime_changed(&self) {
+    (self.sink)("hub-client-runtime-changed", json!({}));
+  }
+
   fn transport_event(&self, transport: TransportState) {
     (self.sink)(
       "hub-client-transport",
@@ -565,6 +587,59 @@ impl Connection {
       }) => response.map_err(|_| "Machine request timed out; delivery may be uncertain and requests are not retried")?,
     }?;
     Ok(response)
+  }
+}
+
+#[cfg(test)]
+mod inventory_tests {
+  use super::*;
+
+  fn connection(id: &str) -> Arc<Connection> {
+    let identity = Arc::new(NoiseIdentity::generate().unwrap());
+    Arc::new(Connection {
+      info: ConnectionInfo {
+        connection_id: id.into(),
+        endpoint: "https://hub.example/machines/example".into(),
+        host_id: "example".into(),
+        host_public_key: identity.public_key(),
+        transport: TransportState::default(),
+      },
+      endpoint: Url::parse("wss://hub.example/hub/v1/secure/example").unwrap(),
+      identity,
+      cancellation: CancellationToken::new(),
+      requests: Arc::new(Semaphore::new(1)),
+      listening: std::sync::atomic::AtomicBool::new(false),
+      sink: Arc::new(|_, _| {}),
+      direct: direct::DirectRoute::default(),
+    })
+  }
+
+  #[tokio::test]
+  async fn inventory_is_memory_only_and_uses_current_transport_not_open_snapshot() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("never-created");
+    let manager = RemoteManager::new(missing.clone());
+    assert!(manager.list_connections().await.is_empty());
+    assert!(!missing.exists());
+    let connection = connection("known-connection");
+    connection.direct.changes.send_replace(TransportState {
+      kind: TransportKind::Direct,
+      reason: None,
+    });
+    manager
+      .connections
+      .lock()
+      .await
+      .insert(connection.info.connection_id.clone(), connection.clone());
+    let inventory = manager.list_connections().await;
+    assert_eq!(inventory.len(), 1);
+    assert_eq!(inventory[0].connection_id, "known-connection");
+    assert_eq!(inventory[0].transport.kind, TransportKind::Direct);
+    assert_eq!(connection.info.transport.kind, TransportKind::Relay);
+    manager.close("known-connection").await;
+    assert!(manager.list_connections().await.is_empty());
+    assert!(connection.cancellation.is_cancelled());
+    assert!(!missing.exists());
   }
 }
 

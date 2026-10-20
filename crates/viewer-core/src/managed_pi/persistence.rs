@@ -103,7 +103,7 @@ impl ReceiptStore {
       if receipt.status != ManagedSessionStatus::Failed {
         receipt.status = ManagedSessionStatus::Stopped;
         receipt.message =
-          Some("The owning viewer runtime has stopped. Resume the persisted session explicitly.".into());
+          Some("The owning viewer runtime has stopped. Send a message to resume the persisted session.".into());
       }
       receipt.dialog = None;
       restarted.push((receipt.clone(), lease));

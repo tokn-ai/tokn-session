@@ -12,6 +12,14 @@ pub struct NativeRemote {
 }
 
 impl NativeRemote {
+  /// Listing runtimes must not generate or load desktop identity storage.
+  pub async fn list_connections(&self) -> Vec<tokn_hub_remote::ConnectionInfo> {
+    match self.initialized.get() {
+      Some(manager) => manager.list_connections().await,
+      None => Vec::new(),
+    }
+  }
+
   pub fn new(paths: SessionPaths, legacy_client: PathBuf) -> Self {
     Self {
       paths,
@@ -83,7 +91,10 @@ mod tests {
     let paths = SessionPaths::from_home(home.path());
     let legacy = home.path().join("config/hub-client");
     let remote = NativeRemote::new(paths.clone(), legacy.clone());
+    assert!(remote.list_connections().await.is_empty());
+    assert!(remote.initialized.get().is_none());
     remote.shutdown().await;
+    assert!(remote.list_connections().await.is_empty());
     assert!(remote.manager().await.is_err());
     assert!(!paths.root().exists());
     assert!(!legacy.exists());
