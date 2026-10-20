@@ -4,13 +4,15 @@ import { errorMessage } from "./state";
 import { isDesktop } from "./transport";
 import { listViewerRuntimes, listenForViewerRuntimeChanges, restartViewerRuntime } from "./tauri";
 import type { RuntimeInfo, RuntimeInventory } from "./types";
+import { useActionNotification } from "../components/ActionNotifications";
 
-export interface RuntimeActionState { busy: boolean; error: string | null; message: string | null; }
+export interface RuntimeActionState { busy: boolean; error: string | null; }
 interface InventoryRead { epoch: number; again: boolean; promise: Promise<void>; }
 
 /** Inventory observation is active only while its section is visible. */
 export function useViewerRuntimes(active: boolean) {
   const desktop = isDesktop();
+  const notify = useActionNotification();
   const [inventory, setInventory] = useState<RuntimeInventory | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -112,25 +114,26 @@ export function useViewerRuntimes(active: boolean) {
     if (!runtime.can_restart || runtime.ownership !== "viewer") return;
     const current = inventory_ref.current?.runtimes.find((row) => row.runtime_id === runtime.runtime_id);
     if (!current || current.instance_id !== runtime.instance_id || !current.can_restart || current.ownership !== "viewer") {
-      updateAction(runtime.runtime_id, { busy: false, error: "This runtime changed. Check its refreshed status before restarting.", message: null });
+      updateAction(runtime.runtime_id, { busy: false, error: "This runtime changed. Check its refreshed status before restarting." });
       await refresh();
       return;
     }
-    updateAction(runtime.runtime_id, { busy: true, error: null, message: null });
+    updateAction(runtime.runtime_id, { busy: true, error: null });
     let outcome: RuntimeActionState;
     try {
       const request_id = createUuid();
       const result = await restartViewerRuntime({ request_id, runtime_id: runtime.runtime_id, expected_instance_id: runtime.instance_id });
       if (result.request_id !== request_id || result.runtime_id !== runtime.runtime_id) throw new Error("The restart response did not match this request.");
-      outcome = { busy: false, error: null, message: result.message || "Runtime restarted." };
+      notify({ title: runtime.name, message: result.message || "Restart requested" });
+      outcome = { busy: false, error: null };
     } catch (failure) {
-      outcome = { busy: false, error: errorMessage(failure), message: null };
+      outcome = { busy: false, error: errorMessage(failure) };
     }
     // Refresh on success or rejection, including stale instance/lease errors.
     // A read never retries the restart action itself.
     await refresh();
     updateAction(runtime.runtime_id, outcome);
-  }, [desktop, refresh, updateAction]);
+  }, [desktop, notify, refresh, updateAction]);
 
   return { desktop, inventory, loading, error, live_error, actions, refresh, restart };
 }

@@ -4,9 +4,10 @@ import { listViewerRuntimes, listenForViewerRuntimeChanges, restartViewerRuntime
 import { useViewerRuntimes } from "./useViewerRuntimes";
 import type { RuntimeInfo, RuntimeInventory, RuntimeRestartResponse } from "./types";
 
-const { desktop } = vi.hoisted(() => ({ desktop: { value: true } }));
+const { desktop, notify } = vi.hoisted(() => ({ desktop: { value: true }, notify: vi.fn() }));
 vi.mock("./transport", () => ({ isDesktop: () => desktop.value }));
 vi.mock("./tauri", () => ({ listViewerRuntimes: vi.fn(), listenForViewerRuntimeChanges: vi.fn(), restartViewerRuntime: vi.fn() }));
+vi.mock("../components/ActionNotifications", () => ({ useActionNotification: () => notify }));
 let changed: () => void;
 const stop = vi.fn();
 const row: RuntimeInfo = { runtime_id: "pi:owned", instance_id: "owned:1", name: "Pi · Hello", kind: "pi",
@@ -94,7 +95,8 @@ it("uses the displayed instance and deduplicates repeated restart clicks", async
   expect(result.current.actions.get(row.runtime_id)?.busy).toBe(true);
   const request = vi.mocked(restartViewerRuntime).mock.calls[0][0];
   await act(async () => { pending.resolve({ request_id: request.request_id, runtime_id: row.runtime_id, message: "Pi restarted" }); await restarting; });
-  expect(result.current.actions.get(row.runtime_id)).toEqual({ busy: false, error: null, message: "Pi restarted" });
+  expect(result.current.actions.get(row.runtime_id)).toEqual({ busy: false, error: null });
+  expect(notify).toHaveBeenCalledExactlyOnceWith({ title: row.name, message: "Pi restarted" });
 });
 
 it("refreshes a rejected stale instance without automatically restarting its successor", async () => {
@@ -132,6 +134,7 @@ it("lets an accepted restart finish after leaving the section without continuing
   expect(result.current.actions.get(row.runtime_id)?.busy).toBe(false);
   expect(listViewerRuntimes).toHaveBeenCalledOnce();
   expect(restartViewerRuntime).toHaveBeenCalledOnce();
+  expect(notify).toHaveBeenCalledExactlyOnceWith({ title: row.name, message: "Restarted" });
   rerender({ active: true });
   await waitFor(() => expect(listViewerRuntimes).toHaveBeenCalledTimes(2));
 });
@@ -142,9 +145,27 @@ it("does not claim success or resubmit when a restart acknowledgement identifies
   await waitFor(() => expect(result.current.inventory).not.toBeNull());
   await act(async () => { await result.current.restart(row); });
   expect(result.current.actions.get(row.runtime_id)?.error).toContain("did not match");
-  expect(result.current.actions.get(row.runtime_id)?.message).toBeNull();
+  expect(notify).not.toHaveBeenCalled();
   expect(restartViewerRuntime).toHaveBeenCalledOnce();
   expect(listViewerRuntimes).toHaveBeenCalledTimes(2);
+});
+
+it("delivers the accepted restart notification after Settings unmounts", async () => {
+  const pending = deferred<RuntimeRestartResponse>();
+  vi.mocked(restartViewerRuntime).mockReturnValueOnce(pending.promise);
+  const { result, unmount } = renderHook(() => useViewerRuntimes(true));
+  await waitFor(() => expect(result.current.inventory).not.toBeNull());
+  let restarting!: Promise<void>;
+  act(() => { restarting = result.current.restart(row); });
+  const request = vi.mocked(restartViewerRuntime).mock.calls[0][0];
+  unmount();
+  await act(async () => {
+    pending.resolve({ request_id: request.request_id, runtime_id: row.runtime_id, message: "Restart requested" });
+    await restarting;
+  });
+  expect(notify).toHaveBeenCalledExactlyOnceWith({ title: row.name, message: "Restart requested" });
+  expect(listViewerRuntimes).toHaveBeenCalledOnce();
+  expect(restartViewerRuntime).toHaveBeenCalledOnce();
 });
 
 it("still loads a snapshot when live notifications are unavailable", async () => {

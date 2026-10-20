@@ -6,6 +6,7 @@ import { useViewerPreferences } from "../lib/viewerPreferences";
 import { SettingsPage } from "../pages/SettingsPage";
 import { MachineHostingSettings } from "./MachineHostingSettings";
 import { NativePreferenceSaveNotice } from "./NativePreferenceSaveNotice";
+import { ActionNotificationHost } from "./ActionNotifications";
 import "./SettingsDialog.css";
 
 interface SettingsDialogProps {
@@ -47,5 +48,6 @@ export function SettingsDialog({ remote, machine_label, machine_key, connected =
       </p>}</div>}
     />
     <NativePreferenceSaveNotice placement="settings" />
+    <ActionNotificationHost />
   </dialog>, document.body);
 }

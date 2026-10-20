@@ -34,7 +34,6 @@
 .runtime-control-icon--spinning { animation: runtime-control-spin 900ms linear infinite; }
 @keyframes runtime-control-spin { to { transform: rotate(360deg); } }
 .runtime-row__warning,
-.runtime-row__message,
 .runtime-row .settings-page__error { margin: 6px 0 0; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
 .runtime-row__warning { color: var(--text-soft); }
 .runtime-row__details { font-size: 12px; }

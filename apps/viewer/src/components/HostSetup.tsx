@@ -5,6 +5,7 @@ import type { LocalHostPairing, StartLocalHostRequest } from "../lib/types";
 import { createPortal } from "react-dom";
 import { hostLabels, isHosting, useLocalHost } from "../lib/localHost";
 import { CloseIcon } from "./Icons";
+import { ActionNotificationHost } from "./ActionNotifications";
 import "./HostSetup.css";
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -122,5 +123,6 @@ export function HostDialog() {
         {show_pairing && <PairingSetup />}
       </section>}
     </div>
+    <ActionNotificationHost />
   </dialog>, document.body);
 }

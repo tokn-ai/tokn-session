@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import type { ManagedSessionDialogResponse, ManagedSessionSnapshot, RegisteredProject, RegisterProjectRequest } from "../lib/types";
 import { errorMessage } from "../lib/state";
 import { CloseIcon } from "./Icons";
+import { ActionNotificationHost } from "./ActionNotifications";
 import "./ProjectWorkspace.css";
 
 function LastTurnFailure({ message }: { message?: string | null }) {
@@ -30,6 +31,7 @@ function WorkspaceDialog({ title, open = true, on_close, children }: {
     onCancel={(event) => { event.preventDefault(); on_close(); }}>
     <header><h2 id={title_id}>{title}</h2><button aria-label={`Close ${title}`} className="icon-button" type="button" onClick={on_close}><CloseIcon /></button></header>
     {children}
+    {open && <ActionNotificationHost />}
   </dialog>, document.body);
 }
 

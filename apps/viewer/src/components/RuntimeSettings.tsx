@@ -52,7 +52,6 @@ function RuntimeRow({ runtime, action, on_restart }: {
     {restartable && runtime.kind === "pi" && runtime.status === "running" && <p className="runtime-row__warning">Restart interrupts the current turn.</p>}
     {runtime.last_error && <p className="settings-page__error" role="alert"><strong>Last error: </strong>{runtime.last_error}</p>}
     {action?.error && <p className="settings-page__error" role="alert"><strong>Restart: </strong>{action.error}</p>}
-    {action?.message && <p className="runtime-row__message" role="status">{action.message}</p>}
     <details className="runtime-row__details"><summary>Details</summary><div className="runtime-row__metadata">
       <p className="runtime-row__ownership">{runtime.ownership === "viewer" ? "Viewer-managed" : "Externally managed"} · {EXECUTION_LABELS[runtime.execution_kind]}</p>
       {runtime.detail && <p className="runtime-row__detail">{runtime.detail}</p>}

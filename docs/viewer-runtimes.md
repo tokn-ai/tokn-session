@@ -58,6 +58,8 @@ an unconfirmed handoff reports an error without bypassing ownership checks.
 
 Runtime lifecycle events refresh the visible inventory. Ordinary chat appends
 do not trigger inventory scans. Refresh failures retain the last known rows and
-offer Retry; restart progress and errors belong to the affected row. Inspection
-does not keep idle Pi workers alive. Viewer quit closes restart admission and
+offer Retry; restart progress and errors belong to the affected row. Restart
+acknowledgments appear as dismissible notifications that expire automatically
+and remain available when Settings closes. Inspection does not keep idle Pi
+workers alive. Viewer quit closes restart admission and
 stops its owned workers and services, including an in-progress replacement.

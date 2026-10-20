@@ -46,14 +46,14 @@ it("keeps saved Pi sessions distinct from active processes and scopes progress/e
   vi.mocked(useViewerRuntimes).mockReturnValue(state({ inventory: { version: 1, runtimes: [
     { ...row, status: "stopped", pid: null, last_error: "Last provider request failed" },
     { ...row, runtime_id: "pi:other", name: "Pi · Other" },
-  ] }, actions: new Map([[row.runtime_id, { busy: true, error: null, message: null }]]) }));
+  ] }, actions: new Map([[row.runtime_id, { busy: true, error: null }]]) }));
   const view = render(<RuntimeSettings active />);
   expect(screen.getByText("Restarting", { exact: true })).toBeVisible();
   expect(screen.getByRole("button", { name: "Restarting Pi · Hello" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "Restart Pi · Other" })).toBeEnabled();
   expect(screen.getByText(/Last provider request failed/)).toBeInTheDocument();
   vi.mocked(useViewerRuntimes).mockReturnValue(state({ inventory: { version: 1, runtimes: [{ ...row, status: "stopped", pid: null }] },
-    actions: new Map([[row.runtime_id, { busy: false, error: "Runtime instance changed", message: null }]]) }));
+    actions: new Map([[row.runtime_id, { busy: false, error: "Runtime instance changed" }]]) }));
   view.rerender(<RuntimeSettings active />);
   expect(screen.getByText("Saved")).toBeVisible();
   expect(screen.getByRole("alert")).toHaveTextContent("Runtime instance changed");
