@@ -5,7 +5,7 @@ use crate::workspace::{
 };
 
 impl ViewerService {
-  fn check_managed_workspace(&self) -> Result<(), String> {
+  pub(super) fn check_managed_workspace(&self) -> Result<(), String> {
     if self.session_scope.is_some() {
       return Err("Managed sessions are unavailable in a session share".into());
     }
@@ -400,7 +400,7 @@ mod tests {
 
   #[cfg(unix)]
   #[tokio::test]
-  async fn owned_creation_input_stop_and_restart_resume_share_one_real_identity() {
+  async fn owned_creation_input_stop_and_restart_send_share_one_real_identity() {
     use crate::model::{InputDeliveryStatus, SessionInputStatusRequest, SubmitSessionInputRequest};
     use crate::workspace::ManagedSessionStatus;
     use std::os::unix::fs::PermissionsExt;
@@ -506,19 +506,43 @@ for line in sys.stdin:
     // Reloading ownership does not launch a process or replay either prompt.
     service.managed_pi =
       crate::managed_pi::ManagedPiSessions::with_test_executable(Some(receipts), executable).unwrap();
-    let resumed = service.resume_managed_session(identity).await.unwrap();
-    assert_eq!(resumed.session_key.as_deref(), Some(key.as_str()));
-    assert!(
+    let status = service.get_session_input_status(status_request.clone()).await.unwrap();
+    assert!(status.available);
+    assert!(status.resume_required);
+    // The broker answers a previously accepted request before any resume or
+    // filesystem work, even after its original worker has stopped.
+    assert_eq!(
+      service.submit_session_input(follow_up).await.unwrap().status,
+      InputDeliveryStatus::Accepted
+    );
+    assert_eq!(
       service
-        .get_session_input_status(status_request)
+        .get_managed_session(identity.clone())
         .await
         .unwrap()
-        .available
+        .unwrap()
+        .status,
+      ManagedSessionStatus::Stopped
     );
+    let next = SubmitSessionInputRequest {
+      session_key: key.clone(),
+      request_id: uuid::Uuid::new_v4().to_string(),
+      text: "after restart".into(),
+      image_ids: Vec::new(),
+    };
+    assert_eq!(
+      service.submit_session_input(next).await.unwrap().status,
+      InputDeliveryStatus::Accepted
+    );
+    let resumed = service.get_managed_session(identity).await.unwrap().unwrap();
+    assert_eq!(resumed.session_key.as_deref(), Some(key.as_str()));
+    let status = service.get_session_input_status(status_request).await.unwrap();
+    assert!(status.available);
+    assert!(!status.resume_required);
     service.shutdown_managed_sessions().await;
     assert_eq!(
       std::fs::read_to_string(Path::new(&project.folder_path).join("prompts.jsonl")).unwrap(),
-      prompts
+      format!("{prompts}\"after restart\"\n")
     );
     service.relay.shutdown().await;
   }

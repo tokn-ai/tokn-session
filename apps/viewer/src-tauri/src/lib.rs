@@ -6,6 +6,7 @@ mod local_host;
 mod local_viewer;
 mod native_remote;
 mod relay_settings;
+mod runtime_management;
 mod translation;
 use tauri::Manager;
 pub use tokn_session_relay::stdio as relay_child;
@@ -25,6 +26,7 @@ pub fn run() {
       ));
       app.manage(device_preferences::DevicePreferences::default());
       app.manage(hub_passkey::PasskeyCallbacks::default());
+      app.manage(runtime_management::RuntimeRestartBroker::default());
       Ok(())
     })
     .invoke_handler(tauri::generate_handler![
@@ -84,6 +86,8 @@ pub fn run() {
       commands::input::submit_session_question_answers,
       commands::relay::get_relay_status,
       commands::settings::get_machine_settings,
+      commands::runtimes::list_viewer_runtimes,
+      commands::runtimes::restart_viewer_runtime,
       commands::relay::configure_relay,
       commands::translation::get_translation_status,
       commands::translation::translate_text,
@@ -94,6 +98,7 @@ pub fn run() {
     .expect("error while building tokn session viewer")
     .run(|app, event| {
       if matches!(event, tauri::RunEvent::Exit) {
+        app.state::<runtime_management::RuntimeRestartBroker>().close();
         tauri::async_runtime::block_on(app.state::<local_host::LocalHost>().shutdown(app));
         tauri::async_runtime::block_on(app.state::<local_viewer::LocalViewer>().shutdown());
         tauri::async_runtime::block_on(app.state::<native_remote::NativeRemote>().shutdown());

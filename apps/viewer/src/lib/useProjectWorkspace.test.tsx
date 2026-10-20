@@ -52,6 +52,31 @@ describe("local project workspace", () => {
     expect(host.invoke).not.toHaveBeenCalled(); expect(host.transport.listen).not.toHaveBeenCalled();
   });
 
+  it("refreshes selected owned input after idle cleanup or another window resumes", async () => {
+    const host = connection(); const original = host.invoke.getMockImplementation()!;
+    host.invoke.mockImplementation((command, payload) => command === "get_managed_session"
+      ? Promise.resolve(state("owned", { status: "idle", session: summary })) : original(command, payload));
+    const { result } = renderHook(() => useProjectWorkspace({ ...options(), selected_session_key: summary.session_key }, host.transport));
+    await waitFor(() => expect(result.current.managed?.status).toBe("idle"));
+    const initial = result.current.input_refresh_key;
+    act(() => host.emit(state("owned", { revision: 2, status: "running", session: summary })));
+    act(() => host.emit(state("owned", { revision: 3, status: "idle", session: summary })));
+    expect(result.current.input_refresh_key).toBe(initial);
+    act(() => host.emit(state("owned", { revision: 4, status: "stopped", session: summary })));
+    expect(result.current.input_refresh_key).toBe(initial + 1);
+    act(() => host.emit(state("owned", { revision: 3, status: "running", session: summary })));
+    expect(result.current.managed?.status).toBe("stopped");
+    expect(result.current.input_refresh_key).toBe(initial + 1);
+    act(() => host.emit(state("owned", { revision: 5, status: "failed", session: summary })));
+    expect(result.current.input_refresh_key).toBe(initial + 1);
+    act(() => host.emit(state("owned", { revision: 6, status: "starting", session: summary })));
+    expect(result.current.input_refresh_key).toBe(initial + 2);
+    act(() => host.emit(state("owned", { revision: 7, status: "running", session: summary })));
+    expect(result.current.input_refresh_key).toBe(initial + 2);
+    act(() => host.emit(state("background", { revision: 2, session_key: "pi:other", session: { ...summary, session_key: "pi:other" }, status: "stopped" })));
+    expect(result.current.input_refresh_key).toBe(initial + 2);
+  });
+
   it("deduplicates same-frame starts and waits for the indexed real identity", async () => {
     const host = connection(); const created = vi.fn(); const start = deferred<ManagedSessionSnapshot>();
     const original = host.invoke.getMockImplementation()!;

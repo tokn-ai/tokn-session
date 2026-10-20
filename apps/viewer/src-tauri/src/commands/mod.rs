@@ -9,6 +9,7 @@ pub(crate) mod local;
 pub(crate) mod preferences;
 pub(crate) mod projects;
 pub(crate) mod relay;
+pub(crate) mod runtimes;
 pub(crate) mod sessions;
 pub(crate) mod settings;
 pub(crate) mod translation;

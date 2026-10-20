@@ -5,10 +5,11 @@
 mod actor;
 mod persistence;
 mod protocol;
+mod runtimes;
 
 use crate::{
   images::ResolvedImage,
-  input::{Admission, DeliveryError, InputCapability, MAX_INPUT_LENGTH},
+  input::{Admission, DeliveryError, MAX_INPUT_LENGTH},
   workspace::{
     CreateProjectSessionRequest, ManagedSessionDialogResponse, ManagedSessionRequest, ManagedSessionSnapshot,
     ManagedSessionStatus, RegisteredProject,
@@ -24,12 +25,14 @@ use std::{
     atomic::{AtomicBool, Ordering},
   },
 };
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc, oneshot, watch};
+use tokio_util::sync::CancellationToken;
 
 const MAX_ACTIVE: usize = 8;
 const MAX_RECEIPTS: usize = 256;
 const COMMAND_CAPACITY: usize = 16;
 const QUEUE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
+const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 #[derive(Clone)]
 pub(crate) struct ManagedPiSessions {
@@ -43,13 +46,54 @@ struct Inner {
   executable: PathBuf,
   unavailable: Option<String>,
   shutting_down: AtomicBool,
+  shutdown: watch::Sender<bool>,
+  idle_timeout: std::time::Duration,
 }
 
 struct Record {
   receipt: Receipt,
   generation: u64,
   sender: Option<mpsc::Sender<actor::Command>>,
+  start_gate: Arc<AsyncMutex<()>>,
+  worker_state: Option<watch::Receiver<WorkerState>>,
+  instance_id: String,
+  worker_pid: Option<u32>,
+  started_at_ms: Option<i64>,
+  termination: Option<CancellationToken>,
+  restarting: Option<watch::Receiver<bool>>,
   images_available: bool,
+}
+
+impl Record {
+  fn new(receipt: Receipt) -> Self {
+    Self {
+      receipt,
+      generation: 0,
+      sender: None,
+      start_gate: Arc::new(AsyncMutex::new(())),
+      worker_state: None,
+      instance_id: uuid::Uuid::new_v4().to_string(),
+      worker_pid: None,
+      started_at_ms: None,
+      termination: None,
+      restarting: None,
+      images_available: false,
+    }
+  }
+}
+
+#[derive(Clone)]
+enum WorkerState {
+  Starting,
+  Ready,
+  Closing(Option<String>),
+  Stopped(Option<String>),
+}
+
+pub(crate) struct OwnedInputStatus {
+  pub message: String,
+  pub resume_required: bool,
+  pub images_available: bool,
 }
 
 impl ManagedPiSessions {
@@ -63,23 +107,21 @@ impl ManagedPiSessions {
   }
 
   fn with_executable(state_path: Option<PathBuf>, executable: PathBuf) -> Result<Self, String> {
+    Self::with_executable_and_idle_timeout(state_path, executable, IDLE_TIMEOUT)
+  }
+
+  fn with_executable_and_idle_timeout(
+    state_path: Option<PathBuf>,
+    executable: PathBuf,
+    idle_timeout: std::time::Duration,
+  ) -> Result<Self, String> {
     if executable.as_os_str().is_empty() {
       return Err("Pi executable path cannot be empty".into());
     }
     let (store, receipts) = ReceiptStore::new(state_path)?;
     let records = receipts
       .into_iter()
-      .map(|receipt| {
-        (
-          receipt.request_id.clone(),
-          Record {
-            receipt,
-            generation: 0,
-            sender: None,
-            images_available: false,
-          },
-        )
-      })
+      .map(|receipt| (receipt.request_id.clone(), Record::new(receipt)))
       .collect();
     let (events, _) = broadcast::channel(128);
     Ok(Self {
@@ -90,6 +132,8 @@ impl ManagedPiSessions {
         executable,
         unavailable: None,
         shutting_down: AtomicBool::new(false),
+        shutdown: watch::channel(false).0,
+        idle_timeout,
       }),
     })
   }
@@ -109,6 +153,8 @@ impl ManagedPiSessions {
         executable: "pi".into(),
         unavailable: Some(message),
         shutting_down: AtomicBool::new(false),
+        shutdown: watch::channel(false).0,
+        idle_timeout: IDLE_TIMEOUT,
       }),
     }
   }
@@ -178,15 +224,7 @@ impl ManagedPiSessions {
       check_capacity(&records, true, true)?;
       // Reserve in memory before awaiting durable admission, so simultaneous
       // calls cannot launch two processes for one creation request.
-      records.insert(
-        request.request_id.clone(),
-        Record {
-          receipt: receipt.clone(),
-          generation: 0,
-          sender: None,
-          images_available: false,
-        },
-      );
+      records.insert(request.request_id.clone(), Record::new(receipt.clone()));
     }
     let store = self.inner.store.clone();
     let proposed = receipt.clone();
@@ -201,15 +239,12 @@ impl ManagedPiSessions {
       }
     };
     if !inserted {
-      self.inner.records.lock().unwrap().insert(
-        request.request_id.clone(),
-        Record {
-          receipt: admitted.clone(),
-          generation: 0,
-          sender: None,
-          images_available: false,
-        },
-      );
+      self
+        .inner
+        .records
+        .lock()
+        .unwrap()
+        .insert(request.request_id.clone(), Record::new(admitted.clone()));
       return duplicate(&admitted, &receipt);
     }
     if let Err(error) = self
@@ -279,11 +314,6 @@ impl ManagedPiSessions {
     let id = {
       let records = self.inner.records.lock().unwrap();
       let id = resolve(&records, &request)?.ok_or("This session was not created by this viewer")?;
-      let record = &records[&id];
-      if record.sender.is_some() {
-        return Ok(record.receipt.snapshot());
-      }
-      check_capacity(&records, true, false)?;
       id
     };
     self.start(id.clone(), None, true).await?;
@@ -312,7 +342,7 @@ impl ManagedPiSessions {
     self.get_by_id(&id).ok_or_else(|| "Managed session disappeared".into())
   }
 
-  pub(crate) fn input_status(&self, session_key: &str) -> Option<Result<InputCapability, DeliveryError>> {
+  pub(crate) fn input_status(&self, session_key: &str) -> Option<Result<OwnedInputStatus, DeliveryError>> {
     self
       .inner
       .records
@@ -321,22 +351,49 @@ impl ManagedPiSessions {
       .values()
       .find(|record| owns_key(&record.receipt, session_key))
       .map(|record| {
-        if record.sender.is_some()
-          && !matches!(
-            record.receipt.status,
-            ManagedSessionStatus::Stopped | ManagedSessionStatus::Failed
-          )
-        {
-          Ok(InputCapability {
-            message: "Send a message to this viewer-owned Pi session".into(),
-            images_available: record.images_available,
-          })
-        } else {
-          Err(DeliveryError::not_sent(
-            "This viewer-owned Pi session is stopped. Resume it before sending a message.",
-          ))
-        }
+        self.available().map_err(DeliveryError::not_sent)?;
+        let resume_required = record.sender.is_none();
+        Ok(OwnedInputStatus {
+          message: if resume_required {
+            "Send a message to resume this viewer-owned Pi session".into()
+          } else {
+            "Send a message to this viewer-owned Pi session".into()
+          },
+          resume_required,
+          images_available: !resume_required && record.images_available,
+        })
       })
+  }
+
+  pub(crate) async fn checked_input_status(
+    &self,
+    session_key: &str,
+  ) -> Option<Result<OwnedInputStatus, DeliveryError>> {
+    let status = self.input_status(session_key)?;
+    let Ok(status) = status else {
+      return Some(status);
+    };
+    if !status.resume_required {
+      return Some(Ok(status));
+    }
+    let (receipt, gate) = {
+      let records = self.inner.records.lock().unwrap();
+      let record = records.values().find(|record| owns_key(&record.receipt, session_key))?;
+      (record.receipt.clone(), record.start_gate.clone())
+    };
+    let _guard = gate.lock().await;
+    // A concurrent Send may already have resumed it. Capability reads share
+    // the startup gate so their temporary lease cannot interfere with Send.
+    let status = match self.input_status(session_key)? {
+      Ok(status) if status.resume_required => status,
+      status => return Some(status),
+    };
+    let store = self.inner.store.clone();
+    let validation = tokio::task::spawn_blocking(move || prepare_start(&store, receipt, true))
+      .await
+      .map_err(|error| error.to_string())
+      .and_then(|result| result);
+    Some(validation.map(|_| status).map_err(DeliveryError::not_sent))
   }
 
   #[cfg(test)]
@@ -361,12 +418,40 @@ impl ManagedPiSessions {
     validate_uuid(request_id, "message request")
       .and_then(|()| validate_message(text, !images.is_empty()))
       .map_err(DeliveryError::not_sent)?;
-    let (_, sender) = self
-      .runtime(&ManagedSessionRequest {
-        request_id: None,
-        session_key: Some(session_key.into()),
-      })
+    let request = ManagedSessionRequest {
+      request_id: None,
+      session_key: Some(session_key.into()),
+    };
+    let id = {
+      let records = self.inner.records.lock().unwrap();
+      resolve(&records, &request)
+        .map_err(DeliveryError::not_sent)?
+        .ok_or_else(|| DeliveryError::not_sent("This session was not created by this viewer"))?
+    };
+    let gate = self.start_gate(&id).map_err(DeliveryError::not_sent)?;
+    let guard = self.admission_gate(&id, gate).await.map_err(DeliveryError::not_sent)?;
+    self
+      .start_locked(id, None, true)
+      .await
       .map_err(DeliveryError::not_sent)?;
+    let (_, sender, mut worker_state) = self.runtime_state(&request).map_err(DeliveryError::not_sent)?;
+    loop {
+      let state = worker_state.borrow_and_update().clone();
+      match state {
+        WorkerState::Ready => break,
+        WorkerState::Closing(error) | WorkerState::Stopped(error) => {
+          return Err(DeliveryError::not_sent(
+            error.unwrap_or_else(|| "Pi runtime has stopped".into()),
+          ));
+        }
+        WorkerState::Starting => {}
+      }
+      worker_state
+        .changed()
+        .await
+        .map_err(|_| DeliveryError::not_sent("Pi stopped before it was ready to receive the message"))?;
+    }
+    self.available().map_err(DeliveryError::not_sent)?;
     let (reply, receive) = oneshot::channel();
     tokio::time::timeout(
       QUEUE_DEADLINE,
@@ -380,6 +465,7 @@ impl ManagedPiSessions {
     .await
     .map_err(|_| DeliveryError::not_sent("Pi command queue is busy"))?
     .map_err(|_| DeliveryError::not_sent("Pi runtime has stopped"))?;
+    drop(guard);
     receive.await.map_err(|_| {
       DeliveryError::uncertain("Pi runtime stopped before acknowledging the message; check its history before retrying")
     })?
@@ -391,23 +477,25 @@ impl ManagedPiSessions {
 
   pub(crate) async fn shutdown(&self) {
     self.inner.shutting_down.store(true, Ordering::Release);
-    let senders: Vec<_> = self
+    self.inner.shutdown.send_replace(true);
+    let workers: Vec<_> = self
       .inner
       .records
       .lock()
       .unwrap()
       .values()
-      .filter_map(|record| record.sender.clone())
+      .filter_map(|record| record.worker_state.clone())
       .collect();
     let mut waits = tokio::task::JoinSet::new();
-    for sender in senders {
+    for mut state in workers {
       waits.spawn(async move {
-        let (reply, receive) = oneshot::channel();
-        if matches!(
-          tokio::time::timeout(QUEUE_DEADLINE, sender.send(actor::Command::Shutdown(reply))).await,
-          Ok(Ok(()))
-        ) {
-          let _ = tokio::time::timeout(std::time::Duration::from_secs(5), receive).await;
+        loop {
+          if matches!(*state.borrow_and_update(), WorkerState::Stopped(_)) {
+            break;
+          }
+          if state.changed().await.is_err() {
+            break;
+          }
         }
       });
     }
@@ -425,60 +513,64 @@ impl ManagedPiSessions {
   }
 
   fn runtime(&self, request: &ManagedSessionRequest) -> Result<(String, mpsc::Sender<actor::Command>), String> {
+    self.runtime_state(request).map(|(id, sender, _)| (id, sender))
+  }
+
+  fn runtime_state(
+    &self,
+    request: &ManagedSessionRequest,
+  ) -> Result<(String, mpsc::Sender<actor::Command>, watch::Receiver<WorkerState>), String> {
     let records = self.inner.records.lock().unwrap();
     let id = resolve(&records, request)?.ok_or("This session was not created by this viewer")?;
     let sender = records[&id]
       .sender
       .clone()
       .ok_or("This viewer-owned Pi session is stopped. Resume it first.")?;
-    Ok((id, sender))
+    let state = records[&id].worker_state.clone().ok_or("Pi runtime is unavailable")?;
+    Ok((id, sender, state))
   }
 
   async fn start(&self, id: String, prompt: Option<(String, Vec<ResolvedImage>)>, resume: bool) -> Result<(), String> {
-    self.available()?;
-    let validation = self
+    let gate = self.start_gate(&id)?;
+    let _guard = self.admission_gate(&id, gate).await?;
+    self.start_locked(id, prompt, resume).await
+  }
+
+  fn start_gate(&self, id: &str) -> Result<Arc<AsyncMutex<()>>, String> {
+    self
       .inner
       .records
       .lock()
       .unwrap()
-      .get(&id)
-      .ok_or("Managed session disappeared")?
-      .receipt
-      .clone();
+      .get(id)
+      .map(|record| record.start_gate.clone())
+      .ok_or_else(|| "Managed session disappeared".into())
+  }
+
+  /// The per-session gate serializes startup and prompt admission with idle
+  /// retirement. Never hold the records mutex across filesystem or RPC waits.
+  async fn start_locked(
+    &self,
+    id: String,
+    prompt: Option<(String, Vec<ResolvedImage>)>,
+    resume: bool,
+  ) -> Result<(), String> {
+    self.available()?;
+    let validation = {
+      let records = self.inner.records.lock().unwrap();
+      let record = records.get(&id).ok_or("Managed session disappeared")?;
+      if record.sender.is_some() {
+        return Ok(());
+      }
+      record.receipt.clone()
+    };
     let store = self.inner.store.clone();
-    let (lease, latest) = tokio::task::spawn_blocking(move || {
-      let lease = store.lease(&validation.request_id)?;
-      let latest = store.latest(&validation.request_id)?.unwrap_or(validation.clone());
-      if latest.fingerprint != validation.fingerprint
-        || latest.folder != validation.folder
-        || latest.project_id != validation.project_id
-      {
-        return Err("Managed Pi ownership changed; reopen the viewer before resuming".into());
-      }
-      let validation = &latest;
-      if !validation.folder.is_dir()
-        || std::fs::canonicalize(&validation.folder).map_err(|error| error.to_string())? != validation.folder
-      {
-        return Err("The registered project folder is unavailable".into());
-      }
-      if resume {
-        let file = validation
-          .session_file
-          .as_ref()
-          .ok_or("Pi has not persisted a session file to resume")?;
-        let session_id = validation
-          .session_id
-          .as_deref()
-          .ok_or("Pi session identity is unavailable")?;
-        if persistence::validate_session(file, session_id, &validation.folder)?.is_none() {
-          return Err("The owned Pi session file is unavailable".into());
-        }
-      }
-      Ok::<_, String>((lease, latest))
-    })
-    .await
-    .map_err(|error| error.to_string())??;
+    let (lease, latest) = tokio::task::spawn_blocking(move || prepare_start(&store, validation, resume))
+      .await
+      .map_err(|error| error.to_string())??;
     let (sender, receive) = mpsc::channel(COMMAND_CAPACITY);
+    let (worker_state, state) = watch::channel(WorkerState::Starting);
+    let termination = CancellationToken::new();
     let (receipt, generation) = {
       let mut records = self.inner.records.lock().unwrap();
       self.available()?;
@@ -498,6 +590,11 @@ impl ManagedPiSessions {
       record.receipt.message = None;
       record.receipt.revision = record.receipt.revision.saturating_add(1);
       record.sender = Some(sender);
+      record.worker_state = Some(state);
+      record.instance_id = uuid::Uuid::new_v4().to_string();
+      record.worker_pid = None;
+      record.started_at_ms = None;
+      record.termination = Some(termination.clone());
       record.images_available = false;
       (record.receipt.clone(), record.generation)
     };
@@ -510,12 +607,22 @@ impl ManagedPiSessions {
         record.receipt.revision = record.receipt.revision.saturating_add(1);
         let _ = self.inner.events.send(record.receipt.snapshot());
       }
+      worker_state.send_replace(WorkerState::Stopped(Some(error.clone())));
       return Err(error);
     }
     let inner = Arc::downgrade(&self.inner);
     let executable = self.inner.executable.clone();
     tokio::spawn(actor::run(
-      inner, lease, executable, receipt, generation, prompt, resume, receive,
+      inner,
+      lease,
+      executable,
+      receipt,
+      generation,
+      prompt,
+      resume,
+      receive,
+      worker_state,
+      termination,
     ));
     Ok(())
   }
@@ -547,6 +654,46 @@ impl Inner {
     };
     self.publish(receipt).await
   }
+}
+
+fn prepare_start(store: &ReceiptStore, validation: Receipt, resume: bool) -> Result<(std::fs::File, Receipt), String> {
+  let lease = store.lease(&validation.request_id)?;
+  let latest = store.latest(&validation.request_id)?.unwrap_or(validation.clone());
+  if latest.fingerprint != validation.fingerprint
+    || latest.folder != validation.folder
+    || latest.project_id != validation.project_id
+  {
+    return Err("Managed Pi ownership changed; reopen the viewer before resuming".into());
+  }
+  if !latest.folder.is_dir()
+    || std::fs::canonicalize(&latest.folder).map_err(|error| error.to_string())? != latest.folder
+  {
+    return Err("The registered project folder is unavailable".into());
+  }
+  if resume {
+    validate_resume_target(&latest)?;
+  }
+  Ok((lease, latest))
+}
+
+fn validate_resume_target(receipt: &Receipt) -> Result<(), String> {
+  if !receipt.folder.is_dir()
+    || std::fs::canonicalize(&receipt.folder).map_err(|error| error.to_string())? != receipt.folder
+  {
+    return Err("The registered project folder is unavailable".into());
+  }
+  let file = receipt
+    .session_file
+    .as_ref()
+    .ok_or("Pi has not persisted a session file to resume")?;
+  let session_id = receipt
+    .session_id
+    .as_deref()
+    .ok_or("Pi session identity is unavailable")?;
+  if persistence::validate_session(file, session_id, &receipt.folder)?.is_none() {
+    return Err("The owned Pi session file is unavailable".into());
+  }
+  Ok(())
 }
 
 fn resolve(records: &HashMap<String, Record>, request: &ManagedSessionRequest) -> Result<Option<String>, String> {
