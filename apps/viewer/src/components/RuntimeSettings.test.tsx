@@ -15,21 +15,28 @@ function state(overrides: Partial<ReturnType<typeof useViewerRuntimes>> = {}): R
 beforeEach(() => { vi.resetAllMocks(); vi.mocked(useViewerRuntimes).mockReturnValue(state()); });
 afterEach(cleanup);
 
-it("shows real execution and ownership and restarts only the chosen viewer runtime", () => {
+it("keeps metadata in Details and offers only supported viewer restart actions", () => {
   const current = state({ inventory: { version: 1, runtimes: [row,
     { ...row, runtime_id: "reader", name: "Session reader", kind: "reader", execution_kind: "embedded", pid: null, session_key: null, detail: null, can_restart: false, restart_disabled_reason: "Part of the viewer runtime" },
     { ...row, runtime_id: "external", name: "External Relay", ownership: "external", execution_kind: "external", can_restart: true, restart_disabled_reason: "Manage this service outside the viewer" },
   ] } });
   vi.mocked(useViewerRuntimes).mockReturnValue(current);
   render(<RuntimeSettings active />);
-  expect(screen.getByText("Viewer-managed · Subprocess")).toBeInTheDocument();
-  expect(screen.getByText("Viewer-managed · In-process")).toBeInTheDocument();
-  expect(screen.getByText("Externally managed · External connection")).toBeInTheDocument();
-  expect(screen.getByText("Restart interrupts the current turn. Saved conversation history is kept.")).toBeInTheDocument();
+  expect(screen.getByText("Viewer-managed · Subprocess")).not.toBeVisible();
+  expect(screen.getByText("Viewer-managed · In-process")).not.toBeVisible();
+  expect(screen.getByText("Externally managed · External connection")).not.toBeVisible();
+  expect(screen.getByText("Restart interrupts the current turn.")).toBeVisible();
+  expect(screen.getByText("External", { exact: true })).toBeVisible();
   const pi = within(screen.getByRole("article", { name: "Pi · Hello" }));
-  expect(pi.getByText("/project/aa")).toBeInTheDocument();
-  expect(pi.getByText("4321")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Restart Session reader" })).toBeDisabled();
+  expect(pi.getByText("Working on the selected project")).not.toBeVisible();
+  expect(pi.getByText("/project/aa")).not.toBeVisible();
+  expect(pi.getByText("4321")).not.toBeVisible();
+  fireEvent.click(pi.getByText("Details"));
+  expect(pi.getByText("/project/aa")).toBeVisible();
+  expect(pi.getByText("4321")).toBeVisible();
+  expect(pi.getByText("Viewer-managed · Subprocess")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Restart Session reader" })).not.toBeInTheDocument();
+  expect(screen.getByText("Part of the viewer runtime")).not.toBeVisible();
   expect(screen.queryByRole("button", { name: "Restart External Relay" })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Restart Pi · Hello" }));
   expect(current.restart).toHaveBeenCalledExactlyOnceWith(row);
@@ -41,13 +48,13 @@ it("keeps saved Pi sessions distinct from active processes and scopes progress/e
     { ...row, runtime_id: "pi:other", name: "Pi · Other" },
   ] }, actions: new Map([[row.runtime_id, { busy: true, error: null, message: null }]]) }));
   const view = render(<RuntimeSettings active />);
-  expect(screen.getByText("Stopped · saved session")).toBeInTheDocument();
+  expect(screen.getByText("Saved")).toBeVisible();
   expect(screen.getByRole("button", { name: "Restarting Pi · Hello" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "Restart Pi · Other" })).toBeEnabled();
   expect(screen.getByText(/Last provider request failed/)).toBeInTheDocument();
   vi.mocked(useViewerRuntimes).mockReturnValue(state({ actions: new Map([[row.runtime_id, { busy: false, error: "Runtime instance changed", message: null }]]) }));
   view.rerender(<RuntimeSettings active />);
-  expect(screen.getByRole("alert")).toHaveTextContent("Could not confirm restart: Runtime instance changed");
+  expect(screen.getByRole("alert")).toHaveTextContent("Runtime instance changed");
 });
 
 it("retains stale rows during refresh failures and offers an explicit retry", () => {
@@ -55,7 +62,7 @@ it("retains stale rows during refresh failures and offers an explicit retry", ()
   vi.mocked(useViewerRuntimes).mockReturnValue(current);
   render(<RuntimeSettings active />);
   expect(screen.getByText("Pi · Hello")).toBeInTheDocument();
-  expect(screen.getByRole("alert")).toHaveTextContent("Showing last known status");
+  expect(screen.getByRole("alert")).toHaveTextContent("Status may be outdated");
   fireEvent.click(screen.getByRole("button", { name: "Retry runtime inventory" }));
   expect(current.refresh).toHaveBeenCalledOnce();
 });
@@ -84,7 +91,7 @@ it("scopes Runtimes to this viewer while a remote machine or no machine is selec
   fireEvent.click(screen.getByRole("button", { name: /^Runtimes/ }));
   expect(useViewerRuntimes).toHaveBeenLastCalledWith(true);
   const section = screen.getByRole("region", { name: "Runtimes" });
-  expect(within(section).getByText("This computer · this viewer")).toBeInTheDocument();
+  expect(within(section).getByText("This viewer")).toBeVisible();
   expect(within(section).getByText("Pi · Hello")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: /^Viewer preferences/ }));
   expect(useViewerRuntimes).toHaveBeenLastCalledWith(false);

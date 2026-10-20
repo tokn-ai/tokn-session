@@ -57,6 +57,10 @@ receipts. Pi replacement waits for process cleanup and resumes verified history
 without replaying prompts; Send waits for a concurrent replacement. External
 services remain read-only. Native Automatic reader mode is embedded rather than
 a separate Relay process. See [runtime management](viewer-runtimes.md).
+Native Quit needs separate follow-up: a desktop preview hung with the main
+thread synchronously awaiting LocalHost shutdown while WebKit IPC reply workers
+waited for that thread. Reader/Pi cleanup had not started; investigate quit
+coordination outside the blocking Exit callback.
 
 All six normalizers distinguish request errors from warnings, retries, tool
 failures, and cancellations, preserving partial content, usage, and native

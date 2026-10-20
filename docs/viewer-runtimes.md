@@ -6,9 +6,10 @@ conversation and does not initialize local readers, create identities, or launch
 stopped workers. Browser clients cannot use these native management commands.
 The inventory is not an operating-system process scan.
 
-Rows distinguish viewer-managed subprocesses, embedded services, and external
-connections. Details include session/project identity, working directory, public
-endpoint, last error, and directly known PID/start time when available. Tokens,
+Compact rows show the name, status, available restart action, and an external
+ownership marker when relevant. Details hold execution/ownership information,
+explanations, session/project identity, working directory, public endpoint, and
+directly known PID/start time when available. Errors remain visible in their row. Tokens,
 environment variables, prompts, and private credentials are not inventory data.
 
 ## Listed runtimes
