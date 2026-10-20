@@ -48,6 +48,16 @@ delivery and coalesces concurrent starts; old prompts are never replayed.
 Viewer shutdown stops its owned workers and prevents further starts.
 See [viewer projects](viewer-projects.md) for scope, settings, storage, and limits.
 
+Settings → Runtimes inventories this desktop viewer's Pi workers/saved sessions,
+reader/Relay, hosting, active Hub connections, and known background services,
+independently of the selected machine. Inspection does not start runtimes or
+create identities. Restart controls follow backend ownership/capabilities and
+target the exact displayed instance, with bounded cancellation-safe UUID
+receipts. Pi replacement waits for process cleanup and resumes verified history
+without replaying prompts; Send waits for a concurrent replacement. External
+services remain read-only. Native Automatic reader mode is embedded rather than
+a separate Relay process. See [runtime management](viewer-runtimes.md).
+
 All six normalizers distinguish request errors from warnings, retries, tool
 failures, and cancellations, preserving partial content, usage, and native
 diagnostics. Codex nested completion errors are failed turns; OpenCode/ZCode

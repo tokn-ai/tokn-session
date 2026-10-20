@@ -2,12 +2,18 @@
 //! body reads while a Relay catalog is authoritative, including reconnects.
 mod cache;
 mod managed;
+#[cfg(test)]
+mod runtime_tests;
+mod runtimes;
 mod settings;
 pub use settings::{RelayMode, RelaySettings};
 use std::{
   collections::HashMap,
   path::PathBuf,
-  sync::{Arc, Condvar, Mutex, Weak},
+  sync::{
+    Arc, Condvar, Mutex, Weak,
+    atomic::{AtomicBool, Ordering},
+  },
   time::{Duration, Instant},
 };
 
@@ -92,6 +98,9 @@ struct State {
   entries: Option<Vec<CatalogEntry>>,
   sessions: HashMap<SessionLocator, CachedSession>,
   cache: CachePolicy,
+  instance_id: String,
+  managed_pid: Option<u32>,
+  started_at_ms: Option<i64>,
 }
 
 pub struct ViewerRelay {
@@ -103,6 +112,7 @@ pub struct ViewerRelay {
   ready: Condvar,
   prefetch_wake: Notify,
   pub changes: broadcast::Sender<RelayChange>,
+  closed: AtomicBool,
 }
 
 impl ViewerRelay {
@@ -130,10 +140,14 @@ impl ViewerRelay {
         entries: None,
         sessions: HashMap::new(),
         cache: CachePolicy::default(),
+        instance_id: uuid::Uuid::new_v4().to_string(),
+        managed_pid: None,
+        started_at_ms: None,
       }),
       ready: Condvar::new(),
       prefetch_wake: Notify::new(),
       changes: broadcast::channel(128).0,
+      closed: AtomicBool::new(false),
     })
   }
 
@@ -154,6 +168,18 @@ impl ViewerRelay {
   }
 
   pub fn configure(self: &Arc<Self>, settings: RelaySettings) -> Result<(), String> {
+    self.configure_inner(settings, false, None)
+  }
+
+  fn configure_inner(
+    self: &Arc<Self>,
+    settings: RelaySettings,
+    preserve_sessions: bool,
+    expected_instance_id: Option<&str>,
+  ) -> Result<(), String> {
+    if self.closed.load(Ordering::Acquire) {
+      return Err("The session reader is shutting down".into());
+    }
     settings.validate()?;
     // Prepare the core reader before publishing Automatic mode. No provider
     // history is read here, and feed startup must not gate snapshot requests.
@@ -164,14 +190,22 @@ impl ViewerRelay {
     };
     let (epoch, cancel, reset) = {
       let mut state = self.state.lock().unwrap();
+      if self.closed.load(Ordering::Acquire) {
+        return Err("The session reader is shutting down".into());
+      }
+      if expected_instance_id.is_some_and(|expected| state.instance_id != expected)
+        || (preserve_sessions && state.settings != settings)
+      {
+        return Err("The session reader changed. Refresh runtimes before restarting it.".into());
+      }
       state.cancel.cancel();
       state.connection_cancel.cancel();
       for session in state.sessions.values() {
         session.cancel.cancel();
       }
       // Explicit source changes clear snapshots. Child crash/restart does not.
-      let reset = state.settings != settings || state.entries.is_none();
-      if reset || settings.mode == RelayMode::Local {
+      let reset = !preserve_sessions && (state.settings != settings || state.entries.is_none());
+      if reset || (!preserve_sessions && settings.mode == RelayMode::Local) {
         state.entries = None;
         state.providers.clear();
         state.sessions.clear();
@@ -186,6 +220,9 @@ impl ViewerRelay {
         state.providers.clear();
       }
       state.epoch += 1;
+      state.instance_id = uuid::Uuid::new_v4().to_string();
+      state.managed_pid = None;
+      state.started_at_ms = snapshots.as_ref().map(|_| crate::runtimes::now_ms());
       state.cancel = CancellationToken::new();
       state.connection_cancel = state.cancel.child_token();
       state.active_endpoint = snapshots.as_ref().map(|_| "embedded".into());
@@ -219,6 +256,22 @@ impl ViewerRelay {
       }
       RelayMode::External => self.connect_endpoint(settings.endpoint, epoch),
       RelayMode::Local => {}
+    }
+    if preserve_sessions {
+      let retained: Vec<_> = self
+        .state
+        .lock()
+        .unwrap()
+        .sessions
+        .iter()
+        .map(|(locator, session)| (locator.clone(), session.priority))
+        .collect();
+      for (locator, priority) in retained {
+        let manager = self.clone();
+        tokio::task::spawn_blocking(move || {
+          let _ = manager.ensure_session(&locator, priority, None);
+        });
+      }
     }
     Ok(())
   }

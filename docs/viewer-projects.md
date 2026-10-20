@@ -136,3 +136,7 @@ lifecycle events or per-token receipt writes.
 Automated lifecycle tests use a synthetic RPC executable without contacting a
 model. Successful real work still depends on the local Pi installation, model,
 authentication, and project configuration.
+
+**Settings → Runtimes** lists these workers and saved conversations alongside
+the viewer's other runtimes. Its Restart action replaces a worker without
+replaying a prompt; see [runtime management](viewer-runtimes.md).

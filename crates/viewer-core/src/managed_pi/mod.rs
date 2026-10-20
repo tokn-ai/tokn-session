@@ -5,6 +5,7 @@
 mod actor;
 mod persistence;
 mod protocol;
+mod runtimes;
 
 use crate::{
   input::{Admission, DeliveryError, MAX_INPUT_LENGTH},
@@ -24,6 +25,7 @@ use std::{
   },
 };
 use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc, oneshot, watch};
+use tokio_util::sync::CancellationToken;
 
 const MAX_ACTIVE: usize = 8;
 const MAX_RECEIPTS: usize = 256;
@@ -53,6 +55,11 @@ struct Record {
   sender: Option<mpsc::Sender<actor::Command>>,
   start_gate: Arc<AsyncMutex<()>>,
   worker_state: Option<watch::Receiver<WorkerState>>,
+  instance_id: String,
+  worker_pid: Option<u32>,
+  started_at_ms: Option<i64>,
+  termination: Option<CancellationToken>,
+  restarting: Option<watch::Receiver<bool>>,
 }
 
 impl Record {
@@ -63,6 +70,11 @@ impl Record {
       sender: None,
       start_gate: Arc::new(AsyncMutex::new(())),
       worker_state: None,
+      instance_id: uuid::Uuid::new_v4().to_string(),
+      worker_pid: None,
+      started_at_ms: None,
+      termination: None,
+      restarting: None,
     }
   }
 }
@@ -379,7 +391,7 @@ impl ManagedPiSessions {
         .ok_or_else(|| DeliveryError::not_sent("This session was not created by this viewer"))?
     };
     let gate = self.start_gate(&id).map_err(DeliveryError::not_sent)?;
-    let guard = gate.lock().await;
+    let guard = self.admission_gate(&id, gate).await.map_err(DeliveryError::not_sent)?;
     self
       .start_locked(id, None, true)
       .await
@@ -481,7 +493,7 @@ impl ManagedPiSessions {
 
   async fn start(&self, id: String, prompt: Option<String>, resume: bool) -> Result<(), String> {
     let gate = self.start_gate(&id)?;
-    let _guard = gate.lock().await;
+    let _guard = self.admission_gate(&id, gate).await?;
     self.start_locked(id, prompt, resume).await
   }
 
@@ -514,6 +526,7 @@ impl ManagedPiSessions {
       .map_err(|error| error.to_string())??;
     let (sender, receive) = mpsc::channel(COMMAND_CAPACITY);
     let (worker_state, state) = watch::channel(WorkerState::Starting);
+    let termination = CancellationToken::new();
     let (receipt, generation) = {
       let mut records = self.inner.records.lock().unwrap();
       self.available()?;
@@ -534,6 +547,10 @@ impl ManagedPiSessions {
       record.receipt.revision = record.receipt.revision.saturating_add(1);
       record.sender = Some(sender);
       record.worker_state = Some(state);
+      record.instance_id = uuid::Uuid::new_v4().to_string();
+      record.worker_pid = None;
+      record.started_at_ms = None;
+      record.termination = Some(termination.clone());
       (record.receipt.clone(), record.generation)
     };
     if let Err(error) = self.inner.publish(receipt.clone()).await {
@@ -560,6 +577,7 @@ impl ManagedPiSessions {
       resume,
       receive,
       worker_state,
+      termination,
     ));
     Ok(())
   }
@@ -608,19 +626,29 @@ fn prepare_start(store: &ReceiptStore, validation: Receipt, resume: bool) -> Res
     return Err("The registered project folder is unavailable".into());
   }
   if resume {
-    let file = latest
-      .session_file
-      .as_ref()
-      .ok_or("Pi has not persisted a session file to resume")?;
-    let session_id = latest
-      .session_id
-      .as_deref()
-      .ok_or("Pi session identity is unavailable")?;
-    if persistence::validate_session(file, session_id, &latest.folder)?.is_none() {
-      return Err("The owned Pi session file is unavailable".into());
-    }
+    validate_resume_target(&latest)?;
   }
   Ok((lease, latest))
+}
+
+fn validate_resume_target(receipt: &Receipt) -> Result<(), String> {
+  if !receipt.folder.is_dir()
+    || std::fs::canonicalize(&receipt.folder).map_err(|error| error.to_string())? != receipt.folder
+  {
+    return Err("The registered project folder is unavailable".into());
+  }
+  let file = receipt
+    .session_file
+    .as_ref()
+    .ok_or("Pi has not persisted a session file to resume")?;
+  let session_id = receipt
+    .session_id
+    .as_deref()
+    .ok_or("Pi session identity is unavailable")?;
+  if persistence::validate_session(file, session_id, &receipt.folder)?.is_none() {
+    return Err("The owned Pi session file is unavailable".into());
+  }
+  Ok(())
 }
 
 fn resolve(records: &HashMap<String, Record>, request: &ManagedSessionRequest) -> Result<Option<String>, String> {

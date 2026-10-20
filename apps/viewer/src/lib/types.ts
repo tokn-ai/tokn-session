@@ -402,6 +402,31 @@ export interface MachineSettingsSnapshot {
 }
 export interface RelayChange { session_key: string | null; reset: boolean; }
 
+export type RuntimeKind = "pi" | "reader" | "hosting" | "hub_connection" | "background_api" | "background_connector";
+export interface RuntimeInfo {
+  runtime_id: string;
+  instance_id: string;
+  name: string;
+  kind: RuntimeKind;
+  execution_kind: "subprocess" | "embedded" | "external";
+  ownership: "viewer" | "external";
+  status: string;
+  pid: number | null;
+  started_at_ms: number | null;
+  session_key: string | null;
+  session_id: string | null;
+  project_id: string | null;
+  working_directory: string | null;
+  endpoint: string | null;
+  detail: string | null;
+  last_error: string | null;
+  can_restart: boolean;
+  restart_disabled_reason: string | null;
+}
+export interface RuntimeInventory { version: 1; runtimes: RuntimeInfo[]; }
+export interface RuntimeRestartRequest { request_id: string; runtime_id: string; expected_instance_id: string; }
+export interface RuntimeRestartResponse { request_id: string; runtime_id: string; message: string; }
+
 /**
  * One in-memory operational snapshot for the durable session index.
  *

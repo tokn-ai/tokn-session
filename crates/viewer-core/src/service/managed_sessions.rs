@@ -5,7 +5,7 @@ use crate::workspace::{
 };
 
 impl ViewerService {
-  fn check_managed_workspace(&self) -> Result<(), String> {
+  pub(super) fn check_managed_workspace(&self) -> Result<(), String> {
     if self.session_scope.is_some() {
       return Err("Managed sessions are unavailable in a session share".into());
     }

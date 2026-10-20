@@ -34,6 +34,7 @@ import type {
   ViewerPreferences,
   RegisteredProject, ProjectWorkspaceSnapshot, RegisterProjectRequest, CreateProjectSessionRequest,
   ManagedSessionRequest, ManagedSessionSnapshot, ManagedSessionDialogResponse,
+  RuntimeInventory, RuntimeRestartRequest, RuntimeRestartResponse,
 } from "./types";
 
 export function listRegisteredProjects(send: CommandInvoker = invoke): Promise<ProjectWorkspaceSnapshot> {
@@ -69,6 +70,22 @@ export function getSessionInputStatus(request: SessionInputStatusRequest): Promi
 export async function initializeLocalViewer(): Promise<void> {
   if (!isDesktop()) throw new Error("This machine is available in the desktop app.");
   await (await import("@tauri-apps/api/core")).invoke<void>("initialize_local_viewer");
+}
+
+/** Runtime ownership belongs to this desktop viewer, not the selected machine. */
+async function viewerRuntimeCommand<T>(command: string, payload?: Record<string, unknown>): Promise<T> {
+  if (!isDesktop()) throw new Error("Runtime management is available in the desktop app.");
+  return (await import("@tauri-apps/api/core")).invoke<T>(command, payload);
+}
+export function listViewerRuntimes(): Promise<RuntimeInventory> {
+  return viewerRuntimeCommand("list_viewer_runtimes");
+}
+export function restartViewerRuntime(request: RuntimeRestartRequest): Promise<RuntimeRestartResponse> {
+  return viewerRuntimeCommand("restart_viewer_runtime", { request });
+}
+export async function listenForViewerRuntimeChanges(handler: () => void): Promise<UnlistenFn> {
+  if (!isDesktop()) throw new Error("Runtime management is available in the desktop app.");
+  return (await import("@tauri-apps/api/event")).listen("viewer-runtimes-changed", handler);
 }
 
 async function nativeDeviceCommand<T>(command: string, payload: Record<string, unknown>): Promise<T> {

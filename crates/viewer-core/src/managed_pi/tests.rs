@@ -19,6 +19,7 @@ fn disabled_runtime_keeps_read_paths_available() {
 #[cfg(unix)]
 mod fake_rpc {
   use super::*;
+  use crate::runtimes::{RuntimeExecutionKind, RuntimeInfo, RuntimeKind, RuntimeOwnership, RuntimeRestartRequest};
   use serde_json::{Value, json};
   use std::{os::unix::fs::PermissionsExt, path::Path, time::Duration};
 
@@ -174,7 +175,7 @@ for line in sys.stdin:
             reply(waiting)
             waiting = None
     elif kind == 'abort':
-        if mode == 'ignore_eof':
+        if mode in ('ignore_eof', 'gated_eof'):
             # Exercise the EOF/kill bound without writing to closing stdout.
             continue
         streaming = False
@@ -187,6 +188,9 @@ for line in sys.stdin:
         emit({'type': 'agent_settled'})
         reply(command)
 record({'kind': 'stdin_closed', 'pid': os.getpid()})
+if mode == 'gated_eof':
+    while not (root / 'allow-exit').exists():
+        time.sleep(0.01)
 if mode == 'ignore_eof':
     while True:
         time.sleep(0.01)
@@ -297,6 +301,21 @@ if mode == 'ignore_eof':
         .collect()
     }
 
+    async fn wait_pid_reaped(pid: u32) {
+      tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+          if (unsafe { libc::kill(pid as libc::pid_t, 0) }) == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+          {
+            return;
+          }
+          tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+      })
+      .await
+      .expect("synthetic Pi child was not reaped");
+    }
+
     fn prompts(&self) -> Vec<String> {
       self
         .log()
@@ -398,10 +417,292 @@ if mode == 'ignore_eof':
     }
 
     async fn persisted(&self) -> ManagedSessionSnapshot {
-      self
+      let snapshot = self
         .wait_for(|snapshot| snapshot.session_key.is_some() && snapshot.status == ManagedSessionStatus::Running)
-        .await
+        .await;
+      self.wait_durable(&snapshot).await;
+      snapshot
     }
+
+    async fn wait_durable(&self, snapshot: &ManagedSessionSnapshot) {
+      // Lifecycle lookups can see the actor's in-memory update before its
+      // blocking receipt save completes. A second manager reads only disk.
+      tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+          let store = self.manager.inner.store.clone();
+          let id = self.request.request_id.clone();
+          let saved = tokio::task::spawn_blocking(move || store.latest(&id))
+            .await
+            .unwrap()
+            .unwrap();
+          if saved.is_some_and(|saved| {
+            saved.revision >= snapshot.revision
+              && saved.session_key == snapshot.session_key
+              && saved.session_id == snapshot.session_id
+          }) {
+            break;
+          }
+          tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+      })
+      .await
+      .expect("managed history identity was not saved in its durable receipt");
+    }
+
+    async fn runtime(&self) -> RuntimeInfo {
+      let mut runtimes = self.manager.list_runtimes().await;
+      assert_eq!(runtimes.len(), 1);
+      runtimes.remove(0)
+    }
+
+    fn restart_request(&self, runtime: &RuntimeInfo) -> RuntimeRestartRequest {
+      RuntimeRestartRequest {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        runtime_id: runtime.runtime_id.clone(),
+        expected_instance_id: runtime.instance_id.clone(),
+      }
+    }
+  }
+
+  #[tokio::test]
+  async fn runtime_inventory_is_metadata_only_and_process_details_are_not_restored_from_receipts() {
+    let mut fixture = Fixture::new("normal", "synthetic prompt excluded from runtime metadata");
+    assert!(fixture.manager.list_runtimes().await.is_empty());
+    fixture.create().await;
+    let key = fixture.persisted().await.session_key.unwrap();
+    let row = fixture.runtime().await;
+    assert_eq!(row.runtime_id, format!("pi:{}", fixture.request.request_id));
+    assert!(!row.instance_id.is_empty());
+    assert_eq!(row.kind, RuntimeKind::Pi);
+    assert_eq!(row.execution_kind, RuntimeExecutionKind::Subprocess);
+    assert_eq!(row.ownership, RuntimeOwnership::Viewer);
+    assert_eq!(row.status, "running");
+    assert_eq!(row.pid, fixture.launches()[0]["pid"].as_u64().map(|pid| pid as u32));
+    assert!(row.started_at_ms.is_some_and(|started| started > 0));
+    assert_eq!(row.session_key.as_deref(), Some(key.as_str()));
+    assert_eq!(row.session_id.as_deref(), Some(fixture.session_id.as_str()));
+    assert_eq!(row.project_id.as_deref(), Some(fixture.project.project_id.as_str()));
+    assert_eq!(
+      row.working_directory.as_deref(),
+      Some(fixture.project.folder_path.as_str())
+    );
+    assert!(row.endpoint.is_none());
+    assert!(row.can_restart);
+    assert!(row.restart_disabled_reason.is_none());
+    let encoded = serde_json::to_string(&row).unwrap();
+    assert!(!encoded.contains(&fixture.request.prompt));
+    assert!(!encoded.contains("fingerprint"));
+    assert_eq!(fixture.runtime().await.instance_id, row.instance_id);
+    assert_eq!(fixture.launches().len(), 1);
+    assert_eq!(fixture.prompts(), [fixture.request.prompt.clone()]);
+
+    fixture.manager.shutdown().await;
+    fixture.wait_reaped().await;
+    fixture.manager =
+      ManagedPiSessions::with_executable(Some(fixture.state_path.clone()), fixture.executable.clone()).unwrap();
+    let restored = fixture.runtime().await;
+    assert_eq!(restored.runtime_id, row.runtime_id);
+    assert_eq!(restored.status, "stopped");
+    assert!(restored.pid.is_none());
+    assert!(restored.started_at_ms.is_none());
+    assert!(restored.can_restart);
+    assert_eq!(fixture.launches().len(), 1);
+    fixture.manager.shutdown().await;
+  }
+
+  #[tokio::test]
+  async fn runtime_restart_reaps_an_active_worker_and_resumes_exact_history_without_replaying_prompts() {
+    let fixture = Fixture::new("normal", "synthetic active turn");
+    fixture.create().await;
+    let key = fixture.persisted().await.session_key.unwrap();
+    let previous = fixture.runtime().await;
+    let previous_pid = previous.pid.unwrap();
+    fixture
+      .manager
+      .restart_runtime(&fixture.restart_request(&previous))
+      .await
+      .unwrap();
+    Fixture::wait_pid_reaped(previous_pid).await;
+    fixture.idle().await;
+    let replacement = fixture.runtime().await;
+    assert_eq!(replacement.runtime_id, previous.runtime_id);
+    assert_ne!(replacement.instance_id, previous.instance_id);
+    assert_ne!(replacement.pid, previous.pid);
+    assert_eq!(replacement.status, "idle");
+    assert_eq!(replacement.session_key.as_deref(), Some(key.as_str()));
+    assert_eq!(fixture.launches().len(), 2);
+    assert_eq!(
+      fixture.launches()[1]["args"],
+      json!([
+        "--mode",
+        "rpc",
+        "--session",
+        fixture.folder().join("synthetic-history.jsonl").to_str().unwrap()
+      ])
+    );
+    assert_eq!(fixture.prompts(), ["synthetic active turn"]);
+    fixture.manager.shutdown().await;
+    fixture.wait_reaped().await;
+  }
+
+  #[tokio::test]
+  async fn runtime_restart_can_resume_a_stopped_saved_owner_but_rejects_a_stale_instance() {
+    let fixture = Fixture::with_idle_timeout("normal", "handled");
+    fixture.create().await;
+    let key = fixture.idle().await.session_key.unwrap();
+    fixture.expired().await;
+    let stopped = fixture.runtime().await;
+    assert_eq!(stopped.status, "stopped");
+    assert!(stopped.pid.is_none());
+    assert!(stopped.can_restart);
+    let request = fixture.restart_request(&stopped);
+    fixture.manager.restart_runtime(&request).await.unwrap();
+    fixture.idle().await;
+    let current = fixture.runtime().await;
+    assert_ne!(current.instance_id, stopped.instance_id);
+    let stale = fixture.restart_request(&stopped);
+    let error = fixture.manager.restart_runtime(&stale).await.unwrap_err();
+    assert!(
+      error.to_lowercase().contains("changed") || error.to_lowercase().contains("stale"),
+      "{error}"
+    );
+    assert_eq!(fixture.runtime().await.instance_id, current.instance_id);
+    assert_eq!(fixture.snapshot().session_key.as_deref(), Some(key.as_str()));
+    assert_eq!(fixture.launches().len(), 2);
+    assert_eq!(fixture.prompts(), ["handled"]);
+    fixture.manager.shutdown().await;
+    fixture.wait_reaped().await;
+  }
+
+  #[tokio::test]
+  async fn send_during_runtime_restart_waits_for_replacement_and_delivers_once() {
+    let fixture = Fixture::new("gated_eof", "synthetic active turn");
+    fixture.create().await;
+    let key = fixture.persisted().await.session_key.unwrap();
+    let previous = fixture.runtime().await;
+    let previous_pid = previous.pid.unwrap();
+    let request = fixture.restart_request(&previous);
+    let manager = fixture.manager.clone();
+    let restarting = tokio::spawn(async move { manager.restart_runtime(&request).await });
+    fixture
+      .wait_log(|value| value["kind"] == "stdin_closed" && value["pid"] == previous_pid)
+      .await;
+    let manager = fixture.manager.clone();
+    let sending = tokio::spawn(async move {
+      manager
+        .submit_owned_input(&key, &uuid::Uuid::new_v4().to_string(), "after replacement")
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!sending.is_finished(), "Send must wait until the replacement is ready");
+    assert_eq!(fixture.prompts(), ["synthetic active turn"]);
+    std::fs::write(fixture.folder().join("allow-exit"), b"ready").unwrap();
+    tokio::time::timeout(Duration::from_secs(8), restarting)
+      .await
+      .unwrap()
+      .unwrap()
+      .unwrap();
+    assert!(matches!(
+      tokio::time::timeout(Duration::from_secs(4), sending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap(),
+      Admission::Started
+    ));
+    Fixture::wait_pid_reaped(previous_pid).await;
+    let launches = fixture.launches();
+    assert_eq!(launches.len(), 2);
+    let delivery = fixture.wait_log(|value| value["message"] == "after replacement").await;
+    assert_eq!(delivery["pid"], launches[1]["pid"]);
+    assert_eq!(fixture.prompts(), ["synthetic active turn", "after replacement"]);
+    fixture.manager.shutdown().await;
+    fixture.wait_reaped().await;
+  }
+
+  #[tokio::test]
+  async fn runtime_restart_never_terminates_a_worker_leased_by_another_viewer() {
+    let fixture = Fixture::new("normal", "synthetic active turn");
+    fixture.create().await;
+    fixture.persisted().await;
+    let other =
+      ManagedPiSessions::with_executable(Some(fixture.state_path.clone()), fixture.executable.clone()).unwrap();
+    let rows = other.list_runtimes().await;
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row.ownership, RuntimeOwnership::External);
+    assert!(!row.can_restart);
+    assert!(row.restart_disabled_reason.is_some());
+    assert!(row.pid.is_none());
+    let error = other.restart_runtime(&fixture.restart_request(row)).await.unwrap_err();
+    assert!(
+      error.to_lowercase().contains("own") || error.to_lowercase().contains("lease"),
+      "{error}"
+    );
+    fixture.assert_worker_alive();
+    assert_eq!(fixture.prompts(), ["synthetic active turn"]);
+    other.shutdown().await;
+    fixture.assert_worker_alive();
+    fixture.manager.shutdown().await;
+    fixture.wait_reaped().await;
+  }
+
+  #[tokio::test]
+  async fn runtime_inventory_recognizes_a_foreign_worker_before_history_is_persisted() {
+    let fixture = Fixture::new("deferred", "synthetic provisional turn");
+    fixture.create().await;
+    let provisional = fixture
+      .wait_for(|snapshot| snapshot.status == ManagedSessionStatus::Running && snapshot.session_key.is_none())
+      .await;
+    fixture.wait_durable(&provisional).await;
+    assert!(!fixture.folder().join("synthetic-history.jsonl").exists());
+
+    let other =
+      ManagedPiSessions::with_executable(Some(fixture.state_path.clone()), fixture.executable.clone()).unwrap();
+    let rows = other.list_runtimes().await;
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row.ownership, RuntimeOwnership::External);
+    assert_eq!(row.status, "external");
+    assert!(row.session_key.is_none());
+    assert!(row.pid.is_none());
+    assert!(!row.can_restart);
+    assert!(
+      row
+        .restart_disabled_reason
+        .as_deref()
+        .unwrap()
+        .contains("owning viewer runtime")
+    );
+    fixture.assert_worker_alive();
+    assert!(!fixture.folder().join("synthetic-history.jsonl").exists());
+    other.shutdown().await;
+    fixture.assert_worker_alive();
+    fixture.manager.shutdown().await;
+    fixture.wait_reaped().await;
+  }
+
+  #[tokio::test]
+  async fn runtime_restart_startup_identity_failure_cannot_send_or_replay_a_prompt() {
+    let fixture = Fixture::new("normal", "handled");
+    fixture.create().await;
+    fixture.idle().await;
+    let previous = fixture.runtime().await;
+    fixture.configure("wrong_identity");
+    let error = fixture
+      .manager
+      .restart_runtime(&fixture.restart_request(&previous))
+      .await
+      .unwrap_err();
+    assert!(error.to_lowercase().contains("identity"), "{error}");
+    fixture
+      .wait_for(|snapshot| snapshot.status == ManagedSessionStatus::Failed)
+      .await;
+    fixture.wait_reaped().await;
+    assert_eq!(fixture.launches().len(), 2);
+    assert_eq!(fixture.prompts(), ["handled"]);
+    assert!(fixture.runtime().await.last_error.is_some());
+    fixture.manager.shutdown().await;
   }
 
   #[tokio::test]

@@ -23,6 +23,7 @@ use tokio::{
   sync::{OwnedMutexGuard, mpsc, oneshot, watch},
   time::{Instant, MissedTickBehavior},
 };
+use tokio_util::sync::CancellationToken;
 
 const RPC_DEADLINE: Duration = Duration::from_secs(15);
 // Prompt preflight may legitimately await extension input or compaction before
@@ -70,6 +71,7 @@ pub(super) async fn run(
   resume: bool,
   mut commands: mpsc::Receiver<Command>,
   worker_state: watch::Sender<WorkerState>,
+  termination: CancellationToken,
 ) {
   let id = receipt.request_id.clone();
   let mut actor = match Actor::spawn(
@@ -80,6 +82,7 @@ pub(super) async fn run(
     prompt,
     resume,
     worker_state.clone(),
+    termination,
   )
   .await
   {
@@ -174,6 +177,7 @@ struct Actor {
   idle_since: Option<Instant>,
   idle_probe: bool,
   retirement: Option<OwnedMutexGuard<()>>,
+  termination: CancellationToken,
 }
 
 impl Actor {
@@ -185,6 +189,7 @@ impl Actor {
     prompt: Option<String>,
     resume: bool,
     worker_state: watch::Sender<WorkerState>,
+    termination: CancellationToken,
   ) -> Result<Self, String> {
     if inner
       .upgrade()
@@ -211,6 +216,22 @@ impl Actor {
     let mut child = command.spawn().map_err(|error| {
       format!("Could not start Pi: {error}. Install Pi or set TOKN_SESSION_PI_EXECUTABLE to its executable path.")
     })?;
+    if let Some(owner) = inner.upgrade() {
+      let snapshot = {
+        let mut records = owner.records.lock().unwrap();
+        records
+          .get_mut(&receipt.request_id)
+          .filter(|record| record.generation == generation)
+          .map(|record| {
+            record.worker_pid = child.id();
+            record.started_at_ms = Some(crate::runtimes::now_ms());
+            record.receipt.snapshot()
+          })
+      };
+      if let Some(snapshot) = snapshot {
+        let _ = owner.events.send(snapshot);
+      }
+    }
     let stdin = child.stdin.take().ok_or("Pi stdin is unavailable")?;
     let stdout = child.stdout.take().ok_or("Pi stdout is unavailable")?;
     let mut stderr_stream = child.stderr.take().ok_or("Pi stderr is unavailable")?;
@@ -274,6 +295,7 @@ impl Actor {
       idle_since: None,
       idle_probe: false,
       retirement: None,
+      termination,
     })
   }
 
@@ -296,11 +318,15 @@ impl Actor {
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
       let stopping = *shutdown.borrow_and_update();
-      if stopping {
+      if stopping || self.termination.is_cancelled() {
         self.begin_shutdown().await;
         return Ok(());
       }
       tokio::select! {
+        _ = self.termination.cancelled() => {
+          self.begin_shutdown().await;
+          return Ok(());
+        },
         _ = shutdown.changed() => {
           self.begin_shutdown().await;
           return Ok(());
@@ -555,10 +581,11 @@ impl Actor {
     text: String,
     reply: Option<oneshot::Sender<Result<Admission, DeliveryError>>>,
   ) -> Result<(), String> {
-    if self
-      .inner
-      .upgrade()
-      .is_none_or(|inner| inner.shutting_down.load(std::sync::atomic::Ordering::Acquire))
+    if self.termination.is_cancelled()
+      || self
+        .inner
+        .upgrade()
+        .is_none_or(|inner| inner.shutting_down.load(std::sync::atomic::Ordering::Acquire))
     {
       if let Some(reply) = reply {
         let _ = reply.send(Err(DeliveryError::not_sent("Managed Pi runtime is shutting down")));
@@ -1003,6 +1030,9 @@ async fn finish(
   if let Some(record) = records.get_mut(id).filter(|record| record.generation == generation) {
     record.receipt = receipt.clone();
     record.sender = None;
+    record.worker_pid = None;
+    record.started_at_ms = None;
+    record.termination = None;
   }
   Some(receipt.snapshot())
 }
