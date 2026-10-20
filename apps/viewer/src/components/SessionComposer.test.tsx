@@ -14,7 +14,9 @@ const SESSION: SessionSummary = {
   message_count: null, event_count: null, history_status: null, has_unread: false,
 };
 const OTHER_SESSION = { ...SESSION, session_key: "codex:other", session_id: "other" };
+const OWNED_PI = { ...SESSION, provider: "pi" as const, session_key: "pi:owned", session_id: "owned" };
 const AVAILABLE: SessionInputStatus = { available: true, message: "", max_length: 16_384 };
+const RESUMABLE: SessionInputStatus = { ...AVAILABLE, resume_required: true, message: "Pi will resume when you send a message." };
 
 function deferred<T>() {
   let resolve!: (result: T) => void;
@@ -41,6 +43,105 @@ afterEach(() => {
 });
 
 describe("SessionComposer", () => {
+  it("edits saved owned Pi history and resumes through one Send request", async () => {
+    vi.mocked(getSessionInputStatus).mockResolvedValue(RESUMABLE);
+    const pending = deferred<SubmitSessionInputResponse>();
+    vi.mocked(submitSessionInput).mockReturnValue(pending.promise);
+    const onAccepted = vi.fn();
+    render(<SessionComposer session={OWNED_PI} on_accepted={onAccepted} />);
+    await ready();
+    expect(textbox()).not.toHaveAttribute("placeholder", "Read-only session");
+    expect(submitSessionInput).not.toHaveBeenCalled();
+    draft("Continue after restart\nKeep the context");
+    const form = screen.getByRole("form");
+    act(() => { fireEvent.submit(form); fireEvent.submit(form); });
+    expect(submitSessionInput).toHaveBeenCalledExactlyOnceWith({
+      session_key: OWNED_PI.session_key, request_id: expect.any(String), text: "Continue after restart\nKeep the context",
+    });
+    expect(screen.getByRole("button", { name: "Resuming Pi…" })).toBeDisabled();
+    expect(screen.getByText("Resuming Pi and sending your message…")).toBeInTheDocument();
+    expect(textbox()).toHaveValue("Continue after restart\nKeep the context");
+    expect(textbox()).toBeDisabled();
+    const request = vi.mocked(submitSessionInput).mock.calls[0][0];
+    await act(async () => pending.resolve({ request_id: request.request_id, status: "accepted", message: "Pi accepted the message." }));
+    expect(onAccepted).toHaveBeenCalledExactlyOnceWith(OWNED_PI.session_key);
+    expect(textbox()).toHaveValue("");
+    expect(textbox()).toBeEnabled();
+    draft("A follow-up message");
+    vi.mocked(submitSessionInput).mockReturnValue(new Promise(() => {}));
+    send();
+    expect(screen.getByRole("button", { name: "Sending…" })).toBeDisabled();
+    expect(screen.queryByText("Resuming Pi and sending your message…")).not.toBeInTheDocument();
+  });
+
+  it("keeps a failed automatic resume editable without replaying its draft", async () => {
+    vi.mocked(getSessionInputStatus).mockResolvedValue(RESUMABLE);
+    vi.mocked(submitSessionInput).mockImplementation(async (request) => ({
+      request_id: request.request_id, status: "not_sent", message: "Pi did not become ready. Try again.",
+    }));
+    render(<SessionComposer session={OWNED_PI} />);
+    await ready();
+    draft("Keep this message");
+    send();
+    await screen.findByText("Pi did not become ready. Try again.");
+    await ready();
+    expect(textbox()).toHaveValue("Keep this message");
+    expect(textbox()).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+    expect(submitSessionInput).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: "Edit message" })).not.toBeInTheDocument();
+  });
+
+  it("gates a preserved draft when automatic resume loses its process lease", async () => {
+    vi.mocked(getSessionInputStatus).mockResolvedValueOnce(RESUMABLE)
+      .mockResolvedValue({ ...AVAILABLE, available: false, message: "Another viewer owns this Pi session." });
+    vi.mocked(submitSessionInput).mockImplementation(async (request) => ({
+      request_id: request.request_id, status: "not_sent", message: "Pi could not resume.",
+    }));
+    render(<SessionComposer session={OWNED_PI} />);
+    await ready();
+    draft("Keep the original message");
+    send();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Retry availability" })).toBeEnabled());
+    expect(textbox()).toHaveValue("Keep the original message");
+    expect(textbox()).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(submitSessionInput).toHaveBeenCalledOnce();
+    expect(getSessionInputStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves a possibly delivered resume message until explicit editing", async () => {
+    vi.mocked(getSessionInputStatus).mockResolvedValue(RESUMABLE);
+    vi.mocked(submitSessionInput).mockRejectedValue(new Error("Connection lost during resume"));
+    render(<SessionComposer session={OWNED_PI} />);
+    await ready();
+    draft("Check before resending");
+    send();
+    await screen.findByText("Delivery not confirmed. Check the conversation before sending again. Reason: Connection lost during resume");
+    expect(textbox()).toHaveValue("Check before resending");
+    expect(textbox()).toBeDisabled();
+    expect(submitSessionInput).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: "Edit message" })).toBeEnabled();
+  });
+
+  it.each([
+    "This Pi history is not viewer-owned.",
+    "Project session input is unavailable on this remote connection.",
+    "External reader connections are read-only.",
+    "Another viewer owns this Pi session.",
+  ])("keeps unavailable Pi input gated: %s", async (message) => {
+    // Availability is authoritative even if an incompatible host includes
+    // the additive resume hint alongside an unavailable result.
+    vi.mocked(getSessionInputStatus).mockResolvedValue({ ...RESUMABLE, available: false, message });
+    render(<SessionComposer session={OWNED_PI} />);
+    await screen.findByText(message);
+    expect(textbox()).toBeDisabled();
+    expect(textbox()).toHaveAttribute("placeholder", "Read-only session");
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    fireEvent.submit(screen.getByRole("form"));
+    expect(submitSessionInput).not.toHaveBeenCalled();
+  });
+
   it("refreshes availability after an explicit Pi resume without losing a draft", async () => {
     const pi = { ...SESSION, provider: "pi" as const, session_key: "pi:owned" };
     const { rerender } = render(<SessionComposer session={pi} input_refresh_key={0} />);

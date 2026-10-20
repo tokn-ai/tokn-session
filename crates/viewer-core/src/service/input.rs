@@ -12,18 +12,20 @@ impl ViewerService {
   ) -> Result<SessionInputStatus, String> {
     if self.session_scope.is_none()
       && self.relay.status().settings.mode != crate::relay::RelayMode::External
-      && let Some(status) = self.managed_pi.input_status(&request.session_key)
+      && let Some(status) = self.managed_pi.checked_input_status(&request.session_key).await
     {
       return Ok(match status {
-        Ok(message) => SessionInputStatus {
+        Ok(status) => SessionInputStatus {
           available: true,
-          message,
+          message: status.message,
           max_length: MAX_INPUT_LENGTH,
+          resume_required: status.resume_required,
         },
         Err(error) => SessionInputStatus {
           available: false,
           message: error.message,
           max_length: MAX_INPUT_LENGTH,
+          resume_required: false,
         },
       });
     }
@@ -40,11 +42,13 @@ impl ViewerService {
         available: true,
         message,
         max_length: MAX_INPUT_LENGTH,
+        resume_required: false,
       },
       Err(message) => SessionInputStatus {
         available: false,
         message,
         max_length: MAX_INPUT_LENGTH,
+        resume_required: false,
       },
     })
   }

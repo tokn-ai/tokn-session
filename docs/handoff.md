@@ -34,13 +34,18 @@ distinct worktrees sharing one group. Migration 11 adds managed-session admissio
 upgrades preserve the original migration 10 and transactionally adopt the one
 known development build that combined both schemas. New conversations open only after their
 real Pi history is verified and indexed. Owned sessions support message input,
-Stop, explicit Resume, and bounded native extension dialogs; private receipts
-and process leases preserve ownership across restarts. HTTP, Hub, session shares,
+Stop, automatic resume on Send, optional explicit Resume, and bounded native
+extension dialogs; private receipts and process leases preserve ownership across
+restarts. HTTP, Hub, session shares,
 and External reader mode do not expose project/session creation or management.
 Pi assistant failures produce visible error events and preserve native diagnostic
 records. Managed turn errors remain separate from process status, so an idle
 process can accept input after a provider failure. Managed Pi also honors
 inherited `SSL_CERT_FILE` when `NODE_EXTRA_CA_CERTS` is unset.
+Fully settled Pi workers exit after five idle minutes, with a fresh native-state
+check and coordinated prompt admission. Send verifies the saved session before
+delivery and coalesces concurrent starts; old prompts are never replayed.
+Viewer shutdown stops its owned workers and prevents further starts.
 See [viewer projects](viewer-projects.md) for scope, settings, storage, and limits.
 
 All six normalizers distinguish request errors from warnings, retries, tool
@@ -1564,8 +1569,8 @@ OpenCode has the first live-output normalizer: `OpenCodeLiveNormalizer` parses `
   provider task lifecycle and interaction events are represented in `AgentEvent`.
 - Viewer message input requires a live Codex Desktop owner, Pi bridge, or a
   locally created viewer-owned Pi runtime. Only viewer-owned Pi histories offer
-  explicit Resume; arbitrary historical sessions have no fallback process.
-  Without a Relay connection, selected
+  automatic or explicit resume; arbitrary historical sessions have no fallback
+  process. Without a Relay connection, selected
   timelines refresh from the durable index and historical source reads. Relay
   snapshot/follow supports all six providers; it is not an agent-control
   transport, and its unread tracking is not persisted yet.

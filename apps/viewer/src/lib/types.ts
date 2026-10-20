@@ -314,6 +314,8 @@ export interface SessionInputStatusRequest {
 export interface SessionInputStatus {
   available: boolean;
   message: string;
+  /** Sending will start the saved viewer-owned process before delivering text. */
+  resume_required?: boolean;
   /** Maximum number of Unicode code points in one message. */
   max_length: number;
 }

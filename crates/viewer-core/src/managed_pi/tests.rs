@@ -26,16 +26,18 @@ mod fake_rpc {
   // imports Pi, reads provider configuration, or contacts a model. Its native
   // history consists solely of a synthetic session header in its temporary cwd.
   const FAKE_PI: &str = r#"#!/usr/bin/env python3
-import json, os, pathlib, sys
+import json, os, pathlib, sys, time
 
 root = pathlib.Path.cwd()
 config = json.loads((root / 'fake-config.json').read_text())
 session_id = config['session_id']
 session_file = root / 'synthetic-history.jsonl'
 streaming = False
+compacting = False
 pending = 0
 waiting = None
 prompt_count = 0
+state_count = 0
 
 def record(value):
     with (root / 'fake-log.jsonl').open('a') as log:
@@ -76,12 +78,28 @@ if mode == 'malformed':
 
 for line in sys.stdin:
     command = json.loads(line)
-    record(command)
+    record(dict(command, pid=os.getpid()))
     kind = command['type']
     if kind == 'get_state':
+        state_count += 1
+        if mode == 'gated_state':
+            record({'kind': 'state_waiting', 'pid': os.getpid()})
+            while not (root / 'allow-state').exists():
+                time.sleep(0.01)
         if mode == 'deferred' and (root / 'allow-persist').exists():
             persist()
-        reply(command, data={'sessionId': session_id, 'sessionFile': str(session_file), 'isStreaming': streaming, 'isCompacting': False, 'pendingMessageCount': pending})
+        reported_id = '00000000-0000-4000-8000-000000000001' if mode == 'wrong_identity' else session_id
+        state = {'sessionId': reported_id, 'sessionFile': str(session_file), 'isStreaming': streaming, 'isCompacting': compacting, 'pendingMessageCount': pending}
+        if mode == 'idle_probe_start' and state_count >= 3 and not streaming:
+            streaming = True
+            record({'kind': 'idle_probe_work', 'pid': os.getpid()})
+            # One pipe write makes the start event available beside the idle
+            # response, as when an extension begins work during an idle probe.
+            response = {'type': 'response', 'id': command['id'], 'command': kind, 'success': True, 'data': state}
+            sys.stdout.write(json.dumps(response) + '\n' + json.dumps({'type': 'agent_start'}) + '\n')
+            sys.stdout.flush()
+        else:
+            reply(command, data=state)
     elif kind == 'prompt':
         prompt_count += 1
         text = command['message']
@@ -106,6 +124,23 @@ for line in sys.stdin:
             continue
         if mode not in ('deferred', 'provisional'):
             persist()
+        if text == 'hold-ack':
+            record({'kind': 'prompt_waiting', 'pid': os.getpid()})
+            while not (root / 'allow-prompt').exists():
+                time.sleep(0.01)
+            reply(command)
+            continue
+        if text == 'queued-only':
+            pending = 1
+            reply(command)
+            emit({'type': 'agent_start'})
+            emit({'type': 'agent_end', 'messages': []})
+            continue
+        if text == 'compacting-only':
+            compacting = True
+            reply(command)
+            emit({'type': 'compaction_start', 'reason': 'synthetic'})
+            continue
         if text == 'handled':
             reply(command)
             continue
@@ -139,7 +174,11 @@ for line in sys.stdin:
             reply(waiting)
             waiting = None
     elif kind == 'abort':
+        if mode == 'ignore_eof':
+            # Exercise the EOF/kill bound without writing to closing stdout.
+            continue
         streaming = False
+        compacting = False
         pending = 0
         if mode == 'stop_aborted':
             assistant_outcome('aborted', 'synthetic abort detail')
@@ -147,7 +186,10 @@ for line in sys.stdin:
             emit({'type': 'compaction_end', 'reason': 'overflow', 'aborted': True, 'willRetry': False})
         emit({'type': 'agent_settled'})
         reply(command)
-record({'kind': 'stdin_closed'})
+record({'kind': 'stdin_closed', 'pid': os.getpid()})
+if mode == 'ignore_eof':
+    while True:
+        time.sleep(0.01)
 "#;
 
   struct Fixture {
@@ -162,6 +204,14 @@ record({'kind': 'stdin_closed'})
 
   impl Fixture {
     fn new(mode: &str, prompt: &str) -> Self {
+      Self::build(mode, prompt, None)
+    }
+
+    fn with_idle_timeout(mode: &str, prompt: &str) -> Self {
+      Self::build(mode, prompt, Some(Duration::from_millis(100)))
+    }
+
+    fn build(mode: &str, prompt: &str, idle_timeout: Option<Duration>) -> Self {
       let directory = tempfile::tempdir().unwrap();
       let folder = directory.path().join("project");
       std::fs::create_dir(&folder).unwrap();
@@ -176,7 +226,13 @@ record({'kind': 'stdin_closed'})
       )
       .unwrap();
       let state_path = directory.path().join("managed.json");
-      let manager = ManagedPiSessions::with_executable(Some(state_path.clone()), executable.clone()).unwrap();
+      let manager = match idle_timeout {
+        Some(timeout) => {
+          ManagedPiSessions::with_executable_and_idle_timeout(Some(state_path.clone()), executable.clone(), timeout)
+        }
+        None => ManagedPiSessions::with_executable(Some(state_path.clone()), executable.clone()),
+      }
+      .unwrap();
       let project_id = uuid::Uuid::new_v4().to_string();
       let project = RegisteredProject {
         project_id: project_id.clone(),
@@ -225,6 +281,31 @@ record({'kind': 'stdin_closed'})
         .collect()
     }
 
+    fn configure(&self, mode: &str) {
+      std::fs::write(
+        self.folder().join("fake-config.json"),
+        serde_json::to_vec(&json!({"mode": mode, "session_id": self.session_id})).unwrap(),
+      )
+      .unwrap();
+    }
+
+    fn launches(&self) -> Vec<Value> {
+      self
+        .log()
+        .into_iter()
+        .filter(|value| value["kind"] == "launch")
+        .collect()
+    }
+
+    fn prompts(&self) -> Vec<String> {
+      self
+        .log()
+        .iter()
+        .filter(|value| value["type"] == "prompt")
+        .map(|value| value["message"].as_str().unwrap().to_owned())
+        .collect()
+    }
+
     async fn create(&self) {
       self
         .manager
@@ -267,13 +348,19 @@ record({'kind': 'stdin_closed'})
     }
 
     async fn wait_reaped(&self) {
-      let launch = self.wait_log(|value| value["kind"] == "launch").await;
-      let pid = launch["pid"].as_i64().unwrap() as libc::pid_t;
+      self.wait_log(|value| value["kind"] == "launch").await;
+      let pids = self
+        .launches()
+        .iter()
+        .map(|launch| launch["pid"].as_i64().unwrap() as libc::pid_t)
+        .collect::<Vec<_>>();
       tokio::time::timeout(Duration::from_secs(5), async {
         loop {
           // Signal zero only checks existence; it sends no signal to the child.
-          if unsafe { libc::kill(pid, 0) } == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-          {
+          if pids.iter().all(|pid| {
+            (unsafe { libc::kill(*pid, 0) }) == -1
+              && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+          }) {
             return;
           }
           tokio::time::sleep(Duration::from_millis(10)).await;
@@ -283,11 +370,364 @@ record({'kind': 'stdin_closed'})
       .expect("fake Pi child was not reaped");
     }
 
+    async fn idle(&self) -> ManagedSessionSnapshot {
+      self
+        .wait_for(|snapshot| snapshot.session_key.is_some() && snapshot.status == ManagedSessionStatus::Idle)
+        .await
+    }
+
+    async fn expired(&self) -> ManagedSessionSnapshot {
+      let stopped = self
+        .wait_for(|snapshot| snapshot.status == ManagedSessionStatus::Stopped)
+        .await;
+      self.wait_reaped().await;
+      stopped
+    }
+
+    fn assert_worker_alive(&self) {
+      let launch = self.launches().last().unwrap().clone();
+      let pid = launch["pid"].as_i64().unwrap() as libc::pid_t;
+      assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "synthetic worker exited unexpectedly");
+      assert!(
+        self.manager.inner.records.lock().unwrap()[&self.request.request_id]
+          .sender
+          .is_some()
+      );
+      assert_eq!(self.launches().len(), 1);
+      assert!(!self.log().iter().any(|value| value["kind"] == "stdin_closed"));
+    }
+
     async fn persisted(&self) -> ManagedSessionSnapshot {
       self
         .wait_for(|snapshot| snapshot.session_key.is_some() && snapshot.status == ManagedSessionStatus::Running)
         .await
     }
+  }
+
+  #[tokio::test]
+  async fn idle_expiry_reaps_the_worker_and_send_resumes_exact_history_once() {
+    let fixture = Fixture::with_idle_timeout("normal", "handled");
+    fixture.create().await;
+    let key = fixture.idle().await.session_key.unwrap();
+    assert_eq!(fixture.expired().await.session_key.as_deref(), Some(key.as_str()));
+    let status = fixture.manager.input_status(&key).unwrap().unwrap();
+    assert!(status.resume_required);
+    assert_eq!(fixture.launches().len(), 1, "status inspection must not start a worker");
+    assert!(matches!(
+      fixture
+        .manager
+        .submit_owned_input(&key, &uuid::Uuid::new_v4().to_string(), "after idle")
+        .await
+        .unwrap(),
+      Admission::Started
+    ));
+    assert_eq!(fixture.snapshot().session_key.as_deref(), Some(key.as_str()));
+    assert_eq!(fixture.prompts(), ["handled", "after idle"]);
+    let launches = fixture.launches();
+    assert_eq!(launches.len(), 2);
+    assert_eq!(
+      launches[1]["args"],
+      json!([
+        "--mode",
+        "rpc",
+        "--session",
+        fixture.folder().join("synthetic-history.jsonl").to_str().unwrap()
+      ])
+    );
+    assert!(!fixture.manager.input_status(&key).unwrap().unwrap().resume_required);
+    fixture.manager.shutdown().await;
+    fixture.wait_reaped().await;
+  }
+
+  #[tokio::test]
+  async fn concurrent_sends_to_an_expired_owner_share_one_resume_without_replaying_creation() {
+    let fixture = Fixture::with_idle_timeout("normal", "handled");
+    fixture.create().await;
+    let key = fixture.idle().await.session_key.unwrap();
+    fixture.expired().await;
+    let first_id = uuid::Uuid::new_v4().to_string();
+    let second_id = uuid::Uuid::new_v4().to_string();
+    let (first, second) = tokio::join!(
+      fixture.manager.submit_owned_input(&key, &first_id, "concurrent first"),
+      fixture
+        .manager
+        .submit_owned_input(&key, &second_id, "concurrent second")
+    );
+    let admissions = [first.unwrap(), second.unwrap()];
+    assert_eq!(
+      admissions
+        .iter()
+        .filter(|value| matches!(value, Admission::Started))
+        .count(),
+      1
+    );
+    assert_eq!(
+      admissions
+        .iter()
+        .filter(|value| matches!(value, Admission::QueuedFollowUp))
+        .count(),
+      1
+    );
+    assert_eq!(fixture.launches().len(), 2);
+    let mut prompts = fixture.prompts();
+    prompts.sort();
+    assert_eq!(prompts, ["concurrent first", "concurrent second", "handled"]);
+    fixture.manager.shutdown().await;
+    fixture.wait_reaped().await;
+  }
+
+  #[tokio::test]
+  async fn resumed_send_waits_for_verified_startup_without_idle_eviction_or_early_prompt() {
+    let fixture = Fixture::with_idle_timeout("normal", "handled");
+    fixture.create().await;
+    let key = fixture.idle().await.session_key.unwrap();
+    fixture.expired().await;
+    fixture.configure("gated_state");
+    let manager = fixture.manager.clone();
+    let sending = tokio::spawn(async move {
+      manager
+        .submit_owned_input(&key, &uuid::Uuid::new_v4().to_string(), "after ready")
+        .await
+    });
+    let waiting = fixture.wait_log(|value| value["kind"] == "state_waiting").await;
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    assert!(!sending.is_finished());
+    assert_eq!(fixture.prompts(), ["handled"]);
+    let pid = waiting["pid"].as_i64().unwrap() as libc::pid_t;
+    assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+    assert_eq!(fixture.launches().len(), 2);
+    std::fs::write(fixture.folder().join("allow-state"), b"ready").unwrap();
+    assert!(matches!(
+      tokio::time::timeout(Duration::from_secs(4), sending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap(),
+      Admission::Started
+    ));
+    assert_eq!(fixture.prompts(), ["handled", "after ready"]);
+    fixture.manager.shutdown().await;
+    fixture.wait_reaped().await;
+  }
+
+  #[tokio::test]
+  async fn streaming_queued_compacting_and_provisional_workers_do_not_expire() {
+    for (mode, prompt) in [
+      ("normal", "still streaming"),
+      ("normal", "queued-only"),
+      ("normal", "compacting-only"),
+      ("provisional", "handled"),
+    ] {
+      let fixture = Fixture::with_idle_timeout(mode, prompt);
+      fixture.create().await;
+      if mode == "provisional" {
+        fixture
+          .wait_for(|snapshot| snapshot.status == ManagedSessionStatus::Idle)
+          .await;
+        assert!(fixture.snapshot().session_key.is_none());
+      } else {
+        fixture.persisted().await;
+      }
+      tokio::time::sleep(Duration::from_millis(1300)).await;
+      fixture.assert_worker_alive();
+      assert_eq!(
+        fixture.snapshot().status,
+        if mode == "provisional" {
+          ManagedSessionStatus::Idle
+        } else {
+          ManagedSessionStatus::Running
+        }
+      );
+      fixture.manager.shutdown().await;
+      fixture.wait_reaped().await;
+    }
+  }
+
+  #[tokio::test]
+  async fn pending_prompt_acknowledgement_and_extension_dialog_block_idle_eviction() {
+    for text in ["hold-ack", "dialog:confirm"] {
+      let fixture = Fixture::with_idle_timeout("normal", "handled");
+      fixture.create().await;
+      let key = fixture.idle().await.session_key.unwrap();
+      let manager = fixture.manager.clone();
+      let sending = tokio::spawn(async move {
+        manager
+          .submit_owned_input(&key, &uuid::Uuid::new_v4().to_string(), text)
+          .await
+      });
+      if text == "hold-ack" {
+        fixture.wait_log(|value| value["kind"] == "prompt_waiting").await;
+      } else {
+        fixture.wait_for(|snapshot| snapshot.pending_dialog.is_some()).await;
+      }
+      tokio::time::sleep(Duration::from_millis(1300)).await;
+      fixture.assert_worker_alive();
+      assert!(!sending.is_finished());
+      if text == "hold-ack" {
+        std::fs::write(fixture.folder().join("allow-prompt"), b"ready").unwrap();
+      } else {
+        assert!(fixture.snapshot().pending_dialog.is_some());
+        fixture
+          .manager
+          .respond_dialog(ManagedSessionDialogResponse {
+            request_id: fixture.request.request_id.clone(),
+            dialog_id: "synthetic-dialog".into(),
+            value: None,
+            confirmed: Some(false),
+            cancelled: false,
+          })
+          .await
+          .unwrap();
+      }
+      assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(4), sending)
+          .await
+          .unwrap()
+          .unwrap()
+          .unwrap(),
+        Admission::Started
+      ));
+      fixture.manager.shutdown().await;
+      fixture.wait_reaped().await;
+    }
+  }
+
+  #[tokio::test]
+  async fn resumed_startup_failure_or_wrong_identity_sends_no_new_prompt() {
+    for mode in ["early_exit", "wrong_identity"] {
+      let fixture = Fixture::with_idle_timeout("normal", "handled");
+      fixture.create().await;
+      let key = fixture.idle().await.session_key.unwrap();
+      fixture.expired().await;
+      fixture.configure(mode);
+      let error = fixture
+        .manager
+        .submit_owned_input(&key, &uuid::Uuid::new_v4().to_string(), "must not send")
+        .await
+        .unwrap_err();
+      assert!(
+        !error.may_have_been_sent,
+        "startup failure incorrectly reported uncertain: {error:?}"
+      );
+      fixture
+        .wait_for(|snapshot| snapshot.status == ManagedSessionStatus::Failed)
+        .await;
+      fixture.wait_reaped().await;
+      assert_eq!(fixture.launches().len(), 2);
+      assert_eq!(fixture.prompts(), ["handled"]);
+      fixture.manager.shutdown().await;
+    }
+  }
+
+  #[tokio::test]
+  async fn uncertain_send_after_idle_resume_is_not_automatically_restarted_or_replayed() {
+    let fixture = Fixture::with_idle_timeout("normal", "handled");
+    fixture.create().await;
+    let key = fixture.idle().await.session_key.unwrap();
+    fixture.expired().await;
+    let error = fixture
+      .manager
+      .submit_owned_input(&key, &uuid::Uuid::new_v4().to_string(), "exit-before-ack")
+      .await
+      .unwrap_err();
+    assert!(error.may_have_been_sent);
+    fixture
+      .wait_for(|snapshot| snapshot.status == ManagedSessionStatus::Failed)
+      .await;
+    fixture.wait_reaped().await;
+    assert_eq!(fixture.launches().len(), 2);
+    assert_eq!(fixture.prompts(), ["handled", "exit-before-ack"]);
+    fixture.manager.shutdown().await;
+  }
+
+  #[tokio::test]
+  async fn shutdown_closes_stdin_then_reaps_an_eof_resistant_child_and_prevents_restart() {
+    let fixture = Fixture::new("ignore_eof", "handled");
+    fixture.create().await;
+    let key = fixture.idle().await.session_key.unwrap();
+    tokio::time::timeout(Duration::from_secs(8), fixture.manager.shutdown())
+      .await
+      .unwrap();
+    fixture.wait_reaped().await;
+    assert!(fixture.log().iter().any(|value| value["kind"] == "stdin_closed"));
+    let error = fixture
+      .manager
+      .submit_owned_input(&key, &uuid::Uuid::new_v4().to_string(), "after shutdown")
+      .await
+      .unwrap_err();
+    assert!(!error.may_have_been_sent);
+    assert_eq!(fixture.launches().len(), 1);
+    assert_eq!(fixture.prompts(), ["handled"]);
+  }
+
+  #[tokio::test]
+  async fn stopped_broadcast_immediately_allows_a_checked_resumable_capability_without_spawning() {
+    let fixture = Fixture::with_idle_timeout("normal", "handled");
+    let mut events = fixture.manager.subscribe();
+    fixture.create().await;
+    let key = fixture.idle().await.session_key.unwrap();
+    let stopped = tokio::time::timeout(Duration::from_secs(8), async {
+      loop {
+        let snapshot = events.recv().await.unwrap();
+        if snapshot.status == ManagedSessionStatus::Stopped {
+          return snapshot;
+        }
+      }
+    })
+    .await
+    .unwrap();
+    assert_eq!(stopped.session_key.as_deref(), Some(key.as_str()));
+    let status = fixture.manager.checked_input_status(&key).await.unwrap().unwrap();
+    assert!(status.resume_required);
+    assert_eq!(fixture.launches().len(), 1);
+    assert_eq!(fixture.prompts(), ["handled"]);
+    fixture.manager.shutdown().await;
+    fixture.wait_reaped().await;
+  }
+
+  #[tokio::test]
+  async fn shutdown_during_automatic_resume_startup_reaps_the_worker_and_definitely_sends_nothing() {
+    let fixture = Fixture::with_idle_timeout("normal", "handled");
+    fixture.create().await;
+    let key = fixture.idle().await.session_key.unwrap();
+    fixture.expired().await;
+    fixture.configure("gated_state");
+    let manager = fixture.manager.clone();
+    let sending = tokio::spawn(async move {
+      manager
+        .submit_owned_input(&key, &uuid::Uuid::new_v4().to_string(), "cancelled during startup")
+        .await
+    });
+    fixture.wait_log(|value| value["kind"] == "state_waiting").await;
+    tokio::time::timeout(Duration::from_secs(8), fixture.manager.shutdown())
+      .await
+      .unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(4), sending)
+      .await
+      .unwrap()
+      .unwrap()
+      .unwrap_err();
+    assert!(
+      !error.may_have_been_sent,
+      "startup cancellation was incorrectly uncertain: {error:?}"
+    );
+    fixture.wait_reaped().await;
+    assert_eq!(fixture.launches().len(), 2);
+    assert_eq!(fixture.prompts(), ["handled"]);
+  }
+
+  #[tokio::test]
+  async fn work_buffered_beside_an_idle_probe_reply_prevents_worker_retirement() {
+    let fixture = Fixture::with_idle_timeout("idle_probe_start", "handled");
+    fixture.create().await;
+    fixture.idle().await;
+    fixture.wait_log(|value| value["kind"] == "idle_probe_work").await;
+    fixture.persisted().await;
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    fixture.assert_worker_alive();
+    assert_eq!(fixture.snapshot().status, ManagedSessionStatus::Running);
+    fixture.manager.shutdown().await;
+    fixture.wait_reaped().await;
   }
 
   #[tokio::test]

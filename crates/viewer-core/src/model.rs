@@ -392,6 +392,8 @@ pub struct SessionInputStatus {
   pub available: bool,
   pub message: String,
   pub max_length: usize,
+  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  pub resume_required: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]

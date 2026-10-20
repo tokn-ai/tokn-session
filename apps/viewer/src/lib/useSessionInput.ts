@@ -13,6 +13,7 @@ interface InputState {
   checking: boolean;
   check_id: number;
   sending: boolean;
+  resuming: boolean;
   delivery_uncertain: boolean;
   notice: string | null;
 }
@@ -20,7 +21,7 @@ interface InputState {
 function emptyInput(): InputState {
   return {
     draft: "", availability: null, checking: true, check_id: 0,
-    sending: false, delivery_uncertain: false, notice: null,
+    sending: false, resuming: false, delivery_uncertain: false, notice: null,
   };
 }
 
@@ -80,14 +81,14 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
       || !current.availability?.available || !current.draft.trim()
       || Array.from(current.draft).length > current.availability.max_length) return;
     const text = current.draft;
-    update(key, (value) => ({ ...value, sending: true, notice: null }));
+    update(key, (value) => ({ ...value, sending: true, resuming: current.availability?.resume_required === true, notice: null }));
     let requestId: string;
     try {
       requestId = createUuid();
     } catch (error) {
       // Preparing an ID cannot deliver anything, so the draft remains editable.
       update(key, (value) => ({
-        ...value, sending: false,
+        ...value, sending: false, resuming: false,
         notice: withDetail("Message was not sent. Could not prepare the message.", errorMessage(error)),
       }));
       return;
@@ -98,16 +99,21 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
       const matchingResponse = result.request_id === requestId;
       if (matchingResponse && result.status === "accepted") {
         update(key, (value) => ({
-          ...value, sending: false,
+          ...value, sending: false, resuming: false,
           draft: value.draft === text ? "" : value.draft,
+          availability: value.availability?.resume_required && value.check_id === current.check_id
+            ? { ...value.availability, resume_required: false, message: "" } : value.availability,
           notice: result.message || "Message sent.",
         }));
         accepted = true;
       } else if (matchingResponse && result.status === "not_sent") {
-        update(key, (value) => ({ ...value, sending: false, notice: result.message || "Message was not sent. Try again." }));
+        update(key, (value) => ({ ...value, sending: false, resuming: false, notice: result.message || "Message was not sent. Try again." }));
+        // Resume can lose a process lease or fail its saved-folder checks after
+        // the initial capability read. Recheck without resending the draft.
+        if (current.availability.resume_required) void checkAvailability(key);
       } else {
         update(key, (value) => ({
-          ...value, sending: false, delivery_uncertain: true,
+          ...value, sending: false, resuming: false, delivery_uncertain: true,
           notice: withDetail(UNCONFIRMED_MESSAGE, matchingResponse
             ? result.message
             : "The server response did not match this message."),
@@ -115,7 +121,7 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
       }
     } catch (error) {
       update(key, (value) => ({
-        ...value, sending: false, delivery_uncertain: true,
+        ...value, sending: false, resuming: false, delivery_uncertain: true,
         notice: withDetail(UNCONFIRMED_MESSAGE, errorMessage(error)),
       }));
     }
