@@ -7,7 +7,9 @@ stopped workers. Browser clients cannot use these native management commands.
 The inventory is not an operating-system process scan.
 
 Compact rows show the name, status, available restart action, and an external
-ownership marker when relevant. Details hold execution/ownership information,
+ownership marker when relevant. Runtime icons and labeled status badges use
+theme-aware color; external connections are not presented as verified healthy.
+Details hold execution/ownership information,
 explanations, session/project identity, working directory, public endpoint, and
 directly known PID/start time when available. Errors remain visible in their row. Tokens,
 environment variables, prompts, and private credentials are not inventory data.

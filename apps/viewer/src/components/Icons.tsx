@@ -153,3 +153,46 @@ export function BranchIcon(props: IconProps) {
     </IconBase>
   );
 }
+
+export function TerminalIcon(props: IconProps) {
+  return <IconBase {...props}>
+    <rect x="3" y="4.5" width="18" height="15" rx="2" stroke="currentColor" strokeWidth="1.6" />
+    <path d="m7 9 3 3-3 3m6 0h4" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" />
+  </IconBase>;
+}
+
+export function ActivityIcon(props: IconProps) {
+  return <IconBase {...props}>
+    <path d="M3 12h4l3-7 4 14 3-7h4" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" />
+  </IconBase>;
+}
+
+export function ServerIcon(props: IconProps) {
+  return <IconBase {...props}>
+    <rect x="3.5" y="4" width="17" height="6" rx="1.5" stroke="currentColor" strokeWidth="1.6" />
+    <rect x="3.5" y="14" width="17" height="6" rx="1.5" stroke="currentColor" strokeWidth="1.6" />
+    <path d="M7 7h.1M7 17h.1M11 7h6m-6 10h6" stroke="currentColor" strokeLinecap="round" strokeWidth="1.7" />
+  </IconBase>;
+}
+
+export function ConnectionIcon(props: IconProps) {
+  return <IconBase {...props}>
+    <path d="m8 8 3 3m2 2 3 3m-8 0 3-3m2-2 3-3" stroke="currentColor" strokeLinecap="round" strokeWidth="1.6" />
+    <circle cx="6" cy="6" r="2.5" stroke="currentColor" strokeWidth="1.6" />
+    <circle cx="18" cy="6" r="2.5" stroke="currentColor" strokeWidth="1.6" />
+    <circle cx="6" cy="18" r="2.5" stroke="currentColor" strokeWidth="1.6" />
+    <circle cx="18" cy="18" r="2.5" stroke="currentColor" strokeWidth="1.6" />
+  </IconBase>;
+}
+
+export function RefreshIcon(props: IconProps) {
+  return <IconBase {...props}>
+    <path d="M20 9a8 8 0 0 0-13.5-3L4 8m0-4v4h4m-4 7a8 8 0 0 0 13.5 3l2.5-2m0 4v-4h-4" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" />
+  </IconBase>;
+}
+
+export function RestartIcon(props: IconProps) {
+  return <IconBase {...props}>
+    <path d="M4 9a8 8 0 1 1 .5 7M4 4v5h5" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" />
+  </IconBase>;
+}
