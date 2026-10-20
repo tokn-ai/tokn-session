@@ -1,3 +1,5 @@
+import { useMemo } from "react";
+import { bindMarkdownImages } from "../lib/markdownImages";
 import type { EventSummary } from "../lib/types";
 import { formatTimestamp } from "../lib/state";
 import { useMessageTranslation } from "../lib/useMessageTranslation";
@@ -23,8 +25,14 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
   const hasImages = !event.is_hidden && !!event.images?.length;
   const showText = event.is_hidden || !!event.summary.trim() || !hasImages;
   const usesMarkdown = !event.is_hidden && (role === "user" || role === "assistant");
-  const imageContent = hasImages && event.images ? session_key
-    ? <MessageImages session_key={session_key} event_key={event.event_key} revision={event.content_revision} images={event.images} />
+  const display_text = translation.content || event.title;
+  const inline_images = useMemo(() => session_key && usesMarkdown && !translation.showing_translation
+    ? bindMarkdownImages(display_text, event.images ?? []) : new Map(),
+  [display_text, event.images, session_key, usesMarkdown, translation.showing_translation]);
+  const inline_metadata = new Set(inline_images.values());
+  const tray_images = event.images?.filter((image) => !inline_metadata.has(image)) ?? [];
+  const imageContent = hasImages && tray_images.length ? session_key
+    ? <MessageImages session_key={session_key} event_key={event.event_key} revision={event.content_revision} images={tray_images} />
     : <span className="message-image__status">Image unavailable</span> : null;
   const canTranslate = Boolean(status && session_key && role === "assistant" && !event.is_hidden && event.summary.trim());
 
@@ -36,7 +44,9 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
         {role === "user" ? imageContent : null}
         {showText ? usesMarkdown ? (
           <div aria-busy={translation.loading} lang={translation.showing_translation ? "zh-Hans" : undefined}>
-            <MarkdownContent class_name="message-event__text" content={translation.content || event.title} />
+            <MarkdownContent class_name="message-event__text" content={display_text} image_context={session_key && inline_images.size ? {
+              session_key, event_key: event.event_key, revision: event.content_revision ?? null, bindings: inline_images,
+            } : undefined} />
           </div>
         ) : (
           <div className="message-event__text message-event__text--plain">

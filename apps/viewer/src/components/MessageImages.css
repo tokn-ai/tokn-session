@@ -21,3 +21,5 @@
 .image-preview header > span { overflow-wrap: anywhere; }
 .image-preview__body { display: flex; align-items: center; justify-content: center; min-width: min(70vw, 320px); min-height: 140px; }
 .image-preview__body img { display: block; max-width: 90vw; max-height: 78vh; object-fit: contain; }
+
+.message-image-inline { display: inline-flex; max-width: 100%; margin: 4px 0; vertical-align: middle; }

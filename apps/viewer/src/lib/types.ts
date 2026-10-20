@@ -530,6 +530,8 @@ export interface QuestionSelectionSummary {
 }
 
 export interface MessageImageSummary {
+  /** Exact full-message Markdown span, measured in UTF-16 code units. */
+  markdown_range?: { start: number; end: number };
   /** Raw owner of an image projected into a grouped tool operation. */
   source_event_key?: string;
   image_id: string;

@@ -14,8 +14,15 @@ create assistant messages, sidebar previews, or unread final replies. Image-only
 results retain thumbnails and unavailable placeholders alongside ordinary text,
 error, and shell output. Collapsed tool cards do not load image bytes.
 
-Markdown image references still render as placeholders. The viewer does not
-infer local files or fetch remote images from arbitrary assistant/tool prose.
+Markdown images in recorded user and assistant messages also render inline,
+including reference-style and linked images. The host parses actual Markdown
+image nodes, excluding code and raw HTML, and resolves absolute local paths and
+local `file://` URLs through the same resource API. Embedded Markdown data URLs
+retain their inert placeholder; structured image data remains supported.
+Relative paths and remote URLs remain unavailable; the host never fetches them.
+Source ranges use UTF-16 offsets to match the displayed Markdown without giving
+the client file-read authority. Images outside a truncated preview, or in a
+translated message, remain available in the attachment tray.
 
 The session composer and local **New Pi Session** dialog accept file picking,
 clipboard images, and drag/drop, with removable previews and image-only submission.
@@ -51,8 +58,9 @@ Image bytes are separate resources, independent of timeline delivery levels:
 
 These commands share the Tauri, HTTP, and encrypted Hub adapters. HTTP uses the
 existing `/api/v1/<command>` request envelope. The small upload chunks fit existing
-Hub request limits. Session timelines and display details carry compact image
-metadata, without retransmitting image bytes or exposing source paths. The
+Hub request limits. Image metadata in timelines and display details contains no
+image bytes or source paths. Recorded Markdown text retains its original
+destinations; derived metadata adds only resource identities and source ranges. The
 frontend has a separate per-machine blob cache bounded to 64 resources and
 40 MiB, with de-duplicated reads, pinned visible resources, and URL cleanup on
 transport closure. Its keys include the content revision and variant. An assembled

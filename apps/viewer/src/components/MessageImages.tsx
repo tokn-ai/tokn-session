@@ -13,7 +13,7 @@ interface ImageProps {
 }
 
 function ImageResource({ session_key, event_key, revision, image, full = false, on_open }: ImageProps & { full?: boolean; on_open?: () => void }) {
-  const container = useRef<HTMLDivElement>(null);
+  const container = useRef<HTMLSpanElement>(null);
   const [visible, setVisible] = useState(full || typeof IntersectionObserver === "undefined");
   const [retry, setRetry] = useState(0);
 
@@ -41,12 +41,12 @@ function ImageResource({ session_key, event_key, revision, image, full = false, 
     return () => { cancelled = true; resource.release(); };
   }, [current.cache, image.availability, revision, source, visible, retry, observation]);
   const label = image.name || "Recorded image";
-  return <div ref={container} className={full ? "image-preview__body" : "message-image"}>
+  return <span ref={container} className={full ? "image-preview__body" : "message-image"}>
     {image.availability !== "available" ? <span className="message-image__status">{label}<br />Image unavailable</span>
       : visible_result?.url ? full ? <img src={visible_result.url} alt={label} />
         : <button aria-label={`Preview ${label}`} onClick={on_open} type="button"><img src={visible_result.url} alt={label} /></button>
         : <span className="message-image__status" role="status">{visible_result?.error ? <>{label}<br />{visible_result.error}<br /><button type="button" className="text-button" onClick={() => setRetry((value) => value + 1)}>Retry image</button></> : visible ? "Loading image…" : "Image"}</span>}
-  </div>;
+  </span>;
 }
 
 function ImagePreview({ on_close, ...props }: ImageProps & { on_close: () => void }) {
@@ -73,4 +73,16 @@ export function MessageImages({ session_key, event_key, revision = null, images,
     {images.map((image) => <ImageResource key={imageKey(image)} session_key={session_key} event_key={event_key} revision={revision} image={image} on_open={() => setPreview(imageKey(image))} />)}
     {selected ? <ImagePreview session_key={session_key} event_key={event_key} revision={revision} image={selected} on_close={() => setPreview(null)} /> : null}
   </div>;
+}
+
+/** Paragraph-safe image presentation for an authorized Markdown image span. */
+export function InlineMessageImage({ session_key, event_key, revision, image, alt_text }: ImageProps & { alt_text?: string }) {
+  const [preview, setPreview] = useState(false);
+  const label = alt_text ? Array.from(alt_text.replace(/[\u0000-\u001f\u007f-\u009f]/g, "")).slice(0, 255).join("") : null;
+  const display_image = label ? { ...image, name: label } : image;
+  useEffect(() => { setPreview(false); }, [session_key, event_key, revision, image.image_id, image.source_event_key]);
+  return <span className="message-image-inline">
+    <ImageResource session_key={session_key} event_key={event_key} revision={revision} image={display_image} on_open={() => setPreview(true)} />
+    {preview ? <ImagePreview session_key={session_key} event_key={event_key} revision={revision} image={display_image} on_close={() => setPreview(false)} /> : null}
+  </span>;
 }

@@ -1,4 +1,6 @@
 //! Session-bound image resources and private input uploads.
+pub(crate) mod markdown;
+
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -77,6 +79,14 @@ pub struct SessionImage {
   pub height: u32,
 }
 
+/// UTF-16 offsets of one complete Markdown image node in canonical message text.
+/// JavaScript uses these host-derived ranges to bind inline images without paths.
+#[derive(Clone, Debug, Serialize)]
+pub struct MarkdownImageRange {
+  pub start: usize,
+  pub end: usize,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct MessageImageSummary {
   pub image_id: String,
@@ -84,6 +94,8 @@ pub struct MessageImageSummary {
   /// from several tool events. Absent for ordinary message/raw source rows.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub source_event_key: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub markdown_range: Option<MarkdownImageRange>,
   pub mime_type: Option<String>,
   pub name: Option<String>,
   pub availability: ImageAvailability,

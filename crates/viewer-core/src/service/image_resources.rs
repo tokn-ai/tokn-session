@@ -18,8 +18,10 @@ impl ViewerService {
     if event.is_hidden() {
       return Err("Image event is unavailable".into());
     }
+    let markdown_images = markdown_images(event);
     let mut matching = recorded_images(event)
       .iter()
+      .chain(markdown_images.iter().map(|(image, _)| image))
       .filter(|image| display_image_id(&image.image_id) == request.image_id);
     let image = matching.next().ok_or("Image is no longer available in this event")?;
     if matching.next().is_some() {
@@ -81,14 +83,35 @@ pub(super) fn event_images(event: &AgentEvent) -> Vec<MessageImageSummary> {
   if event.is_hidden() {
     return Vec::new();
   }
-  recorded_images(event).iter().take(64).map(image_summary).collect()
+  let mut summaries: Vec<_> = recorded_images(event).iter().take(64).map(image_summary).collect();
+  if summaries.len() < 64 {
+    let remaining = 64 - summaries.len();
+    summaries.extend(
+      markdown_images(event)
+        .into_iter()
+        .take(remaining)
+        .map(|(image, range)| {
+          let mut summary = image_summary(&image);
+          summary.markdown_range = Some(range);
+          summary
+        }),
+    );
+  }
+  summaries
 }
 
 pub(super) fn summary_images(event: &AgentEvent) -> Option<Vec<MessageImageSummary>> {
-  if !event.is_hidden() && (matches!(event, AgentEvent::ToolCall(_)) || !recorded_images(event).is_empty()) {
-    Some(event_images(event))
-  } else {
-    None
+  // Empty coverage is authoritative too: a message edit can remove its last
+  // Markdown image, and retained clients must not revive the old resource.
+  (!event.is_hidden() && matches!(event, AgentEvent::Message(_) | AgentEvent::ToolCall(_))).then(|| event_images(event))
+}
+
+fn markdown_images(event: &AgentEvent) -> Vec<(RecordedImage, images::MarkdownImageRange)> {
+  match event {
+    AgentEvent::Message(message) if !event.is_hidden() && matches!(message.role, Role::User | Role::Assistant) => {
+      images::markdown::message_images(&message.text)
+    }
+    _ => Vec::new(),
   }
 }
 
@@ -187,6 +210,7 @@ fn image_summary(image: &RecordedImage) -> MessageImageSummary {
   MessageImageSummary {
     image_id: display_image_id(&image.image_id),
     source_event_key: None,
+    markdown_range: None,
     mime_type: image
       .mime_type
       .as_ref()

@@ -3261,14 +3261,16 @@ fn source_event_detail(event_key: String, event: &AgentEvent) -> Result<EventDet
     .transpose()?;
   let mut normalized =
     serde_json::to_value(event).map_err(|error| format!("failed to serialize normalized event: {error}"))?;
-  if let Some(images) = image_resources::summary_images(event) {
+  let images = image_resources::summary_images(event);
+  let has_images = images.as_ref().is_some_and(|images| !images.is_empty());
+  if let Some(images) = &images {
     normalized["images"] = serde_json::to_value(images).map_err(|_| "Could not serialize image metadata")?;
   }
   remove_embedded_native(&mut normalized);
   let normalized = bounded_detail_value(normalized, "normalized_event")?;
   let content_revision = match event {
     AgentEvent::ToolCall(_) => image_resources::event_image_revision(event),
-    AgentEvent::Message(message) if !message.images.is_empty() => Some(image_resources::message_revision(message)),
+    AgentEvent::Message(message) if has_images => Some(image_resources::message_revision(message)),
     AgentEvent::Message(message)
       if message.role == Role::Assistant && message.text.chars().count() > MAX_MESSAGE_SUMMARY_CHARS =>
     {
@@ -4951,9 +4953,11 @@ fn event_summary_with_delegation_targets(
     MAX_TECHNICAL_SUMMARY_CHARS
   };
   let (summary, summary_truncated) = truncate_with_flag(summary, summary_max_chars);
+  let images = image_resources::summary_images(event);
+  let has_images = images.as_ref().is_some_and(|images| !images.is_empty());
   let content_revision = if matches!(event, AgentEvent::ToolCall(_)) {
     image_resources::event_image_revision(event)
-  } else if !hidden && matches!(event, AgentEvent::Message(message) if !message.images.is_empty()) {
+  } else if !hidden && has_images && matches!(event, AgentEvent::Message(_)) {
     match event {
       AgentEvent::Message(message) => Some(image_resources::message_revision(message)),
       _ => None,
@@ -4977,7 +4981,7 @@ fn event_summary_with_delegation_targets(
     })
     .flatten();
   EventSummary {
-    images: image_resources::summary_images(event),
+    images,
     child_keys: None,
     slot_key: None,
     event_key: encode_event_key(index),
