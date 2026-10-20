@@ -115,3 +115,12 @@ it("uses the original cleanup transport when its host closes during upload", asy
   await act(async () => resolve({ upload_id: request.upload_id, received_bytes: request.total_bytes, image_id: "unused" }));
   expect(submitSessionInput).not.toHaveBeenCalled();
 });
+
+it("places attachment previews above prompt text and keeps the picker below it", async () => {
+  render(<SessionComposer session={session} />); await ready(); attach();
+  const previews = screen.getByRole("list", { name: "Attached images" });
+  const prompt = screen.getByRole("textbox", { name: "Message this session" });
+  const picker = screen.getByRole("button", { name: "Attach images" });
+  expect(previews.compareDocumentPosition(prompt) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(prompt.compareDocumentPosition(picker) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});

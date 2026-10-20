@@ -144,3 +144,15 @@ it("allows an image-only first Pi message with removable previews", () => {
   expect(screen.getByRole("button", { name: "Start Pi session" })).toBeDisabled();
   expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:pi");
 });
+
+it("places Pi attachment previews above the first message while keeping its picker below", () => {
+  Object.defineProperties(URL, { createObjectURL: { configurable: true, value: vi.fn(() => "blob:pi") }, revokeObjectURL: { configurable: true, value: vi.fn() } });
+  render(<NewSessionDialog open projects={[project()]} snapshot={null} creating={false} error={null} control_error={null} controlling={false}
+    on_close={vi.fn()} on_create={vi.fn()} on_stop={vi.fn()} on_open={vi.fn()} />);
+  fireEvent.change(screen.getByLabelText("Image files"), { target: { files: [new File(["png"], "new.png", { type: "image/png" })] } });
+  const previews = screen.getByRole("list", { name: "Attached images" });
+  const prompt = screen.getByRole("textbox", { name: "First message" });
+  const picker = screen.getByRole("button", { name: "Attach images" });
+  expect(previews.compareDocumentPosition(prompt) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(prompt.compareDocumentPosition(picker) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});

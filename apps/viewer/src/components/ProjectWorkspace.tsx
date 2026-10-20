@@ -4,7 +4,7 @@ import type { ManagedSessionDialogResponse, ManagedSessionSnapshot, RegisteredPr
 import { errorMessage } from "../lib/state";
 import { CloseIcon } from "./Icons";
 import "./ProjectWorkspace.css";
-import { ImageAttachments, imageDrop, imagePaste } from "./ImageAttachments";
+import { ImageAttachmentPreviews, ImageAttachmentPicker, imageDrop, imagePaste } from "./ImageAttachments";
 import { addImageDrafts, disposeImageDrafts, DEFAULT_IMAGE_LIMITS, type ImageDraft } from "../lib/imageDrafts";
 
 function LastTurnFailure({ message }: { message?: string | null }) {
@@ -111,12 +111,13 @@ export function NewSessionDialog({ open, projects, preferred_group_key, snapshot
         {projects.map((project) => <option key={project.project_id} value={project.project_id} disabled={!project.available}>{project.name} · {project.folder_path}{project.available ? "" : " (unavailable)"}</option>)}
       </select></label>
       {selected ? <p className="workspace-folder">{selected.folder_path}</p> : null}
-      <label>First message<textarea autoFocus rows={6} required={!images.length} value={prompt} disabled={pending || uncertain} onChange={(event) => setPrompt(event.target.value)} placeholder="What would you like Pi to do?" /></label>
-      <ImageAttachments images={images} limits={DEFAULT_IMAGE_LIMITS} disabled={pending || uncertain} on_add={addImages} on_remove={(draft_id) => {
+      <ImageAttachmentPreviews images={images} disabled={pending || uncertain} on_remove={(draft_id) => {
         if (pending || uncertain) return;
         disposeImageDrafts(images.filter((image) => image.draft_id === draft_id));
         setImages(images.filter((image) => image.draft_id !== draft_id)); setImageError(null);
       }} />
+      <label>First message<textarea autoFocus rows={6} required={!images.length} value={prompt} disabled={pending || uncertain} onChange={(event) => setPrompt(event.target.value)} placeholder="What would you like Pi to do?" /></label>
+      <ImageAttachmentPicker image_count={images.length} limits={DEFAULT_IMAGE_LIMITS} disabled={pending || uncertain} on_add={addImages} />
       {image_error ? <p className="workspace-error" role="alert">{image_error}</p> : null}
       {pending ? <p className="workspace-progress" role="status"><span className="inline-spinner" />{snapshot?.status === "stopping" ? "Stopping Pi…" : "Starting Pi… Waiting for its conversation to be saved."}</p> : null}
       {snapshot?.message ? <p className={snapshot.status === "failed" ? "workspace-error" : "workspace-notice"} role={snapshot.status === "failed" ? "alert" : "status"}>{snapshot.message}</p> : null}

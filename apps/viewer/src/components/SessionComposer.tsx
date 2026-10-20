@@ -1,5 +1,5 @@
 import { useId, useLayoutEffect, useRef, useState } from "react";
-import { ImageAttachments, imagePaste, imageDrop } from "./ImageAttachments";
+import { ImageAttachmentPreviews, ImageAttachmentPicker, imagePaste, imageDrop } from "./ImageAttachments";
 import { SendIcon } from "./Icons";
 import { useSessionInput } from "../lib/useSessionInput";
 import type { SessionSummary } from "../lib/types";
@@ -53,6 +53,7 @@ export function SessionComposer({ session, on_accepted, input_refresh_key }: {
       <div className="session-composer__content">
         <label className="sr-only" htmlFor={inputId}>Message this session</label>
         <div className="session-composer__box">
+          <ImageAttachmentPreviews images={input.images} disabled={disabled} on_remove={input.removeImage} />
           <textarea
             id={inputId}
             ref={textarea}
@@ -72,7 +73,7 @@ export function SessionComposer({ session, on_accepted, input_refresh_key }: {
             rows={expanded ? 3 : 1}
             value={input.draft}
           />
-          <ImageAttachments images={input.images} limits={input.image_limits} disabled={disabled} on_add={input.addImages} on_remove={input.removeImage} />
+          <ImageAttachmentPicker image_count={input.images.length} limits={input.image_limits} disabled={disabled} on_add={input.addImages} />
           <div className="session-composer__footer">
             <span className="session-composer__provider">{providerLabel(session.provider)}</span>
             <button

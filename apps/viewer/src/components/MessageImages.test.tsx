@@ -64,3 +64,13 @@ describe("recorded image display", () => {
     expect(URL.revokeObjectURL).toHaveBeenCalledOnce();
   });
 });
+
+it.each(["user", "assistant"])("keeps recorded %s attachment order consistent with its message role", (role) => {
+  const event = { event_key: "event", type: "message", role, title: "Message", summary: "Message text", is_hidden: false,
+    images: [{ ...image, availability: "unavailable" }] } as EventSummary;
+  render(<MessageCard event={event} session_key="session" button_id="inspect" is_selected={false} on_select={vi.fn()} />);
+  const attachment = screen.getByText(/Image unavailable/);
+  const text = screen.getByText("Message text");
+  const order = role === "user" ? Node.DOCUMENT_POSITION_FOLLOWING : Node.DOCUMENT_POSITION_PRECEDING;
+  expect(attachment.compareDocumentPosition(text) & order).toBeTruthy();
+});
