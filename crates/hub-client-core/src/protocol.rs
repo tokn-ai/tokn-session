@@ -138,7 +138,13 @@ pub fn valid_host_uuid(host_id: &str) -> bool {
 pub fn allowed_route(method: &str, path: &str, allow_control: bool) -> bool {
   match (method, path) {
     ("GET", "/api/v1/health" | "/api/v1/events") => true,
-    ("POST", "/api/v1/submit_session_input" | "/api/v1/submit_session_question_answers") => allow_control,
+    (
+      "POST",
+      "/api/v1/submit_session_input"
+      | "/api/v1/submit_session_question_answers"
+      | "/api/v1/upload_image_chunk"
+      | "/api/v1/release_image_upload",
+    ) => allow_control,
     (
       "POST",
       "/api/v1/list_sessions"
@@ -154,6 +160,7 @@ pub fn allowed_route(method: &str, path: &str, allow_control: bool) -> bool {
       | "/api/v1/renew_background_subscriptions"
       | "/api/v1/update_session_view"
       | "/api/v1/load_event_detail"
+      | "/api/v1/load_session_image"
       | "/api/v1/load_trajectory_event_page"
       | "/api/v1/acknowledge_session_attention"
       | "/api/v1/get_session_index_progress"
@@ -182,6 +189,7 @@ mod tests {
         "/api/v1/load_session_backward",
         "/api/v1/load_session_details",
         "/api/v1/inspect_session_event",
+        "/api/v1/load_session_image",
         "/api/v1/renew_session_subscriptions",
         "/api/v1/renew_background_subscriptions",
         "/api/v1/get_machine_settings",
@@ -193,6 +201,16 @@ mod tests {
         for suffix in ["/", "?x=1"] {
           assert!(!allowed_route("POST", &format!("{path}{suffix}"), allow_control));
         }
+      }
+    }
+    for path in ["/api/v1/upload_image_chunk", "/api/v1/release_image_upload"] {
+      assert!(allowed_route("POST", path, true));
+      assert!(!allowed_route("POST", path, false));
+      for method in ["GET", "PUT", "DELETE"] {
+        assert!(!allowed_route(method, path, true));
+      }
+      for suffix in ["/", "?x=1"] {
+        assert!(!allowed_route("POST", &format!("{path}{suffix}"), true));
       }
     }
     assert!(allowed_route("POST", "/api/v1/submit_session_input", true));

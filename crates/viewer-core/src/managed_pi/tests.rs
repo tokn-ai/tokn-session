@@ -79,9 +79,17 @@ for line in sys.stdin:
     record(command)
     kind = command['type']
     if kind == 'get_state':
+        invalid = root / 'invalid-state'
+        if invalid.exists():
+            fault = invalid.read_text()
+            response = {'type':'response', 'id':command['id'], 'command':'wrong-command' if fault == 'command' else 'get_state', 'success':'invalid' if fault == 'flag' else True}
+            if fault == 'data':
+                response['data'] = {'sessionId': False}
+            emit(response)
+            continue
         if mode == 'deferred' and (root / 'allow-persist').exists():
             persist()
-        reply(command, data={'sessionId': session_id, 'sessionFile': str(session_file), 'isStreaming': streaming, 'isCompacting': False, 'pendingMessageCount': pending})
+        reply(command, data={'sessionId': session_id, 'sessionFile': str(session_file), 'isStreaming': streaming, 'isCompacting': False, 'pendingMessageCount': pending, 'model': {'input': ['text', 'image'] if mode == 'vision' and not (root / 'text-only').exists() else ['text']}})
     elif kind == 'prompt':
         prompt_count += 1
         text = command['message']
@@ -190,6 +198,7 @@ record({'kind': 'stdin_closed'})
         request_id: uuid::Uuid::new_v4().to_string(),
         project_id,
         prompt: prompt.into(),
+        image_ids: Vec::new(),
       };
       Self {
         manager,
@@ -288,6 +297,125 @@ record({'kind': 'stdin_closed'})
         .wait_for(|snapshot| snapshot.session_key.is_some() && snapshot.status == ManagedSessionStatus::Running)
         .await
     }
+  }
+
+  fn image(id: &str) -> ResolvedImage {
+    ResolvedImage {
+      image_id: id.into(),
+      mime_type: "image/png".into(),
+      sha256: "synthetic-image-hash".into(),
+      path: "/private/viewer/owned-image.png".into(),
+      bytes: Arc::new(vec![1, 2, 3]),
+    }
+  }
+
+  #[tokio::test]
+  async fn image_only_creation_and_follow_up_use_native_images_and_fresh_model_capabilities() {
+    let mut fixture = Fixture::new("vision", "");
+    let image_id = uuid::Uuid::new_v4().to_string();
+    fixture.request.image_ids = vec![image_id.clone()];
+    fixture
+      .manager
+      .create_with_images(fixture.request.clone(), fixture.project.clone(), vec![image(&image_id)])
+      .await
+      .unwrap();
+    let ready = fixture
+      .wait_for(|snapshot| snapshot.session_key.is_some() && snapshot.status == ManagedSessionStatus::Running)
+      .await;
+    let key = ready.session_key.unwrap();
+    assert!(fixture.manager.input_status(&key).unwrap().unwrap().images_available);
+    let first = fixture
+      .log()
+      .into_iter()
+      .find(|value| value["type"] == "prompt")
+      .unwrap();
+    assert_eq!(first["message"], "");
+    assert_eq!(
+      first["images"],
+      json!([{"type":"image", "data":"AQID", "mimeType":"image/png"}])
+    );
+    let followup_id = uuid::Uuid::new_v4().to_string();
+    for _ in 0..2 {
+      assert!(matches!(
+        fixture
+          .manager
+          .submit_owned_input_images(&key, &followup_id, "caption", vec![image(&image_id)])
+          .await
+          .unwrap(),
+        Admission::QueuedFollowUp
+      ));
+    }
+    let prompts: Vec<_> = fixture
+      .log()
+      .into_iter()
+      .filter(|value| value["type"] == "prompt")
+      .collect();
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts[1]["streamingBehavior"], "followUp");
+    // Recheck model capabilities immediately before each image prompt, even if
+    // the status previously advertised a vision model.
+    std::fs::write(fixture.folder().join("text-only"), "").unwrap();
+    let error = fixture
+      .manager
+      .submit_owned_input_images(&key, &uuid::Uuid::new_v4().to_string(), "", vec![image(&image_id)])
+      .await
+      .unwrap_err();
+    assert!(!error.may_have_been_sent);
+    assert!(error.message.contains("does not support image"));
+    assert!(!fixture.manager.input_status(&key).unwrap().unwrap().images_available);
+    assert_eq!(
+      fixture.log().iter().filter(|value| value["type"] == "prompt").count(),
+      2
+    );
+    fixture.manager.shutdown().await;
+  }
+
+  #[tokio::test]
+  async fn malformed_image_preflight_is_a_definite_non_send() {
+    for fault in ["command", "flag", "data", "missing-data"] {
+      // A handled first prompt settles with no further pending state probes.
+      let fixture = Fixture::new("vision", "handled");
+      fixture.create().await;
+      let ready = fixture
+        .wait_for(|snapshot| snapshot.session_key.is_some() && snapshot.status == ManagedSessionStatus::Idle)
+        .await;
+      let key = ready.session_key.unwrap();
+      std::fs::write(fixture.folder().join("invalid-state"), fault).unwrap();
+      let error = fixture
+        .manager
+        .submit_owned_input_images(
+          &key,
+          &uuid::Uuid::new_v4().to_string(),
+          "caption",
+          vec![image("synthetic")],
+        )
+        .await
+        .unwrap_err();
+      assert!(!error.may_have_been_sent, "{fault} preflight did not write a prompt");
+      assert_eq!(
+        fixture.log().iter().filter(|value| value["type"] == "prompt").count(),
+        1
+      );
+      fixture.manager.shutdown().await;
+    }
+  }
+
+  #[tokio::test]
+  async fn initial_images_never_fall_back_to_text_when_model_is_not_vision_capable() {
+    let mut fixture = Fixture::new("normal", "caption");
+    let image_id = uuid::Uuid::new_v4().to_string();
+    fixture.request.image_ids = vec![image_id.clone()];
+    fixture
+      .manager
+      .create_with_images(fixture.request.clone(), fixture.project.clone(), vec![image(&image_id)])
+      .await
+      .unwrap();
+    let failed = fixture
+      .wait_for(|snapshot| snapshot.status == ManagedSessionStatus::Failed)
+      .await;
+    assert!(failed.message.unwrap().contains("does not support image"));
+    assert!(!fixture.log().iter().any(|value| value["type"] == "prompt"));
+    fixture.manager.shutdown().await;
   }
 
   #[tokio::test]

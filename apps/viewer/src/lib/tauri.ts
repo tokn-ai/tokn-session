@@ -101,8 +101,8 @@ export function listenForMachinePreferences(handler: (preferences: NativePrefere
   return nativeDeviceListener("machine-preferences-changed", handler);
 }
 
-export function submitSessionInput(request: SubmitSessionInputRequest): Promise<SubmitSessionInputResponse> {
-  return invoke<SubmitSessionInputResponse>("submit_session_input", { request });
+export function submitSessionInput(request: SubmitSessionInputRequest, send: CommandInvoker = invoke): Promise<SubmitSessionInputResponse> {
+  return send<SubmitSessionInputResponse>("submit_session_input", { request });
 }
 
 export function getTranslationStatus(): Promise<TranslationStatus> {
@@ -360,4 +360,15 @@ export function getSessionQuestionStatus(request: import("./types").SessionQuest
 }
 export function submitSessionQuestionAnswers(request: import("./types").SubmitSessionQuestionAnswersRequest, send: CommandInvoker = invoke): Promise<SubmitSessionInputResponse> {
   return send("submit_session_question_answers", { request });
+}
+
+export function loadSessionImage(request: import("./types").LoadSessionImageRequest, send: CommandInvoker = invoke): Promise<import("./types").LoadSessionImageResponse> {
+  return send("load_session_image", { request });
+}
+export function uploadImageChunk(request: import("./types").UploadImageChunkRequest, send: CommandInvoker = invoke): Promise<import("./types").UploadImageChunkResponse> {
+  return send("upload_image_chunk", { request });
+}
+export function releaseImageUpload(request: import("./types").ReleaseImageUploadRequest,
+  send: (command: string, payload?: Record<string, unknown>) => Promise<unknown> = invoke): Promise<void> {
+  return send("release_image_upload", { request }).then(() => {});
 }

@@ -12,6 +12,7 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use super::{Admission, DeliveryError, InputTarget};
+use crate::images::ResolvedImage;
 
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -35,10 +36,15 @@ pub(super) async fn status(_target: &InputTarget) -> Result<String, DeliveryErro
   Ok("Codex Desktop is available. Open this session in Codex Desktop to receive messages.".to_owned())
 }
 
-pub(super) async fn submit(target: &InputTarget, request_id: &str, text: &str) -> Result<Admission, DeliveryError> {
+pub(super) async fn submit_images(
+  target: &InputTarget,
+  request_id: &str,
+  text: &str,
+  images: &[ResolvedImage],
+) -> Result<Admission, DeliveryError> {
   let mut client = DesktopClient::connect(&desktop_endpoint()?, REQUEST_TIMEOUT).await?;
   client.request_timeout = SUBMISSION_TIMEOUT;
-  client.submit(&target.session_id, request_id, text).await
+  client.submit_images(&target.session_id, request_id, text, images).await
 }
 
 pub(crate) async fn submit_question(
@@ -111,11 +117,29 @@ impl DesktopClient {
     Ok(client)
   }
 
+  #[cfg(test)]
   async fn submit(&mut self, session_id: &str, request_id: &str, text: &str) -> Result<Admission, DeliveryError> {
-    if session_id.trim().is_empty() || request_id.trim().is_empty() || text.trim().is_empty() {
+    self.submit_images(session_id, request_id, text, &[]).await
+  }
+
+  async fn submit_images(
+    &mut self,
+    session_id: &str,
+    request_id: &str,
+    text: &str,
+    images: &[ResolvedImage],
+  ) -> Result<Admission, DeliveryError> {
+    if session_id.trim().is_empty() || request_id.trim().is_empty() || (text.trim().is_empty() && images.is_empty()) {
       return Err(DeliveryError::not_sent(
         "A session, request ID, and message are required.",
       ));
+    }
+    let mut input = Vec::new();
+    if !text.trim().is_empty() {
+      input.push(json!({ "type": "text", "text": text, "text_elements": [] }));
+    }
+    for image in images {
+      input.push(json!({ "type": "localImage", "path": image.path }));
     }
     // The wire request is unique for this connection. The user-message ID is
     // stable across the viewer's delivery bookkeeping, not a promise that the
@@ -139,7 +163,7 @@ impl DesktopClient {
                 // Desktop renders this input before the app server normalizes
                 // it. Its text renderer requires the annotation array even
                 // for plain text, or the owning conversation fails to render.
-                "input": [{ "type": "text", "text": text, "text_elements": [] }],
+                "input": input,
                 "clientUserMessageId": request_id,
                 "additionalContext": null
               },

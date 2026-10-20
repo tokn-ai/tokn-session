@@ -453,3 +453,41 @@ async fn async_answers_steer_with_display_context_and_never_start_another_turn()
   ));
   server.await.unwrap();
 }
+
+#[tokio::test]
+#[cfg(any(unix, windows))]
+async fn image_only_submission_uses_host_local_image_wire_without_empty_text() {
+  let (mut client, server) = initialized_client(|mut stream| async move {
+    let request = read_frame(&mut stream).await.unwrap();
+    assert_eq!(
+      request["params"]["turnStart"]["request"]["input"],
+      json!([
+        {"type":"localImage", "path":"/private/viewer/image.png"},
+        {"type":"localImage", "path":"/private/viewer/second.jpg"}
+      ])
+    );
+    write_frame(&mut stream, &success(&request, json!({}))).await;
+  })
+  .await;
+  let images = [
+    crate::images::ResolvedImage {
+      image_id: "first".into(),
+      mime_type: "image/png".into(),
+      sha256: "first-hash".into(),
+      path: "/private/viewer/image.png".into(),
+      bytes: std::sync::Arc::new(vec![1]),
+    },
+    crate::images::ResolvedImage {
+      image_id: "second".into(),
+      mime_type: "image/jpeg".into(),
+      sha256: "second-hash".into(),
+      path: "/private/viewer/second.jpg".into(),
+      bytes: std::sync::Arc::new(vec![2]),
+    },
+  ];
+  assert!(matches!(
+    client.submit_images("session", "request", "", &images).await.unwrap(),
+    Admission::Accepted
+  ));
+  server.await.unwrap();
+}

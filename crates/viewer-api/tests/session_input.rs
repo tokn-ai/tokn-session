@@ -125,7 +125,6 @@ async fn input_routes_reject_malformed_request_envelopes() {
   for payload in [
     json!({"request": {"session_key": "forged", "text": "missing id"}}),
     json!({"request": {"session_key": "forged", "request_id": REQUEST_ID, "text": ["not text"]}}),
-    json!({"request": {"session_key": "forged", "request_id": "not-a-uuid", "text": "hello"}}),
   ] {
     let (status, body) = fixture.authorized("submit_session_input", payload).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -140,12 +139,21 @@ async fn invalid_message_bodies_fail_before_delivery_admission() {
     let (status, body) = fixture
       .authorized("submit_session_input", submission("forged", &text))
       .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["error"].is_string());
-    assert!(
-      body.get("status").is_none(),
-      "invalid input must not receive an admission result"
-    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "not_sent");
+    assert_eq!(body["request_id"], REQUEST_ID);
+    assert!(body["message"].is_string());
+  }
+  for request in [
+    json!({"session_key":"forged", "request_id":"not-a-uuid", "text":"hello"}),
+    json!({"session_key":"forged", "request_id":REQUEST_ID, "text":"hello", "image_ids":["invalid"]}),
+  ] {
+    let (status, body) = fixture
+      .authorized("submit_session_input", json!({"request":request}))
+      .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "not_sent");
+    assert!(body["message"].is_string());
   }
 }
 

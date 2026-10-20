@@ -411,6 +411,7 @@ impl Normalizer {
     time: Option<String>,
   ) -> AgentEvent {
     AgentEvent::Message(MessageEvent {
+      images: Vec::new(),
       provenance: None,
       provider: Provider::Dsh,
       session_id: Some(self.session_id.clone()),

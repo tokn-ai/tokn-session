@@ -251,6 +251,7 @@ impl WorkBuddyNormalizer {
       .and_then(provider_error_message);
     if !text.is_empty() {
       events.push(AgentEvent::Message(MessageEvent {
+        images: Vec::new(),
         provenance: None,
         provider: Provider::WorkBuddy,
         session_id: Some(session_id.clone()),

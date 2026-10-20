@@ -2,6 +2,7 @@ mod async_replies;
 mod code_mode;
 mod communication;
 mod diagnostics;
+mod images;
 mod item_lifecycle;
 mod questions;
 mod turn_lifecycle;
@@ -727,7 +728,8 @@ fn normalize_message(session_id: Option<String>, item: MessageItem, timestamp: O
   let delivery = codex_message_delivery(item.phase.as_deref());
 
   let text = content_text(&item.content);
-  if text.is_empty() {
+  let images = images::response_images(&item.content);
+  if text.is_empty() && images.is_empty() {
     return vec![unknown_event(
       session_id,
       Some("response_item.message".to_string()),
@@ -737,6 +739,7 @@ fn normalize_message(session_id: Option<String>, item: MessageItem, timestamp: O
   }
 
   vec![AgentEvent::Message(MessageEvent {
+    images,
     provenance: None,
     provider: Provider::Codex,
     session_id,
@@ -797,18 +800,19 @@ fn normalize_event_message(
       events.push(turn_lifecycle::normalize(session_id, &payload, kind, timestamp));
       events
     }
-    Some("user_message") => string_field(&payload, "message")
-      .map(|text| {
-        vec![message_event(
-          session_id,
-          None,
-          Role::User,
-          Phase::Finished,
-          text,
-          timestamp,
-        )]
-      })
-      .unwrap_or_default(),
+    Some("user_message") if canonical_items => Vec::new(),
+    Some("user_message") => {
+      let text = string_field(&payload, "message").unwrap_or_default();
+      let images = images::legacy_user_images(&payload);
+      if text.is_empty() && images.is_empty() {
+        return Vec::new();
+      }
+      let mut event = message_event(session_id, None, Role::User, Phase::Finished, text, timestamp);
+      if let AgentEvent::Message(message) = &mut event {
+        message.images = images;
+      }
+      vec![event]
+    }
     Some("agent_message") => Vec::new(),
     Some("request_user_input") => vec![
       questions::request(session_id.clone(), &payload, timestamp.clone()).unwrap_or_else(|| {
@@ -1342,6 +1346,7 @@ fn message_event(
   timestamp: Option<String>,
 ) -> AgentEvent {
   AgentEvent::Message(MessageEvent {
+    images: Vec::new(),
     provenance: None,
     provider: Provider::Codex,
     session_id,
@@ -1520,6 +1525,119 @@ mod tests {
 
   fn normalize_value(normalizer: &mut CodexNormalizer, value: Value) -> Vec<AgentEvent> {
     normalizer.normalize(serde_json::from_value(value).expect("record should decode"))
+  }
+
+  #[test]
+  fn legacy_user_images_keep_recorded_order_and_image_only_messages() {
+    let mut normalizer = CodexNormalizer::new();
+    let events = normalize_value(
+      &mut normalizer,
+      json!({"type":"event_msg","payload":{
+        "type":"user_message", "message":"", "images":["data:image/png;base64,YQ==", "https://example.com/image.png"],
+        "file_ids":["file-opaque"], "image_order":["file", "inline", "inline"], "local_images":["/tmp/local.png"]
+      }}),
+    );
+    let [AgentEvent::Message(message)] = &events[..] else {
+      panic!("expected image-only user message")
+    };
+    assert!(message.text.is_empty());
+    assert_eq!(message.images.len(), 4);
+    assert!(
+      matches!(&message.images[0].source, tokn_session_core::MessageImageSource::Unavailable { reference: Some(reference) } if reference == "file-opaque")
+    );
+    assert!(matches!(
+      &message.images[1].source,
+      tokn_session_core::MessageImageSource::DataUrl { .. }
+    ));
+    assert!(matches!(
+      &message.images[2].source,
+      tokn_session_core::MessageImageSource::Unavailable { .. }
+    ));
+    assert!(
+      matches!(&message.images[3].source, tokn_session_core::MessageImageSource::LocalFile { path } if path.to_str() == Some("/tmp/local.png"))
+    );
+  }
+
+  #[test]
+  fn canonical_user_images_are_authoritative_over_raw_and_legacy_duplicates() {
+    let mut normalizer = CodexNormalizer::new();
+    normalize_value(
+      &mut normalizer,
+      json!({"type":"session_meta","payload":{"id":"session", "history_mode":"paginated"}}),
+    );
+    for raw in [
+      json!({"type":"response_item", "payload":{"type":"message", "role":"user", "content":[{"type":"input_image", "image_url":"data:image/png;base64,YQ=="}]}}),
+      json!({"type":"event_msg", "payload":{"type":"user_message", "message":"caption", "images":["data:image/png;base64,YQ=="]}}),
+    ] {
+      assert!(normalize_value(&mut normalizer, raw).is_empty());
+    }
+    let item = json!({"type":"UserMessage", "id":"user", "content":[
+      {"type":"text", "text":"caption"}, {"type":"image", "file_id":"opaque"},
+      {"type":"local_image", "path":"/tmp/local.png"}, {"type":"image", "image_url":"data:image/png;base64,YQ=="}
+    ]});
+    let started = normalize_value(
+      &mut normalizer,
+      json!({"type":"event_msg", "payload":{"type":"item_started", "thread_id":"session", "turn_id":"turn", "item":item}}),
+    );
+    assert!(started.iter().all(|event| !matches!(event, AgentEvent::Message(_))));
+    let events = normalize_value(
+      &mut normalizer,
+      json!({"type":"event_msg", "payload":{"type":"item_completed", "thread_id":"session", "turn_id":"turn", "item":item}}),
+    );
+    let [AgentEvent::Message(message)] = &events[..] else {
+      panic!("expected canonical user message")
+    };
+    assert_eq!(message.text, "caption");
+    assert_eq!(
+      message
+        .images
+        .iter()
+        .map(|image| image.image_id.as_str())
+        .collect::<Vec<_>>(),
+      ["image.v1.1", "image.v1.2", "image.v1.3"]
+    );
+    assert!(matches!(
+      &message.images[0].source,
+      tokn_session_core::MessageImageSource::Unavailable { .. }
+    ));
+    assert!(matches!(
+      &message.images[1].source,
+      tokn_session_core::MessageImageSource::LocalFile { .. }
+    ));
+  }
+
+  #[test]
+  fn canonical_image_only_user_message_is_not_reduced_to_lifecycle_metadata() {
+    let mut normalizer = CodexNormalizer::new();
+    normalize_value(
+      &mut normalizer,
+      json!({"type":"session_meta","payload":{"id":"session", "history_mode":"paginated"}}),
+    );
+    let events = normalize_value(
+      &mut normalizer,
+      json!({"type":"event_msg", "payload":{
+        "type":"item_completed", "thread_id":"session", "turn_id":"turn", "item":{
+          "type":"UserMessage", "id":"user", "content":[{"type":"image", "image_url":"data:image/png;base64,YQ=="}]
+        }
+      }}),
+    );
+    assert!(
+      matches!(&events[..], [AgentEvent::Message(message)] if message.text.is_empty() && message.images.len() == 1)
+    );
+  }
+
+  #[test]
+  fn legacy_assistant_image_only_response_is_a_message() {
+    let mut normalizer = CodexNormalizer::new();
+    let events = normalize_value(
+      &mut normalizer,
+      json!({"type":"response_item", "payload":{
+        "type":"message", "role":"assistant", "id":"answer", "content":[{"type":"output_image", "image_url":"data:image/png;base64,YQ=="}]
+      }}),
+    );
+    assert!(
+      matches!(&events[..], [AgentEvent::Message(message)] if message.text.is_empty() && message.images.len() == 1)
+    );
   }
 
   #[test]

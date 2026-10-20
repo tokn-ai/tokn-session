@@ -101,7 +101,10 @@ fn custom_messages_have_extension_provenance_and_visibility_not_a_human_role() {
     };
     assert!(matches!(event.role, Role::System));
     assert!(matches!(event.delivery, MessageDelivery::Unspecified));
-    assert_eq!(event.text, "extension content\n[image]");
+    assert_eq!(event.text, "extension content");
+    assert_eq!(event.images.len(), 1);
+    assert_eq!(event.images[0].mime_type.as_deref(), Some("image/png"));
+    assert!(matches!(&event.images[0].source, tokn_session_core::MessageImageSource::Base64 { data } if data == "abc"));
     let provenance = event.provenance.as_ref().unwrap();
     assert_eq!(provenance.display, Some(display));
     assert_eq!(provenance.source["custom_type"], "plugin/status");

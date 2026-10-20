@@ -1,4 +1,5 @@
 use super::{Admission, DeliveryError, InputTarget};
+use crate::{images::ResolvedImage, input::InputCapability};
 
 #[cfg(unix)]
 mod unix {
@@ -14,11 +15,15 @@ mod unix {
   use tokio::io::{AsyncReadExt, AsyncWriteExt};
   use tokio::net::UnixStream;
 
-  use super::{Admission, DeliveryError, InputTarget};
+  use super::{Admission, DeliveryError, InputCapability, InputTarget, ResolvedImage};
   use crate::model::ViewerProvider;
+  use base64::Engine;
 
   const PROTOCOL: u64 = 1;
-  const MAX_FRAME_BYTES: usize = 32 * 1024;
+  const MAX_DESCRIPTOR_BYTES: usize = 32 * 1024;
+  // 24 MiB of validated images expands to 32 MiB of base64, plus text/envelope.
+  const MAX_FRAME_BYTES: usize = 34 * 1024 * 1024;
+  const MAX_RESPONSE_BYTES: usize = 32 * 1024;
   const BRIDGE_TIMEOUT: Duration = Duration::from_secs(5);
 
   #[derive(Debug, Deserialize)]
@@ -34,14 +39,24 @@ mod unix {
     token: String,
   }
 
-  pub(super) async fn status(target: &InputTarget) -> Result<String, DeliveryError> {
+  pub(super) async fn status(target: &InputTarget) -> Result<InputCapability, DeliveryError> {
     let descriptor = load_descriptor(target).await?;
-    query_status(&descriptor, BRIDGE_TIMEOUT).await
+    query_capability(&descriptor, BRIDGE_TIMEOUT).await
   }
 
-  pub(super) async fn submit(target: &InputTarget, request_id: &str, text: &str) -> Result<Admission, DeliveryError> {
+  pub(super) async fn submit_images(
+    target: &InputTarget,
+    request_id: &str,
+    text: &str,
+    images: &[ResolvedImage],
+  ) -> Result<Admission, DeliveryError> {
     let descriptor = load_descriptor(target).await?;
-    submit_message(&descriptor, request_id, text, BRIDGE_TIMEOUT).await
+    if !images.is_empty() && !query_capability(&descriptor, BRIDGE_TIMEOUT).await?.images_available {
+      return Err(DeliveryError::not_sent(
+        "The active Pi model or bridge does not support image input. Update the bridge or choose an image-capable model.",
+      ));
+    }
+    submit_message_images(&descriptor, request_id, text, images, BRIDGE_TIMEOUT).await
   }
 
   // Node's path.resolve normalizes lexically without resolving symlinks. Using
@@ -109,7 +124,7 @@ mod unix {
     // SAFETY: getuid has no preconditions or pointer arguments.
     let uid = unsafe { libc::getuid() };
     if !metadata.is_file()
-      || metadata.len() > MAX_FRAME_BYTES as u64
+      || metadata.len() > MAX_DESCRIPTOR_BYTES as u64
       || metadata.mode() & 0o077 != 0
       || metadata.uid() != uid
     {
@@ -119,10 +134,10 @@ mod unix {
     }
     let mut bytes = Vec::new();
     file
-      .take((MAX_FRAME_BYTES + 1) as u64)
+      .take((MAX_DESCRIPTOR_BYTES + 1) as u64)
       .read_to_end(&mut bytes)
       .map_err(|_| unavailable())?;
-    if bytes.len() > MAX_FRAME_BYTES {
+    if bytes.len() > MAX_DESCRIPTOR_BYTES {
       return Err(DeliveryError::not_sent("The Pi input bridge descriptor is too large."));
     }
     let descriptor: Descriptor = serde_json::from_slice(&bytes)
@@ -160,7 +175,14 @@ mod unix {
     })
   }
 
+  #[cfg(test)]
   async fn query_status(descriptor: &Descriptor, timeout: Duration) -> Result<String, DeliveryError> {
+    query_capability(descriptor, timeout)
+      .await
+      .map(|capability| capability.message)
+  }
+
+  async fn query_capability(descriptor: &Descriptor, timeout: Duration) -> Result<InputCapability, DeliveryError> {
     let request_id = uuid::Uuid::new_v4().to_string();
     let response = exchange(descriptor, request(descriptor, "status", &request_id), false, timeout).await?;
     validate_response(&response, &request_id, false)?;
@@ -173,24 +195,48 @@ mod unix {
         "The Pi input bridge returned a mismatched status.",
       ));
     }
-    match response["state"].as_str() {
-      Some("idle") => Ok("Pi is ready for a new message.".into()),
-      Some("busy") => Ok("Pi is busy; your message will be queued as a follow-up.".into()),
-      _ => Err(DeliveryError::not_sent(
-        "The Pi input bridge returned an invalid status.",
-      )),
-    }
+    let message = match response["state"].as_str() {
+      Some("idle") => "Pi is ready for a new message.",
+      Some("busy") => "Pi is busy; your message will be queued as a follow-up.",
+      _ => {
+        return Err(DeliveryError::not_sent(
+          "The Pi input bridge returned an invalid status.",
+        ));
+      }
+    };
+    Ok(InputCapability {
+      message: message.into(),
+      images_available: response["images_available"].as_bool().unwrap_or(false),
+    })
   }
 
+  #[cfg(test)]
   async fn submit_message(
     descriptor: &Descriptor,
     request_id: &str,
     text: &str,
     timeout: Duration,
   ) -> Result<Admission, DeliveryError> {
+    submit_message_images(descriptor, request_id, text, &[], timeout).await
+  }
+
+  async fn submit_message_images(
+    descriptor: &Descriptor,
+    request_id: &str,
+    text: &str,
+    images: &[ResolvedImage],
+    timeout: Duration,
+  ) -> Result<Admission, DeliveryError> {
     let mut request = request(descriptor, "submit", request_id);
     request["delivery"] = json!("auto");
-    request["content"] = json!([{ "type": "text", "text": text }]);
+    let mut content = Vec::new();
+    if !text.trim().is_empty() {
+      content.push(json!({ "type": "text", "text": text }));
+    }
+    for image in images {
+      content.push(json!({ "type": "image", "data": base64::engine::general_purpose::STANDARD.encode(image.bytes.as_slice()), "mimeType": image.mime_type }));
+    }
+    request["content"] = json!(content);
     let response = exchange(descriptor, request, true, timeout).await?;
     validate_response(&response, request_id, true)?;
     if response["type"] != "admitted"
@@ -263,7 +309,15 @@ mod unix {
     let mut frame = serde_json::to_vec(&request)
       .map_err(|_| DeliveryError::not_sent("The Pi input request could not be encoded."))?;
     frame.push(b'\n');
-    if frame.len() > MAX_FRAME_BYTES {
+    let limit = if request["content"]
+      .as_array()
+      .is_some_and(|items| items.iter().any(|item| item["type"] == "image"))
+    {
+      MAX_FRAME_BYTES
+    } else {
+      MAX_DESCRIPTOR_BYTES
+    };
+    if frame.len() > limit {
       return Err(DeliveryError::not_sent(
         "This message exceeds the Pi input bridge's encoded request size limit.",
       ));
@@ -297,7 +351,7 @@ mod unix {
         }
         let end = buffer[..count].iter().position(|byte| *byte == b'\n');
         let line_bytes = end.unwrap_or(count);
-        if response.len() + line_bytes > MAX_FRAME_BYTES {
+        if response.len() + line_bytes > MAX_RESPONSE_BYTES {
           return Err(delivery_error("The Pi input bridge response is too large.", submission));
         }
         response.extend_from_slice(&buffer[..line_bytes]);
@@ -448,7 +502,7 @@ mod unix {
       assert!(fixture.descriptor().is_err());
       std::fs::remove_file(fixture.path()).unwrap();
       std::fs::rename(alternate, fixture.path()).unwrap();
-      std::fs::write(fixture.path(), vec![b' '; MAX_FRAME_BYTES + 1]).unwrap();
+      std::fs::write(fixture.path(), vec![b' '; MAX_DESCRIPTOR_BYTES + 1]).unwrap();
       assert!(fixture.descriptor().is_err());
     }
 
@@ -520,6 +574,54 @@ mod unix {
         assert!(!error.may_have_been_sent);
         server.await.unwrap();
       }
+    }
+
+    #[tokio::test]
+    async fn legacy_bridge_status_does_not_advertise_images() {
+      for advertised in [None, Some(false), Some(true)] {
+        let fixture = Fixture::new();
+        let server = fixture.serve(move |request| {
+          let mut response = json!({"protocol":1,"type":"ready","request_id":request["request_id"],"session_id":request["session_id"],"session_file":request["session_file"],"instance_id":request["instance_id"],"state":"idle"});
+          if let Some(available) = advertised { response["images_available"] = json!(available); }
+          frame(response)
+        });
+        assert_eq!(
+          query_capability(&fixture.descriptor().unwrap(), BRIDGE_TIMEOUT)
+            .await
+            .unwrap()
+            .images_available,
+          advertised.unwrap_or(false)
+        );
+        server.await.unwrap();
+      }
+    }
+
+    #[tokio::test]
+    async fn image_submission_keeps_bytes_separate_from_paths_and_omits_empty_text() {
+      let fixture = Fixture::new();
+      let server = fixture.serve(move |request| frame(admitted(request, "started")));
+      let images = [ResolvedImage {
+        image_id: "image".into(),
+        mime_type: "image/png".into(),
+        sha256: "hash".into(),
+        path: "/host/private.png".into(),
+        bytes: std::sync::Arc::new(vec![1, 2, 3]),
+      }];
+      submit_message_images(
+        &fixture.descriptor().unwrap(),
+        "image-request",
+        "",
+        &images,
+        BRIDGE_TIMEOUT,
+      )
+      .await
+      .unwrap();
+      let request = server.await.unwrap();
+      assert_eq!(
+        request["content"],
+        json!([{"type":"image", "data":"AQID", "mimeType":"image/png"}])
+      );
+      assert!(!request.to_string().contains("/host/private.png"));
     }
 
     #[tokio::test]
@@ -605,7 +707,7 @@ mod unix {
 
     #[tokio::test]
     async fn invalid_or_missing_responses_are_uncertain_after_submission() {
-      for response in [b"invalid\n".to_vec(), Vec::new(), vec![b'a'; MAX_FRAME_BYTES + 1]] {
+      for response in [b"invalid\n".to_vec(), Vec::new(), vec![b'a'; MAX_RESPONSE_BYTES + 1]] {
         let fixture = Fixture::new();
         let server = fixture.serve(move |_| response);
         let error = submit_message(&fixture.descriptor().unwrap(), "request-1", "Hello", BRIDGE_TIMEOUT)
@@ -654,7 +756,7 @@ mod unix {
   }
 }
 
-pub(super) async fn status(target: &InputTarget) -> Result<String, DeliveryError> {
+pub(super) async fn status(target: &InputTarget) -> Result<InputCapability, DeliveryError> {
   #[cfg(unix)]
   return unix::status(target).await;
   #[cfg(not(unix))]
@@ -666,12 +768,17 @@ pub(super) async fn status(target: &InputTarget) -> Result<String, DeliveryError
   }
 }
 
-pub(super) async fn submit(target: &InputTarget, request_id: &str, text: &str) -> Result<Admission, DeliveryError> {
+pub(super) async fn submit_images(
+  target: &InputTarget,
+  request_id: &str,
+  text: &str,
+  images: &[ResolvedImage],
+) -> Result<Admission, DeliveryError> {
   #[cfg(unix)]
-  return unix::submit(target, request_id, text).await;
+  return unix::submit_images(target, request_id, text, images).await;
   #[cfg(not(unix))]
   {
-    let _ = (target, request_id, text);
+    let _ = (target, request_id, text, images);
     Err(DeliveryError::not_sent(
       "Pi input requires a Unix system with the Pi input bridge extension loaded.",
     ))

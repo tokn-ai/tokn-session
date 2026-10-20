@@ -148,6 +148,8 @@ pub struct MessageEvent {
   pub delivery: MessageDelivery,
   pub phase: Phase,
   pub text: String,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub images: Vec<crate::MessageImage>,
   pub timestamp: Option<String>,
 }
 

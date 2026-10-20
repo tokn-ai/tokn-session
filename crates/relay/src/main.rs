@@ -1030,6 +1030,7 @@ mod tests {
       topic: "pi.session-1".to_string(),
       session: session_context(),
       event: AgentEvent::Message(MessageEvent {
+        images: Vec::new(),
         provenance: None,
         provider: Provider::Pi,
         session_id: Some("session-1".to_string()),

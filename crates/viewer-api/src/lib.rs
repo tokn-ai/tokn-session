@@ -145,6 +145,7 @@ async fn command(
       | "submit_session_input"
       | "get_session_question_status"
       | "submit_session_question_answers"
+      | "upload_image_chunk"
   ) {
     let _permit = permit;
     let request = payload.get("request").cloned().unwrap_or_else(|| json!({}));
@@ -155,6 +156,18 @@ async fn command(
           state
             .service
             .get_session_input_status(request)
+            .await
+            .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
+        )
+      }
+      "upload_image_chunk" => {
+        let request: tokn_viewer_core::images::UploadImageChunkRequest =
+          serde_json::from_value(request).map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
+        validate_remote_image_target(&request.target)?;
+        serde_json::to_value(
+          state
+            .service
+            .upload_image_chunk(request)
             .await
             .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
         )
@@ -203,6 +216,16 @@ async fn command(
   .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Viewer request failed"))?
 }
 
+fn validate_remote_image_target(target: &tokn_viewer_core::images::ImageTarget) -> Result<(), ApiError> {
+  match target {
+    tokn_viewer_core::images::ImageTarget::Session { .. } => Ok(()),
+    tokn_viewer_core::images::ImageTarget::Project { .. } => Err(error(
+      StatusCode::FORBIDDEN,
+      "Project image uploads are only available in the local desktop app",
+    )),
+  }
+}
+
 fn dispatch(service: &ViewerService, command: &str, payload: Value) -> Result<Value, ApiError> {
   let request = payload.get("request").cloned().unwrap_or_else(|| json!({}));
   if matches!(
@@ -216,6 +239,7 @@ fn dispatch(service: &ViewerService, command: &str, payload: Value) -> Result<Va
       | "load_event_detail"
       | "load_trajectory_event_page"
       | "acknowledge_session_attention"
+      | "load_session_image"
   ) {
     let field = if command == "list_session_children" {
       "parent_session_key"
@@ -252,6 +276,17 @@ fn dispatch(service: &ViewerService, command: &str, payload: Value) -> Result<Va
     "subscribe_background_updates" => call!(subscribe_background),
     "load_session_details" => call!(load_session_details),
     "inspect_session_event" => call!(inspect_session_event),
+    "load_session_image" => call!(load_session_image),
+    "release_image_upload" => {
+      let request: tokn_viewer_core::images::ReleaseImageUploadRequest =
+        serde_json::from_value(request).map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
+      validate_remote_image_target(&request.target)?;
+      serde_json::to_value(
+        service
+          .release_image_upload(request)
+          .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
+      )
+    }
     "renew_session_subscriptions" => {
       let ids: Vec<String> = serde_json::from_value(payload.get("ids").cloned().unwrap_or_else(|| json!([])))
         .map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
@@ -332,6 +367,50 @@ mod tests {
   use super::*;
   use axum::body::{Body, to_bytes};
   use tower::ServiceExt;
+
+  #[tokio::test]
+  async fn image_routes_keep_project_uploads_native_and_validate_read_catalog_scope() {
+    let directory = tempfile::tempdir().unwrap();
+    let service = ViewerService::native(directory.path().join("index.sqlite")).unwrap();
+    let (events, _) = broadcast::channel(16);
+    let app = router(service, events, None, vec![], CancellationToken::new());
+    let request = |command: &str, payload: Value| {
+      Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/v1/{command}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({"request": payload}).to_string()))
+        .unwrap()
+    };
+    for (command, payload) in [
+      (
+        "upload_image_chunk",
+        json!({
+          "target":{"type":"project", "project_id":"project"}, "upload_id":"upload", "offset":0,
+          "total_bytes":1, "mime_type":"image/png", "name":"picture.png", "data_base64":"YQ=="
+        }),
+      ),
+      (
+        "release_image_upload",
+        json!({"target":{"type":"project", "project_id":"project"}, "upload_id":"upload"}),
+      ),
+    ] {
+      let response = app.clone().oneshot(request(command, payload)).await.unwrap();
+      assert_eq!(response.status(), StatusCode::FORBIDDEN);
+      let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+      assert!(body["error"].as_str().unwrap().contains("local desktop"));
+    }
+    let response = app
+      .oneshot(request(
+        "load_session_image",
+        json!({
+          "session_key":"outside-catalog", "event_key":"event.v1.0", "image_id":"image.v1.0", "variant":"thumbnail"
+        }),
+      ))
+      .await
+      .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+  }
 
   #[tokio::test]
   async fn machine_settings_requires_host_auth_and_remains_read_only() {
