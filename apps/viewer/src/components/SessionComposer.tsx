@@ -1,4 +1,5 @@
 import { useId, useLayoutEffect, useRef, useState } from "react";
+import { ImageAttachments, imagePaste, imageDrop } from "./ImageAttachments";
 import { SendIcon } from "./Icons";
 import { useSessionInput } from "../lib/useSessionInput";
 import type { SessionSummary } from "../lib/types";
@@ -13,7 +14,7 @@ export function SessionComposer({ session, on_accepted, input_refresh_key }: {
   const inputId = useId();
   const textarea = useRef<HTMLTextAreaElement>(null);
   const [focused_session, setFocusedSession] = useState<string | null>(null);
-  const expanded = !!input.draft || (!!session && focused_session === session.session_key);
+  const expanded = !!input.draft || !!input.images.length || (!!session && focused_session === session.session_key);
 
   useLayoutEffect(() => {
     const field = textarea.current;
@@ -38,6 +39,9 @@ export function SessionComposer({ session, on_accepted, input_refresh_key }: {
       aria-label="Send a message to this session"
       className="session-composer"
       data-expanded={expanded}
+      onPaste={(event) => { if (!disabled && input.image_limits) imagePaste(event, input.addImages); }}
+      onDragOver={(event) => { if (!disabled && input.image_limits && event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
+      onDrop={(event) => { if (!disabled && input.image_limits) imageDrop(event, input.addImages); }}
       onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) setFocusedSession(null);
       }}
@@ -68,6 +72,7 @@ export function SessionComposer({ session, on_accepted, input_refresh_key }: {
             rows={expanded ? 3 : 1}
             value={input.draft}
           />
+          <ImageAttachments images={input.images} limits={input.image_limits} disabled={disabled} on_add={input.addImages} on_remove={input.removeImage} />
           <div className="session-composer__footer">
             <span className="session-composer__provider">{providerLabel(session.provider)}</span>
             <button

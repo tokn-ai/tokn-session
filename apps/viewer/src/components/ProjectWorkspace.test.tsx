@@ -130,3 +130,17 @@ describe("project workspace dialogs", () => {
     expect(respond).toHaveBeenCalledExactlyOnceWith({ request_id: "request", dialog_id: "question", cancelled: false, value: kind === "select" ? "Second" : "Written answer" });
   });
 });
+
+it("allows an image-only first Pi message with removable previews", () => {
+  Object.defineProperties(URL, { createObjectURL: { configurable: true, value: vi.fn(() => "blob:pi") }, revokeObjectURL: { configurable: true, value: vi.fn() } });
+  const create = vi.fn(async () => {});
+  render(<NewSessionDialog open projects={[project()]} snapshot={null} creating={false} error={null} control_error={null} controlling={false}
+    on_close={vi.fn()} on_create={create} on_stop={vi.fn()} on_open={vi.fn()} />);
+  fireEvent.change(screen.getByLabelText("Image files"), { target: { files: [new File(["png"], "new.png", { type: "image/png" })] } });
+  expect(screen.getByRole("textbox", { name: "First message" })).not.toBeRequired();
+  fireEvent.click(screen.getByRole("button", { name: "Start Pi session" }));
+  expect(create).toHaveBeenCalledWith("repo", "", [expect.objectContaining({ file: expect.any(File), url: "blob:pi" })]);
+  fireEvent.click(screen.getByRole("button", { name: "Remove new.png" }));
+  expect(screen.getByRole("button", { name: "Start Pi session" })).toBeDisabled();
+  expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:pi");
+});

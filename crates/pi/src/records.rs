@@ -15,6 +15,27 @@ pub(crate) fn normalize(session_id: Option<String>, native: Value, timestamp: Op
       return vec![unknown(session_id, native, timestamp)];
     };
     return vec![AgentEvent::Message(MessageEvent {
+      images: native["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, block)| {
+          if block["type"] != "image" {
+            return None;
+          }
+          Some(tokn_session_core::MessageImage {
+            image_id: format!("image.v1.{index}"),
+            mime_type: block["mimeType"].as_str().map(str::to_owned),
+            name: None,
+            source: block["data"]
+              .as_str()
+              .filter(|data| !data.is_empty())
+              .map(|data| tokn_session_core::MessageImageSource::Base64 { data: data.into() })
+              .unwrap_or(tokn_session_core::MessageImageSource::Unavailable { reference: None }),
+          })
+        })
+        .collect(),
       provider: Provider::Pi,
       session_id,
       message_id: native["id"].as_str().map(str::to_owned),
@@ -153,12 +174,18 @@ fn custom_text(content: &Value) -> Option<String> {
       "image" => {
         block["mimeType"].as_str()?;
         block["data"].as_str()?;
-        Some("[image]".into())
+        Some(String::new())
       }
       _ => None,
     })
     .collect::<Option<Vec<_>>>()
-    .map(|parts| parts.join("\n"))
+    .map(|parts| {
+      parts
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+    })
 }
 
 pub(crate) fn usage(

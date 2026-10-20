@@ -3,6 +3,7 @@
 pub(crate) mod codex;
 mod pi;
 
+use crate::images::ResolvedImage;
 use crate::model::{InputDeliveryStatus, SubmitSessionInputRequest, SubmitSessionInputResponse, ViewerProvider};
 use sha2::{Digest, Sha256};
 use std::{
@@ -63,9 +64,18 @@ pub(crate) enum Admission {
   QueuedFollowUp,
 }
 
-pub(crate) async fn status(target: &InputTarget) -> Result<String, DeliveryError> {
+#[derive(Clone, Debug)]
+pub(crate) struct InputCapability {
+  pub message: String,
+  pub images_available: bool,
+}
+
+pub(crate) async fn status(target: &InputTarget) -> Result<InputCapability, DeliveryError> {
   match target.provider {
-    ViewerProvider::Codex => codex::status(target).await,
+    ViewerProvider::Codex => codex::status(target).await.map(|message| InputCapability {
+      message,
+      images_available: true,
+    }),
     ViewerProvider::Pi => pi::status(target).await,
     _ => Err(DeliveryError::not_sent(
       "Message input is not available for this provider yet.",
@@ -73,10 +83,25 @@ pub(crate) async fn status(target: &InputTarget) -> Result<String, DeliveryError
   }
 }
 
-async fn deliver(target: InputTarget, request: SubmitSessionInputRequest) -> Result<Admission, DeliveryError> {
+async fn deliver(
+  target: InputTarget,
+  request: SubmitSessionInputRequest,
+  images: Vec<ResolvedImage>,
+) -> Result<Admission, DeliveryError> {
+  if request.image_ids.len() != images.len()
+    || request
+      .image_ids
+      .iter()
+      .zip(&images)
+      .any(|(id, image)| id != &image.image_id)
+  {
+    return Err(DeliveryError::not_sent(
+      "Image attachments did not match the message request",
+    ));
+  }
   match target.provider {
-    ViewerProvider::Codex => codex::submit(&target, &request.request_id, &request.text).await,
-    ViewerProvider::Pi => pi::submit(&target, &request.request_id, &request.text).await,
+    ViewerProvider::Codex => codex::submit_images(&target, &request.request_id, &request.text, &images).await,
+    ViewerProvider::Pi => pi::submit_images(&target, &request.request_id, &request.text, &images).await,
     _ => Err(DeliveryError::not_sent(
       "Message input is not available for this provider yet.",
     )),
@@ -87,7 +112,7 @@ pub(crate) fn validate_request(request: &mut SubmitSessionInputRequest) -> Resul
   if uuid::Uuid::parse_str(&request.request_id).is_err() {
     return Err("Invalid message request ID".into());
   }
-  if request.text.trim().is_empty() {
+  if request.text.trim().is_empty() && request.image_ids.is_empty() {
     return Err("Message cannot be empty".into());
   }
   if request.text.chars().count() > MAX_INPUT_LENGTH {
@@ -100,7 +125,30 @@ pub(crate) fn validate_request(request: &mut SubmitSessionInputRequest) -> Resul
   {
     return Err("Message contains unsupported control characters".into());
   }
+  validate_image_ids(&request.image_ids)?;
   Ok(())
+}
+
+pub(crate) fn validate_image_ids(ids: &[String]) -> Result<(), String> {
+  if ids.len() > crate::images::MAX_IMAGES {
+    return Err(format!("Attach at most {} images", crate::images::MAX_IMAGES));
+  }
+  let mut seen = HashSet::new();
+  for id in ids {
+    if uuid::Uuid::parse_str(id).is_err() || !seen.insert(id) {
+      return Err("Invalid or duplicate image attachment ID".into());
+    }
+  }
+  Ok(())
+}
+
+/// Preserve text-only fingerprints while binding image messages to their ordered
+/// immutable upload identities. Clients can never substitute host paths.
+pub(crate) fn message_fingerprint(text: &str, image_ids: &[String]) -> [u8; 32] {
+  if image_ids.is_empty() {
+    return Sha256::digest(text.as_bytes()).into();
+  }
+  Sha256::digest(serde_json::to_vec(&(text, image_ids)).expect("string message fingerprint")).into()
 }
 
 #[derive(Default)]
@@ -120,14 +168,17 @@ struct RecordedRequest {
 pub(crate) struct InputBroker(Arc<Mutex<RequestState>>);
 
 impl InputBroker {
-  pub async fn submit(
+  pub async fn submit_images(
     &self,
     target: InputTarget,
     mut request: SubmitSessionInputRequest,
+    images: Vec<ResolvedImage>,
   ) -> SubmitSessionInputResponse {
     request.session_key = target.identity();
     let delivery_request = request.clone();
-    self.submit_with(request, deliver(target, delivery_request)).await
+    self
+      .submit_with(request, deliver(target, delivery_request, images))
+      .await
   }
 
   pub(crate) fn receipt(
@@ -137,7 +188,7 @@ impl InputBroker {
   ) -> Option<SubmitSessionInputResponse> {
     let state = self.0.lock().unwrap_or_else(|error| error.into_inner());
     let previous = state.recent.get(&request.request_id)?;
-    let hash: [u8; 32] = Sha256::digest(request.text.as_bytes()).into();
+    let hash: [u8; 32] = message_fingerprint(&request.text, &request.image_ids);
     Some(
       if previous.session_key == target.identity() && previous.text_hash == hash {
         previous.response.clone()
@@ -168,7 +219,7 @@ impl InputBroker {
   where
     F: Future<Output = Result<Admission, DeliveryError>> + Send + 'static,
   {
-    let text_hash: [u8; 32] = Sha256::digest(request.text.as_bytes()).into();
+    let text_hash: [u8; 32] = message_fingerprint(&request.text, &request.image_ids);
     let request_id = request.request_id.clone();
     let response = |status, message: &str| SubmitSessionInputResponse {
       request_id: request_id.clone(),

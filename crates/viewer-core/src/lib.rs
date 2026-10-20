@@ -3,6 +3,7 @@
 //! Relay supplies provider feeds.
 pub mod background;
 pub mod delivery;
+pub mod images;
 mod index_queries;
 mod indexer;
 mod input;

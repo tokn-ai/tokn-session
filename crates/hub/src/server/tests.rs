@@ -559,6 +559,11 @@ async fn passkey_owner_routes_multiple_hosts_and_logout_stops_live_streams() {
   let (status, result) = post_json(app.clone(), &path, Some(ORIGIN), Some(&token), json!({})).await;
   assert_eq!(status, StatusCode::OK);
   assert_eq!(result["available"], false);
+  assert_eq!(result["images_available"], false);
+  assert_eq!(result["max_images"], 0);
+  assert_eq!(result["max_image_bytes"], 0);
+  assert_eq!(result["max_total_image_bytes"], 0);
+  assert_eq!(result["image_mime_types"], json!([]));
 
   let path = format!("/hosts/{}/api/v1/events", view.host_id);
   let response = get(app.clone(), &path, Some(&token)).await;

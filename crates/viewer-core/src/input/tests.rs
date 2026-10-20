@@ -6,6 +6,7 @@ fn request(text: &str) -> SubmitSessionInputRequest {
     session_key: "session-a".into(),
     request_id: uuid::Uuid::new_v4().to_string(),
     text: text.into(),
+    image_ids: Vec::new(),
   }
 }
 
@@ -165,4 +166,53 @@ fn multiline_unicode_messages_are_bounded_and_invalid_requests_rejected() {
   let mut invalid = request("hello");
   invalid.request_id = "not-a-uuid".into();
   assert!(validate_request(&mut invalid).is_err());
+}
+
+#[test]
+fn image_only_messages_validate_and_ordered_attachments_bind_receipts() {
+  let first = uuid::Uuid::new_v4().to_string();
+  let second = uuid::Uuid::new_v4().to_string();
+  let mut image_only = request("");
+  image_only.image_ids = vec![first.clone(), second.clone()];
+  validate_request(&mut image_only).unwrap();
+  assert_ne!(
+    message_fingerprint("", &image_only.image_ids),
+    message_fingerprint("", &[second, first.clone()])
+  );
+  assert_eq!(
+    message_fingerprint("text", &[]),
+    <[u8; 32]>::from(Sha256::digest(b"text"))
+  );
+  image_only.image_ids = vec![first.clone(), first];
+  assert!(validate_request(&mut image_only).is_err());
+  image_only.image_ids = vec!["/client/image.png".into()];
+  assert!(validate_request(&mut image_only).is_err());
+}
+
+#[tokio::test]
+async fn image_receipts_reject_changed_attachments_without_a_second_delivery() {
+  let broker = InputBroker::default();
+  let mut original = request("caption");
+  original.image_ids = vec![uuid::Uuid::new_v4().to_string()];
+  let result = broker
+    .submit_with(original.clone(), async {
+      Err(DeliveryError::uncertain("closed after send"))
+    })
+    .await;
+  assert_eq!(result.status, InputDeliveryStatus::Unknown);
+  assert_eq!(
+    broker
+      .submit_with(original.clone(), async { panic!("must not retry") })
+      .await
+      .status,
+    InputDeliveryStatus::Unknown
+  );
+  original.image_ids = vec![uuid::Uuid::new_v4().to_string()];
+  assert_eq!(
+    broker
+      .submit_with(original, async { panic!("must not send conflicting images") })
+      .await
+      .status,
+    InputDeliveryStatus::NotSent
+  );
 }

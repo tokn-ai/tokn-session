@@ -63,7 +63,17 @@ boundary.
 
 Text may contain newlines, tabs, and carriage returns. Whitespace is preserved
 so multiline Markdown and indented code reach Pi unchanged; whitespace-only
-messages and other control characters are rejected.
+text and other control characters are rejected.
+
+The `ready` status includes `images_available`, derived from the current model's
+`input` capabilities. Older bridges without this field support text only. Image
+submissions contain `{ "type": "image", "data": "<base64>", "mimeType": "image/png" }`
+content items, optionally alongside one text item. Image-only input is supported.
+The bridge rechecks the active model before admitting images; unsupported images
+never silently become a text-only message. PNG, JPEG, WebP, and GIF are accepted,
+with at most four images, 8 MiB each, and 24 MiB in total. Private request frames
+are bounded to 34 MiB after base64 encoding; descriptors and replies remain small.
+Admission fingerprints include ordered image content hashes.
 
 The bridge returns `ready`, `admitted`, or `error`. An `admitted` response has a
 `started`, `queued_follow_up`, or `queued_steer` disposition. It means the live

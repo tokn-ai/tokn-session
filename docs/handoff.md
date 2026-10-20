@@ -4,6 +4,13 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
+Recorded images from Codex, Pi, OpenCode, and ZCode now render through lazy
+thumbnail/full resources, including image-only messages. The composer and local
+New Pi Session dialog support picking, paste, drag/drop, and image-only sending.
+Codex/Pi transports use host-validated uploads, model capabilities, and retained
+assets; image bytes stay outside timeline updates and shares remain read-only.
+See [viewer images](viewer-images.md) for APIs, limits, storage, and retention.
+
 Native storage defaults share `~/.tokn/sessions` through the storage crate:
 the index stays in place, Hub state moves under `hub`, the desktop client keeps
 its separate identity in `hub/desktop-client`, and native viewer preferences,

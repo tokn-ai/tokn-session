@@ -5,8 +5,9 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, BufReader};
 
 use crate::workspace::ManagedSessionDialog;
 
-/// Maximum bytes before the LF delimiter, including an optional trailing CR.
-pub(super) const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum bytes before LF, including an optional CR. A 24 MiB image batch
+/// becomes 32 MiB of base64; leave bounded room for its text and JSON envelope.
+pub(super) const MAX_FRAME_BYTES: usize = 34 * 1024 * 1024;
 const MAX_DIALOG_TEXT_BYTES: usize = 16 * 1024;
 const MAX_DIALOG_OPTIONS: usize = 128;
 const MAX_ID_BYTES: usize = 256;
@@ -49,7 +50,7 @@ pub(super) async fn read_frame(reader: &mut (impl AsyncBufRead + Unpin)) -> Resu
       let newline = available.iter().position(|byte| *byte == b'\n');
       let payload_length = newline.unwrap_or(available.len());
       if payload_length > MAX_FRAME_BYTES - bytes.len() {
-        return Err("Pi RPC frame exceeds the 8 MiB limit".to_string());
+        return Err("Pi RPC frame exceeds the 34 MiB limit".to_string());
       }
       bytes.extend_from_slice(&available[..payload_length]);
       (payload_length + usize::from(newline.is_some()), newline.is_some())
@@ -73,6 +74,7 @@ pub(super) struct RpcState {
   pub(super) is_streaming: bool,
   pub(super) is_compacting: bool,
   pub(super) pending_message_count: u64,
+  pub(super) images_available: bool,
 }
 
 /// Parse the `data` object of a successful native `get_state` response.
@@ -92,6 +94,11 @@ pub(super) fn parse_state(data: &Value) -> Result<RpcState, String> {
     session_file,
     is_streaming: boolean(data, "isStreaming")?,
     is_compacting: boolean(data, "isCompacting")?,
+    images_available: data
+      .get("model")
+      .and_then(|model| model.get("input"))
+      .and_then(Value::as_array)
+      .is_some_and(|input| input.iter().any(|value| value.as_str() == Some("image"))),
     pending_message_count: data
       .get("pendingMessageCount")
       .and_then(Value::as_u64)
@@ -272,7 +279,7 @@ mod tests {
         .read_frame()
         .await
         .unwrap_err()
-        .contains("8 MiB")
+        .contains("34 MiB")
     );
   }
 
@@ -300,6 +307,18 @@ mod tests {
     assert_eq!(parse_state(&value).unwrap().session_file, None);
     value["sessionFile"] = Value::Null;
     assert_eq!(parse_state(&value).unwrap().session_file, None);
+  }
+
+  #[test]
+  fn native_model_input_is_required_before_advertising_image_support() {
+    let mut value = state();
+    assert!(!parse_state(&value).unwrap().images_available);
+    for input in [json!(["text"]), json!(null), json!("image")] {
+      value["model"] = json!({"input":input});
+      assert!(!parse_state(&value).unwrap().images_available);
+    }
+    value["model"] = json!({"input":["text","image"]});
+    assert!(parse_state(&value).unwrap().images_available);
   }
 
   #[test]

@@ -29,6 +29,8 @@ pub struct CreateProjectSessionRequest {
   pub request_id: String,
   pub project_id: String,
   pub prompt: String,
+  #[serde(default)]
+  pub image_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

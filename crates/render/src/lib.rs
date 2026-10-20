@@ -272,6 +272,15 @@ pub fn render_event_pretty(event: &AgentEvent) -> String {
       output.push_str(role_label(event.role));
       output.push('\n');
       write_indented(&mut output, &event.text);
+      for image in &event.images {
+        let label = image.name.as_deref().unwrap_or("image");
+        let status = if matches!(image.source, tokn_session_core::MessageImageSource::Unavailable { .. }) {
+          " unavailable"
+        } else {
+          ""
+        };
+        write_indented(&mut output, &format!("[{label}{status}]"));
+      }
       output.push('\n');
     }
     AgentEvent::QuestionReply(event) => {
@@ -413,7 +422,24 @@ pub fn render_event_summary(event: &AgentEvent) -> String {
     AgentEvent::Usage(event) => render_usage(event),
     AgentEvent::Compaction(event) => event.state.label().to_string(),
     AgentEvent::Metadata(event) => format!("[{}] {}", event.native_type, first_line(&event.summary)),
-    AgentEvent::Message(event) => format!("{} {}", role_label(event.role), first_line(&event.text)),
+    AgentEvent::Message(event) => {
+      let text = first_line(&event.text);
+      if event.images.is_empty() {
+        format!("{} {text}", role_label(event.role))
+      } else {
+        let suffix = if event.images.len() == 1 { "image" } else { "images" };
+        format!(
+          "{} {}[{} {suffix}]",
+          role_label(event.role),
+          if text.is_empty() {
+            String::new()
+          } else {
+            format!("{text} ")
+          },
+          event.images.len()
+        )
+      }
+    }
     AgentEvent::QuestionReply(event) => format!(
       "user answers {}",
       event
@@ -1008,6 +1034,7 @@ mod tests {
         timestamp: None,
       }),
       AgentEvent::Message(MessageEvent {
+        images: Vec::new(),
         provenance: None,
         provider: Provider::Codex,
         session_id: Some("session".to_string()),
@@ -1057,6 +1084,7 @@ mod tests {
   #[test]
   fn render_event_summary_handles_message_first_line() {
     let event = AgentEvent::Message(MessageEvent {
+      images: Vec::new(),
       provenance: None,
       provider: Provider::Codex,
       session_id: Some("session".to_string()),
@@ -1434,6 +1462,7 @@ mod tests {
     let native = json!({"type":"custom_message","customType":"extension","display":false,"content":"secret content"});
     let events = vec![
       AgentEvent::Message(MessageEvent {
+        images: Vec::new(),
         provider: Provider::Pi,
         session_id: None,
         message_id: None,

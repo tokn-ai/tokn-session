@@ -354,6 +354,7 @@ mod tests {
         request_id: uuid::Uuid::new_v4().to_string(),
         project_id: "project".into(),
         prompt: "private prompt is never persisted".into(),
+        image_ids: Vec::new(),
       },
       &RegisteredProject {
         project_id: "project".into(),

@@ -9,6 +9,7 @@ import {
   socketPathForProcess,
   type PiInputBridgeDescriptor,
   type PiInputBridgeResponse,
+  type PiInputContent,
   type PiExtensionContext
 } from "./input-bridge";
 
@@ -19,7 +20,7 @@ interface TestHarness {
   getIdle(): boolean;
   setIdle(value: boolean): void;
   messages: Array<{
-    message: string;
+    message: string | PiInputContent[];
     options?: { deliverAs?: "steer" | "followUp" };
   }>;
 }
@@ -94,6 +95,51 @@ function request(socketPath: string, value: unknown): Promise<PiInputBridgeRespo
 }
 
 describe("Pi input bridge", () => {
+  test("advertises current model images, sends image-only content, and binds ordered images to request IDs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tokn-pi-input-images-"));
+    const harness = await makeHarness(root);
+    const base = { protocol: 1, token: "test-token", session_id: "session-1", session_file: harness.descriptor.session_file, instance_id: "instance-1" };
+    try {
+      await expect(request(harness.descriptor.socket_path, { ...base, type: "status" })).resolves.toMatchObject({ type: "ready", images_available: false });
+      harness.context.model = { input: ["text", "image"] };
+      await expect(request(harness.descriptor.socket_path, { ...base, type: "status" })).resolves.toMatchObject({ type: "ready", images_available: true });
+      const content = [{ type: "image", data: Buffer.from("a".repeat(40 * 1024)).toString("base64"), mimeType: "image/png" }];
+      const message = { ...base, type: "submit", request_id: "image-message", delivery: "auto", content };
+      await expect(request(harness.descriptor.socket_path, message)).resolves.toMatchObject({ type: "admitted", disposition: "started" });
+      await expect(request(harness.descriptor.socket_path, message)).resolves.toMatchObject({ type: "admitted" });
+      expect(harness.messages).toEqual([{ message: content, options: undefined }]);
+      await expect(request(harness.descriptor.socket_path, { ...message, content: [{ ...content[0], data: Buffer.from("different").toString("base64") }] })).resolves.toMatchObject({ type: "error", code: "request_conflict" });
+      harness.context.model = { input: ["text"] };
+      await expect(request(harness.descriptor.socket_path, { ...message, request_id: "unsupported" })).resolves.toMatchObject({ type: "error", code: "unsupported" });
+      expect(harness.messages).toHaveLength(1);
+    } finally {
+      await harness.bridge.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects malformed, unsupported, duplicate text, and excessive image content before delivery", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tokn-pi-input-invalid-images-"));
+    const harness = await makeHarness(root);
+    harness.context.model = { input: ["image"] };
+    const base = { protocol: 1, type: "submit", token: "test-token", session_id: "session-1", session_file: harness.descriptor.session_file, instance_id: "instance-1", request_id: "invalid-image", delivery: "auto" };
+    try {
+      for (const content of [
+        [{ type: "image", data: "not-base64", mimeType: "image/png" }],
+        [{ type: "image", data: "YQ==", mimeType: "image/svg+xml" }],
+        [{ type: "image", data: "", mimeType: "image/png" }],
+        Array.from({ length: 5 }, () => ({ type: "image", data: "YQ==", mimeType: "image/png" })),
+        [{ type: "text", text: "one" }, { type: "text", text: "two" }]
+      ]) {
+        await expect(request(harness.descriptor.socket_path, { ...base, content })).resolves.toMatchObject({ type: "error", code: "message_invalid" });
+      }
+      expect(harness.messages).toHaveLength(0);
+    } finally {
+      await harness.bridge.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("uses session descriptors and process-instance sockets", () => {
     const firstSession = descriptorPathForSession("/sessions/first.jsonl");
     const secondSession = descriptorPathForSession("/sessions/second.jsonl");
