@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { releaseImageUploads, uploadImageDrafts, type ImageDraft, type ImageUploadReceipt } from "./imageDrafts";
 import { createUuid } from "./id";
 import { errorMessage } from "./state";
 import { captureTransport, type CommandInvoker, type EventSubscriber } from "./transport";
@@ -17,7 +18,7 @@ interface WorkspaceOptions {
   selected_session_key: string | null;
   on_created: (session: SessionSummary) => void;
 }
-type WorkspaceTransport = { invoke: CommandInvoker; listen: EventSubscriber };
+type WorkspaceTransport = { invoke: CommandInvoker; listen: EventSubscriber; release?: (command: string, payload?: Record<string, unknown>) => Promise<void> };
 interface PendingManagedRead {
   epoch: number;
   transport: WorkspaceTransport;
@@ -25,6 +26,9 @@ interface PendingManagedRead {
 }
 interface CreationAttempt {
   request: CreateProjectSessionRequest;
+  images_key: string;
+  uploads: ImageUploadReceipt[];
+  release_uploads: () => Promise<void>;
   selection_version: number;
   opened: boolean;
 }
@@ -82,6 +86,9 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
     const pending = attempt.current;
     if (pending?.request.request_id !== next.request_id) return;
     setCreation(next);
+    // A managed receipt means the host retained its admitted attachments.
+    // Releasing their staging tokens cannot remove provider history images.
+    void pending.release_uploads();
     if (next.session && !pending.opened && pending.selection_version === selection.current.version) {
       pending.opened = true;
       current.current.on_created(next.session);
@@ -117,7 +124,7 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
     alive.current = enabled;
     setWorkspace(null); setCreation(null); setManaged(null); setPendingDialogSession(null);
     setCreationError(null); setCreationUncertain(false); setControlFailure(null); setError(null);
-    snapshots.current.clear(); attempt.current = null;
+    snapshots.current.clear(); void attempt.current?.release_uploads(); attempt.current = null;
     busy.current = false; control_busy.current = false;
     setCreating(false); setControlling(false); setLoading(enabled);
     if (!enabled) return;
@@ -161,6 +168,7 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
       for (const unlisten of unlisteners) unlisten();
       window.removeEventListener("focus", focus);
       const pending = attempt.current;
+      void pending?.release_uploads();
       if (pending && !pending.opened) {
         void stopManagedSession({ request_id: pending.request.request_id }, transport.invoke).catch(() => {});
       }
@@ -207,29 +215,42 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
     return project;
   }, [enabled, transport, workspace?.available]);
 
-  const createSession = useCallback(async (project_id: string, prompt: string) => {
-    if (!enabled || !alive.current || active_transport.current !== transport || !workspace?.available || busy.current || !prompt.trim()) return;
+  const createSession = useCallback(async (project_id: string, prompt: string, images: ImageDraft[] = []) => {
+    if (!enabled || !alive.current || active_transport.current !== transport || !workspace?.available || busy.current || (!prompt.trim() && !images.length)) return;
     busy.current = true; setCreating(true); setCreationError(null); setCreationUncertain(false);
     const epoch = lifetime.current;
+    const images_key = images.map((image) => image.draft_id).join(";");
     let pending = attempt.current;
     const previous = pending && snapshots.current.get(pending.request.request_id);
     if (!pending || pending.opened || previous?.status === "failed" || previous?.status === "stopped") {
       let request_id: string;
       try { request_id = createUuid(); }
       catch (failure) { busy.current = false; setCreating(false); setCreationError(errorMessage(failure)); return; }
-      pending = { request: { request_id, project_id, prompt }, selection_version: selection.current.version, opened: false };
+      void pending?.release_uploads();
+      const uploads: ImageUploadReceipt[] = [];
+      pending = { request: { request_id, project_id, prompt }, images_key, uploads,
+        release_uploads: () => releaseImageUploads(uploads, transport.release ?? transport.invoke),
+        selection_version: selection.current.version, opened: false };
       attempt.current = pending;
       setCreation(null);
-    } else if (pending.request.project_id !== project_id || pending.request.prompt !== prompt) {
+    } else if (pending.request.project_id !== project_id || pending.request.prompt !== prompt || pending.images_key !== images_key) {
       setCreationError("Check the pending session before changing its folder or prompt.");
       busy.current = false; setCreating(false); return;
     }
     const request = pending.request;
+    // An uncertain earlier attempt remains uncertain even if its status read fails.
+    let provider_attempted = creation_uncertain;
     try {
       if (creation_uncertain) {
         const existing = await refreshRequest(request.request_id, epoch);
         if (existing) return;
       }
+      if (images.length && !request.image_ids) {
+        request.image_ids = await uploadImageDrafts(images, { type: "project", project_id }, transport.invoke,
+          () => alive.current && lifetime.current === epoch && active_transport.current === transport, (receipt) => pending.uploads.push(receipt));
+      }
+      if (!alive.current || lifetime.current !== epoch || active_transport.current !== transport) return;
+      provider_attempted = true;
       const snapshot = await createProjectSession(request, transport.invoke);
       if (!alive.current || lifetime.current !== epoch) {
         void stopManagedSession({ request_id: request.request_id }, transport.invoke).catch(() => {});
@@ -240,15 +261,17 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
     } catch (failure) {
       if (alive.current && lifetime.current === epoch) {
         const known = creationFailure(failure);
-        if (known && !known.may_have_started) {
+        if (!provider_attempted || known && !known.may_have_started) {
+          await pending.release_uploads();
           if (attempt.current?.request.request_id === request.request_id) attempt.current = null;
-          setCreation(null); setCreationError(known.message);
+          setCreation(null); setCreationError(known?.message ?? errorMessage(failure));
         } else {
           setCreationUncertain(true);
           setCreationError(`Session start was not confirmed. ${known?.message ?? errorMessage(failure)} Retry checks the same request.`);
         }
       }
     } finally {
+      if (!alive.current || lifetime.current !== epoch) await pending.release_uploads();
       if (alive.current && lifetime.current === epoch) { busy.current = false; setCreating(false); }
     }
   }, [accept, creation_uncertain, enabled, refreshRequest, transport, workspace?.available]);
@@ -287,7 +310,7 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
     retry: () => setRetry((value) => value + 1),
     beginCreation: () => {
       const pending = attempt.current;
-      if (!pending || pending.opened) { attempt.current = null; setCreation(null); setCreationError(null); setCreationUncertain(false); }
+      if (!pending || pending.opened) { void pending?.release_uploads(); attempt.current = null; setCreation(null); setCreationError(null); setCreationUncertain(false); }
     },
     dismissCreation: () => { if (attempt.current) attempt.current.selection_version = -1; },
     openCreation: () => {

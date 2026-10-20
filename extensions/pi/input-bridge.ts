@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmod,
   lstat,
@@ -18,6 +18,7 @@ import {
   type PiInputBridgeRequest,
   type PiInputBridgeResponse,
   type PiInputDelivery,
+  type PiInputContent,
 } from "./lib/input-protocol";
 
 export {
@@ -30,11 +31,17 @@ export type {
   PiInputBridgeResponse,
   PiInputDelivery,
   PiInputTextContent,
+  PiInputImageContent,
+  PiInputContent,
 } from "./lib/input-protocol";
 
 const PROTOCOL_VERSION = PI_INPUT_PROTOCOL_VERSION;
 const PROVIDER = PI_INPUT_PROVIDER;
-const MAX_FRAME_BYTES = 32 * 1024;
+const MAX_FRAME_BYTES = 34 * 1024 * 1024;
+const MAX_IMAGES = 4;
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_TOTAL_IMAGE_BYTES = 24 * 1024 * 1024;
+const IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const MAX_MESSAGE_LENGTH = 16 * 1024;
 const SOCKET_REQUEST_TIMEOUT_MS = 5_000;
 const MAX_ADMISSION_CACHE_SIZE = 256;
@@ -64,6 +71,7 @@ export interface PiExtensionUi {
 
 export interface PiExtensionContext {
   mode: string;
+  model?: { input?: readonly string[] };
   isIdle(): boolean;
   sessionManager: PiSessionManager;
   ui: PiExtensionUi;
@@ -79,7 +87,7 @@ export interface PiExtensionApi {
     handler: (event: PiSessionShutdownEvent, context: PiExtensionContext) => void | Promise<void>
   ): void;
   sendUserMessage(
-    content: string,
+    content: string | PiInputContent[],
     options?: { deliverAs?: "steer" | "followUp" }
   ): void;
 }
@@ -212,13 +220,15 @@ export class PiInputBridge {
   }
 
   #handleSocket(socket: Socket): void {
-    socket.setEncoding("utf8");
     socket.setTimeout(SOCKET_REQUEST_TIMEOUT_MS, () => socket.destroy());
 
-    let buffer = "";
-    const onData = (chunk: string): void => {
-      buffer += chunk;
-      if (Buffer.byteLength(buffer, "utf8") > MAX_FRAME_BYTES) {
+    const chunks: Buffer[] = [];
+    let received_bytes = 0;
+    const onData = (chunk: Buffer): void => {
+      const newline = chunk.indexOf(0x0a);
+      const payload = newline < 0 ? chunk : chunk.subarray(0, newline);
+      received_bytes += payload.length;
+      if (received_bytes > MAX_FRAME_BYTES) {
         socket.off("data", onData);
         socket.end(encodeResponse({
           protocol: PROTOCOL_VERSION,
@@ -228,13 +238,14 @@ export class PiInputBridge {
         }));
         return;
       }
-
-      const newline = buffer.indexOf("\n");
+      chunks.push(payload);
       if (newline < 0) {
         return;
       }
       socket.off("data", onData);
-      const line = buffer.slice(0, newline).replace(/\r$/u, "");
+      // Concatenate once so image-sized frames do not repeatedly copy all
+      // preceding chunks or rescan their UTF-8 byte lengths.
+      const line = Buffer.concat(chunks, received_bytes).toString("utf8").replace(/\r$/u, "");
       this.#respond(socket, line);
     };
     socket.on("data", onData);
@@ -284,7 +295,8 @@ export class PiInputBridge {
         session_id: descriptor.session_id,
         session_file: descriptor.session_file,
         instance_id: descriptor.instance_id,
-        state: this.#context.isIdle() ? "idle" : "busy"
+        state: this.#context.isIdle() ? "idle" : "busy",
+        images_available: this.#context.model?.input?.includes("image") === true
       };
     }
 
@@ -298,14 +310,14 @@ export class PiInputBridge {
       return errorResponse("invalid_request", "delivery must be auto, follow_up, or steer", requestId);
     }
     if (!message) {
-      return errorResponse("message_invalid", "content must contain one valid text message", requestId);
+      return errorResponse("message_invalid", "content must contain valid text or supported image attachments", requestId);
     }
 
     const fingerprint = JSON.stringify({
       session_id: descriptor.session_id,
       instance_id: descriptor.instance_id,
       delivery,
-      message
+      message: typeof message === "string" ? message : message.map((item) => item.type === "image" ? { type: item.type, mime_type: item.mimeType, sha256: createHash("sha256").update(Buffer.from(item.data, "base64")).digest("hex") } : item)
     });
     const previous = this.#admissions.get(requestId);
     if (previous) {
@@ -313,6 +325,10 @@ export class PiInputBridge {
         return errorResponse("request_conflict", "request_id was already used for different input", requestId);
       }
       return previous.response;
+    }
+
+    if (typeof message !== "string" && message.some((item) => item.type === "image") && this.#context.model?.input?.includes("image") !== true) {
+      return errorResponse("unsupported", "the active Pi model does not support image input", requestId);
     }
 
     const idle = this.#context.isIdle();
@@ -547,23 +563,44 @@ function normalizeDelivery(value: unknown): PiInputDelivery | undefined {
     : undefined;
 }
 
-function normalizeContent(value: unknown): string | undefined {
-  if (!Array.isArray(value) || value.length !== 1) {
+function normalizeContent(value: unknown): string | PiInputContent[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_IMAGES + 1) {
     return undefined;
   }
-  const item = value[0];
-  if (!isRecord(item) || item.type !== "text" || typeof item.text !== "string") {
-    return undefined;
+  const content: PiInputContent[] = [];
+  let text_count = 0;
+  let image_count = 0;
+  let total_image_bytes = 0;
+  for (const item of value) {
+    if (!isRecord(item)) {
+      return undefined;
+    }
+    if (item.type === "text") {
+      if (typeof item.text !== "string" || ++text_count > 1
+        || item.text.trim().length === 0 || Array.from(item.text).length > MAX_MESSAGE_LENGTH
+        || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(item.text)) {
+        return undefined;
+      }
+      content.push({ type: "text", text: item.text });
+    } else if (item.type === "image") {
+      if (++image_count > MAX_IMAGES || typeof item.data !== "string" || typeof item.mimeType !== "string"
+        || !IMAGE_MIME_TYPES.has(item.mimeType) || item.data.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4
+        || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(item.data)) {
+        return undefined;
+      }
+      const bytes = Buffer.from(item.data, "base64");
+      total_image_bytes += bytes.length;
+      if (bytes.length === 0 || bytes.length > MAX_IMAGE_BYTES || total_image_bytes > MAX_TOTAL_IMAGE_BYTES
+        || bytes.toString("base64") !== item.data) {
+        return undefined;
+      }
+      content.push({ type: "image", data: item.data, mimeType: item.mimeType });
+    } else {
+      return undefined;
+    }
   }
-  const message = item.text;
-  if (
-    message.trim().length === 0
-    || message.length > MAX_MESSAGE_LENGTH
-    || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(message)
-  ) {
-    return undefined;
-  }
-  return message;
+  // Preserve the established text-only extension API and wire behavior.
+  return image_count === 0 ? (content[0] as { type: "text"; text: string }).text : content;
 }
 
 function errorResponse(

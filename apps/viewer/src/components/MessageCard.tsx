@@ -1,6 +1,7 @@
 import type { EventSummary } from "../lib/types";
 import { formatTimestamp } from "../lib/state";
 import { useMessageTranslation } from "../lib/useMessageTranslation";
+import { MessageImages } from "./MessageImages";
 import { MarkdownContent } from "./MarkdownContent";
 import { InspectorIcon } from "./Icons";
 import { useTranslationEngine, useTranslationStatus } from "./TranslationProvider";
@@ -19,7 +20,12 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
   const translation = useMessageTranslation(event, session_key, engine);
   const role = event.role ?? "unknown";
   const presentation = role === "user" ? "bubble" : role === "assistant" ? "transcript" : "technical";
+  const hasImages = !event.is_hidden && !!event.images?.length;
+  const showText = event.is_hidden || !!event.summary.trim() || !hasImages;
   const usesMarkdown = !event.is_hidden && (role === "user" || role === "assistant");
+  const imageContent = hasImages && event.images ? session_key
+    ? <MessageImages session_key={session_key} event_key={event.event_key} revision={event.content_revision} images={event.images} />
+    : <span className="message-image__status">Image unavailable</span> : null;
   const canTranslate = Boolean(status && session_key && role === "assistant" && !event.is_hidden && event.summary.trim());
 
   return (
@@ -27,7 +33,8 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
       <div className="message-event__surface">
         <span className={role === "user" || role === "assistant" ? "sr-only" : "message-event__role"}>{role}</span>
         {event.type === "question_reply" && !event.is_hidden ? <span className="message-event__answer-heading">Recorded answers</span> : null}
-        {usesMarkdown ? (
+        {role === "user" ? imageContent : null}
+        {showText ? usesMarkdown ? (
           <div aria-busy={translation.loading} lang={translation.showing_translation ? "zh-Hans" : undefined}>
             <MarkdownContent class_name="message-event__text" content={translation.content || event.title} />
           </div>
@@ -35,7 +42,8 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
           <div className="message-event__text message-event__text--plain">
             {event.is_hidden ? "Hidden extension message" : event.summary || event.title}
           </div>
-        )}
+        ) : null}
+        {role !== "user" ? imageContent : null}
         {translation.error ? (
           <div className="message-translation__error" role="alert">
             <span>{translation.error}</span>

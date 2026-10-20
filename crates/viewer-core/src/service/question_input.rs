@@ -319,6 +319,7 @@ fn answer_message(
     session_key: request.session_key.clone(),
     request_id: request.request_id.clone(),
     text,
+    image_ids: Vec::new(),
   };
   input::validate_request(&mut message)?;
   Ok((message, ids))

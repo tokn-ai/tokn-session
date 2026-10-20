@@ -2,9 +2,9 @@ use crate::row::{OpenCodeMessageRow, OpenCodePartRow, OpenCodeSessionEntryRow, O
 use serde_json::{Value, json};
 use tokn_opencode_protocol::v1::{MessageItem, PartItem, TokenUsage, ToolState, ToolStateItem};
 use tokn_session_core::{
-  AgentEvent, MessageDelivery, MessageEvent, MessageProvenance, MetadataEvent, MetadataKind, Phase, Provider,
-  ProviderChanged, ReasoningEvent, Role, SessionStarted, ToolCallEvent, ToolRecordKind, ToolTransport, UnknownEvent,
-  UsageEvent, UsageKind, tool_kind_for_optional_name, tool_summary_for_io,
+  AgentEvent, MessageDelivery, MessageEvent, MessageImage, MessageImageSource, MessageProvenance, MetadataEvent,
+  MetadataKind, Phase, Provider, ProviderChanged, ReasoningEvent, Role, SessionStarted, ToolCallEvent, ToolRecordKind,
+  ToolTransport, UnknownEvent, UsageEvent, UsageKind, tool_kind_for_optional_name, tool_summary_for_io,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -290,11 +290,13 @@ impl OpenCodeNormalizer {
     parts: Vec<OpenCodePartRow>,
   ) -> Vec<AgentEvent> {
     let mut texts = Vec::new();
+    let mut images = Vec::new();
     let mut unknowns = Vec::new();
     for part in parts {
       let (item, native) = part.data.into_parts();
       match item {
         PartItem::Text(part) => texts.push(part.text),
+        PartItem::File(file) if is_image_file(&file) => images.push(recorded_file_image(file, part.id)),
         item => unknowns.push(unknown_event(
           self.provider,
           Some(self.session_id.clone()),
@@ -307,8 +309,9 @@ impl OpenCodeNormalizer {
 
     let text = texts.join("\n");
     let mut events = Vec::with_capacity(unknowns.len() + 1);
-    if !text.is_empty() {
+    if !text.is_empty() || !images.is_empty() {
       events.push(AgentEvent::Message(MessageEvent {
+        images,
         provenance,
         provider: self.provider,
         session_id: Some(self.session_id.clone()),
@@ -374,6 +377,7 @@ impl OpenCodeNormalizer {
 
     match item {
       PartItem::Text(part) => vec![AgentEvent::Message(MessageEvent {
+        images: Vec::new(),
         provenance: provenance.clone(),
         provider: self.provider,
         session_id: Some(self.session_id.clone()),
@@ -383,6 +387,19 @@ impl OpenCodeNormalizer {
         delivery: MessageDelivery::Final,
         phase: message_phase,
         text: part.text,
+        timestamp: timestamp(time_created),
+      })],
+      PartItem::File(file) if is_image_file(&file) => vec![AgentEvent::Message(MessageEvent {
+        images: vec![recorded_file_image(file, part_id)],
+        provenance: provenance.clone(),
+        provider: self.provider,
+        session_id: Some(self.session_id.clone()),
+        message_id: Some(message_id.to_string()),
+        parent_id: parent_id.clone(),
+        role: Role::Assistant,
+        delivery: MessageDelivery::Final,
+        phase: message_phase,
+        text: String::new(),
         timestamp: timestamp(time_created),
       })],
       PartItem::Reasoning(part) => {
@@ -535,6 +552,32 @@ impl OpenCodeNormalizer {
       events.push(usage);
     }
     events
+  }
+}
+
+fn is_image_file(file: &tokn_opencode_protocol::v1::FilePart) -> bool {
+  file.mime.as_deref().is_some_and(|mime| mime.starts_with("image/"))
+    || file.url.as_deref().is_some_and(|url| url.starts_with("data:image/"))
+}
+
+fn recorded_file_image(file: tokn_opencode_protocol::v1::FilePart, part_id: String) -> MessageImage {
+  let image_id = file.identity.id.unwrap_or(part_id);
+  if let Some(url) = file.url {
+    return MessageImage::from_url(image_id, url, file.mime, file.filename);
+  }
+  let path = file
+    .source
+    .as_ref()
+    .filter(|source| source["type"] == "file")
+    .and_then(|source| source.get("path"))
+    .and_then(Value::as_str);
+  MessageImage {
+    image_id,
+    mime_type: file.mime,
+    name: file.filename,
+    source: path
+      .map(|path| MessageImageSource::LocalFile { path: path.into() })
+      .unwrap_or(MessageImageSource::Unavailable { reference: None }),
   }
 }
 
@@ -809,6 +852,71 @@ mod tests {
 
   use super::OpenCodeNormalizer;
   use crate::row::{OpenCodeMessageRow, OpenCodePartRow};
+
+  #[test]
+  fn opencode_and_zcode_image_files_are_messages_and_opaque_references_stay_unavailable() {
+    for provider in [
+      tokn_session_core::Provider::OpenCode,
+      tokn_session_core::Provider::ZCode,
+    ] {
+      let mut normalizer = OpenCodeNormalizer::with_provider("session".into(), provider);
+      let events = normalizer.normalize_message(message_row(
+        "user",
+        json!({"role":"user"}),
+        vec![
+          part_row(
+            "inline",
+            json!({"type":"file", "mime":"image/png", "url":"data:image/png;base64,YQ==", "filename":"picture.png"}),
+          ),
+          part_row(
+            "local",
+            json!({"type":"file", "mime":"image/png", "url":"file:///tmp/a%20b.png"}),
+          ),
+          part_row(
+            "remote",
+            json!({"type":"file", "mime":"image/png", "url":"https://example.com/image.png"}),
+          ),
+          part_row(
+            "document",
+            json!({"type":"file", "mime":"application/pdf", "url":"file:///tmp/file.pdf"}),
+          ),
+        ],
+      ));
+      let [AgentEvent::Message(message), AgentEvent::Unknown(document)] = &events[..] else {
+        panic!("unexpected file projection")
+      };
+      assert_eq!(message.provider, provider);
+      assert!(message.text.is_empty());
+      assert_eq!(
+        message
+          .images
+          .iter()
+          .map(|image| image.image_id.as_str())
+          .collect::<Vec<_>>(),
+        ["inline", "local", "remote"]
+      );
+      assert_eq!(message.images[0].name.as_deref(), Some("picture.png"));
+      assert!(
+        matches!(&message.images[1].source, tokn_session_core::MessageImageSource::LocalFile { path } if path.to_str() == Some("/tmp/a b.png"))
+      );
+      assert!(matches!(
+        &message.images[2].source,
+        tokn_session_core::MessageImageSource::Unavailable { .. }
+      ));
+      assert_eq!(document.native_type.as_deref(), Some("part.file"));
+      let events = normalizer.normalize_message(message_row(
+        "assistant",
+        json!({"role":"assistant"}),
+        vec![part_row(
+          "image",
+          json!({"type":"file", "mime":"image/png", "source":{"type":"file", "path":"relative.png"}}),
+        )],
+      ));
+      assert!(
+        matches!(&events[..], [AgentEvent::Message(message)] if message.role == Role::Assistant && matches!(&message.images[0].source, tokn_session_core::MessageImageSource::LocalFile { path } if path.to_str() == Some("relative.png")))
+      );
+    }
+  }
 
   #[test]
   fn assistant_text_is_not_finalized_until_the_mutable_message_completes() {

@@ -427,6 +427,7 @@ mod tests {
 
   fn message(role: Role, delivery: MessageDelivery, phase: Phase) -> AgentEvent {
     AgentEvent::Message(MessageEvent {
+      images: Vec::new(),
       provenance: None,
       provider: Provider::Codex,
       session_id: None,

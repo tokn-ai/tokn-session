@@ -76,7 +76,9 @@ pub(super) async fn command(State(state): State<ApiState>, Json(mut share): Json
     match share.command.as_str() {
       "health" => Ok(json!({ "version": 1 })),
       "get_session_input_status" => Ok(json!({
-        "available": false, "message": "This session share is read-only", "max_length": 0
+        "available": false, "message": "This session share is read-only", "max_length": 0,
+        "images_available": false, "max_images": 0, "max_image_bytes": 0,
+        "max_total_image_bytes": 0, "image_mime_types": []
       })),
       "get_session_question_status" => Ok(json!({
         "available": false, "message": "This session share is read-only", "max_length": 0, "question_ids": []
@@ -167,7 +169,8 @@ fn prepare(share: &mut SharedRequest) -> Result<(), &'static str> {
     | "load_trajectory_event_page"
     | "acknowledge_session_attention"
     | "get_session_input_status"
-    | "get_session_question_status" => {
+    | "get_session_question_status"
+    | "load_session_image" => {
       let field = if share.command == "list_session_children" {
         "parent_session_key"
       } else {
@@ -481,6 +484,7 @@ mod tests {
       "acknowledge_session_attention",
       "get_session_input_status",
       "get_session_question_status",
+      "load_session_image",
     ] {
       assert!(prepare(&mut request(command, json!({"request":{"session_key":"allowed"}}))).is_ok());
       assert!(prepare(&mut request(command, json!({"request":{"session_key":"hidden"}}))).is_err());
@@ -495,6 +499,8 @@ mod tests {
     for command in [
       "submit_session_input",
       "submit_session_question_answers",
+      "upload_image_chunk",
+      "release_image_upload",
       "retry_session_index",
       "configure_relay",
       "get_machine_settings",
@@ -585,6 +591,22 @@ mod tests {
       .await
       .unwrap();
     assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    let status = app
+      .clone()
+      .oneshot(request(
+        "get_session_input_status",
+        true,
+        json!({"request":{"session_key":key.clone()}}),
+      ))
+      .await
+      .unwrap();
+    assert_eq!(status.status(), StatusCode::OK);
+    let status: Value = serde_json::from_slice(&status.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(status["images_available"], false);
+    for field in ["max_images", "max_image_bytes", "max_total_image_bytes"] {
+      assert_eq!(status[field], 0);
+    }
+    assert_eq!(status["image_mime_types"], json!([]));
     let list = app
       .clone()
       .oneshot(request("list_sessions", true, json!({})))
