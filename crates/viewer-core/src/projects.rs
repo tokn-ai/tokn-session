@@ -67,10 +67,10 @@ impl ViewerService {
     let groups = self
       .session_index
       .project_groups(std::slice::from_ref(&group_folder), created_at_ms)
-      .map_err(|error| format!("Could not resolve the project's repository group: {error}"))?;
+      .map_err(|error| format!("Could not resolve the project's folder group: {error}"))?;
     let group_key = groups
       .get(&group_folder)
-      .ok_or("Could not resolve the project's repository group")?
+      .ok_or("Could not resolve the project's folder group")?
       .project_key
       .clone();
     let project = self
@@ -342,6 +342,24 @@ mod tests {
       service.validated_project(&second.project_id).unwrap().folder_path,
       second.folder_path
     );
+  }
+
+  #[test]
+  fn registering_a_non_git_folder_does_not_adopt_its_parent_repository() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = directory.path().join("repository");
+    let folder = repository.join("independent-project");
+    std::fs::create_dir_all(repository.join(".git")).unwrap();
+    std::fs::create_dir(&folder).unwrap();
+    let service = ViewerService::native(directory.path().join("index.sqlite")).unwrap();
+    let parent = register(&service, &repository);
+    let project = register(&service, &folder);
+    assert_eq!(project.name, "independent-project");
+    assert_eq!(project.group_key, project.folder_path);
+    assert_ne!(project.group_key, parent.group_key);
+    let saved = service.validated_project(&project.project_id).unwrap();
+    assert_eq!(saved.project_id, project.project_id);
+    assert_eq!(saved.group_key, project.folder_path);
   }
 
   #[test]

@@ -55,6 +55,11 @@ delivery and coalesces concurrent starts; old prompts are never replayed.
 Viewer shutdown stops its owned workers and prevents further starts.
 See [viewer projects](viewer-projects.md) for scope, settings, storage, and limits.
 
+Project discovery reads Git metadata only in the recorded working folder.
+Non-Git folders remain independent projects; explicit worktrees can still share
+a repository. Migration 12 tracks alias provenance and repairs legacy ancestor
+mappings while preserving registered identities, launch folders, and ownership.
+
 Settings → Runtimes inventories this desktop viewer's Pi workers/saved sessions,
 reader/Relay, hosting, active Hub connections, and known background services,
 independently of the selected machine. Inspection does not start runtimes or
@@ -1651,10 +1656,12 @@ last hour, today, yesterday, past seven days, older, and unknown time. Recent
 rows keep their relative order for the mounted viewer; new activity arrivals
 prepend and older pagination results append. Calendar groups refresh every 30
 seconds and on focus. Switching views preserves the open conversation and tree.
-Projects sort newest-discovered first before root pagination. Git worktrees and
-subdirectories group under the shared repository, using Git common-directory
-metadata rather than matching folder names. SQLite migration 8 caches these cwd
-aliases so recognized historical worktrees stay grouped after removal. Unresolved
-paths retain their own identity. Migration 7 stores immutable project anchors;
+Projects sort newest-discovered first before root pagination. Git metadata is
+read only in the recorded working directory. Explicit worktrees share a repository
+using Git common-directory metadata; non-Git subfolders stay independent projects.
+SQLite migration 12 records alias provenance and revisits migration 8's legacy
+ancestor mappings. Recognized explicit worktrees retain their grouping after
+removal; unverified paths retain their own identity. Registration IDs, names,
+launch folders, and managed ownership remain intact. Migration 7 stores immutable project anchors;
 existing projects seed from earliest known session time (index discovery as
 fallback). Later older history and removal/reappearance do not move the anchor.
