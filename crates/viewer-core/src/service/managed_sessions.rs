@@ -109,6 +109,7 @@ impl ViewerService {
   }
 
   pub async fn shutdown_managed_sessions(&self) {
+    let _ = self.interactions.shutdown().await;
     self.managed_pi.shutdown().await;
   }
 
@@ -676,6 +677,7 @@ for line in sys.stdin:
       request_id: None,
       session_key: Some(key.clone()),
     };
+    assert!(shared.interaction_service().is_err());
     assert!(shared.get_managed_session(request()).await.is_err());
     assert!(shared.stop_managed_session(request()).await.is_err());
     assert!(shared.resume_managed_session(request()).await.is_err());

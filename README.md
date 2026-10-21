@@ -55,6 +55,15 @@ cargo run -p tokn-session-cli -- list --source zcode --limit 5
 cargo run -p tokn-session-cli -- list --source workbuddy --limit 5
 ```
 
+## Native interaction libraries
+
+Rust interaction contracts and dedicated Pi, OpenCode V2, and DSH RPC adapters
+support owned runtimes and explicit attachment, metadata/model queries, native
+message/steering admission, cancellation, and live question/permission replies.
+The core owns runtime identity and bounded receipts; native protocols remain
+provider-specific. See [live interaction](docs/interaction-core.md) for usage,
+capabilities, and current viewer integration.
+
 ## Desktop viewer
 
 `apps/viewer` is a Tauri and browser app that presents root sessions from all

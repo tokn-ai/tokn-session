@@ -5954,7 +5954,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokn-dsh-adapter"
+version = "0.1.1"
+dependencies = [
+ "axum",
+ "futures-util",
+ "libc",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tokn-dsh-rpc-protocol",
+ "tokn-interaction-core",
+ "uuid",
+]
+
+[[package]]
 name = "tokn-dsh-protocol"
+version = "0.1.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tokn-dsh-rpc-protocol"
 version = "0.1.1"
 dependencies = [
  "serde",
@@ -6023,6 +6048,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokn-interaction-core"
+version = "0.1.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
+name = "tokn-opencode-adapter"
+version = "0.1.1"
+dependencies = [
+ "base64 0.22.1",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokn-interaction-core",
+ "tokn-opencode-rpc-protocol",
+ "uuid",
+]
+
+[[package]]
 name = "tokn-opencode-protocol"
 version = "0.1.1"
 dependencies = [
@@ -6031,7 +6080,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokn-opencode-rpc-protocol"
+version = "0.1.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tokn-pi-adapter"
+version = "0.1.1"
+dependencies = [
+ "base64 0.22.1",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokn-interaction-core",
+ "tokn-pi-rpc-protocol",
+ "uuid",
+]
+
+[[package]]
 name = "tokn-pi-protocol"
+version = "0.1.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tokn-pi-rpc-protocol"
 version = "0.1.1"
 dependencies = [
  "serde",
@@ -6304,6 +6382,9 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "tokn-interaction-core",
+ "tokn-pi-adapter",
+ "tokn-pi-rpc-protocol",
  "tokn-session-client",
  "tokn-session-codex",
  "tokn-session-core",

@@ -1,0 +1,26 @@
+[package]
+name = "tokn-dsh-adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Rust live interaction adapter for DeepSeek Harness ApiProxy endpoints."
+
+[dependencies]
+tokn-interaction-core = { version = "0.1.1", path = "../interaction-core" }
+tokn-dsh-rpc-protocol = { version = "0.1.1", path = "../dsh-rpc-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["process"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
+uuid = { version = "1", features = ["v4"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+axum = { version = "0.8", features = ["ws"] }

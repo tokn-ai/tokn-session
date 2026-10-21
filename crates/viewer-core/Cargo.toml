@@ -9,6 +9,9 @@ readme = "README.md"
 license.workspace = true
 
 [dependencies]
+tokn-interaction-core.workspace = true
+tokn-pi-rpc-protocol.workspace = true
+tokn-pi-adapter.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 serde.workspace = true

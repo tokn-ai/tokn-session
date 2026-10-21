@@ -1,71 +1,12 @@
-use std::path::PathBuf;
-
-use serde_json::Value;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, BufReader};
-
+//! Viewer-specific display mapping over the reusable native Pi RPC layer.
 use crate::workspace::ManagedSessionDialog;
-
-/// Maximum bytes before LF, including an optional CR. A 24 MiB image batch
-/// becomes 32 MiB of base64; leave bounded room for its text and JSON envelope.
-pub(super) const MAX_FRAME_BYTES: usize = 34 * 1024 * 1024;
-const MAX_DIALOG_TEXT_BYTES: usize = 16 * 1024;
-const MAX_DIALOG_OPTIONS: usize = 128;
-const MAX_ID_BYTES: usize = 256;
-const STDERR_TAIL_BYTES: usize = 16 * 1024;
-
-/// Retain this reader for the process lifetime so bytes after an LF stay buffered.
-pub(super) struct RpcReader<R> {
-  reader: BufReader<R>,
-}
-
-impl<R: AsyncRead + Unpin> RpcReader<R> {
-  pub(super) fn new(reader: R) -> Self {
-    Self {
-      reader: BufReader::new(reader),
-    }
-  }
-
-  pub(super) async fn read_frame(&mut self) -> Result<Option<Value>, String> {
-    read_frame(&mut self.reader).await
-  }
-}
-
-/// Clean EOF is distinct from a truncated frame. Invalid frames are terminal:
-/// callers must stop the process rather than try to recover delimiter alignment.
-pub(super) async fn read_frame(reader: &mut (impl AsyncBufRead + Unpin)) -> Result<Option<Value>, String> {
-  let mut bytes = Vec::new();
-  loop {
-    let (consumed, complete) = {
-      let available = reader
-        .fill_buf()
-        .await
-        .map_err(|error| format!("failed to read Pi RPC stdout: {error}"))?;
-      if available.is_empty() {
-        return if bytes.is_empty() {
-          Ok(None)
-        } else {
-          Err("Pi RPC stdout ended before the LF frame delimiter".to_string())
-        };
-      }
-      let newline = available.iter().position(|byte| *byte == b'\n');
-      let payload_length = newline.unwrap_or(available.len());
-      if payload_length > MAX_FRAME_BYTES - bytes.len() {
-        return Err("Pi RPC frame exceeds the 34 MiB limit".to_string());
-      }
-      bytes.extend_from_slice(&available[..payload_length]);
-      (payload_length + usize::from(newline.is_some()), newline.is_some())
-    };
-    reader.consume(consumed);
-    if complete {
-      if bytes.last() == Some(&b'\r') {
-        bytes.pop();
-      }
-      return serde_json::from_slice(&bytes)
-        .map(Some)
-        .map_err(|error| format!("invalid Pi RPC JSON frame: {error}"));
-    }
-  }
-}
+use serde_json::Value;
+use std::path::PathBuf;
+#[cfg(test)]
+use tokn_pi_adapter::framing::STDERR_TAIL_BYTES;
+pub(super) use tokn_pi_adapter::framing::{MAX_FRAME_BYTES, RpcReader, StderrTail};
+#[cfg(test)]
+use tokn_pi_rpc_protocol::{MAX_DIALOG_OPTIONS, MAX_DIALOG_TEXT_BYTES, is_cosmetic_extension_method};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct RpcState {
@@ -78,149 +19,30 @@ pub(super) struct RpcState {
   pub(super) model: Option<crate::models::ModelIdentity>,
 }
 
-/// Parse the `data` object of a successful native `get_state` response.
-/// The managed owner validates the returned history path before trusting it.
 pub(super) fn parse_state(data: &Value) -> Result<RpcState, String> {
-  if !data.is_object() {
-    return Err("Pi RPC state must be an object".to_string());
-  }
-  let session_id = identity(data, "sessionId")?.to_string();
-  let session_file = match data.get("sessionFile") {
-    None | Some(Value::Null) => None,
-    Some(Value::String(path)) if !path.trim().is_empty() && !path.contains('\0') => Some(PathBuf::from(path)),
-    _ => return Err("Pi RPC state has an invalid sessionFile".to_string()),
-  };
+  let state = tokn_pi_rpc_protocol::parse_state(data)?;
   Ok(RpcState {
-    session_id,
-    session_file,
-    is_streaming: boolean(data, "isStreaming")?,
-    is_compacting: boolean(data, "isCompacting")?,
-    images_available: data
-      .get("model")
-      .and_then(|model| model.get("input"))
-      .and_then(Value::as_array)
-      .is_some_and(|input| input.iter().any(|value| value.as_str() == Some("image"))),
-    model: data.get("model").and_then(crate::models::pi_model),
-    pending_message_count: data
-      .get("pendingMessageCount")
-      .and_then(Value::as_u64)
-      .ok_or_else(|| "Pi RPC state has an invalid pendingMessageCount".to_string())?,
+    session_id: state.session_id,
+    session_file: state.session_file,
+    is_streaming: state.is_streaming,
+    is_compacting: state.is_compacting,
+    pending_message_count: state.pending_message_count,
+    images_available: state.images_available,
+    model: state.model.as_ref().and_then(crate::models::pi_model),
   })
 }
 
-fn identity<'a>(value: &'a Value, field: &str) -> Result<&'a str, String> {
-  let identity = value
-    .get(field)
-    .and_then(Value::as_str)
-    .ok_or_else(|| format!("Pi RPC has an invalid {field}"))?;
-  if identity.is_empty()
-    || identity.len() > MAX_ID_BYTES
-    || identity.trim() != identity
-    || identity.chars().any(char::is_control)
-  {
-    return Err(format!("Pi RPC has an invalid {field}"));
-  }
-  Ok(identity)
-}
-
-fn boolean(value: &Value, field: &str) -> Result<bool, String> {
-  value
-    .get(field)
-    .and_then(Value::as_bool)
-    .ok_or_else(|| format!("Pi RPC state has an invalid {field}"))
-}
-
-pub(super) fn is_cosmetic_extension_method(method: &str) -> bool {
-  matches!(
-    method,
-    "notify" | "setStatus" | "setWidget" | "setTitle" | "set_editor_text"
-  )
-}
-
-/// Unknown/malformed interactive requests return a reason for explicit native
-/// cancellation. The caller retains the raw request to recover its native ID.
 pub(super) fn parse_extension_dialog(value: &Value) -> Result<Option<ManagedSessionDialog>, String> {
-  if value.get("type").and_then(Value::as_str) != Some("extension_ui_request") {
-    return Err("invalid Pi extension UI request type".to_string());
-  }
-  let method = value
-    .get("method")
-    .and_then(Value::as_str)
-    .ok_or_else(|| "Pi extension UI request has no method".to_string())?;
-  if is_cosmetic_extension_method(method) {
-    return Ok(None);
-  }
-  if !matches!(method, "confirm" | "select" | "input" | "editor") {
-    return Err("unsupported Pi extension dialog method".to_string());
-  }
-  let dialog_id = identity(value, "id")?.to_string();
-  let title = dialog_text(value, "title", true)?.unwrap();
-  let mut dialog = ManagedSessionDialog {
-    dialog_id,
-    kind: method.to_string(),
-    title,
-    message: None,
-    options: Vec::new(),
-    initial_value: None,
-  };
-  match method {
-    "confirm" => dialog.message = dialog_text(value, "message", true)?,
-    "select" => {
-      let options = value
-        .get("options")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "Pi select dialog has invalid options".to_string())?;
-      if options.len() > MAX_DIALOG_OPTIONS {
-        return Err("Pi select dialog exceeds the 128 option limit".to_string());
-      }
-      dialog.options = options
-        .iter()
-        .map(|option| {
-          option
-            .as_str()
-            .filter(|text| text.len() <= MAX_DIALOG_TEXT_BYTES)
-            .map(str::to_string)
-            .ok_or_else(|| "Pi select dialog has an invalid or oversized option".to_string())
-        })
-        .collect::<Result<_, _>>()?;
-    }
-    // A placeholder is a hint, never text to submit as the initial value.
-    "input" => dialog.message = dialog_text(value, "placeholder", false)?,
-    "editor" => dialog.initial_value = dialog_text(value, "prefill", false)?,
-    _ => unreachable!(),
-  }
-  Ok(Some(dialog))
-}
-
-fn dialog_text(value: &Value, field: &str, required: bool) -> Result<Option<String>, String> {
-  match value.get(field) {
-    None if !required => Ok(None),
-    Some(Value::String(text)) if text.len() <= MAX_DIALOG_TEXT_BYTES => Ok(Some(text.clone())),
-    _ => Err(format!("Pi extension dialog has an invalid or oversized {field}")),
-  }
-}
-
-/// Bounded diagnostic bytes, independent of stderr line lengths or UTF-8 splits.
-#[derive(Default)]
-pub(super) struct StderrTail {
-  bytes: Vec<u8>,
-}
-
-impl StderrTail {
-  pub(super) fn push(&mut self, bytes: &[u8]) {
-    if bytes.len() >= STDERR_TAIL_BYTES {
-      self.bytes.clear();
-      self.bytes.extend_from_slice(&bytes[bytes.len() - STDERR_TAIL_BYTES..]);
-    } else {
-      let overflow = (self.bytes.len() + bytes.len()).saturating_sub(STDERR_TAIL_BYTES);
-      self.bytes.drain(..overflow);
-      self.bytes.extend_from_slice(bytes);
-    }
-  }
-
-  pub(super) fn text(&self) -> String {
-    String::from_utf8_lossy(&self.bytes).into_owned()
-  }
+  Ok(
+    tokn_pi_rpc_protocol::parse_extension_dialog(value)?.map(|dialog| ManagedSessionDialog {
+      dialog_id: dialog.dialog_id,
+      kind: dialog.kind,
+      title: dialog.title,
+      message: dialog.message,
+      options: dialog.options,
+      initial_value: dialog.initial_value,
+    }),
+  )
 }
 
 #[cfg(test)]
@@ -425,9 +247,9 @@ mod tests {
   fn stderr_tail_is_bounded_and_handles_split_utf8() {
     let mut tail = StderrTail::default();
     tail.push(&vec![b'a'; STDERR_TAIL_BYTES + 200]);
-    assert_eq!(tail.bytes.len(), STDERR_TAIL_BYTES);
+    assert_eq!(tail.text().len(), STDERR_TAIL_BYTES);
     tail.push(b"last diagnostic");
-    assert_eq!(tail.bytes.len(), STDERR_TAIL_BYTES);
+    assert_eq!(tail.text().len(), STDERR_TAIL_BYTES);
     assert!(tail.text().ends_with("last diagnostic"));
     tail.push(&[0xf0, 0x9f]);
     tail.push(&[0x98, 0x80]);
