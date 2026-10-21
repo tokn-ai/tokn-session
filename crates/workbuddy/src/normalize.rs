@@ -89,6 +89,7 @@ impl WorkBuddyNormalizer {
         let input = item.arguments.and_then(decode_arguments);
         let tool_kind = tool_kind_for_optional_name(item.name.as_deref());
         events.push(AgentEvent::ToolCall(ToolCallEvent {
+          images: Vec::new(),
           provider: Provider::WorkBuddy,
           session_id: Some(session_id),
           turn_id: None,
@@ -114,6 +115,7 @@ impl WorkBuddyNormalizer {
         let is_error = result_is_error(item.status.as_deref(), item.provider_data.as_ref());
         let tool_kind = tool_kind_for_optional_name(item.name.as_deref());
         events.push(AgentEvent::ToolCall(ToolCallEvent {
+          images: Vec::new(),
           provider: Provider::WorkBuddy,
           session_id: Some(session_id),
           turn_id: None,

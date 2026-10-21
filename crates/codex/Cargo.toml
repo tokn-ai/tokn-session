@@ -13,6 +13,7 @@ dirs.workspace = true
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
 tempfile = "3"
 toml = "1.1"
 zstd = "0.13"

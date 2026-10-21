@@ -4131,6 +4131,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulldown-cmark"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+dependencies = [
+ "bitflags 2.12.1",
+ "memchr",
+ "unicase",
+]
+
+[[package]]
 name = "pxfm"
 version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6061,6 +6072,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokn-codex-protocol",
  "tokn-session-core",
@@ -6284,6 +6296,7 @@ dependencies = [
  "libc",
  "notify 7.0.0",
  "notify 8.2.0",
+ "pulldown-cmark",
  "rusqlite",
  "serde",
  "serde_json",

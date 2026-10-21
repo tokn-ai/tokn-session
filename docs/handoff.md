@@ -9,6 +9,12 @@ thumbnail/full resources, including image-only messages. The composer and local
 New Pi Session dialog support picking, paste, drag/drop, and image-only sending.
 Codex/Pi transports use host-validated uploads, model capabilities, and retained
 assets; image bytes stay outside timeline updates and shares remain read-only.
+Expanded tool cards also display Codex generation/MCP/structured image outputs,
+Pi tool images, and OpenCode/ZCode tool attachments. Assembled tool images keep
+their owning source event for lazy reads; output replacement clears old image
+coverage without inventing assistant messages. Recorded Markdown image nodes in
+user/assistant messages use source-bound metadata and the same lazy resources;
+local absolute/file URLs render inline, with relative/remote references unavailable.
 See [viewer images](viewer-images.md) for APIs, limits, storage, and retention.
 
 Native storage defaults share `~/.tokn/sessions` through the storage crate:

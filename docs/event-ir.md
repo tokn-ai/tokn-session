@@ -3,6 +3,21 @@
 `AgentEvent` is a display-oriented, provider-neutral stream. Native detail is
 retained where useful; it is not an exact reconstruction of provider context.
 
+## Images
+
+Messages and tool calls carry optional `images` arrays of `RecordedImage`
+references. `MessageImage` and `MessageImageSource` remain compatibility aliases
+for the shared image types. Missing arrays decode as empty; empty arrays are
+omitted from normalized source JSON. References are base64 data, data URLs,
+recorded local files, or explicit unavailable/opaque references. Normalization
+never reads image files or fetches URLs.
+
+Assembled tool operations retain the latest output's images, each with its
+owning `source_event_index`. A new output replaces the image list, including an
+explicit empty output; metadata-only progress preserves it. Output images remain
+tool results and do not become assistant replies. Viewer delivery exposes bounded
+metadata and lazy resources; normalized JSON export preserves recorded sources.
+
 ## Lifecycle
 
 `lifecycle` identifies a turn and optionally a step, with `scope`, `phase`, and

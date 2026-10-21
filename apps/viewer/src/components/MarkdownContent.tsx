@@ -1,10 +1,23 @@
+import { createContext, useContext } from "react";
+import { InlineMessageImage } from "./MessageImages";
+import { markdownImageRangeKey } from "../lib/markdownImages";
+import type { MessageImageSummary } from "../lib/types";
 import ReactMarkdown, { type Components, type UrlTransform } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 
+export interface MarkdownImageContext {
+  session_key: string;
+  event_key: string;
+  revision: string | null;
+  bindings: ReadonlyMap<string, MessageImageSummary>;
+}
+const MarkdownImagesContext = createContext<MarkdownImageContext | null>(null);
+
 interface MarkdownContentProps {
   content: string;
   class_name?: string;
+  image_context?: MarkdownImageContext;
 }
 
 const ALLOWED_ELEMENTS = [
@@ -52,7 +65,12 @@ const MARKDOWN_COMPONENTS = {
   a({ children }) {
     return <span className="markdown-content__link">{children}</span>;
   },
-  img({ alt }) {
+  img({ alt, node }) {
+    const context = useContext(MarkdownImagesContext);
+    const key = markdownImageRangeKey(node?.position?.start.offset, node?.position?.end.offset);
+    const image = key ? context?.bindings.get(key) : null;
+    if (context && image) return <InlineMessageImage session_key={context.session_key} event_key={context.event_key}
+      revision={context.revision} image={image} alt_text={alt} />;
     const label = alt ? `Image: ${alt}` : "Image";
     return (
       <span aria-label={label} className="markdown-content__image" role="img">
@@ -80,20 +98,22 @@ const MARKDOWN_COMPONENTS = {
   },
 } satisfies Components;
 
-export function MarkdownContent({ content, class_name }: MarkdownContentProps) {
+export function MarkdownContent({ content, class_name, image_context }: MarkdownContentProps) {
   const rootClassName = ["markdown-content", class_name].filter(Boolean).join(" ");
 
   return (
     <div className={rootClassName}>
-      <ReactMarkdown
-        allowedElements={ALLOWED_ELEMENTS}
-        components={MARKDOWN_COMPONENTS}
-        remarkPlugins={[remarkGfm, remarkBreaks]}
-        skipHtml
-        urlTransform={safeUrlTransform}
-      >
-        {content}
-      </ReactMarkdown>
+      <MarkdownImagesContext.Provider value={image_context ?? null}>
+        <ReactMarkdown
+          allowedElements={ALLOWED_ELEMENTS}
+          components={MARKDOWN_COMPONENTS}
+          remarkPlugins={[remarkGfm, remarkBreaks]}
+          skipHtml
+          urlTransform={safeUrlTransform}
+        >
+          {content}
+        </ReactMarkdown>
+      </MarkdownImagesContext.Provider>
     </div>
   );
 }

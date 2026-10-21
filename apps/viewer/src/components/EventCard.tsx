@@ -28,6 +28,8 @@ import {
 import { DeferredActivityGroup } from "./DeferredActivityGroup";
 import { ActivityGroup, groupActivity } from "./ActivityGroup";
 import { ShellOutputSection } from "./ShellOutputSection";
+import { MessageImages } from "./MessageImages";
+import { toolOutputImages } from "../lib/toolOutputImages";
 import { MessageCard } from "./MessageCard";
 import type { TechnicalCardHeading } from "./CardPresentation";
 import { ReasoningCard, reasoningHeading } from "./ReasoningCard";
@@ -660,12 +662,14 @@ function TrajectorySection({
 }
 
 function ToolOutput({
+  session_key,
   detail,
   error,
   event,
   is_loading,
   on_retry,
 }: {
+  session_key?: string;
   detail: EventDetail | null;
   error: string | null;
   event: EventSummary;
@@ -675,17 +679,21 @@ function ToolOutput({
   if (event.is_hidden || detail?.is_hidden) {
     return <p className="tool-output__empty">Tool output is hidden by the provider.</p>;
   }
+  const { images, revision } = toolOutputImages(event, detail);
+  const imageContent = images.length ? session_key
+    ? <MessageImages session_key={session_key} event_key={event.event_key} revision={revision} images={images} aria_label="Tool output images" />
+    : <span className="message-image__status">Image unavailable</span> : null;
   if (is_loading && !detail) {
     return (
-      <div className="tool-output__state" role="status">
+      <><div className="tool-output__state" role="status">
         <span className="inline-spinner" aria-hidden="true" />
         Loading tool output…
-      </div>
+      </div>{imageContent}</>
     );
   }
   if (error && !detail) {
     return (
-      <div className="tool-output__error" role="alert">
+      <><div className="tool-output__error" role="alert">
         <span>
           <strong>Output unavailable</strong>
           <small>{error}</small>
@@ -693,12 +701,12 @@ function ToolOutput({
         <button className="text-button" onClick={on_retry} type="button">
           Try again
         </button>
-      </div>
+      </div>{imageContent}</>
     );
   }
 
   const output = detail?.tool_output ?? null;
-  if (!output || output.sections.length === 0) {
+  if ((!output || output.sections.length === 0) && !images.length) {
     const isPending = event.tool?.status === "pending" || event.tool?.status === "running"
       || (event.tool?.status === undefined && event.phase !== null && event.phase !== "finished");
     return (
@@ -725,7 +733,7 @@ function ToolOutput({
           ) : null}
         </header>
       ) : null}
-      {output.sections.map((section, index) => isShell ? (
+      {output?.sections.map((section, index) => isShell ? (
         <ShellOutputSection key={`${event.event_key}-${index}`} section={section} command={toolLabel} />
       ) : (
         <section className="tool-output__section" key={`${section.label ?? "output"}-${index}`}>
@@ -739,7 +747,8 @@ function ToolOutput({
           </pre>
         </section>
       ))}
-      {output.truncated ? (
+      {imageContent}
+      {output?.truncated ? (
         <p className="tool-output__notice" role="status">
           Output preview is truncated
           {output.original_size_bytes > 0 ? ` from ${formatBytes(output.original_size_bytes)}` : ""}.
@@ -916,6 +925,7 @@ export function EventCard({
         >
           {event.type === "tool_call" ? (
             <ToolOutput
+              session_key={session_key}
               detail={detail}
               error={detail_error}
               event={event}
