@@ -142,10 +142,10 @@ no remote recovery bypass; preserve an additional passkey before that happens.
   `view`/`control` access, durable encrypted-only status, and an optional
   `machine_address`. `DELETE /hub/v1/hosts/<host_id>` revokes one.
 - Authenticated `GET /hub/v1/namespaces` lists namespaces; `POST` with
-  `{"username":"clouds"}` creates one. Authenticated
-  `POST /hub/v1/namespaces/clouds/machines/macbook` with `{"host_id":"UUID"}`
+  `{"username":"alice"}` creates one. Authenticated
+  `POST /hub/v1/namespaces/alice/machines/macbook` with `{"host_id":"UUID"}`
   assigns a registered encrypted machine its permanent address.
-- Public `GET /hub/v1/resolve/clouds/macbook` returns `host_id`, `machine_address`,
+- Public `GET /hub/v1/resolve/alice/macbook` returns `host_id`, `machine_address`,
   `name`, and `online`. No directory key establishes encryption trust.
 - `GET /hub/v1/enrollments` lists pending connections. Authenticated
   `POST /hub/v1/enrollments/approve` accepts `{"pairing_code":"…"}`.
