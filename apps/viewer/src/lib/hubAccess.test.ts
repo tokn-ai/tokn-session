@@ -3,7 +3,7 @@ import { withMachineAddressing, type HubAccessBackend } from "./hubAccess";
 import type { SavedHubHost } from "./types";
 
 const host = { host_id: "550e8400-e29b-41d4-a716-446655440000", host_public_key: "H".repeat(43) };
-const machine = { host_id: host.host_id, machine_address: "clouds:macbook", name: "MacBook", online: true };
+const machine = { host_id: host.host_id, machine_address: "alice:macbook", name: "MacBook", online: true };
 let hosts: SavedHubHost[];
 let backend: HubAccessBackend;
 beforeEach(() => {

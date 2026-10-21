@@ -145,9 +145,9 @@ local reader and event stream.
 
 ## Readable machine addresses
 
-The Hub administrator can create a namespace such as `clouds` at `/admin`, then
+The Hub administrator can create a namespace such as `alice` at `/admin`, then
 assign a registered encrypted machine a name such as `macbook`. Its address is
-`clouds:macbook`, scoped to that Hub. Names use 1–63 lowercase ASCII letters or
+`alice:macbook`, scoped to that Hub. Names use 1–63 lowercase ASCII letters or
 digits with internal hyphens. A namespace is a managed name, not a user account;
 the Hub still has one administrator. Connector `--name` remains its display name.
 
@@ -178,7 +178,7 @@ passkeys. On another device,
 choose **Passkey**, enter the complete machine reference, and sign in.
 The reference supplies the host key needed to authenticate the encrypted channel
 before passkey login; a bare UUID or readable address does not establish that trust.
-The reference may use `clouds:macbook@host_public_key` after an address is assigned.
+The reference may use `alice:macbook@host_public_key` after an address is assigned.
 An already remembered machine can use its readable address with its saved pin. Transfer the
 reference through a trusted channel. The Hub cannot replace a saved host pin.
 
