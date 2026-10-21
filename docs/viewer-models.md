@@ -61,7 +61,10 @@ to choose a vision model without an early model change. Pi's native setter may
 also persist its default provider/model for new sessions, but this happens only
 when sending an idle prompt with that choice. New Pi Session inherits defaults.
 
-Codex status reads `thread-follower-read-model-settings` from the owning Desktop
-client. The follower connection currently has no verified catalog tied to the
+Codex status first uses local `thread-owner-discovery`, then binds
+`thread-follower-read-model-settings` to that exact Desktop client and verifies
+its response owner. Both reads share one bounded metadata budget. Missing owners
+and pending settings preserve recorded context with an unavailable reason; they
+do not resume a thread or become message-delivery errors. The follower connection currently has no verified catalog tied to the
 same provider/account, so selection is unavailable. A standalone app-server
 catalog, cached model list, or hardcoded IDs are not treated as Desktop authority.

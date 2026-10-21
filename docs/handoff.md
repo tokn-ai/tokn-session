@@ -12,8 +12,10 @@ catalogs use shared desktop/HTTP/Hub commands. Pi model choices stay in composer
 drafts until Send: idle sends validate and apply them; running sends ignore them,
 steer with the active model, and reset the draft choice. Model intent and message
 share admission/receipts; only actual idle selection may update Pi defaults.
-Image staging does not change models, and delivery checks the effective model. Codex Desktop supplies owner-bound
-current settings but no verifiable catalog through follower IPC, so its picker
+Image staging does not change models, and delivery checks the effective model.
+Codex model reads discover the local owner first, bind the read to that client,
+and retain recorded context when the bounded live lookup is unavailable.
+Desktop supplies no verifiable catalog through follower IPC, so its picker
 remains read-only with a reason. Shares and viewing grants never expose live
 catalogs or model mutation. See [session models](viewer-models.md).
 

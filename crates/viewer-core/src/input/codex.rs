@@ -38,7 +38,10 @@ pub(super) async fn status(_target: &InputTarget) -> Result<String, DeliveryErro
 }
 
 pub(crate) async fn model_status(target: &InputTarget) -> Result<SessionModelStatus, DeliveryError> {
-  let mut client = DesktopClient::connect(&desktop_endpoint()?, REQUEST_TIMEOUT).await?;
+  let endpoint = desktop_endpoint().map_err(|_| model_unavailable())?;
+  let mut client = DesktopClient::connect(&endpoint, REQUEST_TIMEOUT)
+    .await
+    .map_err(|_| model_unavailable())?;
   client.read_model_status(&target.session_id).await
 }
 
@@ -79,14 +82,51 @@ fn desktop_endpoint() -> Result<PathBuf, DeliveryError> {
   }
 }
 
+fn model_unavailable() -> DeliveryError {
+  DeliveryError::not_sent(
+    "Live model settings are unavailable for this session in Codex Desktop. Open it there and retry; recorded model information is shown when available.",
+  )
+}
+
 impl DesktopClient {
   async fn read_model_status(&mut self, session_id: &str) -> Result<SessionModelStatus, DeliveryError> {
+    // Optional display metadata has one bounded budget. Router-wide negative
+    // discovery can take ten seconds, so a deadline means unavailable context,
+    // not a failed message. Never resume a thread or retry through another owner.
+    match timeout(self.request_timeout, self.read_owned_model_status(session_id)).await {
+      Ok(Ok(status)) => Ok(status),
+      _ => Err(model_unavailable()),
+    }
+  }
+
+  async fn read_owned_model_status(&mut self, session_id: &str) -> Result<SessionModelStatus, DeliveryError> {
+    let id = Uuid::new_v4().to_string();
+    // Desktop's explicit discovery uses cached ownership or a short role probe.
+    // Ordinary follower discovery can wait on unrelated peers for much longer.
+    let discovery = self
+      .request(
+        json!({
+          "type":"request", "requestId":id, "sourceClientId":self.client_id,
+          "version":1, "method":"thread-owner-discovery",
+          "params":{"hostId":"local", "conversationId":session_id},
+          "timeoutMs":self.request_timeout.as_millis() as u64
+        }),
+        &id,
+        "thread-owner-discovery",
+        false,
+      )
+      .await?;
+    let owner = discovery["handledByClientId"]
+      .as_str()
+      .filter(|value| valid_identity(value))
+      .ok_or_else(model_unavailable)?
+      .to_owned();
     let id = Uuid::new_v4().to_string();
     let response = self
       .request(
         json!({
           "type":"request", "requestId":id, "sourceClientId":self.client_id,
-          "version":1, "method":"thread-follower-read-model-settings",
+          "version":1, "method":"thread-follower-read-model-settings", "targetClientId":owner,
           "params":{"conversationId":session_id}, "timeoutMs":self.request_timeout.as_millis() as u64
         }),
         &id,
@@ -94,15 +134,14 @@ impl DesktopClient {
         false,
       )
       .await?;
+    if response["handledByClientId"].as_str() != Some(owner.as_str()) {
+      return Err(model_unavailable());
+    }
     let settings = &response["result"]["settings"];
     let model_id = settings["model"]
       .as_str()
       .filter(|value| valid_identity(value))
       .ok_or_else(|| DeliveryError::not_sent("Codex Desktop has no live model state for this session"))?;
-    let owner = response["handledByClientId"]
-      .as_str()
-      .filter(|value| valid_identity(value))
-      .ok_or_else(|| DeliveryError::not_sent("Codex Desktop returned no verified thread owner"))?;
     let generation = format!("{session_id}:{owner}");
     Ok(SessionModelStatus {
       state: SessionModelState::live(Some(ModelIdentity {
