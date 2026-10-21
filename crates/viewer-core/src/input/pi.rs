@@ -17,6 +17,7 @@ mod unix {
 
   use super::{Admission, DeliveryError, InputCapability, InputTarget, ResolvedImage};
   use crate::model::ViewerProvider;
+  use crate::models::*;
   use base64::Engine;
 
   const PROTOCOL: u64 = 1;
@@ -42,6 +43,185 @@ mod unix {
   pub(super) async fn status(target: &InputTarget) -> Result<InputCapability, DeliveryError> {
     let descriptor = load_descriptor(target).await?;
     query_capability(&descriptor, BRIDGE_TIMEOUT).await
+  }
+
+  pub(super) async fn model_status(target: &InputTarget) -> Result<SessionModelStatus, DeliveryError> {
+    let descriptor = load_descriptor(target).await?;
+    let (status, _) = query_model_status(&descriptor).await?;
+    Ok(status)
+  }
+
+  async fn query_model_status(descriptor: &Descriptor) -> Result<(SessionModelStatus, String), DeliveryError> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let response = exchange(descriptor, request(descriptor, "status", &id), false, BRIDGE_TIMEOUT).await?;
+    validate_response(&response, &id, false)?;
+    if response["type"] != "ready" || response["session_file"] != descriptor.session_file {
+      return Err(DeliveryError::not_sent("Pi returned an invalid model status"));
+    }
+    parse_model_status(descriptor, &response)
+  }
+
+  fn parse_model_status(
+    descriptor: &Descriptor,
+    response: &Value,
+  ) -> Result<(SessionModelStatus, String), DeliveryError> {
+    if response["session_id"] != descriptor.session_id || response["instance_id"] != descriptor.instance_id {
+      return Err(DeliveryError::not_sent(
+        "Pi model status targets another session or process",
+      ));
+    }
+    if response["model_controls_version"] != 1 {
+      return Ok((
+        SessionModelStatus::unavailable("Update the Pi input bridge to enable model discovery and selection"),
+        String::new(),
+      ));
+    }
+    let model: Option<ModelIdentity> = serde_json::from_value(response["model"].clone())
+      .map_err(|_| DeliveryError::not_sent("Pi returned an invalid model identity"))?;
+    if model.as_ref().is_some_and(|model| {
+      !valid_identity(&model.model_id)
+        || model
+          .model_provider
+          .as_deref()
+          .is_none_or(|provider| !valid_identity(provider))
+        || model.display_name.as_deref().is_some_and(|name| !valid_identity(name))
+    }) {
+      return Err(DeliveryError::not_sent("Pi returned an invalid model identity"));
+    }
+    let token = response["model_revision"]
+      .as_str()
+      .filter(|token| valid_identity(token))
+      .ok_or_else(|| DeliveryError::not_sent("Pi returned an invalid model revision"))?
+      .to_owned();
+    let idle = response["state"] == "idle";
+    let can_list = response["can_list_models"] == true;
+    let can_select = idle && response["can_select_model"] == true && can_list;
+    Ok((
+      SessionModelStatus {
+        state: SessionModelState::live(model, &format!("{}:{token}", descriptor.instance_id)),
+        can_list,
+        can_select,
+        runtime_generation: Some(descriptor.instance_id.clone()),
+        updates_pi_default: true,
+        reason: (!can_select).then(|| {
+          if !idle {
+            "Wait for Pi and queued messages to finish before changing models".into()
+          } else {
+            "This Pi extension cannot select models".into()
+          }
+        }),
+      },
+      token,
+    ))
+  }
+
+  pub(super) async fn list_models(target: &InputTarget) -> Result<ListSessionModelsResponse, DeliveryError> {
+    let descriptor = load_descriptor(target).await?;
+    let (status, _) = query_model_status(&descriptor).await?;
+    if !status.can_list {
+      return Ok(ListSessionModelsResponse {
+        status,
+        models: Vec::new(),
+      });
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let response = exchange(&descriptor, request(&descriptor, "models", &id), false, BRIDGE_TIMEOUT).await?;
+    validate_response(&response, &id, false)?;
+    if response["type"] != "models" {
+      return Err(DeliveryError::not_sent("Pi returned an invalid model catalog"));
+    }
+    let (status, _) = parse_model_status(&descriptor, &response)?;
+    let models: Vec<ModelChoice> = serde_json::from_value(response["models"].clone())
+      .map_err(|_| DeliveryError::not_sent("Pi returned an invalid model catalog"))?;
+    let mut seen = std::collections::HashSet::new();
+    if models.len() > 512
+      || models.iter().any(|choice| {
+        !valid_identity(&choice.model.model_id)
+          || choice
+            .model
+            .model_provider
+            .as_deref()
+            .is_none_or(|provider| !valid_identity(provider))
+          || choice
+            .model
+            .display_name
+            .as_deref()
+            .is_some_and(|name| !valid_identity(name))
+          || !seen.insert((choice.model.model_provider.clone(), choice.model.model_id.clone()))
+      })
+    {
+      return Err(DeliveryError::not_sent(
+        "Pi returned an invalid or oversized model catalog",
+      ));
+    }
+    Ok(ListSessionModelsResponse { status, models })
+  }
+
+  pub(super) async fn select_model(
+    target: &InputTarget,
+    selection: &SelectSessionModelRequest,
+  ) -> SelectSessionModelResponse {
+    let outcome = async {
+      let descriptor = load_descriptor(target).await?;
+      let (status, token) = query_model_status(&descriptor).await?;
+      if !status.can_select {
+        return Err(DeliveryError::not_sent(
+          status
+            .reason
+            .unwrap_or_else(|| "Pi model selection is unavailable".into()),
+        ));
+      }
+      if selection.runtime_generation != status.runtime_generation
+        || selection.expected_revision != status.state.revision
+      {
+        return Err(DeliveryError::not_sent(
+          "The Pi model or process changed; refresh before choosing a model",
+        ));
+      }
+      let mut value = request(&descriptor, "select_model", &selection.request_id);
+      value["model_provider"] = json!(selection.model_provider);
+      value["model_id"] = json!(selection.model_id);
+      value["expected_model_revision"] = json!(token);
+      let response = exchange(&descriptor, value, true, BRIDGE_TIMEOUT).await?;
+      validate_response(&response, &selection.request_id, true)?;
+      if response["type"] != "model_selected" {
+        return Err(DeliveryError::uncertain(
+          "Pi did not confirm the model change; refresh its current model",
+        ));
+      }
+      let (status, _) =
+        parse_model_status(&descriptor, &response).map_err(|error| DeliveryError::uncertain(error.message))?;
+      if !status
+        .state
+        .model
+        .as_ref()
+        .is_some_and(|model| model.model_provider == selection.model_provider && model.model_id == selection.model_id)
+      {
+        return Err(DeliveryError::uncertain(
+          "Pi's selected model changed before it could be confirmed; refresh its current model",
+        ));
+      }
+      Ok(status.state)
+    }
+    .await;
+    match outcome {
+      Ok(state) => SelectSessionModelResponse {
+        request_id: selection.request_id.clone(),
+        status: ModelSelectionStatus::Applied,
+        message: "Model changed. Pi also saved it as its default model.".into(),
+        state: Some(state),
+      },
+      Err(error) => SelectSessionModelResponse {
+        request_id: selection.request_id.clone(),
+        status: if error.may_have_been_sent {
+          ModelSelectionStatus::Unknown
+        } else {
+          ModelSelectionStatus::NotApplied
+        },
+        message: error.message,
+        state: None,
+      },
+    }
   }
 
   pub(super) async fn submit_images(
@@ -351,7 +531,12 @@ mod unix {
         }
         let end = buffer[..count].iter().position(|byte| *byte == b'\n');
         let line_bytes = end.unwrap_or(count);
-        if response.len() + line_bytes > MAX_RESPONSE_BYTES {
+        let response_limit = if matches!(request["type"].as_str(), Some("models")) {
+          1024 * 1024
+        } else {
+          MAX_RESPONSE_BYTES
+        };
+        if response.len() + line_bytes > response_limit {
           return Err(delivery_error("The Pi input bridge response is too large.", submission));
         }
         response.extend_from_slice(&buffer[..line_bytes]);
@@ -596,6 +781,28 @@ mod unix {
       }
     }
 
+    #[test]
+    fn model_status_requires_capability_and_binds_revision_to_process_and_native_model() {
+      let fixture = Fixture::new();
+      let descriptor = fixture.descriptor().unwrap();
+      let mut response = json!({"protocol":1,"type":"ready","session_id":descriptor.session_id,"session_file":descriptor.session_file,
+        "instance_id":descriptor.instance_id,"state":"idle","model_controls_version":1,"can_list_models":true,"can_select_model":true,
+        "model":{"model_provider":"synthetic","model_id":"text","display_name":"Text"},"model_revision":"revision-one"});
+      let first = parse_model_status(&descriptor, &response).unwrap().0;
+      assert!(first.can_list && first.can_select && first.updates_pi_default);
+      response["model_revision"] = json!("revision-two");
+      assert_ne!(
+        parse_model_status(&descriptor, &response).unwrap().0.state.revision,
+        first.state.revision
+      );
+      response["state"] = json!("busy");
+      assert!(!parse_model_status(&descriptor, &response).unwrap().0.can_select);
+      response.as_object_mut().unwrap().remove("model_controls_version");
+      let legacy = parse_model_status(&descriptor, &response).unwrap().0;
+      assert!(!legacy.can_select && !legacy.can_list);
+      assert!(legacy.state.model.is_none());
+    }
+
     #[tokio::test]
     async fn image_submission_keeps_bytes_separate_from_paths_and_omits_empty_text() {
       let fixture = Fixture::new();
@@ -765,6 +972,48 @@ pub(super) async fn status(target: &InputTarget) -> Result<InputCapability, Deli
     Err(DeliveryError::not_sent(
       "Pi input requires a Unix system with the Pi input bridge extension loaded.",
     ))
+  }
+}
+
+pub(crate) async fn model_status(target: &InputTarget) -> Result<crate::models::SessionModelStatus, DeliveryError> {
+  #[cfg(unix)]
+  return unix::model_status(target).await;
+  #[cfg(not(unix))]
+  {
+    let _ = target;
+    Err(DeliveryError::not_sent(
+      "Pi model controls require the Unix input bridge",
+    ))
+  }
+}
+
+pub(crate) async fn list_models(
+  target: &InputTarget,
+) -> Result<crate::models::ListSessionModelsResponse, DeliveryError> {
+  #[cfg(unix)]
+  return unix::list_models(target).await;
+  #[cfg(not(unix))]
+  {
+    let _ = target;
+    Err(DeliveryError::not_sent(
+      "Pi model controls require the Unix input bridge",
+    ))
+  }
+}
+
+pub(crate) async fn select_model(
+  target: &InputTarget,
+  request: &crate::models::SelectSessionModelRequest,
+) -> crate::models::SelectSessionModelResponse {
+  #[cfg(unix)]
+  return unix::select_model(target, request).await;
+  #[cfg(not(unix))]
+  {
+    let _ = target;
+    crate::models::SelectSessionModelResponse::not_applied(
+      &request.request_id,
+      "Pi model controls require the Unix input bridge",
+    )
   }
 }
 

@@ -141,6 +141,7 @@ pub fn allowed_route(method: &str, path: &str, allow_control: bool) -> bool {
     (
       "POST",
       "/api/v1/submit_session_input"
+      | "/api/v1/select_session_model"
       | "/api/v1/submit_session_question_answers"
       | "/api/v1/upload_image_chunk"
       | "/api/v1/release_image_upload",
@@ -168,15 +169,51 @@ pub fn allowed_route(method: &str, path: &str, allow_control: bool) -> bool {
       | "/api/v1/get_relay_status"
       | "/api/v1/get_machine_settings"
       | "/api/v1/get_session_input_status"
-      | "/api/v1/get_session_question_status",
+      | "/api/v1/get_session_question_status"
+      | "/api/v1/get_session_model_status"
+      | "/api/v1/list_session_models",
     ) => true,
     _ => false,
   }
 }
 
+/// Viewing grants keep recorded model context but cannot discover a live
+/// runtime's catalog or advertise controls that the grant cannot use.
+pub fn read_only_model_response(path: &str, reason: &str) -> Option<serde_json::Value> {
+  if !matches!(path, "/api/v1/get_session_model_status" | "/api/v1/list_session_models") {
+    return None;
+  }
+  let status = serde_json::json!({
+    "state":{"model":null,"source":"unknown","revision":"read_only"},
+    "can_select":false,"can_list":false,"reason":reason,
+    "runtime_generation":null,"updates_pi_default":false
+  });
+  Some(if path.ends_with("/list_session_models") {
+    serde_json::json!({"status":status,"models":[]})
+  } else {
+    status
+  })
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn viewing_model_controls_never_advertise_or_disclose_a_catalog() {
+    for path in ["/api/v1/get_session_model_status", "/api/v1/list_session_models"] {
+      let response = read_only_model_response(path, "Viewing only").unwrap();
+      let status = response.get("status").unwrap_or(&response);
+      assert_eq!(status["can_select"], false);
+      assert_eq!(status["can_list"], false);
+      assert!(status["state"]["model"].is_null());
+      assert!(status["runtime_generation"].is_null());
+      if path.ends_with("/list_session_models") {
+        assert_eq!(response["models"], serde_json::json!([]));
+      }
+    }
+    assert!(read_only_model_response("/api/v1/select_session_model", "Viewing only").is_none());
+  }
 
   #[test]
   fn paths_are_exact_and_control_is_explicit() {
@@ -193,6 +230,8 @@ mod tests {
         "/api/v1/renew_session_subscriptions",
         "/api/v1/renew_background_subscriptions",
         "/api/v1/get_machine_settings",
+        "/api/v1/get_session_model_status",
+        "/api/v1/list_session_models",
       ] {
         assert!(allowed_route("POST", path, allow_control));
         for method in ["GET", "PUT", "DELETE"] {
@@ -203,7 +242,11 @@ mod tests {
         }
       }
     }
-    for path in ["/api/v1/upload_image_chunk", "/api/v1/release_image_upload"] {
+    for path in [
+      "/api/v1/upload_image_chunk",
+      "/api/v1/release_image_upload",
+      "/api/v1/select_session_model",
+    ] {
       assert!(allowed_route("POST", path, true));
       assert!(!allowed_route("POST", path, false));
       for method in ["GET", "PUT", "DELETE"] {

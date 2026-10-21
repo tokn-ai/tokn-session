@@ -43,6 +43,27 @@ afterEach(() => {
 });
 
 describe("SessionComposer", () => {
+  it("does not send through a same-frame or uncertain model change, preserving the draft", async () => {
+    const mutation_lock = { send_busy: false, model_busy: false, model_uncertain: false };
+    render(<SessionComposer session={SESSION} mutation_lock={mutation_lock} />);
+    await ready(); draft("Preserve my message");
+    mutation_lock.model_busy = true;
+    fireEvent.submit(screen.getByRole("form"));
+    expect(submitSessionInput).not.toHaveBeenCalled();
+    mutation_lock.model_busy = false; mutation_lock.model_uncertain = true;
+    fireEvent.submit(screen.getByRole("form"));
+    expect(submitSessionInput).not.toHaveBeenCalled();
+    expect(textbox()).toHaveValue("Preserve my message");
+    mutation_lock.model_uncertain = false;
+    const pending = deferred<SubmitSessionInputResponse>();
+    vi.mocked(submitSessionInput).mockReturnValueOnce(pending.promise);
+    fireEvent.submit(screen.getByRole("form"));
+    expect(mutation_lock.send_busy).toBe(true);
+    const request = vi.mocked(submitSessionInput).mock.calls[0][0];
+    await act(async () => pending.resolve({ request_id: request.request_id, status: "not_sent", message: "Not sent" }));
+    expect(mutation_lock.send_busy).toBe(false);
+    expect(textbox()).toHaveValue("Preserve my message");
+  });
   it("edits saved owned Pi history and resumes through one Send request", async () => {
     vi.mocked(getSessionInputStatus).mockResolvedValue(RESUMABLE);
     const pending = deferred<SubmitSessionInputResponse>();

@@ -39,10 +39,12 @@ mod event_filter;
 mod image_resources;
 mod input;
 mod managed_sessions;
+mod model_projection;
 mod notifications;
 mod question_display;
 mod question_input;
 mod runtimes;
+mod session_models;
 mod trajectory_state;
 mod usage_filter;
 mod windows;
@@ -93,6 +95,7 @@ pub struct ViewerService {
   failed_body_jobs: Arc<Mutex<HashMap<(SourceKey, String), FailedBodyJob>>>,
   loaded_session_cache: Arc<Mutex<Option<CachedSession>>>,
   input_broker: crate::input::InputBroker,
+  model_controls: crate::models::ModelControls,
   pub(crate) images: crate::images::ImageStore,
   pub(crate) managed_pi: crate::managed_pi::ManagedPiSessions,
   question_claims: Arc<Mutex<question_input::QuestionClaims>>,
@@ -726,6 +729,7 @@ impl ViewerService {
       #[cfg(test)]
       notification_work_stats: Arc::new(Mutex::new(notifications::NotificationWorkStats::default())),
       input_broker: crate::input::InputBroker::default(),
+      model_controls: crate::models::ModelControls::default(),
       images: crate::images::ImageStore::temporary().expect("temporary image storage should be available"),
       managed_pi: crate::managed_pi::ManagedPiSessions::new(None)
         .unwrap_or_else(crate::managed_pi::ManagedPiSessions::disabled),
@@ -2911,7 +2915,8 @@ impl ViewerService {
     } else {
       loaded
     };
-    let timeline = timeline_entries(&loaded.events);
+    let models = model_projection::ModelProjection::new(&loaded.events, loaded.reference.model_baseline.as_ref());
+    let timeline = timeline_entries_with_models(&loaded.events, &models);
     let identity = self.window_identity(&locator, &loaded, false)?;
     let total_events = timeline.len();
     let requested = requested_offset(request.cursor.as_deref(), request.offset, decode_event_cursor)?;
@@ -2930,16 +2935,17 @@ impl ViewerService {
     let events = timeline[start..end]
       .iter()
       .map(|entry| {
-        identity.summary(timeline_entry_event_summary(
+        identity.summary(models.summary(timeline_entry_event_summary(
           entry,
           &loaded.events,
           &delegation_targets,
           &intermediate_usage,
-        ))
+        )))
       })
       .collect();
 
     Ok(EventPage {
+      current_model: models.state,
       events,
       next_cursor: (end < total_events).then(|| encode_event_cursor(end)),
       previous_cursor: (start > 0).then(|| encode_event_cursor(start)),
@@ -2995,7 +3001,8 @@ impl ViewerService {
       .as_deref()
       .map(|value| identity.local_key(value))
       .transpose()?;
-    let trajectory = trajectory_for_start(&loaded.events, start_source_event_index)
+    let models = model_projection::ModelProjection::new(&loaded.events, loaded.reference.model_baseline.as_ref());
+    let trajectory = trajectory_for_start_with_models(&loaded.events, start_source_event_index, &models)
       .ok_or_else(|| "trajectory key is outside the session".to_string())?;
     let total_events = trajectory.entries.len();
     let requested = requested_trajectory_offset(cursor.as_deref(), request.offset, start_source_event_index)?;
@@ -3050,7 +3057,8 @@ impl ViewerService {
   ) -> Result<(EventDetail, bool), String> {
     if event_key.starts_with("trajectory.v1.") {
       let start_source_event_index = decode_trajectory_key(&event_key)?;
-      let trajectory = trajectory_for_start(&loaded.events, start_source_event_index)
+      let models = model_projection::ModelProjection::new(&loaded.events, loaded.reference.model_baseline.as_ref());
+      let trajectory = trajectory_for_start_with_models(&loaded.events, start_source_event_index, &models)
         .ok_or_else(|| "trajectory key is outside the session".to_string())?;
       let mut detail = trajectory_detail(event_key, &trajectory, &loaded.events)?;
       if let Some(native) = self.relay_native_detail(locator, loaded, &trajectory_source_event_indices(&trajectory))? {
@@ -4457,7 +4465,16 @@ fn base_timeline_entries(events: &[AgentEvent]) -> Vec<TimelineEntry> {
 /// semantics are not reliable enough to fold safely. The grouping is
 /// directional: bookkeeping written after a final reply is never made to look
 /// like a second completed turn merely because it has a usage record.
+#[cfg(test)]
 fn timeline_entries(events: &[AgentEvent]) -> Vec<TimelineEntry> {
+  let models = model_projection::ModelProjection::new(events, None);
+  timeline_entries_with_models(events, &models)
+}
+
+fn timeline_entries_with_models(
+  events: &[AgentEvent],
+  models: &model_projection::ModelProjection,
+) -> Vec<TimelineEntry> {
   let base_entries = base_timeline_entries(events);
   let mut entries = Vec::with_capacity(base_entries.len());
   let mut pending = Vec::new();
@@ -4480,7 +4497,9 @@ fn timeline_entries(events: &[AgentEvent]) -> Vec<TimelineEntry> {
     if trajectory_state::is_turn_start(&entry, events) && !pending.is_empty() {
       flush_trajectory_candidate(&mut entries, &mut pending, events);
     }
-    if is_trajectory_boundary(&entry, events) {
+    if matches!(&entry, TimelineEntry::Event { source_event_index } if models.is_change(*source_event_index))
+      || is_trajectory_boundary(&entry, events)
+    {
       flush_trajectory_candidate(&mut entries, &mut pending, events);
       update_after_final_reply(&entry, events, &mut after_final_reply);
       entries.push(entry);
@@ -4573,7 +4592,7 @@ fn is_trajectory_boundary(entry: &TimelineEntry, events: &[AgentEvent]) -> bool 
     AgentEvent::Message(message) => !is_non_final_assistant_message(message.role, message.delivery),
     AgentEvent::QuestionRequest(_) => true,
     AgentEvent::QuestionReply(_) => true,
-    AgentEvent::SessionStarted(_) | AgentEvent::ProviderChanged(_) | AgentEvent::Compaction(_) => true,
+    AgentEvent::SessionStarted(_) | AgentEvent::Compaction(_) => true,
     _ => false,
   }
 }
@@ -4625,13 +4644,25 @@ fn base_timeline_entry_for_source(events: &[AgentEvent], source_event_index: usi
   })
 }
 
+#[cfg(test)]
 fn trajectory_for_start(events: &[AgentEvent], start_source_event_index: usize) -> Option<Trajectory> {
-  timeline_entries(events).into_iter().find_map(|entry| match entry {
-    TimelineEntry::Trajectory { trajectory } if trajectory.start_source_event_index == start_source_event_index => {
-      Some(trajectory)
-    }
-    TimelineEntry::Event { .. } | TimelineEntry::ToolOperation { .. } | TimelineEntry::Trajectory { .. } => None,
-  })
+  let models = model_projection::ModelProjection::new(events, None);
+  trajectory_for_start_with_models(events, start_source_event_index, &models)
+}
+
+fn trajectory_for_start_with_models(
+  events: &[AgentEvent],
+  start_source_event_index: usize,
+  models: &model_projection::ModelProjection,
+) -> Option<Trajectory> {
+  timeline_entries_with_models(events, models)
+    .into_iter()
+    .find_map(|entry| match entry {
+      TimelineEntry::Trajectory { trajectory } if trajectory.start_source_event_index == start_source_event_index => {
+        Some(trajectory)
+      }
+      TimelineEntry::Event { .. } | TimelineEntry::ToolOperation { .. } | TimelineEntry::Trajectory { .. } => None,
+    })
 }
 
 fn timeline_entry_has_targeted_agent_activity(entry: &TimelineEntry, events: &[AgentEvent]) -> bool {
@@ -4682,6 +4713,7 @@ fn trajectory_event_summary(trajectory: &Trajectory, events: &[AgentEvent]) -> E
   let summary = trajectory_summary(&card);
 
   EventSummary {
+    model_change: None,
     images: None,
     child_keys: Some(
       trajectory
@@ -4982,6 +5014,7 @@ fn event_summary_with_delegation_targets(
     })
     .flatten();
   EventSummary {
+    model_change: None,
     images,
     child_keys: None,
     slot_key: None,
@@ -5032,6 +5065,7 @@ fn tool_operation_event_summary(source_event_index: usize, operation: &ToolOpera
   let (summary, summary_truncated) =
     truncate_with_flag(tool_operation_summary(operation, &tool), MAX_TECHNICAL_SUMMARY_CHARS);
   EventSummary {
+    model_change: None,
     images: Some(image_resources::operation_images(operation)),
     child_keys: None,
     slot_key: None,
@@ -5985,6 +6019,7 @@ mod tests {
     fn load(&self) -> LoadedSession {
       LoadedSession {
         reference: SessionRef {
+          model_baseline: None,
           id: self.header.id.clone(),
           parent_session_id: self.header.parent_session_id.clone(),
           agent_path: self.header.agent_path.clone(),
@@ -9714,6 +9749,7 @@ mod tests {
       message_event("A visible assistant message"),
       metadata_event("turn metadata without work"),
       AgentEvent::ProviderChanged(ProviderChanged {
+        model_origin: None,
         provider: Provider::Codex,
         session_id: Some("fixture".to_string()),
         native_id: None,
@@ -12141,7 +12177,7 @@ mod tests {
     })
   }
 
-  fn settings_event() -> AgentEvent {
+  pub(super) fn settings_event() -> AgentEvent {
     AgentEvent::SessionSettingsApplied(SessionSettingsApplied {
       provider: Provider::Codex,
       session_id: Some("fixture".to_string()),
@@ -12234,7 +12270,7 @@ mod tests {
   }
 
   #[allow(clippy::too_many_arguments)]
-  fn tool_call(
+  pub(super) fn tool_call(
     provider: Provider,
     tool_name: &str,
     tool_call_id: &str,
@@ -12375,6 +12411,7 @@ mod tests {
 
   fn session_ref(id: &str, parent: Option<&str>, cwd: &str, timestamp: &str) -> SessionRef {
     SessionRef {
+      model_baseline: None,
       id: id.to_string(),
       title: None,
       preview: None,

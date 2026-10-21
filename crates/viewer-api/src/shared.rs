@@ -80,6 +80,18 @@ pub(super) async fn command(State(state): State<ApiState>, Json(mut share): Json
         "images_available": false, "max_images": 0, "max_image_bytes": 0,
         "max_total_image_bytes": 0, "image_mime_types": []
       })),
+      "get_session_model_status" | "list_session_models" => {
+        let status = json!({
+          "state": {"model":null,"source":"unknown","revision":"read_only"},
+          "can_select":false,"can_list":false,"reason":"This session share is read-only",
+          "runtime_generation":null,"updates_pi_default":false
+        });
+        Ok(if share.command == "list_session_models" {
+          json!({"status":status,"models":[]})
+        } else {
+          status
+        })
+      }
       "get_session_question_status" => Ok(json!({
         "available": false, "message": "This session share is read-only", "max_length": 0, "question_ids": []
       })),
@@ -170,6 +182,8 @@ fn prepare(share: &mut SharedRequest) -> Result<(), &'static str> {
     | "acknowledge_session_attention"
     | "get_session_input_status"
     | "get_session_question_status"
+    | "get_session_model_status"
+    | "list_session_models"
     | "load_session_image" => {
       let field = if share.command == "list_session_children" {
         "parent_session_key"
@@ -484,6 +498,8 @@ mod tests {
       "acknowledge_session_attention",
       "get_session_input_status",
       "get_session_question_status",
+      "get_session_model_status",
+      "list_session_models",
       "load_session_image",
     ] {
       assert!(prepare(&mut request(command, json!({"request":{"session_key":"allowed"}}))).is_ok());
@@ -497,6 +513,7 @@ mod tests {
       .is_err()
     );
     for command in [
+      "select_session_model",
       "submit_session_input",
       "submit_session_question_answers",
       "upload_image_chunk",

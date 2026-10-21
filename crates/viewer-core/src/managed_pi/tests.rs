@@ -39,6 +39,7 @@ pending = 0
 waiting = None
 prompt_count = 0
 state_count = 0
+model_id = 'text'
 
 def record(value):
     with (root / 'fake-log.jsonl').open('a') as log:
@@ -98,7 +99,7 @@ for line in sys.stdin:
         if mode == 'deferred' and (root / 'allow-persist').exists():
             persist()
         reported_id = '00000000-0000-4000-8000-000000000001' if mode == 'wrong_identity' else session_id
-        state = {'sessionId': reported_id, 'sessionFile': str(session_file), 'isStreaming': streaming, 'isCompacting': compacting, 'pendingMessageCount': pending, 'model': {'input': ['text', 'image'] if mode == 'vision' and not (root / 'text-only').exists() else ['text']}}
+        state = {'sessionId': reported_id, 'sessionFile': str(session_file), 'isStreaming': streaming, 'isCompacting': compacting, 'pendingMessageCount': pending, 'model': {'id': model_id, 'provider':'synthetic', 'name':model_id.title(), 'input': ['text', 'image'] if (mode == 'vision' or mode == 'model_controls' and model_id == 'vision') and not (root / 'text-only').exists() else ['text']}}
         if mode == 'idle_probe_start' and state_count >= 3 and not streaming:
             streaming = True
             record({'kind': 'idle_probe_work', 'pid': os.getpid()})
@@ -109,6 +110,19 @@ for line in sys.stdin:
             sys.stdout.flush()
         else:
             reply(command, data=state)
+    elif kind == 'get_available_models':
+        if mode == 'model_compaction_race':
+            compacting = True
+            emit({'type':'compaction_start'})
+        elif mode == 'model_retry_race':
+            streaming = True
+            emit({'type':'auto_retry_start'})
+        reply(command, data={'models': [{'id':'text', 'provider':'synthetic', 'name':'Text', 'input':['text'], 'headers':{'authorization':'secret'}}, {'id':'vision', 'provider':'synthetic', 'name':'Vision', 'input':['text','image']}]})
+    elif kind == 'set_model':
+        if (root / 'exit-model').exists():
+            sys.exit(28)
+        model_id = command['modelId']
+        reply(command, data={'id':model_id, 'provider':'synthetic', 'name':model_id.title(), 'input':['text','image'] if model_id == 'vision' else ['text']})
     elif kind == 'prompt':
         prompt_count += 1
         text = command['message']
@@ -212,6 +226,128 @@ if mode == 'ignore_eof':
     project: RegisteredProject,
     request: CreateProjectSessionRequest,
     session_id: String,
+  }
+
+  #[tokio::test]
+  async fn owned_model_controls_verify_catalog_generation_and_refresh_images_without_resuming() {
+    use crate::models::*;
+    let fixture = Fixture::new("model_controls", "handled");
+    fixture.create().await;
+    let key = fixture.idle().await.session_key.unwrap();
+    let status = fixture.manager.model_status(&key).await.unwrap().unwrap();
+    assert!(status.can_select && status.can_list && status.updates_pi_default);
+    assert_eq!(status.state.model.as_ref().unwrap().model_id, "text");
+    let choices = fixture.manager.list_models(&key).await.unwrap().unwrap();
+    assert_eq!(choices.status.state.revision, status.state.revision);
+    assert_eq!(choices.models.len(), 2);
+    assert!(!serde_json::to_string(&choices).unwrap().contains("secret"));
+    let mut selection = SelectSessionModelRequest {
+      session_key: key.clone(),
+      request_id: uuid::Uuid::new_v4().to_string(),
+      model_provider: Some("synthetic".into()),
+      model_id: "vision".into(),
+      expected_revision: status.state.revision,
+      runtime_generation: Some("stale-worker".into()),
+    };
+    assert_eq!(
+      fixture.manager.select_model(&selection).await.unwrap().status,
+      ModelSelectionStatus::NotApplied
+    );
+    assert_eq!(
+      fixture
+        .log()
+        .iter()
+        .filter(|value| value["type"] == "set_model")
+        .count(),
+      0
+    );
+    selection.runtime_generation = status.runtime_generation;
+    assert_eq!(
+      fixture.manager.select_model(&selection).await.unwrap().status,
+      ModelSelectionStatus::Applied
+    );
+    assert!(fixture.manager.input_status(&key).unwrap().unwrap().images_available);
+    assert_eq!(
+      fixture.manager.select_model(&selection).await.unwrap().status,
+      ModelSelectionStatus::NotApplied,
+      "stale revision cannot apply a second change"
+    );
+    fixture.manager.shutdown().await;
+    let launches = fixture.launches().len();
+    let status = fixture.manager.model_status(&key).await.unwrap().unwrap();
+    assert!(!status.can_select && !status.can_list);
+    assert!(
+      fixture
+        .manager
+        .list_models(&key)
+        .await
+        .unwrap()
+        .unwrap()
+        .models
+        .is_empty()
+    );
+    assert_eq!(fixture.launches().len(), launches);
+  }
+
+  #[tokio::test]
+  async fn model_worker_exit_releases_admission_gate_and_records_unknown_mutation() {
+    use crate::models::*;
+    let fixture = Fixture::new("model_controls", "handled");
+    fixture.create().await;
+    let key = fixture.idle().await.session_key.unwrap();
+    let status = fixture.manager.model_status(&key).await.unwrap().unwrap();
+    std::fs::write(fixture.folder().join("exit-model"), "").unwrap();
+    let result = tokio::time::timeout(
+      Duration::from_secs(3),
+      fixture.manager.select_model(&SelectSessionModelRequest {
+        session_key: key,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        model_provider: Some("synthetic".into()),
+        model_id: "vision".into(),
+        expected_revision: status.state.revision,
+        runtime_generation: status.runtime_generation,
+      }),
+    )
+    .await
+    .expect("model acknowledgement must not deadlock cleanup")
+    .unwrap();
+    assert_eq!(result.status, ModelSelectionStatus::Unknown);
+    fixture.manager.shutdown().await;
+  }
+
+  #[tokio::test]
+  async fn model_selection_rejects_observed_work_starting_after_native_idle_preflight() {
+    use crate::models::*;
+    for mode in ["model_compaction_race", "model_retry_race"] {
+      let fixture = Fixture::new(mode, "handled");
+      fixture.create().await;
+      let key = fixture.idle().await.session_key.unwrap();
+      let status = fixture.manager.model_status(&key).await.unwrap().unwrap();
+      assert!(status.can_select, "a ready idle worker can select models");
+      let result = fixture
+        .manager
+        .select_model(&SelectSessionModelRequest {
+          session_key: key.clone(),
+          request_id: uuid::Uuid::new_v4().to_string(),
+          model_provider: Some("synthetic".into()),
+          model_id: "vision".into(),
+          expected_revision: status.state.revision,
+          runtime_generation: status.runtime_generation,
+        })
+        .await
+        .unwrap();
+      assert_eq!(result.status, ModelSelectionStatus::NotApplied);
+      assert_eq!(
+        fixture
+          .log()
+          .iter()
+          .filter(|value| value["type"] == "set_model")
+          .count(),
+        0
+      );
+      assert!(!fixture.manager.model_status(&key).await.unwrap().unwrap().can_select);
+      fixture.manager.shutdown().await;
+    }
   }
 
   impl Fixture {

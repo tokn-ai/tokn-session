@@ -23,6 +23,11 @@ pub async fn forward(
   let mut url = config.local_url.clone();
   let request = match &grant.scope {
     GrantScope::All {} => {
+      if !(config.allow_control && grant.allow_control)
+        && let Some(value) = protocol::read_only_model_response(path, "This grant allows viewing only")
+      {
+        return json_response(value);
+      }
       if matches!(
         path,
         "/api/v1/get_session_input_status" | "/api/v1/get_session_question_status"
@@ -49,7 +54,8 @@ pub async fn forward(
       let command = path.strip_prefix("/api/v1/").ok_or("Route unavailable")?;
       if matches!(
         command,
-        "submit_session_input"
+        "select_session_model"
+          | "submit_session_input"
           | "submit_session_question_answers"
           | "retry_session_index"
           | "upload_image_chunk"
@@ -87,4 +93,13 @@ pub async fn forward(
     return Err("Local API redirects are forbidden".into());
   }
   Ok(response)
+}
+
+fn json_response(value: Value) -> Result<reqwest::Response, String> {
+  Ok(reqwest::Response::from(
+    axum::http::Response::builder()
+      .header("content-type", "application/json")
+      .body(serde_json::to_vec(&value).map_err(|_| "Could not encode model status")?)
+      .map_err(|_| "Could not encode model status")?,
+  ))
 }

@@ -26,6 +26,10 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod model_control;
+use model_control::ModelPending;
+pub(super) use model_control::{ModelOperation, ModelResult};
+
 const RPC_DEADLINE: Duration = Duration::from_secs(15);
 // Prompt preflight may legitimately await extension input or compaction before
 // acknowledgement. The actor continues reading events and accepting Stop.
@@ -35,6 +39,7 @@ const DIALOG_DEADLINE: Duration = Duration::from_secs(120);
 const MAX_TURN_ERROR_BYTES: usize = 2048;
 
 pub(super) enum Command {
+  Model(ModelOperation, oneshot::Sender<Result<ModelResult, DeliveryError>>),
   Prompt {
     request_id: String,
     text: String,
@@ -46,6 +51,7 @@ pub(super) enum Command {
 }
 
 enum PendingKind {
+  Model(ModelPending),
   State {
     initial: bool,
   },
@@ -110,12 +116,31 @@ pub(super) async fn run(
   let result = actor.run(&mut commands).await;
   commands.close();
   worker_state.send_replace(WorkerState::Closing(result.as_ref().err().cloned()));
+  // Model controls hold the admission gate through their correlated reply.
+  // Wake them before cleanup tries to acquire that same gate.
+  reject_queued_commands(&mut commands, "Pi stopped before receiving the message");
+  let model_requests: Vec<_> = actor
+    .pending
+    .iter()
+    .filter_map(|(id, pending)| matches!(pending.kind, PendingKind::Model(_)).then(|| id.clone()))
+    .collect();
+  for id in model_requests {
+    if let Some(Pending {
+      kind: PendingKind::Model(pending),
+      ..
+    }) = actor.pending.remove(&id)
+    {
+      pending.reject(
+        "Pi stopped before confirming the model request; refresh its current model",
+        true,
+      );
+    }
+  }
   // Wake startup waiters before acquiring their admission gate. All exits hold
   // it through cleanup, including failures and viewer shutdown.
   if actor.retirement.is_none() {
     actor.retirement = retirement_gate(&inner, &id).await;
   }
-  reject_queued_commands(&mut commands, "Pi stopped before receiving the message");
   // Pending deliveries are uncertain after writing, even when the subprocess
   // exits before its correlated response arrives.
   for (_, pending) in actor.pending.drain() {
@@ -133,6 +158,7 @@ pub(super) async fn run(
       PendingKind::Abort(reply) => {
         let _ = reply.send(Err("Pi stopped before acknowledging Stop".into()));
       }
+      PendingKind::Model(pending) => pending.reject("Pi stopped before confirming the model request", true),
       _ => {}
     }
   }
@@ -178,6 +204,7 @@ struct Actor {
   recent: HashMap<String, (String, Option<Result<Admission, DeliveryError>>)>,
   initial_prompt: Option<(String, Vec<ResolvedImage>)>,
   state: Option<RpcState>,
+  model_revision: u64,
   saw_settled: bool,
   checking_idle: bool,
   dialog_deadline: Option<Instant>,
@@ -296,6 +323,7 @@ impl Actor {
       recent: HashMap::new(),
       initial_prompt: prompt,
       state: None,
+      model_revision: 0,
       saw_settled: false,
       checking_idle: false,
       dialog_deadline: None,
@@ -353,6 +381,10 @@ impl Actor {
           self.idle_since = None;
           self.idle_probe = false;
           match command {
+          Some(Command::Model(operation, reply)) => {
+            if self.termination.is_cancelled() { let _ = reply.send(Err(DeliveryError::not_sent("Pi runtime is stopping"))); }
+            else { self.send("get_state", json!({"type":"get_state"}), PendingKind::Model(ModelPending::new(operation, reply))).await?; }
+          }
           Some(Command::Prompt {request_id, text, images, reply}) => {
             if self.termination.is_cancelled() || self.inner.upgrade().is_none_or(|inner| inner.shutting_down.load(std::sync::atomic::Ordering::Acquire)) {
               let _ = reply.send(Err(DeliveryError::not_sent("Managed Pi runtime is shutting down")));
@@ -431,6 +463,7 @@ impl Actor {
           .collect::<String>();
         let pending = self.pending.remove(id).expect("validated pending response");
         match pending.kind {
+          PendingKind::Model(pending) => self.model_response(pending, success, value.get("data"), &error).await?,
           PendingKind::State { initial } => {
             if !success {
               return Err(error);
@@ -629,6 +662,9 @@ impl Actor {
       if state.session_id != expected {
         return Err("Pi resumed a different session identity".into());
       }
+    }
+    if self.state.as_ref().is_none_or(|previous| previous.model != state.model) {
+      self.model_revision = self.model_revision.saturating_add(1);
     }
     if let Some(inner) = self.inner.upgrade() {
       if let Some(record) = inner
@@ -1119,6 +1155,7 @@ impl Actor {
 /// uncertainty would unnecessarily lock an editable draft after a failed check.
 fn reject_before_send(kind: PendingKind, message: &str) {
   match kind {
+    PendingKind::Model(pending) => pending.reject(message, false),
     PendingKind::ImagePreflight { reply, .. } | PendingKind::Prompt { reply: Some(reply), .. } => {
       let _ = reply.send(Err(DeliveryError::not_sent(message)));
     }
@@ -1184,6 +1221,9 @@ async fn retirement_gate(inner: &Weak<Inner>, id: &str) -> Option<OwnedMutexGuar
 fn reject_queued_commands(commands: &mut mpsc::Receiver<Command>, message: &str) {
   while let Ok(command) = commands.try_recv() {
     match command {
+      Command::Model(_, reply) => {
+        let _ = reply.send(Err(DeliveryError::not_sent(message)));
+      }
       Command::Prompt { reply, .. } => {
         let _ = reply.send(Err(DeliveryError::not_sent(message)));
       }

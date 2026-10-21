@@ -10,6 +10,14 @@ function activity(key: string, kind: string, overrides: Partial<EventSummary> = 
 }
 
 describe("activity folding", () => {
+  it("keeps model changes visible as independent boundaries between work groups", () => {
+    const change = { event_key: "model-change", type: "model_changed" } as EventSummary;
+    const events = [activity("before", "shell"), change, activity("after", "file_read")];
+    expect(groupActivity(events).map((group) => group.map((event) => event.event_key))).toEqual([["before"], ["model-change"], ["after"]]);
+    render(<ActivityGroup events={[change]}><span>Model switched</span></ActivityGroup>);
+    expect(screen.getByText("Model switched")).toBeVisible();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
   it("groups all activity between messages without crossing commentary boundaries", () => {
     const events = [activity("read", "file_read"), activity("shell", "shell"),
       {event_key: "commentary", type: "message"} as EventSummary,

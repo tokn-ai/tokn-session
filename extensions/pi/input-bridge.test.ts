@@ -10,7 +10,8 @@ import {
   type PiInputBridgeDescriptor,
   type PiInputBridgeResponse,
   type PiInputContent,
-  type PiExtensionContext
+  type PiExtensionContext,
+  type PiNativeModel
 } from "./input-bridge";
 
 interface TestHarness {
@@ -23,9 +24,10 @@ interface TestHarness {
     message: string | PiInputContent[];
     options?: { deliverAs?: "steer" | "followUp" };
   }>;
+  model_changes: PiNativeModel[];
 }
 
-async function makeHarness(root: string): Promise<TestHarness> {
+async function makeHarness(root: string, models?: PiNativeModel[]): Promise<TestHarness> {
   const sessionFile = join(root, "session.jsonl");
   const descriptorPath = join(root, "descriptor.json");
   const socketPath = join(root, "bridge.sock");
@@ -33,6 +35,7 @@ async function makeHarness(root: string): Promise<TestHarness> {
 
   let idle = true;
   const messages: TestHarness["messages"] = [];
+  const model_changes: PiNativeModel[] = [];
   const context: PiExtensionContext = {
     mode: "tui",
     isIdle: () => idle,
@@ -45,8 +48,10 @@ async function makeHarness(root: string): Promise<TestHarness> {
       setStatus: () => {}
     }
   };
+  if (models) { context.model = models[0]; context.modelRegistry = { getAvailable: () => models }; }
   const bridge = new PiInputBridge({
     api: {
+      ...(models ? { async setModel(model: PiNativeModel) { context.model = model; model_changes.push(model); return true; } } : {}),
       sendUserMessage(message, options) {
         messages.push({ message, options });
         idle = false;
@@ -68,7 +73,8 @@ async function makeHarness(root: string): Promise<TestHarness> {
     setIdle: (value) => {
       idle = value;
     },
-    messages
+    messages,
+    model_changes
   };
 }
 
@@ -95,6 +101,30 @@ function request(socketPath: string, value: unknown): Promise<PiInputBridgeRespo
 }
 
 describe("Pi input bridge", () => {
+  test("lists compact models and selects once only when idle with a current model revision", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tokn-pi-models-"));
+    const models = [{ id:"text", provider:"test", name:"Text", input:["text"], headers:{ authorization:"secret" } },
+      { id:"vision", provider:"test", name:"Vision", input:["text","image"] }];
+    const harness = await makeHarness(root, models);
+    const base = { protocol:1, token:"test-token", session_id:"session-1", session_file:harness.descriptor.session_file, instance_id:"instance-1" };
+    try {
+      const status = await request(harness.descriptor.socket_path, { ...base, type:"status", request_id:"status" });
+      if (status.type !== "ready") throw new Error("expected ready status");
+      const catalog = await request(harness.descriptor.socket_path, { ...base, type:"models", request_id:"models" });
+      expect(catalog).toMatchObject({ type:"models", models:[{ model:{ model_id:"text" }, supports_images:false }, { model:{ model_id:"vision" }, supports_images:true }] });
+      expect(JSON.stringify(catalog)).not.toContain("secret");
+      const selection = { ...base, type:"select_model", request_id:"select", expected_model_revision:status.model_revision, model_provider:"test", model_id:"vision" };
+      harness.setIdle(false);
+      await expect(request(harness.descriptor.socket_path, selection)).resolves.toMatchObject({ type:"error", code:"unsupported" });
+      harness.setIdle(true);
+      const selected = await request(harness.descriptor.socket_path, selection);
+      expect(selected).toMatchObject({ type:"model_selected", model:{ model_id:"vision" } });
+      await expect(request(harness.descriptor.socket_path, selection)).resolves.toEqual(selected);
+      expect(harness.model_changes).toHaveLength(1);
+      await expect(request(harness.descriptor.socket_path, { ...base, type:"status", request_id:"fresh" })).resolves.toMatchObject({ images_available:true });
+      await expect(request(harness.descriptor.socket_path, { ...selection, request_id:"stale", model_id:"text" })).resolves.toMatchObject({ type:"error", code:"request_conflict" });
+    } finally { await harness.bridge.stop(); await rm(root, { recursive:true, force:true }); }
+  });
   test("advertises current model images, sends image-only content, and binds ordered images to request IDs", async () => {
     const root = await mkdtemp(join(tmpdir(), "tokn-pi-input-images-"));
     const harness = await makeHarness(root);

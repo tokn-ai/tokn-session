@@ -133,7 +133,8 @@ impl ViewerService {
       (start, start > 0)
     };
     let identity = self.window_identity(&locator, &loaded, true)?;
-    let timeline = timeline_entries(&loaded.events);
+    let models = model_projection::ModelProjection::new(&loaded.events, loaded.reference.model_baseline.as_ref());
+    let timeline = timeline_entries_with_models(&loaded.events, &models);
     let entries: Vec<_> = timeline
       .iter()
       .filter(|entry| timeline_entry_start_source_event_index(entry).is_some_and(|index| index >= start))
@@ -147,12 +148,12 @@ impl ViewerService {
     let events = entries
       .iter()
       .map(|entry| {
-        identity.summary(timeline_entry_event_summary(
+        identity.summary(models.summary(timeline_entry_event_summary(
           entry,
           &loaded.events,
           &targets,
           &intermediate_usage,
-        ))
+        )))
       })
       .collect::<Vec<_>>();
     // Intermediate assistant messages and individual tool operations remain
@@ -167,12 +168,12 @@ impl ViewerService {
         .iter()
         .filter(|entry| timeline_entry_start_source_event_index(entry).is_some_and(|index| index >= start))
         .map(|entry| {
-          identity.summary(timeline_entry_event_summary(
+          identity.summary(models.summary(timeline_entry_event_summary(
             entry,
             &loaded.events,
             &targets,
             &intermediate_usage,
-          ))
+          )))
         })
         .collect()
     } else {
@@ -225,6 +226,7 @@ impl ViewerService {
     }
     Ok((
       EventPage {
+        current_model: models.state,
         total_events: events.len(),
         events,
         next_cursor: None,

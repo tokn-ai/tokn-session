@@ -329,6 +329,7 @@ impl RelaySubscription {
       native,
       loaded: LoadedSession {
         reference: SessionRef {
+          model_baseline: None,
           id: header.id,
           parent_session_id: header.parent_session_id,
           agent_path: header.agent_path,

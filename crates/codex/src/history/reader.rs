@@ -15,6 +15,8 @@ pub struct CodexHistoryReadStats {
   pub lineage_resolutions: u64,
   pub boundary_bytes_read: u64,
   pub boundary_rows_scanned: u64,
+  pub model_checkpoint_bytes_read: u64,
+  pub model_checkpoint_rows_scanned: u64,
 }
 
 /// Atomic normalized delta. A reset replaces the previous logical transcript.
@@ -41,6 +43,13 @@ pub struct CodexHistoryReader {
   state: Option<ReaderState>,
   stats: CodexHistoryReadStats,
   window_turns: Option<usize>,
+  model_checkpoint: Option<ModelCheckpoint>,
+}
+
+struct ModelCheckpoint {
+  source_start: u64,
+  versions: Vec<FileVersion>,
+  baseline: Option<tokn_session_core::ModelObservation>,
 }
 
 struct ReaderState {
@@ -101,6 +110,7 @@ impl CodexHistoryReader {
       state: None,
       stats: CodexHistoryReadStats::default(),
       window_turns: None,
+      model_checkpoint: None,
     }
   }
 
@@ -320,8 +330,26 @@ impl CodexHistoryReader {
     } else {
       0
     };
+    reference.model_baseline = if source_start == 0 {
+      None
+    } else if let Some(checkpoint) = self
+      .model_checkpoint
+      .as_ref()
+      .filter(|checkpoint| checkpoint.source_start == source_start && checkpoint.versions == versions)
+    {
+      checkpoint.baseline.clone()
+    } else {
+      let baseline = super::window::model_baseline(&mut files, &lengths, source_start, &mut self.stats)?;
+      self.model_checkpoint = Some(ModelCheckpoint {
+        source_start,
+        versions: versions.clone(),
+        baseline: baseline.clone(),
+      });
+      baseline
+    };
     let mut normalizer = CodexNormalizer::new_historical();
     let owner_events = normalizer.normalize(owner.clone());
+    normalizer.seed_model(reference.model_baseline.as_ref());
     let mut records = if source_start == 0 {
       vec![NormalizedRecord {
         record_id: format!("session:{}", reference.id),

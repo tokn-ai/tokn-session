@@ -428,6 +428,7 @@ pub struct SubmitSessionInputResponse {
 
 #[derive(Debug, Serialize)]
 pub struct EventPage {
+  pub current_model: crate::models::SessionModelState,
   pub events: Vec<EventSummary>,
   pub next_cursor: Option<String>,
   pub previous_cursor: Option<String>,
@@ -467,6 +468,8 @@ pub struct QuestionSelectionSummary {
 
 #[derive(Debug, Serialize)]
 pub struct EventSummary {
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub model_change: Option<ModelChangeSummary>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub images: Option<Vec<crate::images::MessageImageSummary>>,
   /// Recorded selections only; absent when no reply can be correlated safely.
@@ -512,6 +515,12 @@ pub struct EventSummary {
   /// activity's provider-native target ID resolves to a canonical direct child
   /// of the session being viewed.
   pub agent_activity: Option<AgentActivityCardSummary>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ModelChangeSummary {
+  pub previous: crate::models::ModelIdentity,
+  pub current: crate::models::ModelIdentity,
 }
 
 #[derive(Debug, Serialize)]

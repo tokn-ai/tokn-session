@@ -62,6 +62,34 @@ fn success(request: &Value, result: Value) -> Value {
   })
 }
 
+#[tokio::test]
+#[cfg(any(unix, windows))]
+async fn model_status_reads_the_real_owner_and_keeps_unverified_catalog_closed() {
+  let (mut client, server) = initialized_client(|mut stream| async move {
+    let request = read_frame(&mut stream).await.unwrap();
+    assert_eq!(request["method"], "thread-follower-read-model-settings");
+    assert_eq!(request["version"], 1);
+    assert_eq!(request["params"]["conversationId"], "session-model");
+    write_frame(
+      &mut stream,
+      &success(
+        &request,
+        json!({"settings":{"model":"test-model", "modelProvider":"custom", "reasoningEffort":"high"}}),
+      ),
+    )
+    .await;
+  })
+  .await;
+  let status = client.read_model_status("session-model").await.unwrap();
+  assert_eq!(status.state.model.unwrap().model_id, "test-model");
+  assert!(!status.can_list && !status.can_select);
+  assert_eq!(
+    status.runtime_generation.as_deref(),
+    Some("session-model:desktop-owner")
+  );
+  server.await.unwrap();
+}
+
 async fn write_frame(stream: &mut Box<dyn IpcStream>, value: &Value) {
   stream.write_all(&encode_frame(value).unwrap()).await.unwrap();
 }

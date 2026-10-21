@@ -19,6 +19,8 @@ import {
   type PiInputBridgeResponse,
   type PiInputDelivery,
   type PiInputContent,
+  type PiModelIdentity,
+  type PiModelChoice,
 } from "./lib/input-protocol";
 
 export {
@@ -71,11 +73,15 @@ export interface PiExtensionUi {
 
 export interface PiExtensionContext {
   mode: string;
-  model?: { input?: readonly string[] };
+  model?: PiNativeModel;
+  modelRegistry?: { getAvailable(): PiNativeModel[] };
   isIdle(): boolean;
+  hasPendingMessages?(): boolean;
   sessionManager: PiSessionManager;
   ui: PiExtensionUi;
 }
+
+export interface PiNativeModel { id?: string; provider?: string; name?: string; input?: readonly string[] }
 
 export interface PiExtensionApi {
   on(
@@ -90,10 +96,11 @@ export interface PiExtensionApi {
     content: string | PiInputContent[],
     options?: { deliverAs?: "steer" | "followUp" }
   ): void;
+  setModel?(model: PiNativeModel): Promise<boolean>;
 }
 
 export interface PiInputBridgeOptions {
-  api: Pick<PiExtensionApi, "sendUserMessage">;
+  api: Pick<PiExtensionApi, "sendUserMessage" | "setModel">;
   context: PiExtensionContext;
   descriptor_path?: string;
   socket_path?: string;
@@ -108,7 +115,7 @@ interface CachedAdmission {
 }
 
 export class PiInputBridge {
-  readonly #api: Pick<PiExtensionApi, "sendUserMessage">;
+  readonly #api: Pick<PiExtensionApi, "sendUserMessage" | "setModel">;
   readonly #context: PiExtensionContext;
   readonly #descriptorPathOverride: string | undefined;
   readonly #socketPathOverride: string | undefined;
@@ -120,6 +127,8 @@ export class PiInputBridge {
   #descriptorPath: string | undefined;
   readonly #connections = new Set<Socket>();
   readonly #admissions = new Map<string, CachedAdmission>();
+  readonly #modelAdmissions = new Map<string, { fingerprint: string; response: PiInputBridgeResponse }>();
+  #requests: Promise<void> = Promise.resolve();
 
   constructor(options: PiInputBridgeOptions) {
     this.#api = options.api;
@@ -204,6 +213,7 @@ export class PiInputBridge {
     this.#server = undefined;
     this.#descriptorPath = undefined;
     this.#admissions.clear();
+    this.#modelAdmissions.clear();
 
     if (descriptor) {
       try {
@@ -255,11 +265,13 @@ export class PiInputBridge {
   }
 
   #respond(socket: Socket, line: string): void {
-    const response = this.#handleRequest(line);
-    socket.end(encodeResponse(response));
+    this.#requests = this.#requests.then(async () => {
+      const response = await this.#handleRequest(line);
+      socket.end(encodeResponse(response));
+    }).catch(() => socket.destroy());
   }
 
-  #handleRequest(line: string): PiInputBridgeResponse {
+  async #handleRequest(line: string): Promise<PiInputBridgeResponse> {
     let value: unknown;
     try {
       value = JSON.parse(line);
@@ -286,6 +298,10 @@ export class PiInputBridge {
     if (!instanceId || instanceId !== descriptor.instance_id) {
       return errorResponse("instance_mismatch", "request targets a stale Pi process instance", requestId);
     }
+    const currentFile = this.#context.sessionManager.getSessionFile();
+    if (this.#context.sessionManager.getSessionId() !== descriptor.session_id || !currentFile || resolve(currentFile) !== descriptor.session_file) {
+      return errorResponse("session_mismatch", "the Pi process has switched to another session", requestId);
+    }
 
     if (value.type === "status") {
       return {
@@ -296,8 +312,54 @@ export class PiInputBridge {
         session_file: descriptor.session_file,
         instance_id: descriptor.instance_id,
         state: this.#context.isIdle() ? "idle" : "busy",
-        images_available: this.#context.model?.input?.includes("image") === true
+        images_available: this.#context.model?.input?.includes("image") === true,
+        model_controls_version: 1,
+        model: this.#modelIdentity(),
+        model_revision: this.#modelRevision(),
+        can_list_models: typeof this.#context.modelRegistry?.getAvailable === "function",
+        can_select_model: typeof this.#api.setModel === "function" && this.#idle()
       };
+    }
+
+    if ((value.type === "models" || value.type === "select_model") && requestId) {
+      const fingerprint = JSON.stringify([value.type, value.model_provider, value.model_id, value.expected_model_revision]);
+      const previous = this.#modelAdmissions.get(requestId);
+      if (previous) return previous.fingerprint === fingerprint ? previous.response
+        : errorResponse("request_conflict", "request_id was already used for another model change", requestId);
+      const registry = this.#context.modelRegistry;
+      if (!registry) return errorResponse("unsupported", "this Pi extension does not expose model discovery", requestId);
+      const nativeModels = registry.getAvailable();
+      if (nativeModels.length > 512) return errorResponse("unsupported", "model catalog exceeds 512 entries", requestId);
+      const models = nativeModels.map((model): PiModelChoice | null => {
+        const identity = modelIdentity(model);
+        return identity ? { model: identity, supports_images: model.input?.includes("image") === true } : null;
+      });
+      if (models.some((model) => !model)) return errorResponse("unsupported", "model catalog contains invalid identities", requestId);
+      if (value.type === "select_model") {
+        if (!this.#api.setModel) return errorResponse("unsupported", "this Pi extension cannot select models", requestId);
+        if (!this.#idle()) return errorResponse("unsupported", "wait for Pi and queued messages to finish before changing models", requestId);
+        if (value.expected_model_revision !== this.#modelRevision()) return errorResponse("request_conflict", "the active model changed; refresh and retry", requestId);
+        const selected = nativeModels.find((model) => model.provider === value.model_provider && model.id === value.model_id);
+        if (!selected) return errorResponse("unsupported", "the selected model is no longer available", requestId);
+        // Pi's native setter changes the session and Pi's saved default. It
+        // mutates before awaiting model_select hooks; do not retry on a throw.
+        try {
+          if (!await this.#api.setModel(selected)) return this.#rememberModelAdmission(requestId, fingerprint, errorResponse("unsupported", "Pi could not authenticate the selected model", requestId));
+        } catch (error) { return this.#rememberModelAdmission(requestId, fingerprint, errorResponse("bridge_unavailable", errorMessage(error), requestId)); }
+        const currentFile = this.#context.sessionManager.getSessionFile();
+        if (this.#descriptor !== descriptor || this.#context.sessionManager.getSessionId() !== descriptor.session_id
+          || !currentFile || resolve(currentFile) !== descriptor.session_file) {
+          return this.#rememberModelAdmission(requestId, fingerprint, errorResponse("bridge_unavailable", "Pi changed sessions before the model selection was confirmed", requestId));
+        }
+      }
+      const response: PiInputBridgeResponse = {
+        protocol: PROTOCOL_VERSION, type: value.type === "models" ? "models" : "model_selected",
+        request_id: requestId, session_id: descriptor.session_id, instance_id: descriptor.instance_id,
+        model: this.#modelIdentity(), model_revision: this.#modelRevision(), state: this.#idle() ? "idle" : "busy",
+        model_controls_version: 1, can_list_models: true, can_select_model: typeof this.#api.setModel === "function" && this.#idle(),
+        ...(value.type === "models" ? { models: models as PiModelChoice[] } : {})
+      };
+      return value.type === "select_model" ? this.#rememberModelAdmission(requestId, fingerprint, response) : response;
     }
 
     if (value.type !== "submit" || !requestId) {
@@ -359,6 +421,23 @@ export class PiInputBridge {
     return response;
   }
 
+  #idle(): boolean { return this.#context.isIdle() && !this.#context.hasPendingMessages?.(); }
+
+  #modelIdentity(): PiModelIdentity | null { return modelIdentity(this.#context.model); }
+
+  #modelRevision(): string {
+    return createHash("sha256").update(JSON.stringify(this.#modelIdentity())).digest("hex");
+  }
+
+  #rememberModelAdmission(request_id: string, fingerprint: string, response: PiInputBridgeResponse): PiInputBridgeResponse {
+    this.#modelAdmissions.set(request_id, { fingerprint, response });
+    if (this.#modelAdmissions.size > MAX_ADMISSION_CACHE_SIZE) {
+      const oldest = this.#modelAdmissions.keys().next().value;
+      if (oldest) this.#modelAdmissions.delete(oldest);
+    }
+    return response;
+  }
+
   #rememberAdmission(
     requestId: string,
     fingerprint: string,
@@ -400,6 +479,14 @@ export default function installPiInputBridge(pi: PiExtensionApi): void {
     bridge = undefined;
     context.ui.setStatus("tokn-input", undefined);
   });
+}
+
+function modelIdentity(model: PiNativeModel | undefined): PiModelIdentity | null {
+  const valid = (value: string | undefined): value is string => typeof value === "string" && value.length > 0
+    && Buffer.byteLength(value) <= 512 && value.trim() === value && !/[\u0000-\u001f\u007f-\u009f]/u.test(value);
+  return model && valid(model.id) && valid(model.provider)
+    ? { model_provider: model.provider, model_id: model.id, display_name: valid(model.name) ? model.name : null }
+    : null;
 }
 
 async function prepareSocketPath(socketPath: string): Promise<void> {

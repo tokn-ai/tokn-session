@@ -59,7 +59,8 @@ fn discovers_and_normalizes_historical_session_without_duplicate_streams() {
       .events
       .iter()
       .any(|event| matches!(event, AgentEvent::ProviderChanged(value)
-    if value.model_id.as_deref() == Some("deepseek-v4-flash") && value.thinking_level.as_deref() == Some("high")))
+    if value.model_id.as_deref() == Some("deepseek-v4-flash") && value.thinking_level.as_deref() == Some("high")
+      && value.model_origin == Some(tokn_session_core::ModelOrigin::Request)))
   );
   assert!(
     loaded

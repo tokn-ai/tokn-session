@@ -146,10 +146,43 @@ async fn command(
       | "get_session_question_status"
       | "submit_session_question_answers"
       | "upload_image_chunk"
+      | "get_session_model_status"
+      | "list_session_models"
+      | "select_session_model"
   ) {
     let _permit = permit;
     let request = payload.get("request").cloned().unwrap_or_else(|| json!({}));
     let response = match command.as_str() {
+      "get_session_model_status" => {
+        let request = serde_json::from_value(request).map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
+        serde_json::to_value(
+          state
+            .service
+            .get_session_model_status(request)
+            .await
+            .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
+        )
+      }
+      "list_session_models" => {
+        let request = serde_json::from_value(request).map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
+        serde_json::to_value(
+          state
+            .service
+            .list_session_models(request)
+            .await
+            .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
+        )
+      }
+      "select_session_model" => {
+        let request = serde_json::from_value(request).map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
+        serde_json::to_value(
+          state
+            .service
+            .select_session_model(request)
+            .await
+            .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
+        )
+      }
       "get_session_input_status" => {
         let request = serde_json::from_value(request).map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
         serde_json::to_value(

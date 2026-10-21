@@ -3,6 +3,7 @@
 //! The read-only provider remains the source of transcript data. This manager
 //! publishes only lifecycle metadata and never manufactures history rows.
 mod actor;
+mod models;
 mod persistence;
 mod protocol;
 mod runtimes;

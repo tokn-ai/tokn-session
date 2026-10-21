@@ -75,6 +75,22 @@ with at most four images, 8 MiB each, and 24 MiB in total. Private request frame
 are bounded to 34 MiB after base64 encoding; descriptors and replies remain small.
 Admission fingerprints include ordered image content hashes.
 
+Updated bridges advertise `model_controls_version: 1`, the current compact
+model identity, and a model revision in `ready`. A `models` request returns at
+most 512 configured choices, containing only display identity and image support;
+provider URLs, credentials, and native headers are not exposed. Catalog replies
+are bounded to 1 MiB by the viewer. Older bridges remain usable for input and do
+not advertise model controls.
+
+`select_model` takes `model_provider`, `model_id`, and the latest
+`expected_model_revision`, alongside the existing session/instance/token fields.
+It requires Pi to be idle without queued messages and validates the choice
+against the runtime's registry before calling Pi's native setter. The setter
+changes this session **and Pi's saved default model**. The bridge serializes
+control/input requests, caches selection receipts, and returns `model_selected`
+with the confirmed current model. A lost response or setter exception can mean
+the change occurred: refresh model status instead of automatically retrying.
+
 The bridge returns `ready`, `admitted`, or `error`. An `admitted` response has a
 `started`, `queued_follow_up`, or `queued_steer` disposition. It means the live
 Pi runtime accepted responsibility for the input, not that the user message is

@@ -1,6 +1,7 @@
 //! The public Hub boundary: owner authentication, host selection, and forwarding.
 use crate::{
   auth::AuthState,
+  protocol,
   store::{MachineRecord, NamespaceError, Store},
   tunnel::HubTunnels,
 };
@@ -345,6 +346,14 @@ async fn proxy(
       "This host requires the installed encrypted client",
     )
     .into_response();
+  }
+  if method == Method::POST
+    && state.tunnels.online(&host_id)
+    && state.tunnels.access(&host_id).as_deref() != Some("control")
+    && let Some(value) =
+      protocol::read_only_model_response(&format!("/api/v1/{command}"), "This host allows viewing only")
+  {
+    return Json(value).into_response();
   }
   // Advertising unavailable input also keeps the viewer's composer disabled.
   if method == Method::POST

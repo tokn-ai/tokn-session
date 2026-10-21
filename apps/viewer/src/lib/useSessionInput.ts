@@ -4,6 +4,7 @@ import { getSessionInputStatus, submitSessionInput } from "./tauri";
 import { errorMessage } from "./state";
 import type { SessionInputStatus } from "./types";
 import { captureTransport, viewerStorageScope } from "./transport";
+import type { SessionMutationLock } from "./sessionModels";
 import { addImageDrafts, disposeImageDrafts, imageLimits, releaseImageUploads, uploadImageDrafts, type ImageDraft, type ImageUploadReceipt } from "./imageDrafts";
 
 const DEFAULT_MAX_LENGTH = 16_384;
@@ -29,7 +30,7 @@ function emptyInput(): InputState {
 }
 
 /** Keep drafts and in-flight results attached to their original session. */
-export function useSessionInput(session_key: string | null, on_accepted?: (session_key: string) => void, refresh_key = 0) {
+export function useSessionInput(session_key: string | null, on_accepted?: (session_key: string) => void, refresh_key = 0, mutation_lock?: SessionMutationLock) {
   const scope = viewerStorageScope();
   const current_scope = useRef(scope);
   current_scope.current = scope;
@@ -90,18 +91,20 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
     const source_session = session_key;
     // Read the ref, not the render snapshot: two clicks in one frame must send once.
     const current = states.current.get(key);
-    if (!current || current.sending || current.delivery_uncertain || current.checking
+    if (!current || mutation_lock?.model_busy || mutation_lock?.model_uncertain || current.sending || current.delivery_uncertain || current.checking
       || !current.availability?.available || (!current.draft.trim() && !current.images.length)
       || (current.images.length > 0 && !imageLimits(current.availability))
       || Array.from(current.draft).length > current.availability.max_length) return;
     const text = current.draft;
     const images = current.images;
     const source_scope = scope;
+    if (mutation_lock) mutation_lock.send_busy = true;
     update(key, (value) => ({ ...value, sending: true, resuming: current.availability?.resume_required === true, notice: null }));
     let requestId: string;
     try {
       requestId = createUuid();
     } catch (error) {
+      if (mutation_lock) mutation_lock.send_busy = false;
       // Preparing an ID cannot deliver anything, so the draft remains editable.
       update(key, (value) => ({
         ...value, sending: false, resuming: false,
@@ -154,6 +157,7 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
         notice: withDetail(provider_attempted ? UNCONFIRMED_MESSAGE : "Message was not sent. Could not upload images.", errorMessage(error)),
       }));
     } finally {
+      if (mutation_lock) mutation_lock.send_busy = false;
       unlisten?.();
       // Retained provider images survive release. Unused uploads are removed
       // after every outcome, including a host switch before provider input.

@@ -29,6 +29,10 @@ pub struct SessionHeader {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionRef {
+  /// Model immediately before a retained history window; absent for a full
+  /// transcript. This checkpoint is state, never a synthetic history record.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub model_baseline: Option<crate::ModelObservation>,
   pub id: String,
   pub parent_session_id: Option<String>,
   pub agent_path: Option<String>,

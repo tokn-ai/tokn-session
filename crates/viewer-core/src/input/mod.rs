@@ -1,7 +1,7 @@
 //! Native live-session input shared by desktop and HTTP clients.
 
 pub(crate) mod codex;
-mod pi;
+pub(crate) mod pi;
 
 use crate::images::ResolvedImage;
 use crate::model::{InputDeliveryStatus, SubmitSessionInputRequest, SubmitSessionInputResponse, ViewerProvider};
@@ -167,7 +167,34 @@ struct RecordedRequest {
 #[derive(Clone, Default)]
 pub(crate) struct InputBroker(Arc<Mutex<RequestState>>);
 
+pub(crate) struct InputControlReservation {
+  state: Arc<Mutex<RequestState>>,
+  identity: String,
+}
+
+impl Drop for InputControlReservation {
+  fn drop(&mut self) {
+    self
+      .state
+      .lock()
+      .unwrap_or_else(|error| error.into_inner())
+      .in_flight
+      .remove(&self.identity);
+  }
+}
+
 impl InputBroker {
+  pub(crate) fn reserve_control(&self, target: &InputTarget) -> Result<InputControlReservation, String> {
+    let identity = target.identity();
+    let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
+    if !state.in_flight.insert(identity.clone()) {
+      return Err("A message or model change is already pending for this session".into());
+    }
+    Ok(InputControlReservation {
+      state: self.0.clone(),
+      identity,
+    })
+  }
   pub async fn submit_images(
     &self,
     target: InputTarget,
@@ -241,7 +268,7 @@ impl InputBroker {
       if state.in_flight.contains(&request.session_key) {
         return response(
           InputDeliveryStatus::NotSent,
-          "A message is already being sent to this session.",
+          "A message or model change is already pending for this session.",
         );
       }
       while state.recent.len() >= MAX_RECENT_REQUESTS {

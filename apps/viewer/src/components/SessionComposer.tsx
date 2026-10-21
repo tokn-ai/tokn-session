@@ -4,13 +4,18 @@ import { SendIcon } from "./Icons";
 import { useSessionInput } from "../lib/useSessionInput";
 import type { SessionSummary } from "../lib/types";
 import { providerLabel } from "../lib/state";
+import type { SessionMutationLock } from "../lib/sessionModels";
+import type { SessionModelController } from "../lib/useSessionModel";
+import { SessionModelPicker } from "./SessionModelPicker";
 
-export function SessionComposer({ session, on_accepted, input_refresh_key }: {
+export function SessionComposer({ session, on_accepted, input_refresh_key, model, mutation_lock }: {
   session: SessionSummary | null;
   on_accepted?: (session_key: string) => void;
   input_refresh_key?: number;
+  model?: SessionModelController;
+  mutation_lock?: SessionMutationLock;
 }) {
-  const input = useSessionInput(session?.session_key ?? null, on_accepted, input_refresh_key);
+  const input = useSessionInput(session?.session_key ?? null, on_accepted, input_refresh_key, mutation_lock);
   const inputId = useId();
   const textarea = useRef<HTMLTextAreaElement>(null);
   const [focused_session, setFocusedSession] = useState<string | null>(null);
@@ -31,7 +36,7 @@ export function SessionComposer({ session, on_accepted, input_refresh_key }: {
   if (!session) return null;
 
   const disabled = input.checking || !input.availability?.available
-    || input.sending || input.delivery_uncertain;
+    || input.sending || input.delivery_uncertain || model?.changing === true || model?.uncertain === true;
   const overLimit = input.length > input.max_length;
 
   return (
@@ -43,7 +48,8 @@ export function SessionComposer({ session, on_accepted, input_refresh_key }: {
       onDragOver={(event) => { if (!disabled && input.image_limits && event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
       onDrop={(event) => { if (!disabled && input.image_limits) imageDrop(event, input.addImages); }}
       onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget)) setFocusedSession(null);
+        const in_model_panel = event.relatedTarget instanceof Element && event.relatedTarget.closest(".session-model__panel");
+        if (!event.currentTarget.contains(event.relatedTarget) && !in_model_panel) setFocusedSession(null);
       }}
       onSubmit={(event) => {
         event.preventDefault();
@@ -75,11 +81,12 @@ export function SessionComposer({ session, on_accepted, input_refresh_key }: {
           />
           <ImageAttachmentPicker image_count={input.images.length} limits={input.image_limits} disabled={disabled} on_add={input.addImages} />
           <div className="session-composer__footer">
-            <span className="session-composer__provider">{providerLabel(session.provider)}</span>
+            {model ? <SessionModelPicker key={session.session_key} model={model} provider={providerLabel(session.provider)} input_busy={input.sending || input.delivery_uncertain} />
+              : <span className="session-composer__provider">{providerLabel(session.provider)}</span>}
             <button
               aria-label={input.sending ? input.resuming ? "Resuming Pi…" : "Sending…" : "Send"}
               className="session-composer__send"
-              disabled={!input.can_send}
+              disabled={!input.can_send || model?.changing || model?.uncertain}
               title="Send message (⌘ / Ctrl + Enter)"
               type="submit"
             >
@@ -106,7 +113,10 @@ export function SessionComposer({ session, on_accepted, input_refresh_key }: {
             }} type="button">Edit message</button>
           ) : null}
           {!input.checking && !input.availability?.available ? (
-            <button className="text-button" onClick={input.retryAvailability} type="button">
+            <button className="text-button" onClick={() => {
+              input.retryAvailability();
+              if (model) void model.refresh();
+            }} type="button">
               Retry availability
             </button>
           ) : null}

@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use super::{Admission, DeliveryError, InputTarget};
 use crate::images::ResolvedImage;
+use crate::models::{ModelIdentity, SessionModelState, SessionModelStatus, valid_identity};
 
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -34,6 +35,11 @@ struct DesktopClient {
 pub(super) async fn status(_target: &InputTarget) -> Result<String, DeliveryError> {
   DesktopClient::connect(&desktop_endpoint()?, REQUEST_TIMEOUT).await?;
   Ok("Codex Desktop is available. Open this session in Codex Desktop to receive messages.".to_owned())
+}
+
+pub(crate) async fn model_status(target: &InputTarget) -> Result<SessionModelStatus, DeliveryError> {
+  let mut client = DesktopClient::connect(&desktop_endpoint()?, REQUEST_TIMEOUT).await?;
+  client.read_model_status(&target.session_id).await
 }
 
 pub(super) async fn submit_images(
@@ -74,6 +80,41 @@ fn desktop_endpoint() -> Result<PathBuf, DeliveryError> {
 }
 
 impl DesktopClient {
+  async fn read_model_status(&mut self, session_id: &str) -> Result<SessionModelStatus, DeliveryError> {
+    let id = Uuid::new_v4().to_string();
+    let response = self
+      .request(
+        json!({
+          "type":"request", "requestId":id, "sourceClientId":self.client_id,
+          "version":1, "method":"thread-follower-read-model-settings",
+          "params":{"conversationId":session_id}, "timeoutMs":self.request_timeout.as_millis() as u64
+        }),
+        &id,
+        "thread-follower-read-model-settings",
+        false,
+      )
+      .await?;
+    let settings = &response["result"]["settings"];
+    let model_id = settings["model"]
+      .as_str()
+      .filter(|value| valid_identity(value))
+      .ok_or_else(|| DeliveryError::not_sent("Codex Desktop has no live model state for this session"))?;
+    let owner = response["handledByClientId"]
+      .as_str()
+      .filter(|value| valid_identity(value))
+      .ok_or_else(|| DeliveryError::not_sent("Codex Desktop returned no verified thread owner"))?;
+    let generation = format!("{session_id}:{owner}");
+    Ok(SessionModelStatus {
+      state: SessionModelState::live(Some(ModelIdentity {
+        model_provider: settings["modelProvider"].as_str().filter(|value| valid_identity(value)).map(str::to_owned),
+        model_id: model_id.to_owned(), display_name: None,
+      }), &generation),
+      can_select: false, can_list: false,
+      reason: Some("Codex Desktop does not expose a verified model catalog through its input connection. Change models in Codex Desktop.".into()),
+      runtime_generation: Some(generation), updates_pi_default: false,
+    })
+  }
+
   async fn connect(endpoint: &std::path::Path, request_timeout: Duration) -> Result<Self, DeliveryError> {
     timeout(request_timeout, Self::connect_and_initialize(endpoint, request_timeout))
       .await

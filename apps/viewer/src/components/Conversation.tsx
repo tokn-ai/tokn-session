@@ -1,5 +1,8 @@
 import type { ExpandedActivityState } from "../lib/types";
-import { useLayoutEffect, type ReactNode } from "react";
+import { useLayoutEffect, useMemo, type ReactNode } from "react";
+import { useSessionModel } from "../lib/useSessionModel";
+import { modelLabel, type SessionMutationLock } from "../lib/sessionModels";
+import { viewerStorageScope } from "../lib/transport";
 import { readingEventKey } from "../lib/readingPosition";
 import { useTimelineScroll } from "../lib/useTimelineScroll";
 import { useViewerPreferences } from "../lib/viewerPreferences";
@@ -10,6 +13,7 @@ import type {
   OutstandingQuestion,
   SessionHistoryStatus,
   SessionSummary,
+  SessionModelState,
   TrajectoryEventPageState,
 } from "../lib/types";
 import {
@@ -26,6 +30,7 @@ import { LoadingRows, StateView } from "./StateView";
 import { SessionComposer } from "./SessionComposer";
 
 interface ConversationProps {
+  current_model?: SessionModelState;
   managed_controls?: ReactNode;
   input_refresh_key?: number;
   outstanding_questions?: OutstandingQuestion[];
@@ -78,6 +83,7 @@ interface ConversationProps {
 }
 
 export function Conversation({
+  current_model,
   managed_controls,
   input_refresh_key,
   outstanding_questions = [],
@@ -128,6 +134,9 @@ export function Conversation({
   on_retry,
   on_retry_expanded_detail,
 }: ConversationProps) {
+  const scope = viewerStorageScope();
+  const mutation_lock = useMemo<SessionMutationLock>(() => ({ send_busy: false, model_busy: false }), [scope, session?.session_key]);
+  const model = useSessionModel(session?.session_key ?? null, current_model, mutation_lock, session?.is_running, input_refresh_key);
   const { preferences, updatePreferences } = useViewerPreferences();
   const hideLifecycle = !preferences.show_lifecycle;
   const visibleEvents = hideLifecycle ? events.filter((event) => !isBookkeepingEvent(event)) : events;
@@ -190,6 +199,9 @@ export function Conversation({
               <span className="provider-badge" data-provider={session.provider}>
                 {providerLabel(session.provider)}
               </span>
+              {model.state?.model ? <span className="conversation__model" title={`${model.state.model.model_provider ?? session.provider} · ${model.state.model.model_id}`}>
+                {modelLabel(model.state.model)}{model.state.source === "recorded" ? " · Recorded" : model.state.source === "catalog" ? " · Catalog" : ""}
+              </span> : null}
             </div>
             <details className="conversation__metadata" key={session.session_key}>
               <summary>
@@ -452,7 +464,8 @@ export function Conversation({
           </button>
         ) : null}
       </div>
-      <SessionComposer session={session} on_accepted={on_input_accepted} input_refresh_key={input_refresh_key} />
+      <SessionComposer session={session} on_accepted={on_input_accepted} model={model} mutation_lock={mutation_lock}
+        input_refresh_key={(input_refresh_key ?? 0) + model.input_revision} />
     </main>
   );
 }

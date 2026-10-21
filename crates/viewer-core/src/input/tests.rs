@@ -31,6 +31,32 @@ fn delivery_identity_uses_the_resolved_owner_not_the_client_key() {
 }
 
 #[tokio::test]
+async fn model_control_reservation_excludes_message_admission_and_releases_on_drop() {
+  let broker = InputBroker::default();
+  let target = InputTarget {
+    provider: ViewerProvider::Pi,
+    session_id: "pi-session".into(),
+    session_file: "/session.jsonl".into(),
+  };
+  let reservation = broker.reserve_control(&target).unwrap();
+  assert!(broker.reserve_control(&target).is_err());
+  let blocked = broker
+    .submit_custom(&target, request("hello"), async {
+      panic!("must not deliver during a model change")
+    })
+    .await;
+  assert_eq!(blocked.status, InputDeliveryStatus::NotSent);
+  drop(reservation);
+  assert_eq!(
+    broker
+      .submit_custom(&target, request("hello"), async { Ok(Admission::Started) })
+      .await
+      .status,
+    InputDeliveryStatus::Accepted
+  );
+}
+
+#[tokio::test]
 async fn repeated_requests_deliver_once_and_reject_conflicting_payloads() {
   let broker = InputBroker::default();
   let request = request("hello");

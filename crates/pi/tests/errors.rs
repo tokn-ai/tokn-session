@@ -21,6 +21,17 @@ fn normalize_record(native: Value) -> Vec<AgentEvent> {
   normalizer.normalize(serde_json::from_value(native).unwrap())
 }
 
+fn assert_model_request(event: &AgentEvent, native: &Value) {
+  let AgentEvent::ProviderChanged(model) = event else {
+    panic!("expected recorded request model")
+  };
+  assert_eq!(model.model_origin, Some(tokn_session_core::ModelOrigin::Request));
+  assert_eq!(model.model_provider.as_deref(), native["message"]["provider"].as_str());
+  assert_eq!(model.model_id.as_deref(), native["message"]["model"].as_str());
+  assert_eq!(model.native_id.as_deref(), native["id"].as_str());
+  assert_eq!(model.native_parent_id.as_deref(), native["parentId"].as_str());
+}
+
 #[test]
 fn connection_errors_remain_visible_in_history_and_incremental_normalization() {
   let fixture = include_str!("fixtures/assistant_errors.jsonl");
@@ -47,11 +58,19 @@ fn connection_errors_remain_visible_in_history_and_incremental_normalization() {
     }
     let events = incremental.normalize(decoded);
     if index >= 2 {
+      let diagnostic_events = if index == 2 {
+        assert_model_request(&events[0], &native);
+        &events[1..]
+      } else {
+        // Repeated retries keep their own diagnostics without repeating the
+        // same model observation before every failed response.
+        &events[..]
+      };
       let [
         AgentEvent::Error(error),
         AgentEvent::Metadata(diagnostic),
         AgentEvent::Usage(usage),
-      ] = &events[..]
+      ] = diagnostic_events
       else {
         panic!("failed empty assistant must retain error, correlation, and usage: {events:?}")
       };
@@ -96,9 +115,10 @@ fn failed_response_without_usage_retains_the_exact_native_message() {
     "role":"assistant", "content":[], "provider":"zai", "model":"glm-5.2",
     "stopReason":"error", "errorMessage":"Connection error.", "diagnostics":{"retry":4},
   }));
-  let [AgentEvent::Error(error), AgentEvent::Metadata(diagnostic)] = &events[..] else {
+  let [model, AgentEvent::Error(error), AgentEvent::Metadata(diagnostic)] = &events[..] else {
     panic!("expected visible error and native diagnostic")
   };
+  assert_model_request(model, &native);
   assert_eq!(error.message, "Connection error.");
   assert_eq!(error.native.as_ref(), Some(&native));
   assert_eq!(diagnostic.native, native);
@@ -532,9 +552,8 @@ fn redacted_thinking_is_withheld_from_failure_and_cancellation_native_payloads()
       assert_eq!(payload["message"]["content"][2], native["message"]["content"][2]);
       assert_eq!(payload["message"]["content"][3], native["message"]["content"][3]);
     }
-    assert!(
-      matches!(events.first(), Some(AgentEvent::Reasoning(event)) if event.redacted == Some(true) && event.text.is_none())
-    );
+    assert_model_request(&events[0], &native);
+    assert!(matches!(&events[1], AgentEvent::Reasoning(event) if event.redacted == Some(true) && event.text.is_none()));
     assert!(matches!(events.last(), Some(AgentEvent::Usage(event)) if event.total_tokens == Some(6)));
   }
 }

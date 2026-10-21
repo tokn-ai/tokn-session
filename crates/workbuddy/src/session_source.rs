@@ -31,6 +31,7 @@ impl WorkBuddySessionSource {
         None
       };
       sessions.push(SessionRef {
+        model_baseline: None,
         id: header.id,
         parent_session_id: None,
         agent_path: None,
@@ -59,6 +60,7 @@ impl WorkBuddySessionSource {
       .into_iter()
       .map(|header| {
         Ok(SessionRef {
+          model_baseline: None,
           id: header.id,
           parent_session_id: None,
           agent_path: None,
@@ -255,6 +257,7 @@ impl WorkBuddySessionSource {
       .or(summary.updated_at);
     let model = catalog.as_ref().and_then(|row| row.model.as_deref());
     let reference = SessionRef {
+      model_baseline: None,
       id: summary.id.clone(),
       parent_session_id: None,
       agent_path: None,

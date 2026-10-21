@@ -113,6 +113,8 @@ pub struct ProviderChanged {
   pub native_parent_id: Option<String>,
   pub model_provider: Option<String>,
   pub model_id: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub model_origin: Option<crate::ModelOrigin>,
   pub thinking_level: Option<String>,
   pub timestamp: Option<String>,
 }

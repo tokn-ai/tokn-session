@@ -115,7 +115,7 @@ fn classify(summary: &Value) -> (&'static str, UpdateLevel) {
       },
     ),
     "question_reply" => ("user_message", UpdateLevel::Final),
-    "question_request" | "error" => ("notification", UpdateLevel::Final),
+    "question_request" | "error" | "model_changed" => ("notification", UpdateLevel::Final),
     "tool_call" | "trajectory" | "activity_group" => ("tool_summary", UpdateLevel::Steps),
     _ => ("notification", UpdateLevel::Steps),
   }
@@ -754,6 +754,46 @@ mod tests {
 
   fn page(events: Vec<Value>, questions: Vec<Value>) -> Value {
     json!({"events":events,"total_events":0,"outstanding_questions":questions,"previous_cursor":null,"next_cursor":null,"history_status":"complete","attention_revision":null,"is_running":false})
+  }
+
+  #[test]
+  fn genuine_model_separators_and_context_are_retained_at_every_delivery_level() {
+    let model = json!({"model":{"model_provider":"test","model_id":"new","display_name":null},"source":"recorded","revision":"new"});
+    for level in [
+      UpdateLevel::Final,
+      UpdateLevel::Messages,
+      UpdateLevel::Steps,
+      UpdateLevel::Details,
+      UpdateLevel::All,
+    ] {
+      for scoped in [false, true] {
+        let mut subscription = subscription(level);
+        if scoped {
+          subscription.request.scope = Some(UpdateScope {
+            history: HistoryScope::Retained,
+            ..Default::default()
+          });
+        }
+        let mut page = page(
+          vec![json!({"event_key":"change","type":"model_changed","summary":"old → new","is_bookkeeping":false})],
+          vec![],
+        );
+        page["current_model"] = model.clone();
+        let semantic = page["events"].as_array().unwrap().clone();
+        let projected = subscription.update(page, semantic, Vec::new(), true, None);
+        assert!(
+          projected
+            .items
+            .iter()
+            .any(|item| item["summary"]["type"] == "model_changed"
+              && item["kind"] == "notification"
+              && item["level"] == "final"),
+          "{level:?}: {:?}",
+          projected.items
+        );
+        assert_eq!(projected.state["current_model"], model);
+      }
+    }
   }
 
   #[test]

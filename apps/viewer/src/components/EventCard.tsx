@@ -27,6 +27,7 @@ import {
 } from "./Icons";
 import { DeferredActivityGroup } from "./DeferredActivityGroup";
 import { ActivityGroup, groupActivity } from "./ActivityGroup";
+import { modelChangeLabels } from "../lib/sessionModels";
 import { ShellOutputSection } from "./ShellOutputSection";
 import { MessageImages } from "./MessageImages";
 import { toolOutputImages } from "../lib/toolOutputImages";
@@ -823,6 +824,15 @@ export function EventCard({
         selected_event_key={selected_event_key}
       />
     );
+  }
+
+  if (event.type === "model_changed" && event.model_change) {
+    const labels = modelChangeLabels(event.model_change.previous, event.model_change.current);
+    return <div className="model-change" role="separator" aria-label={`Model changed to ${labels.current}`}>
+      <span className="model-change__label" title={`Previously ${labels.previous}`}>
+        Switched to {labels.current}
+      </span>
+    </div>;
   }
 
   if (isMessage(event) || event.type === "question_reply") {
