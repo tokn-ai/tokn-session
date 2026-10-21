@@ -42,8 +42,8 @@ impl ViewerService {
               session_key: session_key.clone(),
             })
             .await?;
-          if !status.available || !status.images_available {
-            return Err("Image input is unavailable for this session or model".into());
+          if !status.available || !status.images_stageable {
+            return Err("Image staging is unavailable for this session".into());
           }
         } else {
           // Capability discovery can involve native IPC. Check it once at

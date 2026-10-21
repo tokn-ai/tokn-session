@@ -35,7 +35,32 @@ export interface PiInputImageContent {
 
 export type PiInputContent = PiInputTextContent | PiInputImageContent;
 
+export interface PiModelIdentity {
+  model_provider: string | null;
+  model_id: string;
+  display_name: string | null;
+}
+
+export interface PiModelChoice { model: PiModelIdentity; supports_images: boolean }
+
+export interface PiMessageModelSelection {
+  model_provider: string | null;
+  model_id: string;
+  expected_revision: string;
+  expected_model_revision: string;
+  runtime_generation: string | null;
+}
+
+export interface PiMessageModelResult {
+  outcome: "unchanged" | "applied" | "ignored_while_running";
+  model: PiModelIdentity | null;
+  model_revision: string;
+}
+
 export type PiInputBridgeRequest =
+  | { protocol: typeof PI_INPUT_PROTOCOL_VERSION; type: "models" | "select_model"; request_id: string;
+      token: string; session_id: string; session_file: string; instance_id: string;
+      model_provider?: string; model_id?: string; expected_model_revision?: string }
   | {
       protocol: typeof PI_INPUT_PROTOCOL_VERSION;
       type: "status";
@@ -55,6 +80,7 @@ export type PiInputBridgeRequest =
       instance_id: string;
       delivery: PiInputDelivery;
       content: PiInputContent[];
+      model_selection?: PiMessageModelSelection;
     };
 
 export type PiInputBridgeResponse =
@@ -67,7 +93,17 @@ export type PiInputBridgeResponse =
       instance_id: string;
       state: "idle" | "busy";
       images_available?: boolean;
+      model_controls_version?: 1;
+      model_input_version?: 1;
+      model?: PiModelIdentity | null;
+      model_revision?: string;
+      can_list_models?: boolean;
+      can_select_model?: boolean;
     }
+  | { protocol: typeof PI_INPUT_PROTOCOL_VERSION; type: "models" | "model_selected"; request_id: string;
+      session_id: string; instance_id: string; model: PiModelIdentity | null; model_revision: string;
+      state: "idle" | "busy"; models?: PiModelChoice[];
+      model_controls_version: 1; model_input_version?: 1; can_list_models: boolean; can_select_model: boolean }
   | {
       protocol: typeof PI_INPUT_PROTOCOL_VERSION;
       type: "admitted";
@@ -75,6 +111,7 @@ export type PiInputBridgeResponse =
       session_id: string;
       instance_id: string;
       disposition: "started" | "queued_follow_up" | "queued_steer";
+      model_result?: PiMessageModelResult;
     }
   | {
       protocol: typeof PI_INPUT_PROTOCOL_VERSION;
@@ -90,6 +127,8 @@ export type PiInputBridgeResponse =
         | "unauthorized"
         | "unsupported";
       message: string;
+      may_have_been_sent?: boolean;
+      model_result?: PiMessageModelResult;
     };
 
 export function descriptorPathForSession(sessionFile: string): string {

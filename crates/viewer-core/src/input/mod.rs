@@ -1,10 +1,11 @@
 //! Native live-session input shared by desktop and HTTP clients.
 
 pub(crate) mod codex;
-mod pi;
+pub(crate) mod pi;
 
 use crate::images::ResolvedImage;
 use crate::model::{InputDeliveryStatus, SubmitSessionInputRequest, SubmitSessionInputResponse, ViewerProvider};
+use crate::models::MessageModelResult;
 use sha2::{Digest, Sha256};
 use std::{
   collections::{HashMap, HashSet, VecDeque},
@@ -39,6 +40,7 @@ impl InputTarget {
 pub(crate) struct DeliveryError {
   pub message: String,
   pub may_have_been_sent: bool,
+  pub model_result: Option<MessageModelResult>,
 }
 
 impl DeliveryError {
@@ -46,6 +48,7 @@ impl DeliveryError {
     Self {
       message: message.into(),
       may_have_been_sent: false,
+      model_result: None,
     }
   }
 
@@ -53,7 +56,13 @@ impl DeliveryError {
     Self {
       message: message.into(),
       may_have_been_sent: true,
+      model_result: None,
     }
+  }
+
+  pub(crate) fn with_model_result(mut self, result: MessageModelResult) -> Self {
+    self.model_result = Some(result);
+    self
   }
 }
 
@@ -62,6 +71,17 @@ pub(crate) enum Admission {
   Accepted,
   Started,
   QueuedFollowUp,
+  Steered,
+  WithModel {
+    disposition: ModelInputDisposition,
+    result: MessageModelResult,
+  },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ModelInputDisposition {
+  Started,
+  Steered,
 }
 
 #[derive(Clone, Debug)]
@@ -100,8 +120,15 @@ async fn deliver(
     ));
   }
   match target.provider {
-    ViewerProvider::Codex => codex::submit_images(&target, &request.request_id, &request.text, &images).await,
-    ViewerProvider::Pi => pi::submit_images(&target, &request.request_id, &request.text, &images).await,
+    ViewerProvider::Codex => {
+      if request.model_selection.is_some() {
+        return Err(DeliveryError::not_sent(
+          "Codex model selection is unavailable without a verified Desktop catalog",
+        ));
+      }
+      codex::submit_images(&target, &request.request_id, &request.text, &images).await
+    }
+    ViewerProvider::Pi => pi::submit_model_images(&target, &request, &images).await,
     _ => Err(DeliveryError::not_sent(
       "Message input is not available for this provider yet.",
     )),
@@ -151,6 +178,14 @@ pub(crate) fn message_fingerprint(text: &str, image_ids: &[String]) -> [u8; 32] 
   Sha256::digest(serde_json::to_vec(&(text, image_ids)).expect("string message fingerprint")).into()
 }
 
+fn input_fingerprint(request: &SubmitSessionInputRequest) -> [u8; 32] {
+  let Some(selection) = &request.model_selection else {
+    return message_fingerprint(&request.text, &request.image_ids);
+  };
+  Sha256::digest(serde_json::to_vec(&(&request.text, &request.image_ids, selection)).expect("message fingerprint"))
+    .into()
+}
+
 #[derive(Default)]
 struct RequestState {
   recent: HashMap<String, RecordedRequest>,
@@ -188,12 +223,13 @@ impl InputBroker {
   ) -> Option<SubmitSessionInputResponse> {
     let state = self.0.lock().unwrap_or_else(|error| error.into_inner());
     let previous = state.recent.get(&request.request_id)?;
-    let hash: [u8; 32] = message_fingerprint(&request.text, &request.image_ids);
+    let hash = input_fingerprint(request);
     Some(
       if previous.session_key == target.identity() && previous.text_hash == hash {
         previous.response.clone()
       } else {
         SubmitSessionInputResponse {
+          model_result: None,
           request_id: request.request_id.clone(),
           status: InputDeliveryStatus::NotSent,
           message: "This request ID was already used for a different message.".into(),
@@ -219,9 +255,10 @@ impl InputBroker {
   where
     F: Future<Output = Result<Admission, DeliveryError>> + Send + 'static,
   {
-    let text_hash: [u8; 32] = message_fingerprint(&request.text, &request.image_ids);
+    let text_hash = input_fingerprint(&request);
     let request_id = request.request_id.clone();
     let response = |status, message: &str| SubmitSessionInputResponse {
+      model_result: None,
       request_id: request_id.clone(),
       status,
       message: message.into(),
@@ -241,7 +278,7 @@ impl InputBroker {
       if state.in_flight.contains(&request.session_key) {
         return response(
           InputDeliveryStatus::NotSent,
-          "A message is already being sent to this session.",
+          "A message is already pending for this session.",
         );
       }
       while state.recent.len() >= MAX_RECENT_REQUESTS {
@@ -275,6 +312,20 @@ impl InputBroker {
           "Delivery was interrupted. The message may have been sent.",
         ))
       });
+      let (outcome, model_result) = match outcome {
+        Ok(Admission::WithModel { disposition, result }) => (
+          Ok(match disposition {
+            ModelInputDisposition::Started => Admission::Started,
+            ModelInputDisposition::Steered => Admission::Steered,
+          }),
+          Some(result),
+        ),
+        Err(mut error) => {
+          let result = error.model_result.take();
+          (Err(error), result)
+        }
+        other => (other, None),
+      };
       let (status, message) = match outcome {
         Ok(Admission::Accepted) => (InputDeliveryStatus::Accepted, "Codex App accepted the message.".into()),
         Ok(Admission::Started) => (
@@ -285,6 +336,11 @@ impl InputBroker {
           InputDeliveryStatus::Accepted,
           "Message queued after Pi's current turn.".into(),
         ),
+        Ok(Admission::Steered) => (
+          InputDeliveryStatus::Accepted,
+          "Message accepted as steering for Pi's active turn.".into(),
+        ),
+        Ok(Admission::WithModel { .. }) => unreachable!("model admission was unwrapped"),
         Err(error) => (
           if error.may_have_been_sent {
             InputDeliveryStatus::Unknown
@@ -295,6 +351,7 @@ impl InputBroker {
         ),
       };
       let result = SubmitSessionInputResponse {
+        model_result,
         request_id: request.request_id.clone(),
         status,
         message,

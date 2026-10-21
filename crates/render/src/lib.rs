@@ -1458,6 +1458,7 @@ mod tests {
   #[test]
   fn render_pretty_handles_provider_changes() {
     let session = loaded_session(vec![AgentEvent::ProviderChanged(ProviderChanged {
+      model_origin: None,
       provider: Provider::Codex,
       session_id: Some("session".to_string()),
       native_id: None,
@@ -1862,6 +1863,7 @@ mod tests {
   fn loaded_session(events: Vec<AgentEvent>) -> LoadedSession {
     LoadedSession {
       reference: SessionRef {
+        model_baseline: None,
         id: "session".to_string(),
         parent_session_id: None,
         agent_path: None,

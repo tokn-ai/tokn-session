@@ -74,6 +74,7 @@ impl CodexSessionSource {
     let mut references = headers
       .iter()
       .map(|header| SessionRef {
+        model_baseline: None,
         id: header.id.clone(),
         parent_session_id: header.parent_session_id.clone(),
         agent_path: header.agent_path.clone(),
@@ -576,6 +577,7 @@ pub(crate) fn inspect_session_header(path: &Path) -> Result<SessionRef, String> 
   let path = crate::storage::resolve_path(path);
   let reader = crate::storage::reader(&path)?;
   let mut reference = SessionRef {
+    model_baseline: None,
     id: session_id_from_path(&path),
     parent_session_id: None,
     agent_path: None,
@@ -1308,6 +1310,7 @@ mod tests {
 
   fn session_reference(id: &str, path: PathBuf) -> SessionRef {
     SessionRef {
+      model_baseline: None,
       id: id.to_string(),
       parent_session_id: None,
       agent_path: None,

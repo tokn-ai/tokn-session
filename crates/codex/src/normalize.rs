@@ -31,6 +31,8 @@ const MAX_PENDING_CODE_MODE_CALLS: usize = 256;
 
 pub struct CodexNormalizer {
   session_id: Option<String>,
+  model: Option<tokn_session_core::ModelIdentity>,
+  model_provider: Option<String>,
   history_mode: CodexRolloutHistoryMode,
   history_boundary: Option<CodexHistoryBoundary>,
   records: crate::records::RecordsNormalizer,
@@ -117,6 +119,8 @@ impl CodexNormalizer {
   pub fn new() -> Self {
     Self {
       session_id: None,
+      model: None,
+      model_provider: None,
       history_mode: CodexRolloutHistoryMode::Legacy,
       history_boundary: None,
       records: Default::default(),
@@ -133,6 +137,8 @@ impl CodexNormalizer {
   pub fn new_historical() -> Self {
     Self {
       session_id: None,
+      model: None,
+      model_provider: None,
       history_mode: CodexRolloutHistoryMode::Legacy,
       history_boundary: Some(CodexHistoryBoundary::new()),
       records: Default::default(),
@@ -174,7 +180,7 @@ impl CodexNormalizer {
       self.session_id.clone(),
       matches!(self.history_mode, CodexRolloutHistoryMode::Paginated),
     ) {
-      return events;
+      return self.observe_models(events);
     }
     if duplicate_generation {
       return Vec::new();
@@ -187,6 +193,50 @@ impl CodexNormalizer {
     }
     let events = self.normalize_item(line.into_item(), timestamp, communication_trigger);
     self.question_replies.observe(&events);
+    self.observe_models(events)
+  }
+
+  /// Seed a lazy reader without inventing a source event at the window edge.
+  pub(crate) fn seed_model(&mut self, baseline: Option<&tokn_session_core::ModelObservation>) {
+    if let Some(baseline) = baseline {
+      self.model = Some(baseline.model.clone());
+      self.model_provider.clone_from(&baseline.model.model_provider);
+    }
+  }
+
+  fn observe_models(&mut self, mut events: Vec<AgentEvent>) -> Vec<AgentEvent> {
+    events.retain_mut(|event| match event {
+      AgentEvent::ProviderChanged(event) => {
+        if event.model_provider.is_some() {
+          self.model_provider.clone_from(&event.model_provider);
+        }
+        let Some(model_id) = event.model_id.as_ref().filter(|id| !id.trim().is_empty()) else {
+          return true;
+        };
+        let model = tokn_session_core::ModelIdentity {
+          model_provider: event.model_provider.clone().or_else(|| self.model_provider.clone()),
+          model_id: model_id.clone(),
+        };
+        let duplicate =
+          event.model_origin == Some(tokn_session_core::ModelOrigin::Request) && self.model.as_ref() == Some(&model);
+        self.model = Some(model.clone());
+        event.model_provider = model.model_provider;
+        !duplicate
+      }
+      AgentEvent::SessionSettingsApplied(event) => {
+        if event.model_provider.is_some() {
+          self.model_provider.clone_from(&event.model_provider);
+        }
+        if let Some(model_id) = event.model_id.as_ref().filter(|id| !id.trim().is_empty()) {
+          self.model = Some(tokn_session_core::ModelIdentity {
+            model_provider: event.model_provider.clone().or_else(|| self.model_provider.clone()),
+            model_id: model_id.clone(),
+          });
+        }
+        true
+      }
+      _ => true,
+    });
     events
   }
 
@@ -298,6 +348,7 @@ impl CodexNormalizer {
 
     if item.model_provider.is_some() {
       events.push(AgentEvent::ProviderChanged(ProviderChanged {
+        model_origin: Some(tokn_session_core::ModelOrigin::Catalog),
         provider: Provider::Codex,
         session_id: self.session_id.clone(),
         native_id: item.id,
@@ -1619,6 +1670,41 @@ mod tests {
 
   fn normalize_value(normalizer: &mut CodexNormalizer, value: Value) -> Vec<AgentEvent> {
     normalizer.normalize(serde_json::from_value(value).expect("record should decode"))
+  }
+
+  #[test]
+  fn turn_models_preserve_context_and_deduplicate_known_requests() {
+    let events = normalize_fixture(
+      r#"{"type":"session_meta","payload":{"id":"models","model_provider":"first"}}
+{"type":"turn_context","payload":{"turn_id":"one","model":"same","effort":"high"}}
+{"type":"turn_context","payload":{"turn_id":"two","model":"same"}}
+{"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model_provider_id":"second","model":"same"}}}
+{"type":"turn_context","payload":{"turn_id":"three","model":"same"}}
+{"type":"turn_context","payload":{"turn_id":"four","model":"different"}}
+{"type":"turn_context","payload":{"turn_id":"five","model":" "}}"#,
+    );
+    let facts = events
+      .iter()
+      .filter_map(|event| match event {
+        AgentEvent::ProviderChanged(event) => Some(event),
+        _ => None,
+      })
+      .collect::<Vec<_>>();
+    assert_eq!(facts.len(), 3);
+    assert_eq!(facts[0].model_origin, Some(tokn_session_core::ModelOrigin::Catalog));
+    assert_eq!(facts[1].model_provider.as_deref(), Some("first"));
+    assert_eq!(facts[1].model_origin, Some(tokn_session_core::ModelOrigin::Request));
+    assert_eq!(facts[1].thinking_level.as_deref(), Some("high"));
+    assert_eq!(facts[2].model_provider.as_deref(), Some("second"));
+    assert_eq!(facts[2].model_id.as_deref(), Some("different"));
+    assert_eq!(
+      events
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::Metadata(event)
+      if event.native_type == "turn_context"))
+        .count(),
+      5
+    );
   }
 
   #[test]

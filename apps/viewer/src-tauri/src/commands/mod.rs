@@ -6,6 +6,7 @@ pub(crate) mod images;
 pub(crate) mod indexing;
 pub(crate) mod input;
 pub(crate) mod local;
+pub(crate) mod models;
 pub(crate) mod preferences;
 pub(crate) mod projects;
 pub(crate) mod relay;

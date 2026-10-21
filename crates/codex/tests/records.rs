@@ -571,10 +571,20 @@ fn context_records_are_metadata_not_final_messages() {
     json!({"type":"event_msg","payload":{"type":"thread_rolled_back","num_turns":2}}),
   ] {
     let events = line(&mut normalizer(), record.clone());
-    assert!(
-      matches!(&events[..], [AgentEvent::Metadata(event)] if event.native == record),
-      "{record}"
-    );
+    if record["type"] == "turn_context" {
+      assert!(
+        matches!(&events[..], [AgentEvent::ProviderChanged(model), AgentEvent::Metadata(event)]
+        if model.model_id.as_deref() == Some("model")
+          && model.model_origin == Some(tokn_session_core::ModelOrigin::Request)
+          && model.thinking_level.as_deref() == Some("low") && event.native == record)
+      );
+    } else {
+      assert!(
+        matches!(&events[..], [AgentEvent::Metadata(event)] if event.native == record),
+        "{record}"
+      );
+    }
+    assert!(!events.iter().any(|event| matches!(event, AgentEvent::Message(_))));
   }
   let record = json!({"type":"event_msg","payload":{"type":"item_completed","thread_id":"codex-1","turn_id":"turn-1",
     "item":{"type":"ContextCompaction","id":"compact-1"},"completed_at_ms":1}});

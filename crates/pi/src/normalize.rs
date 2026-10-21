@@ -9,17 +9,21 @@ use tokn_session_core::{
 
 pub struct PiNormalizer {
   session_id: Option<String>,
+  model: Option<tokn_session_core::ModelIdentity>,
 }
 
 impl PiNormalizer {
   pub fn new() -> Self {
-    Self { session_id: None }
+    Self {
+      session_id: None,
+      model: None,
+    }
   }
 
   pub fn normalize(&mut self, line: PiSessionLine) -> Vec<AgentEvent> {
     let line_timestamp = line.timestamp().map(str::to_string);
     let (event, native) = line.into_parts();
-    match event {
+    let mut events = match event {
       PiSessionItem::Session(event) => {
         let Some(session_id) = event.id else {
           return vec![unknown_event(
@@ -38,6 +42,7 @@ impl PiNormalizer {
         })]
       }
       PiSessionItem::ModelChange(event) => vec![AgentEvent::ProviderChanged(ProviderChanged {
+        model_origin: Some(tokn_session_core::ModelOrigin::Selection),
         provider: Provider::Pi,
         session_id: self.session_id.clone(),
         native_id: event.id,
@@ -49,6 +54,7 @@ impl PiNormalizer {
       })],
       PiSessionItem::ThinkingLevelChange(event) => {
         vec![AgentEvent::ProviderChanged(ProviderChanged {
+          model_origin: None,
           provider: Provider::Pi,
           session_id: self.session_id.clone(),
           native_id: event.id,
@@ -102,7 +108,24 @@ impl PiNormalizer {
         Some(event.native),
         line_timestamp,
       )],
-    }
+    };
+    events.retain(|event| {
+      let AgentEvent::ProviderChanged(event) = event else {
+        return true;
+      };
+      let Some(model_id) = event.model_id.as_ref().filter(|id| !id.trim().is_empty()) else {
+        return true;
+      };
+      let model = tokn_session_core::ModelIdentity {
+        model_provider: event.model_provider.clone(),
+        model_id: model_id.clone(),
+      };
+      let duplicate =
+        event.model_origin == Some(tokn_session_core::ModelOrigin::Request) && self.model.as_ref() == Some(&model);
+      self.model = Some(model);
+      !duplicate
+    });
+    events
   }
 }
 
@@ -151,6 +174,25 @@ fn normalize_message(
     PiMessage::Assistant(message) => normalize_assistant_outcome(session_id.clone(), &meta, message, &native),
     _ => Vec::new(),
   };
+  let model = match &message {
+    PiMessage::Assistant(message) => message.model.as_ref().filter(|id| !id.trim().is_empty()).map(|id| {
+      AgentEvent::ProviderChanged(ProviderChanged {
+        provider: Provider::Pi,
+        session_id: session_id.clone(),
+        native_id: meta.id.clone(),
+        native_parent_id: meta.parent_id.clone(),
+        model_provider: message.provider.clone().filter(|provider| !provider.trim().is_empty()),
+        model_id: Some(id.clone()),
+        model_origin: Some(tokn_session_core::ModelOrigin::Request),
+        thinking_level: None,
+        timestamp: meta
+          .timestamp
+          .clone()
+          .or_else(|| message.timestamp.map(|value| value.to_string())),
+      })
+    }),
+    _ => None,
+  };
   let mut events = match message {
     PiMessage::User(message) => normalize_user_message(session_id, &meta, message),
     PiMessage::Assistant(message) => normalize_assistant_message(session_id, &meta, message, !outcome.is_empty()),
@@ -178,6 +220,9 @@ fn normalize_message(
       events.retain(|event| !matches!(event, AgentEvent::Unknown(event) if event.native.is_none()));
     }
     events.push(accounting);
+  }
+  if let Some(model) = model {
+    events.insert(0, model);
   }
   events
 }
@@ -619,6 +664,37 @@ fn json_value(value: impl serde::Serialize) -> Value {
 mod tests {
   use super::*;
   use tokn_session_core::{ToolKind, ToolSummary};
+
+  #[test]
+  fn model_observations_distinguish_selection_and_request_without_backend_alias_switches() {
+    let events = normalize_fixture(
+      r#"{"type":"session","id":"pi"}
+{"type":"model_change","id":"selection","provider":"first","modelId":"same"}
+{"type":"message","id":"same-model","message":{"role":"assistant","provider":"first","model":"same","responseModel":"backend-alias","content":[{"type":"text","text":"one"}]}}
+{"type":"thinking_level_change","id":"thinking","thinkingLevel":"high"}
+{"type":"message","id":"new-provider","message":{"role":"assistant","provider":"second","model":"same","content":[{"type":"text","text":"two"}]}}
+{"type":"message","id":"repeated","message":{"role":"assistant","provider":"second","model":"same","content":[]}}
+{"type":"message","id":"blank","message":{"role":"assistant","provider":"second","model":" ","content":[{"type":"text","text":"three"}]}}"#,
+    );
+    let facts = events
+      .iter()
+      .filter_map(|event| match event {
+        AgentEvent::ProviderChanged(event) if event.model_id.is_some() => Some(event),
+        _ => None,
+      })
+      .collect::<Vec<_>>();
+    assert_eq!(facts.len(), 2);
+    assert_eq!(facts[0].model_origin, Some(tokn_session_core::ModelOrigin::Selection));
+    assert_eq!(facts[1].model_origin, Some(tokn_session_core::ModelOrigin::Request));
+    assert_eq!(facts[1].model_provider.as_deref(), Some("second"));
+    assert_eq!(facts[1].native_id.as_deref(), Some("new-provider"));
+    assert!(
+      events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::ProviderChanged(event)
+      if event.thinking_level.as_deref() == Some("high") && event.model_id.is_none()))
+    );
+  }
 
   #[test]
   fn image_only_and_mixed_messages_preserve_images_without_tool_reordering() {

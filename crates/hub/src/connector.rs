@@ -549,10 +549,22 @@ async fn forward(
   if let Some(token) = &config.local_token {
     request = request.bearer_auth(token);
   }
-  let response = request
-    .send()
-    .await
-    .map_err(|_| "Local API request failed; delivery may be uncertain and will not be retried")?;
+  let viewing_response = (!config.allow_control)
+    .then(|| protocol::read_only_model_response(path, "Agent control is disabled on this host"))
+    .flatten();
+  let response = if let Some(value) = viewing_response {
+    reqwest::Response::from(
+      axum::http::Response::builder()
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&value).map_err(|_| "Could not encode model status")?)
+        .map_err(|_| "Could not encode model status")?,
+    )
+  } else {
+    request
+      .send()
+      .await
+      .map_err(|_| "Local API request failed; delivery may be uncertain and will not be retried")?
+  };
   if response.status().is_redirection() {
     return Err("Local API redirects are forbidden".into());
   }

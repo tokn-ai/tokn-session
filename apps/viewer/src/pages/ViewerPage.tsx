@@ -100,6 +100,7 @@ function ViewerContent({ remote = false, connection, on_open_machines, machine_l
         </SessionDrawer>
 
         <Conversation
+          current_model={viewer.currentModel}
           input_refresh_key={workspace.input_refresh_key}
           managed_controls={<ManagedSessionControls snapshot={workspace.managed} busy={workspace.controlling}
             error={workspace.control_error} on_control={(kind, snapshot) => { void workspace.control(kind, snapshot); }} />}

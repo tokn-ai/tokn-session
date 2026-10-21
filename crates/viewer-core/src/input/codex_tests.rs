@@ -62,6 +62,164 @@ fn success(request: &Value, result: Value) -> Value {
   })
 }
 
+#[tokio::test]
+#[cfg(any(unix, windows))]
+async fn model_status_reads_the_real_owner_and_keeps_unverified_catalog_closed() {
+  let (mut client, server) = initialized_client(|mut stream| async move {
+    let discovery = read_frame(&mut stream).await.unwrap();
+    assert_eq!(discovery["method"], "thread-owner-discovery");
+    assert_eq!(discovery["version"], 1);
+    assert_eq!(
+      discovery["params"],
+      json!({"hostId":"local", "conversationId":"session-model"})
+    );
+    write_frame(
+      &mut stream,
+      &success(&discovery, json!({"supportsUntrustedAppInput":true})),
+    )
+    .await;
+    let request = read_frame(&mut stream).await.unwrap();
+    assert_eq!(request["method"], "thread-follower-read-model-settings");
+    assert_eq!(request["version"], 1);
+    assert_eq!(request["params"]["conversationId"], "session-model");
+    assert_eq!(request["targetClientId"], "desktop-owner");
+    write_frame(
+      &mut stream,
+      &success(
+        &request,
+        json!({"settings":{"model":"test-model", "modelProvider":"custom", "reasoningEffort":"high"}}),
+      ),
+    )
+    .await;
+  })
+  .await;
+  let status = client.read_model_status("session-model").await.unwrap();
+  assert_eq!(status.state.model.unwrap().model_id, "test-model");
+  assert!(!status.can_list && !status.can_select);
+  assert_eq!(
+    status.runtime_generation.as_deref(),
+    Some("session-model:desktop-owner")
+  );
+  server.await.unwrap();
+}
+
+fn assert_model_unavailable(error: &DeliveryError) {
+  assert!(!error.may_have_been_sent);
+  assert!(
+    error
+      .message
+      .starts_with("Live model settings are unavailable for this session in Codex Desktop.")
+  );
+  assert!(!error.message.contains("thread-follower"));
+  assert!(!error.message.contains("thread-owner"));
+  assert!(!error.message.contains("timed out"));
+  assert!(!error.message.contains("send again"));
+}
+
+#[tokio::test]
+#[cfg(any(unix, windows))]
+async fn missing_or_invalid_model_owner_never_reads_settings_or_sends_input() {
+  for variant in 0..3 {
+    let (mut client, server) = initialized_client(move |mut stream| async move {
+      let discovery = read_frame(&mut stream).await.unwrap();
+      assert_eq!(discovery["method"], "thread-owner-discovery");
+      let mut response = success(&discovery, json!({}));
+      match variant {
+        0 => {
+          response["resultType"] = json!("error");
+          response["error"] = json!("no-client-found");
+        }
+        1 => {
+          response.as_object_mut().unwrap().remove("handledByClientId");
+        }
+        _ => response["handledByClientId"] = json!(" "),
+      }
+      write_frame(&mut stream, &response).await;
+      let mut byte = [0];
+      assert_eq!(
+        stream.read(&mut byte).await.unwrap(),
+        0,
+        "failed discovery must end the lookup"
+      );
+    })
+    .await;
+    assert_model_unavailable(&client.read_model_status("session-model").await.unwrap_err());
+    drop(client);
+    server.await.unwrap();
+  }
+}
+
+#[tokio::test]
+#[cfg(any(unix, windows))]
+async fn model_owner_discovery_timeout_never_reads_settings_or_sends_input() {
+  let (mut client, server) = initialized_client(|mut stream| async move {
+    let discovery = read_frame(&mut stream).await.unwrap();
+    assert_eq!(discovery["method"], "thread-owner-discovery");
+    assert_eq!(discovery["timeoutMs"], 50);
+    let mut byte = [0];
+    assert_eq!(
+      stream.read(&mut byte).await.unwrap(),
+      0,
+      "timed-out discovery must not continue"
+    );
+  })
+  .await;
+  client.request_timeout = Duration::from_millis(50);
+  assert_model_unavailable(&client.read_model_status("session-model").await.unwrap_err());
+  drop(client);
+  server.await.unwrap();
+}
+
+#[tokio::test]
+#[cfg(any(unix, windows))]
+async fn model_settings_from_a_different_owner_are_not_live_authority() {
+  let (mut client, server) = initialized_client(|mut stream| async move {
+    let discovery = read_frame(&mut stream).await.unwrap();
+    assert_eq!(discovery["method"], "thread-owner-discovery");
+    write_frame(&mut stream, &success(&discovery, json!({}))).await;
+    let request = read_frame(&mut stream).await.unwrap();
+    assert_eq!(request["method"], "thread-follower-read-model-settings");
+    assert_eq!(request["targetClientId"], "desktop-owner");
+    let mut response = success(&request, json!({"settings":{"model":"wrong-owner-model"}}));
+    response["handledByClientId"] = json!("another-owner");
+    write_frame(&mut stream, &response).await;
+    let mut byte = [0];
+    assert_eq!(
+      stream.read(&mut byte).await.unwrap(),
+      0,
+      "owner mismatch must not retry elsewhere"
+    );
+  })
+  .await;
+  assert_model_unavailable(&client.read_model_status("session-model").await.unwrap_err());
+  drop(client);
+  server.await.unwrap();
+}
+
+#[tokio::test]
+#[cfg(any(unix, windows))]
+async fn pending_model_settings_timeout_remains_read_only_and_uses_a_display_reason() {
+  let (mut client, server) = initialized_client(|mut stream| async move {
+    let discovery = read_frame(&mut stream).await.unwrap();
+    assert_eq!(discovery["method"], "thread-owner-discovery");
+    write_frame(&mut stream, &success(&discovery, json!({}))).await;
+    let request = read_frame(&mut stream).await.unwrap();
+    assert_eq!(request["method"], "thread-follower-read-model-settings");
+    assert_eq!(request["targetClientId"], "desktop-owner");
+    let mut byte = [0];
+    assert_eq!(
+      stream.read(&mut byte).await.unwrap(),
+      0,
+      "pending settings must not trigger another request"
+    );
+  })
+  .await;
+  client.request_timeout = Duration::from_millis(50);
+  assert_model_unavailable(&client.read_model_status("session-model").await.unwrap_err());
+  drop(client);
+  server.await.unwrap();
+}
+
 async fn write_frame(stream: &mut Box<dyn IpcStream>, value: &Value) {
   stream.write_all(&encode_frame(value).unwrap()).await.unwrap();
 }

@@ -2457,6 +2457,7 @@ export function useViewerState() {
     loadMoreSessionChildren,
     openRelatedSession,
     selectedSession,
+    currentModel: selectedSessionKey ? displayCache.current.currentModel(selectedSessionKey) : undefined,
     selectedSessionKey,
     selectSession,
     openCreatedSession,

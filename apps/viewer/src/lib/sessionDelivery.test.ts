@@ -1,10 +1,26 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { invoke, type CommandInvoker } from "./transport";
-import { inspectSessionEvent, loadGroupDetails, loadSessionUpdates, loadToolDetails, renewSessionSubscriptions } from "./tauri";
+import { getSessionModelStatus, listSessionModels, inspectSessionEvent, loadGroupDetails, loadSessionUpdates, loadToolDetails, renewSessionSubscriptions, submitSessionInput } from "./tauri";
 import type { SessionUpdatesRequest, SessionUpdate } from "./types";
 
 vi.mock("./transport", () => ({ invoke: vi.fn(), listen: vi.fn(), isDesktop: () => false }));
 beforeEach(() => vi.mocked(invoke).mockReset());
+
+it("routes model reads and mutation through the captured session machine without local fallback", async () => {
+  const { send, calls } = machineInvoker();
+  calls.mockResolvedValue({});
+  const target = { session_key: "one" };
+  const message = { ...target, request_id: "uuid", text: "next", model_selection: { model_provider: "anthropic", model_id: "sonnet", expected_revision: "revision", runtime_generation: "pi-runtime" } };
+  await getSessionModelStatus(target, send);
+  await listSessionModels(target, send);
+  await submitSessionInput(message, send);
+  expect(calls.mock.calls).toEqual([
+    ["get_session_model_status", { request: target }],
+    ["list_session_models", { request: target }],
+    ["submit_session_input", { request: message }],
+  ]);
+  expect(invoke).not.toHaveBeenCalled();
+});
 const request: SessionUpdatesRequest = { subscription_id: "modern", session_key: "one", level: "steps", cursor: null, detail_keys: [], scope: { history: "latest_turn", group_keys: [] } };
 const update: SessionUpdate = { ...request, generation: "source", revision: "1", snapshot: true, base_revision: null,
   items: [], groups: [], removed_items: [], item_order: [], state: { total_events: 0, previous_cursor: null, next_cursor: null, history_status: "complete" } };

@@ -9,6 +9,7 @@ mod indexer;
 mod input;
 pub(crate) mod managed_pi;
 pub mod model;
+pub mod models;
 pub mod projects;
 mod questions;
 pub mod relay;

@@ -4,6 +4,21 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
+Existing sessions expose model context in the header and composer. Historical
+observations carry origin metadata; genuine configured-model changes appear as
+standalone separators at every delivery level. Codex retained windows preserve
+the preceding model without normalizing older turns. Live status and lazy model
+catalogs use shared desktop/HTTP/Hub commands. Pi model choices stay in composer
+drafts until Send: idle sends validate and apply them; running sends ignore them,
+steer with the active model, and reset the draft choice. Model intent and message
+share admission/receipts; only actual idle selection may update Pi defaults.
+Image staging does not change models, and delivery checks the effective model.
+Codex model reads discover the local owner first, bind the read to that client,
+and retain recorded context when the bounded live lookup is unavailable.
+Desktop supplies no verifiable catalog through follower IPC, so its picker
+remains read-only with a reason. Shares and viewing grants never expose live
+catalogs or model mutation. See [session models](viewer-models.md).
+
 Recorded images from Codex, Pi, OpenCode, and ZCode now render through lazy
 thumbnail/full resources, including image-only messages. The composer and local
 New Pi Session dialog support picking, paste, drag/drop, and image-only sending.

@@ -28,8 +28,11 @@ The session composer and local **New Pi Session** dialog accept file picking,
 clipboard images, and drag/drop, with removable previews and image-only submission.
 Existing Codex Desktop and Pi input transports handle sending. Codex uses validated
 host-local image paths; Pi uses native image content with base64 bytes and MIME
-type. Pi advertises image support from the current model and rechecks it before
-sending; old bridges without the capability field remain text-only. New managed
+type. Pi advertises image support from the current model and rechecks the
+effective model inside Send. `images_stageable` allows bounded uploads before an
+idle draft chooses a vision model; uploads never change the model. Busy sends
+check the active model even if the draft chose another one. Older bridges
+without the capability field remain text-only. New managed
 Pi sessions check the actual model after startup. Unsupported images produce an
 explicit failure rather than silently sending only their caption.
 

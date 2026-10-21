@@ -37,6 +37,22 @@ impl RecordsNormalizer {
       }
       RolloutItem::TurnContext(item) => {
         let valid = item.turn_id.is_some() || item.model.is_some() || item.cwd.is_some();
+        if let Some(model) = item.model.as_ref().filter(|model| !model.trim().is_empty()) {
+          return Some(vec![
+            AgentEvent::ProviderChanged(tokn_session_core::ProviderChanged {
+              provider: Provider::Codex,
+              session_id: context.session_id.clone(),
+              native_id: item.turn_id.clone(),
+              native_parent_id: None,
+              model_provider: None,
+              model_id: Some(model.clone()),
+              model_origin: Some(tokn_session_core::ModelOrigin::Request),
+              thinking_level: item.effort.clone(),
+              timestamp: context.timestamp.clone(),
+            }),
+            context.metadata(MetadataKind::Configuration, "turn context"),
+          ]);
+        }
         valid.then_some((MetadataKind::Configuration, "turn context"))
       }
       RolloutItem::WorldState(item) => {

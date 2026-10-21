@@ -3,13 +3,17 @@
 //! The read-only provider remains the source of transcript data. This manager
 //! publishes only lifecycle metadata and never manufactures history rows.
 mod actor;
+mod models;
 mod persistence;
 mod protocol;
 mod runtimes;
 
+#[cfg(test)]
+use crate::input::ModelInputDisposition;
 use crate::{
   images::ResolvedImage,
   input::{Admission, DeliveryError, MAX_INPUT_LENGTH},
+  models::MessageModelSelection,
   workspace::{
     CreateProjectSessionRequest, ManagedSessionDialogResponse, ManagedSessionRequest, ManagedSessionSnapshot,
     ManagedSessionStatus, RegisteredProject,
@@ -408,12 +412,37 @@ impl ManagedPiSessions {
       .await
   }
 
+  #[cfg(test)]
   pub(crate) async fn submit_owned_input_images(
     &self,
     session_key: &str,
     request_id: &str,
     text: &str,
     images: Vec<ResolvedImage>,
+  ) -> Result<Admission, DeliveryError> {
+    self
+      .submit_owned_input_with_model(session_key, request_id, text, images, None)
+      .await
+      .map(|admission| match admission {
+        Admission::WithModel {
+          disposition: ModelInputDisposition::Started,
+          ..
+        } => Admission::Started,
+        Admission::WithModel {
+          disposition: ModelInputDisposition::Steered,
+          ..
+        } => Admission::Steered,
+        admission => admission,
+      })
+  }
+
+  pub(crate) async fn submit_owned_input_with_model(
+    &self,
+    session_key: &str,
+    request_id: &str,
+    text: &str,
+    images: Vec<ResolvedImage>,
+    selection: Option<MessageModelSelection>,
   ) -> Result<Admission, DeliveryError> {
     validate_uuid(request_id, "message request")
       .and_then(|()| validate_message(text, !images.is_empty()))
@@ -459,16 +488,18 @@ impl ManagedPiSessions {
         request_id: request_id.into(),
         text: text.into(),
         images,
+        selection,
         reply,
       }),
     )
     .await
     .map_err(|_| DeliveryError::not_sent("Pi command queue is busy"))?
     .map_err(|_| DeliveryError::not_sent("Pi runtime has stopped"))?;
-    drop(guard);
-    receive.await.map_err(|_| {
+    let result = receive.await.map_err(|_| {
       DeliveryError::uncertain("Pi runtime stopped before acknowledging the message; check its history before retrying")
-    })?
+    })?;
+    drop(guard);
+    result
   }
 
   pub(crate) fn subscribe(&self) -> broadcast::Receiver<ManagedSessionSnapshot> {

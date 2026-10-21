@@ -395,6 +395,7 @@ pub struct SessionInputStatus {
   #[serde(skip_serializing_if = "std::ops::Not::not")]
   pub resume_required: bool,
   pub images_available: bool,
+  pub images_stageable: bool,
   pub max_images: usize,
   pub max_image_bytes: usize,
   pub max_total_image_bytes: usize,
@@ -408,6 +409,8 @@ pub struct SubmitSessionInputRequest {
   pub text: String,
   #[serde(default)]
   pub image_ids: Vec<String>,
+  #[serde(default)]
+  pub model_selection: Option<crate::models::MessageModelSelection>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -424,10 +427,13 @@ pub struct SubmitSessionInputResponse {
   pub request_id: String,
   pub status: InputDeliveryStatus,
   pub message: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub model_result: Option<crate::models::MessageModelResult>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct EventPage {
+  pub current_model: crate::models::SessionModelState,
   pub events: Vec<EventSummary>,
   pub next_cursor: Option<String>,
   pub previous_cursor: Option<String>,
@@ -467,6 +473,8 @@ pub struct QuestionSelectionSummary {
 
 #[derive(Debug, Serialize)]
 pub struct EventSummary {
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub model_change: Option<ModelChangeSummary>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub images: Option<Vec<crate::images::MessageImageSummary>>,
   /// Recorded selections only; absent when no reply can be correlated safely.
@@ -512,6 +520,12 @@ pub struct EventSummary {
   /// activity's provider-native target ID resolves to a canonical direct child
   /// of the session being viewed.
   pub agent_activity: Option<AgentActivityCardSummary>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ModelChangeSummary {
+  pub previous: crate::models::ModelIdentity,
+  pub current: crate::models::ModelIdentity,
 }
 
 #[derive(Debug, Serialize)]

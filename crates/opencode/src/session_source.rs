@@ -195,6 +195,7 @@ impl OpenCodeSessionSource {
         .copied()
         .unwrap_or(0);
       sessions.push(SessionRef {
+        model_baseline: None,
         id: row.id,
         parent_session_id: row.parent_id,
         agent_path: None,
@@ -293,6 +294,7 @@ impl OpenCodeSessionSource {
       None
     };
     let reference = SessionRef {
+      model_baseline: None,
       id: session.id.clone(),
       parent_session_id: session.parent_id.clone(),
       agent_path: None,

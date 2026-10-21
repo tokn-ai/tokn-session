@@ -7,10 +7,14 @@ export function groupActivity(events: EventSummary[]): EventSummary[][] {
   const groups: EventSummary[][] = [];
   for (const event of events) {
     const previous = groups[groups.length - 1];
-    if (event.type !== "message" && event.type !== "activity_group" && previous && previous[0].type !== "message" && previous[0].type !== "activity_group") previous.push(event);
+    if (!isActivityBoundary(event) && previous && !isActivityBoundary(previous[0])) previous.push(event);
     else groups.push([event]);
   }
   return groups;
+}
+
+function isActivityBoundary(event: EventSummary): boolean {
+  return event.type === "message" || event.type === "activity_group" || event.type === "model_changed";
 }
 
 export function activitySummary(events: EventSummary[]): string {
@@ -62,7 +66,7 @@ export function ActivityGroup({ events, selected_event_key, reveal = false, chil
   const [loaded, setLoaded] = useState(needsAttention || reveal);
   const hasSelection = events.some((event) => event.event_key === selected_event_key);
   useEffect(() => { if (hasSelection || needsAttention || reveal) { setExpanded(true); setLoaded(true); } }, [hasSelection, needsAttention, reveal, selected_event_key]);
-  if (events[0]?.type === "message") return typeof children === "function" ? children() : children;
+  if (events[0]?.type === "message" || events[0]?.type === "model_changed") return typeof children === "function" ? children() : children;
   const summary = activitySummary(events);
   const failures = events.filter((event) => event.is_error || event.type === "error"
     || event.tool?.status === "failed" || (event.tool?.exit_code != null && event.tool.exit_code !== 0)).length;
