@@ -236,8 +236,10 @@ from older servers. Acknowledgement
 revisions remain opaque and must come from the displayed newest event page.
 
 Session list requests accept `query.order` (`time`, the default, or `project`).
-Project ordering is applied before pagination and groups shared repository
-identities by their durable discovery anchor, newest first, then session activity.
+Project ordering is applied before pagination and groups folder identities by
+their durable discovery anchor, newest first, then session activity. Git metadata
+is read only in the recorded working folder; explicit worktrees can share a
+repository identity, while non-Git subfolders remain independent projects.
 Root summaries include nullable `project_key` and `project_order_ms`; `cwd` remains
 the original session working directory. Clients should group by `project_key`,
 falling back to `cwd` for older servers. Clients keep Recent display positions in

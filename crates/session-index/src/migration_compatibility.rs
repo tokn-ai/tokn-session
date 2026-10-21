@@ -166,6 +166,34 @@ mod tests {
     "sessions",
   ];
 
+  fn assert_folder_upgrade(connection: &Connection) {
+    let project: (String, String, String, String, i64) = connection
+      .query_row(
+        "SELECT project_id, group_key, folder_path, name, created_at_ms FROM registered_projects",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+      )
+      .unwrap();
+    assert_eq!(
+      project,
+      (
+        "project".into(),
+        "/repository/worktree".into(),
+        "/repository/worktree".into(),
+        "Saved project".into(),
+        30
+      )
+    );
+    let alias: (String, String) = connection
+      .query_row(
+        "SELECT project_key, provenance FROM project_aliases WHERE cwd = '/repository/worktree'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+      )
+      .unwrap();
+    assert_eq!(alias, ("/repository/worktree".into(), "registered_folder".into()));
+  }
+
   #[test]
   fn immutable_project_migration_checksums_identify_only_the_two_observed_schemas() {
     assert_eq!(migration_checksum(MIGRATION_010), "40d63f219f2bcf7a");
@@ -182,7 +210,7 @@ mod tests {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("original.sqlite");
     let connection = fixture(&path, false);
-    let before = data(&connection, EXISTING_DATA);
+    let before = data(&connection, &["sources", "sessions"]);
     let before_ledger = ledger(&connection);
     drop(connection);
 
@@ -197,14 +225,15 @@ mod tests {
     assert_eq!(row.attention_marker.as_deref(), Some("saved-marker"));
     assert!(index.managed_session_admissions().unwrap().is_empty());
     let connection = index.connection().unwrap();
-    assert_eq!(data(&connection, EXISTING_DATA), before);
+    assert_eq!(data(&connection, &["sources", "sessions"]), before);
+    assert_folder_upgrade(&connection);
     assert_eq!(ledger(&connection)[..10], before_ledger);
     drop(connection);
     index.admit_managed_session(&key, "project").unwrap();
     drop(index);
     let reopened = SessionIndex::open(&path).unwrap();
     assert!(reopened.has_managed_session_admission(&key).unwrap());
-    assert_eq!(ledger(&reopened.connection().unwrap()).len(), 11);
+    assert_eq!(ledger(&reopened.connection().unwrap()).len(), 12);
   }
 
   #[test]
@@ -212,17 +241,18 @@ mod tests {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("combined.sqlite");
     let connection = fixture(&path, true);
-    let before = data(&connection, EXISTING_DATA);
+    let before = data(&connection, &["sources", "sessions"]);
     let admission = data(&connection, &["managed_session_admissions"]);
     let before_ledger = ledger(&connection);
     drop(connection);
 
     let index = SessionIndex::open(&path).unwrap();
     let connection = index.connection().unwrap();
-    assert_eq!(data(&connection, EXISTING_DATA), before);
+    assert_eq!(data(&connection, &["sources", "sessions"]), before);
+    assert_folder_upgrade(&connection);
     assert_eq!(data(&connection, &["managed_session_admissions"]), admission);
     let after = ledger(&connection);
-    assert_eq!(after.len(), 11);
+    assert_eq!(after.len(), 12);
     assert_eq!(after[..9], before_ledger[..9]);
     assert_eq!(after[9], (10, migration_checksum(MIGRATION_010), 1010));
     assert_eq!(after[10], (11, migration_checksum(MIGRATION_011), 1010));
@@ -260,7 +290,7 @@ mod tests {
         .unwrap()
     );
     let applied = ledger(&index.connection().unwrap());
-    assert_eq!(applied.len(), 11);
+    assert_eq!(applied.len(), 12);
     assert_eq!(applied[10], (11, migration_checksum(MIGRATION_011), 1010));
   }
 

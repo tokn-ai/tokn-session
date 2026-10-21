@@ -16,6 +16,7 @@
 
 mod managed_admissions;
 mod migration_compatibility;
+mod project_aliases;
 mod projects;
 mod registered_projects;
 pub use registered_projects::RegisteredProjectRecord;
@@ -316,6 +317,14 @@ BEGIN
 END;
 "#;
 
+// Legacy aliases did not distinguish an explicit checkout from an ancestor
+// discovered by walking upward. Only verified folder identities are reusable.
+const MIGRATION_012: &str = r#"
+ALTER TABLE project_aliases ADD COLUMN provenance TEXT NOT NULL DEFAULT 'legacy'
+  CHECK(provenance IN ('legacy', 'direct_git', 'worktree', 'registered_folder'));
+CREATE INDEX project_aliases_by_provenance ON project_aliases(provenance);
+"#;
+
 #[derive(Clone, Debug)]
 pub struct ProjectGroup {
   pub project_key: String,
@@ -371,6 +380,10 @@ const MIGRATIONS: &[Migration] = &[
   Migration {
     version: 11,
     sql: MIGRATION_011,
+  },
+  Migration {
+    version: 12,
+    sql: MIGRATION_012,
   },
 ];
 
@@ -986,27 +999,22 @@ impl SessionIndex {
     Ok(order)
   }
 
-  /// Shared repository identities and durable anchors for all known working directories.
+  /// Folder identities and explicit worktree groups with durable ordering anchors.
   /// Resolve the complete catalog so provider/search filters cannot change identity.
   pub fn project_groups(&self, keys: &[String], discovered_at_ms: i64) -> Result<HashMap<String, ProjectGroup>> {
     let order = self.project_order(keys, discovered_at_ms)?;
     let mut connection = self.connection()?;
-    let mut aliases = {
-      let mut statement = connection.prepare("SELECT cwd, project_key FROM project_aliases")?;
-      statement
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
-        .collect::<rusqlite::Result<HashMap<_, _>>>()?
-    };
+    let mut aliases = project_aliases::load_current(&mut connection, keys)?;
     let mut discovered = HashMap::new();
     let mut registered = HashMap::new();
     for cwd in order.keys().filter(|cwd| !aliases.contains_key(*cwd)) {
-      if let Some(root) = projects::repository_root(cwd) {
-        registered.extend(projects::registered_worktrees(&root));
-        discovered.insert(cwd.clone(), root.to_string_lossy().into_owned());
+      if let Some(alias) = projects::direct_repository(cwd) {
+        registered.extend(projects::registered_worktrees(Path::new(&alias.project_key)));
+        discovered.insert(cwd.clone(), alias);
       }
     }
     // Cached repositories also know about subsequently removed worktrees.
-    for root in aliases.values().collect::<HashSet<_>>() {
+    for root in aliases.values().map(|alias| &alias.project_key).collect::<HashSet<_>>() {
       registered.extend(projects::registered_worktrees(Path::new(root)));
     }
     // A live checkout wins over a stale worktree registration at the same path.
@@ -1017,24 +1025,22 @@ impl SessionIndex {
     if !discovered.is_empty() {
       let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
       let mut anchors: HashMap<&str, i64> = HashMap::new();
-      for (cwd, root) in &discovered {
+      for (cwd, alias) in &discovered {
         let time = order[cwd];
         anchors
-          .entry(root)
+          .entry(&alias.project_key)
           .and_modify(|anchor| *anchor = (*anchor).min(time))
           .or_insert(time);
       }
       for (root, time) in anchors {
         remember_project(&transaction, root, time)?;
       }
-      for (cwd, root) in &discovered {
-        transaction.execute(
-          "INSERT INTO project_aliases(cwd, project_key) VALUES(?1, ?2) ON CONFLICT(cwd) DO NOTHING",
-          params![cwd, root],
-        )?;
+      for (cwd, alias) in &discovered {
+        project_aliases::insert(&transaction, cwd, alias)?;
       }
       transaction.commit()?;
-      aliases.extend(discovered);
+      // A sibling indexer may have won a registration while discovery ran.
+      aliases = project_aliases::load(&connection)?;
     }
     let mut statement = connection.prepare("SELECT project_key, sort_at_ms FROM projects")?;
     let anchors = statement
@@ -1044,7 +1050,10 @@ impl SessionIndex {
       order
         .into_iter()
         .map(|(cwd, time)| {
-          let root = aliases.get(&cwd).cloned().unwrap_or_else(|| cwd.clone());
+          let root = aliases
+            .get(&cwd)
+            .map(|alias| alias.project_key.clone())
+            .unwrap_or_else(|| cwd.clone());
           let order_ms = anchors.get(&root).copied().unwrap_or(time);
           (
             cwd,
@@ -1614,6 +1623,9 @@ fn migrate(connection: &mut Connection) -> Result<()> {
   };
   for migration in MIGRATIONS.iter().skip(applied_count) {
     transaction.execute_batch(migration.sql)?;
+    if migration.version == 12 {
+      project_aliases::upgrade_legacy(&transaction)?;
+    }
     transaction.execute(
       "INSERT INTO schema_migrations(version, checksum, applied_at_ms) VALUES(?1, ?2, ?3)",
       params![migration.version, migration_checksum(migration.sql), current_time_ms()],
@@ -2408,7 +2420,7 @@ mod tests {
   }
 
   #[test]
-  fn worktrees_and_subdirectories_share_a_persistent_project() {
+  fn direct_worktrees_share_a_persistent_project_but_subfolders_are_independent() {
     let directory = tempdir().unwrap();
     let root = directory.path().join("main/repo");
     let checkout = directory.path().join("worktrees/repo");
@@ -2435,16 +2447,20 @@ mod tests {
       .project_groups(&[checkout_key.clone(), nested.clone(), other.clone()], 20)
       .unwrap();
     assert_eq!(groups[&checkout_key].project_key, root);
-    assert_eq!(groups[&nested].project_key, root);
+    assert_eq!(groups[&nested].project_key, nested);
     assert_eq!(groups[&checkout_key].order_ms, 10);
     assert_eq!(groups[&other].project_key, other);
     drop(index);
     std::fs::remove_dir_all(checkout).unwrap();
     std::fs::remove_dir_all(registration).unwrap();
     let index = SessionIndex::open(&path).unwrap();
-    let groups = index.project_groups(&[nested.clone()], 30).unwrap();
-    assert_eq!(groups[&nested].project_key, root);
-    assert_eq!(groups[&nested].order_ms, 10);
+    let groups = index
+      .project_groups(&[checkout_key.clone(), nested.clone()], 30)
+      .unwrap();
+    assert_eq!(groups[&checkout_key].project_key, root);
+    assert_eq!(groups[&checkout_key].order_ms, 10);
+    assert_eq!(groups[&nested].project_key, nested);
+    assert_eq!(groups[&nested].order_ms, 20);
   }
 
   #[test]
@@ -2504,6 +2520,7 @@ mod tests {
         (9, migration_checksum(MIGRATION_009)),
         (10, migration_checksum(MIGRATION_010)),
         (11, migration_checksum(MIGRATION_011)),
+        (12, migration_checksum(MIGRATION_012)),
       ]
     );
   }
@@ -2781,7 +2798,7 @@ mod tests {
       .expect("migration query should run")
       .collect::<rusqlite::Result<Vec<_>>>()
       .expect("migration versions should decode");
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
   }
 
   #[test]

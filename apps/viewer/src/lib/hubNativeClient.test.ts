@@ -76,7 +76,7 @@ it("sends a verified machine pin to native pairing before persistence", async ()
   expect(invoke).toHaveBeenCalledWith("hub_client_pair", { hub_url: "https://hub.example", host_id: host.host_id, code: "123456", expected_host_public_key: host.host_public_key });
 });
 it("keeps readable display metadata out of cryptographic IPC arguments", async () => {
-  const named = { ...host, machine_address: "clouds:macbook", name: "MacBook" };
+  const named = { ...host, machine_address: "alice:macbook", name: "MacBook" };
   const client = await NativeHubClient.connect("https://hub.example", named);
   expect(invoke).toHaveBeenCalledWith("hub_client_open", { hub_url: "https://hub.example", host_id: host.host_id, host_public_key: host.host_public_key });
   await nativeHubAuthenticate("https://hub.example", named, false, new AbortController().signal, { create: vi.fn(), get: vi.fn().mockResolvedValue({ credential: true }) });

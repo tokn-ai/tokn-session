@@ -20,10 +20,18 @@ before launching or resuming, including whether its saved path now resolves
 elsewhere.
 
 Registered folders appear in **Projects** grouping even before they have any
-sessions. Existing inferred project identities, aliases, and ordering anchors
-are preserved. Separate worktree folders can be registered under one repository
-group; each retains its own launch directory and remains separately selectable
-in **New Pi session**. A registration name does not retitle historical sessions.
+sessions. A folder can be a project without Git. The viewer reads Git metadata
+only in the recorded working directory; it never searches parent folders.
+Explicit Git worktrees can share their repository group, while a subfolder
+without its own Git metadata keeps its own project identity. Each registration
+retains its launch directory and remains separately selectable in **New Pi
+session**. A registration name does not retitle historical sessions.
+
+Migration 12 distinguishes explicit aliases from legacy inferred mappings.
+Legacy parent-repository mappings are reconsidered using direct Git or worktree
+metadata, with an independent folder identity when that evidence is unavailable.
+Registration IDs, names, launch paths, ownership, and existing folder ordering
+anchors are preserved.
 
 ## Start a Pi session
 
