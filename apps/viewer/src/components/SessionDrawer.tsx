@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { ActionNotificationHost } from "./ActionNotifications";
 
 interface SessionDrawerProps {
   desktop_hidden?: boolean;
@@ -48,6 +49,7 @@ export function SessionDrawer({ desktop_hidden = false, is_open, on_close, child
       ref={dialog}
     >
       {children}
+      {compact && is_open && <ActionNotificationHost />}
     </dialog>
   );
 }

@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import type { ManagedSessionDialogResponse, ManagedSessionSnapshot, RegisteredProject, RegisterProjectRequest } from "../lib/types";
 import { errorMessage } from "../lib/state";
 import { CloseIcon } from "./Icons";
+import { ActionNotificationHost } from "./ActionNotifications";
 import "./ProjectWorkspace.css";
 import { ImageAttachmentPreviews, ImageAttachmentPicker, imageDrop, imagePaste } from "./ImageAttachments";
 import { addImageDrafts, disposeImageDrafts, DEFAULT_IMAGE_LIMITS, type ImageDraft } from "../lib/imageDrafts";
@@ -32,6 +33,7 @@ function WorkspaceDialog({ title, open = true, on_close, children }: {
     onCancel={(event) => { event.preventDefault(); on_close(); }}>
     <header><h2 id={title_id}>{title}</h2><button aria-label={`Close ${title}`} className="icon-button" type="button" onClick={on_close}><CloseIcon /></button></header>
     {children}
+    {open && <ActionNotificationHost />}
   </dialog>, document.body);
 }
 

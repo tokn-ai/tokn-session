@@ -167,6 +167,7 @@ impl ViewerRelay {
       self.managed_phase(epoch, if attempt == 0 { "starting" } else { "retrying" }, None);
       let error = match ManagedChild::spawn(executable) {
         Ok(mut child) => {
+          self.managed_process(epoch, child.child.id());
           let ready = tokio::select! {
             biased;
             _ = cancel.cancelled() => { child.stop().await; return; }
@@ -194,6 +195,7 @@ impl ViewerRelay {
             Err(error) => error,
           };
           child.stop().await;
+          self.managed_process(epoch, None);
           error
         }
         Err(error) => error,
@@ -234,7 +236,23 @@ impl ViewerRelay {
     self.notify(None, false);
   }
 
+  fn managed_process(&self, epoch: u64, pid: Option<u32>) {
+    {
+      let mut state = self.state.lock().unwrap();
+      if state.epoch != epoch {
+        return;
+      }
+      state.managed_pid = pid;
+      state.started_at_ms = pid.map(|_| crate::runtimes::now_ms());
+      if pid.is_some() {
+        state.instance_id = uuid::Uuid::new_v4().to_string();
+      }
+    }
+    self.notify(None, false);
+  }
+
   pub async fn shutdown(&self) {
+    self.closed.store(true, std::sync::atomic::Ordering::Release);
     {
       let mut state = self.state.lock().unwrap();
       state.epoch += 1;
@@ -247,6 +265,10 @@ impl ViewerRelay {
     self.ready.notify_all();
     // The supervisor releases this only after closing stdin and reaping its child.
     let _owner = self.managed_lock.lock().await;
+    let mut state = self.state.lock().unwrap();
+    state.managed_pid = None;
+    state.started_at_ms = None;
+    state.phase = "stopped".into();
   }
 }
 

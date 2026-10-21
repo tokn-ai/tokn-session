@@ -4,6 +4,7 @@ import { loadSessionImage } from "../lib/tauri";
 import { captureTransport, viewerStorageScope } from "../lib/transport";
 import { MessageCard } from "./MessageCard";
 import { InlineMessageImage, MessageImages } from "./MessageImages";
+import { ActionNotificationsProvider, useActionNotification } from "./ActionNotifications";
 import type { EventSummary, MessageImageSummary } from "../lib/types";
 vi.mock("../lib/tauri", () => ({ loadSessionImage: vi.fn(), loadEventDetail: vi.fn() }));
 vi.mock("../lib/transport", async (original) => ({ ...await original<typeof import("../lib/transport")>(), captureTransport: vi.fn(), viewerStorageScope: vi.fn() }));
@@ -18,7 +19,7 @@ beforeEach(() => {
   vi.mocked(captureTransport).mockReturnValue({ invoke: send, listen: vi.fn(), release: vi.fn(), on_close: (callback) => { close = callback; return () => {}; } });
   vi.mocked(loadSessionImage).mockResolvedValue({ mime_type: "image/png", data_base64: btoa("image"), width: 100, height: 100 });
 });
-afterEach(() => { cleanup(); close?.(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); close?.(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 describe("recorded image display", () => {
   it("loads a thumbnail and requests full bytes only after opening its preview", async () => {
     render(<MessageImages session_key="session" event_key="window.generation.event" images={[image]} />);
@@ -72,6 +73,33 @@ describe("recorded image display", () => {
     fireEvent(screen.getByRole("dialog"), new Event("cancel", { cancelable: true }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(opener).toHaveFocus();
+  });
+  it("keeps late action notifications inside the image preview and returns them to the page on close", async () => {
+    let notify!: ReturnType<typeof useActionNotification>;
+    function NotificationSource() { notify = useActionNotification(); return null; }
+    render(<ActionNotificationsProvider><NotificationSource />
+      <MessageImages session_key="session" event_key="event" images={[image]} />
+    </ActionNotificationsProvider>);
+    const preview = await screen.findByRole("button", { name: "Preview photo.png" });
+    const thumbnail_url = within(preview).getByRole("img").getAttribute("src");
+    fireEvent.click(preview);
+    const dialog = screen.getByRole("dialog", { name: "Image preview" });
+    expect(await within(dialog).findByRole("img", { name: "photo.png" })).toHaveAttribute("src", expect.stringMatching(/^blob:image-/));
+    vi.useFakeTimers();
+    act(() => { notify({ title: "Pi", message: "Restart requested" }); });
+    expect(within(dialog).getByRole("status")).toHaveTextContent("Restart requested");
+    expect(within(dialog).getByRole("status")).toHaveAttribute("data-placement", "dialog");
+    act(() => { vi.advanceTimersByTime(2000); });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close image preview" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveAttribute("data-placement", "page");
+    expect(screen.getByRole("status")).toHaveTextContent("Restart requested");
+    expect(within(preview).getByRole("img")).toHaveAttribute("src", thumbnail_url);
+    expect(vi.mocked(loadSessionImage).mock.calls.map(([request]) => request.variant)).toEqual(["thumbnail", "full"]);
+    act(() => { vi.advanceTimersByTime(2999); });
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    act(() => { vi.advanceTimersByTime(1); });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
   it("waits until an image approaches the viewport", async () => {
     let observer!: (entries: { isIntersecting: boolean }[]) => void;

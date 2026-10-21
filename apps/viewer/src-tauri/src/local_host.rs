@@ -4,11 +4,13 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::{
+  future::Future,
   path::PathBuf,
   sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
   },
+  time::Duration,
 };
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::{sync::Mutex as AsyncMutex, task::JoinHandle};
@@ -20,7 +22,11 @@ use tokn_session_hub::{
   pairing::TOTP_PERIOD,
   secure::NoiseIdentity,
 };
+use tokn_viewer_core::runtimes::{RuntimeExecutionKind, RuntimeInfo, RuntimeKind, RuntimeOwnership};
 use zeroize::Zeroize;
+
+const HOST_HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
+const HOST_HANDOFF_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -62,7 +68,7 @@ impl Default for HostStatus {
     }
   }
 }
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StartHostRequest {
   pub hub_url: String,
@@ -88,6 +94,9 @@ impl Drop for HostPairing {
 struct RunningHost {
   shutdown: CancellationToken,
   task: JoinHandle<()>,
+  instance_id: String,
+  started_at_ms: i64,
+  configuration: Option<StartHostRequest>,
 }
 impl RunningHost {
   async fn stop(mut self) {
@@ -114,6 +123,7 @@ pub struct LocalHost {
   operation: AsyncMutex<Option<RunningHost>>,
   status: Arc<Mutex<HostStatus>>,
   closed: AtomicBool,
+  closing: CancellationToken,
 }
 impl LocalHost {
   pub fn new(state_dir: PathBuf) -> Self {
@@ -123,6 +133,7 @@ impl LocalHost {
       operation: AsyncMutex::new(None),
       status: Arc::new(Mutex::new(HostStatus::default())),
       closed: AtomicBool::new(false),
+      closing: CancellationToken::new(),
     }
   }
   pub fn unified(paths: tokn_session_storage::SessionPaths) -> Self {
@@ -155,12 +166,22 @@ impl LocalHost {
 
   pub async fn start(&self, app: AppHandle, request: StartHostRequest) -> Result<HostStatus, String> {
     let mut running = self.operation.lock().await;
+    self.start_locked(app, request, &mut running).await
+  }
+
+  async fn start_locked(
+    &self,
+    app: AppHandle,
+    request: StartHostRequest,
+    running: &mut Option<RunningHost>,
+  ) -> Result<HostStatus, String> {
     if self.closed.load(Ordering::Acquire) {
       return Err("App hosting is shutting down".into());
     }
     if running.is_some() {
       return Err("Stop app hosting before changing its settings".into());
     }
+    let configuration = request.clone();
     let state_dir = self.storage_path(true).await?;
     let path = state_dir.clone();
     let (lease, previous) = tokio::task::spawn_blocking(move || {
@@ -243,6 +264,7 @@ impl LocalHost {
     });
     let task_shutdown = shutdown.clone();
     let state = self.status.clone();
+    let task_app = app.clone();
     let task = tokio::spawn(async move {
       let stop = task_shutdown.clone();
       let api = axum::serve(listener, router).with_graceful_shutdown(async move { stop.cancelled().await });
@@ -260,11 +282,126 @@ impl LocalHost {
             .err()
             .unwrap_or_else(|| "Host service stopped unexpectedly".into()),
         );
-        publish(&app, &state, status);
+        publish(&task_app, &state, status);
       }
     });
-    *running = Some(RunningHost { shutdown, task });
+    *running = Some(RunningHost {
+      shutdown,
+      task,
+      instance_id: uuid::Uuid::new_v4().to_string(),
+      started_at_ms: crate::runtime_management::now_ms(),
+      configuration: Some(configuration),
+    });
+    crate::runtime_management::changed(&app);
     Ok(self.status.lock().unwrap().clone())
+  }
+
+  /// Restart only this app's exact current instance. The saved enrollment,
+  /// authorization, and profile are reused by the normal checked start path.
+  pub async fn restart(&self, app: AppHandle, expected_instance_id: &str) -> Result<(), String> {
+    let mut running = self.operation.lock().await;
+    if self.closed.load(Ordering::Acquire) {
+      return Err("App hosting is shutting down".into());
+    }
+    let host = running.as_ref().ok_or("Hosting is not owned by this viewer")?;
+    let request = restart_configuration(host, expected_instance_id)?;
+    // Capture the prior identity while its owned task and lease still exist.
+    // Local task completion alone does not acknowledge remote deregistration.
+    let path = self.storage_path(false).await?.join("host.json");
+    let profile = tokio::task::spawn_blocking(move || HostProfile::load(&path))
+      .await
+      .map_err(|_| "Host configuration task failed")??
+      .ok_or("The owned hosting configuration is unavailable")?;
+    running.take().unwrap().stop().await;
+    let result = async {
+      wait_for_host_offline(
+        || host_setup::existing_host_online(&profile),
+        &self.closing,
+        HOST_HANDOFF_TIMEOUT,
+        HOST_HANDOFF_POLL,
+      )
+      .await?;
+      self.start_locked(app.clone(), request, &mut running).await
+    }
+    .await;
+    if let Err(error) = &result {
+      let mut status = self.status.lock().unwrap().clone();
+      status.phase = HostPhase::Error;
+      status.error = Some(error.clone());
+      publish(&app, &self.status, status);
+    }
+    result.map(|_| ())
+  }
+
+  pub async fn runtime_inventory(&self) -> Vec<RuntimeInfo> {
+    let running = self.operation.lock().await;
+    if let Some(host) = running.as_ref() {
+      return vec![hosting_runtime(self.status.lock().unwrap().clone(), Some(host))];
+    }
+    let observed = match self.storage_path(false).await {
+      Ok(path) => detected_status(path).await,
+      Err(error) => Err(error),
+    };
+    let status = observed.unwrap_or_else(|error| HostStatus {
+      phase: HostPhase::Unavailable,
+      error: Some(error),
+      ..Default::default()
+    });
+    let mut runtimes = vec![hosting_runtime(status.clone(), None)];
+    for (id, name, kind, service) in [
+      (
+        "background-api",
+        "Background viewer API",
+        RuntimeKind::BackgroundApi,
+        &status.background_services.api,
+      ),
+      (
+        "background-connector",
+        "Background Hub connector",
+        RuntimeKind::BackgroundConnector,
+        &status.background_services.connector,
+      ),
+    ] {
+      if service.registered || service.loaded || service.error.is_some() {
+        runtimes.push(RuntimeInfo {
+          runtime_id: id.into(),
+          instance_id: format!("{id}:external"),
+          name: name.into(),
+          kind,
+          execution_kind: RuntimeExecutionKind::External,
+          ownership: RuntimeOwnership::External,
+          status: if service.error.is_some() {
+            "unavailable"
+          } else if service.running {
+            "running"
+          } else if service.loaded {
+            "loaded"
+          } else {
+            "stopped"
+          }
+          .into(),
+          pid: None,
+          started_at_ms: None,
+          session_key: None,
+          session_id: None,
+          project_id: None,
+          working_directory: None,
+          endpoint: crate::runtime_management::public_endpoint(&status.hub_url),
+          detail: Some(
+            if service.verified {
+              "Recognized OS service; managed outside this viewer"
+            } else {
+              "Unverified OS service registration"
+            }
+            .into(),
+          ),
+          last_error: service.error.clone(),
+          can_restart: false,
+          restart_disabled_reason: Some("Background services are managed outside this viewer".into()),
+        });
+      }
+    }
+    runtimes
   }
   pub async fn stop(&self, app: &AppHandle) -> Result<HostStatus, String> {
     let mut running = self.operation.lock().await;
@@ -327,6 +464,7 @@ impl LocalHost {
   }
   pub async fn shutdown(&self, app: &AppHandle) {
     self.closed.store(true, Ordering::Release);
+    self.closing.cancel();
     let _ = self.stop(app).await;
   }
   pub async fn pairing(&self) -> Result<HostPairing, String> {
@@ -339,6 +477,95 @@ impl LocalHost {
 fn publish(app: &AppHandle, state: &Mutex<HostStatus>, status: HostStatus) {
   *state.lock().unwrap() = status.clone();
   let _ = app.emit("local-host-status", status);
+  crate::runtime_management::changed(app);
+}
+
+fn hosting_runtime(status: HostStatus, owned: Option<&RunningHost>) -> RuntimeInfo {
+  let external = owned.is_none() && matches!(status.phase, HostPhase::External | HostPhase::Background);
+  RuntimeInfo {
+    runtime_id: "hosting".into(),
+    instance_id: owned
+      .map(|host| host.instance_id.clone())
+      .unwrap_or_else(|| "hosting:stopped".into()),
+    name: "Hub hosting".into(),
+    kind: RuntimeKind::Hosting,
+    execution_kind: if external {
+      RuntimeExecutionKind::External
+    } else {
+      RuntimeExecutionKind::Embedded
+    },
+    ownership: if external {
+      RuntimeOwnership::External
+    } else {
+      RuntimeOwnership::Viewer
+    },
+    status: serde_json::to_value(&status.phase)
+      .ok()
+      .and_then(|value| value.as_str().map(str::to_owned))
+      .unwrap_or_else(|| "unavailable".into()),
+    pid: owned.map(|_| std::process::id()),
+    started_at_ms: owned.map(|host| host.started_at_ms),
+    session_key: None,
+    session_id: None,
+    project_id: None,
+    working_directory: None,
+    endpoint: crate::runtime_management::public_endpoint(&status.hub_url),
+    detail: Some(
+      if owned.is_some() {
+        "Viewer-owned API and connector; stops when the viewer quits"
+      } else if external {
+        "Hosting is owned outside this viewer"
+      } else {
+        "Start hosting from Machines to create an app-owned runtime"
+      }
+      .into(),
+    ),
+    last_error: status.error,
+    can_restart: owned.is_some_and(|host| host.configuration.is_some()),
+    restart_disabled_reason: owned
+      .is_none()
+      .then(|| "No hosting runtime is owned by this viewer".into()),
+  }
+}
+
+fn restart_configuration(host: &RunningHost, expected_instance_id: &str) -> Result<StartHostRequest, String> {
+  if host.instance_id != expected_instance_id {
+    return Err("Hosting instance changed; refresh runtimes before restarting".into());
+  }
+  host
+    .configuration
+    .clone()
+    .ok_or_else(|| "Hosting cannot be restarted safely".into())
+}
+
+/// A stopped local connector can remain briefly registered at the Hub until
+/// the remote socket task observes EOF. Only owned restart uses this handoff;
+/// the normal start path still performs every competing-owner check.
+async fn wait_for_host_offline<P, F>(
+  mut probe: P,
+  closing: &CancellationToken,
+  timeout: Duration,
+  poll_interval: Duration,
+) -> Result<(), String>
+where
+  P: FnMut() -> F,
+  F: Future<Output = Result<bool, String>>,
+{
+  let handoff = async {
+    loop {
+      if !probe().await? {
+        return Ok::<(), String>(());
+      }
+      tokio::time::sleep(poll_interval).await;
+    }
+  };
+  tokio::select! {
+    biased;
+    _ = closing.cancelled() => Err("App hosting is shutting down".into()),
+    result = tokio::time::timeout(timeout, handoff) => result
+      .map_err(|_| "The previous connector is still visible at the Hub; refresh hosting before retrying".to_string())?
+      .map_err(|error| format!("Could not confirm the previous connector stopped: {error}")),
+  }
 }
 async fn detected_status(path: PathBuf) -> Result<HostStatus, String> {
   let read_path = path.clone();
@@ -577,6 +804,133 @@ mod tests {
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
   }
   #[tokio::test]
+  async fn unconfigured_runtime_inventory_is_read_only_and_cannot_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let local = LocalHost::new(directory.path().to_owned());
+    let runtimes = local.runtime_inventory().await;
+    assert_eq!(runtimes.len(), 1);
+    assert_eq!(runtimes[0].runtime_id, "hosting");
+    assert_eq!(runtimes[0].status, "stopped");
+    assert!(!runtimes[0].can_restart);
+    assert!(runtimes[0].endpoint.is_none());
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    assert!(local.operation.lock().await.is_none());
+  }
+  #[tokio::test]
+  async fn restart_capability_requires_the_owned_instance_and_reuses_its_configuration() {
+    let host = RunningHost {
+      shutdown: CancellationToken::new(),
+      task: tokio::spawn(std::future::pending()),
+      instance_id: "owned-instance".into(),
+      started_at_ms: 42,
+      configuration: Some(StartHostRequest {
+        hub_url: "https://hub.example".into(),
+        name: "Existing host".into(),
+        allow_control: false,
+      }),
+    };
+    assert!(
+      restart_configuration(&host, "stale-instance")
+        .unwrap_err()
+        .contains("instance changed")
+    );
+    let configuration = restart_configuration(&host, "owned-instance").unwrap();
+    assert_eq!(configuration.hub_url, "https://hub.example");
+    assert_eq!(configuration.name, "Existing host");
+    assert!(!configuration.allow_control);
+    let row = hosting_runtime(HostStatus::default(), Some(&host));
+    assert_eq!(row.instance_id, "owned-instance");
+    assert_eq!(row.started_at_ms, Some(42));
+    assert!(row.can_restart);
+    let external = hosting_runtime(
+      HostStatus {
+        phase: HostPhase::External,
+        ..Default::default()
+      },
+      None,
+    );
+    assert_eq!(external.ownership, RuntimeOwnership::External);
+    assert!(!external.can_restart);
+    assert!(external.pid.is_none());
+  }
+  #[tokio::test]
+  async fn owned_restart_handoff_waits_until_the_previous_connector_is_offline() {
+    use std::sync::atomic::AtomicUsize;
+    let calls = AtomicUsize::new(0);
+    wait_for_host_offline(
+      || std::future::ready(Ok(calls.fetch_add(1, Ordering::SeqCst) == 0)),
+      &CancellationToken::new(),
+      Duration::from_millis(200),
+      Duration::from_millis(1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+  }
+  #[tokio::test]
+  async fn owned_restart_handoff_rejects_a_connector_that_remains_online() {
+    let error = wait_for_host_offline(
+      || std::future::ready(Ok(true)),
+      &CancellationToken::new(),
+      Duration::from_millis(20),
+      Duration::from_millis(1),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("still visible at the Hub"));
+  }
+  #[tokio::test]
+  async fn owned_restart_handoff_propagates_probe_errors_without_treating_them_as_offline() {
+    let error = wait_for_host_offline(
+      || std::future::ready(Err("Hub unavailable".into())),
+      &CancellationToken::new(),
+      Duration::from_millis(200),
+      Duration::from_millis(1),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("Hub unavailable"));
+  }
+  #[tokio::test]
+  async fn owned_restart_handoff_cancels_an_in_flight_probe_when_the_app_closes() {
+    let closing = CancellationToken::new();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let waiting = {
+      let (closing, entered) = (closing.clone(), entered.clone());
+      tokio::spawn(async move {
+        wait_for_host_offline(
+          || {
+            entered.notify_one();
+            std::future::pending::<Result<bool, String>>()
+          },
+          &closing,
+          Duration::from_secs(60),
+          Duration::from_millis(1),
+        )
+        .await
+      })
+    };
+    entered.notified().await;
+    closing.cancel();
+    let error = tokio::time::timeout(Duration::from_secs(1), waiting)
+      .await
+      .unwrap()
+      .unwrap()
+      .unwrap_err();
+    assert!(error.contains("shutting down"));
+    assert!(
+      wait_for_host_offline(
+        || async { panic!("a closed app must not probe") },
+        &closing,
+        Duration::from_millis(200),
+        Duration::from_millis(1),
+      )
+      .await
+      .unwrap_err()
+      .contains("shutting down")
+    );
+  }
+  #[tokio::test]
   async fn stopping_owned_host_releases_its_port_and_process_lease() {
     let directory = tempfile::tempdir().unwrap();
     let key = directory.path().join("host-enrollment.key");
@@ -593,7 +947,15 @@ mod tests {
       let _listener = listener;
       cancel.cancelled().await;
     });
-    RunningHost { shutdown, task }.stop().await;
+    RunningHost {
+      shutdown,
+      task,
+      instance_id: "test".into(),
+      started_at_ms: 0,
+      configuration: None,
+    }
+    .stop()
+    .await;
     assert!(!HostLease::is_held(&key).unwrap());
     assert!(HostLease::acquire(&key).is_ok());
     assert!(tokio::net::TcpListener::bind(address).await.is_ok());

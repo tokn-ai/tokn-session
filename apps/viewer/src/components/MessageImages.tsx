@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { currentImageCache } from "../lib/imageCache";
 import { errorMessage } from "../lib/state";
 import type { MessageImageSummary } from "../lib/types";
+import { ActionNotificationHost } from "./ActionNotifications";
 import "./MessageImages.css";
 
 interface ImageProps {
@@ -74,6 +75,7 @@ function ImagePreview({ on_close, ...props }: ImageProps & { on_close: () => voi
     onCancel={(event) => { event.preventDefault(); on_close(); }}>
     <header><span>{props.image.name || "Image preview"}</span><button type="button" className="text-button" aria-label="Close image preview" onClick={on_close}>Close</button></header>
     <ImageResource {...props} full />
+    <ActionNotificationHost />
   </dialog>, document.body);
 }
 

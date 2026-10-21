@@ -64,6 +64,9 @@ pub async fn hub_client_open(
   host_public_key: Option<String>,
 ) -> Result<ConnectionInfo, String> {
   let sink = std::sync::Arc::new(move |event: &str, payload: Value| {
+    if matches!(event, "hub-client-runtime-changed" | "hub-client-transport") {
+      crate::runtime_management::changed(&app);
+    }
     let _ = app.emit(event, payload);
   });
   state

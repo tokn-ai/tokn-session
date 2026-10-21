@@ -12,9 +12,16 @@ impl ViewerService {
   ) -> Result<SessionInputStatus, String> {
     if self.session_scope.is_none()
       && self.relay.status().settings.mode != crate::relay::RelayMode::External
-      && let Some(status) = self.managed_pi.input_status(&request.session_key)
+      && let Some(status) = self.managed_pi.checked_input_status(&request.session_key).await
     {
-      return Ok(input_status_response(status));
+      let resume_required = status.as_ref().is_ok_and(|status| status.resume_required);
+      return Ok(input_status_response(
+        status.map(|status| input::InputCapability {
+          message: status.message,
+          images_available: status.images_available,
+        }),
+        resume_required,
+      ));
     }
     let service = self.clone();
     let target = tokio::task::spawn_blocking(move || service.resolve_input_target(&request.session_key))
@@ -24,7 +31,7 @@ impl ViewerService {
       Ok(target) => input::status(&target).await,
       Err(error) => Err(input::DeliveryError::not_sent(error)),
     };
-    Ok(input_status_response(status))
+    Ok(input_status_response(status, false))
   }
 
   pub async fn submit_session_input(
@@ -201,6 +208,33 @@ impl ViewerService {
 mod tests {
   use super::*;
 
+  #[test]
+  fn input_status_preserves_image_support_independently_of_worker_resume() {
+    for (images_available, resume_required) in [(true, true), (false, true), (true, false)] {
+      let status = input_status_response(
+        Ok(input::InputCapability {
+          message: "Ready for a new message".into(),
+          images_available,
+        }),
+        resume_required,
+      );
+      let wire = serde_json::to_value(status).unwrap();
+      assert_eq!(wire["available"], true);
+      assert_eq!(wire["images_available"], images_available);
+      if resume_required {
+        assert_eq!(wire["resume_required"], true);
+      } else {
+        assert!(wire.get("resume_required").is_none());
+      }
+      assert!(!wire["image_mime_types"].as_array().unwrap().is_empty());
+    }
+    let unavailable = input_status_response(Err(input::DeliveryError::not_sent("Worker unavailable")), true);
+    assert!(!unavailable.available);
+    assert!(!unavailable.images_available);
+    assert!(!unavailable.resume_required);
+    assert_eq!(unavailable.message, "Worker unavailable");
+  }
+
   struct HeaderRepository(Mutex<SessionHeader>);
 
   impl ViewerRepository for HeaderRepository {
@@ -364,7 +398,10 @@ mod tests {
   }
 }
 
-fn input_status_response(status: Result<input::InputCapability, input::DeliveryError>) -> SessionInputStatus {
+fn input_status_response(
+  status: Result<input::InputCapability, input::DeliveryError>,
+  resume_required: bool,
+) -> SessionInputStatus {
   let (available, message, images_available) = match status {
     Ok(capability) => (true, capability.message, capability.images_available),
     Err(error) => (false, error.message, false),
@@ -373,6 +410,7 @@ fn input_status_response(status: Result<input::InputCapability, input::DeliveryE
     available,
     message,
     max_length: MAX_INPUT_LENGTH,
+    resume_required: available && resume_required,
     images_available,
     max_images: crate::images::MAX_IMAGES,
     max_image_bytes: crate::images::MAX_IMAGE_BYTES,

@@ -1299,6 +1299,33 @@ describe("useViewerState Relay updates", () => {
 });
 
 describe("useViewerState refresh after message input", () => {
+  it("keeps the conversation, draft, and subscriptions mounted while viewing runtime settings", async () => {
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
+    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, toolEventPage()));
+    const { container } = render(<ViewerPage remote machine_label="Remote machine" machine_key="remote" />);
+    fireEvent.click(await screen.findByRole("button", { name: /session live/ }));
+    const input = await screen.findByRole("textbox", { name: "Message this session" });
+    await waitFor(() => expect(input).toBeEnabled());
+    fireEvent.change(input, { target: { value: "Keep this conversation draft" } });
+    const timeline = container.querySelector<HTMLElement>(".conversation__timeline")!;
+    Object.defineProperties(timeline, { scrollHeight: { configurable: true, value: 1000 }, clientHeight: { configurable: true, value: 300 } });
+    timeline.scrollTop = 77;
+    await act(async () => { fireEvent.wheel(timeline, { deltaY: -1 }); fireEvent.scroll(timeline); });
+    const subscriptions = vi.mocked(listenForSessionUpdates).mock.calls.length;
+    const reads = vi.mocked(loadSessionUpdates).mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Runtimes/ }));
+    expect(screen.getByRole("heading", { name: "Runtimes" })).toBeInTheDocument();
+    expect(container.querySelector(".conversation__timeline")).toBe(timeline);
+    expect(timeline.scrollTop).toBe(77);
+    expect(input).toHaveValue("Keep this conversation draft");
+    expect(listenForSessionUpdates).toHaveBeenCalledTimes(subscriptions);
+    expect(loadSessionUpdates).toHaveBeenCalledTimes(reads);
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+    expect(screen.getByRole("textbox", { name: "Message this session" })).toBe(input);
+    expect(input).toHaveValue("Keep this conversation draft");
+  });
+
   it("refreshes after acceptance without a Relay notification and picks up delayed persistence without resending", async () => {
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
     const original = toolEventPage();

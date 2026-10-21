@@ -46,7 +46,11 @@ No prompt is automatically replayed after a runtime failure or restart.
 
 Once open, the ordinary composer sends directly to this owned Pi process.
 Idle messages start a turn; messages sent during work enter Pi's follow-up
-queue. The durable Pi history remains the displayed transcript.
+queue. For a saved owned session whose worker has stopped, **Send** resumes its
+exact history, verifies Pi's session identity, and sends only the new message.
+The composer shows **Resuming Pi…** while starting. Startup failures preserve
+the draft; uncertain delivery requires checking the conversation before retrying.
+The durable Pi history remains the displayed transcript.
 
 ## Stop, Resume, and dialogs
 
@@ -63,14 +67,19 @@ previous turn's failure because it does not retry the prompt.
   history file exists, Pi stays owned and ready for another message.
 - Before Pi has persisted any history, **Stop** ends the provisional process.
   There is no saved file to resume in that case.
-- Viewer shutdown stops its managed processes. After restart, or after a
-  failure, **Resume Pi** explicitly opens the exact saved file with
-  `pi --mode rpc --session <file>`. It checks the registered folder and native
-  identity again and does not resend the original prompt.
+- A worker that remains fully idle for five minutes exits and releases its
+  process lease. Cleanup rechecks Pi's native streaming, compaction, and queue
+  state, and waits for pending RPCs and extension dialogs. The saved conversation
+  remains available; sending another message starts a fresh worker.
+- Viewer shutdown stops and reaps its managed processes and prevents further
+  starts. After restart, idle cleanup, or a process failure, **Send** opens the
+  exact saved file with `pi --mode rpc --session <file>` automatically. The
+  optional **Resume Pi** action starts it without sending a message. Both check
+  the registered folder and native identity again and never replay an old prompt.
 
-Resume is limited to sessions explicitly created by this viewer; opening an
-arbitrary Pi history does not adopt its process. A process lease prevents two
-viewer processes from owning the same managed session concurrently.
+Automatic and explicit resume are limited to sessions created by this viewer;
+opening an arbitrary Pi history does not adopt its process. A process lease
+prevents two viewer processes from owning the same managed session concurrently.
 
 Pi extension confirmation, selection, input, and editor dialogs appear in the
 viewer. Responses return to their exact pending native dialog. Closing a dialog
@@ -116,8 +125,10 @@ than prompt text or credentials. Pi keeps its native histories at its own
 configured location. See [native storage](native-storage.md).
 
 Each viewer runtime permits eight active managed Pi processes, including idle
-ones. The receipt store retains at most 256 creation receipts. Those receipts
-are not automatically pruned, and there is no project rename/removal or receipt
+ones until cleanup releases them. The five-minute idle timeout restarts after
+work settles; reading a conversation does not keep its worker alive. The receipt
+store retains at most 256 creation receipts. Those receipts are not automatically
+pruned, and there is no project rename/removal or receipt
 cleanup UI yet. RPC frames, command queues, pending requests, diagnostics, and
 dialog payloads have independent bounds; token updates do not produce viewer
 lifecycle events or per-token receipt writes.
@@ -125,3 +136,7 @@ lifecycle events or per-token receipt writes.
 Automated lifecycle tests use a synthetic RPC executable without contacting a
 model. Successful real work still depends on the local Pi installation, model,
 authentication, and project configuration.
+
+**Settings → Runtimes** lists these workers and saved conversations alongside
+the viewer's other runtimes. Its Restart action replaces a worker without
+replaying a prompt; see [runtime management](viewer-runtimes.md).

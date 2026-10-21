@@ -16,6 +16,11 @@ pub struct LocalViewer {
 }
 
 impl LocalViewer {
+  /// Inspect already-running services without opening an index or starting readers.
+  pub fn existing(&self) -> Option<ViewerService> {
+    self.initialized.get().map(|started| started.service.clone())
+  }
+
   pub async fn service(&self, app: &AppHandle) -> Result<ViewerService, String> {
     self.get_or_start(|| start(app.clone())).await
   }
@@ -137,9 +142,13 @@ async fn forward_events(mut events: broadcast::Receiver<ViewerEvent>, app: AppHa
   loop {
     match events.recv().await {
       Ok(event) => {
+        if matches!(event.event.as_str(), "managed-session-changed" | "relay-status") {
+          crate::runtime_management::changed(&app);
+        }
         let _ = app.emit(&event.event, event.payload);
       }
       Err(broadcast::error::RecvError::Lagged(_)) => {
+        crate::runtime_management::changed(&app);
         let _ = app.emit(
           "relay-changed",
           relay::RelayChange {
@@ -185,6 +194,7 @@ mod tests {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("local/index.sqlite");
     let local = LocalViewer::default();
+    assert!(local.existing().is_none());
     assert!(local.initialized.get().is_none());
     local.shutdown().await;
     let calls = AtomicUsize::new(0);
