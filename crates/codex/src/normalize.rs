@@ -2,6 +2,8 @@ mod async_replies;
 mod code_mode;
 mod communication;
 mod diagnostics;
+#[cfg(test)]
+mod image_tests;
 mod images;
 mod item_lifecycle;
 mod questions;
@@ -38,6 +40,7 @@ pub struct CodexNormalizer {
   pending_code_mode_call_count: usize,
   next_pending_code_mode_token: u64,
   question_replies: questions::RepliesNormalizer,
+  generation_dedup: images::GenerationDedup,
 }
 
 #[derive(Clone, Debug)]
@@ -123,6 +126,7 @@ impl CodexNormalizer {
       pending_code_mode_call_count: 0,
       next_pending_code_mode_token: 0,
       question_replies: Default::default(),
+      generation_dedup: Default::default(),
     }
   }
 
@@ -138,6 +142,7 @@ impl CodexNormalizer {
       pending_code_mode_call_count: 0,
       next_pending_code_mode_token: 0,
       question_replies: Default::default(),
+      generation_dedup: Default::default(),
     }
   }
 
@@ -158,6 +163,10 @@ impl CodexNormalizer {
       return Vec::new();
     }
 
+    let duplicate_generation = self.generation_dedup.observe(
+      line.item(),
+      matches!(self.history_mode, CodexRolloutHistoryMode::Paginated),
+    );
     // Observe every source record before reply adapters can consume it. A
     // substantive reply must break pending checkpoint/notice correlation too.
     if let Some(events) = self.records.normalize(
@@ -166,6 +175,9 @@ impl CodexNormalizer {
       matches!(self.history_mode, CodexRolloutHistoryMode::Paginated),
     ) {
       return events;
+    }
+    if duplicate_generation {
+      return Vec::new();
     }
     if let Some(events) = async_replies::normalize(&line, self.session_id.clone()) {
       return events;
@@ -366,6 +378,7 @@ impl CodexNormalizer {
     let provider_tool_name = code_mode.then(|| name.clone());
 
     vec![AgentEvent::ToolCall(ToolCallEvent {
+      images: Vec::new(),
       provider: Provider::Codex,
       session_id: self.session_id.clone(),
       turn_id,
@@ -405,6 +418,7 @@ impl CodexNormalizer {
           let tool_name = call.tool.name().to_string();
           let is_error = output.get("exit_code").and_then(Value::as_i64).map(|code| code != 0);
           return vec![AgentEvent::ToolCall(ToolCallEvent {
+            images: images::output_images(&output),
             provider: Provider::Codex,
             session_id: self.session_id.clone(),
             turn_id: turn_id.or(pending.turn_id),
@@ -446,6 +460,7 @@ impl CodexNormalizer {
     };
 
     vec![AgentEvent::ToolCall(ToolCallEvent {
+      images: images::output_images(&item.output),
       provider: Provider::Codex,
       session_id: self.session_id.clone(),
       turn_id: turn_id.or(fallback_turn_id),
@@ -563,6 +578,7 @@ fn normalize_response_item(
         .unwrap_or_else(|| "function_call".to_string());
       let input = parse_json_string_or_value(item.arguments);
       vec![AgentEvent::ToolCall(ToolCallEvent {
+        images: Vec::new(),
         provider: Provider::Codex,
         session_id,
         turn_id: None,
@@ -595,6 +611,7 @@ fn normalize_response_item(
       let (record_kind, phase, is_error) = standalone_tool_call_lifecycle(item.status.as_deref());
       let input = item.action.unwrap_or(Value::Null);
       vec![AgentEvent::ToolCall(ToolCallEvent {
+        images: Vec::new(),
         provider: Provider::Codex,
         session_id,
         turn_id: None,
@@ -623,6 +640,7 @@ fn normalize_response_item(
     ResponseItem::ToolSearchCall(item) => {
       let input = parse_json_string_or_value(item.arguments);
       vec![AgentEvent::ToolCall(ToolCallEvent {
+        images: Vec::new(),
         provider: Provider::Codex,
         session_id,
         turn_id: None,
@@ -668,6 +686,7 @@ fn normalize_response_item(
       let (record_kind, phase, is_error) = standalone_tool_call_lifecycle(item.status.as_deref());
       let input = item.action.unwrap_or(Value::Null);
       vec![AgentEvent::ToolCall(ToolCallEvent {
+        images: Vec::new(),
         provider: Provider::Codex,
         session_id,
         turn_id: None,
@@ -692,6 +711,10 @@ fn normalize_response_item(
       let (record_kind, phase, is_error) = standalone_tool_call_lifecycle(item.status.as_deref());
       let native = (is_error == Some(true)).then(|| json_value(&item));
       vec![AgentEvent::ToolCall(ToolCallEvent {
+        images: images::generated_images(
+          item.result.as_deref(),
+          item.extra.get("saved_path").and_then(Value::as_str),
+        ),
         provider: Provider::Codex,
         session_id,
         turn_id: None,
@@ -848,13 +871,17 @@ fn normalize_event_message(
     Some("exec_command_begin") => normalize_exec_begin(session_id, &payload, timestamp),
     Some("exec_command_output_delta") => normalize_exec_delta(session_id, payload, timestamp),
     Some("exec_command_end") => normalize_exec_end(session_id, &payload, timestamp),
+    Some("mcp_tool_call_begin" | "mcp_tool_call_end") if canonical_items => Vec::new(),
     Some("mcp_tool_call_begin") => normalize_mcp_begin(session_id, &payload, timestamp),
     Some("mcp_tool_call_end") => normalize_mcp_end(session_id, &payload, timestamp),
     Some("web_search_begin") => normalize_web_search_begin(session_id, &payload, timestamp),
     Some("web_search_end") => normalize_web_search_end(session_id, &payload, timestamp),
     Some("patch_apply_begin") => normalize_patch_begin(session_id, &payload, timestamp),
     Some("patch_apply_end") => normalize_patch_end(session_id, &payload, timestamp),
+    Some("view_image_tool_call") if canonical_items => Vec::new(),
     Some("view_image_tool_call") => normalize_view_image(session_id, &payload, timestamp),
+    Some("image_generation_end") if canonical_items => Vec::new(),
+    Some("image_generation_end") => normalize_image_generation_end(session_id, &payload, timestamp),
     Some("error") => diagnostics::error(session_id, &payload, &payload, "error", timestamp),
     Some(kind @ ("warning" | "guardian_warning" | "stream_error")) => {
       diagnostics::notice(session_id, &payload, kind, timestamp)
@@ -940,6 +967,7 @@ fn normalize_reasoning_event(
 fn normalize_exec_begin(session_id: Option<String>, payload: &Value, timestamp: Option<String>) -> Vec<AgentEvent> {
   let command = command_value(payload);
   vec![AgentEvent::ToolCall(ToolCallEvent {
+    images: Vec::new(),
     provider: Provider::Codex,
     session_id,
     turn_id: None,
@@ -967,6 +995,7 @@ fn normalize_exec_begin(session_id: Option<String>, payload: &Value, timestamp: 
 
 fn normalize_exec_delta(session_id: Option<String>, payload: Value, timestamp: Option<String>) -> Vec<AgentEvent> {
   vec![AgentEvent::ToolCall(ToolCallEvent {
+    images: Vec::new(),
     provider: Provider::Codex,
     session_id,
     turn_id: None,
@@ -991,6 +1020,7 @@ fn normalize_exec_delta(session_id: Option<String>, payload: Value, timestamp: O
 fn normalize_exec_end(session_id: Option<String>, payload: &Value, timestamp: Option<String>) -> Vec<AgentEvent> {
   let exit_code = payload.get("exit_code").and_then(Value::as_i64);
   vec![AgentEvent::ToolCall(ToolCallEvent {
+    images: Vec::new(),
     provider: Provider::Codex,
     session_id,
     turn_id: None,
@@ -1026,6 +1056,7 @@ fn normalize_mcp_begin(session_id: Option<String>, payload: &Value, timestamp: O
   let name = invocation.and_then(mcp_name);
   let input = invocation.and_then(|value| value.get("arguments")).cloned();
   vec![AgentEvent::ToolCall(ToolCallEvent {
+    images: Vec::new(),
     provider: Provider::Codex,
     session_id,
     turn_id: None,
@@ -1051,6 +1082,7 @@ fn normalize_mcp_end(session_id: Option<String>, payload: &Value, timestamp: Opt
   let name = payload.get("invocation").and_then(mcp_name);
   let output = payload.get("result").cloned().unwrap_or(Value::Null);
   vec![AgentEvent::ToolCall(ToolCallEvent {
+    images: images::output_images(&output),
     provider: Provider::Codex,
     session_id,
     turn_id: None,
@@ -1092,6 +1124,7 @@ fn normalize_web_search_begin(
 fn normalize_web_search_end(session_id: Option<String>, payload: &Value, timestamp: Option<String>) -> Vec<AgentEvent> {
   let query = string_field(payload, "query");
   vec![AgentEvent::ToolCall(ToolCallEvent {
+    images: Vec::new(),
     provider: Provider::Codex,
     session_id,
     turn_id: None,
@@ -1133,6 +1166,7 @@ fn normalize_patch_begin(session_id: Option<String>, payload: &Value, timestamp:
 fn normalize_patch_end(session_id: Option<String>, payload: &Value, timestamp: Option<String>) -> Vec<AgentEvent> {
   let changes = payload.get("changes").cloned().unwrap_or(Value::Null);
   vec![AgentEvent::ToolCall(ToolCallEvent {
+    images: Vec::new(),
     provider: Provider::Codex,
     session_id,
     turn_id: None,
@@ -1157,9 +1191,67 @@ fn normalize_patch_end(session_id: Option<String>, payload: &Value, timestamp: O
   })]
 }
 
+fn normalize_image_generation_end(
+  session_id: Option<String>,
+  payload: &Value,
+  timestamp: Option<String>,
+) -> Vec<AgentEvent> {
+  let (Some(call_id), Some(status), Some(result)) = (
+    string_field(payload, "call_id"),
+    string_field(payload, "status"),
+    payload.get("result").and_then(Value::as_str),
+  ) else {
+    return vec![unknown_event(
+      session_id,
+      Some("event_msg.image_generation_end".into()),
+      Some(payload.clone()),
+      timestamp,
+    )];
+  };
+  if !matches!(
+    status.as_str(),
+    "completed" | "failed" | "error" | "cancelled" | "canceled"
+  ) || payload
+    .get("saved_path")
+    .is_some_and(|value| !value.is_null() && !value.is_string())
+  {
+    return vec![unknown_event(
+      session_id,
+      Some("event_msg.image_generation_end".into()),
+      Some(payload.clone()),
+      timestamp,
+    )];
+  }
+  vec![AgentEvent::ToolCall(ToolCallEvent {
+    images: images::generated_images(Some(result), payload.get("saved_path").and_then(Value::as_str)),
+    provider: Provider::Codex,
+    session_id,
+    turn_id: None,
+    message_id: None,
+    parent_id: None,
+    record_kind: ToolRecordKind::Result,
+    tool_call_id: Some(call_id),
+    provider_tool_name: None,
+    tool_name: Some("image_generation".into()),
+    tool_kind: ToolKind::Unknown,
+    transport: None,
+    summary: None,
+    phase: Phase::Finished,
+    input: payload
+      .get("revised_prompt")
+      .and_then(Value::as_str)
+      .map(|prompt| Value::String(prompt.into())),
+    output: Some(json!({"status":status, "result":result, "saved_path":payload.get("saved_path")})),
+    is_error: Some(status != "completed"),
+    native: Some(payload.clone()),
+    timestamp,
+  })]
+}
+
 fn normalize_view_image(session_id: Option<String>, payload: &Value, timestamp: Option<String>) -> Vec<AgentEvent> {
   let path = path_field(payload, "path");
   vec![AgentEvent::ToolCall(ToolCallEvent {
+    images: images::path_images(path.as_deref()),
     provider: Provider::Codex,
     session_id,
     turn_id: None,
@@ -1260,6 +1352,7 @@ fn tool_lifecycle_event(
   timestamp: Option<String>,
 ) -> AgentEvent {
   AgentEvent::ToolCall(ToolCallEvent {
+    images: Vec::new(),
     provider: Provider::Codex,
     session_id,
     turn_id: None,
@@ -1290,6 +1383,7 @@ fn tool_output_event(
   timestamp: Option<String>,
 ) -> AgentEvent {
   AgentEvent::ToolCall(ToolCallEvent {
+    images: images::output_images(&output),
     provider: Provider::Codex,
     session_id,
     turn_id: None,

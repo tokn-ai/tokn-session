@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadSessionImage } from "../lib/tauri";
 import { captureTransport, viewerStorageScope } from "../lib/transport";
 import { MessageCard } from "./MessageCard";
-import { MessageImages } from "./MessageImages";
+import { InlineMessageImage, MessageImages } from "./MessageImages";
 import { ActionNotificationsProvider, useActionNotification } from "./ActionNotifications";
 import type { EventSummary, MessageImageSummary } from "../lib/types";
 vi.mock("../lib/tauri", () => ({ loadSessionImage: vi.fn(), loadEventDetail: vi.fn() }));
@@ -30,6 +30,49 @@ describe("recorded image display", () => {
     expect(loadSessionImage).toHaveBeenCalledWith({ session_key: "session", event_key: "window.generation.event", image_id: "image-0", variant: "full" }, send);
     fireEvent.click(screen.getByRole("button", { name: "Close image preview" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+  it.each(["attachment", "inline"])("dismisses the %s preview only for a complete backdrop click and restores focus", async (kind) => {
+    render(kind === "inline"
+      ? <InlineMessageImage session_key="session" event_key="event" revision={null} image={image} />
+      : <MessageImages session_key="session" event_key="event" images={[image]} />);
+    const opener = await screen.findByRole("button", { name: "Preview photo.png" });
+    opener.focus();
+    fireEvent.click(opener);
+    const dialog = screen.getByRole("dialog", { name: "Image preview" });
+    vi.spyOn(dialog, "getBoundingClientRect").mockReturnValue({ left: 100, top: 100, right: 500, bottom: 400 } as DOMRect);
+    const full_image = await within(dialog).findByRole("img", { name: "photo.png" });
+    const pointerDown = (target: Element, clientX: number, clientY: number, button = 0) =>
+      fireEvent(target, new MouseEvent("pointerdown", { bubbles: true, clientX, clientY, button }));
+
+    // Image/header content and the dialog's own empty area all stay open.
+    for (const target of [full_image, within(dialog).getByText("photo.png"), dialog]) {
+      pointerDown(target, 150, 150);
+      fireEvent.click(target, { clientX: 150, clientY: 150 });
+      expect(dialog).toBeInTheDocument();
+    }
+    // Ending a gesture on the other side of the boundary is not dismissal.
+    pointerDown(full_image, 150, 150);
+    fireEvent.click(dialog, { clientX: 50, clientY: 50 });
+    expect(dialog).toBeInTheDocument();
+    pointerDown(dialog, 50, 50);
+    fireEvent.click(dialog, { clientX: 150, clientY: 150 });
+    expect(dialog).toBeInTheDocument();
+    pointerDown(dialog, 50, 50);
+    fireEvent.pointerCancel(dialog);
+    fireEvent.click(dialog, { clientX: 50, clientY: 50 });
+    expect(dialog).toBeInTheDocument();
+    pointerDown(dialog, 50, 50, 2);
+    fireEvent.click(dialog, { clientX: 50, clientY: 50, button: 2 });
+    expect(dialog).toBeInTheDocument();
+
+    pointerDown(dialog, 50, 50);
+    fireEvent.click(dialog, { clientX: 50, clientY: 50 });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(opener).toHaveFocus();
+    fireEvent.click(opener);
+    fireEvent(screen.getByRole("dialog"), new Event("cancel", { cancelable: true }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(opener).toHaveFocus();
   });
   it("keeps late action notifications inside the image preview and returns them to the page on close", async () => {
     let notify!: ReturnType<typeof useActionNotification>;

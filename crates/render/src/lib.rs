@@ -4,9 +4,9 @@ use std::path::Path;
 use serde_json::Value;
 use tokn_session_core::{
   AgentActivity, AgentEvent, LifecycleEvent, LifecycleOutcome, LifecycleScope, LiveSessionEvent, LoadedSession,
-  LoadedSessionTree, Phase, Role, SessionHistoryStatus, SessionRef, SessionSettingsApplied, TerminalAction,
-  ToolCallEvent, ToolKind, ToolOperation, ToolOperationStatus, ToolSummary, UsageEvent, UsageKind,
-  assemble_tool_operations,
+  LoadedSessionTree, Phase, RecordedImage, RecordedImageSource, Role, SessionHistoryStatus, SessionRef,
+  SessionSettingsApplied, TerminalAction, ToolCallEvent, ToolKind, ToolOperation, ToolOperationStatus, ToolSummary,
+  UsageEvent, UsageKind, assemble_tool_operations, omit_image_resources,
 };
 
 pub struct EventDisplay {
@@ -272,15 +272,7 @@ pub fn render_event_pretty(event: &AgentEvent) -> String {
       output.push_str(role_label(event.role));
       output.push('\n');
       write_indented(&mut output, &event.text);
-      for image in &event.images {
-        let label = image.name.as_deref().unwrap_or("image");
-        let status = if matches!(image.source, tokn_session_core::MessageImageSource::Unavailable { .. }) {
-          " unavailable"
-        } else {
-          ""
-        };
-        write_indented(&mut output, &format!("[{label}{status}]"));
-      }
+      render_image_labels(&mut output, event.images.iter());
       output.push('\n');
     }
     AgentEvent::QuestionReply(event) => {
@@ -491,6 +483,7 @@ pub fn render_event_summary(event: &AgentEvent) -> String {
         summary.push_str(name);
       }
       append_tool_id(&mut summary, event.tool_call_id.as_deref());
+      append_image_count(&mut summary, event.images.len());
       summary
     }),
     AgentEvent::Error(event) => format!("error {}", first_line(&event.message)),
@@ -691,6 +684,7 @@ fn render_tool(output: &mut String, event: &ToolCallEvent) {
     if let Some(detail) = render_tool_detail(event) {
       write_indented(output, &detail);
     }
+    render_image_labels(output, event.images.iter());
     output.push('\n');
     return;
   }
@@ -707,13 +701,18 @@ fn render_tool(output: &mut String, event: &ToolCallEvent) {
   if event.is_error == Some(true) {
     output.push_str(" error");
   }
+  append_image_count(output, event.images.len());
   output.push('\n');
   if let Some(input) = &event.input {
     write_indented(output, &format!("input: {input}"));
   }
   if let Some(output_value) = &event.output {
-    write_indented(output, &format!("output: {output_value}"));
+    write_indented(
+      output,
+      &render_tool_output(output_value, event.images.iter(), event.tool_name.as_deref()),
+    );
   }
+  render_image_labels(output, event.images.iter());
   output.push('\n');
 }
 
@@ -725,10 +724,17 @@ fn render_tool_operation(output: &mut String, operation: &ToolOperation) {
     output.push_str(&line);
     output.push('\n');
     if matches!(operation.status, ToolOperationStatus::Failed)
-      && let Some(detail) = operation.output.as_ref().map(|output| format!("output: {output}"))
+      && let Some(detail) = operation.output.as_ref().map(|output| {
+        render_tool_output(
+          output,
+          operation.images.iter().map(|image| &image.image),
+          operation.tool_name.as_deref(),
+        )
+      })
     {
       write_indented(output, &detail);
     }
+    render_image_labels(output, operation.images.iter().map(|image| &image.image));
     output.push('\n');
     return;
   }
@@ -749,13 +755,22 @@ fn render_tool_operation(output: &mut String, operation: &ToolOperation) {
   if matches!(operation.status, ToolOperationStatus::Failed) {
     output.push_str(" error");
   }
+  append_image_count(output, operation.images.len());
   output.push('\n');
   if let Some(input) = &operation.input {
     write_indented(output, &format!("input: {input}"));
   }
   if let Some(output_value) = &operation.output {
-    write_indented(output, &format!("output: {output_value}"));
+    write_indented(
+      output,
+      &render_tool_output(
+        output_value,
+        operation.images.iter().map(|image| &image.image),
+        operation.tool_name.as_deref(),
+      ),
+    );
   }
+  render_image_labels(output, operation.images.iter().map(|image| &image.image));
   output.push('\n');
 }
 
@@ -766,6 +781,10 @@ fn render_tool_summary(event: &ToolCallEvent) -> Option<String> {
     tool_status(event),
     event.tool_call_id.as_deref(),
   )
+  .map(|mut summary| {
+    append_image_count(&mut summary, event.images.len());
+    summary
+  })
 }
 
 fn render_tool_operation_summary(operation: &ToolOperation) -> Option<String> {
@@ -775,6 +794,10 @@ fn render_tool_operation_summary(operation: &ToolOperation) -> Option<String> {
     tool_operation_status(operation.status),
     operation.tool_call_id.as_deref(),
   )
+  .map(|mut summary| {
+    append_image_count(&mut summary, operation.images.len());
+    summary
+  })
 }
 
 fn render_tool_summary_parts(
@@ -858,6 +881,25 @@ fn render_tool_summary_parts(
   Some(line)
 }
 
+fn append_image_count(line: &mut String, count: usize) {
+  if count > 0 {
+    let label = if count == 1 { "image" } else { "images" };
+    line.push_str(&format!(" [{count} {label}]"));
+  }
+}
+
+fn render_image_labels<'a>(output: &mut String, images: impl IntoIterator<Item = &'a RecordedImage>) {
+  for image in images {
+    let label = image.name.as_deref().unwrap_or("image");
+    let status = if matches!(image.source, RecordedImageSource::Unavailable { .. }) {
+      " unavailable"
+    } else {
+      ""
+    };
+    write_indented(output, &format!("[{label}{status}]"));
+  }
+}
+
 fn append_tool_id(line: &mut String, tool_call_id: Option<&str>) {
   if let Some(id) = tool_call_id {
     line.push_str(" #");
@@ -865,9 +907,58 @@ fn append_tool_id(line: &mut String, tool_call_id: Option<&str>) {
   }
 }
 
+/// Render a sanitized clone only when typed image metadata proves the output
+/// contains resources. JSONL exports continue to serialize the untouched IR.
+fn render_tool_output<'a>(
+  value: &Value,
+  images: impl IntoIterator<Item = &'a RecordedImage>,
+  tool_name: Option<&str>,
+) -> String {
+  let mut images = images.into_iter().peekable();
+  if images.peek().is_none() {
+    return format!("output: {value}");
+  }
+  let generation = tool_name == Some("image_generation");
+  let raw_generation = generation
+    && value.as_str().is_some_and(|text| {
+      images.any(|image| match &image.source {
+        RecordedImageSource::Base64 { data } => text.trim() == data,
+        RecordedImageSource::DataUrl { url } => text.trim() == url,
+        RecordedImageSource::LocalFile { .. } | RecordedImageSource::Unavailable { .. } => false,
+      })
+    });
+  let mut display = if raw_generation {
+    Value::String("[Image resource omitted]".into())
+  } else {
+    value.clone()
+  };
+  // The semantic generation result can omit its native type marker. Supply
+  // context only on this display clone, then restore its original JSON shape.
+  let previous_name = if generation {
+    display
+      .as_object_mut()
+      .map(|object| object.insert("tool_name".into(), Value::String("image_generation".into())))
+  } else {
+    None
+  };
+  omit_image_resources(&mut display);
+  if let Some(previous_name) = previous_name {
+    let object = display.as_object_mut().expect("display remains an object");
+    if let Some(name) = previous_name {
+      object.insert("tool_name".into(), name);
+    } else {
+      object.remove("tool_name");
+    }
+  }
+  format!("output: {display}")
+}
+
 fn render_tool_detail(event: &ToolCallEvent) -> Option<String> {
   if event.is_error == Some(true) {
-    return event.output.as_ref().map(|output| format!("output: {output}"));
+    return event
+      .output
+      .as_ref()
+      .map(|output| render_tool_output(output, event.images.iter(), event.tool_name.as_deref()));
   }
   match event.phase {
     Phase::Started | Phase::Updated => None,
@@ -939,8 +1030,161 @@ mod tests {
   use super::*;
 
   #[test]
+  fn image_only_tool_outputs_have_compact_labels_in_live_and_assembled_views() {
+    for tool_kind in [ToolKind::FileRead, ToolKind::Unknown] {
+      let event = AgentEvent::ToolCall(ToolCallEvent {
+        provider: Provider::Pi,
+        session_id: Some("session".into()),
+        turn_id: None,
+        message_id: None,
+        parent_id: None,
+        record_kind: ToolRecordKind::Result,
+        tool_call_id: Some("call".into()),
+        provider_tool_name: Some("view_image".into()),
+        tool_name: Some("view_image".into()),
+        tool_kind,
+        transport: None,
+        summary: None,
+        phase: Phase::Finished,
+        input: None,
+        output: None,
+        images: vec![
+          RecordedImage {
+            image_id: "first".into(),
+            mime_type: Some("image/png".into()),
+            name: Some("diagram.png".into()),
+            source: RecordedImageSource::Base64 {
+              data: "private-base64".into(),
+            },
+          },
+          RecordedImage {
+            image_id: "second".into(),
+            mime_type: None,
+            name: Some("chart".into()),
+            source: RecordedImageSource::Unavailable {
+              reference: Some("opaque-reference".into()),
+            },
+          },
+        ],
+        is_error: None,
+        native: None,
+        timestamp: None,
+      });
+      assert!(render_event_summary(&event).ends_with("#call [2 images]"));
+      for pretty in [
+        render_event_pretty(&event),
+        render_pretty(&loaded_session(vec![event.clone()])),
+      ] {
+        assert!(pretty.contains("#call [2 images]\n"));
+        assert!(pretty.contains("  [diagram.png]\n  [chart unavailable]\n"));
+        assert!(!pretty.contains("private-base64"));
+        assert!(!pretty.contains("opaque-reference"));
+      }
+    }
+  }
+
+  fn image_output_event(tool_name: &str, output: Value, source: RecordedImageSource, is_error: bool) -> AgentEvent {
+    AgentEvent::ToolCall(ToolCallEvent {
+      provider: Provider::Pi,
+      session_id: Some("session".into()),
+      turn_id: None,
+      message_id: None,
+      parent_id: None,
+      record_kind: ToolRecordKind::Result,
+      tool_call_id: Some("image-call".into()),
+      provider_tool_name: None,
+      tool_name: Some(tool_name.into()),
+      tool_kind: if is_error { ToolKind::Shell } else { ToolKind::Unknown },
+      transport: None,
+      summary: None,
+      phase: Phase::Finished,
+      input: None,
+      output: Some(output),
+      images: vec![RecordedImage {
+        image_id: "image.v1.0".into(),
+        mime_type: Some("image/png".into()),
+        name: None,
+        source,
+      }],
+      is_error: Some(is_error),
+      native: None,
+      timestamp: None,
+    })
+  }
+
+  #[test]
+  fn image_tool_display_omits_pi_and_mcp_bodies_but_keeps_output_text_and_errors() {
+    for is_error in [false, true] {
+      let event = image_output_event(
+        "capture",
+        json!({"content":[
+        {"type":"text", "text":"Keep this readable output"},
+        {"type":"image", "data":"private-binary", "mimeType":"image/png"}
+      ], "error":"Keep this failure diagnostic"}),
+        RecordedImageSource::Base64 {
+          data: "private-binary".into(),
+        },
+        is_error,
+      );
+      let before = serde_json::to_value(&event).unwrap();
+      for pretty in [
+        render_event_pretty(&event),
+        render_pretty(&loaded_session(vec![event.clone()])),
+      ] {
+        assert!(!pretty.contains("private-binary"));
+        assert!(pretty.contains("[Image resource omitted]"));
+        assert!(pretty.contains("Keep this readable output"));
+        assert!(pretty.contains("Keep this failure diagnostic"));
+      }
+      assert_eq!(serde_json::to_value(&event).unwrap(), before);
+      assert!(render_agent_jsonl(&[event]).unwrap().contains("private-binary"));
+    }
+  }
+
+  #[test]
+  fn generation_display_uses_tool_context_for_raw_results_without_hiding_other_text() {
+    let image = RecordedImageSource::Base64 {
+      data: "generated-binary".into(),
+    };
+    for output in [
+      json!("generated-binary"),
+      json!({"status":"completed", "result":"generated-binary", "saved_path":"/private/output.png", "savedPath":"/private/second.png", "error":"Keep this warning"}),
+    ] {
+      let event = image_output_event("image_generation", output.clone(), image.clone(), false);
+      for pretty in [
+        render_event_pretty(&event),
+        render_pretty(&loaded_session(vec![event.clone()])),
+      ] {
+        assert!(!pretty.contains("generated-binary"));
+        assert!(!pretty.contains("/private/output.png"));
+        assert!(!pretty.contains("/private/second.png"));
+        assert!(pretty.contains("[Image resource omitted]"));
+        if output.is_object() {
+          assert!(pretty.contains("Keep this warning"));
+        }
+      }
+      assert!(render_agent_jsonl(&[event]).unwrap().contains("generated-binary"));
+    }
+    for (name, output, source) in [
+      ("unrelated_tool", "ordinary text", image.clone()),
+      (
+        "image_generation",
+        "Human-readable failure",
+        RecordedImageSource::Unavailable {
+          reference: Some("opaque".into()),
+        },
+      ),
+    ] {
+      let event = image_output_event(name, json!(output), source, true);
+      assert!(render_event_pretty(&event).contains(output));
+      assert!(render_pretty(&loaded_session(vec![event])).contains(output));
+    }
+  }
+
+  #[test]
   fn display_event_exposes_summary_and_detail() {
     let event = AgentEvent::ToolCall(ToolCallEvent {
+      images: Vec::new(),
       provider: Provider::Codex,
       session_id: Some("session".to_string()),
       turn_id: None,
@@ -975,6 +1219,7 @@ mod tests {
   #[test]
   fn render_pretty_summarizes_shell_tools() {
     let session = loaded_session(vec![AgentEvent::ToolCall(ToolCallEvent {
+      images: Vec::new(),
       provider: Provider::Codex,
       session_id: Some("session".to_string()),
       turn_id: None,
@@ -1009,6 +1254,7 @@ mod tests {
   fn render_pretty_assembles_tool_invocation_and_result_once() {
     let session = loaded_session(vec![
       AgentEvent::ToolCall(ToolCallEvent {
+        images: Vec::new(),
         provider: Provider::Codex,
         session_id: Some("session".to_string()),
         turn_id: Some("turn".to_string()),
@@ -1047,6 +1293,7 @@ mod tests {
         timestamp: None,
       }),
       AgentEvent::ToolCall(ToolCallEvent {
+        images: Vec::new(),
         provider: Provider::Codex,
         session_id: Some("session".to_string()),
         turn_id: Some("turn".to_string()),
@@ -1269,6 +1516,7 @@ mod tests {
   #[test]
   fn render_event_summary_keeps_tool_ids() {
     let event = AgentEvent::ToolCall(ToolCallEvent {
+      images: Vec::new(),
       provider: Provider::Codex,
       session_id: Some("session".to_string()),
       turn_id: None,
@@ -1299,6 +1547,7 @@ mod tests {
   #[test]
   fn render_pretty_summarizes_file_tools() {
     let session = loaded_session(vec![AgentEvent::ToolCall(ToolCallEvent {
+      images: Vec::new(),
       provider: Provider::Codex,
       session_id: Some("session".to_string()),
       turn_id: None,
@@ -1331,6 +1580,7 @@ mod tests {
   #[test]
   fn render_pretty_keeps_unknown_tool_payloads_visible() {
     let session = loaded_session(vec![AgentEvent::ToolCall(ToolCallEvent {
+      images: Vec::new(),
       provider: Provider::Pi,
       session_id: Some("session".to_string()),
       turn_id: None,

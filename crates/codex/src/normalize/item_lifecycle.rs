@@ -55,7 +55,24 @@ pub(super) fn normalize_legacy_item_completed(
       payload,
       timestamp,
     )],
-    (Some("Extension"), Some(item)) if string_field(item, "kind").as_deref() == Some("clock.sleep") => {
+    (Some("ImageGeneration"), Some(item)) => {
+      normalize_image_generation_item(session_id.clone(), item, Phase::Finished, false, timestamp.clone())
+        .unwrap_or_else(|| {
+          unknown_item_lifecycle(
+            session_id,
+            "item_completed",
+            Some("ImageGeneration"),
+            payload,
+            timestamp,
+          )
+        })
+    }
+    (Some("Extension"), Some(item))
+      if matches!(
+        string_field(item, "kind").as_deref(),
+        Some("clock.sleep" | "image_gen.generation")
+      ) =>
+    {
       normalize_extension_item(session_id.clone(), item, Phase::Finished, timestamp.clone()).unwrap_or_else(|| {
         vec![unknown_event(
           session_id,
@@ -342,6 +359,7 @@ fn normalize_command_item(
     })
   });
   Some(vec![AgentEvent::ToolCall(ToolCallEvent {
+    images: Vec::new(),
     provider: Provider::Codex,
     session_id,
     turn_id: None,
@@ -399,6 +417,7 @@ fn normalize_dynamic_tool_item(
   }
   let success = item.get("success").and_then(Value::as_bool);
   Some(vec![AgentEvent::ToolCall(ToolCallEvent {
+    images: Vec::new(),
     provider: Provider::Codex,
     session_id,
     turn_id: None,
@@ -444,6 +463,7 @@ fn normalize_file_change_item(
     return None;
   }
   Some(vec![AgentEvent::ToolCall(ToolCallEvent {
+    images: Vec::new(),
     provider: Provider::Codex,
     session_id,
     turn_id: None,
@@ -503,6 +523,11 @@ fn normalize_mcp_item(
     .and_then(Value::as_bool)
     .unwrap_or(false);
   Some(vec![AgentEvent::ToolCall(ToolCallEvent {
+    images: if is_finished {
+      super::images::output_images(&output)
+    } else {
+      Vec::new()
+    },
     provider: Provider::Codex,
     session_id,
     turn_id: None,
@@ -558,6 +583,7 @@ fn normalize_collab_item(
     "reasoning_effort": item.get("reasoning_effort"),
   });
   Some(vec![AgentEvent::ToolCall(ToolCallEvent {
+    images: Vec::new(),
     provider: Provider::Codex,
     session_id,
     turn_id: None,
@@ -661,6 +687,11 @@ fn normalize_image_view_item(
   let call_id = string_field(item, "id")?;
   let path = path_field(item, "path")?;
   Some(vec![AgentEvent::ToolCall(ToolCallEvent {
+    images: if matches!(phase, Phase::Finished) {
+      super::images::path_images(Some(&path))
+    } else {
+      Vec::new()
+    },
     provider: Provider::Codex,
     session_id,
     turn_id: None,
@@ -711,6 +742,11 @@ fn normalize_image_generation_item(
   let result = item.get("result")?.as_str()?.to_string();
   let is_finished = matches!(phase, Phase::Finished);
   Some(vec![AgentEvent::ToolCall(ToolCallEvent {
+    images: if is_finished {
+      super::images::generated_images(Some(&result), item.get(saved_path_field).and_then(Value::as_str))
+    } else {
+      Vec::new()
+    },
     provider: Provider::Codex,
     session_id,
     turn_id: None,
@@ -771,6 +807,7 @@ fn normalize_extension_item(
       let duration_ms = item.get("durationMs")?.as_u64()?;
       let is_finished = matches!(phase, Phase::Finished);
       Some(vec![AgentEvent::ToolCall(ToolCallEvent {
+        images: Vec::new(),
         provider: Provider::Codex,
         session_id,
         turn_id: None,
@@ -827,6 +864,7 @@ fn search_tool_event(
 ) -> Vec<AgentEvent> {
   let is_finished = matches!(phase, Phase::Finished);
   vec![AgentEvent::ToolCall(ToolCallEvent {
+    images: Vec::new(),
     provider: Provider::Codex,
     session_id,
     turn_id: None,

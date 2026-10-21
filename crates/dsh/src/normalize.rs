@@ -466,6 +466,7 @@ impl Normalizer {
       _ => ToolRecordKind::Snapshot,
     };
     AgentEvent::ToolCall(ToolCallEvent {
+      images: Vec::new(),
       provider: Provider::Dsh,
       session_id: Some(self.session_id.clone()),
       turn_id: turn_id.map(|value| value.to_string()),
