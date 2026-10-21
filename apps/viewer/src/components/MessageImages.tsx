@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { currentImageCache } from "../lib/imageCache";
 import { errorMessage } from "../lib/state";
@@ -49,14 +49,29 @@ function ImageResource({ session_key, event_key, revision, image, full = false, 
   </span>;
 }
 
+function isDialogBackdrop(event: MouseEvent<HTMLDialogElement>): boolean {
+  if (event.target !== event.currentTarget) return false;
+  const rect = event.currentTarget.getBoundingClientRect();
+  return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
+}
+
 function ImagePreview({ on_close, ...props }: ImageProps & { on_close: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const backdrop_pressed = useRef(false);
   useEffect(() => {
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     dialog.current?.showModal();
     return () => { dialog.current?.close(); if (opener?.isConnected) opener.focus({ preventScroll: true }); };
   }, []);
-  return createPortal(<dialog ref={dialog} className="image-preview" aria-label="Image preview" onCancel={(event) => { event.preventDefault(); on_close(); }}>
+  return createPortal(<dialog ref={dialog} className="image-preview" aria-label="Image preview"
+    onPointerDown={(event) => { backdrop_pressed.current = event.button === 0 && isDialogBackdrop(event); }}
+    onPointerCancel={() => { backdrop_pressed.current = false; }}
+    onClick={(event) => {
+      const started_outside = backdrop_pressed.current;
+      backdrop_pressed.current = false;
+      if (started_outside && event.button === 0 && isDialogBackdrop(event)) on_close();
+    }}
+    onCancel={(event) => { event.preventDefault(); on_close(); }}>
     <header><span>{props.image.name || "Image preview"}</span><button type="button" className="text-button" aria-label="Close image preview" onClick={on_close}>Close</button></header>
     <ImageResource {...props} full />
   </dialog>, document.body);
