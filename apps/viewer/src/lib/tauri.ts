@@ -35,6 +35,7 @@ import type {
   RegisteredProject, ProjectWorkspaceSnapshot, RegisterProjectRequest, CreateProjectSessionRequest,
   ManagedSessionRequest, ManagedSessionSnapshot, ManagedSessionDialogResponse,
   RuntimeInventory, RuntimeRestartRequest, RuntimeRestartResponse,
+  SessionModelStatusRequest, SessionModelStatus, ListSessionModelsResponse,
 } from "./types";
 
 export function listRegisteredProjects(send: CommandInvoker = invoke): Promise<ProjectWorkspaceSnapshot> {
@@ -64,6 +65,13 @@ export function listenForManagedSessionChanges(handler: (snapshot: ManagedSessio
 
 export function getSessionInputStatus(request: SessionInputStatusRequest): Promise<SessionInputStatus> {
   return invoke<SessionInputStatus>("get_session_input_status", { request });
+}
+
+export function getSessionModelStatus(request: SessionModelStatusRequest, send: CommandInvoker = invoke): Promise<SessionModelStatus> {
+  return send("get_session_model_status", { request });
+}
+export function listSessionModels(request: SessionModelStatusRequest, send: CommandInvoker = invoke): Promise<ListSessionModelsResponse> {
+  return send("list_session_models", { request });
 }
 
 /** Prepare this device's viewer independently of the selected remote transport. */

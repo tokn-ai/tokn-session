@@ -13,6 +13,24 @@ function snapshot(cache: SessionDisplayCache, key: string, ids = ["a"]): Session
 }
 
 describe("session display replicas", () => {
+  it("retains current model across levels and rejects older history/context", () => {
+    const cache = new SessionDisplayCache();
+    const model = (model_id: string) => ({ model: { model_provider: "openai", model_id, display_name: null }, source: "recorded" as const, revision: model_id });
+    const initial = snapshot(cache, "one");
+    initial.state = { ...initial.state, source_revision: "source:10", current_model: model("latest") };
+    cache.apply(initial, true);
+    expect(cache.currentModel("one")?.model?.model_id).toBe("latest");
+    const final = cache.request("one", "final");
+    cache.apply({ ...initial, ...final, revision: "2", state: { ...initial.state, source_revision: "source:9", current_model: model("old") } }, true);
+    cache.rememberLoadedPage("one", { ...initial.state, events: [], source_revision: "source:8", current_model: model("older") });
+    expect(cache.currentModel("one")?.model?.model_id).toBe("latest");
+    cache.apply({ ...initial, ...final, revision: "3", state: { ...initial.state, source_revision: "source:11", current_model: undefined } }, true);
+    expect(cache.currentModel("one")?.model?.model_id).toBe("latest");
+    cache.apply({ ...initial, ...final, revision: "4", state: { ...initial.state, source_revision: "source:12", current_model: model("newer") } }, true);
+    expect(cache.currentModel("one")?.model?.model_id).toBe("newer");
+    cache.invalidate("one");
+    expect(cache.currentModel("one")).toBeUndefined();
+  });
   afterEach(() => vi.useRealTimers());
 
   it.each([false, true])("suspends running=%s ownership until an acknowledged healthy baseline", (is_running) => {

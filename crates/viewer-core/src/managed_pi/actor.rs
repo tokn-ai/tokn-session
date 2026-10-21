@@ -26,6 +26,14 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod message_input;
+mod model_control;
+use crate::input::ModelInputDisposition;
+use crate::models::{MessageModelResult, MessageModelSelection};
+use message_input::{MessagePending, PreparedMessage};
+use model_control::ModelPending;
+pub(super) use model_control::{ModelOperation, ModelResult};
+
 const RPC_DEADLINE: Duration = Duration::from_secs(15);
 // Prompt preflight may legitimately await extension input or compaction before
 // acknowledgement. The actor continues reading events and accepting Stop.
@@ -35,10 +43,12 @@ const DIALOG_DEADLINE: Duration = Duration::from_secs(120);
 const MAX_TURN_ERROR_BYTES: usize = 2048;
 
 pub(super) enum Command {
+  Model(ModelOperation, oneshot::Sender<Result<ModelResult, DeliveryError>>),
   Prompt {
     request_id: String,
     text: String,
     images: Vec<ResolvedImage>,
+    selection: Option<MessageModelSelection>,
     reply: oneshot::Sender<Result<Admission, DeliveryError>>,
   },
   Abort(oneshot::Sender<Result<(), String>>),
@@ -46,19 +56,16 @@ pub(super) enum Command {
 }
 
 enum PendingKind {
+  Model(ModelPending),
   State {
     initial: bool,
   },
-  ImagePreflight {
-    request_id: String,
-    text: String,
-    images: Vec<ResolvedImage>,
-    reply: oneshot::Sender<Result<Admission, DeliveryError>>,
-  },
+  Message(MessagePending),
   Prompt {
     request_id: String,
     reply: Option<oneshot::Sender<Result<Admission, DeliveryError>>>,
     busy: bool,
+    model_result: Option<MessageModelResult>,
   },
   Abort(oneshot::Sender<Result<(), String>>),
 }
@@ -110,31 +117,37 @@ pub(super) async fn run(
   let result = actor.run(&mut commands).await;
   commands.close();
   worker_state.send_replace(WorkerState::Closing(result.as_ref().err().cloned()));
-  // Wake startup waiters before acquiring their admission gate. All exits hold
-  // it through cleanup, including failures and viewer shutdown.
-  if actor.retirement.is_none() {
-    actor.retirement = retirement_gate(&inner, &id).await;
-  }
+  // Model controls hold the admission gate through their correlated reply.
+  // Wake them before cleanup tries to acquire that same gate.
   reject_queued_commands(&mut commands, "Pi stopped before receiving the message");
-  // Pending deliveries are uncertain after writing, even when the subprocess
-  // exits before its correlated response arrives.
+  // Input admission now holds this gate through preflight and its native
+  // acknowledgement. Wake all request owners before cleanup acquires it.
   for (_, pending) in actor.pending.drain() {
     match pending.kind {
-      PendingKind::Prompt { reply: Some(reply), .. } => {
-        let _ = reply.send(Err(DeliveryError::uncertain(
-          "Pi exited before acknowledging the message; check its history before retrying",
-        )));
+      PendingKind::Prompt {
+        reply: Some(reply),
+        model_result,
+        ..
+      } => {
+        let error =
+          DeliveryError::uncertain("Pi exited before acknowledging the message; check its history before retrying");
+        let error = model_result.map_or(error.clone(), |result| error.with_model_result(result));
+        let _ = reply.send(Err(error));
       }
-      PendingKind::ImagePreflight { reply, .. } => {
-        let _ = reply.send(Err(DeliveryError::not_sent(
-          "Pi stopped while checking image input support",
-        )));
-      }
+      PendingKind::Message(pending) => pending.reject(
+        "Pi stopped before confirming the message; check its history before retrying",
+        true,
+      ),
+      PendingKind::Model(pending) => pending.reject("Pi stopped before confirming the model request", true),
       PendingKind::Abort(reply) => {
         let _ = reply.send(Err("Pi stopped before acknowledging Stop".into()));
       }
       _ => {}
     }
+  }
+  // Startup waiters were woken through WorkerState::Closing above.
+  if actor.retirement.is_none() {
+    actor.retirement = retirement_gate(&inner, &id).await;
   }
   actor.reader.abort();
   // Tokio's Unix ChildStdin::shutdown does not close the pipe. Dropping the
@@ -178,6 +191,7 @@ struct Actor {
   recent: HashMap<String, (String, Option<Result<Admission, DeliveryError>>)>,
   initial_prompt: Option<(String, Vec<ResolvedImage>)>,
   state: Option<RpcState>,
+  model_revision: u64,
   saw_settled: bool,
   checking_idle: bool,
   dialog_deadline: Option<Instant>,
@@ -296,6 +310,7 @@ impl Actor {
       recent: HashMap::new(),
       initial_prompt: prompt,
       state: None,
+      model_revision: 0,
       saw_settled: false,
       checking_idle: false,
       dialog_deadline: None,
@@ -353,23 +368,25 @@ impl Actor {
           self.idle_since = None;
           self.idle_probe = false;
           match command {
-          Some(Command::Prompt {request_id, text, images, reply}) => {
-            if self.termination.is_cancelled() || self.inner.upgrade().is_none_or(|inner| inner.shutting_down.load(std::sync::atomic::Ordering::Acquire)) {
-              let _ = reply.send(Err(DeliveryError::not_sent("Managed Pi runtime is shutting down")));
-            } else if images.is_empty() {
-              self.prompt(request_id, text, images, Some(reply)).await?;
+          Some(Command::Model(operation, reply)) => {
+            if self.termination.is_cancelled() { let _ = reply.send(Err(DeliveryError::not_sent("Pi runtime is stopping"))); }
+            else { self.send("get_state", json!({"type":"get_state"}), PendingKind::Model(ModelPending::new(operation, reply))).await?; }
+          }
+          Some(Command::Prompt {request_id, text, images, selection, reply}) => {
+            if self.termination.is_cancelled() || self.stop_requested || self.inner.upgrade().is_none_or(|inner| inner.shutting_down.load(std::sync::atomic::Ordering::Acquire)) {
+              let _ = reply.send(Err(DeliveryError::not_sent("Managed Pi runtime is stopping")));
             } else {
-              self.send("get_state", json!({"type":"get_state"}), PendingKind::ImagePreflight { request_id, text, images, reply }).await?;
+              self.begin_message(MessagePending::new(request_id, text, images, selection, reply)).await?;
             }
           },
           Some(Command::Abort(reply)) => {
             self.stop_requested = true;
             self.awaiting_new_turn = false;
             self.initial_prompt = None;
-            let image_checks: Vec<_> = self.pending.iter().filter_map(|(id, pending)| matches!(pending.kind, PendingKind::ImagePreflight { .. }).then(|| id.clone())).collect();
-            for id in image_checks {
-              if let Some(Pending { kind: PendingKind::ImagePreflight { reply, .. }, .. }) = self.pending.remove(&id) {
-                let _ = reply.send(Err(DeliveryError::not_sent("Image message was cancelled by Stop before submission")));
+            let input_checks: Vec<_> = self.pending.iter().filter_map(|(id, pending)| matches!(pending.kind, PendingKind::Message(_)).then(|| id.clone())).collect();
+            for id in input_checks {
+              if let Some(Pending { kind: PendingKind::Message(pending), .. }) = self.pending.remove(&id) {
+                self.reject_message(pending, "Message was cancelled by Stop before submission", true);
               }
             }
             self.cancel_dialog("Pi dialog was cancelled by Stop").await?;
@@ -431,6 +448,12 @@ impl Actor {
           .collect::<String>();
         let pending = self.pending.remove(id).expect("validated pending response");
         match pending.kind {
+          PendingKind::Model(pending) => self.model_response(pending, success, value.get("data"), &error).await?,
+          PendingKind::Message(pending) => {
+            self
+              .message_response(pending, success, value.get("data"), &error)
+              .await?
+          }
           PendingKind::State { initial } => {
             if !success {
               return Err(error);
@@ -441,7 +464,7 @@ impl Actor {
             if initial {
               if let Some((prompt, images)) = self.initial_prompt.take() {
                 self
-                  .prompt(self.receipt.request_id.clone(), prompt, images, None)
+                  .prompt(self.receipt.request_id.clone(), prompt, images, None, None)
                   .await?;
               } else {
                 self.set_phase_from_state().await?;
@@ -451,47 +474,31 @@ impl Actor {
               self.set_phase_from_state().await?;
             }
           }
-          PendingKind::ImagePreflight {
-            request_id,
-            text,
-            images,
-            reply,
-          } => {
-            if !success {
-              let _ = reply.send(Err(DeliveryError::not_sent(error)));
-              return Ok(());
-            }
-            let state = match value
-              .get("data")
-              .ok_or_else(|| "Pi get_state response has no data".to_string())
-              .and_then(parse_state)
-            {
-              Ok(state) => state,
-              Err(error) => {
-                let _ = reply.send(Err(DeliveryError::not_sent(error.clone())));
-                return Err(error);
-              }
-            };
-            if let Err(error) = self.accept_state(state) {
-              let _ = reply.send(Err(DeliveryError::not_sent(error.clone())));
-              return Err(error);
-            }
-            self.prompt(request_id, text, images, Some(reply)).await?;
-          }
           PendingKind::Prompt {
             request_id,
             reply,
             busy,
+            model_result,
           } => {
             let initial = reply.is_none();
             let result = if success {
-              Ok(if busy {
-                Admission::QueuedFollowUp
+              Ok(if let Some(result) = model_result {
+                Admission::WithModel {
+                  disposition: if busy {
+                    ModelInputDisposition::Steered
+                  } else {
+                    ModelInputDisposition::Started
+                  },
+                  result,
+                }
+              } else if busy {
+                Admission::Steered
               } else {
                 Admission::Started
               })
             } else {
-              Err(DeliveryError::not_sent(error.clone()))
+              let failure = DeliveryError::not_sent(error.clone());
+              Err(model_result.map_or(failure.clone(), |result| failure.with_model_result(result)))
             };
             if let Some(recent) = self.recent.get_mut(&request_id) {
               recent.1 = Some(result.clone());
@@ -630,6 +637,9 @@ impl Actor {
         return Err("Pi resumed a different session identity".into());
       }
     }
+    if self.state.as_ref().is_none_or(|previous| previous.model != state.model) {
+      self.model_revision = self.model_revision.saturating_add(1);
+    }
     if let Some(inner) = self.inner.upgrade() {
       if let Some(record) = inner
         .records
@@ -651,7 +661,9 @@ impl Actor {
     text: String,
     images: Vec<ResolvedImage>,
     reply: Option<oneshot::Sender<Result<Admission, DeliveryError>>>,
+    prepared: Option<PreparedMessage>,
   ) -> Result<(), String> {
+    let model_result = prepared.as_ref().map(|prepared| prepared.result.clone());
     if self.termination.is_cancelled()
       || self
         .inner
@@ -659,60 +671,68 @@ impl Actor {
         .is_none_or(|inner| inner.shutting_down.load(std::sync::atomic::Ordering::Acquire))
     {
       if let Some(reply) = reply {
-        let _ = reply.send(Err(DeliveryError::not_sent("Managed Pi runtime is shutting down")));
+        let _ = reply.send(Err(with_model_result(
+          DeliveryError::not_sent("Managed Pi runtime is shutting down"),
+          model_result,
+        )));
       }
       return Ok(());
     }
     use sha2::{Digest, Sha256};
-    let fingerprint = if images.is_empty() {
-      format!("{:x}", Sha256::digest(text.as_bytes()))
-    } else {
-      format!(
-        "{:x}",
-        Sha256::digest(
-          serde_json::to_vec(&(
-            &text,
-            images
-              .iter()
-              .map(|image| (&image.image_id, &image.sha256))
-              .collect::<Vec<_>>()
-          ))
-          .map_err(|error| error.to_string())?
-        )
-      )
-    };
-    if let Some((existing, result)) = self.recent.get(&request_id) {
-      let result = if existing != &fingerprint {
-        Err(DeliveryError::not_sent(
-          "Message request ID was already used with different content",
-        ))
+    if prepared.is_none() {
+      let fingerprint = if images.is_empty() {
+        format!("{:x}", Sha256::digest(text.as_bytes()))
       } else {
-        result.clone().unwrap_or_else(|| {
-          Err(DeliveryError::uncertain(
-            "The original message is still awaiting Pi acknowledgement",
-          ))
-        })
+        format!(
+          "{:x}",
+          Sha256::digest(
+            serde_json::to_vec(&(
+              &text,
+              images
+                .iter()
+                .map(|image| (&image.image_id, &image.sha256))
+                .collect::<Vec<_>>()
+            ))
+            .map_err(|error| error.to_string())?
+          )
+        )
       };
-      if let Some(reply) = reply {
-        let _ = reply.send(result);
+      if let Some((existing, result)) = self.recent.get(&request_id) {
+        let result = if existing != &fingerprint {
+          Err(DeliveryError::not_sent(
+            "Message request ID was already used with different content",
+          ))
+        } else {
+          result.clone().unwrap_or_else(|| {
+            Err(DeliveryError::uncertain(
+              "The original message is still awaiting Pi acknowledgement",
+            ))
+          })
+        };
+        if let Some(reply) = reply {
+          let _ = reply.send(result);
+        }
+        return Ok(());
       }
-      return Ok(());
     }
     if self.state.is_none() {
       if let Some(reply) = reply {
-        let _ = reply.send(Err(DeliveryError::not_sent("Pi is still starting")));
+        let _ = reply.send(Err(with_model_result(
+          DeliveryError::not_sent("Pi is still starting"),
+          model_result,
+        )));
       }
       return Ok(());
     }
     if !images.is_empty() && self.state.as_ref().is_none_or(|state| !state.images_available) {
       let message = "The active Pi model does not support image input. Choose an image-capable model and retry.";
       if let Some(reply) = reply {
-        let _ = reply.send(Err(DeliveryError::not_sent(message)));
+        let _ = reply.send(Err(with_model_result(DeliveryError::not_sent(message), model_result)));
         return Ok(());
       }
       return Err(message.into());
     }
-    if self.recent.len() >= 1024 {
+    if prepared.is_none() && self.recent.len() >= 1024 {
       if let Some(reply) = reply {
         let _ = reply.send(Err(DeliveryError::not_sent(
           "Managed runtime message receipt limit reached; resume this session to continue",
@@ -720,25 +740,46 @@ impl Actor {
       }
       return Ok(());
     }
-    let busy = matches!(
-      self.receipt.status,
-      ManagedSessionStatus::Running | ManagedSessionStatus::Stopping
-    ) || self
-      .state
-      .as_ref()
-      .is_some_and(|state| state.is_streaming || state.is_compacting || state.pending_message_count > 0);
+    let busy = prepared.as_ref().map(|prepared| prepared.busy).unwrap_or_else(|| {
+      matches!(
+        self.receipt.status,
+        ManagedSessionStatus::Running | ManagedSessionStatus::Stopping
+      ) || self
+        .state
+        .as_ref()
+        .is_some_and(|state| state.is_streaming || state.is_compacting || state.pending_message_count > 0)
+    });
     if !busy {
       self.awaiting_new_turn = true;
       self.stop_requested = false;
     }
-    self.recent.insert(request_id.clone(), (fingerprint, None));
+    if prepared.is_none() {
+      let fingerprint = if images.is_empty() {
+        format!("{:x}", Sha256::digest(text.as_bytes()))
+      } else {
+        format!(
+          "{:x}",
+          Sha256::digest(
+            serde_json::to_vec(&(
+              &text,
+              images
+                .iter()
+                .map(|image| (&image.image_id, &image.sha256))
+                .collect::<Vec<_>>()
+            ))
+            .map_err(|error| error.to_string())?
+          )
+        )
+      };
+      self.recent.insert(request_id.clone(), (fingerprint, None));
+    }
     let mut command = json!({"type":"prompt","message":text});
     if !images.is_empty() {
       use base64::Engine;
       command["images"] = json!(images.iter().map(|image| json!({"type":"image", "data": base64::engine::general_purpose::STANDARD.encode(image.bytes.as_slice()), "mimeType":image.mime_type})).collect::<Vec<_>>());
     }
-    if busy {
-      command["streamingBehavior"] = json!("followUp");
+    if busy || prepared.is_some() {
+      command["streamingBehavior"] = json!("steer");
     }
     self
       .send(
@@ -748,6 +789,7 @@ impl Actor {
           request_id,
           reply,
           busy,
+          model_result,
         },
       )
       .await?;
@@ -1117,10 +1159,22 @@ impl Actor {
 
 /// These failures occur before a provider prompt can be written. Reporting
 /// uncertainty would unnecessarily lock an editable draft after a failed check.
+fn with_model_result(error: DeliveryError, result: Option<MessageModelResult>) -> DeliveryError {
+  result.map_or(error.clone(), |result| error.with_model_result(result))
+}
+
 fn reject_before_send(kind: PendingKind, message: &str) {
   match kind {
-    PendingKind::ImagePreflight { reply, .. } | PendingKind::Prompt { reply: Some(reply), .. } => {
-      let _ = reply.send(Err(DeliveryError::not_sent(message)));
+    PendingKind::Model(pending) => pending.reject(message, false),
+    PendingKind::Message(pending) => pending.reject(message, false),
+    PendingKind::Prompt {
+      reply: Some(reply),
+      model_result,
+      ..
+    } => {
+      let error = DeliveryError::not_sent(message);
+      let error = model_result.map_or(error.clone(), |result| error.with_model_result(result));
+      let _ = reply.send(Err(error));
     }
     PendingKind::Abort(reply) => {
       let _ = reply.send(Err(message.into()));
@@ -1184,6 +1238,9 @@ async fn retirement_gate(inner: &Weak<Inner>, id: &str) -> Option<OwnedMutexGuar
 fn reject_queued_commands(commands: &mut mpsc::Receiver<Command>, message: &str) {
   while let Ok(command) = commands.try_recv() {
     match command {
+      Command::Model(_, reply) => {
+        let _ = reply.send(Err(DeliveryError::not_sent(message)));
+      }
       Command::Prompt { reply, .. } => {
         let _ = reply.send(Err(DeliveryError::not_sent(message)));
       }
@@ -1339,17 +1396,19 @@ mod delivery_preflight_tests {
     for check_only in [true, false] {
       let (reply, mut receive) = oneshot::channel();
       let pending = if check_only {
-        PendingKind::ImagePreflight {
-          request_id: "request".into(),
-          text: "caption".into(),
-          images: Vec::new(),
+        PendingKind::Message(MessagePending::new(
+          "request".into(),
+          "caption".into(),
+          Vec::new(),
+          None,
           reply,
-        }
+        ))
       } else {
         PendingKind::Prompt {
           request_id: "request".into(),
           reply: Some(reply),
           busy: false,
+          model_result: None,
         }
       };
       reject_before_send(pending, "Pi RPC pending request limit reached");

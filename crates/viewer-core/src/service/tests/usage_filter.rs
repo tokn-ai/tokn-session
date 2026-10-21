@@ -105,6 +105,7 @@ fn model_changes_and_message_level_finals_do_not_split_accounting() {
     settings.model_id = Some("another-model".into());
   }
   let provider_changed = AgentEvent::ProviderChanged(ProviderChanged {
+    model_origin: None,
     provider: Provider::Dsh,
     session_id: Some("fixture".into()),
     native_id: None,

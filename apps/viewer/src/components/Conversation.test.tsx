@@ -50,6 +50,21 @@ function toggleFilter() {
 }
 
 describe("Conversation quick filter", () => {
+  it("keeps confirmed model separators visible while lifecycle is hidden", () => {
+    const model = (model_id: string) => ({ model_provider: "openai", model_id, display_name: model_id });
+    render(<Conversation {...props({ events: [event("change", { type: "model_changed", model_change: { previous: model("old"), current: model("new") } })] })} />);
+    expect(screen.getByRole("separator", { name: "Model changed to new" })).toBeVisible();
+    expect(screen.getByText("Switched to new")).toBeVisible();
+    expect(screen.queryByText(/event hidden/)).not.toBeInTheDocument();
+  });
+  it("distinguishes a provider switch when both providers use the same model ID", () => {
+    render(<Conversation {...props({ events: [event("change", { type: "model_changed", model_change: {
+      previous: { model_provider: "before", model_id: "shared", display_name: null },
+      current: { model_provider: "after", model_id: "shared", display_name: null },
+    } })] })} />);
+    expect(screen.getByRole("separator", { name: "Model changed to after/shared" })).toBeVisible();
+    expect(screen.getByText("Switched to after/shared")).toHaveAttribute("title", "Previously before/shared");
+  });
   it("keeps session metadata behind a disclosure and closes it when switching sessions", () => {
     const view = props({ session: { ...SESSION, project: "Viewer", cwd: "/work/viewer" } });
     const { rerender } = render(<Conversation {...view} />);

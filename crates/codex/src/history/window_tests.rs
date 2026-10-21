@@ -180,3 +180,66 @@ fn a_new_turn_without_a_user_message_does_not_slide_the_loaded_range() {
   assert_eq!(reset.source_start, first.source_start);
   assert_eq!(reset.records.len(), 4);
 }
+
+#[test]
+fn lazy_model_checkpoint_is_separate_cached_and_preserves_source_identity() {
+  let settings = row(json!({"type":"event_msg","payload":{"type":"thread_settings_applied",
+    "thread_settings":{"model_provider_id":"custom","model":"before"}}}));
+  let context = row(json!({"type":"turn_context","payload":{"turn_id":"turn-4","model":"after"}}));
+  let body = settings + &turn(0) + &turn(1) + &turn(2) + &turn(3) + &turn(4) + &context;
+  let (_directory, path, source) = fixture(&body);
+  let mut reader = CodexHistoryReader::new_window(path, false, 64 * 1024, 3);
+  let retained = reader.poll(&source).unwrap().unwrap();
+  let baseline = retained.reference.model_baseline.as_ref().unwrap();
+  assert_eq!(baseline.model.model_provider.as_deref(), Some("custom"));
+  assert_eq!(baseline.model.model_id, "before");
+  assert_eq!(baseline.origin, tokn_session_core::ModelOrigin::Selection);
+  assert_eq!(retained.records.len(), 10);
+  assert!(
+    retained
+      .records
+      .iter()
+      .flat_map(|record| &record.events)
+      .any(|event| matches!(event,
+    AgentEvent::ProviderChanged(event) if event.model_id.as_deref() == Some("after")
+      && event.model_provider.as_deref() == Some("custom")))
+  );
+  let checkpoint_reads = reader.stats().model_checkpoint_bytes_read;
+  assert!(checkpoint_reads > 0);
+  reader.invalidate();
+  let same = reader.poll(&source).unwrap().unwrap();
+  assert_eq!(reader.stats().model_checkpoint_bytes_read, checkpoint_reads);
+  assert_eq!(same.records[0].record_id, retained.records[0].record_id);
+  reader.expand(None);
+  let full = reader.poll(&source).unwrap().unwrap();
+  assert!(full.reference.model_baseline.is_none());
+  assert_eq!(full.records[8].record_id, retained.records[0].record_id);
+}
+
+#[test]
+fn latest_model_checkpoint_does_not_scan_older_payloads_to_guess_a_provider() {
+  let large = row(json!({"type":"unknown","payload":{"data":"x".repeat(2 * 1024 * 1024)}}));
+  let context = row(json!({"type":"turn_context","payload":{"turn_id":"old","model":"unqualified"}}));
+  let (_directory, path, source) = fixture(&(large + &context + &turn(1)));
+  let mut reader = CodexHistoryReader::new_window(path, false, 64 * 1024, 1);
+  let retained = reader.poll(&source).unwrap().unwrap();
+  let baseline = retained.reference.model_baseline.as_ref().unwrap();
+  assert_eq!(baseline.model.model_id, "unqualified");
+  assert!(baseline.model.model_provider.is_none());
+  assert_eq!(reader.stats().rows_parsed, 3);
+  assert!(reader.stats().model_checkpoint_bytes_read < 128 * 1024);
+}
+
+#[test]
+fn absent_model_checkpoint_has_a_hard_read_budget_without_loading_omitted_rows() {
+  let large = row(json!({"type":"unknown","payload":{"data":"x".repeat(2 * 1024 * 1024)}}));
+  let (_directory, path, source) = fixture(&(large + &turn(1)));
+  let mut reader = CodexHistoryReader::new_window(path, false, 64 * 1024, 1);
+  let retained = reader.poll(&source).unwrap().unwrap();
+  assert!(retained.reference.model_baseline.is_none());
+  assert_eq!(retained.records.len(), 3);
+  assert_eq!(reader.stats().rows_parsed, 3);
+  assert_eq!(reader.stats().model_checkpoint_bytes_read, 1024 * 1024);
+  assert!(retained.source_start.unwrap() > 2 * 1024 * 1024);
+  assert!(reader.poll(&source).unwrap().is_none());
+}

@@ -75,6 +75,7 @@ pub(super) struct RpcState {
   pub(super) is_compacting: bool,
   pub(super) pending_message_count: u64,
   pub(super) images_available: bool,
+  pub(super) model: Option<crate::models::ModelIdentity>,
 }
 
 /// Parse the `data` object of a successful native `get_state` response.
@@ -99,6 +100,7 @@ pub(super) fn parse_state(data: &Value) -> Result<RpcState, String> {
       .and_then(|model| model.get("input"))
       .and_then(Value::as_array)
       .is_some_and(|input| input.iter().any(|value| value.as_str() == Some("image"))),
+    model: data.get("model").and_then(crate::models::pi_model),
     pending_message_count: data
       .get("pendingMessageCount")
       .and_then(Value::as_u64)

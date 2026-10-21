@@ -506,6 +506,7 @@ mod tests {
   fn unavailable_subagent_history_is_not_browsed_as_an_empty_session() {
     let session = LoadedSession {
       reference: SessionRef {
+        model_baseline: None,
         id: "child".to_string(),
         parent_session_id: Some("parent".to_string()),
         agent_path: None,

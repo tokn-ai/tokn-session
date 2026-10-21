@@ -1,4 +1,4 @@
-use super::{Admission, DeliveryError, InputTarget};
+use super::{Admission, DeliveryError, InputTarget, ModelInputDisposition};
 use crate::{images::ResolvedImage, input::InputCapability};
 
 #[cfg(unix)]
@@ -15,8 +15,10 @@ mod unix {
   use tokio::io::{AsyncReadExt, AsyncWriteExt};
   use tokio::net::UnixStream;
 
-  use super::{Admission, DeliveryError, InputCapability, InputTarget, ResolvedImage};
+  use super::{Admission, DeliveryError, InputCapability, InputTarget, ModelInputDisposition, ResolvedImage};
+  use crate::model::SubmitSessionInputRequest;
   use crate::model::ViewerProvider;
+  use crate::models::*;
   use base64::Engine;
 
   const PROTOCOL: u64 = 1;
@@ -44,19 +46,157 @@ mod unix {
     query_capability(&descriptor, BRIDGE_TIMEOUT).await
   }
 
-  pub(super) async fn submit_images(
+  pub(super) async fn model_status(target: &InputTarget) -> Result<SessionModelStatus, DeliveryError> {
+    let descriptor = load_descriptor(target).await?;
+    let (status, _) = query_model_status(&descriptor).await?;
+    Ok(status)
+  }
+
+  async fn query_model_status(descriptor: &Descriptor) -> Result<(SessionModelStatus, String), DeliveryError> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let response = exchange(descriptor, request(descriptor, "status", &id), false, BRIDGE_TIMEOUT).await?;
+    validate_response(&response, &id, false)?;
+    if response["type"] != "ready" || response["session_file"] != descriptor.session_file {
+      return Err(DeliveryError::not_sent("Pi returned an invalid model status"));
+    }
+    parse_model_status(descriptor, &response)
+  }
+
+  fn parse_model_status(
+    descriptor: &Descriptor,
+    response: &Value,
+  ) -> Result<(SessionModelStatus, String), DeliveryError> {
+    if response["session_id"] != descriptor.session_id || response["instance_id"] != descriptor.instance_id {
+      return Err(DeliveryError::not_sent(
+        "Pi model status targets another session or process",
+      ));
+    }
+    if response["model_controls_version"] != 1 {
+      return Ok((
+        SessionModelStatus::unavailable("Update the Pi input bridge to enable model discovery and selection"),
+        String::new(),
+      ));
+    }
+    let model: Option<ModelIdentity> = serde_json::from_value(response["model"].clone())
+      .map_err(|_| DeliveryError::not_sent("Pi returned an invalid model identity"))?;
+    if model.as_ref().is_some_and(|model| {
+      !valid_identity(&model.model_id)
+        || model
+          .model_provider
+          .as_deref()
+          .is_none_or(|provider| !valid_identity(provider))
+        || model.display_name.as_deref().is_some_and(|name| !valid_identity(name))
+    }) {
+      return Err(DeliveryError::not_sent("Pi returned an invalid model identity"));
+    }
+    let token = response["model_revision"]
+      .as_str()
+      .filter(|token| valid_identity(token))
+      .ok_or_else(|| DeliveryError::not_sent("Pi returned an invalid model revision"))?
+      .to_owned();
+    let idle = response["state"] == "idle";
+    let can_list = response["can_list_models"] == true;
+    let can_select = idle && response["can_select_model"] == true && can_list;
+    Ok((
+      SessionModelStatus {
+        state: SessionModelState::live(model, &format!("{}:{token}", descriptor.instance_id)),
+        can_list,
+        can_select,
+        runtime_generation: Some(descriptor.instance_id.clone()),
+        updates_pi_default: true,
+        supports_model_input: response["model_input_version"] == 1,
+        reason: (!can_select).then(|| {
+          if !idle {
+            "Wait for Pi and queued messages to finish before changing models".into()
+          } else {
+            "This Pi extension cannot select models".into()
+          }
+        }),
+      },
+      token,
+    ))
+  }
+
+  pub(super) async fn list_models(target: &InputTarget) -> Result<ListSessionModelsResponse, DeliveryError> {
+    let descriptor = load_descriptor(target).await?;
+    let (status, _) = query_model_status(&descriptor).await?;
+    if !status.can_list {
+      return Ok(ListSessionModelsResponse {
+        status,
+        models: Vec::new(),
+      });
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let response = exchange(&descriptor, request(&descriptor, "models", &id), false, BRIDGE_TIMEOUT).await?;
+    validate_response(&response, &id, false)?;
+    if response["type"] != "models" {
+      return Err(DeliveryError::not_sent("Pi returned an invalid model catalog"));
+    }
+    let (status, _) = parse_model_status(&descriptor, &response)?;
+    let models: Vec<ModelChoice> = serde_json::from_value(response["models"].clone())
+      .map_err(|_| DeliveryError::not_sent("Pi returned an invalid model catalog"))?;
+    let mut seen = std::collections::HashSet::new();
+    if models.len() > 512
+      || models.iter().any(|choice| {
+        !valid_identity(&choice.model.model_id)
+          || choice
+            .model
+            .model_provider
+            .as_deref()
+            .is_none_or(|provider| !valid_identity(provider))
+          || choice
+            .model
+            .display_name
+            .as_deref()
+            .is_some_and(|name| !valid_identity(name))
+          || !seen.insert((choice.model.model_provider.clone(), choice.model.model_id.clone()))
+      })
+    {
+      return Err(DeliveryError::not_sent(
+        "Pi returned an invalid or oversized model catalog",
+      ));
+    }
+    Ok(ListSessionModelsResponse { status, models })
+  }
+
+  pub(super) async fn submit_model_images(
     target: &InputTarget,
-    request_id: &str,
-    text: &str,
+    request: &SubmitSessionInputRequest,
     images: &[ResolvedImage],
   ) -> Result<Admission, DeliveryError> {
     let descriptor = load_descriptor(target).await?;
-    if !images.is_empty() && !query_capability(&descriptor, BRIDGE_TIMEOUT).await?.images_available {
-      return Err(DeliveryError::not_sent(
-        "The active Pi model or bridge does not support image input. Update the bridge or choose an image-capable model.",
-      ));
-    }
-    submit_message_images(&descriptor, request_id, text, images, BRIDGE_TIMEOUT).await
+    let selection = if let Some(selection) = request.model_selection.as_ref() {
+      let (status, token) = query_model_status(&descriptor).await?;
+      if !status.supports_model_input {
+        return Err(DeliveryError::not_sent(
+          "Update the Pi input bridge to apply the draft model when sending",
+        ));
+      }
+      // Only the bridge may decide idle versus steering. A stale intent is
+      // deliberately carried through: busy admission ignores it, whereas idle
+      // admission must reject it without applying a model or sending input.
+      let token = if status.state.revision == selection.expected_revision
+        && status.runtime_generation == selection.runtime_generation
+      {
+        token
+      } else {
+        "stale".to_string()
+      };
+      Some((selection, token))
+    } else {
+      None
+    };
+    submit_message_images(
+      &descriptor,
+      &request.request_id,
+      &request.text,
+      images,
+      selection
+        .as_ref()
+        .map(|(selection, token)| (*selection, token.as_str())),
+      BRIDGE_TIMEOUT,
+    )
+    .await
   }
 
   // Node's path.resolve normalizes lexically without resolving symlinks. Using
@@ -197,7 +337,7 @@ mod unix {
     }
     let message = match response["state"].as_str() {
       Some("idle") => "Pi is ready for a new message.",
-      Some("busy") => "Pi is busy; your message will be queued as a follow-up.",
+      Some("busy") => "Pi is busy; your message will steer its current turn.",
       _ => {
         return Err(DeliveryError::not_sent(
           "The Pi input bridge returned an invalid status.",
@@ -217,7 +357,7 @@ mod unix {
     text: &str,
     timeout: Duration,
   ) -> Result<Admission, DeliveryError> {
-    submit_message_images(descriptor, request_id, text, &[], timeout).await
+    submit_message_images(descriptor, request_id, text, &[], None, timeout).await
   }
 
   async fn submit_message_images(
@@ -225,10 +365,20 @@ mod unix {
     request_id: &str,
     text: &str,
     images: &[ResolvedImage],
+    selection: Option<(&MessageModelSelection, &str)>,
     timeout: Duration,
   ) -> Result<Admission, DeliveryError> {
     let mut request = request(descriptor, "submit", request_id);
-    request["delivery"] = json!("auto");
+    request["delivery"] = json!("steer");
+    if let Some((selection, token)) = selection {
+      request["model_selection"] = json!({
+        "model_provider": selection.model_provider,
+        "model_id": selection.model_id,
+        "expected_revision": selection.expected_revision,
+        "expected_model_revision": token,
+        "runtime_generation": selection.runtime_generation,
+      });
+    }
     let mut content = Vec::new();
     if !text.trim().is_empty() {
       content.push(json!({ "type": "text", "text": text }));
@@ -238,7 +388,17 @@ mod unix {
     }
     request["content"] = json!(content);
     let response = exchange(descriptor, request, true, timeout).await?;
-    validate_response(&response, request_id, true)?;
+    if response["protocol"] != PROTOCOL || response["request_id"] != request_id {
+      return Err(DeliveryError::uncertain(
+        "The Pi input bridge returned an invalid or mismatched response.",
+      ));
+    }
+    let model_result =
+      parse_message_model_result(descriptor, &response).map_err(|error| DeliveryError::uncertain(error.message))?;
+    validate_response(&response, request_id, true).map_err(|mut error| {
+      error.model_result = model_result.clone();
+      error
+    })?;
     if response["type"] != "admitted"
       || response["session_id"] != descriptor.session_id
       || response["instance_id"] != descriptor.instance_id
@@ -247,13 +407,74 @@ mod unix {
         "The Pi input bridge returned a mismatched admission. Check the session before retrying.",
       ));
     }
-    match response["disposition"].as_str() {
-      Some("started") => Ok(Admission::Started),
-      Some("queued_follow_up") => Ok(Admission::QueuedFollowUp),
+    if let Some((selection, _)) = selection {
+      let valid_result =
+        model_result
+          .as_ref()
+          .is_some_and(|result| match (response["disposition"].as_str(), result.outcome) {
+            (Some("queued_steer"), MessageModelOutcome::IgnoredWhileRunning) => true,
+            (Some("started"), MessageModelOutcome::Applied | MessageModelOutcome::Unchanged) => {
+              result.state.model.as_ref().is_some_and(|model| {
+                model.model_provider == selection.model_provider && model.model_id == selection.model_id
+              })
+            }
+            _ => false,
+          });
+      if !valid_result {
+        return Err(DeliveryError::uncertain(
+          "Pi did not confirm how the draft model was handled; check the session before retrying",
+        ));
+      }
+    }
+    match (response["disposition"].as_str(), model_result) {
+      (Some("started"), Some(result)) => Ok(Admission::WithModel {
+        disposition: ModelInputDisposition::Started,
+        result,
+      }),
+      (Some("queued_steer"), Some(result)) => Ok(Admission::WithModel {
+        disposition: ModelInputDisposition::Steered,
+        result,
+      }),
+      (Some("started"), None) => Ok(Admission::Started),
+      (Some("queued_steer"), None) => Ok(Admission::Steered),
+      (Some("queued_follow_up"), None) => Ok(Admission::QueuedFollowUp),
       _ => Err(DeliveryError::uncertain(
         "The Pi input bridge returned an unexpected admission. Check the session before retrying.",
       )),
     }
+  }
+
+  fn parse_message_model_result(
+    descriptor: &Descriptor,
+    response: &Value,
+  ) -> Result<Option<MessageModelResult>, DeliveryError> {
+    let Some(value) = response.get("model_result") else {
+      return Ok(None);
+    };
+    let outcome: MessageModelOutcome = serde_json::from_value(value["outcome"].clone())
+      .map_err(|_| DeliveryError::uncertain("Pi returned an invalid message model outcome"))?;
+    let model: Option<ModelIdentity> = serde_json::from_value(value["model"].clone())
+      .map_err(|_| DeliveryError::uncertain("Pi returned an invalid message model identity"))?;
+    if model.as_ref().is_some_and(|model| {
+      !valid_identity(&model.model_id)
+        || model
+          .model_provider
+          .as_deref()
+          .is_none_or(|provider| !valid_identity(provider))
+        || model.display_name.as_deref().is_some_and(|name| !valid_identity(name))
+    }) {
+      return Err(DeliveryError::uncertain(
+        "Pi returned an invalid message model identity",
+      ));
+    }
+    let revision = value["model_revision"]
+      .as_str()
+      .filter(|revision| valid_identity(revision))
+      .ok_or_else(|| DeliveryError::uncertain("Pi returned an invalid message model revision"))?;
+    Ok(Some(MessageModelResult {
+      outcome,
+      state: SessionModelState::live(model, &format!("{}:{revision}", descriptor.instance_id)),
+    }))
   }
 
   fn delivery_error(message: impl Into<String>, may_have_been_sent: bool) -> DeliveryError {
@@ -276,18 +497,19 @@ mod unix {
     }
     // These errors precede sendUserMessage. bridge_unavailable can instead be a
     // throw from that call, so it cannot establish that input was never sent.
-    let rejected_before_send = matches!(
-      response["code"].as_str(),
-      Some(
-        "instance_mismatch"
-          | "invalid_request"
-          | "message_invalid"
-          | "request_conflict"
-          | "session_mismatch"
-          | "unauthorized"
-          | "unsupported"
-      )
-    );
+    let rejected_before_send = response["may_have_been_sent"] != true
+      && matches!(
+        response["code"].as_str(),
+        Some(
+          "instance_mismatch"
+            | "invalid_request"
+            | "message_invalid"
+            | "request_conflict"
+            | "session_mismatch"
+            | "unauthorized"
+            | "unsupported"
+        )
+      );
     let message = response["message"]
       .as_str()
       .filter(|text| !text.is_empty())
@@ -351,7 +573,12 @@ mod unix {
         }
         let end = buffer[..count].iter().position(|byte| *byte == b'\n');
         let line_bytes = end.unwrap_or(count);
-        if response.len() + line_bytes > MAX_RESPONSE_BYTES {
+        let response_limit = if matches!(request["type"].as_str(), Some("models")) {
+          1024 * 1024
+        } else {
+          MAX_RESPONSE_BYTES
+        };
+        if response.len() + line_bytes > response_limit {
           return Err(delivery_error("The Pi input bridge response is too large.", submission));
         }
         response.extend_from_slice(&buffer[..line_bytes]);
@@ -537,7 +764,7 @@ mod unix {
         let status = query_status(&fixture.descriptor().unwrap(), BRIDGE_TIMEOUT)
           .await
           .unwrap();
-        assert!(status.contains(if state == "idle" { "ready" } else { "follow-up" }));
+        assert!(status.contains(if state == "idle" { "ready" } else { "steer" }));
         let request = server.await.unwrap();
         assert_eq!(request["type"], "status");
         assert_eq!(request["token"], "test-token");
@@ -596,6 +823,36 @@ mod unix {
       }
     }
 
+    #[test]
+    fn model_status_requires_capability_and_binds_revision_to_process_and_native_model() {
+      let fixture = Fixture::new();
+      let descriptor = fixture.descriptor().unwrap();
+      let mut response = json!({"protocol":1,"type":"ready","session_id":descriptor.session_id,"session_file":descriptor.session_file,
+        "instance_id":descriptor.instance_id,"state":"idle","model_controls_version":1,"can_list_models":true,"can_select_model":true,
+        "model":{"model_provider":"synthetic","model_id":"text","display_name":"Text"},"model_revision":"revision-one"});
+      let first = parse_model_status(&descriptor, &response).unwrap().0;
+      assert!(first.can_list && first.can_select && first.updates_pi_default);
+      assert!(!first.supports_model_input);
+      response["model_input_version"] = json!(1);
+      assert!(
+        parse_model_status(&descriptor, &response)
+          .unwrap()
+          .0
+          .supports_model_input
+      );
+      response["model_revision"] = json!("revision-two");
+      assert_ne!(
+        parse_model_status(&descriptor, &response).unwrap().0.state.revision,
+        first.state.revision
+      );
+      response["state"] = json!("busy");
+      assert!(!parse_model_status(&descriptor, &response).unwrap().0.can_select);
+      response.as_object_mut().unwrap().remove("model_controls_version");
+      let legacy = parse_model_status(&descriptor, &response).unwrap().0;
+      assert!(!legacy.can_select && !legacy.can_list);
+      assert!(legacy.state.model.is_none());
+    }
+
     #[tokio::test]
     async fn image_submission_keeps_bytes_separate_from_paths_and_omits_empty_text() {
       let fixture = Fixture::new();
@@ -612,6 +869,7 @@ mod unix {
         "image-request",
         "",
         &images,
+        None,
         BRIDGE_TIMEOUT,
       )
       .await
@@ -625,8 +883,8 @@ mod unix {
     }
 
     #[tokio::test]
-    async fn submission_preserves_multiline_text_and_uses_auto_delivery() {
-      for disposition in ["started", "queued_follow_up"] {
+    async fn submission_preserves_multiline_text_and_uses_steer_delivery() {
+      for disposition in ["started", "queued_steer"] {
         let fixture = Fixture::new();
         let server = fixture.serve(move |request| frame(admitted(request, disposition)));
         let text = "Explain this:\n\tfirst line\r\n第二行";
@@ -635,7 +893,7 @@ mod unix {
           .unwrap();
         assert!(matches!(
           (disposition, result),
-          ("started", Admission::Started) | ("queued_follow_up", Admission::QueuedFollowUp)
+          ("started", Admission::Started) | ("queued_steer", Admission::Steered)
         ));
         let request = server.await.unwrap();
         assert_eq!(request["protocol"], 1);
@@ -645,9 +903,123 @@ mod unix {
         assert_eq!(request["session_id"], "session-1");
         assert_eq!(request["session_file"], fixture.value["session_file"]);
         assert_eq!(request["request_id"], "request-1");
-        assert_eq!(request["delivery"], "auto");
+        assert_eq!(request["delivery"], "steer");
         assert_eq!(request["content"], json!([{ "type": "text", "text": text }]));
       }
+    }
+
+    fn model_result(outcome: &str) -> Value {
+      json!({
+        "outcome": outcome,
+        "model": {"model_provider":"test","model_id":"active","display_name":"Active"},
+        "model_revision":"native-revision",
+      })
+    }
+
+    #[tokio::test]
+    async fn busy_admission_returns_actual_model_and_carries_stale_intent_without_applying_it() {
+      let fixture = Fixture::new();
+      let server = fixture.serve(move |request| {
+        let mut response = admitted(request, "queued_steer");
+        response["model_result"] = model_result("ignored_while_running");
+        frame(response)
+      });
+      let selection = MessageModelSelection {
+        model_provider: Some("other".into()),
+        model_id: "draft".into(),
+        expected_revision: "viewer-revision".into(),
+        runtime_generation: Some("old-process".into()),
+      };
+      let response = submit_message_images(
+        &fixture.descriptor().unwrap(),
+        "busy",
+        "steer",
+        &[],
+        Some((&selection, "stale")),
+        BRIDGE_TIMEOUT,
+      )
+      .await
+      .unwrap();
+      let Admission::WithModel {
+        disposition: ModelInputDisposition::Steered,
+        result,
+      } = response
+      else {
+        panic!("expected model-aware steering admission")
+      };
+      assert_eq!(result.outcome, MessageModelOutcome::IgnoredWhileRunning);
+      assert_eq!(result.state.model.as_ref().unwrap().model_id, "active");
+      assert_eq!(
+        result.state,
+        SessionModelState::live(result.state.model.clone(), "instance-1:native-revision",)
+      );
+      let request = server.await.unwrap();
+      assert_eq!(request["delivery"], "steer");
+      assert_eq!(
+        request["model_selection"],
+        json!({
+          "model_provider":"other", "model_id":"draft", "expected_revision":"viewer-revision",
+          "expected_model_revision":"stale", "runtime_generation":"old-process",
+        })
+      );
+    }
+
+    #[tokio::test]
+    async fn draft_model_admission_requires_a_confirmed_matching_model_result() {
+      for result in [
+        Value::Null,
+        model_result("applied"),
+        model_result("ignored_while_running"),
+      ] {
+        let fixture = Fixture::new();
+        let server = fixture.serve(move |request| {
+          let mut response = admitted(request, "started");
+          if !result.is_null() {
+            response["model_result"] = result;
+          }
+          frame(response)
+        });
+        let selection = MessageModelSelection {
+          model_provider: Some("test".into()),
+          model_id: "other".into(),
+          expected_revision: "revision".into(),
+          runtime_generation: Some("instance-1".into()),
+        };
+        assert!(
+          submit_message_images(
+            &fixture.descriptor().unwrap(),
+            "draft",
+            "prompt",
+            &[],
+            Some((&selection, "native")),
+            BRIDGE_TIMEOUT,
+          )
+          .await
+          .unwrap_err()
+          .may_have_been_sent
+        );
+        server.await.unwrap();
+      }
+    }
+
+    #[tokio::test]
+    async fn model_result_survives_an_uncertain_prompt_error() {
+      let fixture = Fixture::new();
+      let server = fixture.serve(move |request| {
+        frame(json!({
+          "protocol":1, "type":"error", "request_id":request["request_id"], "code":"unsupported",
+          "message":"model hook failed after mutation", "may_have_been_sent":true,
+          "model_result":model_result("applied"),
+        }))
+      });
+      let error = submit_message(&fixture.descriptor().unwrap(), "partial", "prompt", BRIDGE_TIMEOUT)
+        .await
+        .unwrap_err();
+      assert!(error.may_have_been_sent);
+      let result = error.model_result.unwrap();
+      assert_eq!(result.outcome, MessageModelOutcome::Applied);
+      assert_eq!(result.state.model.unwrap().model_id, "active");
+      server.await.unwrap();
     }
 
     #[tokio::test]
@@ -768,17 +1140,42 @@ pub(super) async fn status(target: &InputTarget) -> Result<InputCapability, Deli
   }
 }
 
-pub(super) async fn submit_images(
+pub(crate) async fn model_status(target: &InputTarget) -> Result<crate::models::SessionModelStatus, DeliveryError> {
+  #[cfg(unix)]
+  return unix::model_status(target).await;
+  #[cfg(not(unix))]
+  {
+    let _ = target;
+    Err(DeliveryError::not_sent(
+      "Pi model controls require the Unix input bridge",
+    ))
+  }
+}
+
+pub(crate) async fn list_models(
   target: &InputTarget,
-  request_id: &str,
-  text: &str,
+) -> Result<crate::models::ListSessionModelsResponse, DeliveryError> {
+  #[cfg(unix)]
+  return unix::list_models(target).await;
+  #[cfg(not(unix))]
+  {
+    let _ = target;
+    Err(DeliveryError::not_sent(
+      "Pi model controls require the Unix input bridge",
+    ))
+  }
+}
+
+pub(super) async fn submit_model_images(
+  target: &InputTarget,
+  request: &crate::model::SubmitSessionInputRequest,
   images: &[ResolvedImage],
 ) -> Result<Admission, DeliveryError> {
   #[cfg(unix)]
-  return unix::submit_images(target, request_id, text, images).await;
+  return unix::submit_model_images(target, request, images).await;
   #[cfg(not(unix))]
   {
-    let _ = (target, request_id, text, images);
+    let _ = (target, request, images);
     Err(DeliveryError::not_sent(
       "Pi input requires a Unix system with the Pi input bridge extension loaded.",
     ))

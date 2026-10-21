@@ -311,17 +311,19 @@ fn actual_codex_records_keep_usage_and_content_while_projecting_routine_markers(
   assert_eq!(
     flags,
     [
-      true, true, true, true, true, false, true, false, true, false, true, false, false, false
+      true, true, true, true, true, true, false, true, false, true, false, true, false, false, false
     ]
   );
-  assert!(matches!(&loaded.events[5], AgentEvent::Usage(_)));
-  assert!(matches!(&loaded.events[7], AgentEvent::Metadata(event) if event.native_type.ends_with(".Plan")));
-  assert!(matches!(&loaded.events[9], AgentEvent::Unknown(_)));
-  assert!(matches!(&loaded.events[10], AgentEvent::Lifecycle(event) if matches!(event.phase, Phase::Finished)));
-  assert!(matches!(&loaded.events[11], AgentEvent::Error(error) if error.message == "failure"));
-  assert!(matches!(&loaded.events[12], AgentEvent::Metadata(event) if event.native_type == "event_msg.turn_complete"));
+  assert!(matches!(&loaded.events[2], AgentEvent::ProviderChanged(event)
+    if event.model_id.as_deref() == Some("model") && event.model_origin == Some(tokn_session_core::ModelOrigin::Request)));
+  assert!(matches!(&loaded.events[6], AgentEvent::Usage(_)));
+  assert!(matches!(&loaded.events[8], AgentEvent::Metadata(event) if event.native_type.ends_with(".Plan")));
+  assert!(matches!(&loaded.events[10], AgentEvent::Unknown(_)));
+  assert!(matches!(&loaded.events[11], AgentEvent::Lifecycle(event) if matches!(event.phase, Phase::Finished)));
+  assert!(matches!(&loaded.events[12], AgentEvent::Error(error) if error.message == "failure"));
+  assert!(matches!(&loaded.events[13], AgentEvent::Metadata(event) if event.native_type == "event_msg.turn_complete"));
   assert!(
-    matches!(&loaded.events[13], AgentEvent::Lifecycle(event) if matches!(event.outcome, Some(LifecycleOutcome::Failed)))
+    matches!(&loaded.events[14], AgentEvent::Lifecycle(event) if matches!(event.outcome, Some(LifecycleOutcome::Failed)))
   );
 }
 

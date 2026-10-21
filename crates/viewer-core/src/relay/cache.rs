@@ -381,6 +381,7 @@ mod tests {
     let mut session = cached(SessionPriority::Background, accessed, 1);
     session.loaded = Some(Arc::new(LoadedSession {
       reference: SessionRef {
+        model_baseline: None,
         id: "cached".into(),
         parent_session_id: None,
         agent_path: None,

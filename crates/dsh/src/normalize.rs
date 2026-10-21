@@ -108,6 +108,7 @@ impl Normalizer {
     };
     match event {
       SessionEvent::RequestHeader(event) => vec![AgentEvent::ProviderChanged(ProviderChanged {
+        model_origin: Some(tokn_session_core::ModelOrigin::Request),
         provider: Provider::Dsh,
         session_id: Some(self.session_id.clone()),
         native_id: Some(event.seq.to_string()),

@@ -308,6 +308,7 @@ fn inspect_session_header(path: &Path) -> Result<SessionRef, String> {
   let file = File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
   let reader = BufReader::new(file);
   let mut reference = SessionRef {
+    model_baseline: None,
     id: session_id_from_path(path),
     parent_session_id: None,
     agent_path: None,

@@ -10,6 +10,7 @@ pub(crate) struct WorkBuddyNormalizer {
   session_id: String,
   current_model_provider: Option<String>,
   current_model_id: Option<String>,
+  current_model_is_catalog: bool,
 }
 
 impl WorkBuddyNormalizer {
@@ -18,6 +19,7 @@ impl WorkBuddyNormalizer {
       session_id,
       current_model_provider: None,
       current_model_id: None,
+      current_model_is_catalog: false,
     }
   }
 
@@ -37,7 +39,9 @@ impl WorkBuddyNormalizer {
       let (provider, model_id) = split_model(model);
       self.current_model_provider.clone_from(&provider);
       self.current_model_id = Some(model_id.clone());
+      self.current_model_is_catalog = true;
       events.push(AgentEvent::ProviderChanged(ProviderChanged {
+        model_origin: Some(tokn_session_core::ModelOrigin::Catalog),
         provider: Provider::WorkBuddy,
         session_id: Some(self.session_id.clone()),
         native_id: None,
@@ -205,13 +209,24 @@ impl WorkBuddyNormalizer {
       return Vec::new();
     };
     let (reported_provider, model_id) = split_model(&model);
-    let provider = reported_provider.or_else(|| self.current_model_provider.clone());
-    if self.current_model_id.as_deref() == Some(model_id.as_str()) && self.current_model_provider == provider {
+    // An unqualified new model cannot identify its provider. Carry a known
+    // provider only when this is another observation of the very same model.
+    let provider = reported_provider.or_else(|| {
+      (self.current_model_id.as_deref() == Some(model_id.as_str()))
+        .then(|| self.current_model_provider.clone())
+        .flatten()
+    });
+    if self.current_model_id.as_deref() == Some(model_id.as_str())
+      && self.current_model_provider == provider
+      && !self.current_model_is_catalog
+    {
       return Vec::new();
     }
     self.current_model_provider.clone_from(&provider);
     self.current_model_id = Some(model_id.clone());
+    self.current_model_is_catalog = false;
     vec![AgentEvent::ProviderChanged(ProviderChanged {
+      model_origin: Some(tokn_session_core::ModelOrigin::Request),
       provider: Provider::WorkBuddy,
       session_id: Some(session_id.to_string()),
       native_id,
@@ -842,5 +857,30 @@ mod tests {
       assert!(matches!(&events[..], [AgentEvent::ToolCall(tool)]
         if tool.is_error == Some(expected_error) && matches!(tool.phase, Phase::Finished)));
     }
+  }
+  #[test]
+  fn observed_models_replace_catalog_and_do_not_guess_providers_for_new_ids() {
+    let mut normalizer = WorkBuddyNormalizer::new("session".into());
+    let initial = normalizer.start(None, None, Some("first:same"));
+    assert!(matches!(&initial[1], AgentEvent::ProviderChanged(event)
+      if event.model_origin == Some(tokn_session_core::ModelOrigin::Catalog)));
+    let native = serde_json::json!({"providerData":{"requestModelId":"first:same"}});
+    let first = normalizer.observe_model(&native, "session", None, None, None);
+    assert!(matches!(&first[0], AgentEvent::ProviderChanged(event)
+      if event.model_origin == Some(tokn_session_core::ModelOrigin::Request)));
+    assert!(
+      normalizer
+        .observe_model(&native, "session", None, None, None)
+        .is_empty()
+    );
+    let next = normalizer.observe_model(
+      &serde_json::json!({"providerData":{"requestModelId":"unqualified"}}),
+      "session",
+      None,
+      None,
+      None,
+    );
+    assert!(matches!(&next[0], AgentEvent::ProviderChanged(event)
+      if event.model_provider.is_none() && event.model_id.as_deref() == Some("unqualified")));
   }
 }

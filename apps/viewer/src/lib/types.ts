@@ -109,6 +109,7 @@ export type EventType =
   | "session_started"
   | "provider_changed"
   | "session_settings_applied"
+  | "model_changed"
   | "message"
   | "reasoning"
   | "compaction"
@@ -311,6 +312,42 @@ export interface SessionInputStatusRequest {
   session_key: string;
 }
 
+export interface ModelIdentity {
+  model_provider: string | null;
+  model_id: string;
+  display_name: string | null;
+}
+
+export interface SessionModelState {
+  model: ModelIdentity | null;
+  source: "live" | "recorded" | "catalog" | "unknown";
+  revision: string;
+}
+
+export interface SessionModelStatusRequest { session_key: string }
+export interface SessionModelStatus {
+  state: SessionModelState;
+  can_select: boolean;
+  can_list: boolean;
+  reason: string | null;
+  runtime_generation: string | null;
+  updates_pi_default: boolean;
+  /** Omitted by older hosts; draft model selection then remains read-only. */
+  supports_model_input?: boolean;
+}
+export interface ModelChoice { model: ModelIdentity; supports_images: boolean }
+export interface ListSessionModelsResponse { status: SessionModelStatus; models: ModelChoice[] }
+export interface MessageModelSelection {
+  model_provider: string | null;
+  model_id: string;
+  expected_revision: string;
+  runtime_generation: string | null;
+}
+export interface MessageModelResult {
+  outcome: "unchanged" | "applied" | "ignored_while_running";
+  state: SessionModelState;
+}
+
 export interface SessionInputStatus {
   available: boolean;
   message: string;
@@ -320,6 +357,8 @@ export interface SessionInputStatus {
   max_length: number;
   /** Omitted by older hosts, which must remain text-only. */
   images_available?: boolean;
+  /** Upload staging is independent of the current model's image support. */
+  images_stageable?: boolean;
   max_images?: number;
   max_image_bytes?: number;
   max_total_image_bytes?: number;
@@ -331,12 +370,14 @@ export interface SubmitSessionInputRequest {
   request_id: string;
   text: string;
   image_ids?: string[];
+  model_selection?: MessageModelSelection;
 }
 
 export interface SubmitSessionInputResponse {
   request_id: string;
   status: "accepted" | "not_sent" | "unknown" | "pending";
   message: string;
+  model_result?: MessageModelResult;
 }
 
 export interface ListSessionsRequest {
@@ -597,6 +638,7 @@ export interface UploadImageChunkResponse {
 export interface ReleaseImageUploadRequest { target: ImageUploadTarget; upload_id: string }
 
 export interface EventSummary {
+  model_change?: { previous: ModelIdentity; current: ModelIdentity };
   images?: MessageImageSummary[];
   question_selections?: QuestionSelectionSummary[];
   child_keys?: string[];
@@ -682,6 +724,7 @@ export interface AcknowledgeSessionAttentionResponse {
 }
 
 export interface EventPageResponse {
+  current_model?: SessionModelState;
   is_running?: boolean;
   source_revision?: string;
   events: EventSummary[];

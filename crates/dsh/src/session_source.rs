@@ -310,6 +310,7 @@ fn visit_session_records(path: &Path, mut visit: impl FnMut(DshSessionLine, bool
 
 fn reference(path: &Path, header: &DshSessionHeader) -> SessionRef {
   SessionRef {
+    model_baseline: None,
     id: header.id.clone(),
     parent_session_id: if header.origin.as_deref() == Some("subagent") {
       header.parent_session.clone()

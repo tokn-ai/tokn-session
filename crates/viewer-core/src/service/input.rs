@@ -42,6 +42,7 @@ impl ViewerService {
       // Validation never admits or modifies a broker receipt. A previous
       // uncertain token remains recorded and cannot be replayed by this error.
       return Ok(SubmitSessionInputResponse {
+        model_result: None,
         request_id: request.request_id,
         status: InputDeliveryStatus::NotSent,
         message,
@@ -62,6 +63,7 @@ impl ViewerService {
       }
       if let Err(error) = status {
         return Ok(SubmitSessionInputResponse {
+          model_result: None,
           request_id: request.request_id,
           status: InputDeliveryStatus::NotSent,
           message: error.message,
@@ -74,6 +76,7 @@ impl ViewerService {
         Ok(images) => images,
         Err(message) => {
           return Ok(SubmitSessionInputResponse {
+            model_result: None,
             request_id: request.request_id,
             status: InputDeliveryStatus::NotSent,
             message,
@@ -84,12 +87,13 @@ impl ViewerService {
       let session_key = request.session_key.clone();
       let request_id = request.request_id.clone();
       let text = request.text.clone();
+      let model_selection = request.model_selection.clone();
       return Ok(
         self
           .input_broker
           .submit_custom(&target, request, async move {
             manager
-              .submit_owned_input_images(&session_key, &request_id, &text, images)
+              .submit_owned_input_with_model(&session_key, &request_id, &text, images, model_selection)
               .await
           })
           .await,
@@ -104,6 +108,7 @@ impl ViewerService {
       Ok(target) => target,
       Err(message) => {
         return Ok(SubmitSessionInputResponse {
+          model_result: None,
           request_id: request.request_id,
           status: InputDeliveryStatus::NotSent,
           message,
@@ -120,6 +125,7 @@ impl ViewerService {
       Ok(images) => images,
       Err(message) => {
         return Ok(SubmitSessionInputResponse {
+          model_result: None,
           request_id: request.request_id,
           status: InputDeliveryStatus::NotSent,
           message,
@@ -221,6 +227,10 @@ mod tests {
       let wire = serde_json::to_value(status).unwrap();
       assert_eq!(wire["available"], true);
       assert_eq!(wire["images_available"], images_available);
+      assert_eq!(
+        wire["images_stageable"], true,
+        "staging is independent of the active model"
+      );
       if resume_required {
         assert_eq!(wire["resume_required"], true);
       } else {
@@ -231,6 +241,7 @@ mod tests {
     let unavailable = input_status_response(Err(input::DeliveryError::not_sent("Worker unavailable")), true);
     assert!(!unavailable.available);
     assert!(!unavailable.images_available);
+    assert!(!unavailable.images_stageable);
     assert!(!unavailable.resume_required);
     assert_eq!(unavailable.message, "Worker unavailable");
   }
@@ -344,6 +355,7 @@ mod tests {
       session_file: root.path().join("session.jsonl"),
     };
     let request = SubmitSessionInputRequest {
+      model_selection: None,
       session_key: "owned-session".into(),
       request_id: uuid::Uuid::new_v4().to_string(),
       text: "caption".into(),
@@ -387,6 +399,7 @@ mod tests {
     assert!(!status.available);
     let result = service
       .submit_session_input(SubmitSessionInputRequest {
+        model_selection: None,
         session_key: "forged-key".into(),
         request_id: uuid::Uuid::new_v4().to_string(),
         text: "hello".into(),
@@ -412,6 +425,7 @@ fn input_status_response(
     max_length: MAX_INPUT_LENGTH,
     resume_required: available && resume_required,
     images_available,
+    images_stageable: available,
     max_images: crate::images::MAX_IMAGES,
     max_image_bytes: crate::images::MAX_IMAGE_BYTES,
     max_total_image_bytes: crate::images::MAX_TOTAL_IMAGE_BYTES,

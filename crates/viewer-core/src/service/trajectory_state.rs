@@ -17,7 +17,16 @@ fn superseding_boundary_timestamp<'a>(trajectory: &Trajectory, events: &'a [Agen
     let entry = TimelineEntry::Event {
       source_event_index: index,
     };
-    if is_trajectory_boundary(&entry, events) {
+    // Only genuine changes split the projected timeline. An observation
+    // after this trajectory's final source position therefore closes this
+    // segment once substantive work resumes, without re-projecting history
+    // for every card. Repeated settings remain inside the same trajectory.
+    if is_trajectory_boundary(&entry, events)
+      || matches!(
+        event,
+        AgentEvent::ProviderChanged(_) | AgentEvent::SessionSettingsApplied(_)
+      )
+    {
       separator.get_or_insert(index);
     } else if let Some(separator) = separator
       && (matches!(event, AgentEvent::ToolCall(_)) || is_substantive_work_entry(&entry, events))
@@ -230,6 +239,38 @@ mod tests {
       events.push(message_event_with_role("done", Role::Assistant, MessageDelivery::Final));
       assert!(runs.iter().all(|run| status(run, &events) == "complete"));
     }
+  }
+
+  #[test]
+  fn a_model_change_completes_only_the_previous_segment() {
+    use super::super::tests::settings_event;
+    let mut first = settings_event();
+    let mut change = settings_event();
+    if let AgentEvent::SessionSettingsApplied(settings) = &mut first {
+      settings.model_id = Some("old".into());
+    }
+    if let AgentEvent::SessionSettingsApplied(settings) = &mut change {
+      settings.model_id = Some("new".into());
+      settings.timestamp = Some("2026-09-03T00:00:02Z".into());
+    }
+    let events = vec![
+      first,
+      boundary(Phase::Started),
+      message_event_with_role("before", Role::Assistant, MessageDelivery::Commentary),
+      change,
+      message_event_with_role("after", Role::Assistant, MessageDelivery::Commentary),
+    ];
+    let runs: Vec<_> = timeline_entries(&events)
+      .into_iter()
+      .filter_map(|entry| match entry {
+        TimelineEntry::Trajectory { trajectory } => Some(trajectory),
+        _ => None,
+      })
+      .collect();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(status(&runs[0], &events), "complete");
+    assert_eq!(completion_timestamp(&runs[0], &events), Some("2026-09-03T00:00:02Z"));
+    assert_eq!(status(&runs[1], &events), "working");
   }
 
   #[test]

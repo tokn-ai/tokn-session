@@ -151,6 +151,7 @@ impl OpenCodeCompactCache {
     let updated_at_ms = session.time_updated.or(session.time_created);
     let title = native_title(session.title);
     let reference = SessionRef {
+      model_baseline: None,
       id: session.id,
       parent_session_id: session.parent_id,
       agent_path: None,

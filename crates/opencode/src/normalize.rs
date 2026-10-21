@@ -14,6 +14,7 @@ pub struct OpenCodeNormalizer {
   session_id: String,
   current_provider: Option<String>,
   current_model: Option<String>,
+  current_model_is_catalog: bool,
 }
 
 impl OpenCodeNormalizer {
@@ -28,6 +29,7 @@ impl OpenCodeNormalizer {
       session_id,
       current_provider: None,
       current_model: None,
+      current_model_is_catalog: false,
     }
   }
 
@@ -44,7 +46,9 @@ impl OpenCodeNormalizer {
     {
       self.current_provider = model.provider_id.clone();
       self.current_model = model.id.clone();
+      self.current_model_is_catalog = true;
       events.push(AgentEvent::ProviderChanged(ProviderChanged {
+        model_origin: Some(tokn_session_core::ModelOrigin::Catalog),
         provider: self.provider,
         session_id: Some(row.id.clone()),
         native_id: None,
@@ -102,9 +106,13 @@ impl OpenCodeNormalizer {
       parts,
     } = row;
     let (message, native) = data.into_parts();
-    let mut events = self.normalize_model(&message, &native, time_created);
     let parent_id = string_field(&native, "parentID");
     let provenance = message_provenance(self.provider, &native);
+    let mut events = if provenance.as_ref().and_then(|source| source.display) == Some(false) {
+      Vec::new()
+    } else {
+      self.normalize_model(&message, &native, time_created)
+    };
 
     match message {
       MessageItem::User(_) => {
@@ -218,7 +226,9 @@ impl OpenCodeNormalizer {
         }
         self.current_provider.clone_from(&provider_id);
         self.current_model.clone_from(&model_id);
+        self.current_model_is_catalog = false;
         AgentEvent::ProviderChanged(ProviderChanged {
+          model_origin: Some(tokn_session_core::ModelOrigin::Selection),
           provider: self.provider,
           session_id: Some(self.session_id.clone()),
           native_id: Some(id),
@@ -338,7 +348,7 @@ impl OpenCodeNormalizer {
       MessageItem::Unknown(_) => model_from_native(native),
     };
 
-    if provider_id == self.current_provider && model_id == self.current_model {
+    if provider_id == self.current_provider && model_id == self.current_model && !self.current_model_is_catalog {
       return Vec::new();
     }
     if provider_id.is_none() && model_id.is_none() {
@@ -347,7 +357,12 @@ impl OpenCodeNormalizer {
 
     self.current_provider = provider_id.clone();
     self.current_model = model_id.clone();
+    self.current_model_is_catalog = false;
     vec![AgentEvent::ProviderChanged(ProviderChanged {
+      model_origin: Some(match message {
+        MessageItem::Assistant(_) => tokn_session_core::ModelOrigin::Response,
+        _ => tokn_session_core::ModelOrigin::Request,
+      }),
       provider: self.provider,
       session_id: Some(self.session_id.clone()),
       native_id: None,
@@ -890,6 +905,56 @@ mod tests {
 
   use super::OpenCodeNormalizer;
   use crate::row::{OpenCodeMessageRow, OpenCodePartRow};
+
+  #[test]
+  fn hidden_zcode_models_do_not_change_the_visible_session_model() {
+    let mut normalizer = OpenCodeNormalizer::with_provider("session".into(), tokn_session_core::Provider::ZCode);
+    let visible = normalizer.normalize_message(message_row(
+      "visible",
+      json!({
+        "role":"user", "model":{"providerID":"first","modelID":"same"}
+      }),
+      Vec::new(),
+    ));
+    assert!(matches!(&visible[0], AgentEvent::ProviderChanged(event)
+      if event.model_origin == Some(tokn_session_core::ModelOrigin::Request)));
+    let hidden = normalizer.normalize_message(message_row(
+      "hidden",
+      json!({
+        "role":"assistant", "providerID":"internal", "modelID":"auxiliary",
+        "semantics":{"uiVisibility":"hidden"}
+      }),
+      vec![part_row("hidden-text", json!({"type":"text","text":"internal"}))],
+    ));
+    assert!(
+      !hidden
+        .iter()
+        .any(|event| matches!(event, AgentEvent::ProviderChanged(_)))
+    );
+    assert!(hidden.iter().all(AgentEvent::is_hidden));
+    let unchanged = normalizer.normalize_message(message_row(
+      "unchanged",
+      json!({
+        "role":"assistant", "providerID":"first", "modelID":"same"
+      }),
+      Vec::new(),
+    ));
+    assert!(
+      !unchanged
+        .iter()
+        .any(|event| matches!(event, AgentEvent::ProviderChanged(_)))
+    );
+    let changed = normalizer.normalize_message(message_row(
+      "changed",
+      json!({
+        "role":"assistant", "providerID":"second", "modelID":"same"
+      }),
+      Vec::new(),
+    ));
+    assert!(matches!(&changed[0], AgentEvent::ProviderChanged(event)
+      if event.model_provider.as_deref() == Some("second")
+        && event.model_origin == Some(tokn_session_core::ModelOrigin::Response)));
+  }
 
   #[test]
   fn opencode_and_zcode_completed_tools_retain_typed_image_attachments_and_native_unknowns() {

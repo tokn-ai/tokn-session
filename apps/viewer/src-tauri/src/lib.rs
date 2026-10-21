@@ -80,6 +80,8 @@ pub fn run() {
       commands::images::load_session_image,
       commands::images::upload_image_chunk,
       commands::images::release_image_upload,
+      commands::models::get_session_model_status,
+      commands::models::list_session_models,
       commands::input::get_session_input_status,
       commands::input::submit_session_input,
       commands::input::get_session_question_status,

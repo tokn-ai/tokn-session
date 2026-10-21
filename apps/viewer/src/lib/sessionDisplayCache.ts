@@ -1,6 +1,6 @@
 import { SessionResources } from "./sessionResources";
 import { createUuid } from "./id";
-import type { EventPageResponse, EventSummary, TrajectoryEventPageResponse, SessionUpdate, SessionUpdateItem, SessionUpdatesRequest, SessionUpdateScope, UpdateLevel } from "./types";
+import type { EventPageResponse, EventSummary, TrajectoryEventPageResponse, SessionUpdate, SessionUpdateItem, SessionUpdatesRequest, SessionUpdateScope, UpdateLevel, SessionModelState } from "./types";
 
 interface Replica {
   session_key: string;
@@ -58,6 +58,33 @@ export class SessionDisplayCache {
   runningRevision = 0;
   previewRevision = 0;
   private loadedPreviews = new Map<string, AssistantPreviewProjection>();
+  private models = new Map<string, { state: SessionModelState; source_revision?: string }>();
+  currentModel(session_key: string): SessionModelState | undefined { return this.models.get(session_key)?.state; }
+
+  private rememberCurrentModel(session_key: string, page: EventPageResponse) {
+    if (page.current_model === undefined) return;
+    const previous = this.models.get(session_key);
+    const generation = sourceGenerationFrom(page.source_revision);
+    if (generation !== undefined && this.retiredGenerations.get(session_key)?.has(generation)) return;
+    if (previous?.source_revision && !page.source_revision && page.current_model.source !== "live") return;
+    if (previous?.state.source === "live" && page.current_model.source !== "live"
+      && previous.source_revision === page.source_revision) return;
+    if (previous?.source_revision && page.source_revision) {
+      if (sourceGenerationFrom(previous.source_revision) === sourceGenerationFrom(page.source_revision)) {
+        const before = previous.source_revision.split(":").pop()!, after = page.source_revision.split(":").pop()!;
+        if (/^\d+$/.test(before) && /^\d+$/.test(after) && BigInt(before) > BigInt(after)) return;
+      }
+    } else if (previous?.state.source === "live" && page.current_model.source !== "live") return;
+    // Model context survives changing delivery levels and loading earlier turns.
+    // An omitted field from an older host must not clear known context.
+    this.models.delete(session_key);
+    this.models.set(session_key, { state: page.current_model, source_revision: page.source_revision });
+    while (this.models.size > 8) {
+      const oldest = [...this.models.keys()].find((key) => key !== this.selected);
+      if (!oldest) break;
+      this.models.delete(oldest);
+    }
+  }
   coverageVersion(session_key: string, level: UpdateLevel = "steps") {
     const replica = this.replicas.get(this.key(session_key, level));
     return replica ? { generation: replica.generation, revision: replica.revision } : {};
@@ -323,6 +350,7 @@ export class SessionDisplayCache {
   /** Record already accepted legacy pages; semantic pages are owned by their
    * replicas. Retain only the bounded preview, never another history copy. */
   rememberLoadedPage(session_key: string, page: EventPageResponse) {
+    this.rememberCurrentModel(session_key, page);
     if (this.pageItems.has(page)) return;
     const assistantEvents = [...page.events].reverse().filter((event) => event.type === "message" && event.role === "assistant" && !event.is_hidden);
     const latest_is_fragment = !!assistantEvents[0] && isAssistantFragment(assistantEvents[0]);
@@ -399,13 +427,14 @@ export class SessionDisplayCache {
     this.runningRevision += 1;
     this.previewRevision += 1;
     const owners = session_key ? [session_key] : [...new Set([
-      ...this.running.keys(), ...this.loadedPreviews.keys(), ...this.acceptedSources.keys(),
+      ...this.running.keys(), ...this.loadedPreviews.keys(), ...this.models.keys(), ...this.acceptedSources.keys(),
       ...this.access.keys(), ...[...this.subscriptions.keys(), ...this.replicas.keys(), ...this.pending.keys()].map((key) => JSON.parse(key)[0] as string),
     ])];
     this.suspendLive(this.requests().filter((request) => owners.includes(request.session_key)).map((request) => request.subscription_id));
     for (const owner of owners) {
       this.running.delete(owner);
       this.loadedPreviews.delete(owner);
+      this.models.delete(owner);
       for (const key of this.acceptedItems.keys()) if (JSON.parse(key)[0] === owner) this.acceptedItems.delete(key);
       this.acceptedSources.delete(owner);
       this.resources.remove(owner);
@@ -530,7 +559,10 @@ export class SessionDisplayCache {
         }
       }
     }
-    if (update.level !== "details") this.previewRevision += 1;
+    if (update.level !== "details") {
+      this.previewRevision += 1;
+      if (!page.error && !page.follow_error) this.rememberCurrentModel(update.session_key, page);
+    }
     this.pageItems.set(page, items);
     this.pageLevels.set(page, update.level);
     this.replicas.delete(key);
@@ -561,6 +593,7 @@ export class SessionDisplayCache {
       this.sourceRevisions.delete(oldest);
       this.retiredGenerations.delete(oldest);
       this.loadedPreviews.delete(oldest);
+      this.models.delete(oldest);
     }
     return page;
   }
