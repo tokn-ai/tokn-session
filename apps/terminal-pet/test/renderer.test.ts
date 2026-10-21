@@ -109,7 +109,7 @@ describe("renderer", () => {
   test("renders focused activity details in the wide layout", async () => {
     const art = await loadPetArt();
     const focused = petFocus({
-      cwd: "/Users/clouds/Projects/tokn-agent",
+      cwd: "/workspace/demo-project",
       current_activity: {
         kind: "tool",
         label: "exec_command: cargo test",
@@ -133,7 +133,7 @@ describe("renderer", () => {
     expect(output).toContain("FOCUS");
     expect(output).toContain("Current activity: cargo test --workspace");
     expect(output).toContain("12s ago");
-    expect(output).toContain("cwd /Users/clouds/Projects/tokn-agent");
+    expect(output).toContain("cwd /workspace/demo-project");
     expect(output).toContain("SESSION ROSTER");
   });
 

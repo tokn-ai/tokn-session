@@ -19,6 +19,7 @@ impl SessionIndex {
   pub fn register_project(&self, project: RegisteredProjectRecord) -> Result<RegisteredProjectRecord> {
     validate_project(&project)?;
     let mut connection = self.connection()?;
+    super::project_aliases::refresh_registrations(&mut connection)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if let Some(existing) = transaction
       .query_row(
@@ -47,10 +48,10 @@ impl SessionIndex {
     remember_project(&transaction, &project.group_key, project.created_at_ms)?;
     // The launch folder can be a canonical spelling of an older inferred
     // cwd. Bind it to the selected group without overwriting a saved alias.
-    transaction.execute(
-      "INSERT INTO project_aliases(cwd, project_key) VALUES(?1, ?2)
-       ON CONFLICT(cwd) DO NOTHING",
-      params![project.folder_path, project.group_key],
+    super::project_aliases::insert(
+      &transaction,
+      &project.folder_path,
+      &super::project_aliases::Alias::registered(project.group_key.clone()),
     )?;
     transaction.execute(
       "INSERT INTO registered_projects(project_id, group_key, folder_path, name, created_at_ms)
@@ -69,7 +70,8 @@ impl SessionIndex {
 
   /// Lists registrations even when no provider sessions currently exist.
   pub fn list_registered_projects(&self) -> Result<Vec<RegisteredProjectRecord>> {
-    let connection = self.connection()?;
+    let mut connection = self.connection()?;
+    super::project_aliases::refresh_registrations(&mut connection)?;
     let mut statement = connection.prepare(
       "SELECT project_id, group_key, folder_path, name, created_at_ms
        FROM registered_projects ORDER BY created_at_ms DESC, project_id ASC",
@@ -80,7 +82,8 @@ impl SessionIndex {
 
   /// Looks up one saved identity without consulting provider storage.
   pub fn get_registered_project(&self, project_id: &str) -> Result<Option<RegisteredProjectRecord>> {
-    let connection = self.connection()?;
+    let mut connection = self.connection()?;
+    super::project_aliases::refresh_registrations(&mut connection)?;
     connection
       .query_row(
         "SELECT project_id, group_key, folder_path, name, created_at_ms

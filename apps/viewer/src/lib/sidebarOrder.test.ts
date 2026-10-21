@@ -49,13 +49,15 @@ describe("sidebar ordering", () => {
       .toEqual(sessions.map((entry) => [entry.session_key, [entry.session_key]]));
   });
 
-  it("groups worktrees and subdirectories under the shared repository", () => {
+  it("groups server-identified worktrees while keeping a nested non-Git folder separate", () => {
     const sessions = [session("a", 500, { cwd: "/repo", project_key: "/repo", project_order_ms: 10 }),
       session("b", 100, { cwd: "/worktrees/task/repo", project_key: "/repo", project_order_ms: 10 }),
-      session("c", 400, { cwd: "/repo/src", project_key: "/repo", project_order_ms: 10 })];
+      session("c", 400, { cwd: "/repo/src", project_key: "/repo/src", project_order_ms: 10 })];
     const groups = sidebarGroups(sessions, "project", [], Date.now());
-    expect(groups).toHaveLength(1);
-    expect(keys(groups[0].sessions)).toEqual(["a", "c", "b"]);
+    expect(groups).toHaveLength(2);
+    expect(groups.map((group) => [group.key, keys(group.sessions)])).toEqual([
+      ["/repo", ["a", "b"]], ["/repo/src", ["c"]],
+    ]);
   });
 
   it("orders projects by their durable anchor and keeps identical basenames distinct", () => {

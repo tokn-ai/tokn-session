@@ -6434,6 +6434,61 @@ mod tests {
   }
 
   #[test]
+  fn session_project_labels_use_non_git_working_folders_beneath_a_repository() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = directory.path().join("repository");
+    let folder = repository.join("independent-project");
+    std::fs::create_dir_all(repository.join(".git")).unwrap();
+    std::fs::create_dir(&folder).unwrap();
+    let repository = repository.canonicalize().unwrap().to_string_lossy().into_owned();
+    let folder = folder.canonicalize().unwrap().to_string_lossy().into_owned();
+    let specs = [("parent", &repository), ("child", &folder)]
+      .into_iter()
+      .map(|(id, cwd)| {
+        let path = directory.path().join(format!("{id}.jsonl"));
+        std::fs::write(&path, id).unwrap();
+        let mut header = indexed_header(path, id, None);
+        header.cwd = Some(cwd.clone());
+        IndexedLoadSpec {
+          header,
+          messages: vec![],
+        }
+      })
+      .collect();
+    let service = ViewerService::new_with_index(
+      indexing_repository(specs),
+      Arc::new(SessionIndex::open_in_memory().unwrap()),
+    );
+    service.refresh_session_index().unwrap();
+    let catalog = service
+      .list_sessions(ListSessionsRequest {
+        query: SessionQuery {
+          order: SessionOrder::Project,
+          providers: vec![ViewerProvider::Codex],
+          search: None,
+        },
+        cursor: None,
+        offset: None,
+        limit: Some(10),
+      })
+      .unwrap();
+    let parent = catalog
+      .sessions
+      .iter()
+      .find(|session| session.session_id == "parent")
+      .unwrap();
+    let child = catalog
+      .sessions
+      .iter()
+      .find(|session| session.session_id == "child")
+      .unwrap();
+    assert_eq!(parent.project_key.as_deref(), Some(repository.as_str()));
+    assert_eq!(child.cwd.as_deref(), Some(folder.as_str()));
+    assert_eq!(child.project_key.as_deref(), Some(folder.as_str()));
+    assert_eq!(child.project.as_deref(), Some("independent-project"));
+  }
+
+  #[test]
   fn session_index_catalogs_every_header_then_backfills_newest_bodies_in_batches() {
     let directory = tempfile::tempdir().expect("temporary directory should exist");
     let mut specs = Vec::new();
