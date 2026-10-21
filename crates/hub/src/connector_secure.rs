@@ -745,7 +745,8 @@ async fn forward_device(
         .body(
           serde_json::to_vec(&serde_json::json!({
             "available": false, "message": "Agent input is disabled on this host", "max_length": 0, "question_ids": [],
-            "images_available": false, "max_images": 0, "max_image_bytes": 0,
+            "images_available": false,
+            "images_stageable": false, "max_images": 0, "max_image_bytes": 0,
             "max_total_image_bytes": 0, "image_mime_types": []
           }))
           .map_err(|_| "Could not encode input status")?,

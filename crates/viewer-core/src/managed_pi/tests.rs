@@ -117,11 +117,17 @@ for line in sys.stdin:
         elif mode == 'model_retry_race':
             streaming = True
             emit({'type':'auto_retry_start'})
-        reply(command, data={'models': [{'id':'text', 'provider':'synthetic', 'name':'Text', 'input':['text'], 'headers':{'authorization':'secret'}}, {'id':'vision', 'provider':'synthetic', 'name':'Vision', 'input':['text','image']}]})
+        models = [{'id':'text', 'provider':'synthetic', 'name':'Text', 'input':['text'], 'headers':{'authorization':'secret'}}, {'id':'vision', 'provider':'synthetic', 'name':'Vision', 'input':['text','image']}]
+        if (root / 'remove-current-model').exists():
+            models = [model for model in models if model['id'] != model_id]
+        reply(command, data={'models': models})
     elif kind == 'set_model':
         if (root / 'exit-model').exists():
             sys.exit(28)
         model_id = command['modelId']
+        if mode == 'model_starts_work':
+            streaming = True
+            emit({'type':'agent_start'})
         reply(command, data={'id':model_id, 'provider':'synthetic', 'name':model_id.title(), 'input':['text','image'] if model_id == 'vision' else ['text']})
     elif kind == 'prompt':
         prompt_count += 1
@@ -229,30 +235,44 @@ if mode == 'ignore_eof':
   }
 
   #[tokio::test]
-  async fn owned_model_controls_verify_catalog_generation_and_refresh_images_without_resuming() {
+  async fn owned_model_drafts_apply_only_with_idle_send_and_refresh_effective_image_support() {
     use crate::models::*;
     let fixture = Fixture::new("model_controls", "handled");
     fixture.create().await;
     let key = fixture.idle().await.session_key.unwrap();
     let status = fixture.manager.model_status(&key).await.unwrap().unwrap();
-    assert!(status.can_select && status.can_list && status.updates_pi_default);
-    assert_eq!(status.state.model.as_ref().unwrap().model_id, "text");
+    assert!(status.can_select && status.can_list && status.supports_model_input && status.updates_pi_default);
     let choices = fixture.manager.list_models(&key).await.unwrap().unwrap();
     assert_eq!(choices.status.state.revision, status.state.revision);
     assert_eq!(choices.models.len(), 2);
     assert!(!serde_json::to_string(&choices).unwrap().contains("secret"));
-    let mut selection = SelectSessionModelRequest {
-      session_key: key.clone(),
-      request_id: uuid::Uuid::new_v4().to_string(),
+    assert_eq!(
+      fixture
+        .log()
+        .iter()
+        .filter(|value| value["type"] == "set_model")
+        .count(),
+      0,
+      "discovery cannot apply a draft"
+    );
+    let mut selection = MessageModelSelection {
       model_provider: Some("synthetic".into()),
       model_id: "vision".into(),
       expected_revision: status.state.revision,
       runtime_generation: Some("stale-worker".into()),
     };
-    assert_eq!(
-      fixture.manager.select_model(&selection).await.unwrap().status,
-      ModelSelectionStatus::NotApplied
-    );
+    let error = fixture
+      .manager
+      .submit_owned_input_with_model(
+        &key,
+        &uuid::Uuid::new_v4().to_string(),
+        "handled",
+        Vec::new(),
+        Some(selection.clone()),
+      )
+      .await
+      .unwrap_err();
+    assert!(!error.may_have_been_sent);
     assert_eq!(
       fixture
         .log()
@@ -262,20 +282,76 @@ if mode == 'ignore_eof':
       0
     );
     selection.runtime_generation = status.runtime_generation;
-    assert_eq!(
-      fixture.manager.select_model(&selection).await.unwrap().status,
-      ModelSelectionStatus::Applied
-    );
+    let message_id = uuid::Uuid::new_v4().to_string();
+    let image_id = uuid::Uuid::new_v4().to_string();
+    let accepted = fixture
+      .manager
+      .submit_owned_input_with_model(
+        &key,
+        &message_id,
+        "handled",
+        vec![image(&image_id)],
+        Some(selection.clone()),
+      )
+      .await
+      .unwrap();
+    assert!(matches!(
+      accepted,
+      Admission::WithModel {
+        disposition: ModelInputDisposition::Started,
+        result: MessageModelResult {
+          outcome: MessageModelOutcome::Applied,
+          ..
+        }
+      }
+    ));
     assert!(fixture.manager.input_status(&key).unwrap().unwrap().images_available);
+    let duplicate = fixture
+      .manager
+      .submit_owned_input_with_model(
+        &key,
+        &message_id,
+        "handled",
+        vec![image(&image_id)],
+        Some(selection.clone()),
+      )
+      .await
+      .unwrap();
+    assert!(matches!(
+      duplicate,
+      Admission::WithModel {
+        result: MessageModelResult {
+          outcome: MessageModelOutcome::Applied,
+          ..
+        },
+        ..
+      }
+    ));
     assert_eq!(
-      fixture.manager.select_model(&selection).await.unwrap().status,
-      ModelSelectionStatus::NotApplied,
-      "stale revision cannot apply a second change"
+      fixture
+        .log()
+        .iter()
+        .filter(|value| value["type"] == "set_model")
+        .count(),
+      1
     );
+    assert_eq!(fixture.prompts(), ["handled", "handled"]);
+    fixture.idle().await;
+    let error = fixture
+      .manager
+      .submit_owned_input_with_model(
+        &key,
+        &uuid::Uuid::new_v4().to_string(),
+        "stale choice",
+        Vec::new(),
+        Some(selection),
+      )
+      .await
+      .unwrap_err();
+    assert!(!error.may_have_been_sent);
     fixture.manager.shutdown().await;
     let launches = fixture.launches().len();
-    let status = fixture.manager.model_status(&key).await.unwrap().unwrap();
-    assert!(!status.can_select && !status.can_list);
+    assert!(!fixture.manager.model_status(&key).await.unwrap().unwrap().can_list);
     assert!(
       fixture
         .manager
@@ -290,7 +366,68 @@ if mode == 'ignore_eof':
   }
 
   #[tokio::test]
-  async fn model_worker_exit_releases_admission_gate_and_records_unknown_mutation() {
+  async fn busy_send_steers_and_ignores_even_invalid_model_intent() {
+    use crate::models::*;
+    let fixture = Fixture::new("model_controls", "active turn");
+    fixture.create().await;
+    let key = fixture.persisted().await.session_key.unwrap();
+    let invalid = MessageModelSelection {
+      model_provider: None,
+      model_id: String::new(),
+      expected_revision: String::new(),
+      runtime_generation: Some("retired-worker".into()),
+    };
+    let accepted = fixture
+      .manager
+      .submit_owned_input_with_model(
+        &key,
+        &uuid::Uuid::new_v4().to_string(),
+        "steering",
+        Vec::new(),
+        Some(invalid.clone()),
+      )
+      .await
+      .unwrap();
+    assert!(
+      matches!(accepted, Admission::WithModel { disposition:ModelInputDisposition::Steered, result:MessageModelResult { outcome:MessageModelOutcome::IgnoredWhileRunning, state:SessionModelState { model:Some(ModelIdentity { model_id, .. }), .. } } } if model_id == "text")
+    );
+    assert_eq!(
+      fixture.wait_log(|value| value["message"] == "steering").await["streamingBehavior"],
+      "steer"
+    );
+    assert_eq!(
+      fixture
+        .log()
+        .iter()
+        .filter(|value| value["type"] == "get_available_models" || value["type"] == "set_model")
+        .count(),
+      0
+    );
+    let error = fixture
+      .manager
+      .submit_owned_input_with_model(
+        &key,
+        &uuid::Uuid::new_v4().to_string(),
+        "",
+        vec![image(&uuid::Uuid::new_v4().to_string())],
+        Some(invalid),
+      )
+      .await
+      .unwrap_err();
+    assert!(!error.may_have_been_sent);
+    assert!(matches!(
+      error.model_result,
+      Some(MessageModelResult {
+        outcome: MessageModelOutcome::IgnoredWhileRunning,
+        ..
+      })
+    ));
+    assert_eq!(fixture.prompts(), ["active turn", "steering"]);
+    fixture.manager.shutdown().await;
+  }
+
+  #[tokio::test]
+  async fn model_worker_exit_during_send_releases_admission_gate_and_records_unknown_mutation() {
     use crate::models::*;
     let fixture = Fixture::new("model_controls", "handled");
     fixture.create().await;
@@ -299,44 +436,61 @@ if mode == 'ignore_eof':
     std::fs::write(fixture.folder().join("exit-model"), "").unwrap();
     let result = tokio::time::timeout(
       Duration::from_secs(3),
-      fixture.manager.select_model(&SelectSessionModelRequest {
-        session_key: key,
-        request_id: uuid::Uuid::new_v4().to_string(),
-        model_provider: Some("synthetic".into()),
-        model_id: "vision".into(),
-        expected_revision: status.state.revision,
-        runtime_generation: status.runtime_generation,
-      }),
+      fixture.manager.submit_owned_input_with_model(
+        &key,
+        &uuid::Uuid::new_v4().to_string(),
+        "must not be written",
+        Vec::new(),
+        Some(MessageModelSelection {
+          model_provider: Some("synthetic".into()),
+          model_id: "vision".into(),
+          expected_revision: status.state.revision,
+          runtime_generation: status.runtime_generation,
+        }),
+      ),
     )
     .await
-    .expect("model acknowledgement must not deadlock cleanup")
-    .unwrap();
-    assert_eq!(result.status, ModelSelectionStatus::Unknown);
+    .expect("input acknowledgement must not deadlock cleanup")
+    .unwrap_err();
+    assert!(result.may_have_been_sent);
+    assert_eq!(fixture.prompts(), ["handled"]);
     fixture.manager.shutdown().await;
   }
 
   #[tokio::test]
-  async fn model_selection_rejects_observed_work_starting_after_native_idle_preflight() {
+  async fn observed_work_after_idle_preflight_ignores_draft_and_steers_before_model_mutation() {
     use crate::models::*;
     for mode in ["model_compaction_race", "model_retry_race"] {
       let fixture = Fixture::new(mode, "handled");
       fixture.create().await;
       let key = fixture.idle().await.session_key.unwrap();
       let status = fixture.manager.model_status(&key).await.unwrap().unwrap();
-      assert!(status.can_select, "a ready idle worker can select models");
       let result = fixture
         .manager
-        .select_model(&SelectSessionModelRequest {
-          session_key: key.clone(),
-          request_id: uuid::Uuid::new_v4().to_string(),
-          model_provider: Some("synthetic".into()),
-          model_id: "vision".into(),
-          expected_revision: status.state.revision,
-          runtime_generation: status.runtime_generation,
-        })
+        .submit_owned_input_with_model(
+          &key,
+          &uuid::Uuid::new_v4().to_string(),
+          "race steering",
+          Vec::new(),
+          Some(MessageModelSelection {
+            model_provider: Some("synthetic".into()),
+            model_id: "vision".into(),
+            expected_revision: status.state.revision,
+            runtime_generation: status.runtime_generation,
+          }),
+        )
         .await
         .unwrap();
-      assert_eq!(result.status, ModelSelectionStatus::NotApplied);
+      assert!(matches!(
+        result,
+        Admission::WithModel {
+          disposition: ModelInputDisposition::Steered,
+          result: MessageModelResult {
+            outcome: MessageModelOutcome::IgnoredWhileRunning,
+            ..
+          }
+        }
+      ));
       assert_eq!(
         fixture
           .log()
@@ -345,9 +499,147 @@ if mode == 'ignore_eof':
           .count(),
         0
       );
-      assert!(!fixture.manager.model_status(&key).await.unwrap().unwrap().can_select);
+      assert_eq!(
+        fixture.wait_log(|value| value["message"] == "race steering").await["streamingBehavior"],
+        "steer"
+      );
       fixture.manager.shutdown().await;
     }
+  }
+
+  #[tokio::test]
+  async fn rejected_prompt_preserves_the_model_applied_during_its_admission() {
+    use crate::models::*;
+    let fixture = Fixture::new("model_controls", "handled");
+    fixture.create().await;
+    let key = fixture.idle().await.session_key.unwrap();
+    let status = fixture.manager.model_status(&key).await.unwrap().unwrap();
+    let error = fixture
+      .manager
+      .submit_owned_input_with_model(
+        &key,
+        &uuid::Uuid::new_v4().to_string(),
+        "reject-follow-up",
+        Vec::new(),
+        Some(MessageModelSelection {
+          model_provider: Some("synthetic".into()),
+          model_id: "vision".into(),
+          expected_revision: status.state.revision,
+          runtime_generation: status.runtime_generation,
+        }),
+      )
+      .await
+      .unwrap_err();
+    assert!(!error.may_have_been_sent);
+    assert!(matches!(
+      error.model_result,
+      Some(MessageModelResult {
+        outcome: MessageModelOutcome::Applied,
+        ..
+      })
+    ));
+    assert!(fixture.manager.input_status(&key).unwrap().unwrap().images_available);
+    fixture.manager.shutdown().await;
+  }
+
+  #[tokio::test]
+  async fn same_model_draft_still_requires_current_catalog_membership() {
+    use crate::models::*;
+    let fixture = Fixture::new("model_controls", "handled");
+    fixture.create().await;
+    let key = fixture.idle().await.session_key.unwrap();
+    let status = fixture.manager.model_status(&key).await.unwrap().unwrap();
+    let selection = MessageModelSelection {
+      model_provider: Some("synthetic".into()),
+      model_id: "text".into(),
+      expected_revision: status.state.revision,
+      runtime_generation: status.runtime_generation,
+    };
+    std::fs::write(fixture.folder().join("remove-current-model"), "").unwrap();
+    let error = fixture
+      .manager
+      .submit_owned_input_with_model(
+        &key,
+        &uuid::Uuid::new_v4().to_string(),
+        "handled",
+        Vec::new(),
+        Some(selection.clone()),
+      )
+      .await
+      .unwrap_err();
+    assert!(!error.may_have_been_sent);
+    assert!(error.message.contains("no longer available"));
+    assert_eq!(fixture.prompts(), ["handled"]);
+    std::fs::remove_file(fixture.folder().join("remove-current-model")).unwrap();
+    let result = fixture
+      .manager
+      .submit_owned_input_with_model(
+        &key,
+        &uuid::Uuid::new_v4().to_string(),
+        "handled",
+        Vec::new(),
+        Some(selection),
+      )
+      .await
+      .unwrap();
+    assert!(matches!(
+      result,
+      Admission::WithModel {
+        result: MessageModelResult {
+          outcome: MessageModelOutcome::Unchanged,
+          ..
+        },
+        ..
+      }
+    ));
+    assert_eq!(
+      fixture
+        .log()
+        .iter()
+        .filter(|value| value["type"] == "get_available_models")
+        .count(),
+      2
+    );
+    assert_eq!(
+      fixture
+        .log()
+        .iter()
+        .filter(|value| value["type"] == "set_model")
+        .count(),
+      0
+    );
+    fixture.manager.shutdown().await;
+  }
+
+  #[tokio::test]
+  async fn work_starting_during_model_set_reports_applied_state_without_submitting_input() {
+    use crate::models::*;
+    let fixture = Fixture::new("model_starts_work", "handled");
+    fixture.create().await;
+    let key = fixture.idle().await.session_key.unwrap();
+    let status = fixture.manager.model_status(&key).await.unwrap().unwrap();
+    let error = fixture
+      .manager
+      .submit_owned_input_with_model(
+        &key,
+        &uuid::Uuid::new_v4().to_string(),
+        "must not be written",
+        Vec::new(),
+        Some(MessageModelSelection {
+          model_provider: Some("synthetic".into()),
+          model_id: "vision".into(),
+          expected_revision: status.state.revision,
+          runtime_generation: status.runtime_generation,
+        }),
+      )
+      .await
+      .unwrap_err();
+    assert!(error.may_have_been_sent);
+    assert!(
+      matches!(error.model_result, Some(MessageModelResult { outcome:MessageModelOutcome::Applied, state:SessionModelState { model:Some(ModelIdentity { model_id, .. }), .. } }) if model_id == "vision")
+    );
+    assert_eq!(fixture.prompts(), ["handled"]);
+    fixture.manager.shutdown().await;
   }
 
   impl Fixture {
@@ -910,7 +1202,7 @@ if mode == 'ignore_eof':
     assert_eq!(
       admissions
         .iter()
-        .filter(|value| matches!(value, Admission::QueuedFollowUp))
+        .filter(|value| matches!(value, Admission::Steered))
         .count(),
       1
     );
@@ -1221,6 +1513,7 @@ if mode == 'ignore_eof':
       .unwrap_err();
     assert!(!error.may_have_been_sent);
     assert!(error.message.contains("does not support image"));
+    let rejected_message = error.message.clone();
     assert_eq!(fixture.prompts(), ["handled"]);
     let launches = fixture.launches();
     assert_eq!(launches.len(), 2);
@@ -1236,6 +1529,19 @@ if mode == 'ignore_eof':
     assert!(!fixture.manager.input_status(&key).unwrap().unwrap().images_available);
 
     std::fs::remove_file(fixture.folder().join("text-only")).unwrap();
+    let replay = fixture
+      .manager
+      .submit_owned_input_images(&key, &request_id, "", vec![attachment.clone()])
+      .await
+      .unwrap_err();
+    assert!(!replay.may_have_been_sent);
+    assert_eq!(replay.message, rejected_message);
+    assert_eq!(
+      fixture.prompts(),
+      ["handled"],
+      "a rejected receipt never becomes a new send"
+    );
+    let request_id = uuid::Uuid::new_v4().to_string();
     for _ in 0..2 {
       assert!(matches!(
         fixture
@@ -1310,7 +1616,7 @@ if mode == 'ignore_eof':
           .submit_owned_input_images(&key, &followup_id, "caption", vec![image(&image_id)])
           .await
           .unwrap(),
-        Admission::QueuedFollowUp
+        Admission::Steered
       ));
     }
     let prompts: Vec<_> = fixture
@@ -1319,7 +1625,7 @@ if mode == 'ignore_eof':
       .filter(|value| value["type"] == "prompt")
       .collect();
     assert_eq!(prompts.len(), 2);
-    assert_eq!(prompts[1]["streamingBehavior"], "followUp");
+    assert_eq!(prompts[1]["streamingBehavior"], "steer");
     // Recheck model capabilities immediately before each image prompt, even if
     // the status previously advertised a vision model.
     std::fs::write(fixture.folder().join("text-only"), "").unwrap();
@@ -1518,7 +1824,7 @@ if mode == 'ignore_eof':
   }
 
   #[tokio::test]
-  async fn messages_keep_native_identity_queue_when_busy_and_deduplicate() {
+  async fn messages_keep_native_identity_steer_when_busy_and_deduplicate() {
     let fixture = Fixture::new("normal", "synthetic initial prompt");
     fixture.create().await;
     let persisted = fixture.persisted().await;
@@ -1530,7 +1836,7 @@ if mode == 'ignore_eof':
         .submit_owned_input(&key, &message_id, "synthetic follow-up")
         .await
         .unwrap(),
-      Admission::QueuedFollowUp
+      Admission::Steered
     ));
     assert!(matches!(
       fixture
@@ -1538,7 +1844,7 @@ if mode == 'ignore_eof':
         .submit_owned_input(&key, &message_id, "synthetic follow-up")
         .await
         .unwrap(),
-      Admission::QueuedFollowUp
+      Admission::Steered
     ));
     let mismatch = fixture
       .manager
@@ -1549,7 +1855,7 @@ if mode == 'ignore_eof':
     let command = fixture
       .wait_log(|value| value["message"] == "synthetic follow-up")
       .await;
-    assert_eq!(command["streamingBehavior"], "followUp");
+    assert_eq!(command["streamingBehavior"], "steer");
     assert_eq!(
       fixture
         .log()
@@ -1884,7 +2190,7 @@ if mode == 'ignore_eof':
       .unwrap_err();
     assert!(!rejected.may_have_been_sent);
     let follow_up = fixture.wait_log(|value| value["message"] == "reject-follow-up").await;
-    assert_eq!(follow_up["streamingBehavior"], "followUp");
+    assert_eq!(follow_up["streamingBehavior"], "steer");
     fixture
       .wait_for(|snapshot| {
         snapshot.status == ManagedSessionStatus::Idle

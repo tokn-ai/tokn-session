@@ -1,6 +1,6 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { invoke, type CommandInvoker } from "./transport";
-import { getSessionModelStatus, listSessionModels, selectSessionModel, inspectSessionEvent, loadGroupDetails, loadSessionUpdates, loadToolDetails, renewSessionSubscriptions } from "./tauri";
+import { getSessionModelStatus, listSessionModels, inspectSessionEvent, loadGroupDetails, loadSessionUpdates, loadToolDetails, renewSessionSubscriptions, submitSessionInput } from "./tauri";
 import type { SessionUpdatesRequest, SessionUpdate } from "./types";
 
 vi.mock("./transport", () => ({ invoke: vi.fn(), listen: vi.fn(), isDesktop: () => false }));
@@ -10,14 +10,14 @@ it("routes model reads and mutation through the captured session machine without
   const { send, calls } = machineInvoker();
   calls.mockResolvedValue({});
   const target = { session_key: "one" };
-  const selection = { ...target, request_id: "uuid", model_provider: "anthropic", model_id: "sonnet", expected_revision: "revision", runtime_generation: "pi-runtime" };
+  const message = { ...target, request_id: "uuid", text: "next", model_selection: { model_provider: "anthropic", model_id: "sonnet", expected_revision: "revision", runtime_generation: "pi-runtime" } };
   await getSessionModelStatus(target, send);
   await listSessionModels(target, send);
-  await selectSessionModel(selection, send);
+  await submitSessionInput(message, send);
   expect(calls.mock.calls).toEqual([
     ["get_session_model_status", { request: target }],
     ["list_session_models", { request: target }],
-    ["select_session_model", { request: selection }],
+    ["submit_session_input", { request: message }],
   ]);
   expect(invoke).not.toHaveBeenCalled();
 });

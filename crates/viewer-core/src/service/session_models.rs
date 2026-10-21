@@ -71,68 +71,6 @@ impl ViewerService {
     }
   }
 
-  pub async fn select_session_model(
-    &self,
-    request: SelectSessionModelRequest,
-  ) -> Result<SelectSessionModelResponse, String> {
-    if let Err(reason) = validate_selection(&request) {
-      return Ok(SelectSessionModelResponse::not_applied(&request.request_id, reason));
-    }
-    if self.session_scope.is_some() {
-      return Ok(SelectSessionModelResponse::not_applied(
-        &request.request_id,
-        "Shared sessions cannot change models",
-      ));
-    }
-    let owned = self.relay.status().settings.mode != crate::relay::RelayMode::External
-      && self.managed_pi.input_status(&request.session_key).is_some();
-    let target = if owned {
-      let locator = decode_session_key(&request.session_key)?;
-      InputTarget {
-        provider: locator.provider,
-        session_id: locator.session_id,
-        session_file: locator.source_path,
-      }
-    } else {
-      match self.model_target(&request.session_key).await {
-        Ok(target) => target,
-        Err(reason) => return Ok(SelectSessionModelResponse::not_applied(&request.request_id, reason)),
-      }
-    };
-    let identity = target.identity();
-    let service = self.clone();
-    let mutation = request.clone();
-    Ok(
-      self
-        .model_controls
-        .submit(identity, request, async move {
-          let _reservation = match service.input_broker.reserve_control(&target) {
-            Ok(reservation) => reservation,
-            Err(reason) => return SelectSessionModelResponse::not_applied(&mutation.request_id, reason),
-          };
-          if owned {
-            return service
-              .managed_pi
-              .select_model(&mutation)
-              .await
-              .unwrap_or_else(|reason| SelectSessionModelResponse::not_applied(&mutation.request_id, reason));
-          }
-          match target.provider {
-            ViewerProvider::Codex => SelectSessionModelResponse::not_applied(
-              &mutation.request_id,
-              "Codex Desktop does not expose a verified model catalog through its input connection",
-            ),
-            ViewerProvider::Pi => crate::input::pi::select_model(&target, &mutation).await,
-            _ => SelectSessionModelResponse::not_applied(
-              &mutation.request_id,
-              "Model selection is unavailable for this provider",
-            ),
-          }
-        })
-        .await,
-    )
-  }
-
   async fn model_target(&self, session_key: &str) -> Result<InputTarget, String> {
     let service = self.clone();
     let key = session_key.to_owned();

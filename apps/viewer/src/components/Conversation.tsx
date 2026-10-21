@@ -1,8 +1,7 @@
 import type { ExpandedActivityState } from "../lib/types";
-import { useLayoutEffect, useMemo, type ReactNode } from "react";
+import { useLayoutEffect, type ReactNode } from "react";
 import { useSessionModel } from "../lib/useSessionModel";
-import { modelLabel, type SessionMutationLock } from "../lib/sessionModels";
-import { viewerStorageScope } from "../lib/transport";
+import { modelLabel } from "../lib/sessionModels";
 import { readingEventKey } from "../lib/readingPosition";
 import { useTimelineScroll } from "../lib/useTimelineScroll";
 import { useViewerPreferences } from "../lib/viewerPreferences";
@@ -134,9 +133,7 @@ export function Conversation({
   on_retry,
   on_retry_expanded_detail,
 }: ConversationProps) {
-  const scope = viewerStorageScope();
-  const mutation_lock = useMemo<SessionMutationLock>(() => ({ send_busy: false, model_busy: false }), [scope, session?.session_key]);
-  const model = useSessionModel(session?.session_key ?? null, current_model, mutation_lock, session?.is_running, input_refresh_key);
+  const model = useSessionModel(session?.session_key ?? null, current_model, session?.is_running, input_refresh_key);
   const { preferences, updatePreferences } = useViewerPreferences();
   const hideLifecycle = !preferences.show_lifecycle;
   const visibleEvents = hideLifecycle ? events.filter((event) => !isBookkeepingEvent(event)) : events;
@@ -464,7 +461,7 @@ export function Conversation({
           </button>
         ) : null}
       </div>
-      <SessionComposer session={session} on_accepted={on_input_accepted} model={model} mutation_lock={mutation_lock}
+      <SessionComposer session={session} on_accepted={on_input_accepted} model={model}
         input_refresh_key={(input_refresh_key ?? 0) + model.input_revision} />
     </main>
   );

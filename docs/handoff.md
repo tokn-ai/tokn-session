@@ -8,9 +8,11 @@ Existing sessions expose model context in the header and composer. Historical
 observations carry origin metadata; genuine configured-model changes appear as
 standalone separators at every delivery level. Codex retained windows preserve
 the preceding model without normalizing older turns. Live status and lazy model
-catalogs use shared desktop/HTTP/Hub commands; only idle, verified Pi runtimes
-support selection today. Pi selection also updates its native defaults, and
-image-input capability is refreshed afterward. Codex Desktop supplies owner-bound
+catalogs use shared desktop/HTTP/Hub commands. Pi model choices stay in composer
+drafts until Send: idle sends validate and apply them; running sends ignore them,
+steer with the active model, and reset the draft choice. Model intent and message
+share admission/receipts; only actual idle selection may update Pi defaults.
+Image staging does not change models, and delivery checks the effective model. Codex Desktop supplies owner-bound
 current settings but no verifiable catalog through follower IPC, so its picker
 remains read-only with a reason. Shares and viewing grants never expose live
 catalogs or model mutation. See [session models](viewer-models.md).

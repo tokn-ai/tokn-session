@@ -21,7 +21,7 @@ most 1 MiB before falling back to unknown preceding context.
 
 ## Live commands
 
-`get_session_model_status`, `list_session_models`, and `select_session_model`
+`get_session_model_status`, `list_session_models`, and `submit_session_input`
 share snake_case request/response contracts in `viewer-core::models`. Tauri
 commands are async. HTTP invokes the same service; encrypted Hub routing enforces
 control permission independently. Session shares and view-only grants receive
@@ -33,17 +33,33 @@ provider endpoints and authentication headers never leave the host. Pi catalogs
 are bounded to 512 distinct identities. Unsupported runtimes and older bridge
 versions return a reason instead of guessed choices.
 
-Selection carries a UUID, expected model revision, and runtime generation. The
-host rechecks idle state, ownership, catalog membership, and readback. Input and
-model mutation share per-session admission; managed Pi also coordinates startup,
-Stop, and idle retirement. Opening the picker never resumes a retired worker.
-Repeated UUIDs return bounded receipts; an ambiguous mutation is not automatically
-retried. The frontend retains its draft and requires a status refresh after an
-uncertain result. Confirmed selection refreshes input/image capabilities.
+The composer keeps its model choice in the local per-session draft. Picking a
+model never mutates the runtime or global defaults, and the picker remains usable
+while a turn is running. The header always shows confirmed runtime context.
+Hosts advertise `supports_model_input`; older hosts keep the picker read-only.
 
-Pi uses native `setModel`/`set_model`, including Pi's normal persistence of the
-default provider and model for new sessions. This behavior is disclosed in the
-picker. New Pi Session continues to inherit its runtime defaults.
+Send captures text, image IDs, and an optional model intent (provider/ID, expected
+revision, runtime generation) under one UUID. The host uses fresh native state:
+an idle runtime validates ownership, generation, revision, and catalog membership,
+sets and reads back the chosen model, then sends. A busy runtime ignores the model
+intent and always steers with its active model. Pi uses `prompt` with native
+`streamingBehavior: "steer"`, so a turn settling during admission still receives
+the message. It never queues a follow-up for viewer sends. Older bridge clients'
+explicit `auto` delivery retains their legacy behavior.
+
+Model mutation and input share admission and bounded UUID receipts. Managed Pi
+also coordinates startup, Stop, and idle retirement; inspection never resumes a
+retired worker. Native bridges advertise `model_input_version: 1`. Ambiguous
+set/send results are retained and never automatically replayed. A confirmed busy
+result resets the model override even if an attachment prevents delivery; other
+failed or uncertain sends retain drafts. Accepted responses return actual model
+state and clear the captured override without clearing later draft edits.
+
+Image uploads are bounded staging, independent of the active model. Delivery
+checks the effective model after the idle/busy decision, allowing an idle draft
+to choose a vision model without an early model change. Pi's native setter may
+also persist its default provider/model for new sessions, but this happens only
+when sending an idle prompt with that choice. New Pi Session inherits defaults.
 
 Codex status reads `thread-follower-read-model-settings` from the owning Desktop
 client. The follower connection currently has no verified catalog tied to the

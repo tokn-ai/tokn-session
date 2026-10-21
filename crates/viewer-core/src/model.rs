@@ -395,6 +395,7 @@ pub struct SessionInputStatus {
   #[serde(skip_serializing_if = "std::ops::Not::not")]
   pub resume_required: bool,
   pub images_available: bool,
+  pub images_stageable: bool,
   pub max_images: usize,
   pub max_image_bytes: usize,
   pub max_total_image_bytes: usize,
@@ -408,6 +409,8 @@ pub struct SubmitSessionInputRequest {
   pub text: String,
   #[serde(default)]
   pub image_ids: Vec<String>,
+  #[serde(default)]
+  pub model_selection: Option<crate::models::MessageModelSelection>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -424,6 +427,8 @@ pub struct SubmitSessionInputResponse {
   pub request_id: String,
   pub status: InputDeliveryStatus,
   pub message: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub model_result: Option<crate::models::MessageModelResult>,
 }
 
 #[derive(Debug, Serialize)]

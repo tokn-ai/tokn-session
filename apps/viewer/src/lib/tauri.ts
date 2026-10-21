@@ -36,7 +36,6 @@ import type {
   ManagedSessionRequest, ManagedSessionSnapshot, ManagedSessionDialogResponse,
   RuntimeInventory, RuntimeRestartRequest, RuntimeRestartResponse,
   SessionModelStatusRequest, SessionModelStatus, ListSessionModelsResponse,
-  SelectSessionModelRequest, SelectSessionModelResponse,
 } from "./types";
 
 export function listRegisteredProjects(send: CommandInvoker = invoke): Promise<ProjectWorkspaceSnapshot> {
@@ -73,9 +72,6 @@ export function getSessionModelStatus(request: SessionModelStatusRequest, send: 
 }
 export function listSessionModels(request: SessionModelStatusRequest, send: CommandInvoker = invoke): Promise<ListSessionModelsResponse> {
   return send("list_session_models", { request });
-}
-export function selectSessionModel(request: SelectSessionModelRequest, send: CommandInvoker = invoke): Promise<SelectSessionModelResponse> {
-  return send("select_session_model", { request });
 }
 
 /** Prepare this device's viewer independently of the selected remote transport. */

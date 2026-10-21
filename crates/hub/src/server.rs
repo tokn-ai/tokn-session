@@ -369,6 +369,7 @@ async fn proxy(
       "message": "This host allows viewing only",
       "max_length": 0,
       "images_available": false,
+            "images_stageable": false,
       "max_images": 0,
       "max_image_bytes": 0,
       "max_total_image_bytes": 0,

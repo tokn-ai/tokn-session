@@ -95,7 +95,6 @@ pub struct ViewerService {
   failed_body_jobs: Arc<Mutex<HashMap<(SourceKey, String), FailedBodyJob>>>,
   loaded_session_cache: Arc<Mutex<Option<CachedSession>>>,
   input_broker: crate::input::InputBroker,
-  model_controls: crate::models::ModelControls,
   pub(crate) images: crate::images::ImageStore,
   pub(crate) managed_pi: crate::managed_pi::ManagedPiSessions,
   question_claims: Arc<Mutex<question_input::QuestionClaims>>,
@@ -729,7 +728,6 @@ impl ViewerService {
       #[cfg(test)]
       notification_work_stats: Arc::new(Mutex::new(notifications::NotificationWorkStats::default())),
       input_broker: crate::input::InputBroker::default(),
-      model_controls: crate::models::ModelControls::default(),
       images: crate::images::ImageStore::temporary().expect("temporary image storage should be available"),
       managed_pi: crate::managed_pi::ManagedPiSessions::new(None)
         .unwrap_or_else(crate::managed_pi::ManagedPiSessions::disabled),

@@ -332,22 +332,20 @@ export interface SessionModelStatus {
   reason: string | null;
   runtime_generation: string | null;
   updates_pi_default: boolean;
+  /** Omitted by older hosts; draft model selection then remains read-only. */
+  supports_model_input?: boolean;
 }
 export interface ModelChoice { model: ModelIdentity; supports_images: boolean }
 export interface ListSessionModelsResponse { status: SessionModelStatus; models: ModelChoice[] }
-export interface SelectSessionModelRequest {
-  session_key: string;
-  request_id: string;
+export interface MessageModelSelection {
   model_provider: string | null;
   model_id: string;
   expected_revision: string;
   runtime_generation: string | null;
 }
-export interface SelectSessionModelResponse {
-  request_id: string;
-  status: "applied" | "not_applied" | "unknown";
-  message: string;
-  state: SessionModelState | null;
+export interface MessageModelResult {
+  outcome: "unchanged" | "applied" | "ignored_while_running";
+  state: SessionModelState;
 }
 
 export interface SessionInputStatus {
@@ -359,6 +357,8 @@ export interface SessionInputStatus {
   max_length: number;
   /** Omitted by older hosts, which must remain text-only. */
   images_available?: boolean;
+  /** Upload staging is independent of the current model's image support. */
+  images_stageable?: boolean;
   max_images?: number;
   max_image_bytes?: number;
   max_total_image_bytes?: number;
@@ -370,12 +370,14 @@ export interface SubmitSessionInputRequest {
   request_id: string;
   text: string;
   image_ids?: string[];
+  model_selection?: MessageModelSelection;
 }
 
 export interface SubmitSessionInputResponse {
   request_id: string;
   status: "accepted" | "not_sent" | "unknown" | "pending";
   message: string;
+  model_result?: MessageModelResult;
 }
 
 export interface ListSessionsRequest {

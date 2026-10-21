@@ -4,18 +4,16 @@ import { SendIcon } from "./Icons";
 import { useSessionInput } from "../lib/useSessionInput";
 import type { SessionSummary } from "../lib/types";
 import { providerLabel } from "../lib/state";
-import type { SessionMutationLock } from "../lib/sessionModels";
 import type { SessionModelController } from "../lib/useSessionModel";
 import { SessionModelPicker } from "./SessionModelPicker";
 
-export function SessionComposer({ session, on_accepted, input_refresh_key, model, mutation_lock }: {
+export function SessionComposer({ session, on_accepted, input_refresh_key, model }: {
   session: SessionSummary | null;
   on_accepted?: (session_key: string) => void;
   input_refresh_key?: number;
   model?: SessionModelController;
-  mutation_lock?: SessionMutationLock;
 }) {
-  const input = useSessionInput(session?.session_key ?? null, on_accepted, input_refresh_key, mutation_lock);
+  const input = useSessionInput(session?.session_key ?? null, on_accepted, input_refresh_key, model);
   const inputId = useId();
   const textarea = useRef<HTMLTextAreaElement>(null);
   const [focused_session, setFocusedSession] = useState<string | null>(null);
@@ -36,7 +34,7 @@ export function SessionComposer({ session, on_accepted, input_refresh_key, model
   if (!session) return null;
 
   const disabled = input.checking || !input.availability?.available
-    || input.sending || input.delivery_uncertain || model?.changing === true || model?.uncertain === true;
+    || input.sending || input.delivery_uncertain;
   const overLimit = input.length > input.max_length;
 
   return (
@@ -81,12 +79,13 @@ export function SessionComposer({ session, on_accepted, input_refresh_key, model
           />
           <ImageAttachmentPicker image_count={input.images.length} limits={input.image_limits} disabled={disabled} on_add={input.addImages} />
           <div className="session-composer__footer">
-            {model ? <SessionModelPicker key={session.session_key} model={model} provider={providerLabel(session.provider)} input_busy={input.sending || input.delivery_uncertain} />
+            {model ? <SessionModelPicker key={session.session_key} model={model} provider={providerLabel(session.provider)} input_busy={input.sending || input.delivery_uncertain}
+              selected_model={input.model_draft} on_select={input.setModel} on_clear={input.clearModel} />
               : <span className="session-composer__provider">{providerLabel(session.provider)}</span>}
             <button
               aria-label={input.sending ? input.resuming ? "Resuming Pi…" : "Sending…" : "Send"}
               className="session-composer__send"
-              disabled={!input.can_send || model?.changing || model?.uncertain}
+              disabled={!input.can_send}
               title="Send message (⌘ / Ctrl + Enter)"
               type="submit"
             >
@@ -103,7 +102,7 @@ export function SessionComposer({ session, on_accepted, input_refresh_key, model
         </div>
         <div className="session-composer__status" id={`${inputId}-status`} role="status">
           {input.sending ? <span>{input.resuming ? "Resuming Pi and sending your message…" : "Sending your message…"}</span>
-            : input.notice ? <span>{input.notice}</span> : input.checking
+            : input.notice || input.validation_notice ? <span>{input.notice ?? input.validation_notice}</span> : input.checking
             ? <span>Checking message availability…</span>
             : input.availability?.message ? <span>{input.availability.message}</span> : null}
           {input.delivery_uncertain ? (

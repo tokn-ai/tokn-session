@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createUuid } from "./id";
-import { getSessionModelStatus, listSessionModels, selectSessionModel } from "./tauri";
+import { getSessionModelStatus, listSessionModels } from "./tauri";
 import { captureTransport, viewerStorageScope } from "./transport";
 import { errorMessage } from "./state";
-import { sameModel, type SessionMutationLock } from "./sessionModels";
+import { sameModel } from "./sessionModels";
 import type { ModelChoice, ModelIdentity, SessionModelState, SessionModelStatus } from "./types";
 
 interface ModelView {
@@ -11,17 +10,14 @@ interface ModelView {
   state: SessionModelState | null;
   checking: boolean;
   loading: boolean;
-  changing: boolean;
-  uncertain: boolean;
   choices: ModelChoice[] | null;
   error: string | null;
 }
-const emptyView = (): ModelView => ({ status: null, state: null, checking: true, loading: false,
-  changing: false, uncertain: false, choices: null, error: null });
+const emptyView = (): ModelView => ({ status: null, state: null, checking: true, loading: false, choices: null, error: null });
 
-/** One selected session owns requests and their runtime generation. Catalogs are lazy. */
+/** Runtime state is read-only here. Model choices belong to the message draft. */
 export function useSessionModel(session_key: string | null, fallback: SessionModelState | undefined,
-  lock: SessionMutationLock, running = false, refresh_key = 0) {
+  running = false, refresh_key = 0) {
   const scope = viewerStorageScope();
   const owner = JSON.stringify([scope, session_key]);
   const transport = useMemo(captureTransport, [scope]);
@@ -34,10 +30,10 @@ export function useSessionModel(session_key: string | null, fallback: SessionMod
   const status_sequence = useRef(0);
   const catalog_sequence = useRef(0);
   const value = view.owner === owner ? view.value : emptyView();
+  const response_epoch = epoch.current;
+  const response_generation = value.status?.runtime_generation;
   const latest = useRef(value);
   latest.current = value;
-  const current = useRef({ running, lock });
-  current.current = { running, lock };
   const update = useCallback((target: string, apply: (value: ModelView) => ModelView) => {
     if (!active.current || latest_owner.current !== target) return;
     const next = apply(latest.current);
@@ -58,25 +54,23 @@ export function useSessionModel(session_key: string | null, fallback: SessionMod
     const stop = transport.on_close(() => {
       if (epoch.current !== lifetime) return;
       epoch.current += 1;
-      update(owner, (old) => ({ ...old, checking: false, loading: false, changing: false,
-        status: null, error: "Machine disconnected. Reconnect to change the model." }));
+      update(owner, (old) => ({ ...old, checking: false, loading: false,
+        status: null, error: "Machine disconnected. Reconnect to choose a model." }));
     });
     return () => { active.current = false; epoch.current += 1; stop(); };
   }, [owner, transport, update]);
 
   const refresh = useCallback(async () => {
-    if (!session_key || current.current.lock.model_busy) return;
+    if (!session_key) return;
     const sequence = ++status_sequence.current;
     const lifetime = epoch.current;
     update(owner, (old) => ({ ...old, checking: true }));
     try {
       const status = await getSessionModelStatus({ session_key }, transport.invoke);
       if (lifetime !== epoch.current || latest_owner.current !== owner || sequence !== status_sequence.current) return;
-      current.current.lock.model_uncertain = false;
       refreshInputForModel(status.state);
-      update(owner, (old) => ({ ...old, status, state: status.state, checking: false, uncertain: false, error: null,
-        choices: old.status?.runtime_generation === status.runtime_generation
-          && old.status?.state.revision === status.state.revision ? old.choices : null }));
+      update(owner, (old) => ({ ...old, status, state: status.state, checking: false, error: null,
+        choices: old.status?.runtime_generation === status.runtime_generation ? old.choices : null }));
     } catch (error) {
       if (lifetime !== epoch.current || sequence !== status_sequence.current) return;
       update(owner, (old) => ({ ...old, checking: false, status: null,
@@ -88,7 +82,7 @@ export function useSessionModel(session_key: string | null, fallback: SessionMod
 
   const loadChoices = useCallback(async () => {
     const before = latest.current;
-    if (!session_key || before.loading || before.changing || before.checking || !before.status?.can_list) return;
+    if (!session_key || before.loading || before.checking || !before.status?.can_list || before.status.supports_model_input !== true) return;
     const sequence = ++catalog_sequence.current;
     const status_version = status_sequence.current;
     const lifetime = epoch.current;
@@ -109,49 +103,33 @@ export function useSessionModel(session_key: string | null, fallback: SessionMod
     }
   }, [owner, session_key, transport, update, refreshInputForModel]);
 
-  const select = useCallback(async (model: ModelIdentity) => {
-    const before = latest.current;
-    const guard = current.current.lock;
-    if (!session_key || guard.send_busy || guard.model_busy || current.current.running || before.checking || before.loading
-      || before.uncertain || before.error || !before.status?.can_select || !before.choices?.some((choice) => sameModel(choice.model, model))
-      || sameModel(before.state?.model, model)) return;
-    guard.model_busy = true;
-    const lifetime = epoch.current;
+  const acceptState = useCallback((state: SessionModelState, refresh_input = false) => {
+    if (!active.current || latest_owner.current !== owner || epoch.current !== response_epoch
+      || latest.current.status?.runtime_generation !== response_generation) return false;
     ++status_sequence.current;
     ++catalog_sequence.current;
-    update(owner, (old) => ({ ...old, changing: true, error: null }));
-    let attempted = false;
-    try {
-      const request_id = createUuid();
-      attempted = true;
-      const result = await selectSessionModel({ session_key, request_id,
-        model_provider: model.model_provider, model_id: model.model_id,
-        expected_revision: before.status.state.revision, runtime_generation: before.status.runtime_generation }, transport.invoke);
-      if (lifetime !== epoch.current || latest_owner.current !== owner) return;
-      if (result.request_id === request_id && result.status === "applied" && result.state) {
-        update(owner, (old) => ({ ...old, state: result.state, changing: false,
-          status: old.status ? { ...old.status, state: result.state! } : null, error: null }));
-        setInputRevision((old) => old + 1);
-      } else {
-        const uncertain = result.request_id !== request_id || result.status !== "not_applied";
-        guard.model_uncertain = uncertain;
-        update(owner, (old) => ({ ...old, changing: false, uncertain,
-          error: uncertain ? "Model change was not confirmed. Refresh model status before trying again."
-            : result.message || "The model was not changed." }));
-      }
-    } catch (error) {
-      guard.model_uncertain = attempted;
-      if (lifetime === epoch.current) update(owner, (old) => ({ ...old, changing: false, uncertain: attempted,
-        error: `${attempted ? "Model change was not confirmed. Refresh model status before trying again." : "The model was not changed."} ${errorMessage(error)}` }));
-    } finally { guard.model_busy = false; }
-  }, [owner, session_key, transport, update]);
+    if (refresh_input) setInputRevision((revision) => revision + 1);
+    else refreshInputForModel(state);
+    update(owner, (old) => ({ ...old, state, checking: false, loading: false,
+      status: old.status ? { ...old.status, state } : null }));
+    return true;
+  }, [owner, response_epoch, response_generation, refreshInputForModel, update]);
+
+  const choiceAllowed = useCallback((model: ModelIdentity) => {
+    const current = latest.current;
+    return active.current && latest_owner.current === owner && !current.checking && !current.loading && !current.error
+      && current.status?.supports_model_input === true && current.status.can_list
+      && current.choices?.some((choice) => sameModel(choice.model, model)) === true;
+  }, [owner]);
 
   const display_state = !value.state?.model && fallback?.model ? fallback : value.state ?? fallback ?? null;
-  return { ...value, state: display_state, input_revision,
-    reason: running ? "Wait for the current response to finish before changing the model." : value.status?.reason,
-    can_open: !!value.status?.can_list && !value.checking,
-    can_select: !!value.status?.can_select && !value.checking && !value.loading && !value.changing && !value.uncertain && !value.error && !running,
-    refresh, loadChoices, select };
+  const supported = value.status?.supports_model_input === true;
+  return { ...value, state: display_state, input_revision, running,
+    reason: value.status?.can_list && !supported ? "Update this host to choose a model when sending a message."
+      : supported && value.status?.can_list ? null : value.status?.reason,
+    can_open: supported && !!value.status?.can_list && !value.checking,
+    can_select: supported && !!value.status?.can_list && !value.checking && !value.loading && !value.error,
+    refresh, loadChoices, acceptState, choiceAllowed };
 }
 
 export type SessionModelController = ReturnType<typeof useSessionModel>;

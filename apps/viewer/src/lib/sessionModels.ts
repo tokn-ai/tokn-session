@@ -1,8 +1,5 @@
 import type { ModelIdentity } from "./types";
 
-/** Runtime input and model selection share one synchronous admission guard. */
-export interface SessionMutationLock { send_busy: boolean; model_busy: boolean; model_uncertain?: boolean }
-
 export function modelLabel(model: ModelIdentity): string {
   return model.display_name?.trim() || model.model_id;
 }

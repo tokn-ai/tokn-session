@@ -141,7 +141,6 @@ pub fn allowed_route(method: &str, path: &str, allow_control: bool) -> bool {
     (
       "POST",
       "/api/v1/submit_session_input"
-      | "/api/v1/select_session_model"
       | "/api/v1/submit_session_question_answers"
       | "/api/v1/upload_image_chunk"
       | "/api/v1/release_image_upload",
@@ -186,7 +185,7 @@ pub fn read_only_model_response(path: &str, reason: &str) -> Option<serde_json::
   let status = serde_json::json!({
     "state":{"model":null,"source":"unknown","revision":"read_only"},
     "can_select":false,"can_list":false,"reason":reason,
-    "runtime_generation":null,"updates_pi_default":false
+    "runtime_generation":null,"updates_pi_default":false,"supports_model_input":false
   });
   Some(if path.ends_with("/list_session_models") {
     serde_json::json!({"status":status,"models":[]})
@@ -213,6 +212,7 @@ mod tests {
       }
     }
     assert!(read_only_model_response("/api/v1/select_session_model", "Viewing only").is_none());
+    assert!(!allowed_route("POST", "/api/v1/select_session_model", true));
   }
 
   #[test]
@@ -242,11 +242,7 @@ mod tests {
         }
       }
     }
-    for path in [
-      "/api/v1/upload_image_chunk",
-      "/api/v1/release_image_upload",
-      "/api/v1/select_session_model",
-    ] {
+    for path in ["/api/v1/upload_image_chunk", "/api/v1/release_image_upload"] {
       assert!(allowed_route("POST", path, true));
       assert!(!allowed_route("POST", path, false));
       for method in ["GET", "PUT", "DELETE"] {

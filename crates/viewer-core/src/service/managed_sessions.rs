@@ -472,6 +472,7 @@ for line in sys.stdin:
         .available
     );
     let follow_up = SubmitSessionInputRequest {
+      model_selection: None,
       session_key: key.clone(),
       request_id: uuid::Uuid::new_v4().to_string(),
       text: "follow-up".into(),
@@ -525,6 +526,7 @@ for line in sys.stdin:
       ManagedSessionStatus::Stopped
     );
     let next = SubmitSessionInputRequest {
+      model_selection: None,
       session_key: key.clone(),
       request_id: uuid::Uuid::new_v4().to_string(),
       text: "after restart".into(),

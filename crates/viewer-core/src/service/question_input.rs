@@ -209,6 +209,7 @@ impl ViewerService {
       Ok(value) => value,
       Err(message) => {
         return Ok(SubmitSessionInputResponse {
+          model_result: None,
           request_id: attempt,
           status: InputDeliveryStatus::NotSent,
           message,
@@ -226,6 +227,7 @@ impl ViewerService {
       Ok(keys) => keys,
       Err(message) => {
         return Ok(SubmitSessionInputResponse {
+          model_result: None,
           request_id: attempt,
           status: InputDeliveryStatus::NotSent,
           message,
@@ -238,6 +240,7 @@ impl ViewerService {
           .input_broker
           .receipt(&target, &message)
           .unwrap_or(SubmitSessionInputResponse {
+            model_result: None,
             request_id: attempt,
             status: InputDeliveryStatus::Pending,
             message: "These answers already have a submission. Wait for the recorded reply.".into(),
@@ -316,6 +319,7 @@ fn answer_message(
     serde_json::to_string(&replies).map_err(|_| "Could not encode answers")?
   );
   let mut message = SubmitSessionInputRequest {
+    model_selection: None,
     session_key: request.session_key.clone(),
     request_id: request.request_id.clone(),
     text,

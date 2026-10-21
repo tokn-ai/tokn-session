@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn request(text: &str) -> SubmitSessionInputRequest {
   SubmitSessionInputRequest {
+    model_selection: None,
     session_key: "session-a".into(),
     request_id: uuid::Uuid::new_v4().to_string(),
     text: text.into(),
@@ -27,32 +28,6 @@ fn delivery_identity_uses_the_resolved_owner_not_the_client_key() {
     target.identity(),
     pi_owner,
     "Pi ownership includes the exact descriptor path"
-  );
-}
-
-#[tokio::test]
-async fn model_control_reservation_excludes_message_admission_and_releases_on_drop() {
-  let broker = InputBroker::default();
-  let target = InputTarget {
-    provider: ViewerProvider::Pi,
-    session_id: "pi-session".into(),
-    session_file: "/session.jsonl".into(),
-  };
-  let reservation = broker.reserve_control(&target).unwrap();
-  assert!(broker.reserve_control(&target).is_err());
-  let blocked = broker
-    .submit_custom(&target, request("hello"), async {
-      panic!("must not deliver during a model change")
-    })
-    .await;
-  assert_eq!(blocked.status, InputDeliveryStatus::NotSent);
-  drop(reservation);
-  assert_eq!(
-    broker
-      .submit_custom(&target, request("hello"), async { Ok(Admission::Started) })
-      .await
-      .status,
-    InputDeliveryStatus::Accepted
   );
 }
 
@@ -240,5 +215,65 @@ async fn image_receipts_reject_changed_attachments_without_a_second_delivery() {
       .await
       .status,
     InputDeliveryStatus::NotSent
+  );
+}
+
+#[tokio::test]
+async fn message_receipts_bind_model_intent_and_retain_confirmed_reset_on_failure() {
+  use crate::models::{MessageModelOutcome, MessageModelResult, MessageModelSelection, SessionModelState};
+  let broker = InputBroker::default();
+  let mut original = request("steer");
+  original.model_selection = Some(MessageModelSelection {
+    model_provider: Some("synthetic".into()),
+    model_id: "vision".into(),
+    expected_revision: "old".into(),
+    runtime_generation: Some("old-runtime".into()),
+  });
+  let reset = MessageModelResult {
+    outcome: MessageModelOutcome::IgnoredWhileRunning,
+    state: SessionModelState::live(None, "runtime"),
+  };
+  let result = broker
+    .submit_with(original.clone(), async move {
+      Err(DeliveryError::not_sent("active model cannot accept images").with_model_result(reset))
+    })
+    .await;
+  assert_eq!(result.status, InputDeliveryStatus::NotSent);
+  assert_eq!(
+    result.model_result.as_ref().unwrap().outcome,
+    MessageModelOutcome::IgnoredWhileRunning
+  );
+  let receipt = broker
+    .submit_with(original.clone(), async { panic!("must not replay") })
+    .await;
+  assert_eq!(receipt.model_result, result.model_result);
+  original.model_selection.as_mut().unwrap().model_id = "different".into();
+  let conflict = broker
+    .submit_with(original, async { panic!("must not change a receipt") })
+    .await;
+  assert_eq!(conflict.status, InputDeliveryStatus::NotSent);
+  assert!(conflict.model_result.is_none());
+}
+
+#[tokio::test]
+async fn model_bound_steering_returns_actual_state_with_message_receipt() {
+  use crate::models::{MessageModelOutcome, MessageModelResult, SessionModelState};
+  let broker = InputBroker::default();
+  let result = broker
+    .submit_with(request("steer"), async {
+      Ok(Admission::WithModel {
+        disposition: ModelInputDisposition::Steered,
+        result: MessageModelResult {
+          outcome: MessageModelOutcome::IgnoredWhileRunning,
+          state: SessionModelState::live(None, "runtime"),
+        },
+      })
+    })
+    .await;
+  assert_eq!(result.status, InputDeliveryStatus::Accepted);
+  assert!(result.message.contains("steering"));
+  assert_eq!(
+    result.model_result.unwrap().outcome,
+    MessageModelOutcome::IgnoredWhileRunning
   );
 }

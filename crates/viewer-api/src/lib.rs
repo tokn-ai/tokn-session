@@ -148,7 +148,6 @@ async fn command(
       | "upload_image_chunk"
       | "get_session_model_status"
       | "list_session_models"
-      | "select_session_model"
   ) {
     let _permit = permit;
     let request = payload.get("request").cloned().unwrap_or_else(|| json!({}));
@@ -169,16 +168,6 @@ async fn command(
           state
             .service
             .list_session_models(request)
-            .await
-            .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
-        )
-      }
-      "select_session_model" => {
-        let request = serde_json::from_value(request).map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
-        serde_json::to_value(
-          state
-            .service
-            .select_session_model(request)
             .await
             .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
         )

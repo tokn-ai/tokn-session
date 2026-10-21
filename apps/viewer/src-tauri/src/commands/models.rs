@@ -19,12 +19,3 @@ pub async fn list_session_models(
 ) -> Result<ListSessionModelsResponse, String> {
   state.service(&app).await?.list_session_models(request).await
 }
-
-#[tauri::command]
-pub async fn select_session_model(
-  app: AppHandle,
-  state: State<'_, LocalViewer>,
-  request: SelectSessionModelRequest,
-) -> Result<SelectSessionModelResponse, String> {
-  state.service(&app).await?.select_session_model(request).await
-}

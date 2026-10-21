@@ -4,21 +4,17 @@ use crate::models::*;
 pub(in crate::managed_pi) enum ModelOperation {
   Status,
   List,
-  Select(SelectSessionModelRequest),
 }
 
 pub(in crate::managed_pi) enum ModelResult {
   Status(SessionModelStatus),
   List(ListSessionModelsResponse),
-  Selected(SessionModelState),
 }
 
 #[derive(Clone, Copy)]
 enum ModelPhase {
   Before,
   Catalog,
-  Set,
-  After,
 }
 
 pub(super) struct ModelPending {
@@ -37,18 +33,14 @@ impl ModelPending {
   }
 
   pub(super) fn reject(self, message: &str, possibly_written: bool) {
-    let error =
-      if matches!(self.phase, ModelPhase::After) || (possibly_written && matches!(self.phase, ModelPhase::Set)) {
-        DeliveryError::uncertain(message)
-      } else {
-        DeliveryError::not_sent(message)
-      };
+    let _ = possibly_written;
+    let error = DeliveryError::not_sent(message);
     let _ = self.reply.send(Err(error));
   }
 }
 
 impl Actor {
-  fn current_model_status(&self) -> SessionModelStatus {
+  pub(super) fn current_model_status(&self) -> SessionModelStatus {
     let generation = self.inner.upgrade().and_then(|inner| {
       inner
         .records
@@ -70,7 +62,7 @@ impl Actor {
       && !self.pending.values().any(|pending| {
         matches!(
           pending.kind,
-          PendingKind::Prompt { .. } | PendingKind::ImagePreflight { .. } | PendingKind::Abort(_)
+          PendingKind::Prompt { .. } | PendingKind::Message(_) | PendingKind::Abort(_)
         )
       });
     let can_select = idle && generation.is_some() && !self.termination.is_cancelled();
@@ -81,6 +73,7 @@ impl Actor {
       ),
       runtime_generation: generation,
       can_list: true,
+      supports_model_input: true,
       can_select,
       updates_pi_default: true,
       reason: (!can_select)
@@ -100,68 +93,36 @@ impl Actor {
       return Ok(());
     }
     match pending.phase {
-      ModelPhase::Before | ModelPhase::After => {
+      ModelPhase::Before => {
         let state = match data
           .ok_or_else(|| "Pi returned no model state".to_string())
           .and_then(parse_state)
         {
           Ok(state) => state,
           Err(error) => {
-            pending.reject(&error, true);
+            pending.reject(&error, false);
             return Ok(());
           }
         };
         if let Err(error) = self.accept_state(state) {
-          pending.reject(&error, true);
+          pending.reject(&error, false);
           return Err(error);
         }
-        let status = self.current_model_status();
-        if matches!(pending.phase, ModelPhase::After) {
-          let ModelOperation::Select(selection) = &pending.operation else {
-            unreachable!()
-          };
-          if !status.state.model.as_ref().is_some_and(|model| {
-            model.model_provider == selection.model_provider && model.model_id == selection.model_id
-          }) {
-            pending.reject(
-              "Pi's model changed before selection could be confirmed; refresh its current model",
-              true,
-            );
-          } else {
-            let _ = pending.reply.send(Ok(ModelResult::Selected(status.state)));
-          }
-          return Ok(());
-        }
-        match &pending.operation {
+        match pending.operation {
           ModelOperation::Status => {
-            let _ = pending.reply.send(Ok(ModelResult::Status(status)));
-            return Ok(());
+            let _ = pending.reply.send(Ok(ModelResult::Status(self.current_model_status())));
           }
-          ModelOperation::Select(selection) => {
-            if !status.can_select {
-              pending.reject(status.reason.as_deref().unwrap_or("Pi is busy"), false);
-              return Ok(());
-            }
-            if selection.runtime_generation != status.runtime_generation
-              || selection.expected_revision != status.state.revision
-            {
-              pending.reject(
-                "The Pi model or runtime changed; refresh before choosing a model",
-                false,
-              );
-              return Ok(());
-            }
+          ModelOperation::List => {
+            pending.phase = ModelPhase::Catalog;
+            self
+              .send(
+                "get_available_models",
+                json!({"type":"get_available_models"}),
+                PendingKind::Model(pending),
+              )
+              .await?;
           }
-          ModelOperation::List => {}
         }
-        pending.phase = ModelPhase::Catalog;
-        self
-          .send(
-            "get_available_models",
-            json!({"type":"get_available_models"}),
-            PendingKind::Model(pending),
-          )
-          .await?;
       }
       ModelPhase::Catalog => {
         let models = match data
@@ -175,37 +136,10 @@ impl Actor {
             return Ok(());
           }
         };
-        match &pending.operation {
-          ModelOperation::List => {
-            let _ = pending.reply.send(Ok(ModelResult::List(ListSessionModelsResponse {
-              status: self.current_model_status(),
-              models,
-            })));
-          }
-          ModelOperation::Select(selection) => {
-            if !self.current_model_status().can_select {
-              pending.reject("Pi became busy before the model change", false);
-              return Ok(());
-            }
-            if !models.iter().any(|choice| {
-              choice.model.model_provider == selection.model_provider && choice.model.model_id == selection.model_id
-            }) {
-              pending.reject("The selected model is no longer available in this Pi runtime", false);
-              return Ok(());
-            }
-            let request =
-              json!({"type":"set_model", "provider":selection.model_provider, "modelId":selection.model_id});
-            pending.phase = ModelPhase::Set;
-            self.send("set_model", request, PendingKind::Model(pending)).await?;
-          }
-          ModelOperation::Status => unreachable!(),
-        }
-      }
-      ModelPhase::Set => {
-        pending.phase = ModelPhase::After;
-        self
-          .send("get_state", json!({"type":"get_state"}), PendingKind::Model(pending))
-          .await?;
+        let _ = pending.reply.send(Ok(ModelResult::List(ListSessionModelsResponse {
+          status: self.current_model_status(),
+          models,
+        })));
       }
     }
     Ok(())

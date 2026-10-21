@@ -11,6 +11,7 @@ impl ManagedPiSessions {
       Err(error) => {
         let mut status = SessionModelStatus::unavailable(error.message);
         status.updates_pi_default = true;
+        status.supports_model_input = true;
         Ok(status)
       }
     })
@@ -24,39 +25,12 @@ impl ManagedPiSessions {
       Err(error) => {
         let mut status = SessionModelStatus::unavailable(error.message);
         status.updates_pi_default = true;
+        status.supports_model_input = true;
         Ok(ListSessionModelsResponse {
           status,
           models: Vec::new(),
         })
       }
-    })
-  }
-
-  pub(crate) async fn select_model(
-    &self,
-    request: &SelectSessionModelRequest,
-  ) -> Result<SelectSessionModelResponse, String> {
-    let outcome = self
-      .model_command(&request.session_key, ModelOperation::Select(request.clone()))
-      .await;
-    Ok(match outcome {
-      Ok(ModelResult::Selected(state)) => SelectSessionModelResponse {
-        request_id: request.request_id.clone(),
-        status: ModelSelectionStatus::Applied,
-        message: "Model changed. Pi also saved it as its default model.".into(),
-        state: Some(state),
-      },
-      Ok(_) => SelectSessionModelResponse::not_applied(&request.request_id, "Pi returned the wrong model response"),
-      Err(error) => SelectSessionModelResponse {
-        request_id: request.request_id.clone(),
-        status: if error.may_have_been_sent {
-          ModelSelectionStatus::Unknown
-        } else {
-          ModelSelectionStatus::NotApplied
-        },
-        message: error.message,
-        state: None,
-      },
     })
   }
 
