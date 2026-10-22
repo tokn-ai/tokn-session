@@ -1,6 +1,6 @@
 use super::{
   Inner, WorkerState,
-  persistence::{Receipt, validate_session},
+  persistence::{Receipt, SessionLease, validate_session},
   protocol::{RpcReader, RpcState, StderrTail, parse_extension_dialog, parse_state},
 };
 use crate::{
@@ -12,7 +12,6 @@ use serde_json::{Value, json};
 use std::{
   collections::HashMap,
   ffi::{OsStr, OsString},
-  fs::File,
   path::PathBuf,
   process::Stdio,
   sync::{Arc, Mutex, Weak},
@@ -78,7 +77,7 @@ struct Pending {
 
 pub(super) async fn run(
   inner: Weak<Inner>,
-  lease: File,
+  lease: SessionLease,
   executable: PathBuf,
   receipt: Receipt,
   generation: u64,
