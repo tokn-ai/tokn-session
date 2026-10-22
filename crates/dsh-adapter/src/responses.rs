@@ -143,6 +143,8 @@ mod tests {
           description: None,
         }],
         allows_free_text: true,
+        allows_option_notes: false,
+        is_secret: false,
         multiple,
       }],
       native: json!({}),

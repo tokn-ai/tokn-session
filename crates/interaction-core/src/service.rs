@@ -750,7 +750,8 @@ fn validate_response(pending: &PendingInteraction, response: &InteractionRespons
         }
         let choices = answer.answers.iter().collect::<HashSet<_>>();
         if choices.len() != answer.answers.len()
-          || !question.multiple && choices.len() + usize::from(answer.custom.is_some()) > 1
+          || !question.multiple
+            && choices.len() + usize::from(answer.custom.is_some() && !question.allows_option_notes) > 1
         {
           return Err(InteractionError::invalid("Invalid number of question choices"));
         }

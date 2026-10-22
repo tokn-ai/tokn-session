@@ -42,7 +42,7 @@ jobs:
           key: release-packages
 
       - name: Package and verify every publishable crate
-        run: cargo package --workspace --exclude tokn-session-viewer --locked
+        run: cargo package --workspace --exclude tokn-session-viewer --exclude tokn-interaction-tests --locked
 
       - name: Test sources extracted from crate archives
         shell: bash

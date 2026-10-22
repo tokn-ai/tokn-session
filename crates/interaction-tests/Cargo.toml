@@ -1,0 +1,30 @@
+[package]
+name = "tokn-interaction-tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Isolated real-agent RPC capture and replay tests."
+
+[dependencies]
+tokn-interaction-core.workspace = true
+tokn-codex-adapter.workspace = true
+tokn-codex-rpc-protocol.workspace = true
+tokn-pi-adapter.workspace = true
+tokn-pi-rpc-protocol.workspace = true
+tokn-opencode-adapter.workspace = true
+tokn-opencode-rpc-protocol.workspace = true
+tokn-dsh-adapter.workspace = true
+tokn-dsh-rpc-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["process"] }
+axum = { version = "0.8", features = ["ws"] }
+async-stream = "0.3"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"

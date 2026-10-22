@@ -1,0 +1,3850 @@
+{
+  "provider": "pi",
+  "revision": "fdbedcad8aeb7c1e2ebd3b85f16e60e5fab0b2c3",
+  "agent_version": "0.82.1",
+  "model_data_artifact_sha256": "2f9df9522808b621cd3449876537f03d8a8df8b8d7ec2d5b18c6a910aa85b490",
+  "scenario": "metadata/state/models, prompt, tool question/reply, busy steer/queue, cancel",
+  "frames": [
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:0",
+        "type": "get_state"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "get_state",
+        "data": {
+          "autoCompactionEnabled": false,
+          "followUpMode": "one-at-a-time",
+          "isCompacting": false,
+          "isStreaming": false,
+          "messageCount": 0,
+          "model": {
+            "api": "openai-completions",
+            "baseUrl": "http://127.0.0.1:1/v1",
+            "contextWindow": 32768,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0
+            },
+            "id": "fixture-model",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 1024,
+            "name": "Fixture Model",
+            "provider": "fixture",
+            "reasoning": false
+          },
+          "pendingMessageCount": 0,
+          "sessionFile": "/fixture/home/session.jsonl",
+          "sessionId": "00000000-0000-4000-8000-000000000001",
+          "steeringMode": "one-at-a-time",
+          "thinkingLevel": "off"
+        },
+        "id": "pi-fixture-instance:0",
+        "success": true,
+        "type": "response"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:1",
+        "type": "get_commands"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "get_commands",
+        "data": {
+          "commands": [
+            {
+              "description": "Manage llama.cpp router models",
+              "name": "llama",
+              "source": "extension",
+              "sourceInfo": {
+                "origin": "top-level",
+                "path": "<inline:llama.cpp>",
+                "scope": "temporary",
+                "source": "inline"
+              }
+            }
+          ]
+        },
+        "id": "pi-fixture-instance:1",
+        "success": true,
+        "type": "response"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:2",
+        "type": "get_state"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "get_state",
+        "data": {
+          "autoCompactionEnabled": false,
+          "followUpMode": "one-at-a-time",
+          "isCompacting": false,
+          "isStreaming": false,
+          "messageCount": 0,
+          "model": {
+            "api": "openai-completions",
+            "baseUrl": "http://127.0.0.1:1/v1",
+            "contextWindow": 32768,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0
+            },
+            "id": "fixture-model",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 1024,
+            "name": "Fixture Model",
+            "provider": "fixture",
+            "reasoning": false
+          },
+          "pendingMessageCount": 0,
+          "sessionFile": "/fixture/home/session.jsonl",
+          "sessionId": "00000000-0000-4000-8000-000000000001",
+          "steeringMode": "one-at-a-time",
+          "thinkingLevel": "off"
+        },
+        "id": "pi-fixture-instance:2",
+        "success": true,
+        "type": "response"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:3",
+        "type": "get_state"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "get_state",
+        "data": {
+          "autoCompactionEnabled": false,
+          "followUpMode": "one-at-a-time",
+          "isCompacting": false,
+          "isStreaming": false,
+          "messageCount": 0,
+          "model": {
+            "api": "openai-completions",
+            "baseUrl": "http://127.0.0.1:1/v1",
+            "contextWindow": 32768,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0
+            },
+            "id": "fixture-model",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 1024,
+            "name": "Fixture Model",
+            "provider": "fixture",
+            "reasoning": false
+          },
+          "pendingMessageCount": 0,
+          "sessionFile": "/fixture/home/session.jsonl",
+          "sessionId": "00000000-0000-4000-8000-000000000001",
+          "steeringMode": "one-at-a-time",
+          "thinkingLevel": "off"
+        },
+        "id": "pi-fixture-instance:3",
+        "success": true,
+        "type": "response"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:4",
+        "type": "get_available_models"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "get_available_models",
+        "data": {
+          "models": [
+            {
+              "api": "openai-completions",
+              "baseUrl": "http://127.0.0.1:1/v1",
+              "contextWindow": 32768,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0
+              },
+              "id": "fixture-model",
+              "input": [
+                "text"
+              ],
+              "maxTokens": 1024,
+              "name": "Fixture Model",
+              "provider": "fixture",
+              "reasoning": false
+            }
+          ]
+        },
+        "id": "pi-fixture-instance:4",
+        "success": true,
+        "type": "response"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:5",
+        "type": "get_state"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "get_state",
+        "data": {
+          "autoCompactionEnabled": false,
+          "followUpMode": "one-at-a-time",
+          "isCompacting": false,
+          "isStreaming": false,
+          "messageCount": 0,
+          "model": {
+            "api": "openai-completions",
+            "baseUrl": "http://127.0.0.1:1/v1",
+            "contextWindow": 32768,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0
+            },
+            "id": "fixture-model",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 1024,
+            "name": "Fixture Model",
+            "provider": "fixture",
+            "reasoning": false
+          },
+          "pendingMessageCount": 0,
+          "sessionFile": "/fixture/home/session.jsonl",
+          "sessionId": "00000000-0000-4000-8000-000000000001",
+          "steeringMode": "one-at-a-time",
+          "thinkingLevel": "off"
+        },
+        "id": "pi-fixture-instance:5",
+        "success": true,
+        "type": "response"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:6",
+        "message": "fixture hello",
+        "type": "prompt"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "prompt",
+        "id": "pi-fixture-instance:6",
+        "success": true,
+        "type": "response"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "type": "agent_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "type": "turn_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "content": [
+            {
+              "text": "fixture hello",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "timestamp": 0
+        },
+        "type": "message_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "content": [
+            {
+              "text": "fixture hello",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "timestamp": 0
+        },
+        "type": "message_end"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "api": "openai-completions",
+          "content": [],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "pending",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 0,
+            "output": 0,
+            "totalTokens": 0
+          }
+        },
+        "type": "message_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "contentIndex": 0,
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "fixture hello complete",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "stop",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          },
+          "type": "text_start"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "fixture hello complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 0,
+            "output": 0,
+            "totalTokens": 0
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "contentIndex": 0,
+          "delta": "fixture hello complete",
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "fixture hello complete",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "stop",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          },
+          "type": "text_delta"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "fixture hello complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "content": "fixture hello complete",
+          "contentIndex": 0,
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "fixture hello complete",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "stop",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          },
+          "type": "text_end"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "fixture hello complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "fixture hello complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "type": "message_end"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:7",
+        "type": "get_state"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "fixture hello complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "toolResults": [],
+        "type": "turn_end"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "fixture hello",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "timestamp": 0
+          },
+          {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "fixture hello complete",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "stop",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          }
+        ],
+        "type": "agent_end",
+        "willRetry": false
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "type": "agent_settled"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "get_state",
+        "data": {
+          "autoCompactionEnabled": false,
+          "followUpMode": "one-at-a-time",
+          "isCompacting": false,
+          "isStreaming": false,
+          "messageCount": 2,
+          "model": {
+            "api": "openai-completions",
+            "baseUrl": "http://127.0.0.1:1/v1",
+            "contextWindow": 32768,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0
+            },
+            "id": "fixture-model",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 1024,
+            "name": "Fixture Model",
+            "provider": "fixture",
+            "reasoning": false
+          },
+          "pendingMessageCount": 0,
+          "sessionFile": "/fixture/home/session.jsonl",
+          "sessionId": "00000000-0000-4000-8000-000000000001",
+          "steeringMode": "one-at-a-time",
+          "thinkingLevel": "off"
+        },
+        "id": "pi-fixture-instance:7",
+        "success": true,
+        "type": "response"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:8",
+        "message": "fixture ask question",
+        "type": "prompt"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "prompt",
+        "id": "pi-fixture-instance:8",
+        "success": true,
+        "type": "response"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "type": "agent_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "type": "turn_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "content": [
+            {
+              "text": "fixture ask question",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "timestamp": 0
+        },
+        "type": "message_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "content": [
+            {
+              "text": "fixture ask question",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "timestamp": 0
+        },
+        "type": "message_end"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "api": "openai-completions",
+          "content": [],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "pending",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 0,
+            "output": 0,
+            "totalTokens": 0
+          }
+        },
+        "type": "message_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "contentIndex": 0,
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "arguments": {},
+                "id": "call_local_fixture_2",
+                "name": "fixture_question",
+                "type": "toolCall"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "toolUse",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          },
+          "type": "toolcall_start"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "arguments": {},
+              "id": "call_local_fixture_2",
+              "name": "fixture_question",
+              "type": "toolCall"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "toolUse",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "contentIndex": 0,
+          "delta": "{}",
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "arguments": {},
+                "id": "call_local_fixture_2",
+                "name": "fixture_question",
+                "type": "toolCall"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "toolUse",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          },
+          "type": "toolcall_delta"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "arguments": {},
+              "id": "call_local_fixture_2",
+              "name": "fixture_question",
+              "type": "toolCall"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "toolUse",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "contentIndex": 0,
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "arguments": {},
+                "id": "call_local_fixture_2",
+                "name": "fixture_question",
+                "type": "toolCall"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "toolUse",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          },
+          "toolCall": {
+            "arguments": {},
+            "id": "call_local_fixture_2",
+            "name": "fixture_question",
+            "type": "toolCall"
+          },
+          "type": "toolcall_end"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "arguments": {},
+              "id": "call_local_fixture_2",
+              "name": "fixture_question",
+              "type": "toolCall"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "toolUse",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "arguments": {},
+              "id": "call_local_fixture_2",
+              "name": "fixture_question",
+              "type": "toolCall"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "toolUse",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "type": "message_end"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "args": {},
+        "toolCallId": "call_local_fixture_2",
+        "toolName": "fixture_question",
+        "type": "tool_execution_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "id": "00000000-0000-4000-8000-000000000002",
+        "method": "select",
+        "options": [
+          "Alpha",
+          "Beta"
+        ],
+        "title": "Choose a fixture option",
+        "type": "extension_ui_request"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:9",
+        "type": "get_state"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "get_state",
+        "data": {
+          "autoCompactionEnabled": false,
+          "followUpMode": "one-at-a-time",
+          "isCompacting": false,
+          "isStreaming": true,
+          "messageCount": 4,
+          "model": {
+            "api": "openai-completions",
+            "baseUrl": "http://127.0.0.1:1/v1",
+            "contextWindow": 32768,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0
+            },
+            "id": "fixture-model",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 1024,
+            "name": "Fixture Model",
+            "provider": "fixture",
+            "reasoning": false
+          },
+          "pendingMessageCount": 0,
+          "sessionFile": "/fixture/home/session.jsonl",
+          "sessionId": "00000000-0000-4000-8000-000000000001",
+          "steeringMode": "one-at-a-time",
+          "thinkingLevel": "off"
+        },
+        "id": "pi-fixture-instance:9",
+        "success": true,
+        "type": "response"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:10",
+        "type": "get_state"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "get_state",
+        "data": {
+          "autoCompactionEnabled": false,
+          "followUpMode": "one-at-a-time",
+          "isCompacting": false,
+          "isStreaming": true,
+          "messageCount": 4,
+          "model": {
+            "api": "openai-completions",
+            "baseUrl": "http://127.0.0.1:1/v1",
+            "contextWindow": 32768,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0
+            },
+            "id": "fixture-model",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 1024,
+            "name": "Fixture Model",
+            "provider": "fixture",
+            "reasoning": false
+          },
+          "pendingMessageCount": 0,
+          "sessionFile": "/fixture/home/session.jsonl",
+          "sessionId": "00000000-0000-4000-8000-000000000001",
+          "steeringMode": "one-at-a-time",
+          "thinkingLevel": "off"
+        },
+        "id": "pi-fixture-instance:10",
+        "success": true,
+        "type": "response"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "00000000-0000-4000-8000-000000000002",
+        "type": "extension_ui_response",
+        "value": "Beta"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "isError": false,
+        "result": {
+          "content": [
+            {
+              "text": "Selected Beta",
+              "type": "text"
+            }
+          ],
+          "details": {
+            "answer": "Beta"
+          }
+        },
+        "toolCallId": "call_local_fixture_2",
+        "toolName": "fixture_question",
+        "type": "tool_execution_end"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "content": [
+            {
+              "text": "Selected Beta",
+              "type": "text"
+            }
+          ],
+          "details": {
+            "answer": "Beta"
+          },
+          "isError": false,
+          "role": "toolResult",
+          "timestamp": 0,
+          "toolCallId": "call_local_fixture_2",
+          "toolName": "fixture_question"
+        },
+        "type": "message_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "content": [
+            {
+              "text": "Selected Beta",
+              "type": "text"
+            }
+          ],
+          "details": {
+            "answer": "Beta"
+          },
+          "isError": false,
+          "role": "toolResult",
+          "timestamp": 0,
+          "toolCallId": "call_local_fixture_2",
+          "toolName": "fixture_question"
+        },
+        "type": "message_end"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "arguments": {},
+              "id": "call_local_fixture_2",
+              "name": "fixture_question",
+              "type": "toolCall"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "toolUse",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "toolResults": [
+          {
+            "content": [
+              {
+                "text": "Selected Beta",
+                "type": "text"
+              }
+            ],
+            "details": {
+              "answer": "Beta"
+            },
+            "isError": false,
+            "role": "toolResult",
+            "timestamp": 0,
+            "toolCallId": "call_local_fixture_2",
+            "toolName": "fixture_question"
+          }
+        ],
+        "type": "turn_end"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "type": "turn_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "api": "openai-completions",
+          "content": [],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "pending",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 0,
+            "output": 0,
+            "totalTokens": 0
+          }
+        },
+        "type": "message_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "contentIndex": 0,
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "fixture question complete",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "stop",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          },
+          "type": "text_start"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "fixture question complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 0,
+            "output": 0,
+            "totalTokens": 0
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "contentIndex": 0,
+          "delta": "fixture question complete",
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "fixture question complete",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "stop",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          },
+          "type": "text_delta"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "fixture question complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "content": "fixture question complete",
+          "contentIndex": 0,
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "fixture question complete",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "stop",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          },
+          "type": "text_end"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "fixture question complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "fixture question complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "type": "message_end"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "fixture question complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "toolResults": [],
+        "type": "turn_end"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "fixture ask question",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "timestamp": 0
+          },
+          {
+            "api": "openai-completions",
+            "content": [
+              {
+                "arguments": {},
+                "id": "call_local_fixture_2",
+                "name": "fixture_question",
+                "type": "toolCall"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "toolUse",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          },
+          {
+            "content": [
+              {
+                "text": "Selected Beta",
+                "type": "text"
+              }
+            ],
+            "details": {
+              "answer": "Beta"
+            },
+            "isError": false,
+            "role": "toolResult",
+            "timestamp": 0,
+            "toolCallId": "call_local_fixture_2",
+            "toolName": "fixture_question"
+          },
+          {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "fixture question complete",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "stop",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          }
+        ],
+        "type": "agent_end",
+        "willRetry": false
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "type": "agent_settled"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:11",
+        "type": "get_state"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "get_state",
+        "data": {
+          "autoCompactionEnabled": false,
+          "followUpMode": "one-at-a-time",
+          "isCompacting": false,
+          "isStreaming": false,
+          "messageCount": 6,
+          "model": {
+            "api": "openai-completions",
+            "baseUrl": "http://127.0.0.1:1/v1",
+            "contextWindow": 32768,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0
+            },
+            "id": "fixture-model",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 1024,
+            "name": "Fixture Model",
+            "provider": "fixture",
+            "reasoning": false
+          },
+          "pendingMessageCount": 0,
+          "sessionFile": "/fixture/home/session.jsonl",
+          "sessionId": "00000000-0000-4000-8000-000000000001",
+          "steeringMode": "one-at-a-time",
+          "thinkingLevel": "off"
+        },
+        "id": "pi-fixture-instance:11",
+        "success": true,
+        "type": "response"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:12",
+        "message": "fixture run until released",
+        "type": "prompt"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "prompt",
+        "id": "pi-fixture-instance:12",
+        "success": true,
+        "type": "response"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "type": "agent_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "type": "turn_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "content": [
+            {
+              "text": "fixture run until released",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "timestamp": 0
+        },
+        "type": "message_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "content": [
+            {
+              "text": "fixture run until released",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "timestamp": 0
+        },
+        "type": "message_end"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "api": "openai-completions",
+          "content": [],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "pending",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 0,
+            "output": 0,
+            "totalTokens": 0
+          }
+        },
+        "type": "message_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "contentIndex": 0,
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "working ",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "pending",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 0,
+              "output": 0,
+              "totalTokens": 0
+            }
+          },
+          "type": "text_start"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "working ",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "pending",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 0,
+            "output": 0,
+            "totalTokens": 0
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "contentIndex": 0,
+          "delta": "working ",
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "working ",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "pending",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 0,
+              "output": 0,
+              "totalTokens": 0
+            }
+          },
+          "type": "text_delta"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "working ",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "pending",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 0,
+            "output": 0,
+            "totalTokens": 0
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:13",
+        "type": "get_state"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "get_state",
+        "data": {
+          "autoCompactionEnabled": false,
+          "followUpMode": "one-at-a-time",
+          "isCompacting": false,
+          "isStreaming": true,
+          "messageCount": 7,
+          "model": {
+            "api": "openai-completions",
+            "baseUrl": "http://127.0.0.1:1/v1",
+            "contextWindow": 32768,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0
+            },
+            "id": "fixture-model",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 1024,
+            "name": "Fixture Model",
+            "provider": "fixture",
+            "reasoning": false
+          },
+          "pendingMessageCount": 0,
+          "sessionFile": "/fixture/home/session.jsonl",
+          "sessionId": "00000000-0000-4000-8000-000000000001",
+          "steeringMode": "one-at-a-time",
+          "thinkingLevel": "off"
+        },
+        "id": "pi-fixture-instance:13",
+        "success": true,
+        "type": "response"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:14",
+        "message": "fixture steer",
+        "streamingBehavior": "steer",
+        "type": "prompt"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "followUp": [],
+        "steering": [
+          "fixture steer"
+        ],
+        "type": "queue_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "prompt",
+        "id": "pi-fixture-instance:14",
+        "success": true,
+        "type": "response"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:15",
+        "type": "get_state"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "get_state",
+        "data": {
+          "autoCompactionEnabled": false,
+          "followUpMode": "one-at-a-time",
+          "isCompacting": false,
+          "isStreaming": true,
+          "messageCount": 7,
+          "model": {
+            "api": "openai-completions",
+            "baseUrl": "http://127.0.0.1:1/v1",
+            "contextWindow": 32768,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0
+            },
+            "id": "fixture-model",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 1024,
+            "name": "Fixture Model",
+            "provider": "fixture",
+            "reasoning": false
+          },
+          "pendingMessageCount": 1,
+          "sessionFile": "/fixture/home/session.jsonl",
+          "sessionId": "00000000-0000-4000-8000-000000000001",
+          "steeringMode": "one-at-a-time",
+          "thinkingLevel": "off"
+        },
+        "id": "pi-fixture-instance:15",
+        "success": true,
+        "type": "response"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:16",
+        "message": "fixture queue",
+        "type": "follow_up"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "followUp": [
+          "fixture queue"
+        ],
+        "steering": [
+          "fixture steer"
+        ],
+        "type": "queue_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "follow_up",
+        "id": "pi-fixture-instance:16",
+        "success": true,
+        "type": "response"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "contentIndex": 0,
+          "delta": "fixture busy complete",
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "working fixture busy complete",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "stop",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          },
+          "type": "text_delta"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "working fixture busy complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 0,
+            "output": 0,
+            "totalTokens": 0
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "content": "working fixture busy complete",
+          "contentIndex": 0,
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "working fixture busy complete",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "stop",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          },
+          "type": "text_end"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "working fixture busy complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "working fixture busy complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "type": "message_end"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "working fixture busy complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "toolResults": [],
+        "type": "turn_end"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "type": "turn_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "followUp": [
+          "fixture queue"
+        ],
+        "steering": [],
+        "type": "queue_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "content": [
+            {
+              "text": "fixture steer",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "timestamp": 0
+        },
+        "type": "message_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "content": [
+            {
+              "text": "fixture steer",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "timestamp": 0
+        },
+        "type": "message_end"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "api": "openai-completions",
+          "content": [],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "pending",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 0,
+            "output": 0,
+            "totalTokens": 0
+          }
+        },
+        "type": "message_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "contentIndex": 0,
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "fixture steer complete",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "stop",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          },
+          "type": "text_start"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "fixture steer complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 0,
+            "output": 0,
+            "totalTokens": 0
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "contentIndex": 0,
+          "delta": "fixture steer complete",
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "fixture steer complete",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "stop",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          },
+          "type": "text_delta"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "fixture steer complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "content": "fixture steer complete",
+          "contentIndex": 0,
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "fixture steer complete",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "stop",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          },
+          "type": "text_end"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "fixture steer complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "fixture steer complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "type": "message_end"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "fixture steer complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "toolResults": [],
+        "type": "turn_end"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "type": "turn_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "followUp": [],
+        "steering": [],
+        "type": "queue_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "content": [
+            {
+              "text": "fixture queue",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "timestamp": 0
+        },
+        "type": "message_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "content": [
+            {
+              "text": "fixture queue",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "timestamp": 0
+        },
+        "type": "message_end"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "api": "openai-completions",
+          "content": [],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "pending",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 0,
+            "output": 0,
+            "totalTokens": 0
+          }
+        },
+        "type": "message_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "contentIndex": 0,
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "fixture queue complete",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "stop",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          },
+          "type": "text_start"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "fixture queue complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 0,
+            "output": 0,
+            "totalTokens": 0
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "contentIndex": 0,
+          "delta": "fixture queue complete",
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "fixture queue complete",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "stop",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          },
+          "type": "text_delta"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "fixture queue complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "content": "fixture queue complete",
+          "contentIndex": 0,
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "fixture queue complete",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "stop",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          },
+          "type": "text_end"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "fixture queue complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "fixture queue complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "type": "message_end"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "fixture queue complete",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "stop",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 10,
+            "output": 2,
+            "reasoning": 0,
+            "totalTokens": 12
+          }
+        },
+        "toolResults": [],
+        "type": "turn_end"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "fixture run until released",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "timestamp": 0
+          },
+          {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "working fixture busy complete",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "stop",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          },
+          {
+            "content": [
+              {
+                "text": "fixture steer",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "timestamp": 0
+          },
+          {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "fixture steer complete",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "stop",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          },
+          {
+            "content": [
+              {
+                "text": "fixture queue",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "timestamp": 0
+          },
+          {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "fixture queue complete",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "stop",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 10,
+              "output": 2,
+              "reasoning": 0,
+              "totalTokens": 12
+            }
+          }
+        ],
+        "type": "agent_end",
+        "willRetry": false
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "type": "agent_settled"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:17",
+        "type": "get_state"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "get_state",
+        "data": {
+          "autoCompactionEnabled": false,
+          "followUpMode": "one-at-a-time",
+          "isCompacting": false,
+          "isStreaming": false,
+          "messageCount": 12,
+          "model": {
+            "api": "openai-completions",
+            "baseUrl": "http://127.0.0.1:1/v1",
+            "contextWindow": 32768,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0
+            },
+            "id": "fixture-model",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 1024,
+            "name": "Fixture Model",
+            "provider": "fixture",
+            "reasoning": false
+          },
+          "pendingMessageCount": 0,
+          "sessionFile": "/fixture/home/session.jsonl",
+          "sessionId": "00000000-0000-4000-8000-000000000001",
+          "steeringMode": "one-at-a-time",
+          "thinkingLevel": "off"
+        },
+        "id": "pi-fixture-instance:17",
+        "success": true,
+        "type": "response"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:18",
+        "message": "fixture cancel this",
+        "type": "prompt"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "prompt",
+        "id": "pi-fixture-instance:18",
+        "success": true,
+        "type": "response"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "type": "agent_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "type": "turn_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "content": [
+            {
+              "text": "fixture cancel this",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "timestamp": 0
+        },
+        "type": "message_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "content": [
+            {
+              "text": "fixture cancel this",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "timestamp": 0
+        },
+        "type": "message_end"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "api": "openai-completions",
+          "content": [],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "pending",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 0,
+            "output": 0,
+            "totalTokens": 0
+          }
+        },
+        "type": "message_start"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "contentIndex": 0,
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "working",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "pending",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 0,
+              "output": 0,
+              "totalTokens": 0
+            }
+          },
+          "type": "text_start"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "working",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "pending",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 0,
+            "output": 0,
+            "totalTokens": 0
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "contentIndex": 0,
+          "delta": "working",
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "working",
+                "type": "text"
+              }
+            ],
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "pending",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 0,
+              "output": 0,
+              "totalTokens": 0
+            }
+          },
+          "type": "text_delta"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "working",
+              "type": "text"
+            }
+          ],
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "pending",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 0,
+            "output": 0,
+            "totalTokens": 0
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:19",
+        "type": "get_state"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "get_state",
+        "data": {
+          "autoCompactionEnabled": false,
+          "followUpMode": "one-at-a-time",
+          "isCompacting": false,
+          "isStreaming": true,
+          "messageCount": 13,
+          "model": {
+            "api": "openai-completions",
+            "baseUrl": "http://127.0.0.1:1/v1",
+            "contextWindow": 32768,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0
+            },
+            "id": "fixture-model",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 1024,
+            "name": "Fixture Model",
+            "provider": "fixture",
+            "reasoning": false
+          },
+          "pendingMessageCount": 0,
+          "sessionFile": "/fixture/home/session.jsonl",
+          "sessionId": "00000000-0000-4000-8000-000000000001",
+          "steeringMode": "one-at-a-time",
+          "thinkingLevel": "off"
+        },
+        "id": "pi-fixture-instance:19",
+        "success": true,
+        "type": "response"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:20",
+        "type": "abort"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "assistantMessageEvent": {
+          "content": "working",
+          "contentIndex": 0,
+          "partial": {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "working",
+                "type": "text"
+              }
+            ],
+            "errorMessage": "Request was aborted",
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "aborted",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 0,
+              "output": 0,
+              "totalTokens": 0
+            }
+          },
+          "type": "text_end"
+        },
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "working",
+              "type": "text"
+            }
+          ],
+          "errorMessage": "Request was aborted",
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "aborted",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 0,
+            "output": 0,
+            "totalTokens": 0
+          }
+        },
+        "type": "message_update"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "working",
+              "type": "text"
+            }
+          ],
+          "errorMessage": "Request was aborted",
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "aborted",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 0,
+            "output": 0,
+            "totalTokens": 0
+          }
+        },
+        "type": "message_end"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "message": {
+          "api": "openai-completions",
+          "content": [
+            {
+              "text": "working",
+              "type": "text"
+            }
+          ],
+          "errorMessage": "Request was aborted",
+          "model": "fixture-model",
+          "provider": "fixture",
+          "responseId": "chatcmpl-local-fixture",
+          "role": "assistant",
+          "stopReason": "aborted",
+          "timestamp": 0,
+          "usage": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0,
+              "total": 0
+            },
+            "input": 0,
+            "output": 0,
+            "totalTokens": 0
+          }
+        },
+        "toolResults": [],
+        "type": "turn_end"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "messages": [
+          {
+            "content": [
+              {
+                "text": "fixture cancel this",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "timestamp": 0
+          },
+          {
+            "api": "openai-completions",
+            "content": [
+              {
+                "text": "working",
+                "type": "text"
+              }
+            ],
+            "errorMessage": "Request was aborted",
+            "model": "fixture-model",
+            "provider": "fixture",
+            "responseId": "chatcmpl-local-fixture",
+            "role": "assistant",
+            "stopReason": "aborted",
+            "timestamp": 0,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 0,
+              "output": 0,
+              "totalTokens": 0
+            }
+          }
+        ],
+        "type": "agent_end",
+        "willRetry": false
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "type": "agent_settled"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "abort",
+        "id": "pi-fixture-instance:20",
+        "success": true,
+        "type": "response"
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "pi-fixture-instance:21",
+        "type": "get_state"
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "command": "get_state",
+        "data": {
+          "autoCompactionEnabled": false,
+          "followUpMode": "one-at-a-time",
+          "isCompacting": false,
+          "isStreaming": false,
+          "messageCount": 14,
+          "model": {
+            "api": "openai-completions",
+            "baseUrl": "http://127.0.0.1:1/v1",
+            "contextWindow": 32768,
+            "cost": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 0,
+              "output": 0
+            },
+            "id": "fixture-model",
+            "input": [
+              "text"
+            ],
+            "maxTokens": 1024,
+            "name": "Fixture Model",
+            "provider": "fixture",
+            "reasoning": false
+          },
+          "pendingMessageCount": 0,
+          "sessionFile": "/fixture/home/session.jsonl",
+          "sessionId": "00000000-0000-4000-8000-000000000001",
+          "steeringMode": "one-at-a-time",
+          "thinkingLevel": "off"
+        },
+        "id": "pi-fixture-instance:21",
+        "success": true,
+        "type": "response"
+      }
+    }
+  ]
+}

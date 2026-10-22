@@ -136,10 +136,42 @@ fn question(id: &str) -> PendingInteraction {
       prompt: "Choose?".into(),
       options: vec![],
       allows_free_text: true,
+      allows_option_notes: false,
+      is_secret: false,
       multiple: false,
     }],
     native: serde_json::Value::Null,
   }
+}
+
+#[test]
+fn selected_option_notes_require_the_explicit_native_capability() {
+  let mut pending = question("notes");
+  pending.questions[0].options.push(QuestionOption {
+    label: "Chosen".into(),
+    description: None,
+  });
+  let response = InteractionResponse::Answers {
+    answers: vec![QuestionAnswer {
+      question_id: "q".into(),
+      answers: vec!["Chosen".into()],
+      custom: Some("Additional detail".into()),
+    }],
+  };
+  assert_eq!(
+    validate_response(&pending, &response).unwrap_err().kind,
+    ErrorKind::InvalidRequest
+  );
+  pending.questions[0].allows_option_notes = true;
+  assert!(validate_response(&pending, &response).is_ok());
+  pending.questions[0].allows_free_text = false;
+  assert!(validate_response(&pending, &response).is_err());
+  let legacy: QuestionItem = serde_json::from_value(serde_json::json!({
+    "question_id":"q","prompt":"Choose?","options":[],"allows_free_text":true,"multiple":false
+  }))
+  .unwrap();
+  assert!(!legacy.allows_option_notes);
+  assert!(!legacy.is_secret);
 }
 fn answer(id: &str, interaction_id: &str) -> InteractionRequest {
   request(
