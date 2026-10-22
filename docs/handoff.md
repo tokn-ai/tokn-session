@@ -4,9 +4,9 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
-The private `interaction-tests` crate captures native Pi/OpenCode/DSH RPC while
-running the pinned agents against a deterministic loopback model server, then
-replays checked-in transcripts through the Rust adapters in ordinary workspace
+The private `interaction-tests` crate captures native Codex/Pi/OpenCode/DSH RPC.
+The identified Codex executable and pinned agents use a deterministic loopback
+model server, then checked-in transcripts replay through the adapters in workspace
 tests. Native runs use cleared environments, disposable homes, dummy keys, and
 explicit local model routes; capture requires `TOKN_CAPTURE_RPC_FIXTURES=1`.
 Prepare upstream snapshots outside vendor with `scripts/rpc/prepare-*.sh` and run
@@ -15,12 +15,13 @@ Prepare upstream snapshots outside vendor with `scripts/rpc/prepare-*.sh` and ru
 covered scenarios, and replay ordering. The private harness is excluded from
 published crate archives.
 
-Live interaction now has seven Rust crates: a provider-independent
-`interaction-core`, dedicated Pi/OpenCode/DSH RPC protocol crates, and native
+Live interaction now has nine Rust crates: a provider-independent
+`interaction-core`, dedicated Codex/Pi/OpenCode/DSH RPC protocol crates, and native
 adapters. The core owns instance-bound dispatch, capabilities, live pending
 interactions, cancellation-safe admissions, and bounded receipts; protocol and
-core crates do not import providers. Pi uses stdio, OpenCode V2 HTTP/SSE, and
-DSH ApiProxy HTTP with two WebSocket downlinks. Each adapter supports owned
+core crates do not import providers. Codex uses app-server stdio/WS(S), Pi uses
+stdio, OpenCode V2 HTTP/SSE, and DSH ApiProxy HTTP with two WebSocket downlinks.
+Each adapter supports owned
 launch and explicit attachment (Pi requires supplied IO); attached close never
 stops an external process. Native start-or-steer/queue admission is separate
 from completion, and unsupported atomic model/strict delivery operations reject
@@ -31,6 +32,19 @@ the core receipt ledger, and provides a host-only runtime registry closed during
 managed-session shutdown. Its existing Pi project/history supervisor and
 Codex/Pi frontend routes remain in place; OpenCode/DSH UI and remote registration
 are follow-ups, not exposed by this foundation change.
+
+Codex app-server control requires explicit thread create/resume; reads never
+activate saved work. Its ordered response/event pump and epoch guards preserve
+newer live state, exact callback IDs, and terminal request retirement. Native
+catalogs, text/images, start-or-steer, turn-fenced steering, cancellation, and
+callback question/command/file replies are available through the Rust adapter.
+Strict idle-only start, automatic follow-up queue, atomic model-on-send, and
+permanent generic approval grants reject honestly. Question DTOs retain secret
+input and selected-option notes. The distinct `request_user_input_async` tool's
+assistant-item metadata stays native-only; it has no server callback. Viewer
+Desktop IPC routes are unchanged. The Codex fixture records executable version
+and digest separately from inspected source provenance; inference uses only a
+local Responses server. See the [adapter](../crates/codex-adapter/README.md).
 
 Existing sessions expose model context in the header and composer. Historical
 observations carry origin metadata; genuine configured-model changes appear as
@@ -143,7 +157,7 @@ decode; Rust `ErrorEvent` literals require the new `native` field. Pi envelopes
 omit redacted thinking and hidden ZCode errors remain hidden. Inspector requests
 and caches stay separate from display details even after live subscriptions stop.
 
-Version 0.1.1 is being prepared for all 31 publishable crates; the desktop stays
+Version 0.1.1 is being prepared for all 33 publishable crates; the desktop stays
 `publish = false`. Registry dependency versions, package-local docs/licenses and
 test fixtures, and Rust 1.95 declarations are in place. Codex protocol preserves
 the published 0.1.0 enum/struct shapes through additive metadata accessors.

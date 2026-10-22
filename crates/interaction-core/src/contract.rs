@@ -8,6 +8,7 @@ pub type AdapterFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
+  Codex,
   Pi,
   OpenCode,
   Dsh,
@@ -174,6 +175,11 @@ pub struct QuestionItem {
   pub prompt: String,
   pub options: Vec<QuestionOption>,
   pub allows_free_text: bool,
+  /// Native notes may accompany a single selected option, rather than replacing it.
+  #[serde(default)]
+  pub allows_option_notes: bool,
+  #[serde(default)]
+  pub is_secret: bool,
   pub multiple: bool,
 }
 

@@ -40,8 +40,8 @@ The core abstraction is `AgentEvent`: provider-native historical sessions and li
 - `crates/core`: shared historical/display IR types such as `AgentEvent`, `SessionRef`, and `LoadedSession`.
 - `crates/interaction-core`: provider-independent live contracts, runtime registry, pending interactions, and bounded admission receipts.
 - `crates/interaction-tests`: private real-agent RPC capture/replay harness and loopback scripted model server.
-- `crates/{pi,opencode,dsh}-rpc-protocol`: native live wire contracts, separate from historical protocol crates.
-- `crates/{pi,opencode,dsh}-adapter`: Rust native transports and managed/attached runtime implementations of the interaction contract.
+- `crates/{codex,pi,opencode,dsh}-rpc-protocol`: native live wire contracts, separate from historical protocol crates.
+- `crates/{codex,pi,opencode,dsh}-adapter`: Rust native transports and managed/attached runtime implementations of the interaction contract.
 - `crates/codex-protocol`: tolerant, lossless wire types for persisted Codex rollout JSONL.
 - `crates/pi-protocol`: tolerant, lossless wire types for persisted Pi session JSONL.
 - `crates/opencode-protocol`: tolerant, lossless wire types for OpenCode V1 payloads and run JSONL.

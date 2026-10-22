@@ -3,7 +3,7 @@
 # Dependency preparation is separate; this command never needs provider keys.
 set -euo pipefail
 provider="${1:-all}"
-case "$provider" in pi|opencode|dsh|all) ;; *) echo 'usage: test-real-rpc.sh [pi|opencode|dsh|all] [--capture]' >&2; exit 1;; esac
+case "$provider" in pi|opencode|dsh|codex|all) ;; *) echo 'usage: test-real-rpc.sh [pi|opencode|dsh|codex|all] [--capture]' >&2; exit 1;; esac
 if [[ "${2:-}" == --capture ]]; then
   export TOKN_CAPTURE_RPC_FIXTURES=1
 elif [[ -n "${2:-}" ]]; then
@@ -28,4 +28,8 @@ if [[ "$provider" == dsh || "$provider" == all ]]; then
   : "${TOKN_DSH_RPC_ROOT:?Prepare DSH with scripts/rpc/prepare-dsh.sh and set TOKN_DSH_RPC_ROOT}"
   : "${TOKN_RPC_NODE:?Set TOKN_RPC_NODE to an absolute supported Node executable}"
   cargo test -p tokn-interaction-tests --test dsh capture_real_dsh_rpc -- --ignored --nocapture --test-threads=1
+fi
+if [[ "$provider" == codex || "$provider" == all ]]; then
+  : "${TOKN_CODEX_RPC_EXECUTABLE:?Set TOKN_CODEX_RPC_EXECUTABLE to the documented native Codex executable}"
+  cargo test -p tokn-interaction-tests --test codex capture_real_codex_rpc_conversation -- --ignored --nocapture --test-threads=1
 fi

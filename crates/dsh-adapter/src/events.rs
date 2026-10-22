@@ -134,6 +134,8 @@ async fn ingest(inner: &Inner, frame: api::Request) -> Result<(), String> {
               })
               .collect(),
             allows_free_text: true,
+            allows_option_notes: false,
+            is_secret: false,
             multiple: question.multi_select,
           });
         }

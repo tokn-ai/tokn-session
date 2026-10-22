@@ -5946,7 +5946,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokn-codex-adapter"
+version = "0.1.1"
+dependencies = [
+ "base64 0.22.1",
+ "futures-util",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tokn-codex-rpc-protocol",
+ "tokn-interaction-core",
+ "uuid",
+]
+
+[[package]]
 name = "tokn-codex-protocol"
+version = "0.1.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tokn-codex-rpc-protocol"
 version = "0.1.1"
 dependencies = [
  "serde",
@@ -6071,6 +6095,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.26.2",
+ "tokn-codex-adapter",
+ "tokn-codex-rpc-protocol",
  "tokn-dsh-adapter",
  "tokn-dsh-rpc-protocol",
  "tokn-interaction-core",

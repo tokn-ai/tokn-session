@@ -9,6 +9,8 @@ description = "Isolated real-agent RPC capture and replay tests."
 
 [dependencies]
 tokn-interaction-core.workspace = true
+tokn-codex-adapter.workspace = true
+tokn-codex-rpc-protocol.workspace = true
 tokn-pi-adapter.workspace = true
 tokn-pi-rpc-protocol.workspace = true
 tokn-opencode-adapter.workspace = true

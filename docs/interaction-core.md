@@ -5,6 +5,7 @@ reading. Provider-native protocols flow through adapters into common contracts:
 
 ```text
 Pi JSONL ─────────── pi-rpc-protocol ───────── pi-adapter ───────┐
+Codex app-server ── codex-rpc-protocol ────── codex-adapter ────┤
 OpenCode V2 HTTP/SSE ─ opencode-rpc-protocol ─ opencode-adapter ─┼─ InteractionService ─ host API/UI
 DSH HTTP/WebSocket ─ dsh-rpc-protocol ──────── dsh-adapter ─────┘
 ```
@@ -16,12 +17,19 @@ Each adapter depends on its protocol and the core contract. The host composes
 them with `InteractionService::register(Arc<dyn InteractionAdapter>)`.
 Historical `*-protocol` crates and `AgentEvent` keep their existing role.
 
+Codex uses managed stdio or explicit attached stdio/WS(S). Create/resume binds
+and subscribes a thread before control; metadata/state inspection never resumes
+it. Native model catalogs provide verified choices for these registered
+app-server runtimes. The viewer's existing Desktop route is unchanged. See the
+[Codex adapter](../crates/codex-adapter/README.md) for native guarantees, callback
+questions, transport limits, and ownership.
+
 ## Identity and ownership
 
 A runtime has a host-chosen `runtime_id`, a fresh connection/process
 `instance_id`, a provider, and `Managed` or `Attached` ownership. Commands bind
 both identities and an optional native session ID; mutations require an explicit
-session ID. Multiple sessions can share one OpenCode/DSH runtime. Never identify
+session ID. Multiple sessions can share one Codex/OpenCode/DSH runtime. Never identify
 a runtime solely by a saved history path, PID, or listening port.
 
 Pi `spawn` owns a headless `--mode rpc` child; `attach` accepts IO handles
@@ -56,9 +64,9 @@ An `Accepted` admission is distinct from started, steered, or completed work.
 Cancellation ends native turn work and may preserve queued inputs.
 
 `MessageInput.model` is reserved for an adapter that can atomically apply it only
-when starting, ignoring it during steering. The initial three general adapters
-advertise this as unsupported: their standalone model setter and message methods
-cannot establish that guarantee. Model catalogs still provide real metadata.
+when starting, ignoring it during steering. The four general adapters
+advertise this as unsupported: their native APIs cannot guarantee applying it
+only on idle admission. Model catalogs still provide real metadata.
 The viewer's existing Pi bridge can retain its stronger native admission path.
 
 The core permits one awaiting message admission per session while allowing
@@ -119,7 +127,8 @@ protocol logic to frontend components. No vendor source changes are needed.
 
 Adapter unit tests use synthetic peers for fault injection. The private
 [`interaction-tests`](../crates/interaction-tests/README.md) crate additionally
-launches the exact pinned Pi/OpenCode/DSH agents against a scripted local model
-server, captures native traffic, and replays those fixtures through the adapters.
+launches the pinned Pi/OpenCode/DSH agents and an identified Codex executable
+against a scripted local model server, captures native traffic, and replays those
+fixtures through the adapters.
 The default workspace run needs no native executable or provider credentials;
 real-process capture is explicit and uses isolated temporary state.
