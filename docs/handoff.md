@@ -4,6 +4,17 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
+The private `interaction-tests` crate captures native Pi/OpenCode/DSH RPC while
+running the pinned agents against a deterministic loopback model server, then
+replays checked-in transcripts through the Rust adapters in ordinary workspace
+tests. Native runs use cleared environments, disposable homes, dummy keys, and
+explicit local model routes; capture requires `TOKN_CAPTURE_RPC_FIXTURES=1`.
+Prepare upstream snapshots outside vendor with `scripts/rpc/prepare-*.sh` and run
+`scripts/test-real-rpc.sh`; no provider account is needed. See the
+[test harness](../crates/interaction-tests/README.md) for setup, provenance,
+covered scenarios, and replay ordering. The private harness is excluded from
+published crate archives.
+
 Live interaction now has seven Rust crates: a provider-independent
 `interaction-core`, dedicated Pi/OpenCode/DSH RPC protocol crates, and native
 adapters. The core owns instance-bound dispatch, capabilities, live pending

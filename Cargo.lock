@@ -6058,6 +6058,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokn-interaction-tests"
+version = "0.1.1"
+dependencies = [
+ "async-stream",
+ "axum",
+ "futures-util",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tokn-dsh-adapter",
+ "tokn-dsh-rpc-protocol",
+ "tokn-interaction-core",
+ "tokn-opencode-adapter",
+ "tokn-opencode-rpc-protocol",
+ "tokn-pi-adapter",
+ "tokn-pi-rpc-protocol",
+ "uuid",
+]
+
+[[package]]
 name = "tokn-opencode-adapter"
 version = "0.1.1"
 dependencies = [

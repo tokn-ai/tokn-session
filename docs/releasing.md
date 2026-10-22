@@ -3,7 +3,8 @@
 ## Version 0.1.1
 
 The 31 publishable workspace crates share version `0.1.1`; the desktop viewer
-has `publish = false`. Before this release, only the Codex, Pi, and OpenCode
+and the native RPC test harness have `publish = false`. Before this release,
+only the Codex, Pi, and OpenCode
 protocol crates shipped as `0.1.0`. Use the publish script's `--list` mode below
 to check which current versions are already available on crates.io.
 The Codex protocol retains those published enum and struct shapes; newer token
@@ -30,7 +31,7 @@ cargo check --workspace --all-targets --locked
 cargo test --workspace --locked
 cargo run -p tokn-session-cli --locked -- list --source codex --session-dir crates/codex/fixtures --limit 1
 cargo +1.95.0 check --workspace --exclude tokn-session-viewer --all-targets --locked
-cargo package --workspace --exclude tokn-session-viewer --locked
+cargo package --workspace --exclude tokn-session-viewer --exclude tokn-interaction-tests --locked
 ```
 
 Packaging verifies all 31 crates without uploading. Cargo orders

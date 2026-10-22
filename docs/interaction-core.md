@@ -117,5 +117,9 @@ composer support. Next, bind those host-owned runtimes to authorized commands
 and project the common events into the viewer rather than adding more native
 protocol logic to frontend components. No vendor source changes are needed.
 
-Tests use synthetic JSONL peers, synthetic owned Pi/OpenCode processes, and
-local mock HTTP/SSE/WebSocket services. They make no provider requests.
+Adapter unit tests use synthetic peers for fault injection. The private
+[`interaction-tests`](../crates/interaction-tests/README.md) crate additionally
+launches the exact pinned Pi/OpenCode/DSH agents against a scripted local model
+server, captures native traffic, and replays those fixtures through the adapters.
+The default workspace run needs no native executable or provider credentials;
+real-process capture is explicit and uses isolated temporary state.

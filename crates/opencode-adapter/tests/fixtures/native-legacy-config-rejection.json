@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "provider": "opencode",
+  "upstream_revision": "017a5977d2107092007623e507fc5c6eb337d3b2",
+  "scenario": "native_v2_only_config_rejected_by_legacy_history_guard",
+  "records": [
+    {
+      "kind": "http",
+      "method": "GET",
+      "path": "/session/ses_e9b8f762effeLo4T8Fin5Q64qq/message?location%5Bdirectory%5D=%2Ftmp%2Ftokn-rpc-opencode%2Fproject&limit=1&directory=%2Ftmp%2Ftokn-rpc-opencode%2Fproject",
+      "request": null,
+      "status": 400,
+      "response": {
+        "data": {
+          "issues": [
+            {
+              "code": "unrecognized_keys",
+              "keys": [
+                "permissions",
+                "providers",
+                "snapshots"
+              ],
+              "message": "Unrecognized keys: permissions, providers, snapshots",
+              "path": []
+            }
+          ],
+          "path": "/tmp/tokn-rpc-opencode/project/opencode.json"
+        },
+        "name": "ConfigInvalidError"
+      }
+    }
+  ]
+}

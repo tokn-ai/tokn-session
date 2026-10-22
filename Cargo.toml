@@ -3,6 +3,7 @@ members = [
   "apps/viewer/src-tauri",
   "crates/core",
   "crates/interaction-core",
+  "crates/interaction-tests",
   "crates/pi-rpc-protocol",
   "crates/pi-adapter",
   "crates/opencode-rpc-protocol",

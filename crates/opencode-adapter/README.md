@@ -29,6 +29,14 @@ remain read-only instead of silently continuing without their existing context.
 V2 state describes this server's coordinator, not every process using the same
 database. The host must bind an existing session to its configured runtime.
 
+Real-runtime coverage found that the native legacy-history endpoint loads the
+legacy configuration parser, which rejects V2-only `providers`/`permissions`
+configuration. Such locations remain read-only with an explicit unsupported
+reason: a failed legacy check never counts as proof of empty history. The real
+integration suite uses OpenCode's supported legacy configuration, which V2
+migrates. Resolving this native split needs an authoritative history-ownership
+query; V2 metadata and an empty V2 conversation cannot establish V1 absence.
+
 JSON and SSE responses are bounded, requests have deadlines, redirects are
 disabled, and malformed/unknown native events remain inspectable. Reconnection
 emits a gap notification: consumers must refresh state/pending interactions and

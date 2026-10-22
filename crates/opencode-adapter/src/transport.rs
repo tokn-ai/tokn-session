@@ -97,6 +97,12 @@ impl Transport {
       .request(&self.client, Method::GET, &["session", session, "message"])
       .query(&[("limit", "1"), ("directory", self.directory.as_str())]);
     let response = request.send().await.map_err(|_| transport_error(false))?;
+    // Native V1 history reads initialize the legacy config parser. V2-only
+    // configuration is valid for V2, but cannot establish V1 history absence.
+    if response.status() == StatusCode::BAD_REQUEST {
+      let body = read_json(response, false).await?;
+      return Err(legacy_history_error(&body));
+    }
     let value = read_response(response, false).await?;
     serde_json::from_value(value)
       .map_err(|_| InteractionError::unavailable("Could not verify OpenCode V1/V2 session compatibility"))
@@ -170,13 +176,27 @@ fn http_error(status: StatusCode, mutation: bool) -> InteractionError {
   InteractionError::new(kind, format!("OpenCode RPC returned HTTP {}", status.as_u16()))
 }
 
-async fn read_response(mut response: reqwest::Response, mutation: bool) -> Result<Value, InteractionError> {
+fn legacy_history_error(body: &Value) -> InteractionError {
+  if body["name"] == "ConfigInvalidError" {
+    InteractionError::unsupported(
+      "OpenCode's legacy-history check could not read this location's configuration; control requires a configuration compatible with both native V1 and V2",
+    )
+  } else {
+    http_error(StatusCode::BAD_REQUEST, false)
+  }
+}
+
+async fn read_response(response: reqwest::Response, mutation: bool) -> Result<Value, InteractionError> {
   if !response.status().is_success() {
     return Err(http_error(response.status(), mutation));
   }
   if response.status() == StatusCode::NO_CONTENT {
     return Ok(Value::Null);
   }
+  read_json(response, mutation).await
+}
+
+async fn read_json(mut response: reqwest::Response, mutation: bool) -> Result<Value, InteractionError> {
   if !response
     .headers()
     .get("content-type")
@@ -213,4 +233,24 @@ async fn read_response(mut response: reqwest::Response, mutation: bool) -> Resul
       "OpenCode returned malformed JSON",
     )
   })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn real_native_config_rejection_explains_unavailable_history_verification() {
+    let fixture: Value =
+      serde_json::from_str(include_str!("../tests/fixtures/native-legacy-config-rejection.json")).unwrap();
+    assert_eq!(fixture["upstream_revision"], "017a5977d2107092007623e507fc5c6eb337d3b2");
+    let error = legacy_history_error(&fixture["records"][0]["response"]);
+    assert_eq!(error.kind, ErrorKind::Unsupported);
+    assert!(error.message.contains("both native V1 and V2"));
+    assert!(!error.message.contains("opencode.json"));
+    assert_eq!(
+      legacy_history_error(&serde_json::json!({"name":"OtherError"})).kind,
+      ErrorKind::Rejected
+    );
+  }
 }
