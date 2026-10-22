@@ -1,0 +1,13 @@
+[package]
+name = "tokn-pi-rpc-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Tolerant native Pi headless RPC wire types and validation."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

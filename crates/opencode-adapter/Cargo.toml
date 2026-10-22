@@ -1,0 +1,19 @@
+[package]
+name = "tokn-opencode-adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Rust adapter for managed and attached OpenCode V2 runtimes."
+
+[dependencies]
+tokn-interaction-core = { version = "0.1.1", path = "../interaction-core" }
+tokn-opencode-rpc-protocol = { version = "0.1.1", path = "../opencode-rpc-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["process"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"

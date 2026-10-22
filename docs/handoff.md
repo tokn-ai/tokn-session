@@ -4,6 +4,23 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
+Live interaction now has seven Rust crates: a provider-independent
+`interaction-core`, dedicated Pi/OpenCode/DSH RPC protocol crates, and native
+adapters. The core owns instance-bound dispatch, capabilities, live pending
+interactions, cancellation-safe admissions, and bounded receipts; protocol and
+core crates do not import providers. Pi uses stdio, OpenCode V2 HTTP/SSE, and
+DSH ApiProxy HTTP with two WebSocket downlinks. Each adapter supports owned
+launch and explicit attachment (Pi requires supplied IO); attached close never
+stops an external process. Native start-or-steer/queue admission is separate
+from completion, and unsupported atomic model/strict delivery operations reject
+honestly. Inspection never starts or resumes a session. See
+[live interaction](interaction-core.md) for APIs, recovery, ownership, and limits.
+The viewer reuses Pi framing/state/dialog normalization, common model DTOs and
+the core receipt ledger, and provides a host-only runtime registry closed during
+managed-session shutdown. Its existing Pi project/history supervisor and
+Codex/Pi frontend routes remain in place; OpenCode/DSH UI and remote registration
+are follow-ups, not exposed by this foundation change.
+
 Existing sessions expose model context in the header and composer. Historical
 observations carry origin metadata; genuine configured-model changes appear as
 standalone separators at every delivery level. Codex retained windows preserve
@@ -115,7 +132,7 @@ decode; Rust `ErrorEvent` literals require the new `native` field. Pi envelopes
 omit redacted thinking and hidden ZCode errors remain hidden. Inspector requests
 and caches stay separate from display details even after live subscriptions stop.
 
-Version 0.1.1 is being prepared for all 24 publishable crates; the desktop stays
+Version 0.1.1 is being prepared for all 31 publishable crates; the desktop stays
 `publish = false`. Registry dependency versions, package-local docs/licenses and
 test fixtures, and Rust 1.95 declarations are in place. Codex protocol preserves
 the published 0.1.0 enum/struct shapes through additive metadata accessors.
