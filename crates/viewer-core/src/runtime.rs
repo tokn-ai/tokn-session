@@ -139,6 +139,21 @@ impl ViewerRuntime {
   pub fn start(service: ViewerService) -> Self {
     let (events, _) = broadcast::channel(128);
     let mut tasks = Vec::new();
+    let mut rpc_changes = service.rpc_runtimes.subscribe();
+    let rpc_events = events.clone();
+    tasks.push(tokio::spawn(async move {
+      loop {
+        match rpc_changes.recv().await {
+          Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+          Err(_) => return,
+        }
+        // Token and tool traffic never enters this notification. Coalesce
+        // control transitions instead of forcing an inventory read per event.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        while rpc_changes.try_recv().is_ok() {}
+        let _ = emit(&rpc_events, "rpc-runtimes-changed", serde_json::json!({}));
+      }
+    }));
     let mut managed_changes = service.managed_pi.subscribe();
     let managed_service = service.clone();
     let managed_events = events.clone();

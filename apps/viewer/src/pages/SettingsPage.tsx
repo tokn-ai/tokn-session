@@ -3,6 +3,7 @@ import { BellIcon, ChevronIcon, CloseIcon, PanelIcon, TechnicalIcon } from "../c
 import { providerLabel } from "../lib/state";
 import type { MachineSettingsSnapshot, RelaySettings, RelayStatus, ViewerPreferences } from "../lib/types";
 import { RuntimeSettings } from "../components/RuntimeSettings";
+import { RpcRuntimeSettings } from "../components/RpcRuntimeSettings";
 import "./SettingsPage.css";
 
 export interface SettingsPageProps {
@@ -21,7 +22,7 @@ export interface SettingsPageProps {
   hosting: ReactNode;
 }
 
-type SettingsSection = "viewer" | "sources" | "hosting" | "runtimes";
+type SettingsSection = "viewer" | "sources" | "hosting" | "runtimes" | "agent_runtimes";
 
 const READER_PHASES: Record<RelayStatus["phase"], string> = {
   local: "Local history", starting: "Starting", connecting: "Connecting", live: "Live",
@@ -161,6 +162,7 @@ export function SettingsPage({ on_close, machine_label, machine_key, machine_con
     { key: "viewer", label: "Viewer preferences", detail: "This device", icon: <PanelIcon /> },
     { key: "sources", label: "Sources & reader", detail: machine_label, icon: <TechnicalIcon /> },
     { key: "hosting", label: "Hosting & access", detail: machine_label, icon: <BellIcon /> },
+    { key: "agent_runtimes", label: "Agent runtimes", detail: machine_label, icon: <TechnicalIcon /> },
     { key: "runtimes", label: "Runtimes", detail: "This viewer", icon: <TechnicalIcon /> },
   ];
   return <div className="settings-page">
@@ -186,6 +188,9 @@ export function SettingsPage({ on_close, machine_label, machine_key, machine_con
         </section>
         <section aria-labelledby={`${id}-runtimes-title`} className="settings-page__section" hidden={section !== "runtimes"} id={`${id}-runtimes`}>
           <RuntimeSettings active={section === "runtimes"} heading_id={`${id}-runtimes-title`} />
+        </section>
+        <section aria-labelledby={`${id}-agent-runtimes-title`} className="settings-page__section" hidden={section !== "agent_runtimes"} id={`${id}-agent_runtimes`}>
+          <RpcRuntimeSettings key={machine_key} active={section === "agent_runtimes"} connected={machine_connected} machine_key={machine_key} machine_label={machine_label} heading_id={`${id}-agent-runtimes-title`} />
         </section>
       </div>
     </div>

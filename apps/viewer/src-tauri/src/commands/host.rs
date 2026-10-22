@@ -31,3 +31,18 @@ pub async fn local_host_stop_external(app: AppHandle, state: State<'_, LocalHost
 pub async fn local_host_remove_external(app: AppHandle, state: State<'_, LocalHost>) -> Result<HostStatus, String> {
   state.remove_external(&app).await
 }
+
+#[tauri::command]
+pub async fn get_rpc_runtime_access(
+  state: State<'_, LocalHost>,
+) -> Result<crate::local_host::RpcRuntimeAccess, String> {
+  state.rpc_runtime_access().await
+}
+
+#[tauri::command]
+pub async fn set_rpc_runtime_access(
+  state: State<'_, LocalHost>,
+  request: crate::local_host::RpcRuntimeAccessRequest,
+) -> Result<crate::local_host::RpcRuntimeAccess, String> {
+  state.set_rpc_runtime_access(request).await
+}

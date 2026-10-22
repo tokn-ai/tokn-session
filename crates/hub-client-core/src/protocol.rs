@@ -176,6 +176,23 @@ pub fn allowed_route(method: &str, path: &str, allow_control: bool) -> bool {
   }
 }
 
+/// Runtime configuration/lifecycle is a separate host administration capability.
+/// Keep it out of `allowed_route`: legacy grants and plaintext tunnels must
+/// never inherit process administration from their agent-input permission.
+pub fn runtime_management_route(method: &str, path: &str) -> bool {
+  method == "POST"
+    && matches!(
+      path,
+      "/api/v1/get_rpc_runtime_profiles"
+        | "/api/v1/validate_rpc_runtime_profile"
+        | "/api/v1/save_rpc_runtime_profile"
+        | "/api/v1/delete_rpc_runtime_profile"
+        | "/api/v1/list_rpc_runtimes"
+        | "/api/v1/start_rpc_runtime"
+        | "/api/v1/close_rpc_runtime"
+    )
+}
+
 /// Viewing grants keep recorded model context but cannot discover a live
 /// runtime's catalog or advertise controls that the grant cannot use.
 pub fn read_only_model_response(path: &str, reason: &str) -> Option<serde_json::Value> {
@@ -197,6 +214,34 @@ pub fn read_only_model_response(path: &str, reason: &str) -> Option<serde_json::
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn runtime_routes_require_an_independent_paired_host_permission() {
+    for command in [
+      "get_rpc_runtime_profiles",
+      "validate_rpc_runtime_profile",
+      "save_rpc_runtime_profile",
+      "delete_rpc_runtime_profile",
+      "list_rpc_runtimes",
+      "start_rpc_runtime",
+      "close_rpc_runtime",
+    ] {
+      let path = format!("/api/v1/{command}");
+      assert!(runtime_management_route("POST", &path));
+      for control in [false, true] {
+        assert!(!allowed_route("POST", &path, control));
+      }
+      for method in ["GET", "PUT", "DELETE", "OPTIONS"] {
+        assert!(!runtime_management_route(method, &path));
+      }
+      for suffix in ["/", "?admin=true", "/../list_sessions"] {
+        assert!(!runtime_management_route("POST", &format!("{path}{suffix}")));
+      }
+    }
+    for command in ["get_rpc_runtime_access", "set_rpc_runtime_access", "shared"] {
+      assert!(!runtime_management_route("POST", &format!("/api/v1/{command}")));
+    }
+  }
 
   #[test]
   fn viewing_model_controls_never_advertise_or_disclose_a_catalog() {
