@@ -95,6 +95,7 @@ pub struct ViewerService {
   failed_body_jobs: Arc<Mutex<HashMap<(SourceKey, String), FailedBodyJob>>>,
   loaded_session_cache: Arc<Mutex<Option<CachedSession>>>,
   input_broker: crate::input::InputBroker,
+  interactions: tokn_interaction_core::InteractionService,
   pub(crate) images: crate::images::ImageStore,
   pub(crate) managed_pi: crate::managed_pi::ManagedPiSessions,
   question_claims: Arc<Mutex<question_input::QuestionClaims>>,
@@ -669,6 +670,14 @@ struct Trajectory {
 }
 
 impl ViewerService {
+  /// Host-only composition point for provider runtimes. Frontend/remote adapters
+  /// must enforce their own authenticated control permission before execution.
+  /// Historical session shares never receive the host's runtime registry.
+  pub fn interaction_service(&self) -> Result<tokn_interaction_core::InteractionService, String> {
+    self.check_managed_workspace()?;
+    Ok(self.interactions.clone())
+  }
+
   pub fn native(index_path: impl AsRef<Path>) -> Result<Self, String> {
     let session_index = SessionIndex::open(index_path.as_ref())
       .map_err(|error| format!("failed to open the viewer session index: {error}"))?;
@@ -728,6 +737,7 @@ impl ViewerService {
       #[cfg(test)]
       notification_work_stats: Arc::new(Mutex::new(notifications::NotificationWorkStats::default())),
       input_broker: crate::input::InputBroker::default(),
+      interactions: tokn_interaction_core::InteractionService::default(),
       images: crate::images::ImageStore::temporary().expect("temporary image storage should be available"),
       managed_pi: crate::managed_pi::ManagedPiSessions::new(None)
         .unwrap_or_else(crate::managed_pi::ManagedPiSessions::disabled),

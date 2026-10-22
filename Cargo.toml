@@ -2,6 +2,13 @@
 members = [
   "apps/viewer/src-tauri",
   "crates/core",
+  "crates/interaction-core",
+  "crates/pi-rpc-protocol",
+  "crates/pi-adapter",
+  "crates/opencode-rpc-protocol",
+  "crates/opencode-adapter",
+  "crates/dsh-rpc-protocol",
+  "crates/dsh-adapter",
   "crates/codex-protocol",
   "crates/codex",
   "crates/pi-protocol",
@@ -36,6 +43,13 @@ license = "MIT"
 repository = "https://github.com/tokn-ai/tokn-session"
 
 [workspace.dependencies]
+tokn-interaction-core = { version = "0.1.1", path = "crates/interaction-core" }
+tokn-pi-rpc-protocol = { version = "0.1.1", path = "crates/pi-rpc-protocol" }
+tokn-pi-adapter = { version = "0.1.1", path = "crates/pi-adapter" }
+tokn-opencode-rpc-protocol = { version = "0.1.1", path = "crates/opencode-rpc-protocol" }
+tokn-opencode-adapter = { version = "0.1.1", path = "crates/opencode-adapter" }
+tokn-dsh-rpc-protocol = { version = "0.1.1", path = "crates/dsh-rpc-protocol" }
+tokn-dsh-adapter = { version = "0.1.1", path = "crates/dsh-adapter" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 crossterm = "0.28"
 dirs = "6"

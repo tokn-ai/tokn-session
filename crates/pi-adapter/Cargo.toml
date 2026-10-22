@@ -1,0 +1,20 @@
+[package]
+name = "tokn-pi-adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Rust Pi headless runtime adapter and bounded JSONL transport."
+
+[dependencies]
+tokn-interaction-core = { version = "0.1.1", path = "../interaction-core" }
+tokn-pi-rpc-protocol = { version = "0.1.1", path = "../pi-rpc-protocol" }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["process"] }
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"

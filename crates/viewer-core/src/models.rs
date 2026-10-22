@@ -2,12 +2,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ModelIdentity {
-  pub model_provider: Option<String>,
-  pub model_id: String,
-  pub display_name: Option<String>,
-}
+pub use tokn_interaction_core::{ModelChoice, ModelIdentity};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -77,12 +72,6 @@ impl SessionModelStatus {
       supports_model_input: false,
     }
   }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ModelChoice {
-  pub model: ModelIdentity,
-  pub supports_images: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

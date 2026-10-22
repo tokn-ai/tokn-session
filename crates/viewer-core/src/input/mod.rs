@@ -8,11 +8,12 @@ use crate::model::{InputDeliveryStatus, SubmitSessionInputRequest, SubmitSession
 use crate::models::MessageModelResult;
 use sha2::{Digest, Sha256};
 use std::{
-  collections::{HashMap, HashSet, VecDeque},
+  collections::HashSet,
   future::Future,
   path::PathBuf,
   sync::{Arc, Mutex},
 };
+use tokn_interaction_core::{ReceiptAdmission, ReceiptError, ReceiptLedger};
 
 pub(crate) const MAX_INPUT_LENGTH: usize = 16 * 1024;
 const MAX_RECENT_REQUESTS: usize = 1024;
@@ -186,17 +187,18 @@ fn input_fingerprint(request: &SubmitSessionInputRequest) -> [u8; 32] {
     .into()
 }
 
-#[derive(Default)]
 struct RequestState {
-  recent: HashMap<String, RecordedRequest>,
-  completed: VecDeque<String>,
+  receipts: ReceiptLedger<SubmitSessionInputResponse>,
   in_flight: HashSet<String>,
 }
 
-struct RecordedRequest {
-  session_key: String,
-  text_hash: [u8; 32],
-  response: SubmitSessionInputResponse,
+impl Default for RequestState {
+  fn default() -> Self {
+    Self {
+      receipts: ReceiptLedger::new(MAX_RECENT_REQUESTS),
+      in_flight: HashSet::new(),
+    }
+  }
 }
 
 #[derive(Clone, Default)]
@@ -222,20 +224,18 @@ impl InputBroker {
     request: &SubmitSessionInputRequest,
   ) -> Option<SubmitSessionInputResponse> {
     let state = self.0.lock().unwrap_or_else(|error| error.into_inner());
-    let previous = state.recent.get(&request.request_id)?;
-    let hash = input_fingerprint(request);
-    Some(
-      if previous.session_key == target.identity() && previous.text_hash == hash {
-        previous.response.clone()
-      } else {
-        SubmitSessionInputResponse {
-          model_result: None,
-          request_id: request.request_id.clone(),
-          status: InputDeliveryStatus::NotSent,
-          message: "This request ID was already used for a different message.".into(),
-        }
-      },
-    )
+    match state
+      .receipts
+      .lookup(&request.request_id, &target.identity(), &input_fingerprint(request))
+    {
+      Ok(receipt) => receipt,
+      Err(_) => Some(SubmitSessionInputResponse {
+        model_result: None,
+        request_id: request.request_id.clone(),
+        status: InputDeliveryStatus::NotSent,
+        message: "This request ID was already used for a different message.".into(),
+      }),
+    }
   }
 
   pub(crate) async fn submit_custom<F>(
@@ -265,15 +265,18 @@ impl InputBroker {
     };
     {
       let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
-      if let Some(previous) = state.recent.get(&request.request_id) {
-        return if previous.session_key == request.session_key && previous.text_hash == text_hash {
-          previous.response.clone()
-        } else {
-          response(
+      match state
+        .receipts
+        .lookup(&request.request_id, &request.session_key, &text_hash)
+      {
+        Ok(Some(previous)) => return previous,
+        Err(_) => {
+          return response(
             InputDeliveryStatus::NotSent,
             "This request ID was already used for a different message.",
-          )
-        };
+          );
+        }
+        Ok(None) => {}
       }
       if state.in_flight.contains(&request.session_key) {
         return response(
@@ -281,28 +284,32 @@ impl InputBroker {
           "A message is already pending for this session.",
         );
       }
-      while state.recent.len() >= MAX_RECENT_REQUESTS {
-        let Some(oldest) = state.completed.pop_front() else {
+      let pending = response(
+        InputDeliveryStatus::Pending,
+        "This message is still being sent. Check the conversation before sending again.",
+      );
+      match state.receipts.admit(
+        request.request_id.clone(),
+        request.session_key.clone(),
+        text_hash,
+        pending,
+      ) {
+        Ok(ReceiptAdmission::Replay(previous)) => return previous,
+        Ok(ReceiptAdmission::New) => {
+          state.in_flight.insert(request.session_key.clone());
+        }
+        Err(error) => {
           return response(
             InputDeliveryStatus::NotSent,
-            "Too many messages are being sent. Try again shortly.",
+            match error {
+              ReceiptError::Conflict => "This request ID was already used for a different message.",
+              ReceiptError::Full => "Too many messages are being sent. Try again shortly.",
+            },
           );
-        };
-        state.recent.remove(&oldest);
+        }
       }
-      state.in_flight.insert(request.session_key.clone());
-      state.recent.insert(
-        request.request_id.clone(),
-        RecordedRequest {
-          session_key: request.session_key.clone(),
-          text_hash,
-          response: response(
-            InputDeliveryStatus::Pending,
-            "This message is still being sent. Check the conversation before sending again.",
-          ),
-        },
-      );
     }
+
     let broker = self.clone();
     // Once delivery starts it must settle and record its result even if an
     // HTTP client disconnects or the selected conversation changes.
@@ -358,10 +365,11 @@ impl InputBroker {
       };
       let mut state = broker.0.lock().unwrap_or_else(|error| error.into_inner());
       state.in_flight.remove(&request.session_key);
-      if let Some(record) = state.recent.get_mut(&request.request_id) {
-        record.response = result.clone();
+      if result.status == InputDeliveryStatus::Unknown {
+        state.receipts.retain_outcome(&request.request_id, result.clone());
+      } else {
+        state.receipts.complete(&request.request_id, result.clone());
       }
-      state.completed.push_back(request.request_id);
       result
     });
     pending.await.unwrap_or_else(|_| {
