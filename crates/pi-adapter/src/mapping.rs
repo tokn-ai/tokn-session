@@ -134,6 +134,8 @@ pub(super) fn interaction(
         })
         .collect(),
       allows_free_text: matches!(dialog.kind.as_str(), "input" | "editor"),
+      allows_option_notes: false,
+      is_secret: false,
       multiple: false,
     }],
     native,

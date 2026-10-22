@@ -3,6 +3,9 @@ members = [
   "apps/viewer/src-tauri",
   "crates/core",
   "crates/interaction-core",
+  "crates/interaction-tests",
+  "crates/codex-rpc-protocol",
+  "crates/codex-adapter",
   "crates/pi-rpc-protocol",
   "crates/pi-adapter",
   "crates/opencode-rpc-protocol",
@@ -44,6 +47,8 @@ repository = "https://github.com/tokn-ai/tokn-session"
 
 [workspace.dependencies]
 tokn-interaction-core = { version = "0.1.1", path = "crates/interaction-core" }
+tokn-codex-rpc-protocol = { version = "0.1.1", path = "crates/codex-rpc-protocol" }
+tokn-codex-adapter = { version = "0.1.1", path = "crates/codex-adapter" }
 tokn-pi-rpc-protocol = { version = "0.1.1", path = "crates/pi-rpc-protocol" }
 tokn-pi-adapter = { version = "0.1.1", path = "crates/pi-adapter" }
 tokn-opencode-rpc-protocol = { version = "0.1.1", path = "crates/opencode-rpc-protocol" }

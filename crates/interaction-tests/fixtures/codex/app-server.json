@@ -1,0 +1,3056 @@
+{
+  "schema_version": 1,
+  "provider": "codex",
+  "agent_version": "codex-cli 0.163.0-alpha.11",
+  "executable_sha256": "8a6dc3938a2f5d30cc19c50b9ccad83a5aa2ca4a2e3411665430bb78a917220a",
+  "inspected_protocol_revision": "2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4",
+  "scenario": "metadata/state/models, duplicate admission, start-or-steer, native choice/free-text answers, command approval, explicit and atomic steering, cancellation, explicit resume; strict start/queue reject",
+  "frames": [
+    {
+      "direction": "request",
+      "body": {
+        "id": "tokn:1",
+        "method": "initialize",
+        "params": {
+          "capabilities": {
+            "experimentalApi": true
+          },
+          "clientInfo": {
+            "name": "tokn_session",
+            "title": "Tokn Session",
+            "version": "0.1.1"
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "id": "tokn:1",
+        "result": {
+          "codexHome": "/fixture/home/codex",
+          "platformFamily": "unix",
+          "platformOs": "macos",
+          "userAgent": "tokn_session/0.163.0-alpha.11 (Mac OS 15.4.1; arm64) unknown (tokn_session; 0.1.1)"
+        }
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "method": "initialized",
+        "params": {}
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "tokn:2",
+        "method": "thread/start",
+        "params": {
+          "cwd": "/fixture/home/workspace",
+          "model": "fixture-model",
+          "modelProvider": "fixture"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999707,
+        "method": "remoteControl/status/changed",
+        "params": {
+          "environmentId": null,
+          "installationId": "04768198-93f5-40c2-894d-69909569f6f8",
+          "serverName": "fixture-host",
+          "status": "disabled"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "id": "tokn:2",
+        "result": {
+          "activePermissionProfile": null,
+          "approvalPolicy": "on-request",
+          "approvalsReviewer": "user",
+          "cwd": "/fixture/home/workspace",
+          "disabledPluginIds": [],
+          "instructionSources": [],
+          "model": "fixture-model",
+          "modelProvider": "fixture",
+          "multiAgentMode": "explicitRequestOnly",
+          "reasoningEffort": null,
+          "runtimeWorkspaceRoots": [
+            "/fixture/home/workspace"
+          ],
+          "sandbox": {
+            "excludeSlashTmp": false,
+            "excludeTmpdirEnvVar": false,
+            "networkAccess": false,
+            "type": "workspaceWrite",
+            "writableRoots": []
+          },
+          "serviceTier": null,
+          "thread": {
+            "agentNickname": null,
+            "agentRole": null,
+            "canAcceptDirectInput": true,
+            "cliVersion": "0.163.0-alpha.11",
+            "createdAt": 1792691999,
+            "cwd": "/fixture/home/workspace",
+            "daybreakEnabled": null,
+            "environments": [
+              {
+                "cwd": "/fixture/home/workspace",
+                "environmentId": "local",
+                "runtimeWorkspaceRoots": [
+                  "/fixture/home/workspace"
+                ]
+              }
+            ],
+            "ephemeral": false,
+            "extra": null,
+            "forkedFromId": null,
+            "gitInfo": null,
+            "historyMode": "paginated",
+            "id": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+            "model": "fixture-model",
+            "modelProvider": "fixture",
+            "name": null,
+            "originator": "tokn_session",
+            "parentThreadId": null,
+            "path": "/fixture/home/codex/sessions/2026/10/23/rollout-2026-10-23T01-59-59-01a164c5-13f1-7e80-8f2e-d6cb3d321896.jsonl",
+            "preview": "",
+            "projectId": null,
+            "reasoningEffort": null,
+            "recencyAt": 1792691999,
+            "section": null,
+            "sectionEnteredAt": null,
+            "sessionId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+            "source": "vscode",
+            "status": {
+              "type": "idle"
+            },
+            "threadSource": null,
+            "turns": [],
+            "updatedAt": 1792691999
+          }
+        }
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "tokn:3",
+        "method": "thread/read",
+        "params": {
+          "includeTurns": false,
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999839,
+        "method": "thread/started",
+        "params": {
+          "thread": {
+            "agentNickname": null,
+            "agentRole": null,
+            "canAcceptDirectInput": true,
+            "cliVersion": "0.163.0-alpha.11",
+            "createdAt": 1792691999,
+            "cwd": "/fixture/home/workspace",
+            "daybreakEnabled": null,
+            "environments": [
+              {
+                "cwd": "/fixture/home/workspace",
+                "environmentId": "local",
+                "runtimeWorkspaceRoots": [
+                  "/fixture/home/workspace"
+                ]
+              }
+            ],
+            "ephemeral": false,
+            "extra": null,
+            "forkedFromId": null,
+            "gitInfo": null,
+            "historyMode": "paginated",
+            "id": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+            "model": "fixture-model",
+            "modelProvider": "fixture",
+            "name": null,
+            "originator": "tokn_session",
+            "parentThreadId": null,
+            "path": "/fixture/home/codex/sessions/2026/10/23/rollout-2026-10-23T01-59-59-01a164c5-13f1-7e80-8f2e-d6cb3d321896.jsonl",
+            "preview": "",
+            "projectId": null,
+            "reasoningEffort": null,
+            "recencyAt": 1792691999,
+            "section": null,
+            "sectionEnteredAt": null,
+            "sessionId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+            "source": "vscode",
+            "status": {
+              "type": "idle"
+            },
+            "threadSource": null,
+            "turns": [],
+            "updatedAt": 1792691999
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999839,
+        "method": "warning",
+        "params": {
+          "message": "Under-development features enabled: default_mode_request_user_input. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /fixture/home/codex/config.toml.",
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "id": "tokn:3",
+        "result": {
+          "readState": null,
+          "thread": {
+            "agentNickname": null,
+            "agentRole": null,
+            "canAcceptDirectInput": true,
+            "cliVersion": "0.163.0-alpha.11",
+            "createdAt": 1792691999,
+            "cwd": "/fixture/home/workspace",
+            "daybreakEnabled": null,
+            "environments": [
+              {
+                "cwd": "/fixture/home/workspace",
+                "environmentId": "local",
+                "runtimeWorkspaceRoots": [
+                  "/fixture/home/workspace"
+                ]
+              }
+            ],
+            "ephemeral": false,
+            "extra": null,
+            "forkedFromId": null,
+            "gitInfo": null,
+            "historyMode": "paginated",
+            "id": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+            "model": "fixture-model",
+            "modelProvider": "fixture",
+            "name": null,
+            "originator": "tokn_session",
+            "parentThreadId": null,
+            "path": "/fixture/home/codex/sessions/2026/10/23/rollout-2026-10-23T01-59-59-01a164c5-13f1-7e80-8f2e-d6cb3d321896.jsonl",
+            "preview": "",
+            "projectId": null,
+            "reasoningEffort": null,
+            "recencyAt": 1792691999,
+            "section": null,
+            "sectionEnteredAt": null,
+            "sessionId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+            "source": "vscode",
+            "status": {
+              "type": "idle"
+            },
+            "threadSource": null,
+            "turns": [],
+            "updatedAt": 1792691999
+          }
+        }
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "tokn:4",
+        "method": "thread/read",
+        "params": {
+          "includeTurns": false,
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "id": "tokn:4",
+        "result": {
+          "readState": null,
+          "thread": {
+            "agentNickname": null,
+            "agentRole": null,
+            "canAcceptDirectInput": true,
+            "cliVersion": "0.163.0-alpha.11",
+            "createdAt": 1792691999,
+            "cwd": "/fixture/home/workspace",
+            "daybreakEnabled": null,
+            "environments": [
+              {
+                "cwd": "/fixture/home/workspace",
+                "environmentId": "local",
+                "runtimeWorkspaceRoots": [
+                  "/fixture/home/workspace"
+                ]
+              }
+            ],
+            "ephemeral": false,
+            "extra": null,
+            "forkedFromId": null,
+            "gitInfo": null,
+            "historyMode": "paginated",
+            "id": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+            "model": "fixture-model",
+            "modelProvider": "fixture",
+            "name": null,
+            "originator": "tokn_session",
+            "parentThreadId": null,
+            "path": "/fixture/home/codex/sessions/2026/10/23/rollout-2026-10-23T01-59-59-01a164c5-13f1-7e80-8f2e-d6cb3d321896.jsonl",
+            "preview": "",
+            "projectId": null,
+            "reasoningEffort": null,
+            "recencyAt": 1792691999,
+            "section": null,
+            "sectionEnteredAt": null,
+            "sessionId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+            "source": "vscode",
+            "status": {
+              "type": "idle"
+            },
+            "threadSource": null,
+            "turns": [],
+            "updatedAt": 1792691999
+          }
+        }
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "tokn:5",
+        "method": "model/list",
+        "params": {
+          "cursor": null,
+          "limit": 100
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "id": "tokn:5",
+        "result": {
+          "data": [
+            {
+              "additionalSpeedTiers": [
+                "fast"
+              ],
+              "availabilityNux": {
+                "message": "Maximize usage with GPT-6.1 Sol. Try it on complex work for near-Astra performance at a lower cost."
+              },
+              "availableAccessPrograms": null,
+              "defaultReasoningEffort": "low",
+              "defaultServiceTier": null,
+              "description": "Latest workhorse model for coding and everyday work.",
+              "displayName": "GPT-6.1-Sol",
+              "hidden": false,
+              "id": "gpt-6.1-sol",
+              "inputModalities": [
+                "text",
+                "image"
+              ],
+              "isDefault": true,
+              "model": "gpt-6.1-sol",
+              "modelSpecialty": null,
+              "multiAgentVersion": "v2",
+              "serviceTiers": [
+                {
+                  "description": "2x speed, increased usage",
+                  "id": "priority",
+                  "name": "Fast"
+                }
+              ],
+              "supportedReasoningEfforts": [
+                {
+                  "description": "Fast responses with lighter reasoning",
+                  "reasoningEffort": "low"
+                },
+                {
+                  "description": "Balances speed and reasoning depth for everyday tasks",
+                  "reasoningEffort": "medium"
+                },
+                {
+                  "description": "Greater reasoning depth for complex problems",
+                  "reasoningEffort": "high"
+                },
+                {
+                  "description": "Extra high reasoning depth for complex problems",
+                  "reasoningEffort": "xhigh"
+                },
+                {
+                  "description": "Maximum reasoning depth for the hardest problems",
+                  "reasoningEffort": "max"
+                },
+                {
+                  "description": "Maximum reasoning with automatic task delegation",
+                  "reasoningEffort": "ultra"
+                }
+              ],
+              "supportsPersonality": false,
+              "upgrade": null,
+              "upgradeInfo": null
+            },
+            {
+              "additionalSpeedTiers": [
+                "fast"
+              ],
+              "availabilityNux": null,
+              "availableAccessPrograms": null,
+              "defaultReasoningEffort": "low",
+              "defaultServiceTier": null,
+              "description": "Frontier intelligence for the most demanding work.",
+              "displayName": "GPT-6-Astra",
+              "hidden": false,
+              "id": "gpt-6-astra",
+              "inputModalities": [
+                "text",
+                "image"
+              ],
+              "isDefault": false,
+              "model": "gpt-6-astra",
+              "modelSpecialty": null,
+              "multiAgentVersion": "v2",
+              "serviceTiers": [
+                {
+                  "description": "2x speed, increased usage",
+                  "id": "priority",
+                  "name": "Fast"
+                }
+              ],
+              "supportedReasoningEfforts": [
+                {
+                  "description": "Fast responses with lighter reasoning",
+                  "reasoningEffort": "low"
+                },
+                {
+                  "description": "Balances speed and reasoning depth for everyday tasks",
+                  "reasoningEffort": "medium"
+                },
+                {
+                  "description": "Greater reasoning depth for complex problems",
+                  "reasoningEffort": "high"
+                },
+                {
+                  "description": "Extra high reasoning depth for complex problems",
+                  "reasoningEffort": "xhigh"
+                },
+                {
+                  "description": "Maximum reasoning depth for the hardest problems",
+                  "reasoningEffort": "max"
+                },
+                {
+                  "description": "Maximum reasoning with automatic task delegation",
+                  "reasoningEffort": "ultra"
+                }
+              ],
+              "supportsPersonality": false,
+              "upgrade": null,
+              "upgradeInfo": null
+            },
+            {
+              "additionalSpeedTiers": [
+                "fast"
+              ],
+              "availabilityNux": null,
+              "availableAccessPrograms": null,
+              "defaultReasoningEffort": "medium",
+              "defaultServiceTier": "priority",
+              "description": "Previous generation workhorse model.",
+              "displayName": "GPT-6-Sol",
+              "hidden": false,
+              "id": "gpt-6-sol",
+              "inputModalities": [
+                "text",
+                "image"
+              ],
+              "isDefault": false,
+              "model": "gpt-6-sol",
+              "modelSpecialty": null,
+              "multiAgentVersion": "v2",
+              "serviceTiers": [
+                {
+                  "description": "1.5x speed",
+                  "id": "priority",
+                  "name": "Fast"
+                }
+              ],
+              "supportedReasoningEfforts": [
+                {
+                  "description": "Fast responses with lighter reasoning",
+                  "reasoningEffort": "low"
+                },
+                {
+                  "description": "Balances speed and reasoning depth for everyday tasks",
+                  "reasoningEffort": "medium"
+                },
+                {
+                  "description": "Greater reasoning depth for complex problems",
+                  "reasoningEffort": "high"
+                },
+                {
+                  "description": "Extra high reasoning depth for complex problems",
+                  "reasoningEffort": "xhigh"
+                },
+                {
+                  "description": "Maximum reasoning depth for the hardest problems",
+                  "reasoningEffort": "max"
+                },
+                {
+                  "description": "Maximum reasoning with automatic task delegation",
+                  "reasoningEffort": "ultra"
+                }
+              ],
+              "supportsPersonality": false,
+              "upgrade": null,
+              "upgradeInfo": null
+            },
+            {
+              "additionalSpeedTiers": [
+                "fast"
+              ],
+              "availabilityNux": null,
+              "availableAccessPrograms": null,
+              "defaultReasoningEffort": "medium",
+              "defaultServiceTier": "priority",
+              "description": "Fast and affordable model for easier tasks.",
+              "displayName": "GPT-6-Luna",
+              "hidden": false,
+              "id": "gpt-6-luna",
+              "inputModalities": [
+                "text",
+                "image"
+              ],
+              "isDefault": false,
+              "model": "gpt-6-luna",
+              "modelSpecialty": null,
+              "multiAgentVersion": "v2",
+              "serviceTiers": [
+                {
+                  "description": "1.5x speed",
+                  "id": "priority",
+                  "name": "Fast"
+                }
+              ],
+              "supportedReasoningEfforts": [
+                {
+                  "description": "Fast responses with lighter reasoning",
+                  "reasoningEffort": "low"
+                },
+                {
+                  "description": "Balances speed and reasoning depth for everyday tasks",
+                  "reasoningEffort": "medium"
+                },
+                {
+                  "description": "Greater reasoning depth for complex problems",
+                  "reasoningEffort": "high"
+                },
+                {
+                  "description": "Extra high reasoning depth for complex problems",
+                  "reasoningEffort": "xhigh"
+                },
+                {
+                  "description": "Maximum reasoning depth for the hardest problems",
+                  "reasoningEffort": "max"
+                }
+              ],
+              "supportsPersonality": false,
+              "upgrade": null,
+              "upgradeInfo": null
+            },
+            {
+              "additionalSpeedTiers": [
+                "fast"
+              ],
+              "availabilityNux": null,
+              "availableAccessPrograms": null,
+              "defaultReasoningEffort": "low",
+              "defaultServiceTier": null,
+              "description": "Older generation workhorse model.",
+              "displayName": "GPT-5.6-Sol",
+              "hidden": false,
+              "id": "gpt-5.6-sol",
+              "inputModalities": [
+                "text",
+                "image"
+              ],
+              "isDefault": false,
+              "model": "gpt-5.6-sol",
+              "modelSpecialty": null,
+              "multiAgentVersion": "v2",
+              "serviceTiers": [
+                {
+                  "description": "1.5x speed, increased usage",
+                  "id": "priority",
+                  "name": "Fast"
+                }
+              ],
+              "supportedReasoningEfforts": [
+                {
+                  "description": "Fast responses with lighter reasoning",
+                  "reasoningEffort": "low"
+                },
+                {
+                  "description": "Balances speed and reasoning depth for everyday tasks",
+                  "reasoningEffort": "medium"
+                },
+                {
+                  "description": "Greater reasoning depth for complex problems",
+                  "reasoningEffort": "high"
+                },
+                {
+                  "description": "Extra high reasoning depth for complex problems",
+                  "reasoningEffort": "xhigh"
+                },
+                {
+                  "description": "Maximum reasoning depth for the hardest problems",
+                  "reasoningEffort": "max"
+                },
+                {
+                  "description": "Maximum reasoning with automatic task delegation",
+                  "reasoningEffort": "ultra"
+                }
+              ],
+              "supportsPersonality": false,
+              "upgrade": "gpt-6-sol",
+              "upgradeInfo": {
+                "migrationMarkdown": "Meet GPT-6 Sol\n\nOur latest Sol is more intelligent and more efficient so your usage limits go further. This model is a great daily driver for complex tasks, especially coding.\n",
+                "model": "gpt-6-sol",
+                "modelLink": null,
+                "retirementAt": null,
+                "upgradeCopy": null
+              }
+            },
+            {
+              "additionalSpeedTiers": [
+                "fast"
+              ],
+              "availabilityNux": null,
+              "availableAccessPrograms": null,
+              "defaultReasoningEffort": "medium",
+              "defaultServiceTier": null,
+              "description": "Older balanced model for straightforward work.",
+              "displayName": "GPT-5.6-Terra",
+              "hidden": false,
+              "id": "gpt-5.6-terra",
+              "inputModalities": [
+                "text",
+                "image"
+              ],
+              "isDefault": false,
+              "model": "gpt-5.6-terra",
+              "modelSpecialty": null,
+              "multiAgentVersion": "v2",
+              "serviceTiers": [
+                {
+                  "description": "1.5x speed, increased usage",
+                  "id": "priority",
+                  "name": "Fast"
+                }
+              ],
+              "supportedReasoningEfforts": [
+                {
+                  "description": "Fast responses with lighter reasoning",
+                  "reasoningEffort": "low"
+                },
+                {
+                  "description": "Balances speed and reasoning depth for everyday tasks",
+                  "reasoningEffort": "medium"
+                },
+                {
+                  "description": "Greater reasoning depth for complex problems",
+                  "reasoningEffort": "high"
+                },
+                {
+                  "description": "Extra high reasoning depth for complex problems",
+                  "reasoningEffort": "xhigh"
+                },
+                {
+                  "description": "Maximum reasoning depth for the hardest problems",
+                  "reasoningEffort": "max"
+                },
+                {
+                  "description": "Maximum reasoning with automatic task delegation",
+                  "reasoningEffort": "ultra"
+                }
+              ],
+              "supportsPersonality": false,
+              "upgrade": "gpt-6-sol",
+              "upgradeInfo": {
+                "migrationMarkdown": "Meet GPT-6 Sol\n\nOur latest Sol is more intelligent and more efficient so your usage limits go further. This model is a great daily driver for complex tasks, especially coding.\n",
+                "model": "gpt-6-sol",
+                "modelLink": null,
+                "retirementAt": null,
+                "upgradeCopy": null
+              }
+            },
+            {
+              "additionalSpeedTiers": [
+                "fast"
+              ],
+              "availabilityNux": null,
+              "availableAccessPrograms": null,
+              "defaultReasoningEffort": "medium",
+              "defaultServiceTier": null,
+              "description": "Older fast and efficient model.",
+              "displayName": "GPT-5.6-Luna",
+              "hidden": false,
+              "id": "gpt-5.6-luna",
+              "inputModalities": [
+                "text",
+                "image"
+              ],
+              "isDefault": false,
+              "model": "gpt-5.6-luna",
+              "modelSpecialty": null,
+              "multiAgentVersion": "v1",
+              "serviceTiers": [
+                {
+                  "description": "1.5x speed, increased usage",
+                  "id": "priority",
+                  "name": "Fast"
+                }
+              ],
+              "supportedReasoningEfforts": [
+                {
+                  "description": "Fast responses with lighter reasoning",
+                  "reasoningEffort": "low"
+                },
+                {
+                  "description": "Balances speed and reasoning depth for everyday tasks",
+                  "reasoningEffort": "medium"
+                },
+                {
+                  "description": "Greater reasoning depth for complex problems",
+                  "reasoningEffort": "high"
+                },
+                {
+                  "description": "Extra high reasoning depth for complex problems",
+                  "reasoningEffort": "xhigh"
+                },
+                {
+                  "description": "Maximum reasoning depth for the hardest problems",
+                  "reasoningEffort": "max"
+                }
+              ],
+              "supportsPersonality": false,
+              "upgrade": "gpt-6-luna",
+              "upgradeInfo": {
+                "migrationMarkdown": "Meet GPT-6 Luna\n\nOur latest Luna is significantly more efficient, so your usage limits go even further. Reach for it for any job that doesn't require frontier intelligence.\n",
+                "model": "gpt-6-luna",
+                "modelLink": null,
+                "retirementAt": null,
+                "upgradeCopy": null
+              }
+            },
+            {
+              "additionalSpeedTiers": [
+                "fast"
+              ],
+              "availabilityNux": null,
+              "availableAccessPrograms": null,
+              "defaultReasoningEffort": "medium",
+              "defaultServiceTier": null,
+              "description": "Legacy coding model.",
+              "displayName": "GPT-5.5",
+              "hidden": false,
+              "id": "gpt-5.5",
+              "inputModalities": [
+                "text",
+                "image"
+              ],
+              "isDefault": false,
+              "model": "gpt-5.5",
+              "modelSpecialty": null,
+              "multiAgentVersion": null,
+              "serviceTiers": [
+                {
+                  "description": "1.5x speed, increased usage",
+                  "id": "priority",
+                  "name": "Fast"
+                }
+              ],
+              "supportedReasoningEfforts": [
+                {
+                  "description": "Fast responses with lighter reasoning",
+                  "reasoningEffort": "low"
+                },
+                {
+                  "description": "Balances speed and reasoning depth for everyday tasks",
+                  "reasoningEffort": "medium"
+                },
+                {
+                  "description": "Greater reasoning depth for complex problems",
+                  "reasoningEffort": "high"
+                },
+                {
+                  "description": "Extra high reasoning depth for complex problems",
+                  "reasoningEffort": "xhigh"
+                }
+              ],
+              "supportsPersonality": false,
+              "upgrade": "gpt-6-sol",
+              "upgradeInfo": {
+                "migrationMarkdown": "Meet GPT-6 Sol\n\nOur latest Sol is more intelligent and more efficient so your usage limits go further. This model is a great daily driver for complex tasks, especially coding.\n",
+                "model": "gpt-6-sol",
+                "modelLink": null,
+                "retirementAt": null,
+                "upgradeCopy": null
+              }
+            }
+          ],
+          "nextCursor": null
+        }
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "tokn:6",
+        "method": "turn/start",
+        "params": {
+          "input": [
+            {
+              "text": "fixture hello",
+              "text_elements": [],
+              "type": "text"
+            }
+          ],
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999874,
+        "method": "warning",
+        "params": {
+          "message": "Model metadata for `fixture-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.",
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "id": "tokn:6",
+        "result": {
+          "turn": {
+            "completedAt": null,
+            "durationMs": null,
+            "error": null,
+            "id": "01a164c5-1475-7e83-81ab-f85461220035",
+            "items": [],
+            "itemsView": "notLoaded",
+            "rootTurnId": "01a164c5-1475-7e83-81ab-f85461220035",
+            "startedAt": null,
+            "status": "inProgress"
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999894,
+        "method": "thread/status/changed",
+        "params": {
+          "status": {
+            "activeFlags": [],
+            "type": "active"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999894,
+        "method": "turn/started",
+        "params": {
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turn": {
+            "completedAt": null,
+            "durationMs": null,
+            "error": null,
+            "id": "01a164c5-1475-7e83-81ab-f85461220035",
+            "items": [],
+            "itemsView": "notLoaded",
+            "rootTurnId": "01a164c5-1475-7e83-81ab-f85461220035",
+            "startedAt": 1792691999,
+            "status": "inProgress"
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999906,
+        "method": "item/started",
+        "params": {
+          "item": {
+            "clientId": null,
+            "content": [
+              {
+                "text": "fixture hello",
+                "text_elements": [],
+                "type": "text"
+              }
+            ],
+            "id": "01a164c5-14a1-7690-a44b-2855186c6ab1",
+            "type": "userMessage"
+          },
+          "startedAtMs": 1792691999906,
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-1475-7e83-81ab-f85461220035"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999913,
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 1792691999906,
+          "item": {
+            "clientId": null,
+            "content": [
+              {
+                "text": "fixture hello",
+                "text_elements": [],
+                "type": "text"
+              }
+            ],
+            "id": "01a164c5-14a1-7690-a44b-2855186c6ab1",
+            "type": "userMessage"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-1475-7e83-81ab-f85461220035"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999922,
+        "method": "item/started",
+        "params": {
+          "item": {
+            "delivery": null,
+            "id": "msg_local_fixture_1",
+            "memoryCitation": null,
+            "phase": null,
+            "questions": null,
+            "text": "",
+            "type": "agentMessage"
+          },
+          "startedAtMs": 1792691999922,
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-1475-7e83-81ab-f85461220035"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999922,
+        "method": "item/agentMessage/delta",
+        "params": {
+          "delta": "fixture hello complete",
+          "itemId": "msg_local_fixture_1",
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-1475-7e83-81ab-f85461220035"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999923,
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 1792691999922,
+          "item": {
+            "delivery": null,
+            "id": "msg_local_fixture_1",
+            "memoryCitation": null,
+            "phase": null,
+            "questions": null,
+            "text": "fixture hello complete",
+            "type": "agentMessage"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-1475-7e83-81ab-f85461220035"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999927,
+        "method": "thread/tokenUsage/updated",
+        "params": {
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "tokenUsage": {
+            "last": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 0,
+              "inputTokens": 10,
+              "outputTokens": 2,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 12
+            },
+            "modelContextWindow": 258400,
+            "total": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 0,
+              "inputTokens": 10,
+              "outputTokens": 2,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 12
+            }
+          },
+          "turnId": "01a164c5-1475-7e83-81ab-f85461220035"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999927,
+        "method": "account/rateLimits/updated",
+        "params": {
+          "rateLimits": {
+            "credits": null,
+            "individualLimit": null,
+            "limitId": "codex",
+            "limitName": null,
+            "normalModelSlug": null,
+            "planType": null,
+            "primary": null,
+            "rateLimitReachedType": null,
+            "secondary": null,
+            "spendControlReached": null
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999931,
+        "method": "thread/readState/changed",
+        "params": {
+          "readState": {
+            "firstUnread": {
+              "turnId": "01a164c5-1475-7e83-81ab-f85461220035",
+              "type": "turn"
+            },
+            "revision": "88886d4f-6fee-480e-8405-866bd42f0865"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999931,
+        "method": "thread/status/changed",
+        "params": {
+          "status": {
+            "type": "idle"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999931,
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turn": {
+            "completedAt": 1792691999,
+            "durationMs": 54,
+            "error": null,
+            "id": "01a164c5-1475-7e83-81ab-f85461220035",
+            "items": [
+              {
+                "delivery": null,
+                "id": "msg_local_fixture_1",
+                "memoryCitation": null,
+                "phase": null,
+                "questions": null,
+                "text": "fixture hello complete",
+                "type": "agentMessage"
+              }
+            ],
+            "itemsView": "summary",
+            "rootTurnId": "01a164c5-1475-7e83-81ab-f85461220035",
+            "startedAt": 1792691999,
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "tokn:7",
+        "method": "turn/start",
+        "params": {
+          "input": [
+            {
+              "text": "fixture ask question",
+              "text_elements": [],
+              "type": "text"
+            }
+          ],
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999933,
+        "method": "warning",
+        "params": {
+          "message": "Model metadata for `fixture-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.",
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "id": "tokn:7",
+        "result": {
+          "turn": {
+            "completedAt": null,
+            "durationMs": null,
+            "error": null,
+            "id": "01a164c5-14bc-7a42-98ab-c9e880c4ff8e",
+            "items": [],
+            "itemsView": "notLoaded",
+            "rootTurnId": "01a164c5-14bc-7a42-98ab-c9e880c4ff8e",
+            "startedAt": null,
+            "status": "inProgress"
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999935,
+        "method": "thread/status/changed",
+        "params": {
+          "status": {
+            "activeFlags": [],
+            "type": "active"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999935,
+        "method": "turn/started",
+        "params": {
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turn": {
+            "completedAt": null,
+            "durationMs": null,
+            "error": null,
+            "id": "01a164c5-14bc-7a42-98ab-c9e880c4ff8e",
+            "items": [],
+            "itemsView": "notLoaded",
+            "rootTurnId": "01a164c5-14bc-7a42-98ab-c9e880c4ff8e",
+            "startedAt": 1792691999,
+            "status": "inProgress"
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999942,
+        "method": "item/started",
+        "params": {
+          "item": {
+            "clientId": null,
+            "content": [
+              {
+                "text": "fixture ask question",
+                "text_elements": [],
+                "type": "text"
+              }
+            ],
+            "id": "01a164c5-14c6-7922-a134-c4b63ab9c1f7",
+            "type": "userMessage"
+          },
+          "startedAtMs": 1792691999942,
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-14bc-7a42-98ab-c9e880c4ff8e"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999943,
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 1792691999942,
+          "item": {
+            "clientId": null,
+            "content": [
+              {
+                "text": "fixture ask question",
+                "text_elements": [],
+                "type": "text"
+              }
+            ],
+            "id": "01a164c5-14c6-7922-a134-c4b63ab9c1f7",
+            "type": "userMessage"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-14bc-7a42-98ab-c9e880c4ff8e"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999955,
+        "method": "thread/status/changed",
+        "params": {
+          "status": {
+            "activeFlags": [
+              "waitingOnUserInput"
+            ],
+            "type": "active"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "id": 0,
+        "method": "item/tool/requestUserInput",
+        "params": {
+          "autoResolutionMs": null,
+          "isBlocking": false,
+          "itemId": "call_local_fixture_2",
+          "questions": [
+            {
+              "header": "Fixture",
+              "id": "fixture_choice",
+              "isOther": true,
+              "isSecret": false,
+              "options": [
+                {
+                  "description": "First option",
+                  "label": "Alpha"
+                },
+                {
+                  "description": "Second option",
+                  "label": "Beta"
+                }
+              ],
+              "question": "Choose a fixture option"
+            },
+            {
+              "header": "Notes",
+              "id": "fixture_notes",
+              "isOther": true,
+              "isSecret": false,
+              "options": [
+                {
+                  "description": "Continue without notes",
+                  "label": "No notes"
+                },
+                {
+                  "description": "Revisit the plan",
+                  "label": "Revisit"
+                }
+              ],
+              "question": "Any fixture notes?"
+            }
+          ],
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-14bc-7a42-98ab-c9e880c4ff8e"
+        }
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": 0,
+        "result": {
+          "answers": {
+            "fixture_choice": {
+              "answers": [
+                "Beta",
+                "user_note: fixture option note"
+              ]
+            },
+            "fixture_notes": {
+              "answers": [
+                "user_note: fixture custom answer"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999957,
+        "method": "serverRequest/resolved",
+        "params": {
+          "requestId": 0,
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999957,
+        "method": "thread/status/changed",
+        "params": {
+          "status": {
+            "activeFlags": [],
+            "type": "active"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999961,
+        "method": "thread/tokenUsage/updated",
+        "params": {
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "tokenUsage": {
+            "last": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 0,
+              "inputTokens": 10,
+              "outputTokens": 2,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 12
+            },
+            "modelContextWindow": 258400,
+            "total": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 0,
+              "inputTokens": 20,
+              "outputTokens": 4,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 24
+            }
+          },
+          "turnId": "01a164c5-14bc-7a42-98ab-c9e880c4ff8e"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999961,
+        "method": "account/rateLimits/updated",
+        "params": {
+          "rateLimits": {
+            "credits": null,
+            "individualLimit": null,
+            "limitId": "codex",
+            "limitName": null,
+            "normalModelSlug": null,
+            "planType": null,
+            "primary": null,
+            "rateLimitReachedType": null,
+            "secondary": null,
+            "spendControlReached": null
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999967,
+        "method": "item/started",
+        "params": {
+          "item": {
+            "delivery": null,
+            "id": "msg_local_fixture_3",
+            "memoryCitation": null,
+            "phase": null,
+            "questions": null,
+            "text": "",
+            "type": "agentMessage"
+          },
+          "startedAtMs": 1792691999967,
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-14bc-7a42-98ab-c9e880c4ff8e"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999968,
+        "method": "item/agentMessage/delta",
+        "params": {
+          "delta": "fixture question complete",
+          "itemId": "msg_local_fixture_3",
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-14bc-7a42-98ab-c9e880c4ff8e"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999969,
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 1792691999968,
+          "item": {
+            "delivery": null,
+            "id": "msg_local_fixture_3",
+            "memoryCitation": null,
+            "phase": null,
+            "questions": null,
+            "text": "fixture question complete",
+            "type": "agentMessage"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-14bc-7a42-98ab-c9e880c4ff8e"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999972,
+        "method": "thread/tokenUsage/updated",
+        "params": {
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "tokenUsage": {
+            "last": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 0,
+              "inputTokens": 10,
+              "outputTokens": 2,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 12
+            },
+            "modelContextWindow": 258400,
+            "total": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 0,
+              "inputTokens": 30,
+              "outputTokens": 6,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 36
+            }
+          },
+          "turnId": "01a164c5-14bc-7a42-98ab-c9e880c4ff8e"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999972,
+        "method": "account/rateLimits/updated",
+        "params": {
+          "rateLimits": {
+            "credits": null,
+            "individualLimit": null,
+            "limitId": "codex",
+            "limitName": null,
+            "normalModelSlug": null,
+            "planType": null,
+            "primary": null,
+            "rateLimitReachedType": null,
+            "secondary": null,
+            "spendControlReached": null
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999976,
+        "method": "thread/readState/changed",
+        "params": {
+          "readState": {
+            "firstUnread": {
+              "turnId": "01a164c5-1475-7e83-81ab-f85461220035",
+              "type": "turn"
+            },
+            "revision": "7a63794e-db69-4026-a7f5-75d878864fec"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999976,
+        "method": "thread/status/changed",
+        "params": {
+          "status": {
+            "type": "idle"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999976,
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turn": {
+            "completedAt": 1792691999,
+            "durationMs": 40,
+            "error": null,
+            "id": "01a164c5-14bc-7a42-98ab-c9e880c4ff8e",
+            "items": [
+              {
+                "delivery": null,
+                "id": "msg_local_fixture_3",
+                "memoryCitation": null,
+                "phase": null,
+                "questions": null,
+                "text": "fixture question complete",
+                "type": "agentMessage"
+              }
+            ],
+            "itemsView": "summary",
+            "rootTurnId": "01a164c5-14bc-7a42-98ab-c9e880c4ff8e",
+            "startedAt": 1792691999,
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "tokn:8",
+        "method": "turn/start",
+        "params": {
+          "input": [
+            {
+              "text": "fixture request harmless command approval",
+              "text_elements": [],
+              "type": "text"
+            }
+          ],
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999977,
+        "method": "warning",
+        "params": {
+          "message": "Model metadata for `fixture-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.",
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "id": "tokn:8",
+        "result": {
+          "turn": {
+            "completedAt": null,
+            "durationMs": null,
+            "error": null,
+            "id": "01a164c5-14e9-72b3-abe3-961f7348e94f",
+            "items": [],
+            "itemsView": "notLoaded",
+            "rootTurnId": "01a164c5-14e9-72b3-abe3-961f7348e94f",
+            "startedAt": null,
+            "status": "inProgress"
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999979,
+        "method": "thread/status/changed",
+        "params": {
+          "status": {
+            "activeFlags": [],
+            "type": "active"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999979,
+        "method": "turn/started",
+        "params": {
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turn": {
+            "completedAt": null,
+            "durationMs": null,
+            "error": null,
+            "id": "01a164c5-14e9-72b3-abe3-961f7348e94f",
+            "items": [],
+            "itemsView": "notLoaded",
+            "rootTurnId": "01a164c5-14e9-72b3-abe3-961f7348e94f",
+            "startedAt": 1792691999,
+            "status": "inProgress"
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999984,
+        "method": "item/started",
+        "params": {
+          "item": {
+            "clientId": null,
+            "content": [
+              {
+                "text": "fixture request harmless command approval",
+                "text_elements": [],
+                "type": "text"
+              }
+            ],
+            "id": "01a164c5-14ef-7733-8ca0-bc3e0ccf53ce",
+            "type": "userMessage"
+          },
+          "startedAtMs": 1792691999984,
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-14e9-72b3-abe3-961f7348e94f"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792691999984,
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 1792691999984,
+          "item": {
+            "clientId": null,
+            "content": [
+              {
+                "text": "fixture request harmless command approval",
+                "text_elements": [],
+                "type": "text"
+              }
+            ],
+            "id": "01a164c5-14ef-7733-8ca0-bc3e0ccf53ce",
+            "type": "userMessage"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-14e9-72b3-abe3-961f7348e94f"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000005,
+        "method": "thread/status/changed",
+        "params": {
+          "status": {
+            "activeFlags": [
+              "waitingOnApproval"
+            ],
+            "type": "active"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000008,
+        "method": "item/started",
+        "params": {
+          "item": {
+            "aggregatedOutput": null,
+            "command": "/bin/zsh -lc 'printf fixture-approved'",
+            "commandActions": [
+              {
+                "command": "printf fixture-approved",
+                "type": "unknown"
+              }
+            ],
+            "cwd": "/fixture/home/workspace",
+            "durationMs": null,
+            "exitCode": null,
+            "id": "call_local_fixture_4",
+            "pluginId": null,
+            "processId": null,
+            "scriptPath": null,
+            "source": "agent",
+            "status": "inProgress",
+            "type": "commandExecution"
+          },
+          "startedAtMs": 1792692000007,
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-14e9-72b3-abe3-961f7348e94f"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "id": 1,
+        "method": "item/commandExecution/requestApproval",
+        "params": {
+          "availableDecisions": [
+            "accept",
+            {
+              "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": [
+                  "printf",
+                  "fixture-approved"
+                ]
+              }
+            },
+            "cancel"
+          ],
+          "command": "/bin/zsh -lc 'printf fixture-approved'",
+          "commandActions": [
+            {
+              "command": "printf fixture-approved",
+              "type": "unknown"
+            }
+          ],
+          "cwd": "/fixture/home/workspace",
+          "environmentId": "local",
+          "itemId": "call_local_fixture_4",
+          "kind": "command",
+          "proposedExecpolicyAmendment": [
+            "printf",
+            "fixture-approved"
+          ],
+          "reason": "Approve the harmless fixture printf command.",
+          "startedAtMs": 1792692000005,
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-14e9-72b3-abe3-961f7348e94f"
+        }
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": 1,
+        "result": {
+          "decision": "accept"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000011,
+        "method": "serverRequest/resolved",
+        "params": {
+          "requestId": 1,
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000012,
+        "method": "thread/status/changed",
+        "params": {
+          "status": {
+            "activeFlags": [],
+            "type": "active"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000061,
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 1792692000059,
+          "item": {
+            "aggregatedOutput": "fixture-approved",
+            "command": "/bin/zsh -lc 'printf fixture-approved'",
+            "commandActions": [
+              {
+                "command": "printf fixture-approved",
+                "type": "unknown"
+              }
+            ],
+            "cwd": "/fixture/home/workspace",
+            "durationMs": 0,
+            "exitCode": 0,
+            "id": "call_local_fixture_4",
+            "pluginId": null,
+            "processId": "88565",
+            "scriptPath": null,
+            "source": "unifiedExecStartup",
+            "status": "completed",
+            "type": "commandExecution"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-14e9-72b3-abe3-961f7348e94f"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000076,
+        "method": "thread/tokenUsage/updated",
+        "params": {
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "tokenUsage": {
+            "last": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 0,
+              "inputTokens": 10,
+              "outputTokens": 2,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 12
+            },
+            "modelContextWindow": 258400,
+            "total": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 0,
+              "inputTokens": 40,
+              "outputTokens": 8,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 48
+            }
+          },
+          "turnId": "01a164c5-14e9-72b3-abe3-961f7348e94f"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000076,
+        "method": "account/rateLimits/updated",
+        "params": {
+          "rateLimits": {
+            "credits": null,
+            "individualLimit": null,
+            "limitId": "codex",
+            "limitName": null,
+            "normalModelSlug": null,
+            "planType": null,
+            "primary": null,
+            "rateLimitReachedType": null,
+            "secondary": null,
+            "spendControlReached": null
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000082,
+        "method": "item/started",
+        "params": {
+          "item": {
+            "delivery": null,
+            "id": "msg_local_fixture_5",
+            "memoryCitation": null,
+            "phase": null,
+            "questions": null,
+            "text": "",
+            "type": "agentMessage"
+          },
+          "startedAtMs": 1792692000082,
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-14e9-72b3-abe3-961f7348e94f"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000084,
+        "method": "item/agentMessage/delta",
+        "params": {
+          "delta": "fixture permission complete",
+          "itemId": "msg_local_fixture_5",
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-14e9-72b3-abe3-961f7348e94f"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000086,
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 1792692000084,
+          "item": {
+            "delivery": null,
+            "id": "msg_local_fixture_5",
+            "memoryCitation": null,
+            "phase": null,
+            "questions": null,
+            "text": "fixture permission complete",
+            "type": "agentMessage"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-14e9-72b3-abe3-961f7348e94f"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000090,
+        "method": "thread/tokenUsage/updated",
+        "params": {
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "tokenUsage": {
+            "last": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 0,
+              "inputTokens": 10,
+              "outputTokens": 2,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 12
+            },
+            "modelContextWindow": 258400,
+            "total": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 0,
+              "inputTokens": 50,
+              "outputTokens": 10,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 60
+            }
+          },
+          "turnId": "01a164c5-14e9-72b3-abe3-961f7348e94f"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000090,
+        "method": "account/rateLimits/updated",
+        "params": {
+          "rateLimits": {
+            "credits": null,
+            "individualLimit": null,
+            "limitId": "codex",
+            "limitName": null,
+            "normalModelSlug": null,
+            "planType": null,
+            "primary": null,
+            "rateLimitReachedType": null,
+            "secondary": null,
+            "spendControlReached": null
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000098,
+        "method": "thread/readState/changed",
+        "params": {
+          "readState": {
+            "firstUnread": {
+              "turnId": "01a164c5-1475-7e83-81ab-f85461220035",
+              "type": "turn"
+            },
+            "revision": "e9b75284-84c4-441c-b7b8-c9952f66ba10"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000098,
+        "method": "thread/status/changed",
+        "params": {
+          "status": {
+            "type": "idle"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000098,
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turn": {
+            "completedAt": 1792692000,
+            "durationMs": 114,
+            "error": null,
+            "id": "01a164c5-14e9-72b3-abe3-961f7348e94f",
+            "items": [
+              {
+                "delivery": null,
+                "id": "msg_local_fixture_5",
+                "memoryCitation": null,
+                "phase": null,
+                "questions": null,
+                "text": "fixture permission complete",
+                "type": "agentMessage"
+              }
+            ],
+            "itemsView": "summary",
+            "rootTurnId": "01a164c5-14e9-72b3-abe3-961f7348e94f",
+            "startedAt": 1792691999,
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "tokn:9",
+        "method": "turn/start",
+        "params": {
+          "input": [
+            {
+              "text": "fixture run until released",
+              "text_elements": [],
+              "type": "text"
+            }
+          ],
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000105,
+        "method": "warning",
+        "params": {
+          "message": "Model metadata for `fixture-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.",
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "id": "tokn:9",
+        "result": {
+          "turn": {
+            "completedAt": null,
+            "durationMs": null,
+            "error": null,
+            "id": "01a164c5-1565-77f3-bb55-54a1660bdc0f",
+            "items": [],
+            "itemsView": "notLoaded",
+            "rootTurnId": "01a164c5-1565-77f3-bb55-54a1660bdc0f",
+            "startedAt": null,
+            "status": "inProgress"
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000108,
+        "method": "thread/status/changed",
+        "params": {
+          "status": {
+            "activeFlags": [],
+            "type": "active"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000108,
+        "method": "turn/started",
+        "params": {
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turn": {
+            "completedAt": null,
+            "durationMs": null,
+            "error": null,
+            "id": "01a164c5-1565-77f3-bb55-54a1660bdc0f",
+            "items": [],
+            "itemsView": "notLoaded",
+            "rootTurnId": "01a164c5-1565-77f3-bb55-54a1660bdc0f",
+            "startedAt": 1792692000,
+            "status": "inProgress"
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000116,
+        "method": "item/started",
+        "params": {
+          "item": {
+            "clientId": null,
+            "content": [
+              {
+                "text": "fixture run until released",
+                "text_elements": [],
+                "type": "text"
+              }
+            ],
+            "id": "01a164c5-1573-7433-b86c-1f115102b54c",
+            "type": "userMessage"
+          },
+          "startedAtMs": 1792692000116,
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-1565-77f3-bb55-54a1660bdc0f"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000119,
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 1792692000116,
+          "item": {
+            "clientId": null,
+            "content": [
+              {
+                "text": "fixture run until released",
+                "text_elements": [],
+                "type": "text"
+              }
+            ],
+            "id": "01a164c5-1573-7433-b86c-1f115102b54c",
+            "type": "userMessage"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-1565-77f3-bb55-54a1660bdc0f"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000130,
+        "method": "item/started",
+        "params": {
+          "item": {
+            "delivery": null,
+            "id": "msg_local_fixture_6",
+            "memoryCitation": null,
+            "phase": null,
+            "questions": null,
+            "text": "",
+            "type": "agentMessage"
+          },
+          "startedAtMs": 1792692000129,
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-1565-77f3-bb55-54a1660bdc0f"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000130,
+        "method": "item/agentMessage/delta",
+        "params": {
+          "delta": "working ",
+          "itemId": "msg_local_fixture_6",
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-1565-77f3-bb55-54a1660bdc0f"
+        }
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "tokn:10",
+        "method": "turn/steer",
+        "params": {
+          "expectedTurnId": "01a164c5-1565-77f3-bb55-54a1660bdc0f",
+          "input": [
+            {
+              "text": "fixture explicit steer",
+              "text_elements": [],
+              "type": "text"
+            }
+          ],
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "id": "tokn:10",
+        "result": {
+          "turnId": "01a164c5-1565-77f3-bb55-54a1660bdc0f"
+        }
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "tokn:11",
+        "method": "turn/start",
+        "params": {
+          "input": [
+            {
+              "text": "fixture atomic steer",
+              "text_elements": [],
+              "type": "text"
+            }
+          ],
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "id": "tokn:11",
+        "result": {
+          "turn": {
+            "completedAt": null,
+            "durationMs": null,
+            "error": null,
+            "id": "01a164c5-1565-77f3-bb55-54a1660bdc0f",
+            "items": [],
+            "itemsView": "notLoaded",
+            "rootTurnId": "01a164c5-1565-77f3-bb55-54a1660bdc0f",
+            "startedAt": null,
+            "status": "inProgress"
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000132,
+        "method": "thread/tokenUsage/updated",
+        "params": {
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "tokenUsage": {
+            "last": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 0,
+              "inputTokens": 10,
+              "outputTokens": 2,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 12
+            },
+            "modelContextWindow": 258400,
+            "total": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 0,
+              "inputTokens": 50,
+              "outputTokens": 10,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 60
+            }
+          },
+          "turnId": "01a164c5-1565-77f3-bb55-54a1660bdc0f"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000132,
+        "method": "account/rateLimits/updated",
+        "params": {
+          "rateLimits": {
+            "credits": null,
+            "individualLimit": null,
+            "limitId": "codex",
+            "limitName": null,
+            "normalModelSlug": null,
+            "planType": null,
+            "primary": null,
+            "rateLimitReachedType": null,
+            "secondary": null,
+            "spendControlReached": null
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000132,
+        "method": "item/started",
+        "params": {
+          "item": {
+            "clientId": null,
+            "content": [
+              {
+                "text": "fixture explicit steer",
+                "text_elements": [],
+                "type": "text"
+              }
+            ],
+            "id": "01a164c5-1584-79b3-8be3-98c8bcee8bc4",
+            "type": "userMessage"
+          },
+          "startedAtMs": 1792692000132,
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-1565-77f3-bb55-54a1660bdc0f"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000133,
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 1792692000132,
+          "item": {
+            "clientId": null,
+            "content": [
+              {
+                "text": "fixture explicit steer",
+                "text_elements": [],
+                "type": "text"
+              }
+            ],
+            "id": "01a164c5-1584-79b3-8be3-98c8bcee8bc4",
+            "type": "userMessage"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-1565-77f3-bb55-54a1660bdc0f"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000135,
+        "method": "item/started",
+        "params": {
+          "item": {
+            "clientId": null,
+            "content": [
+              {
+                "text": "fixture atomic steer",
+                "text_elements": [],
+                "type": "text"
+              }
+            ],
+            "id": "01a164c5-1586-7583-835f-5374627fc6b6",
+            "type": "userMessage"
+          },
+          "startedAtMs": 1792692000135,
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-1565-77f3-bb55-54a1660bdc0f"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000136,
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 1792692000135,
+          "item": {
+            "clientId": null,
+            "content": [
+              {
+                "text": "fixture atomic steer",
+                "text_elements": [],
+                "type": "text"
+              }
+            ],
+            "id": "01a164c5-1586-7583-835f-5374627fc6b6",
+            "type": "userMessage"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-1565-77f3-bb55-54a1660bdc0f"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000141,
+        "method": "item/started",
+        "params": {
+          "item": {
+            "delivery": null,
+            "id": "msg_local_fixture_7",
+            "memoryCitation": null,
+            "phase": null,
+            "questions": null,
+            "text": "",
+            "type": "agentMessage"
+          },
+          "startedAtMs": 1792692000141,
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-1565-77f3-bb55-54a1660bdc0f"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000143,
+        "method": "item/agentMessage/delta",
+        "params": {
+          "delta": "fixture steer complete",
+          "itemId": "msg_local_fixture_7",
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-1565-77f3-bb55-54a1660bdc0f"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000144,
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 1792692000143,
+          "item": {
+            "delivery": null,
+            "id": "msg_local_fixture_7",
+            "memoryCitation": null,
+            "phase": null,
+            "questions": null,
+            "text": "fixture steer complete",
+            "type": "agentMessage"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-1565-77f3-bb55-54a1660bdc0f"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000146,
+        "method": "thread/tokenUsage/updated",
+        "params": {
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "tokenUsage": {
+            "last": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 0,
+              "inputTokens": 10,
+              "outputTokens": 2,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 12
+            },
+            "modelContextWindow": 258400,
+            "total": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 0,
+              "inputTokens": 60,
+              "outputTokens": 12,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 72
+            }
+          },
+          "turnId": "01a164c5-1565-77f3-bb55-54a1660bdc0f"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000146,
+        "method": "account/rateLimits/updated",
+        "params": {
+          "rateLimits": {
+            "credits": null,
+            "individualLimit": null,
+            "limitId": "codex",
+            "limitName": null,
+            "normalModelSlug": null,
+            "planType": null,
+            "primary": null,
+            "rateLimitReachedType": null,
+            "secondary": null,
+            "spendControlReached": null
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000148,
+        "method": "thread/readState/changed",
+        "params": {
+          "readState": {
+            "firstUnread": {
+              "turnId": "01a164c5-1475-7e83-81ab-f85461220035",
+              "type": "turn"
+            },
+            "revision": "121b8705-f89c-448a-b20c-eee626bad500"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000148,
+        "method": "thread/status/changed",
+        "params": {
+          "status": {
+            "type": "idle"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000148,
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turn": {
+            "completedAt": 1792692000,
+            "durationMs": 41,
+            "error": null,
+            "id": "01a164c5-1565-77f3-bb55-54a1660bdc0f",
+            "items": [
+              {
+                "delivery": null,
+                "id": "msg_local_fixture_7",
+                "memoryCitation": null,
+                "phase": null,
+                "questions": null,
+                "text": "fixture steer complete",
+                "type": "agentMessage"
+              }
+            ],
+            "itemsView": "summary",
+            "rootTurnId": "01a164c5-1565-77f3-bb55-54a1660bdc0f",
+            "startedAt": 1792692000,
+            "status": "completed"
+          }
+        }
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "tokn:12",
+        "method": "turn/start",
+        "params": {
+          "input": [
+            {
+              "text": "fixture cancel this",
+              "text_elements": [],
+              "type": "text"
+            }
+          ],
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000152,
+        "method": "warning",
+        "params": {
+          "message": "Model metadata for `fixture-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.",
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "id": "tokn:12",
+        "result": {
+          "turn": {
+            "completedAt": null,
+            "durationMs": null,
+            "error": null,
+            "id": "01a164c5-1595-7920-bb2e-14bda40030f8",
+            "items": [],
+            "itemsView": "notLoaded",
+            "rootTurnId": "01a164c5-1595-7920-bb2e-14bda40030f8",
+            "startedAt": null,
+            "status": "inProgress"
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000154,
+        "method": "thread/status/changed",
+        "params": {
+          "status": {
+            "activeFlags": [],
+            "type": "active"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000154,
+        "method": "turn/started",
+        "params": {
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turn": {
+            "completedAt": null,
+            "durationMs": null,
+            "error": null,
+            "id": "01a164c5-1595-7920-bb2e-14bda40030f8",
+            "items": [],
+            "itemsView": "notLoaded",
+            "rootTurnId": "01a164c5-1595-7920-bb2e-14bda40030f8",
+            "startedAt": 1792692000,
+            "status": "inProgress"
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000166,
+        "method": "item/started",
+        "params": {
+          "item": {
+            "clientId": null,
+            "content": [
+              {
+                "text": "fixture cancel this",
+                "text_elements": [],
+                "type": "text"
+              }
+            ],
+            "id": "01a164c5-15a2-7403-bc44-f1bd39436561",
+            "type": "userMessage"
+          },
+          "startedAtMs": 1792692000166,
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-1595-7920-bb2e-14bda40030f8"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000170,
+        "method": "item/completed",
+        "params": {
+          "completedAtMs": 1792692000166,
+          "item": {
+            "clientId": null,
+            "content": [
+              {
+                "text": "fixture cancel this",
+                "text_elements": [],
+                "type": "text"
+              }
+            ],
+            "id": "01a164c5-15a2-7403-bc44-f1bd39436561",
+            "type": "userMessage"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-1595-7920-bb2e-14bda40030f8"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000180,
+        "method": "item/started",
+        "params": {
+          "item": {
+            "delivery": null,
+            "id": "msg_local_fixture_8",
+            "memoryCitation": null,
+            "phase": null,
+            "questions": null,
+            "text": "",
+            "type": "agentMessage"
+          },
+          "startedAtMs": 1792692000180,
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-1595-7920-bb2e-14bda40030f8"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000180,
+        "method": "item/agentMessage/delta",
+        "params": {
+          "delta": "working",
+          "itemId": "msg_local_fixture_8",
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-1595-7920-bb2e-14bda40030f8"
+        }
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "tokn:13",
+        "method": "turn/interrupt",
+        "params": {
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turnId": "01a164c5-1595-7920-bb2e-14bda40030f8"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000183,
+        "method": "thread/tokenUsage/updated",
+        "params": {
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "tokenUsage": {
+            "last": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 0,
+              "inputTokens": 10,
+              "outputTokens": 2,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 12
+            },
+            "modelContextWindow": 258400,
+            "total": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 0,
+              "inputTokens": 60,
+              "outputTokens": 12,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 72
+            }
+          },
+          "turnId": "01a164c5-1595-7920-bb2e-14bda40030f8"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000183,
+        "method": "account/rateLimits/updated",
+        "params": {
+          "rateLimits": {
+            "credits": null,
+            "individualLimit": null,
+            "limitId": "codex",
+            "limitName": null,
+            "normalModelSlug": null,
+            "planType": null,
+            "primary": null,
+            "rateLimitReachedType": null,
+            "secondary": null,
+            "spendControlReached": null
+          }
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "id": "tokn:13",
+        "result": {}
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000188,
+        "method": "thread/status/changed",
+        "params": {
+          "status": {
+            "type": "idle"
+          },
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "emittedAtMs": 1792692000188,
+        "method": "turn/completed",
+        "params": {
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+          "turn": {
+            "completedAt": 1792692000,
+            "durationMs": 35,
+            "error": null,
+            "id": "01a164c5-1595-7920-bb2e-14bda40030f8",
+            "items": [],
+            "itemsView": "notLoaded",
+            "rootTurnId": "01a164c5-1595-7920-bb2e-14bda40030f8",
+            "startedAt": 1792692000,
+            "status": "interrupted"
+          }
+        }
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "tokn:14",
+        "method": "thread/read",
+        "params": {
+          "includeTurns": false,
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "id": "tokn:14",
+        "result": {
+          "readState": {
+            "firstUnread": {
+              "turnId": "01a164c5-1475-7e83-81ab-f85461220035",
+              "type": "turn"
+            },
+            "revision": "121b8705-f89c-448a-b20c-eee626bad500"
+          },
+          "thread": {
+            "agentNickname": null,
+            "agentRole": null,
+            "canAcceptDirectInput": true,
+            "cliVersion": "0.163.0-alpha.11",
+            "createdAt": 1792691999,
+            "cwd": "/fixture/home/workspace",
+            "daybreakEnabled": null,
+            "environments": [
+              {
+                "cwd": "/fixture/home/workspace",
+                "environmentId": "local",
+                "runtimeWorkspaceRoots": [
+                  "/fixture/home/workspace"
+                ]
+              }
+            ],
+            "ephemeral": false,
+            "extra": null,
+            "forkedFromId": null,
+            "gitInfo": null,
+            "historyMode": "paginated",
+            "id": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+            "model": "fixture-model",
+            "modelProvider": "fixture",
+            "name": null,
+            "originator": "tokn_session",
+            "parentThreadId": null,
+            "path": "/fixture/home/codex/sessions/2026/10/23/rollout-2026-10-23T01-59-59-01a164c5-13f1-7e80-8f2e-d6cb3d321896.jsonl",
+            "preview": "fixture hello",
+            "projectId": null,
+            "reasoningEffort": null,
+            "recencyAt": 1792692000,
+            "section": null,
+            "sectionEnteredAt": null,
+            "sessionId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+            "source": "vscode",
+            "status": {
+              "type": "idle"
+            },
+            "threadSource": null,
+            "turns": [],
+            "updatedAt": 1792692000
+          }
+        }
+      }
+    },
+    {
+      "direction": "request",
+      "body": {
+        "id": "tokn:15",
+        "method": "thread/resume",
+        "params": {
+          "excludeTurns": true,
+          "threadId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896"
+        }
+      }
+    },
+    {
+      "direction": "event",
+      "body": {
+        "id": "tokn:15",
+        "result": {
+          "activePermissionProfile": null,
+          "approvalPolicy": "on-request",
+          "approvalsReviewer": "user",
+          "collaborationMode": {
+            "mode": "default",
+            "settings": {
+              "developer_instructions": null,
+              "model": "fixture-model",
+              "reasoning_effort": null
+            }
+          },
+          "cwd": "/fixture/home/workspace",
+          "disabledPluginIds": [],
+          "initialTurnsPage": null,
+          "instructionSources": [],
+          "itemsBackwardsCursor": "{\"requestedThreadId\":\"01a164c5-13f1-7e80-8f2e-d6cb3d321896\",\"rolloutOrdinal\":59,\"includeAnchor\":true,\"scope\":{\"kind\":\"itemsByCreatedAtOrdinal\"}}",
+          "model": "fixture-model",
+          "modelProvider": "fixture",
+          "multiAgentMode": "explicitRequestOnly",
+          "reasoningEffort": null,
+          "runtimeWorkspaceRoots": [
+            "/fixture/home/workspace"
+          ],
+          "sandbox": {
+            "excludeSlashTmp": false,
+            "excludeTmpdirEnvVar": false,
+            "networkAccess": false,
+            "type": "workspaceWrite",
+            "writableRoots": []
+          },
+          "serviceTier": null,
+          "thread": {
+            "agentNickname": null,
+            "agentRole": null,
+            "canAcceptDirectInput": true,
+            "cliVersion": "0.163.0-alpha.11",
+            "createdAt": 1792691999,
+            "cwd": "/fixture/home/workspace",
+            "daybreakEnabled": null,
+            "environments": [
+              {
+                "cwd": "/fixture/home/workspace",
+                "environmentId": "local",
+                "runtimeWorkspaceRoots": [
+                  "/fixture/home/workspace"
+                ]
+              }
+            ],
+            "ephemeral": false,
+            "extra": null,
+            "forkedFromId": null,
+            "gitInfo": null,
+            "historyMode": "paginated",
+            "id": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+            "model": "fixture-model",
+            "modelProvider": "fixture",
+            "name": null,
+            "originator": "tokn_session",
+            "parentThreadId": null,
+            "path": "/fixture/home/codex/sessions/2026/10/23/rollout-2026-10-23T01-59-59-01a164c5-13f1-7e80-8f2e-d6cb3d321896.jsonl",
+            "preview": "fixture hello",
+            "projectId": null,
+            "reasoningEffort": null,
+            "recencyAt": 1792692000,
+            "section": null,
+            "sectionEnteredAt": null,
+            "sessionId": "01a164c5-13f1-7e80-8f2e-d6cb3d321896",
+            "source": "vscode",
+            "status": {
+              "type": "idle"
+            },
+            "threadSource": null,
+            "turns": [],
+            "updatedAt": 1792692000
+          },
+          "turnsBackwardsCursor": "{\"requestedThreadId\":\"01a164c5-13f1-7e80-8f2e-d6cb3d321896\",\"rolloutOrdinal\":56,\"includeAnchor\":true,\"scope\":{\"kind\":\"turns\"}}"
+        }
+      }
+    }
+  ]
+}

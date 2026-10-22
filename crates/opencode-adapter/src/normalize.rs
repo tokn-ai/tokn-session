@@ -27,6 +27,8 @@ pub(crate) fn question(native: wire::QuestionRequest) -> PendingInteraction {
         })
         .collect(),
       allows_free_text: question.custom,
+      allows_option_notes: false,
+      is_secret: false,
       multiple: question.multiple,
     })
     .collect();

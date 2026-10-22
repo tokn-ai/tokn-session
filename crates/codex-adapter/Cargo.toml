@@ -1,0 +1,23 @@
+[package]
+name = "tokn-codex-adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Rust Codex app-server runtime adapter with bounded bidirectional RPC transports."
+
+[dependencies]
+tokn-interaction-core = { version = "0.1.1", path = "../interaction-core" }
+tokn-codex-rpc-protocol = { version = "0.1.1", path = "../codex-rpc-protocol" }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["process"] }
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+base64 = "0.22"
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+
+[dev-dependencies]
+tempfile = "3"
