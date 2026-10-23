@@ -1,12 +1,15 @@
 //! Native Pi RPC transport and provider-independent runtime interaction adapter.
 pub mod framing;
 mod mapping;
+mod supervised;
 mod transport;
+
+pub use supervised::SupervisedSession;
 
 use serde_json::{Value, json};
 use std::{
   collections::{BTreeMap, HashMap},
-  ffi::OsString,
+  ffi::{OsStr, OsString},
   path::PathBuf,
   sync::{Arc, Mutex},
   time::Duration,
@@ -96,6 +99,14 @@ impl PiAdapter {
   }
 
   pub async fn spawn(options: EndpointOptions, launch: LaunchOptions) -> Result<Self, InteractionError> {
+    Self::spawn_with_supervision(options, launch, None).await
+  }
+
+  async fn spawn_with_supervision(
+    options: EndpointOptions,
+    mut launch: LaunchOptions,
+    supervision: Option<tokio::sync::mpsc::Sender<Value>>,
+  ) -> Result<Self, InteractionError> {
     validate_options(&options)?;
     if launch.executable.as_os_str().is_empty()
       || !launch.working_directory.is_absolute()
@@ -104,6 +115,19 @@ impl PiAdapter {
       return Err(InteractionError::invalid(
         "Pi needs an executable, an absolute working directory, and an absolute resume path",
       ));
+    }
+    let inherited_node = std::env::var_os("NODE_EXTRA_CA_CERTS");
+    let inherited_ssl = std::env::var_os("SSL_CERT_FILE");
+    let node = launch
+      .environment
+      .get(OsStr::new("NODE_EXTRA_CA_CERTS"))
+      .or(inherited_node.as_ref());
+    let ssl = launch
+      .environment
+      .get(OsStr::new("SSL_CERT_FILE"))
+      .or(inherited_ssl.as_ref());
+    if let Some(path) = inherited_node_ca_fallback(node.map(OsString::as_os_str), ssl.map(OsString::as_os_str)) {
+      launch.environment.insert("NODE_EXTRA_CA_CERTS".into(), path);
     }
     let mut command = tokio::process::Command::new(&launch.executable);
     command
@@ -129,7 +153,7 @@ impl PiAdapter {
       .stdin
       .take()
       .ok_or_else(|| InteractionError::unavailable("Pi stdin is unavailable"))?;
-    Self::connect(options, Ownership::Managed, reader, writer, Some(child))
+    Self::connect_with_supervision(options, Ownership::Managed, reader, writer, Some(child), supervision)
   }
 
   fn connect<R, W>(
@@ -143,8 +167,23 @@ impl PiAdapter {
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
   {
+    Self::connect_with_supervision(options, ownership, reader, writer, child, None)
+  }
+
+  fn connect_with_supervision<R, W>(
+    options: EndpointOptions,
+    ownership: Ownership,
+    reader: R,
+    writer: W,
+    child: Option<Child>,
+    supervision: Option<tokio::sync::mpsc::Sender<Value>>,
+  ) -> Result<Self, InteractionError>
+  where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+  {
     validate_options(&options)?;
-    let inner = transport::Inner::new(options, ownership, writer, child);
+    let inner = transport::Inner::new(options, ownership, writer, child, supervision);
     transport::start_reader(&inner, reader);
     Ok(Self { inner })
   }
@@ -399,6 +438,15 @@ impl InteractionAdapter for PiAdapter {
 fn valid_identity(value: &str) -> bool {
   !value.is_empty() && value.len() <= 512 && value.trim() == value && !value.chars().any(char::is_control)
 }
+
+/// Node does not automatically use SSL_CERT_FILE. An explicit Node setting,
+/// including an empty one, always takes priority over the host CA fallback.
+fn inherited_node_ca_fallback(node_extra_ca_certs: Option<&OsStr>, ssl_cert_file: Option<&OsStr>) -> Option<OsString> {
+  if node_extra_ca_certs.is_some() {
+    return None;
+  }
+  ssl_cert_file.filter(|path| !path.is_empty()).map(OsStr::to_os_string)
+}
 fn validate_options(options: &EndpointOptions) -> Result<(), InteractionError> {
   if !valid_identity(&options.runtime_id)
     || !valid_identity(&options.instance_id)
@@ -433,5 +481,26 @@ fn capabilities() -> Capabilities {
   capabilities
 }
 
+#[cfg(test)]
+mod supervised_tests;
+
+#[cfg(test)]
+mod certificate_tests {
+  use super::*;
+
+  #[test]
+  fn only_an_absent_node_setting_inherits_a_nonempty_host_bundle() {
+    let bundle = OsStr::new("/configured CA bundle.pem");
+    assert_eq!(
+      inherited_node_ca_fallback(None, Some(bundle)),
+      Some(bundle.to_os_string())
+    );
+    for explicit in [OsStr::new(""), OsStr::new("/node-specific.pem")] {
+      assert_eq!(inherited_node_ca_fallback(Some(explicit), Some(bundle)), None);
+    }
+    assert_eq!(inherited_node_ca_fallback(None, None), None);
+    assert_eq!(inherited_node_ca_fallback(None, Some(OsStr::new(""))), None);
+  }
+}
 #[cfg(test)]
 mod tests;

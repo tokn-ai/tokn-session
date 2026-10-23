@@ -16,7 +16,12 @@ type Writer = Box<dyn AsyncWrite + Unpin + Send>;
 struct Pending {
   command: &'static str,
   mutation: bool,
-  reply: oneshot::Sender<Result<Value, InteractionError>>,
+  reply: PendingReply,
+}
+
+enum PendingReply {
+  Common(oneshot::Sender<Result<Value, InteractionError>>),
+  Supervised,
 }
 
 pub(super) struct Inner {
@@ -25,22 +30,37 @@ pub(super) struct Inner {
   pub(super) snapshot: Mutex<Snapshot>,
   pub(super) admission: AsyncMutex<()>,
   pub(super) stderr: Mutex<framing::StderrTail>,
+  pub(super) supervised: bool,
+  pub(super) pid: Option<u32>,
+  pub(super) clean_exit: AtomicBool,
+  supervision: Mutex<Option<tokio::sync::mpsc::Sender<Value>>>,
+  pub(super) terminal: Mutex<Option<String>>,
   options: EndpointOptions,
   writer: AsyncMutex<Option<Writer>>,
   pending: Mutex<HashMap<String, Pending>>,
   child: AsyncMutex<Option<Child>>,
   tasks: Mutex<Vec<JoinHandle<()>>>,
+  stderr_task: Mutex<Option<JoinHandle<()>>>,
+  cleanup: AsyncMutex<Option<Result<(), InteractionError>>>,
   closed: AtomicBool,
   sequence: Mutex<u64>,
   request_sequence: AtomicU64,
 }
 
 impl Inner {
-  pub(super) fn new<W>(options: EndpointOptions, ownership: Ownership, writer: W, child: Option<Child>) -> Arc<Self>
+  pub(super) fn new<W>(
+    options: EndpointOptions,
+    ownership: Ownership,
+    writer: W,
+    child: Option<Child>,
+    supervision: Option<tokio::sync::mpsc::Sender<Value>>,
+  ) -> Arc<Self>
   where
     W: AsyncWrite + Unpin + Send + 'static,
   {
     let (events, _) = broadcast::channel(256);
+    let pid = child.as_ref().and_then(Child::id);
+    let supervised = supervision.is_some();
     let inner = Arc::new(Self {
       descriptor: RuntimeDescriptor {
         runtime_id: options.runtime_id.clone(),
@@ -53,11 +73,18 @@ impl Inner {
       snapshot: Mutex::new(Snapshot::default()),
       admission: AsyncMutex::new(()),
       stderr: Mutex::new(framing::StderrTail::default()),
+      supervised,
+      pid,
+      clean_exit: AtomicBool::new(false),
+      supervision: Mutex::new(supervision),
+      terminal: Mutex::new(None),
       options,
       writer: AsyncMutex::new(Some(Box::new(writer))),
       pending: Mutex::new(HashMap::new()),
       child: AsyncMutex::new(child),
       tasks: Mutex::new(Vec::new()),
+      stderr_task: Mutex::new(None),
+      cleanup: AsyncMutex::new(None),
       closed: AtomicBool::new(false),
       sequence: Mutex::new(0),
       request_sequence: AtomicU64::new(0),
@@ -86,7 +113,7 @@ impl Inner {
             .push(&bytes[..length]);
         }
       });
-      inner.tasks.lock().unwrap_or_else(|error| error.into_inner()).push(task);
+      *inner.stderr_task.lock().unwrap_or_else(|error| error.into_inner()) = Some(task);
     }
     inner
   }
@@ -258,7 +285,7 @@ impl Inner {
         Pending {
           command: name,
           mutation,
-          reply,
+          reply: PendingReply::Common(reply),
         },
       );
     }
@@ -290,6 +317,75 @@ impl Inner {
         })
       }
     }
+  }
+
+  pub(super) async fn supervised_send(&self, id: String, command: wire::Command) -> Result<(), InteractionError> {
+    if !self.supervised || !valid_identity(&id) {
+      return Err(InteractionError::invalid("Invalid supervised Pi RPC request ID"));
+    }
+    self.check_available()?;
+    let name = command.name();
+    let mutation = !matches!(
+      &command,
+      wire::Command::GetState
+        | wire::Command::GetAvailableModels
+        | wire::Command::GetAvailableThinkingLevels
+        | wire::Command::GetCommands
+        | wire::Command::GetSessionStats
+        | wire::Command::GetMessages
+        | wire::Command::GetEntries { .. }
+        | wire::Command::GetTree
+        | wire::Command::GetLastAssistantText
+    );
+    let value = serde_json::to_value(wire::Request {
+      id: Some(id.clone()),
+      command,
+    })
+    .map_err(|error| InteractionError::invalid(error.to_string()))?;
+    {
+      let mut pending = self.pending.lock().unwrap_or_else(|error| error.into_inner());
+      if pending.len() >= MAX_PENDING {
+        return Err(InteractionError::unavailable("Pi RPC pending request limit reached"));
+      }
+      if pending.contains_key(&id) {
+        return Err(InteractionError::new(
+          ErrorKind::Conflict,
+          "Pi RPC request ID is already pending",
+        ));
+      }
+      pending.insert(
+        id.clone(),
+        Pending {
+          command: name,
+          mutation,
+          reply: PendingReply::Supervised,
+        },
+      );
+    }
+    if let Err(error) = self.write_value(value, mutation).await {
+      self
+        .pending
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(&id);
+      return Err(error);
+    }
+    Ok(())
+  }
+
+  async fn emit_supervised(&self, value: Value) -> Result<(), String> {
+    let sender = self
+      .supervision
+      .lock()
+      .unwrap_or_else(|error| error.into_inner())
+      .clone();
+    let Some(sender) = sender else {
+      return Err("Pi supervisor is disconnected".into());
+    };
+    sender
+      .send(value)
+      .await
+      .map_err(|_| "Pi supervisor stopped receiving events".into())
   }
 
   pub(super) async fn write_value(&self, value: Value, mutation: bool) -> Result<(), InteractionError> {
@@ -324,8 +420,11 @@ impl Inner {
 
   async fn receive(self: &Arc<Self>, value: Value) -> Result<(), String> {
     match wire::ServerMessage::decode(value) {
-      wire::ServerMessage::Response { response, native } => {
+      wire::ServerMessage::Response { response, mut native } => {
         let id = response.id.as_deref().ok_or("Pi RPC response has no correlation ID")?;
+        if !valid_identity(id) {
+          return Err("Pi RPC response has an invalid correlation ID".into());
+        }
         let pending = {
           let mut pending = self.pending.lock().unwrap_or_else(|error| error.into_inner());
           if pending
@@ -337,6 +436,15 @@ impl Inner {
           pending.remove(id)
         };
         if let Some(pending) = pending {
+          if matches!(pending.reply, PendingReply::Supervised) {
+            if let Some(error) = response.error.as_ref() {
+              native["error"] = Value::String(error.chars().take(2048).collect());
+            }
+            return self.emit_supervised(native).await;
+          }
+          let PendingReply::Common(reply) = pending.reply else {
+            unreachable!()
+          };
           if response.success && pending.command == "get_state" {
             match response
               .data
@@ -346,7 +454,7 @@ impl Inner {
             {
               Ok(state) => self.accept_state(state),
               Err(reason) => {
-                let _ = pending.reply.send(Err(InteractionError::unavailable(reason.clone())));
+                let _ = reply.send(Err(InteractionError::unavailable(reason.clone())));
                 return Err(reason);
               }
             }
@@ -364,16 +472,27 @@ impl Inner {
                 .collect::<String>(),
             ))
           };
-          let _ = pending.reply.send(result);
-        } else {
+          let _ = reply.send(result);
+        } else if !self.supervised {
           self.publish(RuntimeEventKind::Native(native));
         }
       }
       wire::ServerMessage::ExtensionUi {
         dialog: Some(dialog),
         native,
-      } => self.receive_dialog(dialog, native).await?,
+      } => {
+        if self.supervised {
+          return self.emit_supervised(native).await;
+        }
+        self.receive_dialog(dialog, native).await?;
+      }
       wire::ServerMessage::Notification { kind, native } => {
+        if self.supervised {
+          if let Some(value) = supervised::project_frame(native) {
+            return self.emit_supervised(value).await;
+          }
+          return Ok(());
+        }
         let phase = match kind.as_str() {
           "agent_start" | "auto_retry_start" | "auto_compaction_start" | "compaction_start" => {
             Some(ExecutionState::Running)
@@ -399,6 +518,9 @@ impl Inner {
       wire::ServerMessage::Unknown(native)
         if native.get("type").and_then(Value::as_str) == Some("extension_ui_request") =>
       {
+        if self.supervised {
+          return self.emit_supervised(native).await;
+        }
         if let Some(id) = native
           .get("id")
           .and_then(Value::as_str)
@@ -411,7 +533,15 @@ impl Inner {
         }
         self.publish(RuntimeEventKind::Native(native));
       }
-      message => self.publish(RuntimeEventKind::Native(message.native().clone())),
+      message => {
+        if self.supervised {
+          if let Some(value) = supervised::project_frame(message.native().clone()) {
+            self.emit_supervised(value).await?;
+          }
+        } else {
+          self.publish(RuntimeEventKind::Native(message.native().clone()));
+        }
+      }
     }
     Ok(())
   }
@@ -518,8 +648,21 @@ impl Inner {
   }
 
   fn disconnected(&self, reason: String) {
+    self.disconnected_with_exit(reason, false);
+  }
+
+  fn disconnected_with_exit(&self, reason: String, clean_exit: bool) {
     if self.closed.swap(true, Ordering::AcqRel) {
       return;
+    }
+    self.clean_exit.store(clean_exit, Ordering::Release);
+    if self.supervised {
+      *self.terminal.lock().unwrap_or_else(|error| error.into_inner()) = Some(reason.clone());
+      self
+        .supervision
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take();
     }
     for (_, pending) in self.pending.lock().unwrap_or_else(|error| error.into_inner()).drain() {
       let error = if pending.mutation {
@@ -527,7 +670,9 @@ impl Inner {
       } else {
         InteractionError::unavailable(reason.clone())
       };
-      let _ = pending.reply.send(Err(error));
+      if let PendingReply::Common(reply) = pending.reply {
+        let _ = reply.send(Err(error));
+      }
     }
     let ids = {
       let mut snapshot = self.snapshot.lock().unwrap_or_else(|error| error.into_inner());
@@ -543,35 +688,79 @@ impl Inner {
     self.publish(RuntimeEventKind::Disconnected { reason });
   }
 
+  pub(super) async fn close_input(&self) {
+    // Tokio's Unix pipe shutdown does not close stdin; dropping it delivers EOF.
+    self.writer.lock().await.take();
+  }
+
   pub(super) async fn close(&self) -> Result<(), InteractionError> {
+    let mut cleanup = self.cleanup.lock().await;
+    if let Some(result) = cleanup.as_ref() {
+      return result.clone();
+    }
     // Attached handles belong to a connector client: no abort, signal, or child
     // termination is issued. The connector must keep its native process alive
     // independently of this client transport's lifetime.
     self.disconnected("Pi RPC adapter closed".into());
-    if let Some(mut writer) = self.writer.lock().await.take() {
-      let _ = tokio::time::timeout(WRITE_TIMEOUT, writer.shutdown()).await;
+    self.close_input().await;
+    let mut cleanup_error = None;
+    if let Some(mut child) = self.child.lock().await.take() {
+      if !matches!(
+        tokio::time::timeout(Duration::from_secs(2), child.wait()).await,
+        Ok(Ok(_))
+      ) {
+        let _ = child.start_kill();
+        cleanup_error = match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
+          Ok(Ok(_)) => None,
+          Ok(Err(error)) => Some(InteractionError::unavailable(format!(
+            "Pi child cleanup failed: {error}"
+          ))),
+          Err(_) => Some(InteractionError::unavailable("Pi child cleanup timed out")),
+        };
+      }
+    }
+    let stderr_task = self
+      .stderr_task
+      .lock()
+      .unwrap_or_else(|error| error.into_inner())
+      .take();
+    if let Some(mut task) = stderr_task {
+      let _ = tokio::time::timeout(Duration::from_millis(100), &mut task).await;
+      task.abort();
     }
     for task in self.tasks.lock().unwrap_or_else(|error| error.into_inner()).drain(..) {
       task.abort();
     }
-    if let Some(mut child) = self.child.lock().await.take() {
-      if tokio::time::timeout(Duration::from_secs(2), child.wait())
-        .await
-        .is_err()
-      {
-        let _ = child.start_kill();
-        tokio::time::timeout(Duration::from_secs(3), child.wait())
-          .await
-          .map_err(|_| InteractionError::unavailable("Pi child cleanup timed out"))?
-          .map_err(|error| InteractionError::unavailable(format!("Pi child cleanup failed: {error}")))?;
+    let result = cleanup_error.map_or(Ok(()), Err);
+    *cleanup = Some(result.clone());
+    result
+  }
+
+  async fn eof_reason(&self) -> (String, bool) {
+    let mut child = self.child.lock().await;
+    if let Some(child) = child.as_mut() {
+      // A child normally exits beside stdout EOF. Keep explicit nonzero status
+      // when available without waiting indefinitely for a live detached pipe.
+      match tokio::time::timeout(Duration::from_millis(20), child.wait()).await {
+        Ok(Ok(status)) => return (format!("Pi exited with {status}"), status.success()),
+        Ok(Err(error)) => return (format!("Could not wait for Pi: {error}"), false),
+        _ => {}
       }
     }
-    Ok(())
+    ("Pi closed its RPC output".into(), false)
   }
 }
 
 impl Drop for Inner {
   fn drop(&mut self) {
+    if let Some(task) = self
+      .stderr_task
+      .get_mut()
+      .unwrap_or_else(|error| error.into_inner())
+      .take()
+    {
+      task.abort();
+    }
     for task in self
       .tasks
       .get_mut()
@@ -599,7 +788,11 @@ where
       let Some(inner) = weak.upgrade() else { return };
       let result = match frame {
         Ok(Some(value)) => inner.receive(value).await,
-        Ok(None) => Err("Pi closed its RPC output".into()),
+        Ok(None) => {
+          let (reason, clean_exit) = inner.eof_reason().await;
+          inner.disconnected_with_exit(reason, clean_exit);
+          return;
+        }
         Err(error) => Err(error),
       };
       if let Err(reason) = result {
@@ -609,6 +802,10 @@ where
     }
   });
   inner.tasks.lock().unwrap_or_else(|error| error.into_inner()).push(task);
+  if inner.supervised {
+    start_exit_monitor(inner);
+    return;
+  }
   let weak = Arc::downgrade(inner);
   let expiry = tokio::spawn(async move {
     let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -629,4 +826,43 @@ where
     .lock()
     .unwrap_or_else(|error| error.into_inner())
     .push(expiry);
+}
+
+fn start_exit_monitor(inner: &Arc<Inner>) {
+  if inner.pid.is_none() {
+    return;
+  }
+  let weak = Arc::downgrade(inner);
+  let task = tokio::spawn(async move {
+    let mut tick = tokio::time::interval(Duration::from_millis(50));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+      tick.tick().await;
+      let Some(inner) = weak.upgrade() else { return };
+      if inner.closed.load(Ordering::Acquire) {
+        return;
+      }
+      let exited = {
+        // The child may exit while a descendant keeps its output pipes open.
+        // Observe the owned process independently, without blocking cleanup's
+        // child handle or depending on the descendant ever closing stdout.
+        let Ok(mut child) = inner.child.try_lock() else {
+          continue;
+        };
+        match child.as_mut().map(Child::try_wait) {
+          Some(Ok(Some(status))) => Some((format!("Pi exited with {status}"), status.success())),
+          Some(Err(error)) => Some((format!("Could not wait for Pi: {error}"), false)),
+          _ => None,
+        }
+      };
+      if let Some((reason, clean_exit)) = exited {
+        // Allow final native replies to enter the ordered queue before the
+        // terminal marker. The receiver still drains all already queued frames.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        inner.disconnected_with_exit(reason, clean_exit);
+        return;
+      }
+    }
+  });
+  inner.tasks.lock().unwrap_or_else(|error| error.into_inner()).push(task);
 }

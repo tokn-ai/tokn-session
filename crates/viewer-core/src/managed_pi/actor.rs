@@ -1,29 +1,22 @@
 use super::{
   Inner, WorkerState,
   persistence::{Receipt, SessionLease, validate_session},
-  protocol::{RpcReader, RpcState, StderrTail, parse_extension_dialog, parse_state},
+  protocol::{RpcState, parse_extension_dialog, parse_state},
 };
 use crate::{
   images::ResolvedImage,
   input::{Admission, DeliveryError},
   workspace::{ManagedSessionDialogResponse, ManagedSessionStatus},
 };
-use serde_json::{Value, json};
-use std::{
-  collections::HashMap,
-  ffi::{OsStr, OsString},
-  path::PathBuf,
-  process::Stdio,
-  sync::{Arc, Mutex, Weak},
-  time::Duration,
-};
+use serde_json::Value;
+use std::{collections::HashMap, path::PathBuf, sync::Weak, time::Duration};
 use tokio::{
-  io::{AsyncReadExt, AsyncWriteExt},
-  process::{Child, ChildStdin},
   sync::{OwnedMutexGuard, mpsc, oneshot, watch},
   time::{Instant, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
+use tokn_pi_adapter::{EndpointOptions, LaunchOptions, SupervisedSession};
+use tokn_pi_rpc_protocol as wire;
 
 mod message_input;
 mod model_control;
@@ -148,18 +141,11 @@ pub(super) async fn run(
   if actor.retirement.is_none() {
     actor.retirement = retirement_gate(&inner, &id).await;
   }
-  actor.reader.abort();
-  // Tokio's Unix ChildStdin::shutdown does not close the pipe. Dropping the
-  // handle delivers EOF and lets Pi dispose extensions before the kill bound.
-  drop(actor.stdin.take());
-  if result.is_ok() {
-    let _ = tokio::time::timeout(Duration::from_secs(2), actor.child.wait()).await;
-  }
-  let _ = actor.child.start_kill();
-  let _ = tokio::time::timeout(Duration::from_secs(3), actor.child.wait()).await;
-  let _ = tokio::time::timeout(Duration::from_millis(100), &mut actor.stderr_reader).await;
-  actor.stderr_reader.abort();
-  let error = result.err().map(|error| actor.exit_message(error));
+  // PiAdapter owns stdin, the child, stderr, and bounded cleanup. Keep the
+  // session lease until cleanup and final durable metadata both complete.
+  let cleanup = actor.session.close().await;
+  let error = result.err().or_else(|| cleanup.err().map(|error| error.to_string()));
+  let error = error.map(|error| actor.exit_message(error));
   let stopped = actor.stop_reply.take();
   // Keep the per-session lease until its final durable revision is visible.
   // Otherwise a new owner could resume from the previous revision while this
@@ -180,12 +166,7 @@ struct Actor {
   inner: Weak<Inner>,
   receipt: Receipt,
   generation: u64,
-  child: Child,
-  stdin: Option<ChildStdin>,
-  frames: mpsc::Receiver<Result<Value, String>>,
-  reader: tokio::task::JoinHandle<()>,
-  stderr_reader: tokio::task::JoinHandle<()>,
-  stderr: Arc<Mutex<StderrTail>>,
+  session: SupervisedSession,
   pending: HashMap<String, Pending>,
   recent: HashMap<String, (String, Option<Result<Admission, DeliveryError>>)>,
   initial_prompt: Option<(String, Vec<ResolvedImage>)>,
@@ -223,23 +204,34 @@ impl Actor {
     {
       return Err("Managed Pi runtime is shutting down".into());
     }
-    let mut command = tokio::process::Command::new(executable);
-    command
-      .args(["--mode", "rpc"])
-      .current_dir(&receipt.folder)
-      .stdin(Stdio::piped())
-      .stdout(Stdio::piped())
-      .stderr(Stdio::piped())
-      .kill_on_drop(true);
-    let node_extra_ca_certs = std::env::var_os("NODE_EXTRA_CA_CERTS");
-    let ssl_cert_file = std::env::var_os("SSL_CERT_FILE");
-    if let Some(path) = inherited_node_ca_fallback(node_extra_ca_certs.as_deref(), ssl_cert_file.as_deref()) {
-      command.env("NODE_EXTRA_CA_CERTS", path);
-    }
-    if resume {
-      command.arg("--session").arg(receipt.session_file.as_ref().unwrap());
-    }
-    let mut child = command.spawn().map_err(|error| {
+    let instance_id = inner
+      .upgrade()
+      .and_then(|inner| {
+        inner
+          .records
+          .lock()
+          .unwrap()
+          .get(&receipt.request_id)
+          .map(|record| record.instance_id.clone())
+      })
+      .ok_or("Managed Pi runtime has stopped")?;
+    let mut options = EndpointOptions::new(format!("pi:{}", receipt.request_id));
+    options.instance_id = instance_id;
+    options.expected_session_id = receipt.session_id.clone();
+    options.request_timeout = RPC_DEADLINE;
+    options.prompt_timeout = PROMPT_DEADLINE;
+    let session = tokn_pi_adapter::PiAdapter::spawn_supervised(
+      options,
+      LaunchOptions {
+        executable,
+        working_directory: receipt.folder.clone(),
+        arguments: Vec::new(),
+        environment: Default::default(),
+        session_file: resume.then(|| receipt.session_file.clone()).flatten(),
+      },
+    )
+    .await
+    .map_err(|error| {
       format!("Could not start Pi: {error}. Install Pi or set TOKN_SESSION_PI_EXECUTABLE to its executable path.")
     })?;
     if let Some(owner) = inner.upgrade() {
@@ -249,7 +241,7 @@ impl Actor {
           .get_mut(&receipt.request_id)
           .filter(|record| record.generation == generation)
           .map(|record| {
-            record.worker_pid = child.id();
+            record.worker_pid = session.pid();
             record.started_at_ms = Some(crate::runtimes::now_ms());
             record.receipt.snapshot()
           })
@@ -258,53 +250,11 @@ impl Actor {
         let _ = owner.events.send(snapshot);
       }
     }
-    let stdin = child.stdin.take().ok_or("Pi stdin is unavailable")?;
-    let stdout = child.stdout.take().ok_or("Pi stdout is unavailable")?;
-    let mut stderr_stream = child.stderr.take().ok_or("Pi stderr is unavailable")?;
-    let (send, frames) = mpsc::channel(8);
-    let reader = tokio::spawn(async move {
-      let mut reader = RpcReader::new(stdout);
-      loop {
-        match reader.read_frame().await {
-          Ok(Some(value)) => {
-            if let Some(metadata) = project_frame(value) {
-              if send.send(Ok(metadata)).await.is_err() {
-                break;
-              }
-            }
-          }
-          Ok(None) => {
-            let _ = send.send(Err("Pi closed its RPC output".into())).await;
-            break;
-          }
-          Err(error) => {
-            let _ = send.send(Err(error)).await;
-            break;
-          }
-        }
-      }
-    });
-    let stderr = Arc::new(Mutex::new(StderrTail::default()));
-    let tail = stderr.clone();
-    let stderr_reader = tokio::spawn(async move {
-      let mut buffer = [0; 4096];
-      while let Ok(count) = stderr_stream.read(&mut buffer).await {
-        if count == 0 {
-          break;
-        }
-        tail.lock().unwrap().push(&buffer[..count]);
-      }
-    });
     Ok(Self {
       inner,
       receipt,
       generation,
-      child,
-      stdin: Some(stdin),
-      frames,
-      reader,
-      stderr_reader,
-      stderr,
+      session,
       pending: HashMap::new(),
       recent: HashMap::new(),
       initial_prompt: prompt,
@@ -358,8 +308,9 @@ impl Actor {
           self.begin_shutdown().await;
           return Ok(());
         },
-        frame = self.frames.recv() => match frame {
+        frame = self.session.recv() => match frame {
           Some(Ok(value)) => {self.frame(value).await?; if self.exit_requested {return Ok(());}},
+          Some(Err(_)) | None if self.session.exited_successfully() => return Ok(()),
           Some(Err(error)) => return Err(error),
           None => return Err("Pi RPC reader stopped".into()),
         },
@@ -369,7 +320,7 @@ impl Actor {
           match command {
           Some(Command::Model(operation, reply)) => {
             if self.termination.is_cancelled() { let _ = reply.send(Err(DeliveryError::not_sent("Pi runtime is stopping"))); }
-            else { self.send("get_state", json!({"type":"get_state"}), PendingKind::Model(ModelPending::new(operation, reply))).await?; }
+            else { self.send(wire::Command::GetState, PendingKind::Model(ModelPending::new(operation, reply))).await?; }
           }
           Some(Command::Prompt {request_id, text, images, selection, reply}) => {
             if self.termination.is_cancelled() || self.stop_requested || self.inner.upgrade().is_none_or(|inner| inner.shutting_down.load(std::sync::atomic::Ordering::Acquire)) {
@@ -390,15 +341,12 @@ impl Actor {
             }
             self.cancel_dialog("Pi dialog was cancelled by Stop").await?;
             self.update(|receipt| { receipt.status = ManagedSessionStatus::Stopping; receipt.message = Some("Stopping the current Pi turn".into()); }).await?;
-            self.send("abort", json!({"type":"abort"}), PendingKind::Abort(reply)).await?;
+            self.send(wire::Command::Abort, PendingKind::Abort(reply)).await?;
           }
           Some(Command::Dialog(response, reply)) => { let result = self.respond(response).await; let _ = reply.send(result); }
           None => return Ok(()),
         }},
         _ = tick.tick() => self.tick().await?,
-        exit = self.child.wait() => {
-          return match exit { Ok(status) if status.success() => Ok(()), Ok(status) => Err(format!("Pi exited with {status}")), Err(error) => Err(error.to_string()) };
-        }
       }
       if self.retire_if_idle(commands).await? {
         return Ok(());
@@ -412,11 +360,12 @@ impl Actor {
     let _ = tokio::time::timeout(WRITE_DEADLINE, async {
       let _ = self.cancel_dialog("Pi runtime is stopping").await;
       let _ = self
-        .write(json!({"type":"abort","id":uuid::Uuid::new_v4().to_string()}))
+        .session
+        .send(uuid::Uuid::new_v4().to_string(), wire::Command::Abort)
         .await;
     })
     .await;
-    drop(self.stdin.take());
+    self.session.close_input().await;
   }
 
   async fn frame(&mut self, value: Value) -> Result<(), String> {
@@ -425,26 +374,17 @@ impl Actor {
         let Some(id) = value.get("id").and_then(Value::as_str) else {
           return Err("Pi RPC response has no correlation ID".into());
         };
-        // Keep preflight replies in the pending map until the envelope is
-        // validated. Teardown can then distinguish an unsent image check from
-        // a prompt whose bytes already crossed the process boundary.
-        let Some(pending) = self.pending.get(id) else {
+        // PiAdapter validated native correlation and the response envelope.
+        // This map holds only the supervisor's workflow continuation.
+        if !self.pending.contains_key(id) {
           return Ok(());
-        };
-        if value.get("command").and_then(Value::as_str) != Some(pending.command) {
-          return Err("Pi RPC response command did not match its request".into());
         }
-        let success = value
-          .get("success")
-          .and_then(Value::as_bool)
-          .ok_or("Pi RPC response has no success flag")?;
+        let success = value["success"].as_bool().expect("adapter-validated response");
         let error = value
           .get("error")
           .and_then(Value::as_str)
           .unwrap_or("Pi rejected the request")
-          .chars()
-          .take(2048)
-          .collect::<String>();
+          .to_owned();
         let pending = self.pending.remove(id).expect("validated pending response");
         match pending.kind {
           PendingKind::Model(pending) => self.model_response(pending, success, value.get("data"), &error).await?,
@@ -772,17 +712,27 @@ impl Actor {
       };
       self.recent.insert(request_id.clone(), (fingerprint, None));
     }
-    let mut command = json!({"type":"prompt","message":text});
-    if !images.is_empty() {
+    let mut command = wire::Command::Prompt {
+      message: text,
+      images: Vec::new(),
+      streaming_behavior: (busy || prepared.is_some()).then_some(wire::StreamingBehavior::Steer),
+    };
+    if let wire::Command::Prompt {
+      images: native_images, ..
+    } = &mut command
+    {
       use base64::Engine;
-      command["images"] = json!(images.iter().map(|image| json!({"type":"image", "data": base64::engine::general_purpose::STANDARD.encode(image.bytes.as_slice()), "mimeType":image.mime_type})).collect::<Vec<_>>());
-    }
-    if busy || prepared.is_some() {
-      command["streamingBehavior"] = json!("steer");
+      *native_images = images
+        .iter()
+        .map(|image| wire::ImageContent {
+          kind: "image".into(),
+          data: base64::engine::general_purpose::STANDARD.encode(image.bytes.as_slice()),
+          mime_type: image.mime_type.clone(),
+        })
+        .collect();
     }
     self
       .send(
-        "prompt",
         command,
         PendingKind::Prompt {
           request_id,
@@ -795,54 +745,43 @@ impl Actor {
     self.phase(ManagedSessionStatus::Running).await
   }
 
-  async fn send(&mut self, command: &'static str, mut value: Value, kind: PendingKind) -> Result<(), String> {
+  async fn send(&mut self, command: wire::Command, kind: PendingKind) -> Result<(), String> {
     if self.pending.len() >= 32 {
       let error = "Pi RPC pending request limit reached";
       reject_before_send(kind, error);
       return Err(error.into());
     }
+    let name = command.name();
     let id = uuid::Uuid::new_v4().to_string();
-    value["id"] = json!(id);
-    let bytes = match encode_command(value) {
-      Ok(bytes) => bytes,
-      Err(error) => {
-        reject_before_send(kind, &error);
-        return Err(error);
-      }
-    };
-    if self.stdin.is_none() {
-      let error = "Pi RPC stdin is closed";
-      reject_before_send(kind, error);
-      return Err(error.into());
-    }
-    // Insert before writing: a partial pipe write is uncertain and must never
-    // be automatically repeated by the host.
-    let timeout = if command == "prompt" {
-      PROMPT_DEADLINE
-    } else {
-      RPC_DEADLINE
-    };
+    let deadline = Instant::now()
+      + if name == "prompt" {
+        PROMPT_DEADLINE
+      } else {
+        RPC_DEADLINE
+      };
+    // Workflow ownership is recorded before the write, preserving uncertain
+    // outcomes if only part of the native request reaches Pi.
     self.pending.insert(
-      id,
+      id.clone(),
       Pending {
-        command,
-        deadline: Instant::now() + timeout,
+        command: name,
+        deadline,
         kind,
       },
     );
-    self.write_bytes(bytes).await
+    if let Err(error) = self.session.send(id.clone(), command).await {
+      if error.kind != tokn_interaction_core::ErrorKind::Uncertain {
+        if let Some(pending) = self.pending.remove(&id) {
+          reject_before_send(pending.kind, &error.message);
+        }
+      }
+      return Err(error.to_string());
+    }
+    Ok(())
   }
 
-  async fn write(&mut self, value: Value) -> Result<(), String> {
-    self.write_bytes(encode_command(value)?).await
-  }
-
-  async fn write_bytes(&mut self, bytes: Vec<u8>) -> Result<(), String> {
-    let stdin = self.stdin.as_mut().ok_or("Pi RPC stdin is closed")?;
-    tokio::time::timeout(WRITE_DEADLINE, stdin.write_all(&bytes))
-      .await
-      .map_err(|_| "Pi RPC write timed out".to_string())?
-      .map_err(|error| format!("Pi RPC write failed: {error}"))
+  async fn write(&self, response: wire::ExtensionUiResponse) -> Result<(), String> {
+    self.session.respond(response).await.map_err(|error| error.to_string())
   }
 
   async fn request_state(&mut self, initial: bool) -> Result<(), String> {
@@ -853,9 +792,7 @@ impl Actor {
     {
       return Ok(());
     }
-    self
-      .send("get_state", json!({"type":"get_state"}), PendingKind::State { initial })
-      .await
+    self.send(wire::Command::GetState, PendingKind::State { initial }).await
   }
 
   async fn tick(&mut self) -> Result<(), String> {
@@ -897,7 +834,7 @@ impl Actor {
     if !self.pending.is_empty() {
       return Ok(false);
     }
-    if !self.frames.is_empty() {
+    if !self.session.is_empty() {
       return Ok(false);
     }
     let Some(inner) = self.inner.upgrade() else {
@@ -926,7 +863,7 @@ impl Actor {
     };
     // Send holds this same gate through queue admission. Closing an empty
     // receiver under it cannot strand a message that has already been admitted.
-    if !commands.is_empty() || !self.frames.is_empty() {
+    if !commands.is_empty() || !self.session.is_empty() {
       return Ok(false);
     }
     commands.close();
@@ -1034,9 +971,7 @@ impl Actor {
       Ok(None) => {}
       Ok(Some(dialog)) => {
         if let Some(previous) = &self.receipt.dialog {
-          self
-            .write(json!({"type":"extension_ui_response","id":previous.dialog_id,"cancelled":true}))
-            .await?;
+          self.write(cancel_response(&previous.dialog_id)).await?;
         }
         let timeout = value
           .get("timeout")
@@ -1055,9 +990,7 @@ impl Actor {
       }
       Err(reason) => {
         if let Some(id) = native_id {
-          self
-            .write(json!({"type":"extension_ui_response","id":id,"cancelled":true}))
-            .await?;
+          self.write(cancel_response(&id)).await?;
         }
         self
           .update(|receipt| {
@@ -1076,22 +1009,30 @@ impl Actor {
       .as_ref()
       .filter(|dialog| dialog.dialog_id == response.dialog_id)
       .ok_or("This Pi dialog is no longer pending")?;
-    let mut value = json!({"type":"extension_ui_response","id":dialog.dialog_id});
-    if response.cancelled {
-      value["cancelled"] = json!(true);
-    } else if dialog.kind == "confirm" {
-      value["confirmed"] = json!(response.confirmed.ok_or("Confirm requires a yes or no response")?);
-    } else {
-      let answer = response.value.ok_or("This Pi dialog requires a value")?;
-      if answer.len() > 16 * 1024 {
-        return Err("Pi dialog response exceeds its size limit".into());
+    let mut value = None;
+    let mut confirmed = None;
+    if !response.cancelled {
+      if dialog.kind == "confirm" {
+        confirmed = Some(response.confirmed.ok_or("Confirm requires a yes or no response")?);
+      } else {
+        let answer = response.value.ok_or("This Pi dialog requires a value")?;
+        if answer.len() > 16 * 1024 {
+          return Err("Pi dialog response exceeds its size limit".into());
+        }
+        if dialog.kind == "select" && !dialog.options.contains(&answer) {
+          return Err("Pi dialog response is not an available option".into());
+        }
+        value = Some(answer);
       }
-      if dialog.kind == "select" && !dialog.options.contains(&answer) {
-        return Err("Pi dialog response is not an available option".into());
-      }
-      value["value"] = json!(answer);
     }
-    self.write(value).await?;
+    self
+      .write(wire::ExtensionUiResponse::ExtensionUiResponse {
+        id: dialog.dialog_id.clone(),
+        value,
+        confirmed,
+        cancelled: response.cancelled.then_some(true),
+      })
+      .await?;
     self.dialog_deadline = None;
     self.refresh_deadlines();
     self
@@ -1114,9 +1055,7 @@ impl Actor {
 
   async fn cancel_dialog(&mut self, reason: &str) -> Result<(), String> {
     if let Some(dialog) = &self.receipt.dialog {
-      self
-        .write(json!({"type":"extension_ui_response","id":dialog.dialog_id,"cancelled":true}))
-        .await?;
+      self.write(cancel_response(&dialog.dialog_id)).await?;
       self.dialog_deadline = None;
       self.refresh_deadlines();
       self
@@ -1147,12 +1086,21 @@ impl Actor {
   }
 
   fn exit_message(&self, message: String) -> String {
-    let stderr = self.stderr.lock().unwrap().text();
+    let stderr = self.session.stderr_tail();
     if stderr.trim().is_empty() {
       message
     } else {
       format!("{message}: {}", stderr.trim())
     }
+  }
+}
+
+fn cancel_response(id: &str) -> wire::ExtensionUiResponse {
+  wire::ExtensionUiResponse::ExtensionUiResponse {
+    id: id.to_owned(),
+    value: None,
+    confirmed: None,
+    cancelled: Some(true),
   }
 }
 
@@ -1180,15 +1128,6 @@ fn reject_before_send(kind: PendingKind, message: &str) {
     }
     PendingKind::State { .. } | PendingKind::Prompt { reply: None, .. } => {}
   }
-}
-
-fn encode_command(value: Value) -> Result<Vec<u8>, String> {
-  let mut bytes = serde_json::to_vec(&value).map_err(|error| error.to_string())?;
-  bytes.push(b'\n');
-  if bytes.len() > super::protocol::MAX_FRAME_BYTES {
-    return Err("Pi RPC request exceeds the 34 MiB limit".into());
-  }
-  Ok(bytes)
 }
 
 async fn finish(
@@ -1258,37 +1197,6 @@ fn publish_finished(inner: &Weak<Inner>, snapshot: Option<crate::workspace::Mana
   }
 }
 
-/// Retain only coarse lifecycle metadata across the bounded actor channel.
-/// Token events and completed assistant/tool bodies belong to native history.
-fn project_frame(value: Value) -> Option<Value> {
-  let kind = value.get("type").and_then(Value::as_str)?;
-  match kind {
-    "response" | "extension_ui_request" => Some(value),
-    "message_end" => {
-      let message = value.get("message")?;
-      if message.get("role").and_then(Value::as_str) != Some("assistant") {
-        return None;
-      }
-      Some(
-        json!({"type":"message_end", "stop_reason":message.get("stopReason").and_then(Value::as_str).map(|reason| reason.chars().take(128).collect::<String>()), "error_message":turn_error(message.get("errorMessage"))}),
-      )
-    }
-    "auto_retry_end" => Some(
-      json!({"type":"auto_retry_end", "success":value.get("success").and_then(Value::as_bool), "final_error":turn_error(value.get("finalError"))}),
-    ),
-    "compaction_end" | "auto_compaction_end" => Some(
-      json!({"type":kind, "aborted":value.get("aborted").and_then(Value::as_bool), "error_message":turn_error(value.get("errorMessage"))}),
-    ),
-    "agent_start"
-    | "agent_end"
-    | "agent_settled"
-    | "compaction_start"
-    | "auto_compaction_start"
-    | "auto_retry_start" => Some(json!({"type":kind})),
-    _ => None,
-  }
-}
-
 fn turn_error(value: Option<&Value>) -> Option<String> {
   let text = value.and_then(Value::as_str)?.trim();
   if text.is_empty() {
@@ -1299,91 +1207,6 @@ fn turn_error(value: Option<&Value>) -> Option<String> {
     end -= 1;
   }
   Some(text[..end].to_owned())
-}
-
-/// Node does not automatically use SSL_CERT_FILE. Preserve an explicit Node
-/// setting, including an empty one, while honoring the host's configured CA
-/// bundle when Node has no setting of its own.
-fn inherited_node_ca_fallback(node_extra_ca_certs: Option<&OsStr>, ssl_cert_file: Option<&OsStr>) -> Option<OsString> {
-  if node_extra_ca_certs.is_some() {
-    return None;
-  }
-  ssl_cert_file.filter(|path| !path.is_empty()).map(OsStr::to_os_string)
-}
-
-#[cfg(test)]
-mod certificate_tests {
-  use super::*;
-
-  #[test]
-  fn only_an_absent_node_setting_inherits_a_nonempty_host_bundle() {
-    let host_bundle = OsStr::new("/configured CA bundle.pem");
-    assert_eq!(
-      inherited_node_ca_fallback(None, Some(host_bundle)),
-      Some(host_bundle.to_owned())
-    );
-    assert_eq!(
-      inherited_node_ca_fallback(Some(OsStr::new("/node-specific.pem")), Some(host_bundle)),
-      None
-    );
-    assert_eq!(
-      inherited_node_ca_fallback(Some(OsStr::new("")), Some(host_bundle)),
-      None
-    );
-    assert_eq!(inherited_node_ca_fallback(None, Some(OsStr::new(""))), None);
-    assert_eq!(inherited_node_ca_fallback(None, None), None);
-    assert_eq!(
-      inherited_node_ca_fallback(Some(OsStr::new("/node-specific.pem")), None),
-      None
-    );
-  }
-}
-
-#[cfg(test)]
-mod projection_tests {
-  use super::*;
-
-  #[test]
-  fn projection_discards_tokens_and_bodies_but_keeps_bounded_turn_failure() {
-    for kind in ["message_start", "message_update", "tool_execution_update", "turn_end"] {
-      assert!(
-        project_frame(
-          json!({"type":kind,"message":{"role":"assistant","content":[{"type":"text","text":"private body"}]}})
-        )
-        .is_none()
-      );
-    }
-    let projected = project_frame(json!({"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"private body"}],"stopReason":"error","errorMessage":"x".repeat(MAX_TURN_ERROR_BYTES + 10)}})).unwrap();
-    assert_eq!(projected["stop_reason"], "error");
-    assert_eq!(projected["error_message"].as_str().unwrap().len(), MAX_TURN_ERROR_BYTES);
-    assert!(!projected.to_string().contains("private body"));
-    assert_eq!(
-      project_frame(json!({"type":"agent_end","messages":[{"text":"private body"}]})).unwrap(),
-      json!({"type":"agent_end"})
-    );
-    assert!(
-      project_frame(json!({"type":"message_end","message":{"role":"user","errorMessage":"not an assistant failure"}}))
-        .is_none()
-    );
-  }
-
-  #[test]
-  fn projection_keeps_retry_and_compaction_failure_evidence_only() {
-    assert_eq!(
-      project_frame(
-        json!({"type":"auto_retry_end","success":false,"finalError":"quota exceeded","messages":["private body"]})
-      )
-      .unwrap(),
-      json!({"type":"auto_retry_end","success":false,"final_error":"quota exceeded"})
-    );
-    assert_eq!(
-      project_frame(
-        json!({"type":"compaction_end","aborted":true,"errorMessage":"cancelled","result":{"summary":"private body"}})
-      )
-      .unwrap(),
-      json!({"type":"compaction_end","aborted":true,"error_message":"cancelled"})
-    );
-  }
 }
 
 #[cfg(test)]

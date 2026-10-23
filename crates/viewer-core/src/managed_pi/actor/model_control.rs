@@ -115,11 +115,7 @@ impl Actor {
           ModelOperation::List => {
             pending.phase = ModelPhase::Catalog;
             self
-              .send(
-                "get_available_models",
-                json!({"type":"get_available_models"}),
-                PendingKind::Model(pending),
-              )
+              .send(wire::Command::GetAvailableModels, PendingKind::Model(pending))
               .await?;
           }
         }
