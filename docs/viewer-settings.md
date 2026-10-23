@@ -41,6 +41,13 @@ input permission does not grant configuration administration. Session-scoped
 shares cannot request machine-wide metadata. Old hosts report unavailable
 settings while device preferences remain usable.
 
+**Agent runtimes** has separate selected-machine profile and lifecycle commands
+for Codex/Pi/OpenCode/DSH. Paired remote administration additionally requires
+the host's explicit runtime-management opt-in; the setting cannot be enabled
+remotely. Public profiles redact saved credential and environment values. See
+[viewer RPC runtimes](viewer-rpc-runtimes.md) for persistence, ownership, access,
+and the current boundary between runtime setup and conversation controls.
+
 ## Hosting and access
 
 For the selected local desktop computer, Settings reuses the app-owned host

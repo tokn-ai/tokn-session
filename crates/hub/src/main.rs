@@ -145,6 +145,16 @@ enum Command {
     #[arg(long)]
     state_dir: Option<PathBuf>,
   },
+  /// Inspect or change remote runtime administration on this host. Existing
+  /// paired clients still require host agent-control permission.
+  RuntimeManagement {
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
+    #[arg(long, conflicts_with = "disable")]
+    enable: bool,
+    #[arg(long, conflicts_with = "enable")]
+    disable: bool,
+  },
   /// Revoke a paired client on this host, including its active streams.
   ForgetDevice {
     #[arg(long)]
@@ -428,6 +438,22 @@ async fn run(args: Args) -> Result<(), String> {
         serde_json::to_string_pretty(&onboarding::devices(&state_dir.join("host-access.json"))?)
           .map_err(|e| e.to_string())?
       );
+      Ok(())
+    }
+    Command::RuntimeManagement {
+      state_dir,
+      enable,
+      disable,
+    } => {
+      let state_dir = match state_dir {
+        Some(path) => path,
+        None => storage::inspect_state_dir()?,
+      };
+      let path = state_dir.join("host-access.json");
+      if enable || disable {
+        onboarding::set_runtime_management_enabled(&path, enable)?;
+      }
+      println!("{}", json!({"enabled":onboarding::runtime_management_enabled(&path)?}));
       Ok(())
     }
     Command::ForgetDevice { state_dir, public_key } => {

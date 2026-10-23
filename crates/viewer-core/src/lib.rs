@@ -14,6 +14,8 @@ pub mod projects;
 mod questions;
 pub mod relay;
 mod repository;
+pub mod rpc_profiles;
+pub mod rpc_runtime;
 pub mod runtime;
 pub mod runtimes;
 pub mod service;

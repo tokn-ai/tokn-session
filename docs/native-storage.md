@@ -18,6 +18,8 @@ The desktop, CLI, and native services share one default root:
     preferences.json
     machines.json
     relay.json
+    rpc-runtimes.json
+    rpc-leases/
     import-state.json
 ```
 

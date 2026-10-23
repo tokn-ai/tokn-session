@@ -4,6 +4,20 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
+Settings → Agent runtimes now manages selected-machine Codex/Pi/OpenCode/DSH
+RPC profiles and real managed/attached adapters through the shared Rust registry.
+Private versioned profiles live under `viewer/rpc-runtimes.json`; public reads
+redact environment/credential values. Explicit lifecycle actions use instance
+fences, cross-process profile leases, cancellation-safe receipts, and awaited
+shutdown. Encrypted remote management requires paired control plus a separate
+host-owned opt-in, disabled by default. Host-verified internal session bindings
+recover native state and reserve ownership; existing composer/model/question
+routes are unchanged. Automatic first-Send resume, generalized creation, and
+OpenCode V2 history/display remain follow-ups. Native binding ownership is
+process-local; coordinate per-session leases across distinct profiles and legacy
+transports before routing general input through it. See
+[viewer RPC runtimes](viewer-rpc-runtimes.md) for scope and tests.
+
 The private `interaction-tests` crate captures native Codex/Pi/OpenCode/DSH RPC.
 The identified Codex executable and pinned agents use a deterministic loopback
 model server, then checked-in transcripts replay through the adapters in workspace
@@ -28,10 +42,9 @@ from completion, and unsupported atomic model/strict delivery operations reject
 honestly. Inspection never starts or resumes a session. See
 [live interaction](interaction-core.md) for APIs, recovery, ownership, and limits.
 The viewer reuses Pi framing/state/dialog normalization, common model DTOs and
-the core receipt ledger, and provides a host-only runtime registry closed during
-managed-session shutdown. Its existing Pi project/history supervisor and
-Codex/Pi frontend routes remain in place; OpenCode/DSH UI and remote registration
-are follow-ups, not exposed by this foundation change.
+the core receipt ledger. Its existing Pi project/history supervisor and
+Codex/Pi conversation controls remain in place while the new selected-machine
+runtime setup uses the shared registry described above.
 
 Codex app-server control requires explicit thread create/resume; reads never
 activate saved work. Its ordered response/event pump and epoch guards preserve

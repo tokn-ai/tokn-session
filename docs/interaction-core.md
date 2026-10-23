@@ -41,7 +41,9 @@ loopback port, obtains readiness from that child's native output, and verifies
 the actual HTTP/WebSocket API. `attach` uses a configured ApiProxy endpoint.
 DSH's SDK stdio protocol is separately described but cannot satisfy the richer
 interaction contract. Endpoint credentials and executable/launch configuration
-remain host-owned and never become frontend command fields.
+remain host-owned profiles. The viewer's separately authorized runtime-settings
+commands may update them; ordinary session commands carry only verified runtime
+and session identities. See [viewer RPC runtimes](viewer-rpc-runtimes.md).
 
 Snapshot inspection does not call a provider, start a process, or resume saved
 work. Initial snapshots require recovery and do not claim a live connection until
@@ -118,12 +120,15 @@ receipt ledger. `ViewerService::interaction_service` is a host-only Rust
 composition point, unavailable to session shares or External reader mode, and
 the viewer closes registered adapters during managed-session shutdown.
 
-The existing frontend Codex/Pi routes, history indexing, project ownership,
-runtime UI, and Pi admission bridge remain in place. This change introduces no
-new frontend or remote registration command, and does not claim OpenCode/DSH
-composer support. Next, bind those host-owned runtimes to authorized commands
-and project the common events into the viewer rather than adding more native
-protocol logic to frontend components. No vendor source changes are needed.
+Selected-machine runtime profiles now compose all four adapters through real
+managed/attached factories, with separate authorized local/remote configuration
+and lifecycle commands. The existing frontend Codex/Pi conversation routes,
+history indexing, project ownership, local runtime inventory, and Pi admission
+bridge remain in place. Shared Rust bindings verify history identity and native
+ownership, but frontend Send/model/question controls do not consume them yet.
+Next, wire those controls and allowlist common events for viewer display; this
+does not yet provide OpenCode/DSH composer support. See
+[viewer RPC runtimes](viewer-rpc-runtimes.md). No vendor source changes are needed.
 
 Adapter unit tests use synthetic peers for fault injection. The private
 [`interaction-tests`](../crates/interaction-tests/README.md) crate additionally

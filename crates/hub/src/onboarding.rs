@@ -90,6 +90,9 @@ struct HostAccess {
   version: u8,
   totp_secret: String,
   devices: BTreeMap<String, DeviceAuthorization>,
+  /// Local opt-in; pairing and agent input never imply process administration.
+  #[serde(default, skip_serializing_if = "runtime_management_disabled")]
+  runtime_management: bool,
   last_used_step: Option<u64>,
   attempt_window_start: u64,
   attempts: u32,
@@ -101,6 +104,10 @@ struct HostAccess {
   passkey_attempt_window_start: u64,
   #[serde(default)]
   passkey_attempts: u32,
+}
+
+fn runtime_management_disabled(enabled: &bool) -> bool {
+  !enabled
 }
 
 impl Drop for HostAccess {
@@ -184,6 +191,7 @@ pub fn initialize_host_access(path: &Path, secret: &TotpSecret) -> Result<(), St
       version: 2,
       totp_secret: secret.to_base32(),
       devices: BTreeMap::new(),
+      runtime_management: false,
       last_used_step: None,
       attempt_window_start: 0,
       attempts: 0,
@@ -303,6 +311,37 @@ pub(crate) fn can_enroll_passkey_at(path: &Path, public_key: &str, now: u64) -> 
 
 pub fn devices(path: &Path) -> Result<BTreeMap<String, DeviceAuthorization>, String> {
   Ok(host_access(path)?.devices.clone())
+}
+
+/// Inspect host-local runtime administration without creating identity or trust.
+pub fn runtime_management_enabled(path: &Path) -> Result<bool, String> {
+  Ok(host_access(path)?.runtime_management)
+}
+
+/// This setting is provisioned on the host only. Existing connector requests
+/// re-read it, so revocation takes effect without reconnecting or restarting.
+pub fn set_runtime_management_enabled(path: &Path, enabled: bool) -> Result<(), String> {
+  let _lock = lock(path)?;
+  let mut state = host_access(path)?;
+  state.runtime_management = enabled;
+  write_atomic(path, &state)
+}
+
+/// Both authorization and the independent host opt-in are checked together.
+/// Browser enrollment can register a passkey but cannot administer runtimes.
+pub fn can_manage_runtimes(path: &Path, public_key: &str) -> Result<bool, String> {
+  let now = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map_err(|_| "Invalid host clock")?
+    .as_secs();
+  let state = host_access(path)?;
+  Ok(
+    state.runtime_management
+      && state
+        .devices
+        .get(public_key)
+        .is_some_and(|grant| grant.active(now, false)),
+  )
 }
 
 pub fn remove_device(path: &Path, public_key: &str) -> Result<(), String> {
@@ -894,6 +933,77 @@ pub fn save_configuration(path: &Path, value: &impl Serialize) -> Result<(), Str
 mod tests {
   use super::*;
   use crate::secure::NoiseIdentity;
+
+  #[test]
+  fn runtime_management_is_an_explicit_revocable_host_opt_in() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("host-access.json");
+    assert!(runtime_management_enabled(&path).is_err());
+    assert!(!path.exists(), "Inspection must not create host trust");
+    initialize_host_access(&path, &TotpSecret::generate()).unwrap();
+    // Existing installations have no runtime permission field and stay denied.
+    let mut old: serde_json::Value = read_required(&path).unwrap();
+    old.as_object_mut().unwrap().remove("runtime_management");
+    write_atomic(&path, &old).unwrap();
+    assert!(!runtime_management_enabled(&path).unwrap());
+    let native = NoiseIdentity::generate().unwrap().public_key();
+    let browser = NoiseIdentity::generate().unwrap().public_key();
+    let enrollment = NoiseIdentity::generate().unwrap().public_key();
+    let expired = NoiseIdentity::generate().unwrap().public_key();
+    let unknown = NoiseIdentity::generate().unwrap().public_key();
+    let mut state = host_access(&path).unwrap();
+    state
+      .devices
+      .insert(native.clone(), DeviceAuthorization::Native { paired_at: 1 });
+    state.devices.insert(
+      browser.clone(),
+      DeviceAuthorization::BrowserSession {
+        paired_at: 1,
+        expires_at: u64::MAX,
+      },
+    );
+    state.devices.insert(
+      enrollment.clone(),
+      DeviceAuthorization::BrowserEnrollment {
+        paired_at: 1,
+        expires_at: u64::MAX,
+      },
+    );
+    state.devices.insert(
+      expired.clone(),
+      DeviceAuthorization::BrowserSession {
+        paired_at: 1,
+        expires_at: 2,
+      },
+    );
+    write_atomic(&path, &state).unwrap();
+    assert!(!can_manage_runtimes(&path, &native).unwrap());
+    set_runtime_management_enabled(&path, true).unwrap();
+    assert_eq!(
+      read_required::<serde_json::Value>(&path).unwrap()["runtime_management"],
+      true
+    );
+    for key in [&native, &browser] {
+      assert!(can_manage_runtimes(&path, key).unwrap());
+    }
+    for key in [&enrollment, &expired, &unknown] {
+      assert!(!can_manage_runtimes(&path, key).unwrap());
+    }
+    remove_device(&path, &browser).unwrap();
+    assert!(!can_manage_runtimes(&path, &browser).unwrap());
+    set_runtime_management_enabled(&path, false).unwrap();
+    assert!(
+      read_required::<serde_json::Value>(&path)
+        .unwrap()
+        .get("runtime_management")
+        .is_none()
+    );
+    assert!(!can_manage_runtimes(&path, &native).unwrap());
+    assert!(
+      is_authorized(&path, &native).unwrap(),
+      "Runtime opt-out preserves ordinary device access"
+    );
+  }
 
   #[test]
   fn attempts_and_used_steps_survive_reopening_and_device_revocation() {

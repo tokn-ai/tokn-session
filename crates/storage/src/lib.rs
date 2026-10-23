@@ -9,6 +9,13 @@ pub use migration::{
 mod private;
 pub use private::{read_private_json, update_private_json};
 
+/// Hold a private cross-process lease until the returned file is dropped.
+pub fn acquire_private_lock(path: &Path) -> Result<std::fs::File, String> {
+  let parent = path.parent().ok_or("Private lock needs a parent directory")?;
+  private::private_directory(parent)?;
+  private::acquire_lock(path)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionPaths {
   home: PathBuf,

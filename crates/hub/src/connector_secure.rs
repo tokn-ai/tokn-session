@@ -310,6 +310,31 @@ impl Host {
     }
   }
 
+  fn verify_runtime_management(
+    &self,
+    config: &ConnectorConfig,
+    recipient: &str,
+    grant: Option<&SignedGrant>,
+    method: &str,
+    path: &str,
+  ) -> Result<(), String> {
+    if !protocol::runtime_management_route(method, path) {
+      return Ok(());
+    }
+    let HostTrust::PairedDevices(paired) = &self.trust else {
+      return Err("Runtime management is unavailable to legacy grants".into());
+    };
+    if grant.is_some()
+      || !config.allow_control
+      || !crate::onboarding::can_manage_runtimes(&paired.state_file, recipient)?
+    {
+      return Err(
+        "Remote runtime management is disabled on this host; enable it locally in Settings → Agent runtimes".into(),
+      );
+    }
+    Ok(())
+  }
+
   async fn pair(
     &self,
     host_id: &str,
@@ -572,7 +597,19 @@ async fn run_records(
   .await
   .map_err(|_| "Encrypted request body timed out")??;
   host.verify(grant.as_ref(), host_id, &recipient)?;
+  let runtime_access = host.verify_runtime_management(config, &recipient, grant.as_ref(), &method, &path);
   let channel = Mutex::new(channel);
+  if let Err(message) = runtime_access {
+    let _ = send_inner(
+      outgoing,
+      &channel,
+      &InnerMessage::Error {
+        message: message.clone(),
+      },
+    )
+    .await;
+    return Err(message);
+  }
   let window = Semaphore::new(protocol::RESPONSE_WINDOW);
   let result = {
     let response = forward(
@@ -721,7 +758,9 @@ async fn forward_device(
   path: &str,
   body: Vec<u8>,
 ) -> Result<reqwest::Response, String> {
-  if !protocol::allowed_route(method, path, config.allow_control) {
+  // run_records verified the encrypted peer's active device authorization and
+  // both host permissions before it admits a runtime-management path here.
+  if !protocol::allowed_route(method, path, config.allow_control) && !protocol::runtime_management_route(method, path) {
     return Err("Route unavailable or host control is disabled".into());
   }
   if !config.allow_control
@@ -917,6 +956,95 @@ mod tests {
     };
     task.await.unwrap().unwrap();
     payload
+  }
+
+  #[tokio::test]
+  async fn runtime_administration_requires_both_host_permissions_before_forwarding() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = paired_host(directory.path());
+    let device = NoiseIdentity::generate().unwrap();
+    let state_file = config.paired.as_ref().unwrap().state_file.clone();
+    let current = now().unwrap();
+    crate::onboarding::authorize_device(&state_file, &device.public_key(), current / 30, current).unwrap();
+    for (control, management) in [(false, false), (true, false), (false, true)] {
+      config.allow_control = control;
+      crate::onboarding::set_runtime_management_enabled(&state_file, management).unwrap();
+      let (task, incoming, mut frames, mut channel) = open_host(&config, &device).await;
+      incoming
+        .send(
+          channel
+            .encrypt(&InnerMessage::DeviceRequest {
+              method: "POST".into(),
+              path: "/api/v1/start_rpc_runtime".into(),
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+      incoming
+        .send(channel.encrypt(&InnerMessage::RequestEnd {}).unwrap())
+        .await
+        .unwrap();
+      let InnerMessage::Error { message } = read_inner(&mut frames, &mut channel).await else {
+        panic!("Runtime request should fail before any local API request");
+      };
+      assert!(message.contains("Runtime") || message.contains("runtime"));
+      assert!(task.await.unwrap().is_err());
+    }
+    config.allow_control = true;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    config.local_url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
+    let api = tokio::spawn(async move {
+      let app = axum::Router::new().route(
+        "/api/v1/start_rpc_runtime",
+        axum::routing::post(|| async { axum::Json(json!({"connected":true})) }),
+      );
+      axum::serve(listener, app).await.unwrap();
+    });
+    let (task, incoming, mut frames, mut channel) = open_host(&config, &device).await;
+    incoming
+      .send(
+        channel
+          .encrypt(&InnerMessage::DeviceRequest {
+            method: "POST".into(),
+            path: "/api/v1/start_rpc_runtime".into(),
+          })
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+    incoming
+      .send(channel.encrypt(&InnerMessage::RequestEnd {}).unwrap())
+      .await
+      .unwrap();
+    assert!(matches!(
+      read_inner(&mut frames, &mut channel).await,
+      InnerMessage::Response { status: 200, .. }
+    ));
+    let InnerMessage::Chunk { data } = read_inner(&mut frames, &mut channel).await else {
+      panic!("Expected runtime response");
+    };
+    assert_eq!(
+      serde_json::from_slice::<Value>(&protocol::decode(&data, protocol::CHUNK_SIZE).unwrap()).unwrap(),
+      json!({"connected":true})
+    );
+    assert!(matches!(
+      read_inner(&mut frames, &mut channel).await,
+      InnerMessage::End {}
+    ));
+    drop(incoming);
+    task.await.unwrap().unwrap();
+    api.abort();
+    let host = Host::load(&config).unwrap().unwrap();
+    host
+      .verify_runtime_management(&config, &device.public_key(), None, "POST", "/api/v1/start_rpc_runtime")
+      .unwrap();
+    crate::onboarding::set_runtime_management_enabled(&state_file, false).unwrap();
+    assert!(
+      host
+        .verify_runtime_management(&config, &device.public_key(), None, "POST", "/api/v1/start_rpc_runtime")
+        .is_err()
+    );
   }
 
   #[tokio::test]

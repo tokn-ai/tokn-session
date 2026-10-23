@@ -8,6 +8,16 @@ use std::{
 
 const MAX_STATE_BYTES: u64 = 1024 * 1024;
 
+pub(super) struct SessionLease(File);
+
+impl Drop for SessionLease {
+  fn drop(&mut self) {
+    // A concurrent fork can retain this open file description until exec.
+    // Closing our descriptor alone would delay ownership handoff until then.
+    let _ = self.0.unlock();
+  }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct Receipt {
   pub request_id: String,
@@ -204,7 +214,7 @@ impl ReceiptStore {
     .map(|_| ())
   }
 
-  pub fn lease(&self, id: &str) -> Result<File, String> {
+  pub fn lease(&self, id: &str) -> Result<SessionLease, String> {
     validate_uuid(id, "creation request")?;
     let directory = self
       .path
@@ -229,7 +239,7 @@ impl ReceiptStore {
     file
       .try_lock()
       .map_err(|error| format!("This Pi session already has an owning viewer runtime: {error}"))?;
-    Ok(file)
+    Ok(SessionLease(file))
   }
 }
 
@@ -406,6 +416,30 @@ mod tests {
     assert_eq!(restarted[0].status, ManagedSessionStatus::Stopped);
     assert_eq!(restarted[0].revision, original.revision + 1);
     assert!(store.lease(&original.request_id).is_ok());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn releasing_ownership_unlocks_descriptors_inherited_by_another_child() {
+    let directory = tempfile::tempdir().unwrap();
+    let (store, _) = ReceiptStore::new(Some(directory.path().join("managed.json"))).unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let lease = store.lease(&id).unwrap();
+    // Model the shared file description a concurrent fork can retain before
+    // exec closes its inherited descriptors. Keep it open through the handoff.
+    let inherited = lease.0.try_clone().unwrap();
+    assert!(store.lease(&id).is_err());
+    drop(lease);
+    let next = store
+      .lease(&id)
+      .expect("completed ownership must release its lock immediately");
+    drop(inherited);
+    assert!(
+      store.lease(&id).is_err(),
+      "closing the old descriptor must not unlock the new owner"
+    );
+    drop(next);
+    assert!(store.lease(&id).is_ok());
   }
 
   #[test]

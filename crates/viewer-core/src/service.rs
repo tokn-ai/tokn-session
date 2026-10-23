@@ -43,6 +43,7 @@ mod model_projection;
 mod notifications;
 mod question_display;
 mod question_input;
+mod rpc_runtimes;
 mod runtimes;
 mod session_models;
 mod trajectory_state;
@@ -96,6 +97,7 @@ pub struct ViewerService {
   loaded_session_cache: Arc<Mutex<Option<CachedSession>>>,
   input_broker: crate::input::InputBroker,
   interactions: tokn_interaction_core::InteractionService,
+  pub(crate) rpc_runtimes: crate::rpc_runtime::RpcRuntimeManager,
   pub(crate) images: crate::images::ImageStore,
   pub(crate) managed_pi: crate::managed_pi::ManagedPiSessions,
   question_claims: Arc<Mutex<question_input::QuestionClaims>>,
@@ -697,6 +699,13 @@ impl ViewerService {
       .join("viewer/images");
     // An unusable attachment directory must not prevent opening text history.
     // Uploads report the storage error through their own action state.
+    let profiles_path = index_path
+      .as_ref()
+      .parent()
+      .unwrap_or_else(|| Path::new("."))
+      .join("viewer/rpc-runtimes.json");
+    service.rpc_runtimes =
+      crate::rpc_runtime::RpcRuntimeManager::new(Some(profiles_path), service.interactions.clone());
     service.images = crate::images::ImageStore::persistent(image_root.clone())
       .unwrap_or_else(|_| crate::images::ImageStore::configured(image_root));
     Ok(service)
@@ -719,6 +728,7 @@ impl ViewerService {
     // pass, the pass will detect the revision change and ask this UI to read
     // the durable catalog again.
     let observed_index_data_version = session_index.data_version().ok();
+    let interactions = tokn_interaction_core::InteractionService::default();
     let service = Self {
       relay: crate::relay::ViewerRelay::with_index(Some(session_index.clone())),
       indexer_lock: None,
@@ -737,7 +747,8 @@ impl ViewerService {
       #[cfg(test)]
       notification_work_stats: Arc::new(Mutex::new(notifications::NotificationWorkStats::default())),
       input_broker: crate::input::InputBroker::default(),
-      interactions: tokn_interaction_core::InteractionService::default(),
+      rpc_runtimes: crate::rpc_runtime::RpcRuntimeManager::new(None, interactions.clone()),
+      interactions,
       images: crate::images::ImageStore::temporary().expect("temporary image storage should be available"),
       managed_pi: crate::managed_pi::ManagedPiSessions::new(None)
         .unwrap_or_else(crate::managed_pi::ManagedPiSessions::disabled),
