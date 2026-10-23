@@ -91,6 +91,19 @@ impl Drop for HostPairing {
     self.current_code.zeroize();
   }
 }
+#[derive(Clone, Serialize)]
+pub struct RpcRuntimeAccess {
+  pub available: bool,
+  pub enabled: bool,
+  pub reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RpcRuntimeAccessRequest {
+  pub enabled: bool,
+}
+
 struct RunningHost {
   shutdown: CancellationToken,
   task: JoinHandle<()>,
@@ -462,6 +475,31 @@ impl LocalHost {
     }
     Ok(status)
   }
+  /// Runtime administration is a host-local opt-in, independent of pairing.
+  pub async fn rpc_runtime_access(&self) -> Result<RpcRuntimeAccess, String> {
+    let directory = self.storage_path(false).await?;
+    tokio::task::spawn_blocking(move || runtime_access(&directory))
+      .await
+      .map_err(|_| "Runtime access inspection failed")?
+  }
+
+  pub async fn set_rpc_runtime_access(&self, request: RpcRuntimeAccessRequest) -> Result<RpcRuntimeAccess, String> {
+    let directory = self.storage_path(false).await?;
+    tokio::task::spawn_blocking(move || {
+      let current = runtime_access(&directory)?;
+      if !current.available {
+        return Err(current.reason.unwrap_or_else(|| "Configure hosting first".into()));
+      }
+      tokn_session_hub::onboarding::set_runtime_management_enabled(
+        &directory.join("host-access.json"),
+        request.enabled,
+      )?;
+      runtime_access(&directory)
+    })
+    .await
+    .map_err(|_| "Runtime access update failed")?
+  }
+
   pub async fn shutdown(&self, app: &AppHandle) {
     self.closed.store(true, Ordering::Release);
     self.closing.cancel();
@@ -474,6 +512,22 @@ impl LocalHost {
       .map_err(|_| "Pairing display task failed")?
   }
 }
+fn runtime_access(directory: &std::path::Path) -> Result<RpcRuntimeAccess, String> {
+  let Some(profile) = HostProfile::load(&directory.join("host.json"))? else {
+    return Ok(RpcRuntimeAccess {
+      available: false,
+      enabled: false,
+      reason: Some("Set up Host this computer before enabling remote runtime management".into()),
+    });
+  };
+  Ok(RpcRuntimeAccess {
+    available: true,
+    enabled: tokn_session_hub::onboarding::runtime_management_enabled(&directory.join("host-access.json"))?,
+    reason: (!profile.allow_control)
+      .then(|| "Enable agent input in hosting settings to allow remote runtime management".into()),
+  })
+}
+
 fn publish(app: &AppHandle, state: &Mutex<HostStatus>, status: HostStatus) {
   *state.lock().unwrap() = status.clone();
   let _ = app.emit("local-host-status", status);
@@ -660,6 +714,22 @@ fn pairing(path: &std::path::Path) -> Result<HostPairing, String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn runtime_access_inspection_requires_existing_host_setup() {
+    let directory = tempfile::tempdir().unwrap();
+    let host = LocalHost::new(directory.path().to_owned());
+    let access = host.rpc_runtime_access().await.unwrap();
+    assert!(!access.available);
+    assert!(!access.enabled);
+    assert!(
+      host
+        .set_rpc_runtime_access(RpcRuntimeAccessRequest { enabled: true })
+        .await
+        .is_err()
+    );
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+  }
 
   fn setup(path: &std::path::Path) -> host_setup::PreparedHost {
     host_setup::prepare_host(HostOptions {

@@ -35,8 +35,40 @@ import type {
   RegisteredProject, ProjectWorkspaceSnapshot, RegisterProjectRequest, CreateProjectSessionRequest,
   ManagedSessionRequest, ManagedSessionSnapshot, ManagedSessionDialogResponse,
   RuntimeInventory, RuntimeRestartRequest, RuntimeRestartResponse,
+  RpcRuntimeProfilesSnapshot, SaveRpcRuntimeProfileRequest, DeleteRpcRuntimeProfileRequest,
+  RpcRuntimeProfileInput, RpcRuntimeProfileValidation, RpcRuntimeInventory, RpcRuntimeInfo,
+  StartRpcRuntimeRequest, CloseRpcRuntimeRequest, CloseRpcRuntimeResponse,
+  RpcRuntimeAccess,
   SessionModelStatusRequest, SessionModelStatus, ListSessionModelsResponse,
 } from "./types";
+
+export function getRpcRuntimeProfiles(send: CommandInvoker = invoke): Promise<RpcRuntimeProfilesSnapshot> {
+  return send("get_rpc_runtime_profiles");
+}
+export function saveRpcRuntimeProfile(request: SaveRpcRuntimeProfileRequest, send: CommandInvoker = invoke): Promise<RpcRuntimeProfilesSnapshot> {
+  return send("save_rpc_runtime_profile", { request });
+}
+export function deleteRpcRuntimeProfile(request: DeleteRpcRuntimeProfileRequest, send: CommandInvoker = invoke): Promise<RpcRuntimeProfilesSnapshot> {
+  return send("delete_rpc_runtime_profile", { request });
+}
+export function validateRpcRuntimeProfile(request: RpcRuntimeProfileInput, send: CommandInvoker = invoke): Promise<RpcRuntimeProfileValidation> {
+  return send("validate_rpc_runtime_profile", { request });
+}
+export function listRpcRuntimes(send: CommandInvoker = invoke): Promise<RpcRuntimeInventory> {
+  return send("list_rpc_runtimes");
+}
+export function startRpcRuntime(request: StartRpcRuntimeRequest, send: CommandInvoker = invoke): Promise<RpcRuntimeInfo> {
+  return send("start_rpc_runtime", { request });
+}
+export function closeRpcRuntime(request: CloseRpcRuntimeRequest, send: CommandInvoker = invoke): Promise<CloseRpcRuntimeResponse> {
+  return send("close_rpc_runtime", { request });
+}
+export function getRpcRuntimeAccess(): Promise<RpcRuntimeAccess> {
+  return viewerRuntimeCommand("get_rpc_runtime_access");
+}
+export function setRpcRuntimeAccess(request: { enabled: boolean }): Promise<RpcRuntimeAccess> {
+  return viewerRuntimeCommand("set_rpc_runtime_access", { request });
+}
 
 export function listRegisteredProjects(send: CommandInvoker = invoke): Promise<ProjectWorkspaceSnapshot> {
   return send("list_registered_projects");

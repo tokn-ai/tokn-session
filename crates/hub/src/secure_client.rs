@@ -327,7 +327,9 @@ async fn proxy(State(state): State<ClientState>, request: Request) -> Response {
     .map(|path| path.as_str())
     .unwrap_or_default()
     .to_owned();
-  if !protocol::allowed_route(&method, &path, state.allow_control()) {
+  let runtime_route =
+    matches!(&state.authorization, Authorization::Device { .. }) && protocol::runtime_management_route(&method, &path);
+  if !protocol::allowed_route(&method, &path, state.allow_control()) && !runtime_route {
     return error(StatusCode::FORBIDDEN, "This viewer route is unavailable");
   }
   if let Err(message) = state.verify_grant() {

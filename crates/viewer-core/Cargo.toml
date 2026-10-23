@@ -12,6 +12,10 @@ license.workspace = true
 tokn-interaction-core.workspace = true
 tokn-pi-rpc-protocol.workspace = true
 tokn-pi-adapter.workspace = true
+tokn-codex-adapter.workspace = true
+tokn-opencode-adapter.workspace = true
+tokn-dsh-adapter.workspace = true
+url = "2"
 chrono.workspace = true
 dirs.workspace = true
 serde.workspace = true
@@ -47,5 +51,7 @@ libc = "0.2"
 notify.workspace = true
 
 [dev-dependencies]
+futures-util = "0.3"
+tokio-tungstenite = "0.26"
 tokio = { workspace = true, features = ["test-util"] }
 zstd = "0.13"

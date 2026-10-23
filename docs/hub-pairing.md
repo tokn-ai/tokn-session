@@ -218,6 +218,29 @@ tokn-session-hub connect --allow-control
 tokn-session-hub connect --allow-control=false
 ```
 
+Remote runtime configuration and process lifecycle require a separate host-local
+opt-in in Settings → Agent runtimes, or through the host CLI:
+
+```sh
+tokn-session-hub runtime-management          # Inspect; does not create hosting state
+tokn-session-hub runtime-management --enable
+tokn-session-hub runtime-management --disable
+```
+
+The setting defaults to disabled and lives in `host-access.json`; `--state-dir`
+selects another host bundle. It also requires `--allow-control` and an active
+paired app or passkey-authenticated browser session. Changing it takes effect
+for subsequent requests without restarting the connector. Browser enrollment,
+session shares, legacy signed grants, and trusted-Hub plaintext forwarding never
+gain runtime administration. Remote clients cannot enable their own access.
+Update the host connector before enabling this setting; older connectors reject
+the new enabled trust field rather than silently ignoring the permission.
+An administrator can edit executable paths, environment variables, and RPC
+endpoints on the selected host, so enabling this gives paired clients process
+administration. Profile reads redact credential and environment values; clients
+can replace or clear them. A direct viewer API token has full administrator
+access and must be protected accordingly.
+
 Use `--viewer-url` for another numeric loopback API origin, and provide
 `TOKN_VIEWER_TOKEN` if the API requires it. That local token is not saved in
 configuration or transmitted to the Hub or remote device.

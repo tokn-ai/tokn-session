@@ -109,7 +109,7 @@ impl ViewerService {
   }
 
   pub async fn shutdown_managed_sessions(&self) {
-    let _ = self.interactions.shutdown().await;
+    self.rpc_runtimes.shutdown().await;
     self.managed_pi.shutdown().await;
   }
 

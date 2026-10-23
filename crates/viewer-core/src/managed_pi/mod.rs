@@ -19,7 +19,7 @@ use crate::{
     ManagedSessionStatus, RegisteredProject,
   },
 };
-use persistence::{Receipt, ReceiptStore};
+use persistence::{Receipt, ReceiptStore, SessionLease};
 use sha2::{Digest, Sha256};
 use std::{
   collections::HashMap,
@@ -687,7 +687,7 @@ impl Inner {
   }
 }
 
-fn prepare_start(store: &ReceiptStore, validation: Receipt, resume: bool) -> Result<(std::fs::File, Receipt), String> {
+fn prepare_start(store: &ReceiptStore, validation: Receipt, resume: bool) -> Result<(SessionLease, Receipt), String> {
   let lease = store.lease(&validation.request_id)?;
   let latest = store.latest(&validation.request_id)?.unwrap_or(validation.clone());
   if latest.fingerprint != validation.fingerprint

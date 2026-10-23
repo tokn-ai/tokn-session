@@ -10,6 +10,7 @@ pub(crate) mod models;
 pub(crate) mod preferences;
 pub(crate) mod projects;
 pub(crate) mod relay;
+pub(crate) mod rpc_runtimes;
 pub(crate) mod runtimes;
 pub(crate) mod sessions;
 pub(crate) mod settings;

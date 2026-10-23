@@ -148,10 +148,49 @@ async fn command(
       | "upload_image_chunk"
       | "get_session_model_status"
       | "list_session_models"
+      | "get_rpc_runtime_profiles"
+      | "validate_rpc_runtime_profile"
+      | "save_rpc_runtime_profile"
+      | "delete_rpc_runtime_profile"
+      | "list_rpc_runtimes"
+      | "start_rpc_runtime"
+      | "close_rpc_runtime"
   ) {
     let _permit = permit;
     let request = payload.get("request").cloned().unwrap_or_else(|| json!({}));
+    macro_rules! rpc_call {
+      ($method:ident) => {{
+        let request =
+          serde_json::from_value(request).map_err(|_| error(StatusCode::BAD_REQUEST, "Invalid runtime request"))?;
+        serde_json::to_value(
+          state
+            .service
+            .$method(request)
+            .await
+            .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
+        )
+      }};
+    }
     let response = match command.as_str() {
+      "get_rpc_runtime_profiles" => serde_json::to_value(
+        state
+          .service
+          .get_rpc_runtime_profiles()
+          .await
+          .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
+      ),
+      "validate_rpc_runtime_profile" => rpc_call!(validate_rpc_runtime_profile),
+      "save_rpc_runtime_profile" => rpc_call!(save_rpc_runtime_profile),
+      "delete_rpc_runtime_profile" => rpc_call!(delete_rpc_runtime_profile),
+      "list_rpc_runtimes" => serde_json::to_value(
+        state
+          .service
+          .list_rpc_runtimes()
+          .await
+          .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
+      ),
+      "start_rpc_runtime" => rpc_call!(start_rpc_runtime),
+      "close_rpc_runtime" => rpc_call!(close_rpc_runtime),
       "get_session_model_status" => {
         let request = serde_json::from_value(request).map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
         serde_json::to_value(
@@ -432,6 +471,93 @@ mod tests {
       .await
       .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+  }
+
+  #[tokio::test]
+  async fn runtime_configuration_requires_administrator_auth_and_redacts_credentials() {
+    let directory = tempfile::tempdir().unwrap();
+    let service = ViewerService::native(directory.path().join("index.sqlite")).unwrap();
+    let (events, _) = broadcast::channel(16);
+    let app = router(
+      service,
+      events,
+      Some("administrator-token".into()),
+      vec![],
+      CancellationToken::new(),
+    );
+    let request = |command: &str, payload: Value, authenticated: bool| {
+      let mut request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/v1/{command}"))
+        .header(header::CONTENT_TYPE, "application/json");
+      if authenticated {
+        request = request.header(header::AUTHORIZATION, "Bearer administrator-token");
+      }
+      request.body(Body::from(payload.to_string())).unwrap()
+    };
+    for command in [
+      "get_rpc_runtime_profiles",
+      "validate_rpc_runtime_profile",
+      "save_rpc_runtime_profile",
+      "delete_rpc_runtime_profile",
+      "list_rpc_runtimes",
+      "start_rpc_runtime",
+      "close_rpc_runtime",
+    ] {
+      let response = app.clone().oneshot(request(command, json!({}), false)).await.unwrap();
+      assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{command}");
+    }
+    let response = app
+      .clone()
+      .oneshot(request(
+        "save_rpc_runtime_profile",
+        json!({"request":{
+          "expected_revision":0,
+          "profile":{
+            "profile_id":null, "name":"Codex endpoint", "provider":"codex", "mode":"attached",
+            "executable":null, "arguments":[], "working_directory":null,
+            "endpoint":"wss://rpc.example.test/", "environment":null,
+            "credentials":{"type":"bearer", "token":"private-runtime-credential"}, "is_default":true
+          }
+        }}),
+        true,
+      ))
+      .await
+      .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let saved: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(saved["profiles"][0]["credential_kind"], "bearer");
+    assert!(
+      !std::str::from_utf8(&body)
+        .unwrap()
+        .contains("private-runtime-credential")
+    );
+    let response = app
+      .clone()
+      .oneshot(request("get_rpc_runtime_profiles", json!({}), true))
+      .await
+      .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), saved);
+    let response = app
+      .oneshot(request(
+        "validate_rpc_runtime_profile",
+        json!({"request":{
+          "credentials":{"type":"private-runtime-credential"}
+        }}),
+        true,
+      ))
+      .await
+      .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    assert!(
+      !std::str::from_utf8(&body)
+        .unwrap()
+        .contains("private-runtime-credential")
+    );
   }
 
   #[tokio::test]

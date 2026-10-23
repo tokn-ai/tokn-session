@@ -563,7 +563,7 @@ impl Connection {
     }
     let method = if command == "health" { "GET" } else { "POST" };
     let path = format!("/api/v1/{command}");
-    if !protocol::allowed_route(method, &path, true) {
+    if !protocol::allowed_route(method, &path, true) && !protocol::runtime_management_route(method, &path) {
       return Err("Viewer route is unavailable".into());
     }
     let body = if method == "GET" {

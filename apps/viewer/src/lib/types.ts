@@ -475,6 +475,64 @@ export interface RuntimeInventory { version: 1; runtimes: RuntimeInfo[]; }
 export interface RuntimeRestartRequest { request_id: string; runtime_id: string; expected_instance_id: string; }
 export interface RuntimeRestartResponse { request_id: string; runtime_id: string; message: string; }
 
+export type RpcProvider = "codex" | "pi" | "open_code" | "dsh";
+export type RpcRuntimeMode = "managed" | "attached";
+export interface RpcRuntimeProfile {
+  profile_id: string;
+  name: string;
+  provider: RpcProvider;
+  mode: RpcRuntimeMode;
+  executable: string | null;
+  arguments: string[];
+  working_directory: string | null;
+  endpoint: string | null;
+  environment_keys: string[];
+  credential_kind: "bearer" | "basic" | null;
+  is_default: boolean;
+}
+export type RpcRuntimeCredentials = { type: "none" } | { type: "bearer"; token: string } | { type: "basic"; username: string; password: string };
+export interface RpcRuntimeProfileInput {
+  profile_id: string | null;
+  name: string;
+  provider: RpcProvider;
+  mode: RpcRuntimeMode;
+  executable: string | null;
+  arguments: string[];
+  working_directory: string | null;
+  endpoint: string | null;
+  environment: Record<string, string> | null;
+  credentials: RpcRuntimeCredentials | null;
+  is_default: boolean;
+}
+export interface RpcRuntimeProfilesSnapshot { version: 1; revision: number; profiles: RpcRuntimeProfile[]; }
+export interface SaveRpcRuntimeProfileRequest { expected_revision: number; profile: RpcRuntimeProfileInput; }
+export interface DeleteRpcRuntimeProfileRequest { expected_revision: number; profile_id: string; }
+export interface RpcRuntimeProfileValidation {
+  valid: boolean;
+  issues: { field: string; message: string }[];
+  executable_exists: boolean | null;
+  working_directory_exists: boolean | null;
+}
+export type RpcOperation = "metadata" | "state" | "models" | "message" | "steer" | "queue" | "cancel_turn" | "respond" | "pending_interactions";
+export interface RpcRuntimeInfo {
+  runtime_id: string;
+  instance_id: string;
+  profile_id: string;
+  profile_revision: number;
+  name: string;
+  provider: RpcProvider;
+  ownership: "managed" | "attached";
+  status: "connected" | "disconnected" | "recovery_required" | "closing" | "cleanup_failed";
+  capabilities: { operations: Partial<Record<RpcOperation, { supported: boolean; reason: string | null }>>; atomic_model_on_send: boolean };
+  session_count: number;
+  last_error: string | null;
+}
+export interface RpcRuntimeInventory { version: 1; runtimes: RpcRuntimeInfo[]; }
+export interface StartRpcRuntimeRequest { request_id: string; profile_id: string; expected_revision: number; }
+export interface CloseRpcRuntimeRequest { request_id: string; runtime_id: string; expected_instance_id: string; }
+export interface CloseRpcRuntimeResponse { runtime_id: string; instance_id: string; closed: true; }
+export interface RpcRuntimeAccess { available: boolean; enabled: boolean; reason: string | null; }
+
 /**
  * One in-memory operational snapshot for the durable session index.
  *
