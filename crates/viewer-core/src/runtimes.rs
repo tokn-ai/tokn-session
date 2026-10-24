@@ -55,13 +55,7 @@ pub struct RuntimeInventory {
   pub runtimes: Vec<RuntimeInfo>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeRestartRequest {
-  pub request_id: String,
-  pub runtime_id: String,
-  pub expected_instance_id: String,
-}
+pub use tokn_interaction_core::managed_sessions::RuntimeRestartRequest;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RuntimeRestartResponse {

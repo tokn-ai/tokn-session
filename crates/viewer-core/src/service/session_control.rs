@@ -14,7 +14,7 @@ impl ViewerService {
     let canonical = encode_session_key(&locator)?;
     // A just-created Pi history is already verified by its durable owner, but
     // may precede the provider-wide catalog sentinel's first commit.
-    let input = if locator.provider == ViewerProvider::Pi && self.sessions.pi.input_status(&canonical).is_some() {
+    let input = if locator.provider == ViewerProvider::Pi && self.sessions.managed.input_status(&canonical).is_some() {
       if !locator.source_path.is_absolute() {
         return Err("Managed session history must have an absolute path".into());
       }
@@ -72,7 +72,7 @@ impl ViewerService {
       transport,
       can_select: target.input.provider == ViewerProvider::Codex,
       can_cancel: transport == SessionTransport::Rpc
-        && (binding.is_some() || self.sessions.pi.input_status(&target.session_key).is_some()),
+        && (binding.is_some() || self.sessions.managed.input_status(&target.session_key).is_some()),
       available: readiness.is_ok(),
       message: if let Err(error) = readiness {
         error.message

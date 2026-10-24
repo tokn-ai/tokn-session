@@ -32,14 +32,27 @@ retaining inherited output pipes cannot keep a stopped session alive. Hosts can
 distinguish a confirmed successful process exit from a transport/protocol failure
 with `exited_successfully`; later cleanup never changes that classification.
 
-The supervised host retains business continuations, durable admission receipts,
-model-on-send policy, dialog replacement/validation, dialog-aware workflow
-deadlines, and idle retirement. Its typed dialog replies perform no new state
-preflight. Generic adapter dialog expiry and receipts do not compete with this
-exclusive host mode. A successful write confirms transport delivery, not native
-consumption, and uncertain writes must not be replayed. The common interaction
-API keeps its existing capability limits; supervised access does not claim an
-atomic model mutation that native Pi cannot guarantee.
+`managed::PiSessionDriver` plugs these native workflows into interaction-core's
+shared `ManagedSessions` manager. The adapter owns fresh state/catalog admission,
+model setter/readback, busy draft selection handling, extension dialogs,
+dialog-aware deadlines, turn failure/retry/compaction mapping, and native idle
+eligibility. The core owns durable creation receipts, bounded message receipts,
+admission gates, process and native-session leases, restart/shutdown ordering,
+and idle deadlines.
+History identity is verified by the Pi source crate before the host maps it to
+an opaque session key. The driver imports no viewer types and never decodes
+presentation keys.
+
+The native `bridge` module also supports explicit attachment to the Pi input
+extension using a private descriptor and authenticated Unix socket. Its status,
+models, images and admission envelopes use the same common managed DTOs.
+
+Typed dialog replies perform no new state preflight. Generic adapter dialog
+expiry and receipts do not compete with exclusive supervised workflows. A
+successful write confirms transport delivery, not native consumption, and
+uncertain writes must not be replayed. The common interaction API keeps its
+existing capability limits; supervised workflows do not claim an atomic model
+mutation that native Pi cannot guarantee.
 
 All managed launches preserve explicit `NODE_EXTRA_CA_CERTS`, including an empty
 value. When it is absent, a configured `SSL_CERT_FILE` supplies Node's CA bundle;

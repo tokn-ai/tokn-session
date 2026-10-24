@@ -16,7 +16,7 @@ impl ViewerService {
     };
     let resume_required = self
       .sessions
-      .pi
+      .managed
       .input_status(&target.session_key)
       .is_some_and(|status| status.is_ok_and(|status| status.resume_required))
       || (target.input.provider != ViewerProvider::Pi

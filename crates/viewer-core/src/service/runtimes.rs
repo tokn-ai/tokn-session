@@ -7,7 +7,7 @@ impl ViewerService {
       return Vec::new();
     }
     let mut runtimes = vec![self.relay.runtime_info()];
-    let mut pi = self.sessions.pi.list_runtimes().await;
+    let mut pi = self.sessions.managed.list_runtimes().await;
     if let Err(reason) = self.check_managed_workspace() {
       for runtime in &mut pi {
         runtime.can_restart = false;
@@ -27,7 +27,7 @@ impl ViewerService {
       self.relay.restart_runtime(&request.expected_instance_id).await
     } else if request.runtime_id.starts_with("pi:") {
       self.check_managed_workspace()?;
-      self.sessions.pi.restart_runtime(&request).await
+      self.sessions.managed.restart_runtime(&request).await
     } else {
       Err("Unknown viewer runtime".into())
     }

@@ -154,7 +154,7 @@ impl ViewerRuntime {
         let _ = emit(&rpc_events, "rpc-runtimes-changed", serde_json::json!({}));
       }
     }));
-    let mut managed_changes = service.sessions.pi.subscribe();
+    let mut managed_changes = service.sessions.managed.subscribe();
     let managed_service = service.clone();
     let managed_events = events.clone();
     tasks.push(tokio::spawn(async move {

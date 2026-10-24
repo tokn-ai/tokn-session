@@ -7,7 +7,7 @@ pub mod images;
 mod index_queries;
 mod indexer;
 mod input;
-pub(crate) mod managed_pi;
+pub(crate) mod managed_sessions;
 pub mod model;
 pub mod models;
 pub mod projects;

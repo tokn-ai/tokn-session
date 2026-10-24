@@ -402,34 +402,9 @@ pub struct SessionInputStatus {
   pub image_mime_types: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct SubmitSessionInputRequest {
-  pub session_key: String,
-  pub request_id: String,
-  pub text: String,
-  #[serde(default)]
-  pub image_ids: Vec<String>,
-  #[serde(default)]
-  pub model_selection: Option<crate::models::MessageModelSelection>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InputDeliveryStatus {
-  Accepted,
-  NotSent,
-  Unknown,
-  Pending,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct SubmitSessionInputResponse {
-  pub request_id: String,
-  pub status: InputDeliveryStatus,
-  pub message: String,
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub model_result: Option<crate::models::MessageModelResult>,
-}
+pub use tokn_interaction_core::admission::{
+  InputDeliveryStatus, SubmitSessionInputRequest, SubmitSessionInputResponse,
+};
 
 #[derive(Debug, Serialize)]
 pub struct EventPage {

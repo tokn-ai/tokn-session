@@ -1,30 +1,21 @@
-use super::{
-  Inner, NativeSessionLease, WorkerState,
-  persistence::{Receipt, SessionLease, validate_session},
-  protocol::{RpcState, parse_extension_dialog, parse_state},
-};
-use crate::{
-  images::ResolvedImage,
-  input::{Admission, DeliveryError},
-  workspace::{ManagedSessionDialogResponse, ManagedSessionStatus},
-};
+//! Pi-native managed workflow driver. Generic ownership, receipts, and
+//! lifecycle persistence live in `tokn_interaction_core::managed_sessions`.
+use super::protocol::{RpcState, parse_extension_dialog, parse_state, pi_choices};
+use crate::{EndpointOptions, LaunchOptions, PiAdapter, SupervisedSession};
 use serde_json::Value;
-use std::{collections::HashMap, path::PathBuf, sync::Weak, time::Duration};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 use tokio::{
   sync::{OwnedMutexGuard, mpsc, oneshot, watch},
   time::{Instant, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
-use tokn_pi_adapter::{EndpointOptions, LaunchOptions, SupervisedSession};
+use tokn_interaction_core::managed_sessions::*;
 use tokn_pi_rpc_protocol as wire;
 
 mod message_input;
 mod model_control;
-use crate::input::ModelInputDisposition;
-use crate::models::{MessageModelResult, MessageModelSelection};
 use message_input::{MessagePending, PreparedMessage};
 use model_control::ModelPending;
-pub(super) use model_control::{ModelOperation, ModelResult};
 
 const RPC_DEADLINE: Duration = Duration::from_secs(15);
 // Prompt preflight may legitimately await extension input or compaction before
@@ -33,19 +24,6 @@ const PROMPT_DEADLINE: Duration = Duration::from_secs(300);
 const WRITE_DEADLINE: Duration = Duration::from_secs(3);
 const DIALOG_DEADLINE: Duration = Duration::from_secs(120);
 const MAX_TURN_ERROR_BYTES: usize = 2048;
-
-pub(super) enum Command {
-  Model(ModelOperation, oneshot::Sender<Result<ModelResult, DeliveryError>>),
-  Prompt {
-    request_id: String,
-    text: String,
-    images: Vec<ResolvedImage>,
-    selection: Option<MessageModelSelection>,
-    reply: oneshot::Sender<Result<Admission, DeliveryError>>,
-  },
-  Abort(oneshot::Sender<Result<(), String>>),
-  Dialog(ManagedSessionDialogResponse, oneshot::Sender<Result<(), String>>),
-}
 
 enum PendingKind {
   Model(ModelPending),
@@ -68,25 +46,23 @@ struct Pending {
   kind: PendingKind,
 }
 
-pub(super) async fn run(
-  inner: Weak<Inner>,
-  lease: SessionLease,
-  native_lease: Option<NativeSessionLease>,
-  executable: PathBuf,
-  receipt: Receipt,
-  generation: u64,
-  prompt: Option<(String, Vec<ResolvedImage>)>,
-  resume: bool,
-  mut commands: mpsc::Receiver<Command>,
-  worker_state: watch::Sender<WorkerState>,
-  termination: CancellationToken,
-) {
-  let id = receipt.request_id.clone();
+pub(super) async fn run(executable: PathBuf, worker: ManagedWorker) {
+  let ManagedWorker {
+    host,
+    lease,
+    native_lease,
+    receipt,
+    prompt,
+    resume,
+    mut commands,
+    worker_state,
+    termination,
+  } = worker;
+  let lifecycle = ManagedWorkerLifecycle::new(host.clone(), lease, native_lease.clone(), worker_state.clone());
   let mut actor = match Actor::spawn(
-    inner.clone(),
+    host.clone(),
     executable,
     receipt,
-    generation,
     prompt,
     resume,
     worker_state.clone(),
@@ -97,27 +73,18 @@ pub(super) async fn run(
   {
     Ok(actor) => actor,
     Err(error) => {
-      commands.close();
-      worker_state.send_replace(WorkerState::Closing(Some(error.clone())));
-      let _retirement = retirement_gate(&inner, &id).await;
-      reject_queued_commands(&mut commands, &error);
-      let finished = finish(&inner, &id, generation, Some(error.clone())).await;
-      release_native_ownership(&inner, &id, generation);
+      lifecycle.close_admission(&mut commands, Some(error.clone()), &error);
       drop(native_lease);
-      drop(lease);
-      worker_state.send_replace(WorkerState::Stopped(Some(error)));
-      publish_finished(&inner, finished);
+      lifecycle.complete(Some(error), true, None, None).await;
       return;
     }
   };
   let result = actor.run(&mut commands).await;
-  commands.close();
-  worker_state.send_replace(WorkerState::Closing(result.as_ref().err().cloned()));
-  // Model controls hold the admission gate through their correlated reply.
-  // Wake them before cleanup tries to acquire that same gate.
-  reject_queued_commands(&mut commands, "Pi stopped before receiving the message");
-  // Input admission now holds this gate through preflight and its native
-  // acknowledgement. Wake all request owners before cleanup acquires it.
+  lifecycle.close_admission(
+    &mut commands,
+    result.as_ref().err().cloned(),
+    "Pi stopped before receiving the message",
+  );
   for (_, pending) in actor.pending.drain() {
     match pending.kind {
       PendingKind::Prompt {
@@ -141,44 +108,29 @@ pub(super) async fn run(
       _ => {}
     }
   }
-  // Startup waiters were woken through WorkerState::Closing above.
   if actor.retirement.is_none() {
-    actor.retirement = retirement_gate(&inner, &id).await;
+    actor.retirement = host.retirement_gate().await;
   }
-  // PiAdapter owns stdin, the child, stderr, and bounded cleanup. Keep the
-  // session lease until cleanup and final durable metadata both complete.
+  // Retain both ownership leases until transport cleanup and durable final
+  // metadata are complete, then publish the stopped observation.
   let cleanup = actor.session.close().await;
   let cleanup_confirmed = cleanup.is_ok();
   let error = result.err().or_else(|| cleanup.err().map(|error| error.to_string()));
   let error = error.map(|error| actor.exit_message(error));
   let stopped = actor.stop_reply.take();
-  // Keep the per-session lease until its final durable revision is visible.
-  // Otherwise a new owner could resume from the previous revision while this
-  // actor is still publishing its terminal metadata.
-  let finished = finish(&inner, &id, generation, error.clone()).await;
   let retirement = actor.retirement.take();
-  if cleanup_confirmed {
-    release_native_ownership(&inner, &id, generation);
-  }
   drop(actor);
   drop(native_lease);
-  drop(lease);
-  worker_state.send_replace(WorkerState::Stopped(error));
-  publish_finished(&inner, finished);
-  drop(retirement);
-  if let Some(reply) = stopped {
-    let _ = reply.send(Ok(()));
-  }
+  lifecycle.complete(error, cleanup_confirmed, retirement, stopped).await;
 }
 
 struct Actor {
-  inner: Weak<Inner>,
+  host: ManagedHostContext,
   receipt: Receipt,
-  generation: u64,
   session: SupervisedSession,
-  native_lease: Option<NativeSessionLease>,
+  native_lease: Option<tokn_interaction_core::session_ownership::SessionLease>,
   pending: HashMap<String, Pending>,
-  recent: HashMap<String, (String, Option<Result<Admission, DeliveryError>>)>,
+  recent: ManagedMessageReceipts,
   initial_prompt: Option<(String, Vec<ResolvedImage>)>,
   state: Option<RpcState>,
   model_revision: u64,
@@ -191,7 +143,7 @@ struct Actor {
   awaiting_new_turn: bool,
   stop_requested: bool,
   worker_state: watch::Sender<WorkerState>,
-  idle_since: Option<Instant>,
+  idle_policy: ManagedIdlePolicy,
   idle_probe: bool,
   retirement: Option<OwnedMutexGuard<()>>,
   termination: CancellationToken,
@@ -199,39 +151,25 @@ struct Actor {
 
 impl Actor {
   async fn spawn(
-    inner: Weak<Inner>,
+    host: ManagedHostContext,
     executable: PathBuf,
     receipt: Receipt,
-    generation: u64,
     prompt: Option<(String, Vec<ResolvedImage>)>,
     resume: bool,
     worker_state: watch::Sender<WorkerState>,
     termination: CancellationToken,
-    native_lease: Option<NativeSessionLease>,
+    native_lease: Option<tokn_interaction_core::session_ownership::SessionLease>,
   ) -> Result<Self, String> {
-    if inner
-      .upgrade()
-      .is_none_or(|inner| inner.shutting_down.load(std::sync::atomic::Ordering::Acquire))
-    {
+    if host.is_shutting_down() {
       return Err("Managed Pi runtime is shutting down".into());
     }
-    let instance_id = inner
-      .upgrade()
-      .and_then(|inner| {
-        inner
-          .records
-          .lock()
-          .unwrap()
-          .get(&receipt.request_id)
-          .map(|record| record.instance_id.clone())
-      })
-      .ok_or("Managed Pi runtime has stopped")?;
+    let instance_id = host.instance_id().ok_or("Managed Pi runtime has stopped")?;
     let mut options = EndpointOptions::new(format!("pi:{}", receipt.request_id));
     options.instance_id = instance_id;
     options.expected_session_id = receipt.session_id.clone();
     options.request_timeout = RPC_DEADLINE;
     options.prompt_timeout = PROMPT_DEADLINE;
-    let session = tokn_pi_adapter::PiAdapter::spawn_supervised(
+    let session = PiAdapter::spawn_supervised(
       options,
       LaunchOptions {
         executable,
@@ -245,30 +183,15 @@ impl Actor {
     .map_err(|error| {
       format!("Could not start Pi: {error}. Install Pi or set TOKN_SESSION_PI_EXECUTABLE to its executable path.")
     })?;
-    if let Some(owner) = inner.upgrade() {
-      let snapshot = {
-        let mut records = owner.records.lock().unwrap();
-        records
-          .get_mut(&receipt.request_id)
-          .filter(|record| record.generation == generation)
-          .map(|record| {
-            record.worker_pid = session.pid();
-            record.started_at_ms = Some(crate::runtimes::now_ms());
-            record.receipt.snapshot()
-          })
-      };
-      if let Some(snapshot) = snapshot {
-        let _ = owner.events.send(snapshot);
-      }
-    }
+    host.worker_started(session.pid());
+    let idle_policy = ManagedIdlePolicy::new(host.idle_timeout());
     Ok(Self {
-      inner,
+      host,
       receipt,
-      generation,
       session,
       native_lease,
       pending: HashMap::new(),
-      recent: HashMap::new(),
+      recent: ManagedMessageReceipts::default(),
       initial_prompt: prompt,
       state: None,
       model_revision: 0,
@@ -281,7 +204,7 @@ impl Actor {
       awaiting_new_turn: false,
       stop_requested: false,
       worker_state,
-      idle_since: None,
+      idle_policy,
       idle_probe: false,
       retirement: None,
       termination,
@@ -289,20 +212,11 @@ impl Actor {
   }
 
   async fn run(&mut self, commands: &mut mpsc::Receiver<Command>) -> Result<(), String> {
-    if self
-      .inner
-      .upgrade()
-      .is_none_or(|inner| inner.shutting_down.load(std::sync::atomic::Ordering::Acquire))
-    {
+    if self.host.is_shutting_down() {
       return Ok(());
     }
     self.request_state(true).await?;
-    let mut shutdown = self
-      .inner
-      .upgrade()
-      .ok_or("Managed Pi runtime has stopped")?
-      .shutdown
-      .subscribe();
+    let mut shutdown = self.host.shutdown()?;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
@@ -327,7 +241,7 @@ impl Actor {
           None => return Err("Pi RPC reader stopped".into()),
         },
         command = commands.recv() => {
-          self.idle_since = None;
+          self.idle_policy.reset();
           self.idle_probe = false;
           match command {
           Some(Command::Model(operation, reply)) => {
@@ -335,7 +249,7 @@ impl Actor {
             else { self.send(wire::Command::GetState, PendingKind::Model(ModelPending::new(operation, reply))).await?; }
           }
           Some(Command::Prompt {request_id, text, images, selection, reply}) => {
-            if self.termination.is_cancelled() || self.stop_requested || self.inner.upgrade().is_none_or(|inner| inner.shutting_down.load(std::sync::atomic::Ordering::Acquire)) {
+            if self.termination.is_cancelled() || self.stop_requested || self.host.is_shutting_down() {
               let _ = reply.send(Err(DeliveryError::not_sent("Managed Pi runtime is stopping")));
             } else {
               self.begin_message(MessagePending::new(request_id, text, images, selection, reply)).await?;
@@ -451,9 +365,7 @@ impl Actor {
               let failure = DeliveryError::not_sent(error.clone());
               Err(model_result.map_or(failure.clone(), |result| failure.with_model_result(result)))
             };
-            if let Some(recent) = self.recent.get_mut(&request_id) {
-              recent.1 = Some(result.clone());
-            }
+            self.recent.complete(&request_id, result.clone());
             if let Some(reply) = reply {
               let _ = reply.send(result);
             }
@@ -589,34 +501,12 @@ impl Actor {
       }
     }
     if self.native_lease.is_none() {
-      let owner = self.inner.upgrade().ok_or("Managed Pi runtime has stopped")?;
-      let ownership = owner.ownership.clone().ok_or("Managed Pi runtime is unavailable")?;
-      let id = state.session_id.clone();
-      let lease = tokio::task::spawn_blocking(move || ownership.acquire(tokn_interaction_core::Provider::Pi, &id))
-        .await
-        .map_err(|error| error.to_string())??;
-      let mut records = owner.records.lock().unwrap();
-      let record = records
-        .get_mut(&self.receipt.request_id)
-        .filter(|record| record.generation == self.generation)
-        .ok_or("Managed Pi worker changed while claiming native session ownership")?;
-      record.native_lease = Some(lease.clone());
-      self.native_lease = Some(lease);
+      self.native_lease = Some(self.host.acquire_native_ownership(&state.session_id).await?);
     }
     if self.state.as_ref().is_none_or(|previous| previous.model != state.model) {
       self.model_revision = self.model_revision.saturating_add(1);
     }
-    if let Some(inner) = self.inner.upgrade() {
-      if let Some(record) = inner
-        .records
-        .lock()
-        .unwrap()
-        .get_mut(&self.receipt.request_id)
-        .filter(|record| record.generation == self.generation)
-      {
-        record.images_available = state.images_available;
-      }
-    }
+    self.host.set_images_available(state.images_available);
     self.state = Some(state);
     Ok(())
   }
@@ -630,12 +520,7 @@ impl Actor {
     prepared: Option<PreparedMessage>,
   ) -> Result<(), String> {
     let model_result = prepared.as_ref().map(|prepared| prepared.result.clone());
-    if self.termination.is_cancelled()
-      || self
-        .inner
-        .upgrade()
-        .is_none_or(|inner| inner.shutting_down.load(std::sync::atomic::Ordering::Acquire))
-    {
+    if self.termination.is_cancelled() || self.host.is_shutting_down() {
       if let Some(reply) = reply {
         let _ = reply.send(Err(with_model_result(
           DeliveryError::not_sent("Managed Pi runtime is shutting down"),
@@ -644,41 +529,22 @@ impl Actor {
       }
       return Ok(());
     }
-    use sha2::{Digest, Sha256};
     if prepared.is_none() {
-      let fingerprint = if images.is_empty() {
-        format!("{:x}", Sha256::digest(text.as_bytes()))
-      } else {
-        format!(
-          "{:x}",
-          Sha256::digest(
-            serde_json::to_vec(&(
-              &text,
-              images
-                .iter()
-                .map(|image| (&image.image_id, &image.sha256))
-                .collect::<Vec<_>>()
-            ))
-            .map_err(|error| error.to_string())?
-          )
-        )
-      };
-      if let Some((existing, result)) = self.recent.get(&request_id) {
-        let result = if existing != &fingerprint {
-          Err(DeliveryError::not_sent(
-            "Message request ID was already used with different content",
-          ))
-        } else {
-          result.clone().unwrap_or_else(|| {
-            Err(DeliveryError::uncertain(
-              "The original message is still awaiting Pi acknowledgement",
-            ))
-          })
-        };
-        if let Some(reply) = reply {
-          let _ = reply.send(result);
+      let fingerprint = managed_message_fingerprint(&text, &images, None)?;
+      match self.recent.admit(&request_id, fingerprint) {
+        Ok(None) => {}
+        Ok(Some(result)) => {
+          if let Some(reply) = reply {
+            let _ = reply.send(result);
+          }
+          return Ok(());
         }
-        return Ok(());
+        Err(error) => {
+          if let Some(reply) = reply {
+            let _ = reply.send(Err(error));
+          }
+          return Ok(());
+        }
       }
     }
     if self.state.is_none() {
@@ -698,14 +564,6 @@ impl Actor {
       }
       return Err(message.into());
     }
-    if prepared.is_none() && self.recent.len() >= 1024 {
-      if let Some(reply) = reply {
-        let _ = reply.send(Err(DeliveryError::not_sent(
-          "Managed runtime message receipt limit reached; resume this session to continue",
-        )));
-      }
-      return Ok(());
-    }
     let busy = prepared.as_ref().map(|prepared| prepared.busy).unwrap_or_else(|| {
       matches!(
         self.receipt.status,
@@ -718,26 +576,6 @@ impl Actor {
     if !busy {
       self.awaiting_new_turn = true;
       self.stop_requested = false;
-    }
-    if prepared.is_none() {
-      let fingerprint = if images.is_empty() {
-        format!("{:x}", Sha256::digest(text.as_bytes()))
-      } else {
-        format!(
-          "{:x}",
-          Sha256::digest(
-            serde_json::to_vec(&(
-              &text,
-              images
-                .iter()
-                .map(|image| (&image.image_id, &image.sha256))
-                .collect::<Vec<_>>()
-            ))
-            .map_err(|error| error.to_string())?
-          )
-        )
-      };
-      self.recent.insert(request_id.clone(), (fingerprint, None));
     }
     let mut command = wire::Command::Prompt {
       message: text,
@@ -852,7 +690,7 @@ impl Actor {
       && self.pending_outcome.is_none()
       && !self.stop_requested;
     if !eligible || !commands.is_empty() || (!self.pending.is_empty() && !self.idle_probe) {
-      self.idle_since = None;
+      self.idle_policy.reset();
       self.idle_probe = false;
       return Ok(false);
     }
@@ -864,11 +702,7 @@ impl Actor {
     if !self.session.is_empty() {
       return Ok(false);
     }
-    let Some(inner) = self.inner.upgrade() else {
-      return Ok(true);
-    };
-    let since = self.idle_since.get_or_insert_with(Instant::now);
-    if since.elapsed() < inner.idle_timeout {
+    if !self.idle_policy.observe(true) {
       return Ok(false);
     }
     if !self.idle_probe {
@@ -876,16 +710,7 @@ impl Actor {
       self.request_state(false).await?;
       return Ok(false);
     }
-    let gate = inner
-      .records
-      .lock()
-      .unwrap()
-      .get(&self.receipt.request_id)
-      .map(|record| record.start_gate.clone());
-    let Some(gate) = gate else {
-      return Ok(true);
-    };
-    let Ok(guard) = gate.try_lock_owned() else {
+    let Some(guard) = self.host.try_retirement_gate() else {
       return Ok(false);
     };
     // Send holds this same gate through queue admission. Closing an empty
@@ -910,9 +735,7 @@ impl Actor {
     }
     let id = state.session_id.clone();
     let folder = self.receipt.folder.clone();
-    let validated = tokio::task::spawn_blocking(move || validate_session(&path, &id, &folder))
-      .await
-      .map_err(|error| error.to_string())??;
+    let validated = self.host.validate_history(&path, &id, &folder).await?;
     if let Some((path, key)) = validated {
       if self.receipt.session_key.as_ref() != Some(&key) {
         let session_id = state.session_id.clone();
@@ -1036,30 +859,21 @@ impl Actor {
       .as_ref()
       .filter(|dialog| dialog.dialog_id == response.dialog_id)
       .ok_or("This Pi dialog is no longer pending")?;
-    let mut value = None;
-    let mut confirmed = None;
-    if !response.cancelled {
-      if dialog.kind == "confirm" {
-        confirmed = Some(response.confirmed.ok_or("Confirm requires a yes or no response")?);
-      } else {
-        let answer = response.value.ok_or("This Pi dialog requires a value")?;
-        if answer.len() > 16 * 1024 {
-          return Err("Pi dialog response exceeds its size limit".into());
-        }
-        if dialog.kind == "select" && !dialog.options.contains(&answer) {
-          return Err("Pi dialog response is not an available option".into());
-        }
-        value = Some(answer);
-      }
-    }
-    self
-      .write(wire::ExtensionUiResponse::ExtensionUiResponse {
-        id: dialog.dialog_id.clone(),
-        value,
-        confirmed,
-        cancelled: response.cancelled.then_some(true),
-      })
-      .await?;
+    let native = wire::ExtensionDialog {
+      dialog_id: dialog.dialog_id.clone(),
+      kind: dialog.kind.clone(),
+      title: dialog.title.clone(),
+      message: dialog.message.clone(),
+      options: dialog.options.clone(),
+      initial_value: dialog.initial_value.clone(),
+      timeout_ms: None,
+    };
+    let answer = native.response(
+      (dialog.kind != "confirm").then_some(response.value).flatten(),
+      (dialog.kind == "confirm").then_some(response.confirmed).flatten(),
+      response.cancelled,
+    )?;
+    self.write(answer).await?;
     self.dialog_deadline = None;
     self.refresh_deadlines();
     self
@@ -1098,17 +912,7 @@ impl Actor {
   async fn update(&mut self, update: impl FnOnce(&mut Receipt)) -> Result<(), String> {
     update(&mut self.receipt);
     let receipt = self.receipt.clone();
-    let id = receipt.request_id.clone();
-    if let Some(inner) = self.inner.upgrade() {
-      inner
-        .mutate(&id, self.generation, |current| {
-          // The actor is the only writer of lifecycle metadata in this generation.
-          let revision = current.revision;
-          *current = receipt;
-          current.revision = revision;
-        })
-        .await?;
-    }
+    self.host.update(receipt).await?;
     Ok(())
   }
 
@@ -1154,87 +958,6 @@ fn reject_before_send(kind: PendingKind, message: &str) {
       let _ = reply.send(Err(message.into()));
     }
     PendingKind::State { .. } | PendingKind::Prompt { reply: None, .. } => {}
-  }
-}
-
-async fn finish(
-  inner: &Weak<Inner>,
-  id: &str,
-  generation: u64,
-  error: Option<String>,
-) -> Option<crate::workspace::ManagedSessionSnapshot> {
-  let Some(inner) = inner.upgrade() else {
-    return None;
-  };
-  let receipt = {
-    let records = inner.records.lock().unwrap();
-    let record = records.get(id).filter(|record| record.generation == generation)?;
-    let mut receipt = record.receipt.clone();
-    receipt.status = if error.is_some() {
-      ManagedSessionStatus::Failed
-    } else {
-      ManagedSessionStatus::Stopped
-    };
-    receipt.message = error;
-    receipt.dialog = None;
-    receipt.revision = receipt.revision.saturating_add(1);
-    receipt
-  };
-  let store = inner.store.clone();
-  let saved = receipt.clone();
-  let _ = tokio::task::spawn_blocking(move || store.save(saved)).await;
-  let mut records = inner.records.lock().unwrap();
-  if let Some(record) = records.get_mut(id).filter(|record| record.generation == generation) {
-    record.receipt = receipt.clone();
-    record.sender = None;
-    record.worker_pid = None;
-    record.started_at_ms = None;
-    record.termination = None;
-    record.images_available = false;
-  }
-  Some(receipt.snapshot())
-}
-
-async fn retirement_gate(inner: &Weak<Inner>, id: &str) -> Option<OwnedMutexGuard<()>> {
-  let gate = inner.upgrade()?.records.lock().unwrap().get(id)?.start_gate.clone();
-  Some(gate.lock_owned().await)
-}
-
-fn release_native_ownership(inner: &Weak<Inner>, id: &str, generation: u64) {
-  if let Some(inner) = inner.upgrade() {
-    if let Some(record) = inner
-      .records
-      .lock()
-      .unwrap()
-      .get_mut(id)
-      .filter(|record| record.generation == generation)
-    {
-      record.native_lease = None;
-    }
-  }
-}
-
-fn reject_queued_commands(commands: &mut mpsc::Receiver<Command>, message: &str) {
-  while let Ok(command) = commands.try_recv() {
-    match command {
-      Command::Model(_, reply) => {
-        let _ = reply.send(Err(DeliveryError::not_sent(message)));
-      }
-      Command::Prompt { reply, .. } => {
-        let _ = reply.send(Err(DeliveryError::not_sent(message)));
-      }
-      Command::Abort(reply) | Command::Dialog(_, reply) => {
-        let _ = reply.send(Err("Pi runtime has stopped".into()));
-      }
-    }
-  }
-}
-
-fn publish_finished(inner: &Weak<Inner>, snapshot: Option<crate::workspace::ManagedSessionSnapshot>) {
-  // A stopped event can immediately trigger an input-capability check. Publish
-  // only after releasing the process lease so that check can safely resume.
-  if let (Some(inner), Some(snapshot)) = (inner.upgrade(), snapshot) {
-    let _ = inner.events.send(snapshot);
   }
 }
 

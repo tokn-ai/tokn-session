@@ -1,5 +1,9 @@
 //! Local project registration and viewer-owned session contracts.
 use serde::{Deserialize, Serialize};
+pub use tokn_interaction_core::managed_sessions::{
+  CreateProjectSessionRequest, ManagedSessionDialog, ManagedSessionDialogResponse, ManagedSessionRequest,
+  ManagedSessionStatus,
+};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RegisteredProject {
@@ -24,15 +28,6 @@ pub struct RegisterProjectRequest {
   pub name: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct CreateProjectSessionRequest {
-  pub request_id: String,
-  pub project_id: String,
-  pub prompt: String,
-  #[serde(default)]
-  pub image_ids: Vec<String>,
-}
-
 #[derive(Clone, Debug, Serialize)]
 pub struct SessionCreationError {
   pub message: String,
@@ -55,28 +50,6 @@ impl SessionCreationError {
   }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ManagedSessionStatus {
-  Starting,
-  Running,
-  Idle,
-  Stopping,
-  Stopped,
-  Failed,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct ManagedSessionDialog {
-  pub dialog_id: String,
-  /// Pi RPC dialog method: confirm, select, input, or editor.
-  pub kind: String,
-  pub title: String,
-  pub message: Option<String>,
-  pub options: Vec<String>,
-  pub initial_value: Option<String>,
-}
-
 #[derive(Clone, Debug, Serialize)]
 pub struct ManagedSessionSnapshot {
   pub revision: u64,
@@ -94,20 +67,20 @@ pub struct ManagedSessionSnapshot {
   pub pending_dialog: Option<ManagedSessionDialog>,
 }
 
-/// Exactly one identity must be supplied. Session keys are accepted only for
-/// persisted sessions that this viewer explicitly created.
-#[derive(Clone, Debug, Deserialize)]
-pub struct ManagedSessionRequest {
-  pub request_id: Option<String>,
-  pub session_key: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct ManagedSessionDialogResponse {
-  pub request_id: String,
-  pub dialog_id: String,
-  pub value: Option<String>,
-  pub confirmed: Option<bool>,
-  #[serde(default)]
-  pub cancelled: bool,
+impl From<tokn_interaction_core::managed_sessions::ManagedSessionSnapshot> for ManagedSessionSnapshot {
+  fn from(snapshot: tokn_interaction_core::managed_sessions::ManagedSessionSnapshot) -> Self {
+    Self {
+      revision: snapshot.revision,
+      request_id: snapshot.request_id,
+      project_id: snapshot.project_id,
+      provider: snapshot.provider,
+      status: snapshot.status,
+      session_id: snapshot.session_id,
+      session_key: snapshot.session_key,
+      session: None,
+      message: snapshot.message,
+      last_turn_error: snapshot.last_turn_error,
+      pending_dialog: snapshot.pending_dialog,
+    }
+  }
 }

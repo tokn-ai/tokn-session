@@ -1,15 +1,4 @@
 use super::*;
-use crate::models::*;
-
-pub(in crate::managed_pi) enum ModelOperation {
-  Status,
-  List,
-}
-
-pub(in crate::managed_pi) enum ModelResult {
-  Status(SessionModelStatus),
-  List(ListSessionModelsResponse),
-}
 
 #[derive(Clone, Copy)]
 enum ModelPhase {
@@ -41,15 +30,7 @@ impl ModelPending {
 
 impl Actor {
   pub(super) fn current_model_status(&self) -> SessionModelStatus {
-    let generation = self.inner.upgrade().and_then(|inner| {
-      inner
-        .records
-        .lock()
-        .unwrap()
-        .get(&self.receipt.request_id)
-        .filter(|record| record.generation == self.generation)
-        .map(|record| record.instance_id.clone())
-    });
+    let generation = self.host.instance_id();
     let idle = self.receipt.status == ManagedSessionStatus::Idle
       && self
         .state
@@ -75,7 +56,7 @@ impl Actor {
       can_list: true,
       supports_model_input: true,
       can_select,
-      updates_pi_default: true,
+      updates_default: true,
       reason: (!can_select)
         .then(|| "Wait for Pi, queued messages, and dialogs to finish before changing models".into()),
     }

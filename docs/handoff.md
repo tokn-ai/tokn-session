@@ -16,14 +16,19 @@ history/display remain follow-ups. See the
 [shared session supervisor](shared-session-supervisor.md) for routing, storage,
 capability limits, and ownership.
 
-Viewer-owned Pi sessions now use `PiAdapter::spawn_supervised` for child/pipe
-ownership, framing, typed command writes, response correlation, compact ordered
-control events, stderr, and cleanup. `managed_pi` retains durable receipts,
-session leases, verified history, model-on-send workflows, dialogs, idle retirement,
-and restart policy; it no longer starts or speaks directly to the child.
-The exclusive supervised API preserves these workflows without advertising
-stronger guarantees on the common interaction API. Native Pi fixtures also
-replay through this path.
+Shared live orchestration now lives in `interaction-core`: managed-session
+receipts/resume/restart/idle policy, message/control admission, native ownership,
+route transitions, and configured runtime lifecycle/bind recovery. The core
+accepts host/factory traits and does not import viewers or provider crates.
+`pi-adapter::managed::PiSessionDriver` owns Pi model-on-send, native dialogs,
+stream/error interpretation and workflow deadlines; `pi-adapter::bridge` owns
+the independently running Pi bridge protocol. `pi-rpc-protocol` owns native
+model/dialog parsing and `pi::verify_session_identity` verifies persisted headers.
+The old viewer `managed_pi` module is removed. Viewer composition supplies
+configuration, verified keys/projects, authorization, indexing and display DTOs.
+Existing commands, Pi behavior and exclusive supervised transport remain.
+Managed receipt storage migrates legacy version-one Pi catalogs to version two
+with explicit provider identity; the Pi lease namespace is preserved.
 
 Settings → Agent runtimes now manages selected-machine Codex/Pi/OpenCode/DSH
 RPC profiles and real managed/attached adapters through the shared Rust registry.
@@ -60,10 +65,9 @@ stops an external process. Native start-or-steer/queue admission is separate
 from completion, and unsupported atomic model/strict delivery operations reject
 honestly. Inspection never starts or resumes a session. See
 [live interaction](interaction-core.md) for APIs, recovery, ownership, and limits.
-The viewer reuses Pi state/dialog normalization, common model DTOs and the core
-receipt ledger. Its Pi project/history supervisor runs through the adapter's
-exclusive supervised session API; the shared supervisor coordinates public
-conversation controls with the selected-machine runtime registry.
+The viewer composes the shared core managers with native adapter factories and
+host verification; provider wire workflows stay in their adapters. The common
+RPC capability limits remain distinct from the exclusive managed Pi workflow.
 
 Codex app-server control requires explicit thread create/resume; reads never
 activate saved work. Its ordered response/event pump and epoch guards preserve

@@ -1,7 +1,11 @@
 use super::*;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use std::{path::Path, sync::atomic::AtomicUsize, time::Duration};
+use std::{
+  path::Path,
+  sync::atomic::{AtomicBool, AtomicUsize},
+  time::Duration,
+};
 use tokio::{sync::watch, task::JoinSet};
 mod http_peer;
 mod workflow_tests;
@@ -305,7 +309,7 @@ async fn shutdown_waits_for_cancelled_inflight_start_and_prevents_late_registrat
     let manager = manager.clone();
     tokio::spawn(async move { manager.shutdown().await })
   };
-  wait_until(|| manager.0.stopping.load(Ordering::Acquire)).await;
+  wait_until(|| manager.0.runtimes.is_stopping()).await;
   assert!(
     !shutdown.is_finished(),
     "shutdown returned before its starting runtime was cleaned up"
@@ -545,63 +549,6 @@ async fn http_factories_register_query_and_detach_opencode_and_dsh_without_sessi
     assert_ne!(reconnected.instance_id, info.instance_id);
     manager.shutdown().await;
   }
-}
-
-#[tokio::test]
-async fn unregistered_uncertain_cleanup_remains_visible_and_holds_profile_lease_until_shutdown() {
-  let server = CodexPeer::start(false).await;
-  let directory = tempfile::tempdir().unwrap();
-  let path = directory.path().join("profiles.json");
-  let first = RpcRuntimeManager::new(Some(path.clone()), InteractionService::default());
-  let second = RpcRuntimeManager::new(Some(path), InteractionService::default());
-  let request = save_profile(&first, attached_profile(server.endpoint.clone()));
-  let resolved = first.profiles().unwrap().resolve(&request.profile_id).unwrap();
-  let lease_path = first
-    .0
-    .lease_directory
-    .as_ref()
-    .unwrap()
-    .join(format!("{}.lock", request.profile_id));
-  let lease = tokn_session_storage::acquire_private_lock(&lease_path).unwrap();
-  let handle = factory::open(&format!("rpc:{}", request.profile_id), &resolved)
-    .await
-    .unwrap();
-  first.retain_unconfirmed_start(Some(handle), Some(lease), &resolved);
-  let info = first.inventory().runtimes[0].clone();
-  assert_eq!(info.status, "cleanup_failed");
-  assert!(info.last_error.is_some());
-  assert!(first.0.interactions.snapshots().is_empty());
-  assert!(first.start(request.clone()).await.is_err());
-  assert!(first.close(close_request(&info)).await.is_err());
-  assert!(
-    first
-      .remove_profile(RpcRemoveProfileRequest {
-        expected_revision: request.expected_revision,
-        profile_id: request.profile_id.clone(),
-      })
-      .await
-      .is_err()
-  );
-  let mut competing = request;
-  competing.request_id = uuid::Uuid::new_v4().to_string();
-  assert!(
-    second
-      .remove_profile(RpcRemoveProfileRequest {
-        expected_revision: competing.expected_revision,
-        profile_id: competing.profile_id.clone(),
-      })
-      .await
-      .is_err()
-  );
-  assert!(second.start(competing.clone()).await.is_err());
-  assert_eq!(server.connections.load(Ordering::Relaxed), 1);
-  assert_eq!(first.inventory().runtimes[0].status, "cleanup_failed");
-  first.shutdown().await;
-  assert!(first.inventory().runtimes.is_empty());
-  competing.request_id = uuid::Uuid::new_v4().to_string();
-  second.start(competing).await.unwrap();
-  assert_eq!(server.connections.load(Ordering::Relaxed), 2);
-  second.shutdown().await;
 }
 
 #[cfg(unix)]

@@ -1,4 +1,98 @@
 use super::*;
+use std::{path::PathBuf, sync::Arc};
+use tokn_interaction_core::{Provider, session_ownership::SessionOwnership};
+
+const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+struct Host;
+impl ManagedSessionHost for Host {
+  fn session_key(&self, identity: &ManagedHistoryIdentity) -> Result<String, String> {
+    serde_json::to_string(&(identity.provider, &identity.session_id, &identity.session_file))
+      .map_err(|error| error.to_string())
+  }
+}
+
+#[derive(Clone)]
+struct ManagedPiSessions {
+  manager: ManagedSessions,
+  ownership: SessionOwnership,
+  state_path: Option<PathBuf>,
+}
+
+impl std::ops::Deref for ManagedPiSessions {
+  type Target = ManagedSessions;
+  fn deref(&self) -> &Self::Target {
+    &self.manager
+  }
+}
+
+impl ManagedPiSessions {
+  fn disabled(message: String) -> Self {
+    Self {
+      manager: ManagedSessions::disabled(message, Provider::Pi),
+      ownership: SessionOwnership::new(None).unwrap(),
+      state_path: None,
+    }
+  }
+
+  fn with_executable(state_path: Option<PathBuf>, executable: PathBuf) -> Result<Self, String> {
+    Self::with_executable_and_idle_timeout(state_path, executable, IDLE_TIMEOUT)
+  }
+
+  fn with_executable_and_idle_timeout(
+    state_path: Option<PathBuf>,
+    executable: PathBuf,
+    idle_timeout: std::time::Duration,
+  ) -> Result<Self, String> {
+    let ownership = SessionOwnership::new(
+      state_path
+        .as_ref()
+        .and_then(|path| path.parent())
+        .map(|parent| parent.join("session-leases")),
+    )?;
+    Self::with_configuration(state_path, executable, idle_timeout, ownership)
+  }
+
+  fn with_configuration(
+    state_path: Option<PathBuf>,
+    executable: PathBuf,
+    idle_timeout: std::time::Duration,
+    ownership: SessionOwnership,
+  ) -> Result<Self, String> {
+    let configuration = ManagedSessionConfiguration {
+      state_path: state_path.clone(),
+      idle_timeout,
+      legacy_provider: Some(Provider::Pi),
+      lease_prefix: "managed-pi".into(),
+    };
+    let manager = ManagedSessions::new(
+      configuration,
+      Arc::new(PiSessionDriver::new(executable)),
+      Arc::new(Host),
+      ownership.clone(),
+    )?;
+    Ok(Self {
+      manager,
+      ownership,
+      state_path,
+    })
+  }
+
+  fn latest(&self, id: &str) -> Result<Option<Receipt>, String> {
+    let Some(path) = &self.state_path else {
+      return Ok(None);
+    };
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).map_err(|error| error.to_string())?)
+      .map_err(|error| error.to_string())?;
+    value["receipts"]
+      .as_array()
+      .ok_or("receipt catalog missing")?
+      .iter()
+      .find(|receipt| receipt["request_id"] == id)
+      .map(|receipt| serde_json::from_value(receipt.clone()).map_err(|error| error.to_string()))
+      .transpose()
+  }
+}
 
 #[test]
 fn disabled_runtime_keeps_read_paths_available() {
@@ -19,9 +113,9 @@ fn disabled_runtime_keeps_read_paths_available() {
 #[cfg(unix)]
 mod fake_rpc {
   use super::*;
-  use crate::runtimes::{RuntimeExecutionKind, RuntimeInfo, RuntimeKind, RuntimeOwnership, RuntimeRestartRequest};
   use serde_json::{Value, json};
   use std::{os::unix::fs::PermissionsExt, path::Path, time::Duration};
+  use tokn_interaction_core::managed_sessions::{ManagedRuntimeInfo as RuntimeInfo, RuntimeRestartRequest};
 
   // This executable only implements the protocol exercised below. It never
   // imports Pi, reads provider configuration, or contacts a model. Its native
@@ -236,12 +330,12 @@ if mode == 'ignore_eof':
 
   #[tokio::test]
   async fn owned_model_drafts_apply_only_with_idle_send_and_refresh_effective_image_support() {
-    use crate::models::*;
+    use tokn_interaction_core::managed_sessions::*;
     let fixture = Fixture::new("model_controls", "handled");
     fixture.create().await;
     let key = fixture.idle().await.session_key.unwrap();
     let status = fixture.manager.model_status(&key).await.unwrap().unwrap();
-    assert!(status.can_select && status.can_list && status.supports_model_input && status.updates_pi_default);
+    assert!(status.can_select && status.can_list && status.supports_model_input && status.updates_default);
     let choices = fixture.manager.list_models(&key).await.unwrap().unwrap();
     assert_eq!(choices.status.state.revision, status.state.revision);
     assert_eq!(choices.models.len(), 2);
@@ -367,7 +461,7 @@ if mode == 'ignore_eof':
 
   #[tokio::test]
   async fn busy_send_steers_and_ignores_even_invalid_model_intent() {
-    use crate::models::*;
+    use tokn_interaction_core::managed_sessions::*;
     let fixture = Fixture::new("model_controls", "active turn");
     fixture.create().await;
     let key = fixture.persisted().await.session_key.unwrap();
@@ -428,7 +522,7 @@ if mode == 'ignore_eof':
 
   #[tokio::test]
   async fn model_worker_exit_during_send_releases_admission_gate_and_records_unknown_mutation() {
-    use crate::models::*;
+    use tokn_interaction_core::managed_sessions::*;
     let fixture = Fixture::new("model_controls", "handled");
     fixture.create().await;
     let key = fixture.idle().await.session_key.unwrap();
@@ -459,7 +553,7 @@ if mode == 'ignore_eof':
 
   #[tokio::test]
   async fn observed_work_after_idle_preflight_ignores_draft_and_steers_before_model_mutation() {
-    use crate::models::*;
+    use tokn_interaction_core::managed_sessions::*;
     for mode in ["model_compaction_race", "model_retry_race"] {
       let fixture = Fixture::new(mode, "handled");
       fixture.create().await;
@@ -509,7 +603,7 @@ if mode == 'ignore_eof':
 
   #[tokio::test]
   async fn rejected_prompt_preserves_the_model_applied_during_its_admission() {
-    use crate::models::*;
+    use tokn_interaction_core::managed_sessions::*;
     let fixture = Fixture::new("model_controls", "handled");
     fixture.create().await;
     let key = fixture.idle().await.session_key.unwrap();
@@ -544,7 +638,7 @@ if mode == 'ignore_eof':
 
   #[tokio::test]
   async fn same_model_draft_still_requires_current_catalog_membership() {
-    use crate::models::*;
+    use tokn_interaction_core::managed_sessions::*;
     let fixture = Fixture::new("model_controls", "handled");
     fixture.create().await;
     let key = fixture.idle().await.session_key.unwrap();
@@ -613,7 +707,7 @@ if mode == 'ignore_eof':
 
   #[tokio::test]
   async fn work_starting_during_model_set_reports_applied_state_without_submitting_input() {
-    use crate::models::*;
+    use tokn_interaction_core::managed_sessions::*;
     let fixture = Fixture::new("model_starts_work", "handled");
     fixture.create().await;
     let key = fixture.idle().await.session_key.unwrap();
@@ -676,10 +770,7 @@ if mode == 'ignore_eof':
       let project_id = uuid::Uuid::new_v4().to_string();
       let project = RegisteredProject {
         project_id: project_id.clone(),
-        group_key: "synthetic-project".into(),
         folder_path: folder.to_str().unwrap().into(),
-        name: "Synthetic project".into(),
-        created_at_ms: 0,
         available: true,
       };
       let request = CreateProjectSessionRequest {
@@ -844,11 +935,10 @@ if mode == 'ignore_eof':
       let launch = self.launches().last().unwrap().clone();
       let pid = launch["pid"].as_i64().unwrap() as libc::pid_t;
       assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "synthetic worker exited unexpectedly");
-      assert!(
-        self.manager.inner.records.lock().unwrap()[&self.request.request_id]
-          .sender
-          .is_some()
-      );
+      assert!(!matches!(
+        self.snapshot().status,
+        ManagedSessionStatus::Stopped | ManagedSessionStatus::Failed
+      ));
       assert_eq!(self.launches().len(), 1);
       assert!(!self.log().iter().any(|value| value["kind"] == "stdin_closed"));
     }
@@ -866,9 +956,9 @@ if mode == 'ignore_eof':
       // blocking receipt save completes. A second manager reads only disk.
       tokio::time::timeout(Duration::from_secs(8), async {
         loop {
-          let store = self.manager.inner.store.clone();
+          let manager = self.manager.clone();
           let id = self.request.request_id.clone();
-          let saved = tokio::task::spawn_blocking(move || store.latest(&id))
+          let saved = tokio::task::spawn_blocking(move || manager.latest(&id))
             .await
             .unwrap()
             .unwrap();
@@ -910,23 +1000,18 @@ if mode == 'ignore_eof':
     let row = fixture.runtime().await;
     assert_eq!(row.runtime_id, format!("pi:{}", fixture.request.request_id));
     assert!(!row.instance_id.is_empty());
-    assert_eq!(row.kind, RuntimeKind::Pi);
-    assert_eq!(row.execution_kind, RuntimeExecutionKind::Subprocess);
-    assert_eq!(row.ownership, RuntimeOwnership::Viewer);
+    assert_eq!(row.provider, Provider::Pi);
+    assert!(!row.externally_owned);
     assert_eq!(row.status, "running");
     assert_eq!(row.pid, fixture.launches()[0]["pid"].as_u64().map(|pid| pid as u32));
     assert!(row.started_at_ms.is_some_and(|started| started > 0));
     assert_eq!(row.session_key.as_deref(), Some(key.as_str()));
     assert_eq!(row.session_id.as_deref(), Some(fixture.session_id.as_str()));
-    assert_eq!(row.project_id.as_deref(), Some(fixture.project.project_id.as_str()));
-    assert_eq!(
-      row.working_directory.as_deref(),
-      Some(fixture.project.folder_path.as_str())
-    );
-    assert!(row.endpoint.is_none());
+    assert_eq!(row.project_id, fixture.project.project_id);
+    assert_eq!(row.working_directory.as_str(), fixture.project.folder_path.as_str());
     assert!(row.can_restart);
     assert!(row.restart_disabled_reason.is_none());
-    let encoded = serde_json::to_string(&row).unwrap();
+    let encoded = format!("{row:?}");
     assert!(!encoded.contains(&fixture.request.prompt));
     assert!(!encoded.contains("fingerprint"));
     assert_eq!(fixture.runtime().await.instance_id, row.instance_id);
@@ -1067,7 +1152,7 @@ if mode == 'ignore_eof':
     let rows = other.list_runtimes().await;
     assert_eq!(rows.len(), 1);
     let row = &rows[0];
-    assert_eq!(row.ownership, RuntimeOwnership::External);
+    assert!(row.externally_owned);
     assert!(!row.can_restart);
     assert!(row.restart_disabled_reason.is_some());
     assert!(row.pid.is_none());
@@ -1099,7 +1184,7 @@ if mode == 'ignore_eof':
     let rows = other.list_runtimes().await;
     assert_eq!(rows.len(), 1);
     let row = &rows[0];
-    assert_eq!(row.ownership, RuntimeOwnership::External);
+    assert!(row.externally_owned);
     assert_eq!(row.status, "external");
     assert!(row.session_key.is_none());
     assert!(row.pid.is_none());
@@ -1109,7 +1194,7 @@ if mode == 'ignore_eof':
         .restart_disabled_reason
         .as_deref()
         .unwrap()
-        .contains("owning viewer runtime")
+        .contains("owning host runtime")
     );
     fixture.assert_worker_alive();
     assert!(!fixture.folder().join("synthetic-history.jsonl").exists());
@@ -1473,7 +1558,6 @@ if mode == 'ignore_eof':
       image_id: id.into(),
       mime_type: "image/png".into(),
       sha256: "synthetic-image-hash".into(),
-      path: "/private/viewer/owned-image.png".into(),
       bytes: Arc::new(vec![1, 2, 3]),
     }
   }
@@ -1759,7 +1843,7 @@ if mode == 'ignore_eof':
   #[tokio::test]
   async fn native_session_ownership_is_claimed_before_the_initial_prompt() {
     let fixture = Fixture::new("normal", "synthetic initial prompt");
-    let ownership = fixture.manager.inner.ownership.clone().unwrap();
+    let ownership = fixture.manager.ownership.clone();
     let external = ownership
       .acquire(tokn_interaction_core::Provider::Pi, &fixture.session_id)
       .unwrap();
@@ -1790,7 +1874,7 @@ if mode == 'ignore_eof':
   #[tokio::test]
   async fn native_session_ownership_outlives_the_turn_and_releases_after_shutdown() {
     let fixture = Fixture::new("normal", "handled");
-    let ownership = fixture.manager.inner.ownership.clone().unwrap();
+    let ownership = fixture.manager.ownership.clone();
     fixture.create().await;
     fixture.idle().await;
     assert!(
@@ -1810,7 +1894,7 @@ if mode == 'ignore_eof':
   #[tokio::test]
   async fn native_session_ownership_blocks_resume_before_launching_another_process() {
     let fixture = Fixture::new("normal", "handled");
-    let ownership = fixture.manager.inner.ownership.clone().unwrap();
+    let ownership = fixture.manager.ownership.clone();
     fixture.create().await;
     fixture.idle().await;
     fixture.manager.shutdown().await;
@@ -1863,58 +1947,35 @@ if mode == 'ignore_eof':
     let resumed = later.resume(fixture.identity()).await.unwrap();
     assert!(resumed.revision > previous_revision);
     assert_eq!(resumed.session_key, persisted.session_key);
-    let durable = later.inner.store.latest(&fixture.request.request_id).unwrap().unwrap();
+    let durable = later.latest(&fixture.request.request_id).unwrap().unwrap();
     assert!(durable.revision >= resumed.revision);
     later.shutdown().await;
   }
 
   #[tokio::test]
-  async fn shared_supervisor_can_cancel_a_prompt_waiting_for_extension_input() {
-    use crate::session_supervisor::{SessionSupervisor, SessionTransport, VerifiedSession};
+  async fn manager_can_cancel_a_prompt_waiting_for_extension_input() {
     let fixture = Fixture::new("normal", "handled");
     fixture.create().await;
     let key = fixture.idle().await.session_key.unwrap();
-    let mut sessions = SessionSupervisor::new(None, tokn_interaction_core::InteractionService::default()).unwrap();
-    sessions.pi = fixture.manager.clone();
-    let target = || VerifiedSession {
-      session_key: key.clone(),
-      input: crate::input::InputTarget {
-        provider: crate::model::ViewerProvider::Pi,
-        session_id: fixture.session_id.clone(),
-        session_file: fixture.folder().join("synthetic-history.jsonl"),
-      },
-      cwd: fixture.folder().to_path_buf(),
-    };
-    let request = crate::model::SubmitSessionInputRequest {
-      request_id: uuid::Uuid::new_v4().to_string(),
-      session_key: key.clone(),
-      text: "dialog:confirm".into(),
-      image_ids: Vec::new(),
-      model_selection: None,
-    };
-    let delivery = sessions.clone();
-    let delivery_target = target();
+    let manager = fixture.manager.clone();
     let submission = tokio::spawn(async move {
-      delivery
-        .submit(delivery_target, request, Vec::new(), SessionTransport::Rpc)
+      manager
+        .submit_owned_input(&key, &uuid::Uuid::new_v4().to_string(), "dialog:confirm")
         .await
     });
     fixture.wait_for(|snapshot| snapshot.pending_dialog.is_some()).await;
-    let cancellation = tokio::time::timeout(
-      Duration::from_secs(2),
-      sessions.cancel(&target(), uuid::Uuid::new_v4().to_string()),
-    )
-    .await
-    .expect("Stop must not wait behind the prompt that needs extension input");
-    assert!(cancellation.is_ok(), "{cancellation:?}");
+    tokio::time::timeout(Duration::from_secs(2), fixture.manager.stop(fixture.identity()))
+      .await
+      .expect("Stop must not wait behind the prompt that needs extension input")
+      .unwrap();
     let _outcome = tokio::time::timeout(Duration::from_secs(2), submission)
       .await
-      .expect("cancelled prompt admission must finish")
+      .unwrap()
       .unwrap();
     fixture.wait_for(|snapshot| snapshot.pending_dialog.is_none()).await;
     assert!(fixture.log().iter().any(|event| event["type"] == "abort"));
     assert_eq!(fixture.prompts(), ["handled", "dialog:confirm"]);
-    sessions.shutdown().await;
+    fixture.manager.shutdown().await;
     fixture.wait_reaped().await;
   }
 
@@ -2033,11 +2094,7 @@ if mode == 'ignore_eof':
       .wait_for(|snapshot| snapshot.status == ManagedSessionStatus::Idle)
       .await;
     assert!(persisted.manager.input_status(&key).unwrap().is_ok());
-    assert!(
-      persisted.manager.inner.records.lock().unwrap()[&persisted.request.request_id]
-        .sender
-        .is_some()
-    );
+    assert!(persisted.runtime().await.has_worker);
     persisted.manager.shutdown().await;
     persisted.wait_reaped().await;
 
@@ -2047,11 +2104,7 @@ if mode == 'ignore_eof':
     let stopped = provisional.manager.stop(provisional.identity()).await.unwrap();
     assert_eq!(stopped.status, ManagedSessionStatus::Stopped);
     assert!(stopped.session_key.is_none());
-    assert!(
-      provisional.manager.inner.records.lock().unwrap()[&provisional.request.request_id]
-        .sender
-        .is_none()
-    );
+    assert!(!provisional.runtime().await.has_worker);
     provisional.wait_reaped().await;
     assert!(
       provisional

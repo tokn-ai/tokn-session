@@ -1,5 +1,7 @@
 //! Native Pi RPC transport and provider-independent runtime interaction adapter.
+pub mod bridge;
 pub mod framing;
+pub mod managed;
 mod mapping;
 mod supervised;
 mod transport;

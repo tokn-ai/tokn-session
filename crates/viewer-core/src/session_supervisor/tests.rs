@@ -155,7 +155,7 @@ async fn desktop_question_delivery_checks_current_route_and_canonical_owner() {
     .await
     .unwrap_err();
   assert!(error.message.contains("route changed"));
-  assert!(supervisor.desktop_owners.lock().unwrap().is_empty());
+  assert!(supervisor.coordinator.route_owner_count() == 0);
   supervisor
     .controls
     .set_transport(&target.identity(), SessionTransport::Desktop)
@@ -171,7 +171,7 @@ async fn desktop_question_delivery_checks_current_route_and_canonical_owner() {
       .is_err()
   );
   assert!(
-    supervisor.desktop_owners.lock().unwrap().is_empty(),
+    supervisor.coordinator.route_owner_count() == 0,
     "question bypassed the canonical session lease"
   );
   drop(owner);
@@ -189,6 +189,6 @@ async fn desktop_question_delivery_checks_current_route_and_canonical_owner() {
     .unwrap();
   drop(guard);
   assert!(answer.await.unwrap().unwrap_err().message.contains("route changed"));
-  assert!(supervisor.desktop_owners.lock().unwrap().is_empty());
+  assert!(supervisor.coordinator.route_owner_count() == 0);
   supervisor.shutdown().await;
 }

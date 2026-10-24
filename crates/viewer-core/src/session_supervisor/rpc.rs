@@ -147,7 +147,7 @@ impl SessionSupervisor {
           "This RPC runtime exposes its model catalog but cannot atomically apply a draft model on Send".into()
         }),
         runtime_generation: Some(binding.target.instance_id),
-        updates_pi_default: false,
+        updates_default: false,
         supports_model_input: binding.capabilities.atomic_model_on_send,
       },
       models,
@@ -208,9 +208,9 @@ impl SessionSupervisor {
   }
 
   pub(crate) async fn cancel(&self, target: &VerifiedSession, request_id: String) -> Result<Admission, DeliveryError> {
-    if self.pi.input_status(&target.session_key).is_some() {
+    if self.managed.input_status(&target.session_key).is_some() {
       self
-        .pi
+        .managed
         .stop(crate::workspace::ManagedSessionRequest {
           request_id: None,
           session_key: Some(target.session_key.clone()),

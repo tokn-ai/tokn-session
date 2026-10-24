@@ -10,7 +10,7 @@ impl ViewerService {
       Ok(target) => target,
       Err(reason) => return Ok(SessionModelStatus::unavailable(reason)),
     };
-    if let Some(result) = self.sessions.pi.model_status(&target.session_key).await {
+    if let Some(result) = self.sessions.managed.model_status(&target.session_key).await {
       return Ok(result.unwrap_or_else(SessionModelStatus::unavailable));
     }
     let result = match (target.input.provider, self.sessions.transport(&target).await?) {
@@ -42,7 +42,7 @@ impl ViewerService {
         });
       }
     };
-    if let Some(result) = self.sessions.pi.list_models(&target.session_key).await {
+    if let Some(result) = self.sessions.managed.list_models(&target.session_key).await {
       return result;
     }
     match (target.input.provider, self.sessions.transport(&target).await?) {

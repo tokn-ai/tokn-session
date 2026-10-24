@@ -1,4 +1,4 @@
-//! Host-owned runtime factories and ephemeral, instance-fenced session bindings.
+//! Host configuration, adapter factories and viewer DTO mapping for shared runtimes.
 mod factory;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -6,17 +6,15 @@ mod workflow;
 
 use crate::rpc_profiles::*;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 use std::{
   collections::BTreeMap,
-  fs::File,
   path::PathBuf,
-  sync::{
-    Arc, Mutex, Weak,
-    atomic::{AtomicBool, Ordering},
-  },
+  sync::{Arc, Mutex},
 };
-use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast};
+use tokio::sync::broadcast;
+use tokn_interaction_core::runtime as core_runtime;
 use tokn_interaction_core::*;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -83,597 +81,117 @@ pub struct RpcSessionBinding {
 pub(crate) struct RpcRuntimeManager(Arc<Inner>);
 struct Inner {
   profiles: Arc<RpcProfileStore>,
-  session_ownership: Result<crate::session_ownership::SessionOwnership, String>,
+  runtimes: core_runtime::RuntimeCoordinator<Host>,
+  #[cfg(test)]
   interactions: InteractionService,
-  lease_directory: Option<PathBuf>,
-  state: Mutex<State>,
-  changes: broadcast::Sender<()>,
-  stopping: AtomicBool,
-  settled: Notify,
-}
-struct State {
-  transient_profiles: BTreeMap<String, RpcResolvedProfile>,
-  runtimes: BTreeMap<String, Record>,
-  quarantined: BTreeMap<String, QuarantinedRecord>,
-  bindings: BTreeMap<String, RpcSessionBinding>,
-  binding_owners: BTreeMap<String, BindingOwner>,
-  gates: BTreeMap<String, Weak<AsyncMutex<()>>>,
-  receipts: ReceiptLedger<Result<ActionReply, String>>,
-  active_actions: usize,
-}
-struct BindingOwner {
-  runtime_id: String,
-  instance_id: String,
-  _lease: crate::session_ownership::SessionLease,
-}
-struct Record {
-  info: RpcRuntimeInfo,
-  handle: factory::Handle,
-  _lease: Option<File>,
-  pump: tokio::task::JoinHandle<()>,
-}
-struct QuarantinedRecord {
-  info: RpcRuntimeInfo,
-  _handle: Option<factory::Handle>,
-  _lease: Option<File>,
-}
-impl Drop for Record {
-  fn drop(&mut self) {
-    self.pump.abort();
-  }
-}
-#[derive(Clone)]
-enum ActionReply {
-  Started(RpcRuntimeInfo),
-  Closed(RpcCloseRuntimeResponse),
-  Bound(RpcSessionBinding),
 }
 
-struct ActiveAction {
-  inner: Arc<Inner>,
-  id: String,
-  complete: bool,
-}
-impl Drop for ActiveAction {
-  fn drop(&mut self) {
-    let mut state = self.inner.state.lock().unwrap_or_else(|error| error.into_inner());
-    if !self.complete {
-      state.receipts.retain_outcome(
-        &self.id,
-        Err("Runtime action was interrupted; reconcile its state before another attempt".into()),
-      );
-    }
-    state.active_actions = state.active_actions.saturating_sub(1);
-    drop(state);
-    self.inner.settled.notify_waiters();
-  }
+#[derive(Clone)]
+struct Host {
+  profiles: Arc<RpcProfileStore>,
+  transient_profiles: Arc<Mutex<BTreeMap<String, RpcResolvedProfile>>>,
 }
 
 impl RpcRuntimeManager {
   pub(crate) fn new(path: Option<PathBuf>, interactions: InteractionService) -> Self {
-    let lease_directory = path
-      .as_ref()
-      .and_then(|path| path.parent())
-      .map(|path| path.join("rpc-leases"));
+    let parent = path.as_ref().and_then(|path| path.parent());
+    let lease_directory = parent.map(|path| path.join("rpc-leases"));
+    let ownership = crate::session_ownership::SessionOwnership::new(parent.map(|path| path.join("session-leases")));
+    let profiles = Arc::new(RpcProfileStore::configured(path));
+    let host = Host {
+      profiles: profiles.clone(),
+      transient_profiles: Arc::new(Mutex::new(BTreeMap::new())),
+    };
     Self(Arc::new(Inner {
-      session_ownership: crate::session_ownership::SessionOwnership::new(
-        path
-          .as_ref()
-          .and_then(|path| path.parent())
-          .map(|path| path.join("session-leases")),
-      ),
-      profiles: Arc::new(RpcProfileStore::configured(path)),
-      interactions,
-      lease_directory,
-      state: Mutex::new(State {
-        transient_profiles: BTreeMap::new(),
-        runtimes: BTreeMap::new(),
-        quarantined: BTreeMap::new(),
-        bindings: BTreeMap::new(),
-        binding_owners: BTreeMap::new(),
-        gates: BTreeMap::new(),
-        receipts: ReceiptLedger::new(512),
-        active_actions: 0,
-      }),
-      changes: broadcast::channel(32).0,
-      stopping: AtomicBool::new(false),
-      settled: Notify::new(),
+      profiles,
+      #[cfg(test)]
+      interactions: interactions.clone(),
+      runtimes: core_runtime::RuntimeCoordinator::new(host, interactions, lease_directory, ownership),
     }))
   }
+
   pub(crate) fn with_session_ownership(
     mut self,
     ownership: crate::session_ownership::SessionOwnership,
   ) -> Result<Self, String> {
     Arc::get_mut(&mut self.0)
       .ok_or("Session ownership must be configured before sharing the runtime manager")?
-      .session_ownership = Ok(ownership);
+      .runtimes
+      .with_session_ownership(ownership)?;
     Ok(self)
   }
 
-  fn resolve_profile(&self, profile_id: &str, revision: u64) -> Result<RpcResolvedProfile, String> {
-    if let Some(profile) = self
-      .0
-      .state
-      .lock()
-      .unwrap_or_else(|error| error.into_inner())
-      .transient_profiles
-      .get(profile_id)
-      .cloned()
-    {
-      if profile.revision != revision {
-        return Err("Runtime profile changed before connection".into());
-      }
-      return Ok(profile);
-    }
-    self.0.profiles.resolve_at_revision(profile_id, revision)
-  }
   pub(crate) fn profiles(&self) -> Result<Arc<RpcProfileStore>, String> {
     Ok(self.0.profiles.clone())
   }
+
   pub(crate) fn subscribe(&self) -> broadcast::Receiver<()> {
-    self.0.changes.subscribe()
+    self.0.runtimes.subscribe()
   }
+
   pub(crate) fn changed(&self) {
-    let _ = self.0.changes.send(());
+    self.0.runtimes.changed();
   }
+
   fn ensure_open(&self) -> Result<(), String> {
-    if self.0.stopping.load(Ordering::Acquire) {
-      Err("Runtime manager is shutting down".into())
-    } else {
-      Ok(())
-    }
+    self.0.runtimes.ensure_open()
   }
-  fn gate(&self, id: &str) -> Arc<AsyncMutex<()>> {
-    let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
-    state.gates.retain(|_, gate| gate.strong_count() > 0);
-    if let Some(gate) = state.gates.get(id).and_then(Weak::upgrade) {
-      return gate;
-    }
-    let gate = Arc::new(AsyncMutex::new(()));
-    state.gates.insert(id.to_owned(), Arc::downgrade(&gate));
-    gate
-  }
+
   pub(crate) fn inventory(&self) -> RpcRuntimeInventory {
-    let state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
+    let inventory = self.0.runtimes.inventory();
     RpcRuntimeInventory {
-      version: 1,
-      runtimes: state
-        .runtimes
-        .values()
-        .map(|record| &record.info)
-        .chain(state.quarantined.values().map(|record| &record.info))
-        .map(|record| {
-          let mut info = record.clone();
-          info.session_count = state
-            .bindings
-            .values()
-            .filter(|binding| binding.target.runtime_id == info.runtime_id)
-            .count();
-          info
-        })
-        .collect(),
+      version: inventory.version,
+      runtimes: inventory.runtimes.into_iter().map(Into::into).collect(),
     }
   }
+
   pub(crate) async fn remove_profile(
     &self,
     request: RpcRemoveProfileRequest,
   ) -> Result<RpcRuntimeProfilesSnapshot, String> {
-    validate_uuid(&request.profile_id)?;
-    self.ensure_open()?;
-    let gate = self.gate(&request.profile_id);
-    let guard = gate.lock_owned().await;
-    self.ensure_open()?;
-    {
-      let state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
-      if state
-        .quarantined
-        .values()
-        .any(|record| record.info.profile_id == request.profile_id)
-      {
-        return Err("Runtime cleanup was not confirmed; this profile remains reserved until host shutdown".into());
-      }
-      if state
-        .runtimes
-        .values()
-        .any(|record| record.info.profile_id == request.profile_id)
-      {
-        return Err("Stop or detach this runtime before deleting its profile".into());
-      }
-    }
     let profiles = self.profiles()?;
-    let lease_path = self
+    self
       .0
-      .lease_directory
-      .as_ref()
-      .map(|directory| directory.join(format!("{}.lock", request.profile_id)));
-    let result = tokio::task::spawn_blocking(move || {
-      // Cancellation must not release the profile gate before the write ends.
-      let _guard = guard;
-      let _lease = lease_path
-        .map(|path| tokn_session_storage::acquire_private_lock(&path))
-        .transpose()?;
-      profiles.remove(request)
-    })
-    .await
-    .map_err(|_| "Could not remove runtime profile")??;
-    self.changed();
-    Ok(result)
+      .runtimes
+      .with_inactive_profile(request.profile_id.clone(), move || profiles.remove(request))
+      .await
   }
+
   pub(crate) async fn start(&self, request: RpcStartRuntimeRequest) -> Result<RpcRuntimeInfo, String> {
-    validate_uuid(&request.request_id)?;
-    validate_uuid(&request.profile_id)?;
-    let fingerprint: [u8; 32] =
-      Sha256::digest(serde_json::to_vec(&request).map_err(|_| "Invalid start request")?).into();
-    let manager = self.clone();
-    match self
-      .action(&request.request_id, "start", fingerprint, {
-        let request = request.clone();
-        async move { manager.start_inner(request).await.map(ActionReply::Started) }
+    self
+      .0
+      .runtimes
+      .start(core_runtime::StartRuntimeRequest {
+        request_id: request.request_id,
+        profile_id: request.profile_id,
+        expected_revision: request.expected_revision,
       })
-      .await?
-    {
-      ActionReply::Started(info) => Ok(info),
-      _ => Err("Request ID belongs to another runtime action".into()),
-    }
+      .await
+      .map(Into::into)
   }
+
   pub(crate) async fn close(&self, request: RpcCloseRuntimeRequest) -> Result<RpcCloseRuntimeResponse, String> {
-    validate_uuid(&request.request_id)?;
-    if request.runtime_id.len() > 512 || request.expected_instance_id.len() > 512 {
-      return Err("Invalid runtime identity".into());
-    }
-    let fingerprint: [u8; 32] =
-      Sha256::digest(serde_json::to_vec(&request).map_err(|_| "Invalid close request")?).into();
-    let manager = self.clone();
-    match self
-      .action(&request.request_id, "close", fingerprint, {
-        let request = request.clone();
-        async move { manager.close_inner(request).await.map(ActionReply::Closed) }
-      })
-      .await?
-    {
-      ActionReply::Closed(info) => Ok(info),
-      _ => Err("Request ID belongs to another runtime action".into()),
-    }
-  }
-  async fn action(
-    &self,
-    id: &str,
-    scope: &str,
-    fingerprint: [u8; 32],
-    operation: impl std::future::Future<Output = Result<ActionReply, String>> + Send + 'static,
-  ) -> Result<ActionReply, String> {
-    {
-      let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
-      if let Some(result) = state
-        .receipts
-        .lookup(id, scope, &fingerprint)
-        .map_err(|_| "Runtime action ID conflicts")?
-      {
-        return result;
-      }
-      self.ensure_open()?;
-      state
-        .receipts
-        .admit(
-          id.to_owned(),
-          scope.to_owned(),
-          fingerprint,
-          Err("Runtime action is still pending; check status before retrying".into()),
-        )
-        .map_err(|_| "Runtime action receipt limit reached")?;
-      state.active_actions += 1;
-    }
-    let manager = self.clone();
-    let id = id.to_owned();
-    tokio::spawn(async move {
-      let mut active = ActiveAction {
-        inner: manager.0.clone(),
-        id: id.clone(),
-        complete: false,
-      };
-      let result = operation.await;
-      {
-        let mut state = manager.0.state.lock().unwrap_or_else(|error| error.into_inner());
-        if result.is_err() {
-          state.receipts.retain_outcome(&id, result.clone());
-        } else {
-          state.receipts.complete(&id, result.clone());
-        }
-      }
-      active.complete = true;
-      result
-    })
-    .await
-    .map_err(|_| "Runtime action was interrupted; inspect status before retrying".to_owned())?
-  }
-  async fn start_inner(&self, request: RpcStartRuntimeRequest) -> Result<RpcRuntimeInfo, String> {
-    self.ensure_open()?;
-    let gate = self.gate(&request.profile_id);
-    let _guard = gate.lock().await;
-    self.ensure_open()?;
-    let manager = self.clone();
-    let id = request.profile_id.clone();
-    let revision = request.expected_revision;
-    let resolved = tokio::task::spawn_blocking(move || {
-      let resolved = manager.resolve_profile(&id, revision)?;
-      resolved.validate_launch_ready()?;
-      Ok::<_, String>(resolved)
-    })
-    .await
-    .map_err(|_| "Could not read runtime profile")??;
-    let runtime_id = format!("rpc:{}", request.profile_id);
-    {
-      let state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
-      if state.quarantined.contains_key(&runtime_id) {
-        return Err("Runtime cleanup was not confirmed; this profile remains reserved until host shutdown".into());
-      }
-      if let Some(record) = state.runtimes.get(&runtime_id) {
-        return if record.info.status == "connected" && record.info.profile_revision == revision {
-          Ok(record.info.clone())
-        } else {
-          Err("Close this runtime instance before applying a new configuration or reconnecting".into())
-        };
-      }
-      if state.runtimes.len() + state.quarantined.len() >= 32 {
-        return Err("Runtime limit reached; stop an existing runtime".into());
-      }
-    }
-    let lease = if let Some(directory) = &self.0.lease_directory {
-      let path = directory.join(format!("{}.lock", request.profile_id));
-      Some(
-        tokio::task::spawn_blocking(move || tokn_session_storage::acquire_private_lock(&path))
-          .await
-          .map_err(|_| "Could not acquire runtime ownership")??,
-      )
-    } else {
-      None
-    };
-    // Another viewer may have deleted this profile after the first read but
-    // before we acquired ownership. Recheck while deletion is fenced by lease.
-    let manager = self.clone();
-    let profile_id = request.profile_id.clone();
-    let revision = resolved.revision;
-    tokio::task::spawn_blocking(move || manager.resolve_profile(&profile_id, revision).map(|_| ()))
-      .await
-      .map_err(|_| "Could not recheck runtime configuration")??;
-    let handle = match factory::open(&runtime_id, &resolved).await {
-      Ok(handle) => handle,
-      Err(error) => {
-        let reason = factory::redact_error(&error, &resolved);
-        if resolved.profile.mode == RpcRuntimeMode::Managed {
-          // Launch errors do not currently prove whether a child was spawned
-          // and reaped. Reserve ownership rather than risk a second process.
-          self.retain_unconfirmed_start(None, lease, &resolved);
-          return Err(format!(
-            "{reason} Startup cleanup was not confirmed; reserved until host shutdown."
-          ));
-        }
-        return Err(reason);
-      }
-    };
-    let adapter = handle.adapter();
-    let mut events = adapter.subscribe();
-    let native = adapter.descriptor();
-    if let Err(error) = adapter
-      .execute(InteractionRequest {
-        request_id: uuid::Uuid::new_v4().to_string(),
-        target: SessionTarget {
-          runtime_id: native.runtime_id,
-          instance_id: native.instance_id,
-          session_id: None,
-        },
-        command: Command::Metadata,
-      })
-      .await
-    {
-      let reason = factory::redact_error(&error.to_string(), &resolved);
-      return Err(self.retire_unregistered(handle, lease, &resolved, reason).await);
-    }
-    if self.0.stopping.load(Ordering::Acquire) {
-      return Err(
-        self
-          .retire_unregistered(handle, lease, &resolved, "Runtime manager is shutting down".into())
-          .await,
-      );
-    }
-    let descriptor = match self.0.interactions.register(adapter.clone()) {
-      Ok(descriptor) => descriptor,
-      Err(error) => {
-        let reason = factory::redact_error(&error.to_string(), &resolved);
-        return Err(self.retire_unregistered(handle, lease, &resolved, reason).await);
-      }
-    };
-    let info = runtime_info(descriptor, &resolved, "connected", None);
-    let weak = Arc::downgrade(&self.0);
-    let instance = info.instance_id.clone();
-    let runtime = info.runtime_id.clone();
-    let (ready, start) = tokio::sync::oneshot::channel::<()>();
-    let pump = tokio::spawn(async move {
-      if start.await.is_err() {
-        return;
-      }
-      loop {
-        let event = events.recv().await;
-        let Some(inner) = weak.upgrade() else {
-          return;
-        };
-        let mut state = inner.state.lock().unwrap_or_else(|error| error.into_inner());
-        let Some(record) = state
-          .runtimes
-          .get_mut(&runtime)
-          .filter(|record| record.info.instance_id == instance)
-        else {
-          return;
-        };
-        match event {
-          Ok(RuntimeEvent {
-            kind: RuntimeEventKind::Native(_),
-            ..
-          }) => continue,
-          Ok(RuntimeEvent {
-            kind: RuntimeEventKind::Disconnected { .. },
-            ..
-          }) => {
-            record.info.status = "disconnected".into();
-            record.info.last_error = Some("RPC connection ended; close this instance before reconnecting".into());
-            state.bindings.retain(|_, binding| binding.target.runtime_id != runtime);
-          }
-          Err(broadcast::error::RecvError::Lagged(_)) => {
-            record.info.status = "recovery_required".into();
-            state.bindings.retain(|_, binding| binding.target.runtime_id != runtime);
-          }
-          Err(_) => return,
-          _ => {}
-        }
-        drop(state);
-        let _ = inner.changes.send(());
-      }
-    });
     self
       .0
-      .state
-      .lock()
-      .unwrap_or_else(|error| error.into_inner())
       .runtimes
-      .insert(
-        runtime_id,
-        Record {
-          info: info.clone(),
-          handle,
-          _lease: lease,
-          pump,
-        },
-      );
-    let _ = ready.send(());
-    self.changed();
-    Ok(info)
+      .close(core_runtime::CloseRuntimeRequest {
+        request_id: request.request_id,
+        runtime_id: request.runtime_id,
+        expected_instance_id: request.expected_instance_id,
+      })
+      .await
+      .map(|response| RpcCloseRuntimeResponse {
+        runtime_id: response.runtime_id,
+        instance_id: response.instance_id,
+        closed: response.closed,
+      })
   }
-  async fn retire_unregistered(
-    &self,
-    handle: factory::Handle,
-    lease: Option<File>,
-    profile: &RpcResolvedProfile,
-    reason: String,
-  ) -> String {
-    if handle.adapter().close().await.is_ok() {
-      return reason;
-    }
-    self.retain_unconfirmed_start(Some(handle), lease, profile);
-    format!("{reason} Cleanup was not confirmed; this profile remains reserved until host shutdown.")
-  }
-  fn retain_unconfirmed_start(
-    &self,
-    handle: Option<factory::Handle>,
-    lease: Option<File>,
-    profile: &RpcResolvedProfile,
-  ) {
-    // Some adapters consume their child while attempting cleanup. A second close
-    // can succeed without proving that first child exited, so never retry-unlock.
-    let info = runtime_info(
-      handle
-        .as_ref()
-        .map(|handle| handle.adapter().descriptor())
-        .unwrap_or_else(|| RuntimeDescriptor {
-          runtime_id: format!("rpc:{}", profile.profile.profile_id),
-          instance_id: uuid::Uuid::new_v4().to_string(),
-          provider: profile.profile.provider,
-          ownership: Ownership::Managed,
-          capabilities: Capabilities::default(),
-        }),
-      profile,
-      "cleanup_failed",
-      Some("Startup failed and cleanup was not confirmed; reserved until host shutdown".into()),
-    );
-    self
-      .0
-      .state
-      .lock()
-      .unwrap_or_else(|error| error.into_inner())
-      .quarantined
-      .insert(
-        info.runtime_id.clone(),
-        QuarantinedRecord {
-          info,
-          _handle: handle,
-          _lease: lease,
-        },
-      );
-    self.changed();
-  }
-  async fn close_inner(&self, request: RpcCloseRuntimeRequest) -> Result<RpcCloseRuntimeResponse, String> {
-    self.ensure_open()?;
-    if self
-      .0
-      .state
-      .lock()
-      .unwrap_or_else(|error| error.into_inner())
-      .quarantined
-      .contains_key(&request.runtime_id)
-    {
-      return Err("Runtime cleanup was not confirmed; this instance remains reserved until host shutdown".into());
-    }
-    let profile = self
-      .0
-      .state
-      .lock()
-      .unwrap_or_else(|error| error.into_inner())
-      .runtimes
-      .get(&request.runtime_id)
-      .map(|record| record.info.profile_id.clone())
-      .ok_or("Unknown RPC runtime")?;
-    let gate = self.gate(&profile);
-    let _guard = gate.lock().await;
-    {
-      let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
-      let record = state
-        .runtimes
-        .get_mut(&request.runtime_id)
-        .filter(|record| record.info.instance_id == request.expected_instance_id)
-        .ok_or("Runtime instance changed; refresh its status")?;
-      record.info.status = "closing".into();
-    }
-    self.changed();
-    let result = self
-      .0
-      .interactions
-      .detach(&request.runtime_id, &request.expected_instance_id)
-      .await;
-    let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
-    if let Err(_error) = result {
-      if let Some(record) = state.runtimes.get_mut(&request.runtime_id) {
-        record.info.last_error =
-          Some("Cleanup was not confirmed; this instance remains reserved until host shutdown".into());
-      }
-      drop(state);
-      self.changed();
-      return Err("Runtime cleanup was not confirmed; inspect the host before retrying".into());
-    }
-    state.runtimes.remove(&request.runtime_id);
-    state
-      .binding_owners
-      .retain(|_, owner| owner.runtime_id != request.runtime_id);
-    state
-      .bindings
-      .retain(|_, binding| binding.target.runtime_id != request.runtime_id);
-    drop(state);
-    self.changed();
-    Ok(RpcCloseRuntimeResponse {
-      runtime_id: request.runtime_id,
-      instance_id: request.expected_instance_id,
-      closed: true,
-    })
-  }
+
   pub(crate) fn binding(&self, key: &str) -> Option<RpcSessionBinding> {
-    self
-      .0
-      .state
-      .lock()
-      .unwrap_or_else(|error| error.into_inner())
-      .bindings
-      .get(key)
-      .cloned()
+    self.0.runtimes.binding(key).map(Into::into)
   }
-  /// Host-verified callers only. A binding never comes from a client-supplied path.
+
+  /// Called only with a historical identity verified by the host.
   pub(crate) async fn bind(
     &self,
     request_id: String,
@@ -683,195 +201,55 @@ impl RpcRuntimeManager {
     native_id: String,
     provider: Provider,
   ) -> Result<RpcSessionBinding, String> {
-    validate_uuid(&request_id)?;
-    validate_uuid(&profile_id)?;
-    let fingerprint: [u8; 32] = Sha256::digest(
-      serde_json::to_vec(&(&key, &profile_id, &instance, &native_id, provider))
-        .map_err(|_| "Invalid binding target")?,
-    )
-    .into();
-    let manager = self.clone();
-    match self
-      .action(&request_id, "bind", fingerprint, async move {
-        manager
-          .bind_inner(key, profile_id, instance, native_id, provider)
-          .await
-          .map(ActionReply::Bound)
-      })
-      .await?
-    {
-      ActionReply::Bound(binding) => Ok(binding),
-      _ => Err("Request ID belongs to another runtime action".into()),
-    }
-  }
-  async fn bind_inner(
-    &self,
-    key: String,
-    profile_id: String,
-    instance: String,
-    native_id: String,
-    provider: Provider,
-  ) -> Result<RpcSessionBinding, String> {
-    self.ensure_open()?;
-    let owner_key = format!("{provider:?}:{native_id}");
-    let session_gate = self.gate(&format!("session:{owner_key}"));
-    let _session_guard = session_gate.lock().await;
-    let gate = self.gate(&profile_id);
-    let _guard = gate.lock().await;
-    self.ensure_open()?;
-    let (info, handle) = {
-      let state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
-      let record = state
-        .runtimes
-        .values()
-        .find(|record| {
-          record.info.profile_id == profile_id
-            && record.info.instance_id == instance
-            && record.info.provider == provider
-            && record.info.status == "connected"
-        })
-        .ok_or("No matching connected runtime instance")?;
-      (record.info.clone(), record.handle.clone())
-    };
-    let target = SessionTarget {
-      runtime_id: info.runtime_id.clone(),
-      instance_id: instance,
-      session_id: Some(native_id.clone()),
-    };
-    if let Some(binding) = self.binding(&key) {
-      if binding.target == target {
-        return Ok(binding);
-      }
-    }
-    {
-      let state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
-      if let Some(owner) = state.binding_owners.get(&owner_key) {
-        if owner.runtime_id != target.runtime_id || owner.instance_id != target.instance_id {
-          return Err("This session already has another runtime owner; detach it first".into());
-        }
-      }
-      if state.binding_owners.len() >= 1024 && !state.binding_owners.contains_key(&owner_key) {
-        return Err("Runtime session-owner limit reached".into());
-      }
-      if state.bindings.len() >= 1024 && !state.bindings.contains_key(&key) {
-        return Err("Runtime session-binding limit reached".into());
-      }
-    }
-    let needs_lease = !self
+    self
       .0
-      .state
-      .lock()
-      .unwrap_or_else(|error| error.into_inner())
-      .binding_owners
-      .contains_key(&owner_key);
-    if needs_lease {
-      let ownership = self.0.session_ownership.as_ref().map_err(Clone::clone)?.clone();
-      let id = native_id.clone();
-      let lease = tokio::task::spawn_blocking(move || ownership.acquire(provider, &id))
-        .await
-        .map_err(|_| "Could not acquire session ownership")??;
-      // Uncertain activation retains this canonical lease until exact runtime
-      // close, across both profile choices and independent viewer processes.
-      self
-        .0
-        .state
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .binding_owners
-        .insert(
-          owner_key,
-          BindingOwner {
-            runtime_id: target.runtime_id.clone(),
-            instance_id: target.instance_id.clone(),
-            _lease: lease,
-          },
-        );
-    }
-    self.ensure_open()?;
-    handle.bind_native(&native_id).await?;
-    for (id, command) in [("state", Command::State), ("pending", Command::PendingInteractions)] {
-      self
-        .0
-        .interactions
-        .execute(InteractionRequest {
-          request_id: format!("bind-{id}-{}", uuid::Uuid::new_v4()),
-          target: target.clone(),
-          command,
-        })
-        .await
-        .map_err(|_| "Could not recover live session state")?;
-    }
-    let binding = RpcSessionBinding {
-      session_key: key.clone(),
-      profile_id,
-      target,
-      capabilities: info.capabilities,
-    };
-    let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
-    if state.bindings.len() >= 1024 && !state.bindings.contains_key(&key) {
-      return Err("Runtime session-binding limit reached".into());
-    }
-    self.ensure_open()?;
-    if !state
       .runtimes
-      .get(&binding.target.runtime_id)
-      .is_some_and(|record| record.info.instance_id == binding.target.instance_id && record.info.status == "connected")
-    {
-      return Err("Runtime disconnected while recovering the session binding".into());
-    }
-    state.bindings.insert(key, binding.clone());
-    drop(state);
-    self.changed();
-    Ok(binding)
+      .bind(request_id, key, profile_id, instance, native_id, provider)
+      .await
+      .map(Into::into)
   }
+
   pub(crate) async fn shutdown(&self) {
-    self.0.stopping.store(true, Ordering::Release);
-    loop {
-      let settled = self.0.settled.notified();
-      tokio::pin!(settled);
-      settled.as_mut().enable();
-      if self
-        .0
-        .state
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .active_actions
-        == 0
-      {
-        break;
-      }
-      settled.await;
+    self.0.runtimes.shutdown().await;
+  }
+}
+
+impl From<core_runtime::RuntimeInfo> for RpcRuntimeInfo {
+  fn from(info: core_runtime::RuntimeInfo) -> Self {
+    Self {
+      runtime_id: info.runtime_id,
+      instance_id: info.instance_id,
+      profile_id: info.profile_id,
+      profile_revision: info.profile_revision,
+      name: info.name,
+      provider: info.provider,
+      ownership: info.ownership,
+      status: info.status,
+      capabilities: info.capabilities,
+      session_count: info.session_count,
+      last_error: info.last_error,
     }
-    let _ = self.0.interactions.shutdown().await;
-    let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
-    state.runtimes.clear();
-    state.quarantined.clear();
-    state.bindings.clear();
-    state.binding_owners.clear();
   }
 }
-fn runtime_info(
-  descriptor: RuntimeDescriptor,
-  profile: &RpcResolvedProfile,
-  status: &str,
-  last_error: Option<String>,
-) -> RpcRuntimeInfo {
-  RpcRuntimeInfo {
-    runtime_id: descriptor.runtime_id,
-    instance_id: descriptor.instance_id,
-    profile_id: profile.profile.profile_id.clone(),
-    profile_revision: profile.revision,
-    name: profile.profile.name.clone(),
-    provider: descriptor.provider,
-    ownership: descriptor.ownership,
-    status: status.into(),
-    capabilities: descriptor.capabilities,
-    session_count: 0,
-    last_error,
+
+impl From<core_runtime::SessionBinding> for RpcSessionBinding {
+  fn from(binding: core_runtime::SessionBinding) -> Self {
+    Self {
+      session_key: binding.session_key,
+      profile_id: binding.profile_id,
+      target: binding.target,
+      capabilities: binding.capabilities,
+    }
   }
 }
-fn validate_uuid(id: &str) -> Result<(), String> {
-  uuid::Uuid::parse_str(id)
-    .map(|_| ())
-    .map_err(|_| "Invalid runtime request or profile ID".into())
+
+impl From<&RpcSessionBinding> for core_runtime::SessionBinding {
+  fn from(binding: &RpcSessionBinding) -> Self {
+    Self {
+      session_key: binding.session_key.clone(),
+      profile_id: binding.profile_id.clone(),
+      target: binding.target.clone(),
+      capabilities: binding.capabilities.clone(),
+    }
+  }
 }

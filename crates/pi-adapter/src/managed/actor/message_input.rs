@@ -1,7 +1,5 @@
 //! One fresh native admission transaction for input and optional model intent.
 use super::*;
-use crate::models::*;
-use sha2::{Digest, Sha256};
 
 #[derive(Clone, Copy)]
 enum MessagePhase {
@@ -47,19 +45,7 @@ impl MessagePending {
   }
 
   fn fingerprint(&self) -> Result<String, String> {
-    let images = self
-      .images
-      .iter()
-      .map(|image| (&image.image_id, &image.sha256))
-      .collect::<Vec<_>>();
-    let bytes = if self.selection.is_some() {
-      serde_json::to_vec(&(&self.text, images, &self.selection)).map_err(|error| error.to_string())?
-    } else if images.is_empty() {
-      self.text.as_bytes().to_vec()
-    } else {
-      serde_json::to_vec(&(&self.text, images)).map_err(|error| error.to_string())?
-    };
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    managed_message_fingerprint(&self.text, &self.images, self.selection.as_ref())
   }
 
   fn error(&self, message: &str, possibly_written: bool) -> DeliveryError {
@@ -85,29 +71,17 @@ impl MessagePending {
 impl Actor {
   pub(super) async fn begin_message(&mut self, pending: MessagePending) -> Result<(), String> {
     let fingerprint = pending.fingerprint()?;
-    if let Some((previous, receipt)) = self.recent.get(&pending.request_id) {
-      let response = if previous != &fingerprint {
-        Err(DeliveryError::not_sent(
-          "Message request ID was already used with different content or model intent",
-        ))
-      } else {
-        receipt.clone().unwrap_or_else(|| {
-          Err(DeliveryError::uncertain(
-            "The original message is still awaiting Pi acknowledgement",
-          ))
-        })
-      };
-      let _ = pending.reply.send(response);
-      return Ok(());
+    match self.recent.admit(&pending.request_id, fingerprint) {
+      Ok(None) => {}
+      Ok(Some(result)) => {
+        let _ = pending.reply.send(result);
+        return Ok(());
+      }
+      Err(error) => {
+        let _ = pending.reply.send(Err(error));
+        return Ok(());
+      }
     }
-    if self.recent.len() >= 1024 {
-      pending.reject(
-        "Managed runtime message receipt limit reached; resume this session to continue",
-        false,
-      );
-      return Ok(());
-    }
-    self.recent.insert(pending.request_id.clone(), (fingerprint, None));
     self.send(wire::Command::GetState, PendingKind::Message(pending)).await
   }
 
@@ -128,9 +102,7 @@ impl Actor {
   }
 
   fn reject_message_error(&mut self, pending: MessagePending, error: DeliveryError) {
-    if let Some(receipt) = self.recent.get_mut(&pending.request_id) {
-      receipt.1 = Some(Err(error.clone()));
-    }
+    self.recent.complete(&pending.request_id, Err(error.clone()));
     let _ = pending.reply.send(Err(error));
   }
 

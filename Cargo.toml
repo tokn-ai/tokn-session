@@ -63,6 +63,8 @@ ratatui = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "net", "io-util"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+libc = "0.2"
 tokn-hub-client-core = { version = "0.1.1", path = "crates/hub-client-core" }
 tokn-hub-remote = { version = "0.1.1", path = "crates/hub-remote" }
 tokn-hub-transport = { version = "0.1.1", path = "crates/hub-transport" }

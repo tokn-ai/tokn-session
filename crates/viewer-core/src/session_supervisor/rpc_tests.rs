@@ -114,7 +114,7 @@ async fn codex_default_rpc_inspection_does_not_connect_and_first_send_delivers_o
     supervisor.transport(&target(directory.path())).await.unwrap(),
     SessionTransport::Rpc
   );
-  assert!(supervisor.desktop_owners.lock().unwrap().is_empty());
+  assert!(supervisor.coordinator.route_owner_count() == 0);
   supervisor.shutdown().await;
 }
 
@@ -150,7 +150,7 @@ async fn lost_rpc_acknowledgement_stays_unknown_without_replay_or_desktop_fallba
     supervisor.transport(&target(directory.path())).await.unwrap(),
     SessionTransport::Rpc
   );
-  assert!(supervisor.desktop_owners.lock().unwrap().is_empty());
+  assert!(supervisor.coordinator.route_owner_count() == 0);
   supervisor.shutdown().await;
 }
 

@@ -114,18 +114,23 @@ allowlist fields and enforce existing viewing/control authorization.
 
 ## Current integration
 
-The viewer's managed Pi project/history supervisor uses `PiAdapter`'s exclusive
-supervised session API. The adapter owns process/transport, typed native writes,
-correlation, compact ordered control projection, stderr, and awaited cleanup.
-The host retains admission/model workflows, dialog-aware budgets, durable
-receipts, history validation, leases, and idle/restart policy. Its continuation
-map represents workflow phases rather than another wire response decoder.
-The supervised wrapper exposes no common adapter handle, preventing competing
-command owners; it does not strengthen generic model-on-send capabilities.
-Existing model DTO wire fields are unchanged and come from the core; the input broker uses the shared
-receipt ledger. `ViewerService::interaction_service` is a host-only Rust
-composition point, unavailable to session shares or External reader mode, and
-the viewer closes registered adapters during managed-session shutdown.
+`interaction-core::managed_sessions` owns durable creation receipts, coalesced
+resume, native/process leases, restart fences and idle retirement behind driver
+and host traits. Pi's native model-on-send, dialogs, workflow deadlines and stream
+interpretation live in `pi-adapter::managed::PiSessionDriver`. The supervised
+transport exposes no competing common adapter handle; it does not strengthen
+native model-on-send capabilities. Native model/dialog parsing lives in the RPC
+protocol crate, and persisted header verification lives in the Pi source crate.
+
+The core's `admission` module owns message/control receipts and transport-change
+fences. `session_supervisor::SessionCoordinator` owns per-session gates and route
+changes; `runtime::RuntimeCoordinator` owns configured lifecycle, startup quarantine,
+lease/binding recovery, event pumps and shutdown. The viewer supplies profile
+policy, concrete factories, authorization, project/index integration and display
+projection. Core modules never import providers or viewer types. Existing wire
+fields remain compatible. The old viewer `managed_pi` module is removed.
+`ViewerService::interaction_service` remains a host-only composition point,
+unavailable to shares or External reader mode.
 
 Selected-machine runtime profiles compose all four adapters through real
 managed/attached factories, with separately authorized configuration/lifecycle
