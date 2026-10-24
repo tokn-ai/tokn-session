@@ -113,9 +113,15 @@ allowlist fields and enforce existing viewing/control authorization.
 
 ## Current integration
 
-The viewer's existing managed Pi project/history supervisor consumes the new
-Pi protocol validation and bounded framing helpers. Existing model DTO wire
-fields are unchanged and now come from the core; its input broker uses the shared
+The viewer's managed Pi project/history supervisor uses `PiAdapter`'s exclusive
+supervised session API. The adapter owns process/transport, typed native writes,
+correlation, compact ordered control projection, stderr, and awaited cleanup.
+The host retains admission/model workflows, dialog-aware budgets, durable
+receipts, history validation, leases, and idle/restart policy. Its continuation
+map represents workflow phases rather than another wire response decoder.
+The supervised wrapper exposes no common adapter handle, preventing competing
+command owners; it does not strengthen generic model-on-send capabilities.
+Existing model DTO wire fields are unchanged and come from the core; the input broker uses the shared
 receipt ledger. `ViewerService::interaction_service` is a host-only Rust
 composition point, unavailable to session shares or External reader mode, and
 the viewer closes registered adapters during managed-session shutdown.

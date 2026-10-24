@@ -89,6 +89,16 @@ Automatic and explicit resume are limited to sessions created by this viewer;
 opening an arbitrary Pi history does not adopt its process. A process lease
 prevents two viewer processes from owning the same managed session concurrently.
 
+The supervisor uses the shared Rust Pi adapter's exclusive supervised transport.
+The adapter owns child startup, pipes, native response validation, bounded writes,
+stderr, and reaping. The viewer retains durable ownership/history and admission
+workflows, including its existing model-on-send, dialog, and idle-retirement
+behavior. Control frames are filtered before the ordered bounded queue, so token
+and tool bodies cannot displace lifecycle evidence. The common adapter API keeps
+its existing capability limits; supervised admission is coordinated by this host.
+The adapter observes the owned process independently of stdout EOF, so a child
+inheriting the output pipe cannot keep an exited Pi worker marked as running.
+
 Pi extension confirmation, selection, input, and editor dialogs appear in the
 viewer. Responses return to their exact pending native dialog. Closing a dialog
 cancels it; dialogs expire within two minutes, or sooner if Pi requests a

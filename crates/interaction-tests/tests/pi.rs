@@ -19,6 +19,7 @@ use tokio::{
 use tokn_interaction_core::*;
 use tokn_interaction_tests::{ModelGate, ModelServer, ModelStep, TestResult};
 use tokn_pi_adapter::{EndpointOptions, PiAdapter};
+use tokn_pi_rpc_protocol as wire;
 
 const REVISION: &str = "fdbedcad8aeb7c1e2ebd3b85f16e60e5fab0b2c3";
 fn fixture_path() -> PathBuf {
@@ -298,27 +299,148 @@ async fn replay_real_pi_rpc_conversation() -> TestResult<()> {
   assert_eq!(fixture.model_data_artifact_sha256, MODEL_DATA_SHA256);
   let (client, server) = tokio::io::duplex(1024 * 1024);
   let (reader, writer) = tokio::io::split(client);
+  let replay = tokio::spawn(replay_native_frames(server, fixture.frames));
+  exercise(PiAdapter::attach(options(), reader, writer)?, None).await?;
+  replay.await??;
+  Ok(())
+}
+
+async fn replay_native_frames(server: tokio::io::DuplexStream, frames: Vec<Frame>) -> TestResult<()> {
   let (server_reader, mut server_writer) = tokio::io::split(server);
-  let replay = tokio::spawn(async move {
-    let mut lines = BufReader::new(server_reader).lines();
+  let mut lines = BufReader::new(server_reader).lines();
+  for (index, frame) in frames.into_iter().enumerate() {
+    if frame.direction == "request" {
+      let actual: Value =
+        serde_json::from_str(&lines.next_line().await?.ok_or("adapter closed before capture ended")?)?;
+      assert_eq!(actual, frame.body, "captured Pi request {index} changed");
+    } else {
+      server_writer
+        .write_all(serde_json::to_string(&frame.body)?.as_bytes())
+        .await?;
+      server_writer.write_all(b"\n").await?;
+    }
+  }
+  // Keep the stream alive until the adapter detaches; EOF would race its final
+  // authoritative get_state and change availability semantics.
+  assert!(lines.next_line().await?.is_none());
+  Ok(())
+}
+
+#[tokio::test]
+async fn replay_real_pi_rpc_through_owned_session_supervision() -> TestResult<()> {
+  let fixture: Fixture = serde_json::from_str(&std::fs::read_to_string(fixture_path())?)?;
+  assert_eq!(fixture.provider, "pi");
+  assert_eq!(fixture.revision, REVISION);
+  assert_eq!(fixture.agent_version, "0.82.1");
+  assert_eq!(fixture.model_data_artifact_sha256, MODEL_DATA_SHA256);
+  let (client, server) = tokio::io::duplex(1024 * 1024);
+  let (reader, writer) = tokio::io::split(client);
+  let mut session = PiAdapter::attach_supervised(options(), reader, writer)?;
+  let replay = tokio::spawn(replay_native_frames(server, fixture.frames.clone()));
+
+  // Drive the identical native conversation through the host-supervision API.
+  // The peer checks every serialized write; every expected compact response is
+  // consumed here in its captured position, including responses between work
+  // events. Suppressed token/tool/user records cannot pass this test as output.
+  tokio::time::timeout(Duration::from_secs(20), async {
+    let mut response_count = 0;
+    let mut discarded = 0;
+    let mut lifecycle = Vec::new();
+    let mut assistant_outcomes = Vec::new();
+    let mut prompts = Vec::new();
+    let mut dialog = None;
+    let mut answered = false;
+    let mut final_state = None;
     for (index, frame) in fixture.frames.into_iter().enumerate() {
       if frame.direction == "request" {
-        let actual: Value =
-          serde_json::from_str(&lines.next_line().await?.ok_or("adapter closed before capture ended")?)?;
-        assert_eq!(actual, frame.body, "captured Pi request {index} changed");
+        if frame.body["type"] == "extension_ui_response" {
+          assert_eq!(
+            &frame.body["id"],
+            dialog.as_ref().expect("native question precedes its answer")
+          );
+          assert_eq!(frame.body["value"], "Beta");
+          session.respond(serde_json::from_value(frame.body)?).await?;
+          answered = true;
+        } else {
+          let request: wire::Request = serde_json::from_value(frame.body)?;
+          if let wire::Command::Prompt { message, .. } = &request.command {
+            prompts.push(message.clone());
+          }
+          session
+            .send(
+              request.id.ok_or("captured command has no correlation ID")?,
+              request.command,
+            )
+            .await?;
+        }
+        continue;
+      }
+      let expected = match frame.body["type"].as_str().unwrap_or_default() {
+        "response" => {
+          response_count += 1;
+          if frame.body["command"] == "get_state" {
+            final_state = Some(wire::parse_state(&frame.body["data"])?);
+          }
+          Some(frame.body)
+        }
+        "extension_ui_request" => {
+          assert_eq!(frame.body["method"], "select");
+          assert_eq!(frame.body["title"], "Choose a fixture option");
+          assert_eq!(frame.body["options"], json!(["Alpha", "Beta"]));
+          dialog = Some(frame.body["id"].clone());
+          Some(frame.body)
+        }
+        kind @ ("agent_start" | "agent_end" | "agent_settled") => {
+          lifecycle.push(kind.to_owned());
+          Some(json!({"type":kind}))
+        }
+        "message_end" if frame.body["message"]["role"] == "assistant" => {
+          let stop_reason = frame.body["message"]["stopReason"].clone();
+          assistant_outcomes.push(stop_reason.as_str().ok_or("assistant outcome is missing")?.to_owned());
+          Some(json!({
+            "type":"message_end", "stop_reason":stop_reason,
+            "error_message":frame.body["message"]["errorMessage"]
+          }))
+        }
+        _ => None,
+      };
+      if let Some(expected) = expected {
+        let actual = session
+          .recv()
+          .await
+          .ok_or("supervised output closed before capture ended")??;
+        assert_eq!(actual, expected, "captured Pi control frame {index} changed");
       } else {
-        server_writer
-          .write_all(serde_json::to_string(&frame.body)?.as_bytes())
-          .await?;
-        server_writer.write_all(b"\n").await?;
+        discarded += 1;
       }
     }
-    // Keep the stream alive until the adapter detaches; EOF would race its final
-    // authoritative get_state and change availability semantics.
-    assert!(lines.next_line().await?.is_none());
+    assert_eq!(response_count, 22);
+    assert_eq!(
+      prompts,
+      [
+        "fixture hello",
+        "fixture ask question",
+        "fixture run until released",
+        "fixture steer",
+        "fixture cancel this"
+      ]
+    );
+    assert_eq!(lifecycle, ["agent_start", "agent_end", "agent_settled"].repeat(4));
+    assert_eq!(
+      assistant_outcomes,
+      ["stop", "toolUse", "stop", "stop", "stop", "stop", "aborted"]
+    );
+    assert!(answered);
+    assert!(discarded > 50, "the native fixture includes token/tool/body traffic");
+    let state = final_state.expect("final native get_state was replayed");
+    assert!(!state.is_streaming);
+    assert!(!state.is_compacting);
+    assert_eq!(state.pending_message_count, 0);
+    assert!(session.is_empty(), "unexpected extra supervised output");
+    session.close().await?;
     Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
-  });
-  exercise(PiAdapter::attach(options(), reader, writer)?, None).await?;
+  })
+  .await??;
   replay.await??;
   Ok(())
 }

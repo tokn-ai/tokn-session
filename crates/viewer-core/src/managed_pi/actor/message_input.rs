@@ -108,9 +108,7 @@ impl Actor {
       return Ok(());
     }
     self.recent.insert(pending.request_id.clone(), (fingerprint, None));
-    self
-      .send("get_state", json!({"type":"get_state"}), PendingKind::Message(pending))
-      .await
+    self.send(wire::Command::GetState, PendingKind::Message(pending)).await
   }
 
   fn observed_busy(&self) -> bool {
@@ -257,11 +255,7 @@ impl Actor {
         }
         pending.phase = MessagePhase::Catalog;
         self
-          .send(
-            "get_available_models",
-            json!({"type":"get_available_models"}),
-            PendingKind::Message(pending),
-          )
+          .send(wire::Command::GetAvailableModels, PendingKind::Message(pending))
           .await?;
       }
       MessagePhase::Catalog => {
@@ -270,7 +264,7 @@ impl Actor {
         if self.observed_busy() {
           pending.phase = MessagePhase::BusyState;
           self
-            .send("get_state", json!({"type":"get_state"}), PendingKind::Message(pending))
+            .send(wire::Command::GetState, PendingKind::Message(pending))
             .await?;
           return Ok(());
         }
@@ -321,14 +315,20 @@ impl Actor {
           pending.result = Some(self.message_result(MessageModelOutcome::Unchanged));
           return self.finish_message(pending).await;
         }
-        let value = json!({"type":"set_model","provider":selection.model_provider,"modelId":selection.model_id});
+        let command = wire::Command::SetModel {
+          provider: selection
+            .model_provider
+            .clone()
+            .expect("validated Pi model selection has a provider"),
+          model_id: selection.model_id.clone(),
+        };
         pending.phase = MessagePhase::Setting;
-        self.send("set_model", value, PendingKind::Message(pending)).await?;
+        self.send(command, PendingKind::Message(pending)).await?;
       }
       MessagePhase::Setting => {
         pending.phase = MessagePhase::Readback;
         self
-          .send("get_state", json!({"type":"get_state"}), PendingKind::Message(pending))
+          .send(wire::Command::GetState, PendingKind::Message(pending))
           .await?;
       }
     }
