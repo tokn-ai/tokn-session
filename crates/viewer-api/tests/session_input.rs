@@ -74,7 +74,13 @@ fn submission(key: &str, text: &str) -> Value {
 #[tokio::test]
 async fn input_routes_require_authentication_before_parsing_or_target_validation() {
   let fixture = Fixture::new();
-  for command in ["get_session_input_status", "submit_session_input"] {
+  for command in [
+    "get_session_input_status",
+    "submit_session_input",
+    "get_session_control",
+    "set_session_control",
+    "cancel_session_turn",
+  ] {
     for authorization in [None, Some("Bearer wrong-token"), Some(TOKEN)] {
       // Even invalid JSON must first pass the same auth middleware as reads.
       let response = fixture.post(command, authorization, "{".into()).await;
@@ -111,7 +117,13 @@ async fn input_routes_require_authentication_before_parsing_or_target_validation
 #[tokio::test]
 async fn input_routes_reject_malformed_request_envelopes() {
   let fixture = Fixture::new();
-  for command in ["get_session_input_status", "submit_session_input"] {
+  for command in [
+    "get_session_input_status",
+    "submit_session_input",
+    "get_session_control",
+    "set_session_control",
+    "cancel_session_turn",
+  ] {
     for payload in [
       json!({}),
       json!({"request": null}),
@@ -166,6 +178,7 @@ async fn forged_and_unregistered_session_keys_never_authorize_delivery() {
     "../../private-session.jsonl".to_owned(),
     session_key("codex", &private_file),
     session_key("pi", &private_file),
+    session_key("dsh", &private_file),
   ];
   for key in forged_keys {
     let (status, body) = fixture
@@ -189,7 +202,7 @@ async fn forged_and_unregistered_session_keys_never_authorize_delivery() {
 #[tokio::test]
 async fn unsupported_providers_return_read_only_status_and_no_admission() {
   let fixture = Fixture::new();
-  for provider in ["opencode", "zcode", "workbuddy", "dsh"] {
+  for provider in ["opencode", "zcode", "workbuddy"] {
     let key = session_key(provider, &fixture.directory.path().join("provider-session"));
     let (status, body) = fixture
       .authorized("get_session_input_status", json!({"request": {"session_key": key}}))
@@ -200,7 +213,7 @@ async fn unsupported_providers_return_read_only_status_and_no_admission() {
       body["message"]
         .as_str()
         .unwrap()
-        .contains("not available for this provider")
+        .contains("no compatible live history binding")
     );
     let (status, body) = fixture
       .authorized("submit_session_input", submission(&key, "hello"))
@@ -212,7 +225,7 @@ async fn unsupported_providers_return_read_only_status_and_no_admission() {
       body["message"]
         .as_str()
         .unwrap()
-        .contains("not available for this provider")
+        .contains("no compatible live history binding")
     );
   }
 }

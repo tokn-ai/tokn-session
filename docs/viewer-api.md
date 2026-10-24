@@ -124,8 +124,12 @@ Choose **Change machine** to close requests/subscriptions and clear the viewer
 before connecting elsewhere. Only one machine is selected at a time. The
 browser does not change the server's Relay configuration.
 
-The message composer sends through the API host's Codex Desktop or Pi input
-bridge. The same API token authorizes both history access and message submission.
+The message composer uses the API host's shared Rust session supervisor. Codex
+defaults to RPC with explicit Desktop selection; Pi retains its owned/bridge
+driver, and configured OpenCode V2/DSH runtimes use their native adapters.
+First Send activates and binds existing work; opening history does not. The
+same API token authorizes both history access and message submission.
+See [session routing](shared-session-supervisor.md) for provider limits.
 See [message input behavior](../apps/viewer/README.md#sending-messages).
 
 ## API contract
@@ -144,6 +148,7 @@ Tauri adapter, normally `{"request":{...}}`. Commands without a request take
 - `update_session_view`
 - `get_session_index_progress`, `retry_session_index`, `get_relay_status`
 - `get_session_input_status`, `submit_session_input`
+- `get_session_control`, `set_session_control`, `cancel_session_turn`
 - `get_session_question_status`, `submit_session_question_answers`
 
 Session keys are admitted against the server's index before any

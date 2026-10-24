@@ -1,10 +1,29 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { invoke, type CommandInvoker } from "./transport";
-import { getSessionModelStatus, listSessionModels, inspectSessionEvent, loadGroupDetails, loadSessionUpdates, loadToolDetails, renewSessionSubscriptions, submitSessionInput } from "./tauri";
+import { getSessionModelStatus, listSessionModels, inspectSessionEvent, loadGroupDetails, loadSessionUpdates, loadToolDetails, renewSessionSubscriptions, submitSessionInput, getSessionControl, setSessionControl, cancelSessionTurn } from "./tauri";
 import type { SessionUpdatesRequest, SessionUpdate } from "./types";
 
 vi.mock("./transport", () => ({ invoke: vi.fn(), listen: vi.fn(), isDesktop: () => false }));
 beforeEach(() => vi.mocked(invoke).mockReset());
+
+it("keeps session transport selection and cancellation on the captured machine without fallback", async () => {
+  const { send, calls } = machineInvoker();
+  calls.mockResolvedValue({});
+  const target = { session_key: "one" };
+  const selection = { ...target, request_id: "choice", transport: "desktop" as const };
+  const cancel = { ...target, request_id: "stop" };
+  await getSessionControl(target, send);
+  await setSessionControl(selection, send);
+  await cancelSessionTurn(cancel, send);
+  expect(calls.mock.calls).toEqual([
+    ["get_session_control", { request: target }],
+    ["set_session_control", { request: selection }],
+    ["cancel_session_turn", { request: cancel }],
+  ]);
+  calls.mockRejectedValueOnce(new Error("Remote unavailable"));
+  await expect(setSessionControl(selection, send)).rejects.toThrow("Remote unavailable");
+  expect(invoke).not.toHaveBeenCalled();
+});
 
 it("routes model reads and mutation through the captured session machine without local fallback", async () => {
   const { send, calls } = machineInvoker();

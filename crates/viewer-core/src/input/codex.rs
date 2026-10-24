@@ -45,7 +45,7 @@ pub(crate) async fn model_status(target: &InputTarget) -> Result<SessionModelSta
   client.read_model_status(&target.session_id).await
 }
 
-pub(super) async fn submit_images(
+pub(crate) async fn submit_images(
   target: &InputTarget,
   request_id: &str,
   text: &str,
@@ -150,7 +150,7 @@ impl DesktopClient {
       }), &generation),
       can_select: false, can_list: false,
       reason: Some("Codex Desktop does not expose a verified model catalog through its input connection. Change models in Codex Desktop.".into()),
-      runtime_generation: Some(generation), updates_pi_default: false, supports_model_input: false,
+      runtime_generation: Some(generation), updates_default: false, supports_model_input: false,
     })
   }
 

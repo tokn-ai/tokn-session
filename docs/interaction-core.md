@@ -20,7 +20,8 @@ Historical `*-protocol` crates and `AgentEvent` keep their existing role.
 Codex uses managed stdio or explicit attached stdio/WS(S). Create/resume binds
 and subscribes a thread before control; metadata/state inspection never resumes
 it. Native model catalogs provide verified choices for these registered
-app-server runtimes. The viewer's existing Desktop route is unchanged. See the
+app-server runtimes. The viewer defaults to RPC and offers its existing Desktop
+route as an explicit per-thread alternative. See the
 [Codex adapter](../crates/codex-adapter/README.md) for native guarantees, callback
 questions, transport limits, and ownership.
 
@@ -113,28 +114,36 @@ allowlist fields and enforce existing viewing/control authorization.
 
 ## Current integration
 
-The viewer's managed Pi project/history supervisor uses `PiAdapter`'s exclusive
-supervised session API. The adapter owns process/transport, typed native writes,
-correlation, compact ordered control projection, stderr, and awaited cleanup.
-The host retains admission/model workflows, dialog-aware budgets, durable
-receipts, history validation, leases, and idle/restart policy. Its continuation
-map represents workflow phases rather than another wire response decoder.
-The supervised wrapper exposes no common adapter handle, preventing competing
-command owners; it does not strengthen generic model-on-send capabilities.
-Existing model DTO wire fields are unchanged and come from the core; the input broker uses the shared
-receipt ledger. `ViewerService::interaction_service` is a host-only Rust
-composition point, unavailable to session shares or External reader mode, and
-the viewer closes registered adapters during managed-session shutdown.
+`interaction-core::managed_sessions` owns durable creation receipts, coalesced
+resume, native/process leases, restart fences and idle retirement behind driver
+and host traits. Pi's native model-on-send, dialogs, workflow deadlines and stream
+interpretation live in `pi-adapter::managed::PiSessionDriver`. The supervised
+transport exposes no competing common adapter handle; it does not strengthen
+native model-on-send capabilities. Native model/dialog parsing lives in the RPC
+protocol crate, and persisted header verification lives in the Pi source crate.
 
-Selected-machine runtime profiles now compose all four adapters through real
-managed/attached factories, with separate authorized local/remote configuration
-and lifecycle commands. The existing frontend Codex/Pi conversation routes,
-history indexing, project ownership, local runtime inventory, and Pi admission
-bridge remain in place. Shared Rust bindings verify history identity and native
-ownership, but frontend Send/model/question controls do not consume them yet.
-Next, wire those controls and allowlist common events for viewer display; this
-does not yet provide OpenCode/DSH composer support. See
-[viewer RPC runtimes](viewer-rpc-runtimes.md). No vendor source changes are needed.
+The core's `admission` module owns message/control receipts and transport-change
+fences. `session_supervisor::SessionCoordinator` owns per-session gates and route
+changes; `runtime::RuntimeCoordinator` owns configured lifecycle, startup quarantine,
+lease/binding recovery, event pumps and shutdown. The viewer supplies profile
+policy, concrete factories, authorization, project/index integration and display
+projection. Core modules never import providers or viewer types. Existing wire
+fields remain compatible. The old viewer `managed_pi` module is removed.
+`ViewerService::interaction_service` remains a host-only composition point,
+unavailable to shares or External reader mode.
+
+Selected-machine runtime profiles compose all four adapters through real
+managed/attached factories, with separately authorized configuration/lifecycle
+commands. A shared Rust session supervisor now routes conversation input,
+bound model metadata, live callback answers, and cancellation through these
+verified bindings. First Send activates a runtime; inspecting historical work
+does not. Codex has explicit RPC/Desktop selection without automatic fallback.
+Provider/native-ID cross-process leases are shared across profiles, the owned
+Pi driver, and explicit Desktop control. Pi's existing owner/bridge remains
+exclusive, and OpenCode V1 history still cannot bind to a V2 coordinator.
+Session lifetime is separate from the lifetime of a server shared by several
+sessions. See [shared session supervision](shared-session-supervisor.md) and
+[runtime configuration](viewer-rpc-runtimes.md) for activation and current limits.
 
 Adapter unit tests use synthetic peers for fault injection. The private
 [`interaction-tests`](../crates/interaction-tests/README.md) crate additionally

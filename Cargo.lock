@@ -6075,10 +6075,15 @@ dependencies = [
 name = "tokn-interaction-core"
 version = "0.1.1"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
+ "tokio-util",
+ "tokn-session-storage",
+ "uuid",
 ]
 
 [[package]]
@@ -6142,11 +6147,16 @@ name = "tokn-pi-adapter"
 version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
+ "libc",
+ "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tokn-interaction-core",
  "tokn-pi-rpc-protocol",
+ "tokn-session-pi",
  "uuid",
 ]
 

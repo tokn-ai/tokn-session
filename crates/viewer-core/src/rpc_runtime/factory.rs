@@ -152,3 +152,105 @@ pub(super) fn redact_error(_error: &str, profile: &RpcResolvedProfile) -> String
     profile.profile.provider
   )
 }
+
+impl core_runtime::RuntimeHandle for Handle {
+  fn adapter(&self) -> Arc<dyn InteractionAdapter> {
+    Handle::adapter(self)
+  }
+
+  fn bind_native<'a>(&'a self, id: &'a str) -> AdapterFuture<'a, Result<(), String>> {
+    Box::pin(Handle::bind_native(self, id))
+  }
+}
+
+impl core_runtime::RuntimeHost for Host {
+  type Profile = RpcResolvedProfile;
+
+  fn resolve_profile(&self, profile_id: &str, revision: u64) -> Result<Self::Profile, String> {
+    if let Some(profile) = self
+      .transient_profiles
+      .lock()
+      .unwrap_or_else(|error| error.into_inner())
+      .get(profile_id)
+      .cloned()
+    {
+      if profile.revision != revision {
+        return Err("Runtime profile changed before connection".into());
+      }
+      return Ok(profile);
+    }
+    self.profiles.resolve_at_revision(profile_id, revision)
+  }
+
+  fn describe(&self, profile: &Self::Profile) -> core_runtime::ProfileDescriptor {
+    core_runtime::ProfileDescriptor {
+      profile_id: profile.profile.profile_id.clone(),
+      revision: profile.revision,
+      name: profile.profile.name.clone(),
+      provider: profile.profile.provider,
+      ownership: match profile.profile.mode {
+        RpcRuntimeMode::Managed => Ownership::Managed,
+        RpcRuntimeMode::Attached => Ownership::Attached,
+      },
+    }
+  }
+
+  fn validate_launch_ready(&self, profile: &Self::Profile) -> Result<(), String> {
+    profile.validate_launch_ready()
+  }
+
+  fn select_profile<'a>(
+    &'a self,
+    provider: Provider,
+    cwd: &'a std::path::Path,
+  ) -> AdapterFuture<'a, Result<(String, u64), String>> {
+    Box::pin(async move {
+      // Pi history requires a verified file and the owned-session driver.
+      if provider == Provider::Pi {
+        return Err("Continue this Pi session through its verified owned-session runtime".into());
+      }
+      let profiles = self.profiles.clone();
+      let cwd = cwd.to_path_buf();
+      let selected = tokio::task::spawn_blocking(move || {
+        let snapshot = profiles.snapshot()?;
+        let profile = super::workflow::select_profile(&snapshot, provider, &cwd)?;
+        let Some(profile) = profile else {
+          return Ok((None, snapshot.revision, cwd));
+        };
+        Ok::<_, String>((Some(profile.profile_id.clone()), snapshot.revision, cwd))
+      })
+      .await
+      .map_err(|_| "Could not select a runtime profile")??;
+      if let Some(profile_id) = selected.0 {
+        return Ok((profile_id, selected.1));
+      }
+      let profile = tokio::task::spawn_blocking(move || super::workflow::builtin_codex(&selected.2))
+        .await
+        .map_err(|_| "Could not discover the local Codex executable")??;
+      let profile_id = profile.profile.profile_id.clone();
+      self
+        .transient_profiles
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .entry(profile_id.clone())
+        .or_insert(profile);
+      Ok((profile_id, 0))
+    })
+  }
+
+  fn open<'a>(
+    &'a self,
+    runtime_id: &'a str,
+    profile: &'a Self::Profile,
+  ) -> AdapterFuture<'a, Result<Arc<dyn core_runtime::RuntimeHandle>, String>> {
+    Box::pin(async move {
+      open(runtime_id, profile)
+        .await
+        .map(|handle| Arc::new(handle) as Arc<dyn core_runtime::RuntimeHandle>)
+    })
+  }
+
+  fn redact_error(&self, error: &str, profile: &Self::Profile) -> String {
+    redact_error(error, profile)
+  }
+}

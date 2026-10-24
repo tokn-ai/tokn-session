@@ -20,6 +20,10 @@ The desktop, CLI, and native services share one default root:
     relay.json
     rpc-runtimes.json
     rpc-leases/
+    session-controls.json
+    session-leases/
+    managed-sessions.json
+    managed-pi-<request-id>.lease
     import-state.json
 ```
 

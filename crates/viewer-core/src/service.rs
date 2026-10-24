@@ -43,8 +43,10 @@ mod model_projection;
 mod notifications;
 mod question_display;
 mod question_input;
+mod rpc_questions;
 mod rpc_runtimes;
 mod runtimes;
+mod session_control;
 mod session_models;
 mod trajectory_state;
 mod usage_filter;
@@ -97,9 +99,8 @@ pub struct ViewerService {
   loaded_session_cache: Arc<Mutex<Option<CachedSession>>>,
   input_broker: crate::input::InputBroker,
   interactions: tokn_interaction_core::InteractionService,
-  pub(crate) rpc_runtimes: crate::rpc_runtime::RpcRuntimeManager,
+  pub(crate) sessions: crate::session_supervisor::SessionSupervisor,
   pub(crate) images: crate::images::ImageStore,
-  pub(crate) managed_pi: crate::managed_pi::ManagedPiSessions,
   question_claims: Arc<Mutex<question_input::QuestionClaims>>,
   pub(crate) updates: Arc<Mutex<crate::updates::UpdateStore>>,
   pub(crate) background: Arc<Mutex<crate::background::BackgroundStore>>,
@@ -685,13 +686,6 @@ impl ViewerService {
       .map_err(|error| format!("failed to open the viewer session index: {error}"))?;
     let mut service = Self::with_repository(Arc::new(NativeRepository::default()), Arc::new(session_index));
     service.indexer_lock = Some(crate::indexer::IndexerLock::new(index_path.as_ref())?);
-    let managed_state = index_path
-      .as_ref()
-      .parent()
-      .unwrap_or_else(|| Path::new("."))
-      .join("viewer/managed-sessions.json");
-    service.managed_pi = crate::managed_pi::ManagedPiSessions::new(Some(managed_state))
-      .unwrap_or_else(crate::managed_pi::ManagedPiSessions::disabled);
     let image_root = index_path
       .as_ref()
       .parent()
@@ -699,13 +693,20 @@ impl ViewerService {
       .join("viewer/images");
     // An unusable attachment directory must not prevent opening text history.
     // Uploads report the storage error through their own action state.
-    let profiles_path = index_path
+    let session_directory = index_path
       .as_ref()
       .parent()
       .unwrap_or_else(|| Path::new("."))
-      .join("viewer/rpc-runtimes.json");
-    service.rpc_runtimes =
-      crate::rpc_runtime::RpcRuntimeManager::new(Some(profiles_path), service.interactions.clone());
+      .join("viewer");
+    let session_directory = if session_directory.is_absolute() {
+      session_directory
+    } else {
+      std::env::current_dir()
+        .map_err(|error| error.to_string())?
+        .join(session_directory)
+    };
+    service.sessions =
+      crate::session_supervisor::SessionSupervisor::new(Some(session_directory), service.interactions.clone())?;
     service.images = crate::images::ImageStore::persistent(image_root.clone())
       .unwrap_or_else(|_| crate::images::ImageStore::configured(image_root));
     Ok(service)
@@ -747,11 +748,10 @@ impl ViewerService {
       #[cfg(test)]
       notification_work_stats: Arc::new(Mutex::new(notifications::NotificationWorkStats::default())),
       input_broker: crate::input::InputBroker::default(),
-      rpc_runtimes: crate::rpc_runtime::RpcRuntimeManager::new(None, interactions.clone()),
+      sessions: crate::session_supervisor::SessionSupervisor::new(None, interactions.clone())
+        .expect("temporary session supervision should be available"),
       interactions,
       images: crate::images::ImageStore::temporary().expect("temporary image storage should be available"),
-      managed_pi: crate::managed_pi::ManagedPiSessions::new(None)
-        .unwrap_or_else(crate::managed_pi::ManagedPiSessions::disabled),
       question_claims: Arc::new(Mutex::new(question_input::QuestionClaims::default())),
       session_scope: None,
     };

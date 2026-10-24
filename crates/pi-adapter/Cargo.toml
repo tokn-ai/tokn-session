@@ -12,9 +12,15 @@ description = "Rust Pi headless runtime adapter and bounded JSONL transport."
 tokn-interaction-core = { version = "0.1.1", path = "../interaction-core" }
 tokn-pi-rpc-protocol = { version = "0.1.1", path = "../pi-rpc-protocol" }
 serde_json.workspace = true
+serde.workspace = true
+libc.workspace = true
 tokio = { workspace = true, features = ["process"] }
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
+sha2 = "0.10"
+tokio-util.workspace = true
+tokn-session-pi = { version = "0.1.1", path = "../pi" }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"

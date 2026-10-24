@@ -1,13 +1,8 @@
-//! Viewer-specific display mapping over the reusable native Pi RPC layer.
-use crate::workspace::ManagedSessionDialog;
+//! Allowlisted projection of Pi-native state into common managed contracts.
+use crate::mapping::model_identity;
 use serde_json::Value;
 use std::path::PathBuf;
-#[cfg(test)]
-use tokn_pi_adapter::framing::STDERR_TAIL_BYTES;
-#[cfg(test)]
-use tokn_pi_adapter::framing::{MAX_FRAME_BYTES, RpcReader, StderrTail};
-#[cfg(test)]
-use tokn_pi_rpc_protocol::{MAX_DIALOG_OPTIONS, MAX_DIALOG_TEXT_BYTES, is_cosmetic_extension_method};
+use tokn_interaction_core::{ModelChoice, ModelIdentity, managed_sessions::ManagedSessionDialog};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct RpcState {
@@ -17,11 +12,12 @@ pub(super) struct RpcState {
   pub(super) is_compacting: bool,
   pub(super) pending_message_count: u64,
   pub(super) images_available: bool,
-  pub(super) model: Option<crate::models::ModelIdentity>,
+  pub(super) model: Option<ModelIdentity>,
 }
 
 pub(super) fn parse_state(data: &Value) -> Result<RpcState, String> {
   let state = tokn_pi_rpc_protocol::parse_state(data)?;
+  let model = state.parsed_model().map(model_identity);
   Ok(RpcState {
     session_id: state.session_id,
     session_file: state.session_file,
@@ -29,8 +25,23 @@ pub(super) fn parse_state(data: &Value) -> Result<RpcState, String> {
     is_compacting: state.is_compacting,
     pending_message_count: state.pending_message_count,
     images_available: state.images_available,
-    model: state.model.as_ref().and_then(crate::models::pi_model),
+    model,
   })
+}
+
+pub(super) fn pi_choices(value: &Value) -> Result<Vec<ModelChoice>, String> {
+  Ok(
+    tokn_pi_rpc_protocol::parse_model_catalog(value)?
+      .into_iter()
+      .map(|model| {
+        let supports_images = model.supports_images;
+        ModelChoice {
+          model: model_identity(model),
+          supports_images,
+        }
+      })
+      .collect(),
+  )
 }
 
 pub(super) fn parse_extension_dialog(value: &Value) -> Result<Option<ManagedSessionDialog>, String> {
@@ -52,6 +63,8 @@ mod tests {
   use tokio::io::AsyncWriteExt;
 
   use super::*;
+  use crate::framing::{MAX_FRAME_BYTES, RpcReader, STDERR_TAIL_BYTES, StderrTail};
+  use tokn_pi_rpc_protocol::{MAX_DIALOG_OPTIONS, MAX_DIALOG_TEXT_BYTES, is_cosmetic_extension_method};
 
   #[tokio::test]
   async fn reads_lf_crlf_and_multiple_buffered_frames_without_losing_bytes() {

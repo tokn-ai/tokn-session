@@ -542,6 +542,9 @@ async fn forward(
   let mut url = config.local_url.clone();
   url.set_path(path);
   let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|_| "Invalid request method")?;
+  let control_response = (!config.allow_control)
+    .then(|| protocol::read_only_session_control_response(path, &body, "Agent control is disabled on this host"))
+    .flatten();
   let mut request = client
     .request(method, url)
     .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -552,7 +555,7 @@ async fn forward(
   let viewing_response = (!config.allow_control)
     .then(|| protocol::read_only_model_response(path, "Agent control is disabled on this host"))
     .flatten();
-  let response = if let Some(value) = viewing_response {
+  let response = if let Some(value) = control_response.or(viewing_response) {
     reqwest::Response::from(
       axum::http::Response::builder()
         .header("content-type", "application/json")
