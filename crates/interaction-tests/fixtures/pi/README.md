@@ -13,6 +13,13 @@ The same adapter workflow runs during capture and ordinary replay:
 - hold a model stream open, send steering and queued input, then complete both;
 - start another model stream, cancel the turn, and verify native idle state.
 
+An additional replay runs the same complete transcript through
+`PiAdapter::attach_supervised`, used by the viewer's owned-session supervisor.
+It verifies every native command and dialog answer, all correlated responses,
+ordered compact lifecycle/assistant outcomes, token/body suppression, and final
+idle state. This exercises captured real-agent wire behavior without generating
+a separate synthetic conversation.
+
 Only volatile values are sanitized: temporary paths, the loopback model port,
 UUID identities, and timestamps/durations. Native records, nested payloads,
 request order, and selected answer remain as emitted. Generated model data is

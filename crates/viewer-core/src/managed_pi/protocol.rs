@@ -4,7 +4,8 @@ use serde_json::Value;
 use std::path::PathBuf;
 #[cfg(test)]
 use tokn_pi_adapter::framing::STDERR_TAIL_BYTES;
-pub(super) use tokn_pi_adapter::framing::{MAX_FRAME_BYTES, RpcReader, StderrTail};
+#[cfg(test)]
+use tokn_pi_adapter::framing::{MAX_FRAME_BYTES, RpcReader, StderrTail};
 #[cfg(test)]
 use tokn_pi_rpc_protocol::{MAX_DIALOG_OPTIONS, MAX_DIALOG_TEXT_BYTES, is_cosmetic_extension_method};
 

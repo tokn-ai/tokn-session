@@ -4,6 +4,15 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
+Viewer-owned Pi sessions now use `PiAdapter::spawn_supervised` for child/pipe
+ownership, framing, typed command writes, response correlation, compact ordered
+control events, stderr, and cleanup. `managed_pi` retains durable receipts,
+session leases, verified history, model-on-send workflows, dialogs, idle retirement,
+and restart policy; it no longer starts or speaks directly to the child.
+The exclusive supervised API preserves these workflows without advertising
+stronger guarantees on the common interaction API. Existing public commands and
+wire models are unchanged. Native Pi fixtures also replay through this path.
+
 Settings → Agent runtimes now manages selected-machine Codex/Pi/OpenCode/DSH
 RPC profiles and real managed/attached adapters through the shared Rust registry.
 Private versioned profiles live under `viewer/rpc-runtimes.json`; public reads
@@ -41,10 +50,10 @@ stops an external process. Native start-or-steer/queue admission is separate
 from completion, and unsupported atomic model/strict delivery operations reject
 honestly. Inspection never starts or resumes a session. See
 [live interaction](interaction-core.md) for APIs, recovery, ownership, and limits.
-The viewer reuses Pi framing/state/dialog normalization, common model DTOs and
-the core receipt ledger. Its existing Pi project/history supervisor and
-Codex/Pi conversation controls remain in place while the new selected-machine
-runtime setup uses the shared registry described above.
+The viewer reuses Pi state/dialog normalization, common model DTOs and the core
+receipt ledger. Its Pi project/history supervisor runs through the adapter's
+exclusive supervised session API; Codex/Pi public conversation controls retain
+their routes while selected-machine runtime setup uses the shared registry.
 
 Codex app-server control requires explicit thread create/resume; reads never
 activate saved work. Its ordered response/event pump and epoch guards preserve
