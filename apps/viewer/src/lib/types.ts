@@ -268,7 +268,17 @@ export interface ProjectWorkspaceSnapshot {
 }
 
 export interface RegisterProjectRequest { folder_path: string; name?: string | null }
-export interface CreateProjectSessionRequest { request_id: string; project_id: string; prompt: string; image_ids?: string[] }
+export interface CreateProjectSessionRequest {
+  request_id: string; project_id: string; prompt: string; image_ids?: string[];
+  provider?: RpcProvider; runtime_profile_id?: string | null; runtime_revision?: number | null;
+}
+export interface SessionCreationRuntime { profile_id: string; revision: number; name: string; available: boolean; reason: string | null }
+export interface SessionCreationProvider {
+  provider: RpcProvider; available: boolean; reason: string | null; supports_images: boolean;
+  default_profile_id: string | null; runtimes: SessionCreationRuntime[];
+}
+export interface SessionCreationOptions { project_id: string; providers: SessionCreationProvider[] }
+export interface SessionCreationSelection { provider: RpcProvider; runtime_profile_id?: string | null; runtime_revision?: number | null }
 export interface SessionCreationError { message: string; may_have_started: boolean }
 export type ManagedSessionStatus = "starting" | "running" | "idle" | "stopping" | "stopped" | "failed";
 export interface ManagedSessionDialog {
@@ -292,6 +302,8 @@ export interface ManagedSessionSnapshot {
   /** A provider turn failure can leave its RPC process healthy and idle. */
   last_turn_error?: string | null;
   pending_dialog: ManagedSessionDialog | null;
+  creation_input_state?: "not_attempted" | "uncertain" | "accepted" | "rejected" | null;
+  creation_phase?: "admitted" | "native_create_uncertain" | "native_known" | "first_input_uncertain" | "history_pending" | "ready" | "failed" | null;
 }
 export interface ManagedSessionRequest { request_id?: string | null; session_key?: string | null }
 export interface ManagedSessionDialogResponse {

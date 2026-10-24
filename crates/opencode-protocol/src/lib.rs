@@ -5,6 +5,7 @@ use serde_json::{Map, Value};
 
 pub mod run;
 pub mod v1;
+pub mod v2;
 
 pub type ExtraFields = Map<String, Value>;
 

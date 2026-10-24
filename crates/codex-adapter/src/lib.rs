@@ -65,6 +65,16 @@ pub struct ThreadOptions {
   pub ephemeral: Option<bool>,
 }
 
+/// Native creation facts for host-side history verification. A returned path
+/// may not exist until Codex persists the first user input.
+#[derive(Clone, Debug)]
+pub struct CreatedThread {
+  pub target: SessionTarget,
+  pub working_directory: PathBuf,
+  pub history_path: Option<PathBuf>,
+  pub ephemeral: bool,
+}
+
 #[derive(Clone)]
 pub struct CodexAdapter {
   inner: Arc<Inner>,
@@ -246,6 +256,63 @@ impl CodexAdapter {
   }
 
   pub async fn create_thread(&self, options: ThreadOptions) -> Result<SessionTarget, InteractionError> {
+    let result = self.start_thread(options).await?;
+    self.bind_thread(result, None)
+  }
+
+  /// Create once and retain the native history location. This does not send a
+  /// prompt or claim that the returned history path is already durable.
+  pub async fn create_thread_with_descriptor(&self, options: ThreadOptions) -> Result<CreatedThread, InteractionError> {
+    let expected_cwd = options.cwd.clone();
+    let expected_ephemeral = options.ephemeral;
+    let result = self.start_thread(options).await?;
+    let target = self.bind_thread(result.clone(), None)?;
+    let parsed: wire::ThreadStartResponse = serde_json::from_value(result.clone()).map_err(|_| {
+      InteractionError::uncertain("Codex may have created a thread, but returned incompatible creation metadata")
+    })?;
+    let cwd = parsed
+      .thread
+      .cwd
+      .as_deref()
+      .or_else(|| result.get("cwd").and_then(Value::as_str))
+      .map(PathBuf::from)
+      .filter(|path| path.is_absolute())
+      .ok_or_else(|| {
+        InteractionError::uncertain("Codex may have created a thread, but returned no absolute working directory")
+      })?;
+    if expected_cwd.as_ref().is_some_and(|expected| expected != &cwd)
+      || result
+        .get("cwd")
+        .and_then(Value::as_str)
+        .is_some_and(|value| PathBuf::from(value) != cwd)
+    {
+      return Err(InteractionError::uncertain(
+        "Codex may have created a thread in an unexpected working directory",
+      ));
+    }
+    let ephemeral = result["thread"]["ephemeral"].as_bool().ok_or_else(|| {
+      InteractionError::uncertain("Codex may have created a thread, but returned no persistence identity")
+    })?;
+    if expected_ephemeral.is_some_and(|expected| expected != ephemeral) {
+      return Err(InteractionError::uncertain(
+        "Codex may have created a thread with unexpected persistence settings",
+      ));
+    }
+    let history_path = parsed.thread.path.map(PathBuf::from);
+    if history_path.as_ref().is_some_and(|path| !path.is_absolute()) || !ephemeral && history_path.is_none() {
+      return Err(InteractionError::uncertain(
+        "Codex may have created a thread, but returned no absolute history location",
+      ));
+    }
+    Ok(CreatedThread {
+      target,
+      working_directory: cwd,
+      history_path,
+      ephemeral,
+    })
+  }
+
+  async fn start_thread(&self, options: ThreadOptions) -> Result<Value, InteractionError> {
     self.inner.ensure_open()?;
     if options.cwd.as_ref().is_some_and(|path| !path.is_absolute()) {
       return Err(InteractionError::invalid("Codex thread cwd must be absolute"));
@@ -267,12 +334,11 @@ impl CodexAdapter {
       params["config"] = json!(options.config);
     }
     let epoch = self.inner.epoch();
-    let result = self
+    self
       .inner
       .transport
       .rpc_with_context("thread/start", params, true, Some(epoch))
-      .await?;
-    self.bind_thread(result, None)
+      .await
   }
 
   pub async fn resume_thread(&self, session_id: &str) -> Result<SessionTarget, InteractionError> {

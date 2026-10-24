@@ -540,6 +540,7 @@ mod tests {
       "get_rpc_runtime_access",
       "set_rpc_runtime_access",
       "list_registered_projects",
+      "get_session_creation_options",
       "register_project",
       "create_project_session",
       "get_managed_session",

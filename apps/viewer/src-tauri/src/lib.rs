@@ -57,6 +57,7 @@ pub fn run() {
       commands::hub::hub_client_passkey_credential,
       commands::sessions::list_sessions,
       commands::projects::list_registered_projects,
+      commands::projects::get_session_creation_options,
       commands::projects::register_project,
       commands::projects::create_project_session,
       commands::projects::get_managed_session,

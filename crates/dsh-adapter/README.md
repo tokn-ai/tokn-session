@@ -19,6 +19,12 @@ SIGTERM on Unix so native disposal can finish, then escalates after the configur
 grace period and waits for exit. Other platforms kill/reap the owned child.
 Dropping the adapter requests the same bounded owned-process cleanup.
 
+`create_session` creates a real idle agent using a host-preallocated native ID
+(`new_session_id`) and explicit project cwd. Omitting `agent_preset` preserves
+the host's effective default. The adapter verifies the response identity/preset
+and checks cwd with non-activating `session.list`; native creation returns no
+history path. It sends no prompt and never retries an uncertain creation.
+
 Metadata uses `host.describe`, state uses `session.list`, and models use the
 session-independent `llm.models` directory. These queries never call
 `session.models`, which can resume cold native Agents. Session models are known

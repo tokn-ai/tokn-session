@@ -4,6 +4,7 @@
 consumed by `tokn-session`:
 
 - `v1`: message and part JSON payloads persisted in SQLite
+- `v2`: assembled `session_message` projections, including nested assistant content
 - `run`: JSONL envelopes written by `opencode run --format json`
 
 The crate deliberately does not contain SQLite queries, row identity, session

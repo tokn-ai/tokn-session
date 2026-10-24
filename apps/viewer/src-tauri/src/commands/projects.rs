@@ -6,6 +6,15 @@ use tokn_viewer_core::workspace::{
 };
 
 #[tauri::command]
+pub async fn get_session_creation_options(
+  app: AppHandle,
+  state: State<'_, LocalViewer>,
+  request: tokn_viewer_core::workspace::SessionCreationOptionsRequest,
+) -> Result<tokn_viewer_core::workspace::SessionCreationOptions, String> {
+  state.service(&app).await?.get_session_creation_options(request).await
+}
+
+#[tauri::command]
 pub async fn list_registered_projects(
   app: AppHandle,
   state: State<'_, LocalViewer>,

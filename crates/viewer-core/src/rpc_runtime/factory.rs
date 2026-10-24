@@ -158,6 +158,79 @@ impl core_runtime::RuntimeHandle for Handle {
     Handle::adapter(self)
   }
 
+  fn create_native<'a>(
+    &'a self,
+    request: &'a core_runtime::CreateNativeSessionRequest,
+  ) -> AdapterFuture<'a, Result<core_runtime::NativeSessionDescriptor, InteractionError>> {
+    Box::pin(async move {
+      let (native_id, working_directory, history_path) = match self {
+        Self::Codex(adapter) => {
+          let created = adapter
+            .create_thread_with_descriptor(tokn_codex_adapter::ThreadOptions {
+              cwd: Some(request.working_directory.clone()),
+              ephemeral: Some(false),
+              ..Default::default()
+            })
+            .await?;
+          (
+            created
+              .target
+              .session_id
+              .ok_or_else(|| InteractionError::uncertain("Codex omitted the created thread ID"))?,
+            created.working_directory,
+            created.history_path,
+          )
+        }
+        Self::OpenCode(adapter) => {
+          let id = request
+            .native_id
+            .as_deref()
+            .ok_or_else(|| InteractionError::invalid("OpenCode creation requires a reserved ID"))?;
+          let created = adapter.create_session_with_id(id, None, None).await?;
+          (
+            created
+              .target
+              .session_id
+              .ok_or_else(|| InteractionError::uncertain("OpenCode omitted the created session ID"))?,
+            created.working_directory,
+            None,
+          )
+        }
+        Self::Dsh(adapter) => {
+          let id = request
+            .native_id
+            .clone()
+            .ok_or_else(|| InteractionError::invalid("DSH creation requires a reserved ID"))?;
+          let created = adapter
+            .create_session(tokn_dsh_adapter::CreateSessionOptions {
+              session_id: id,
+              working_directory: request.working_directory.clone(),
+              agent_preset: None,
+            })
+            .await?;
+          (
+            created
+              .target
+              .session_id
+              .ok_or_else(|| InteractionError::uncertain("DSH omitted the created session ID"))?,
+            created.working_directory,
+            None,
+          )
+        }
+        Self::Pi(_) => {
+          return Err(InteractionError::unsupported(
+            "Create Pi sessions through its managed-session driver",
+          ));
+        }
+      };
+      Ok(core_runtime::NativeSessionDescriptor {
+        native_id,
+        working_directory,
+        history_path,
+      })
+    })
+  }
+
   fn bind_native<'a>(&'a self, id: &'a str) -> AdapterFuture<'a, Result<(), String>> {
     Box::pin(Handle::bind_native(self, id))
   }

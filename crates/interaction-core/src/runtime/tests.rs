@@ -2,6 +2,195 @@ use super::*;
 use std::sync::atomic::AtomicUsize;
 use tokio::sync::oneshot;
 
+#[tokio::test]
+async fn verified_planned_creation_recovers_its_owner_without_repeating_native_writes() {
+  let (runtime, shared) = fixture();
+  let info = runtime
+    .start(StartRuntimeRequest {
+      request_id: uuid::Uuid::new_v4().to_string(),
+      profile_id: runtime.0.host.profile.profile_id.clone(),
+      expected_revision: 1,
+    })
+    .await
+    .unwrap();
+  let adapter = shared.adapter.lock().unwrap().clone().unwrap();
+  adapter.uncertain_create.store(true, Ordering::SeqCst);
+  let cwd = std::env::temp_dir();
+  assert_eq!(
+    runtime
+      .create_native(Provider::Codex, cwd.clone(), None, Some("planned-created".into()))
+      .await
+      .unwrap_err()
+      .kind,
+    ErrorKind::Uncertain
+  );
+  assert!(runtime.binding("verified-created").is_none());
+  let recovered = runtime
+    .adopt_verified_creation(
+      Provider::Codex,
+      "planned-created",
+      cwd.clone(),
+      "verified-created".into(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+  assert_eq!(runtime.binding("verified-created").unwrap().target, recovered.target);
+  assert_eq!(recovered.target.runtime_id, info.runtime_id);
+  assert_eq!(recovered.target.instance_id, info.instance_id);
+  assert_eq!(recovered.native.working_directory, cwd);
+  assert!(
+    runtime
+      .adopt_verified_creation(
+        Provider::Codex,
+        "unknown-created",
+        cwd.clone(),
+        "unknown-history".into()
+      )
+      .await
+      .unwrap()
+      .is_none()
+  );
+  assert_eq!(shared.opens.load(Ordering::SeqCst), 1);
+  assert_eq!(adapter.creates.load(Ordering::SeqCst), 1);
+  assert_eq!(adapter.resumes.load(Ordering::SeqCst), 0);
+  assert_eq!(adapter.sends.load(Ordering::SeqCst), 0);
+  assert_eq!(adapter.closes.load(Ordering::SeqCst), 0);
+  adapter.unavailable_state.store(true, Ordering::SeqCst);
+  assert!(
+    runtime
+      .adopt_verified_creation(
+        Provider::Codex,
+        "planned-created",
+        cwd.clone(),
+        "unrecovered-history".into()
+      )
+      .await
+      .is_err()
+  );
+  assert!(runtime.binding("unrecovered-history").is_none());
+  adapter.unavailable_state.store(false, Ordering::SeqCst);
+  runtime
+    .close(CloseRuntimeRequest {
+      request_id: uuid::Uuid::new_v4().to_string(),
+      runtime_id: info.runtime_id,
+      expected_instance_id: info.instance_id,
+    })
+    .await
+    .unwrap();
+  assert!(
+    runtime
+      .adopt_verified_creation(Provider::Codex, "planned-created", cwd, "restart-history".into())
+      .await
+      .unwrap()
+      .is_none()
+  );
+}
+
+#[tokio::test]
+async fn created_sessions_share_a_runtime_and_adoption_never_resumes_or_stops_it() {
+  let (runtime, shared) = fixture();
+  let first = runtime
+    .create_native(Provider::Codex, std::env::temp_dir(), None, Some("created-one".into()))
+    .await
+    .unwrap();
+  let second = runtime
+    .create_native(Provider::Codex, std::env::temp_dir(), None, Some("created-two".into()))
+    .await
+    .unwrap();
+  assert_eq!(first.target.runtime_id, second.target.runtime_id);
+  assert_eq!(shared.opens.load(Ordering::SeqCst), 1);
+  runtime
+    .execute_created(
+      &first,
+      uuid::Uuid::new_v4().to_string(),
+      Command::Message {
+        input: MessageInput {
+          text: "first prompt".into(),
+          ..Default::default()
+        },
+        delivery: DeliveryMode::StartOrSteer,
+      },
+    )
+    .await
+    .unwrap();
+  let binding = runtime.adopt_created(&first, "verified-one".into()).await.unwrap();
+  runtime.adopt_created(&second, "verified-two".into()).await.unwrap();
+  assert_eq!(binding.target, first.target);
+  let adapter = shared.adapter.lock().unwrap().clone().unwrap();
+  assert_eq!(adapter.resumes.load(Ordering::SeqCst), 0);
+  assert_eq!(adapter.sends.load(Ordering::SeqCst), 1);
+  runtime.release_binding("verified-one").await.unwrap();
+  assert!(runtime.binding("verified-two").is_some());
+  assert_eq!(adapter.closes.load(Ordering::SeqCst), 0);
+  runtime.shutdown().await;
+  assert_eq!(adapter.closes.load(Ordering::SeqCst), 1);
+  assert_eq!(
+    runtime
+      .execute_created(&second, uuid::Uuid::new_v4().to_string(), Command::State)
+      .await
+      .unwrap_err()
+      .kind,
+    ErrorKind::Unavailable
+  );
+}
+
+#[tokio::test]
+async fn creation_reserves_native_identity_across_hosts_until_exact_runtime_cleanup() {
+  let directory = tempfile::tempdir().unwrap();
+  let (mut first, _) = fixture();
+  let (mut second, _) = fixture();
+  first
+    .with_session_ownership(SessionOwnership::new(Some(directory.path().to_path_buf())).unwrap())
+    .unwrap();
+  second
+    .with_session_ownership(SessionOwnership::new(Some(directory.path().to_path_buf())).unwrap())
+    .unwrap();
+  let created = first
+    .create_native(
+      Provider::Codex,
+      std::env::temp_dir(),
+      None,
+      Some("exclusive-created".into()),
+    )
+    .await
+    .unwrap();
+  assert!(
+    second
+      .create_native(
+        Provider::Codex,
+        std::env::temp_dir(),
+        None,
+        Some("exclusive-created".into())
+      )
+      .await
+      .is_err()
+  );
+  assert_eq!(
+    first.inventory().runtimes[0].session_count,
+    0,
+    "ownership precedes a public history binding"
+  );
+  first
+    .close(CloseRuntimeRequest {
+      request_id: uuid::Uuid::new_v4().to_string(),
+      runtime_id: created.target.runtime_id,
+      expected_instance_id: created.target.instance_id,
+    })
+    .await
+    .unwrap();
+  second
+    .create_native(
+      Provider::Codex,
+      std::env::temp_dir(),
+      None,
+      Some("exclusive-created".into()),
+    )
+    .await
+    .unwrap();
+  second.shutdown().await;
+}
+
 struct FakeHost {
   profile: ProfileDescriptor,
   shared: Arc<FakeHostState>,
@@ -65,6 +254,9 @@ impl RuntimeHost for FakeHost {
             .with(Operation::Message),
         },
         events: broadcast::channel(8).0,
+        creates: AtomicUsize::new(0),
+        uncertain_create: AtomicBool::new(false),
+        unavailable_state: AtomicBool::new(false),
         resumes: AtomicUsize::new(0),
         sends: AtomicUsize::new(0),
         closes: AtomicUsize::new(0),
@@ -91,11 +283,34 @@ impl RuntimeHandle for FakeHandle {
       Ok(())
     })
   }
+
+  fn create_native<'a>(
+    &'a self,
+    request: &'a CreateNativeSessionRequest,
+  ) -> AdapterFuture<'a, Result<NativeSessionDescriptor, InteractionError>> {
+    Box::pin(async move {
+      self.0.creates.fetch_add(1, Ordering::SeqCst);
+      if self.0.uncertain_create.load(Ordering::SeqCst) {
+        return Err(InteractionError::uncertain("Native create acknowledgement was lost"));
+      }
+      Ok(NativeSessionDescriptor {
+        native_id: request
+          .native_id
+          .clone()
+          .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        working_directory: request.working_directory.clone(),
+        history_path: None,
+      })
+    })
+  }
 }
 
 struct FakeAdapter {
   descriptor: RuntimeDescriptor,
   events: broadcast::Sender<RuntimeEvent>,
+  creates: AtomicUsize,
+  uncertain_create: AtomicBool,
+  unavailable_state: AtomicBool,
   resumes: AtomicUsize,
   sends: AtomicUsize,
   closes: AtomicUsize,
@@ -108,6 +323,9 @@ impl InteractionAdapter for FakeAdapter {
 
   fn execute(&self, request: InteractionRequest) -> AdapterFuture<'_, Result<Reply, InteractionError>> {
     Box::pin(async move {
+      if matches!(request.command, Command::State) && self.unavailable_state.load(Ordering::SeqCst) {
+        return Err(InteractionError::unavailable("Native state recovery failed"));
+      }
       Ok(match request.command {
         Command::Metadata => Reply::Metadata(Metadata::default()),
         Command::State => Reply::State(SessionState {

@@ -43,6 +43,18 @@ pub struct LaunchOptions {
   pub environment: BTreeMap<String, String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct CreatedSession {
+  pub target: SessionTarget,
+  pub working_directory: PathBuf,
+  pub workspace_id: Option<String>,
+}
+
+/// Reserve an opaque native ID before a creation write is admitted.
+pub fn new_session_id() -> String {
+  format!("ses_{}", uuid::Uuid::new_v4())
+}
+
 struct Inner {
   descriptor: RuntimeDescriptor,
   transport: Transport,
@@ -175,26 +187,61 @@ impl OpenCodeAdapter {
     agent: Option<String>,
     model: Option<ModelIdentity>,
   ) -> Result<SessionTarget, InteractionError> {
+    self
+      .create_session_inner(None, agent, model)
+      .await
+      .map(|created| created.target)
+  }
+
+  /// A preallocated identity lets the host reconcile an uncertain creation
+  /// without selecting a different native session or replaying input.
+  pub async fn create_session_with_id(
+    &self,
+    session_id: &str,
+    agent: Option<String>,
+    model: Option<ModelIdentity>,
+  ) -> Result<CreatedSession, InteractionError> {
+    if !session_id.starts_with("ses")
+      || session_id.len() > 512
+      || session_id.trim() != session_id
+      || session_id.chars().any(char::is_control)
+    {
+      return Err(InteractionError::invalid("Invalid preallocated OpenCode session ID"));
+    }
+    self.create_session_inner(Some(session_id), agent, model).await
+  }
+
+  async fn create_session_inner(
+    &self,
+    session_id: Option<&str>,
+    agent: Option<String>,
+    model: Option<ModelIdentity>,
+  ) -> Result<CreatedSession, InteractionError> {
     self.ensure_open()?;
     self.check_child().await?;
     let model = model
       .map(|model| {
         model
           .model_provider
-          .map(|provider| json!({"id":model.model_id,"providerID":provider}))
+          .map(|provider| wire::ModelRef {
+            id: model.model_id,
+            provider_id: provider,
+            variant: None,
+          })
           .ok_or_else(|| InteractionError::invalid("OpenCode models require a provider ID"))
       })
       .transpose()?;
-    let mut body = json!({"location":{"directory":self.inner.directory}});
-    if let Some(workspace) = &self.inner.workspace_id {
-      body["location"]["workspaceID"] = json!(workspace);
-    }
-    if let Some(agent) = agent {
-      body["agent"] = json!(agent);
-    }
-    if let Some(model) = model {
-      body["model"] = model;
-    }
+    let body = serde_json::to_value(wire::SessionCreateRequest {
+      id: session_id.map(str::to_owned),
+      location: wire::Location {
+        directory: self.inner.directory.clone(),
+        workspace_id: self.inner.workspace_id.clone(),
+        extra: BTreeMap::new(),
+      },
+      agent,
+      model,
+    })
+    .map_err(|_| InteractionError::invalid("Invalid OpenCode creation request"))?;
     self.ensure_open()?;
     let value = self.inner.transport.post(&["api", "session"], body).await?;
     let session: Envelope<wire::SessionInfo> = serde_json::from_value(value)
@@ -207,10 +254,28 @@ impl OpenCodeAdapter {
         "OpenCode may have created a session, but returned an invalid session identity",
       ));
     }
-    Ok(SessionTarget {
-      runtime_id: self.inner.descriptor.runtime_id.clone(),
-      instance_id: self.inner.descriptor.instance_id.clone(),
-      session_id: Some(session.data.id),
+    if session_id.is_some_and(|expected| expected != session.data.id) {
+      return Err(InteractionError::uncertain(
+        "OpenCode may have created a session, but returned a different preallocated identity",
+      ));
+    }
+    if session
+      .location
+      .as_ref()
+      .is_some_and(|location| self.check_location(location).is_err())
+    {
+      return Err(InteractionError::uncertain(
+        "OpenCode may have created a session, but returned an unexpected envelope location",
+      ));
+    }
+    Ok(CreatedSession {
+      target: SessionTarget {
+        runtime_id: self.inner.descriptor.runtime_id.clone(),
+        instance_id: self.inner.descriptor.instance_id.clone(),
+        session_id: Some(session.data.id),
+      },
+      working_directory: PathBuf::from(session.data.location.directory),
+      workspace_id: session.data.location.workspace_id,
     })
   }
 

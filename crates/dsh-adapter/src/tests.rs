@@ -17,6 +17,8 @@ struct Fake {
   wrong_response_id: AtomicBool,
   silent_downlinks: AtomicBool,
   pong_count: AtomicU64,
+  created_sessions: Mutex<Vec<Value>>,
+  creation_fault: AtomicU64,
 }
 
 struct Server {
@@ -40,6 +42,8 @@ async fn server(initial: Vec<Value>) -> Server {
     wrong_response_id: AtomicBool::new(false),
     silent_downlinks: AtomicBool::new(false),
     pong_count: AtomicU64::new(0),
+    created_sessions: Mutex::new(Vec::new()),
+    creation_fault: AtomicU64::new(0),
   });
   let router = Router::new()
     .route("/api/events.mux", get(mux_stream))
@@ -121,7 +125,41 @@ async fn call(State(fake): State<Arc<Fake>>, Path(method): Path<String>, body: B
     "host.describe" => {
       json!({"version":"test-version","cwd":"/workspace","provider":"deepseek-official","model":"default-only","attachedSessions":1,"canOpenPath":false,"future":true})
     }
-    "session.list" => json!({"items":[{"sessionId":"session","running":true,"cwd":"/workspace"}]}),
+    "session.list" => {
+      let mut items = vec![json!({"sessionId":"session","running":true,"cwd":"/workspace"})];
+      items.extend(fake.created_sessions.lock().await.iter().cloned());
+      json!({"items":items})
+    }
+    "session.create" => {
+      let fault = fake.creation_fault.load(Ordering::Relaxed);
+      if fault == 6 {
+        return axum::Json(
+          json!({"type":"server-response","rpcId":request["rpcId"],"result":{"ok":false,"error":{"code":"agent-preset-not-found","message":"unknown preset"}}}),
+        );
+      }
+      let payload = &request["payload"];
+      let preset = payload.get("agentPreset").cloned().unwrap_or(json!("standard"));
+      let cwd = if fault == 2 {
+        json!("/another/workspace")
+      } else {
+        payload["cwd"].clone()
+      };
+      fake
+        .created_sessions
+        .lock()
+        .await
+        .push(json!({"sessionId":payload["sessionId"], "cwd":cwd, "running":false, "agentPreset":preset}));
+      if fault == 5 {
+        return axum::Json(
+          json!({"type":"server-response","rpcId":request["rpcId"],"result":{"ok":false,"error":{"code":"internal","message":"failed after publication"}}}),
+        );
+      }
+      if fault == 4 {
+        json!({"agentPreset":preset})
+      } else {
+        json!({"sessionId": if fault == 1 { json!("another-session") } else { payload["sessionId"].clone() },"agentPreset": if fault == 3 { json!("another-preset") } else { preset }})
+      }
+    }
     "llm.models" => {
       json!({"groups":[{"id":"provider","name":"Provider","models":[{"id":"model","name":"Model","future":true}]}],"failures":[{"id":"failed-provider","message":"offline"}]})
     }
@@ -134,6 +172,110 @@ async fn call(State(fake): State<Arc<Fake>>, Path(method): Path<String>, body: B
     request["rpcId"].clone()
   };
   axum::Json(json!({"type":"server-response","rpcId":rpc_id,"result":{"ok":true,"value":value}}))
+}
+
+#[tokio::test]
+async fn creates_native_idle_sessions_with_effective_default_or_explicit_preset() {
+  let server = server(Vec::new()).await;
+  let adapter = attach(&server).await;
+  for requested in [None, Some("custom".to_owned())] {
+    let id = new_session_id();
+    let created = adapter
+      .create_session(CreateSessionOptions {
+        session_id: id.clone(),
+        working_directory: "/workspace".into(),
+        agent_preset: requested.clone(),
+      })
+      .await
+      .unwrap();
+    assert_eq!(created.target.session_id.as_deref(), Some(id.as_str()));
+    assert_eq!(created.working_directory, PathBuf::from("/workspace"));
+    assert_eq!(
+      created.agent_preset.as_deref(),
+      Some(requested.as_deref().unwrap_or("standard"))
+    );
+  }
+  let calls = server.fake.calls.lock().await;
+  assert_eq!(
+    calls.iter().filter(|call| call["method"] == "session.create").count(),
+    2
+  );
+  assert_eq!(calls.iter().filter(|call| call["method"] == "session.list").count(), 2);
+  assert!(
+    calls
+      .iter()
+      .all(|call| call["method"] != "session.prompt" && call["method"] != "session.models")
+  );
+  assert!(calls[0]["payload"].get("agentPreset").is_none());
+  drop(calls);
+  adapter.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn creation_faults_after_mutation_remain_uncertain_and_are_not_retried() {
+  for fault in 1..=5 {
+    let server = server(Vec::new()).await;
+    let adapter = attach(&server).await;
+    server.fake.creation_fault.store(fault, Ordering::Relaxed);
+    let error = adapter
+      .create_session(CreateSessionOptions {
+        session_id: new_session_id(),
+        working_directory: "/workspace".into(),
+        agent_preset: Some("standard".into()),
+      })
+      .await
+      .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Uncertain, "fault {fault}");
+    assert_eq!(
+      server
+        .fake
+        .calls
+        .lock()
+        .await
+        .iter()
+        .filter(|call| call["method"] == "session.create")
+        .count(),
+      1
+    );
+    adapter.close().await.unwrap();
+  }
+}
+
+#[tokio::test]
+async fn invalid_creation_is_rejected_before_native_write() {
+  let server = server(Vec::new()).await;
+  let adapter = attach(&server).await;
+  for (session_id, directory) in [("../escape", "/workspace"), ("safe-session", "relative")] {
+    let error = adapter
+      .create_session(CreateSessionOptions {
+        session_id: session_id.into(),
+        working_directory: directory.into(),
+        agent_preset: None,
+      })
+      .await
+      .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::InvalidRequest);
+  }
+  assert!(server.fake.calls.lock().await.is_empty());
+  adapter.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_creation_configuration_refusal_remains_a_definite_rejection() {
+  let server = server(Vec::new()).await;
+  let adapter = attach(&server).await;
+  server.fake.creation_fault.store(6, Ordering::Relaxed);
+  let error = adapter
+    .create_session(CreateSessionOptions {
+      session_id: new_session_id(),
+      working_directory: "/workspace".into(),
+      agent_preset: Some("missing".into()),
+    })
+    .await
+    .unwrap_err();
+  assert_eq!(error.kind, ErrorKind::Rejected);
+  assert!(server.fake.created_sessions.lock().await.is_empty());
+  adapter.close().await.unwrap();
 }
 
 fn request(adapter: &DshAdapter, command: Command) -> InteractionRequest {

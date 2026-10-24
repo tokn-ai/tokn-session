@@ -192,10 +192,10 @@ function ViewerContent({ remote = false, connection, on_open_machines, machine_l
           preferred_group_key={preferredGroupKey} snapshot={workspace.creation} creating={workspace.creating}
           uncertain={workspace.creation_uncertain}
           error={workspace.creation_error} control_error={workspace.creation_control_error} controlling={workspace.controlling}
-          on_create={workspace.createSession} on_stop={(snapshot) => { void workspace.control("stop", snapshot); }}
+          on_create={workspace.createSession} on_load_options={workspace.loadCreationOptions} on_stop={(snapshot) => { void workspace.control("stop", snapshot); }}
           on_open={workspace.openCreation} on_close={() => { workspace.dismissCreation(); setNewSessionOpen(false); }} />
         {!newSessionOpen && workspace.creation && !workspace.creation.session && !["failed", "stopped"].includes(workspace.creation.status) ?
-          <button className="workspace-pending-session" type="button" onClick={() => setNewSessionOpen(true)}>Pi session starting · View</button> : null}
+          <button className="workspace-pending-session" type="button" onClick={() => setNewSessionOpen(true)}>Session starting · View</button> : null}
         {pendingDialog ? <ManagedPiDialog key={`${pendingDialog.request_id}:${pendingDialog.pending_dialog!.dialog_id}`}
           snapshot={pendingDialog} busy={workspace.controlling} error={workspace.dialog_error}
           on_respond={(response) => { void workspace.respond(response); }} /> : null}

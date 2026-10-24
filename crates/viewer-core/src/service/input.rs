@@ -131,14 +131,9 @@ impl ViewerService {
     let locator = decode_session_key(session_key)?;
     if !matches!(
       locator.provider,
-      ViewerProvider::Codex | ViewerProvider::Pi | ViewerProvider::Dsh
+      ViewerProvider::Codex | ViewerProvider::Pi | ViewerProvider::Dsh | ViewerProvider::OpenCode
     ) {
-      let reason = if locator.provider == ViewerProvider::OpenCode {
-        "This provider has no compatible live history binding yet (OpenCode V1 history cannot use the V2 RPC runtime)."
-      } else {
-        "This provider has no compatible live history binding yet."
-      };
-      return Err(reason.into());
+      return Err("This provider has no compatible live history binding yet.".into());
     }
     // Never trust a client-supplied path, provider, working directory, or
     // parent identity. Resolve the exact catalog key, then recheck its header.
@@ -156,10 +151,13 @@ impl ViewerService {
     }
     let header = self
       .repository
-      .session_header_at_path(locator.provider, &session_file)
-      .map_err(|_| "The selected session file is unavailable.")?;
+      .session_header_exact(locator.provider, &session_file, &locator.session_id)
+      .map_err(|_| "The selected session file is unavailable or has changed. Refresh the session list.")?;
     if header.id != locator.session_id {
       return Err("The selected session file has changed. Refresh the session list.".into());
+    }
+    if locator.provider == ViewerProvider::OpenCode {
+      self.verify_opencode_control(&locator)?;
     }
     if locator.provider == ViewerProvider::Codex
       && (header.parent_session_id.as_deref().is_some_and(|id| !id.is_empty())

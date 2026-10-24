@@ -14,7 +14,18 @@ impl ViewerService {
     let canonical = encode_session_key(&locator)?;
     // A just-created Pi history is already verified by its durable owner, but
     // may precede the provider-wide catalog sentinel's first commit.
-    let input = if locator.provider == ViewerProvider::Pi && self.sessions.managed.input_status(&canonical).is_some() {
+    let input = if (locator.provider == ViewerProvider::Pi && self.sessions.managed.input_status(&canonical).is_some())
+      || self
+        .sessions
+        .creations
+        .get()
+        .and_then(|manager| manager.as_ref().ok())
+        .is_some_and(|manager| {
+          manager
+            .list()
+            .iter()
+            .any(|receipt| receipt.session_key.as_deref() == Some(&canonical))
+        }) {
       if !locator.source_path.is_absolute() {
         return Err("Managed session history must have an absolute path".into());
       }
@@ -28,10 +39,22 @@ impl ViewerService {
     };
     let header = self
       .repository
-      .session_header_at_path(input.provider, &input.session_file)
+      .session_header_exact(input.provider, &input.session_file, &input.session_id)
       .map_err(|_| "Session history is unavailable")?;
     if header.id != input.session_id {
       return Err("Session identity changed; refresh the conversation".into());
+    }
+    if input.provider == ViewerProvider::OpenCode {
+      self.verify_opencode_control(&decode_session_key(&canonical)?)?;
+    }
+    if input.provider == ViewerProvider::Codex
+      && (header.parent_session_id.as_deref().is_some_and(|id| !id.is_empty())
+        || header
+          .agent_path
+          .as_deref()
+          .is_some_and(|path| !path.is_empty() && path != "/root"))
+    {
+      return Err("Control Codex subagents through their parent thread".into());
     }
     let cwd = header
       .cwd

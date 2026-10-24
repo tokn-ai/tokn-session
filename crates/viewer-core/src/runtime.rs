@@ -176,6 +176,24 @@ impl ViewerRuntime {
         }
       }
     }));
+    if let Ok(creations) = service.creation_manager() {
+      let mut changes = creations.subscribe();
+      let creation_service = service.clone();
+      let creation_events = events.clone();
+      tasks.push(tokio::spawn(async move {
+        loop {
+          let receipt = match changes.recv().await {
+            Ok(receipt) => receipt,
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(_) => return,
+          };
+          let service = creation_service.clone();
+          if let Ok(Ok(snapshot)) = tokio::task::spawn_blocking(move || service.creation_snapshot(receipt)).await {
+            let _ = emit(&creation_events, "managed-session-changed", snapshot);
+          }
+        }
+      }));
+    }
     let relay = service.relay.clone();
     let mut changes = relay.changes.subscribe();
     let relay_events = events.clone();

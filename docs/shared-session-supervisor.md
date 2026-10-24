@@ -72,7 +72,8 @@ independently operated native applications or servers that ignore them.
 
 Codex transport preferences live in private, bounded
 `~/.tokn/sessions/viewer/session-controls.json`. Runtime profiles remain in
-`rpc-runtimes.json`; creation receipts remain in `managed-sessions.json`.
+`rpc-runtimes.json`; Pi creation receipts remain in `managed-sessions.json`,
+while RPC creation receipts use `session-creations.json`.
 Legacy version-one Pi receipts migrate to version two with explicit provider
 identity; their existing `managed-pi` process-lease namespace is retained.
 Custom index locations use the corresponding viewer state directory. Input and
@@ -87,8 +88,8 @@ message awaiting native acknowledgement, allowing extension preflight to finish.
 | --- | --- |
 | Codex | Explicit app-server create/resume binding; start-or-steer, turn interruption, model catalogs, and live callback questions. Desktop is an explicit alternative. |
 | Pi | Viewer-owned sessions keep the exclusive Pi workflow driver; independently running bridges keep their existing owner. A Pi profile cannot adopt arbitrary saved history from an ID alone. |
-| OpenCode | Native V2 runtime/profile binding and start-or-steer. V1 history remains read-only; an unsuccessful legacy-history check also blocks mutation. |
-| DSH | Existing native sessions through a configured ApiProxy runtime. State/model inspection does not activate cold agents. General session creation is not implemented. |
+| OpenCode | Native V2 creation, local history, runtime/profile binding and start-or-steer. V1 and mixed histories remain read-only. |
+| DSH | Existing native sessions through a configured ApiProxy runtime. State/model inspection does not activate cold agents. Local project creation uses the native default preset. |
 
 The Pi driver owns model-on-send sequencing, native extension dialogs,
 dialog-aware deadlines, stream/error interpretation and idle eligibility. The
@@ -113,11 +114,33 @@ history alone cannot authorize a reply. Native callback envelopes and credential
 remain host-side. The separate Codex `request_user_input_async` tool emits
 assistant-item metadata without a callback and is unavailable through RPC;
 answering it through Desktop requires explicitly selecting Desktop control.
-There is no new general permission-approval UI or generalized create-session UI.
-OpenCode V2 historical display and broader provider creation remain follow-ups.
+The desktop New session flow uses the same supervisor for Codex/OpenCode/DSH
+creation, while preserving Pi’s specialized worker. Remote-only history and a
+general permission-approval UI remain follow-ups.
 
 Session commands retain existing agent-control authorization and read-only share
 rules. Editing executable/environment profiles or administering runtimes remains
 a separate host permission; the remote runtime-management opt-in is not granted
 by viewing a conversation. See [runtime configuration](viewer-rpc-runtimes.md)
 and [live interaction](interaction-core.md) for transport and capability details.
+
+
+## Durable native creation
+
+`interaction-core::creation::CreationManager` admits immutable creation intent
+before native effects. Its persisted phases distinguish native-creation
+uncertainty, known native identity, first-input uncertainty and history readiness.
+Request leases and a shared UUID/provider ledger cover independent processes and
+Pi/RPC strategy boundaries. Receipts never persist prompt/image bodies or native
+configuration. Repeating or reloading a request does not resend creation/input.
+
+The runtime coordinator creates and reserves the exact native target, then adopts
+an indexed host-verified key without calling native resume. While initial input
+awaits a question, bounded history verification can publish the conversation so
+normal callback controls can answer it. Live binding recovery failures remain
+visible/retryable; history-only publication is allowed when that exact prior
+runtime no longer exists after a host restart. Cancellation fences first input
+and drains the admitted workflow while keeping shared servers alive.
+Lost OpenCode/DSH create acknowledgements can reconcile through their planned
+native IDs, verified local history and an existing exact runtime owner. This
+does not retry native creation or first input, and preserves the uncertainty.

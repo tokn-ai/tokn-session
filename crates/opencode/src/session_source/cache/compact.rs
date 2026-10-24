@@ -106,6 +106,7 @@ impl OpenCodeCompactCache {
           DecodedRecord::Session(row) => next.normalize_session(row),
           DecodedRecord::Message(row) => next.normalize_message(row.clone()),
           DecodedRecord::Entry(row) => vec![next.normalize_session_entry(row.clone())],
+          DecodedRecord::V2Message(row) => next.normalize_v2_message(row),
         };
         if next != *normalizer {
           normalizer = Arc::new(next);
@@ -115,6 +116,7 @@ impl OpenCodeCompactCache {
             DecodedRecord::Session(row) => serde_json::to_value(row),
             DecodedRecord::Message(row) => serde_json::to_value(row),
             DecodedRecord::Entry(row) => serde_json::to_value(row),
+            DecodedRecord::V2Message(row) => serde_json::to_value(row),
           })
           .transpose()
           .map_err(|error| error.to_string())?;
@@ -132,7 +134,7 @@ impl OpenCodeCompactCache {
           has_preview,
         )
       };
-      if matches!(row.kind, RawKind::Message) {
+      if matches!(row.kind, RawKind::Message | RawKind::V2Message(_)) {
         message_count += 1;
       }
       rows.insert(
@@ -220,6 +222,10 @@ fn fingerprint(row: &RawRecord) -> [u8; 32] {
     RawKind::Message => hash.update([1]),
     RawKind::Entry(kind) => {
       hash.update([2]);
+      text(&mut hash, kind);
+    }
+    RawKind::V2Message(kind) => {
+      hash.update([3]);
       text(&mut hash, kind);
     }
   }

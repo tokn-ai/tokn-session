@@ -44,6 +44,17 @@ pub struct OpenCodeSessionSource {
   flavor: SessionDatabaseFlavor,
 }
 
+/// Per-session conversation ownership. The metadata table is shared by V1/V2,
+/// so an empty session cannot establish which native loop created it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenCodeHistoryFormat {
+  Empty,
+  V1,
+  V2,
+  Mixed,
+}
+
 /// Reuses SQLite's page cache while listing and loading sessions. Each loaded
 /// session has its own short read transaction, so a large scan does not pin one
 /// WAL snapshot for its entire duration.
@@ -103,6 +114,35 @@ impl OpenCodeSessionSource {
     self.list_session_refs(&connection, capabilities, true)
   }
 
+  /// Read one exact metadata row from the configured local database.
+  pub fn session_header_exact(&self, session_id: &str) -> Result<SessionHeader, String> {
+    let (connection, capabilities) = self.connect()?;
+    let row = load_session_row(&connection, capabilities, session_id, self.flavor.name())?
+      .ok_or_else(|| format!("no {} session found for `{session_id}`", self.flavor.name()))?;
+    let updated_at_ms = row.time_updated.or(row.time_created);
+    Ok(SessionHeader {
+      id: row.id,
+      parent_session_id: row.parent_id,
+      agent_path: None,
+      agent_nickname: None,
+      agent_role: None,
+      title: native_title(row.title),
+      preview: None,
+      path: self.database_path()?,
+      cwd: row.directory,
+      timestamp: timestamp(row.time_created),
+      updated_at: timestamp(updated_at_ms),
+      updated_at_ms,
+    })
+  }
+
+  pub fn history_format_exact(&self, session_id: &str) -> Result<OpenCodeHistoryFormat, String> {
+    let (connection, capabilities) = self.connect()?;
+    load_session_row(&connection, capabilities, session_id, self.flavor.name())?
+      .ok_or_else(|| format!("no {} session found for `{session_id}`", self.flavor.name()))?;
+    history_format(&connection, capabilities, session_id)
+  }
+
   /// Reuse one SQLite connection while reconciling a catalog with selected
   /// sessions. Each session load keeps its own consistent read transaction.
   pub fn scan_reader(&self) -> Result<OpenCodeScanReader<'_>, String> {
@@ -160,7 +200,11 @@ impl OpenCodeSessionSource {
       .ok_or_else(|| format!("no {} session found for `{}`", self.flavor.name(), header.id))?;
     header.title = native_title(session.title);
     header.preview = if header.title.is_none() {
-      first_user_preview(&connection, &header.id, self.flavor.name())?
+      if self.v2_history(&connection, capabilities, &header.id)? {
+        v2_preview(&connection, &header.id)?
+      } else {
+        first_user_preview(&connection, &header.id, self.flavor.name())?
+      }
     } else {
       None
     };
@@ -185,7 +229,7 @@ impl OpenCodeSessionSource {
     database_path: &Path,
   ) -> Result<Vec<SessionRef>, String> {
     let message_counts = include_message_count
-      .then(|| message_counts(connection, self.flavor.name()))
+      .then(|| message_counts(connection, capabilities, self.flavor))
       .transpose()?;
     let mut sessions = Vec::new();
     for row in list_session_catalog(connection, capabilities, self.flavor.name())? {
@@ -286,6 +330,9 @@ impl OpenCodeSessionSource {
   ) -> Result<LoadedSessionRecords, String> {
     let session = load_session_row(&connection, capabilities, session_id, self.flavor.name())?
       .ok_or_else(|| format!("no {} session found for `{session_id}`", self.flavor.name()))?;
+    if self.v2_history(connection, capabilities, session_id)? {
+      return load_v2_records(connection, session, database_path, include_native);
+    }
     let title = native_title(session.title.clone());
     let messages = load_messages(&connection, &session.id, self.flavor.name())?;
     let preview = if title.is_none() {
@@ -388,6 +435,26 @@ impl OpenCodeSessionSource {
     let connection = connect_database(&self.database_path()?)?;
     let capabilities = OpenCodeCapabilities::detect(&connection)?;
     Ok((connection, capabilities))
+  }
+
+  fn v2_history(
+    &self,
+    connection: &Connection,
+    capabilities: OpenCodeCapabilities,
+    session_id: &str,
+  ) -> Result<bool, String> {
+    if matches!(self.flavor, SessionDatabaseFlavor::ZCode) {
+      return Ok(false);
+    }
+    match history_format(connection, capabilities, session_id)? {
+      OpenCodeHistoryFormat::V2 => Ok(true),
+      OpenCodeHistoryFormat::Mixed => Err(
+        "OpenCode session has both V1 and V2 conversation history; refusing to merge incompatible native contexts"
+          .into(),
+      ),
+      OpenCodeHistoryFormat::Empty => Ok(!capabilities.has_v1),
+      OpenCodeHistoryFormat::V1 => Ok(false),
+    }
   }
 
   pub fn database_path(&self) -> Result<PathBuf, String> {
@@ -767,9 +834,24 @@ fn load_session_entries(
   Ok(entries)
 }
 
-fn message_counts(connection: &Connection, source_name: &str) -> Result<HashMap<String, usize>, String> {
+fn message_counts(
+  connection: &Connection,
+  capabilities: OpenCodeCapabilities,
+  flavor: SessionDatabaseFlavor,
+) -> Result<HashMap<String, usize>, String> {
+  let source_name = flavor.name();
+  let tables = match (
+    capabilities.has_v1,
+    capabilities.has_v2 && matches!(flavor, SessionDatabaseFlavor::OpenCode),
+  ) {
+    (true, true) => "select session_id from message union all select session_id from session_message",
+    (false, true) => "select session_id from session_message",
+    _ => "select session_id from message",
+  };
   let mut statement = connection
-    .prepare("select session_id, count(*) from message group by session_id")
+    .prepare(&format!(
+      "select session_id, count(*) from ({tables}) group by session_id"
+    ))
     .map_err(|err| format!("failed to prepare {source_name} message counts: {err}"))?;
   let rows = statement
     .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
@@ -782,6 +864,120 @@ fn message_counts(connection: &Connection, source_name: &str) -> Result<HashMap<
       Ok((session_id, count))
     })
     .collect()
+}
+
+fn history_format(
+  connection: &Connection,
+  capabilities: OpenCodeCapabilities,
+  session_id: &str,
+) -> Result<OpenCodeHistoryFormat, String> {
+  let exists = |table: &str| {
+    connection
+      .query_row(
+        &format!("select exists(select 1 from {table} where session_id = ?1)"),
+        [session_id],
+        |row| row.get::<_, bool>(0),
+      )
+      .map_err(|error| format!("Could not verify OpenCode history format: {error}"))
+  };
+  let v1 = capabilities.has_v1 && exists("message")?;
+  let v2 = capabilities.has_v2 && exists("session_message")?;
+  Ok(match (v1, v2) {
+    (false, false) => OpenCodeHistoryFormat::Empty,
+    (true, false) => OpenCodeHistoryFormat::V1,
+    (false, true) => OpenCodeHistoryFormat::V2,
+    (true, true) => OpenCodeHistoryFormat::Mixed,
+  })
+}
+
+fn decode_v2_message(id: &str, kind: &str, data: &str) -> Result<tokn_opencode_protocol::v2::MessageData, String> {
+  let mut data: Value =
+    serde_json::from_str(data).map_err(|error| format!("invalid OpenCode V2 message `{id}`: {error}"))?;
+  if let Some(object) = data.as_object_mut() {
+    object.insert("id".into(), Value::String(id.into()));
+    object.insert("type".into(), Value::String(kind.into()));
+  }
+  serde_json::from_value(data).map_err(|error| format!("invalid OpenCode V2 message `{id}`: {error}"))
+}
+
+fn v2_preview(connection: &Connection, session_id: &str) -> Result<Option<String>, String> {
+  let mut statement = connection
+    .prepare("select data from session_message where session_id = ?1 and type = 'user' order by seq")
+    .map_err(|error| error.to_string())?;
+  for data in statement
+    .query_map([session_id], |row| row.get::<_, String>(0))
+    .map_err(|error| error.to_string())?
+  {
+    let data: Value =
+      serde_json::from_str(&data.map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+    if let Some(text) = data["text"].as_str().and_then(non_blank) {
+      return Ok(Some(text.into()));
+    }
+  }
+  Ok(None)
+}
+
+fn load_v2_records(
+  connection: &Connection,
+  session: OpenCodeSessionRow,
+  database_path: PathBuf,
+  native: bool,
+) -> Result<LoadedSessionRecords, String> {
+  let mut normalizer = OpenCodeNormalizer::new(session.id.clone());
+  let mut records = vec![NormalizedRecord {
+    record_id: format!("session:{}", session.id),
+    native: native
+      .then(|| serde_json::to_value(&session))
+      .transpose()
+      .map_err(|error| error.to_string())?,
+    events: normalizer.normalize_session(&session),
+  }];
+  let mut statement = connection
+    .prepare("select id, type, time_created, data from session_message where session_id = ?1 order by seq")
+    .map_err(|error| error.to_string())?;
+  let rows = statement
+    .query_map([&session.id], |row| {
+      Ok((
+        row.get::<_, String>(0)?,
+        row.get::<_, String>(1)?,
+        row.get::<_, Option<i64>>(2)?,
+        row.get::<_, String>(3)?,
+      ))
+    })
+    .map_err(|error| error.to_string())?;
+  for row in rows {
+    let (id, kind, _time, data) = row.map_err(|error| error.to_string())?;
+    let decoded = decode_v2_message(&id, &kind, &data)?;
+    records.push(NormalizedRecord {
+      record_id: format!("v2:{id}"),
+      native: native.then(|| decoded.native().clone()),
+      events: normalizer.normalize_v2_message(&decoded),
+    });
+  }
+  let title = native_title(session.title);
+  let preview = if title.is_none() {
+    v2_preview(connection, &session.id)?
+  } else {
+    None
+  };
+  Ok(LoadedSessionRecords {
+    reference: SessionRef {
+      model_baseline: None,
+      id: session.id,
+      parent_session_id: session.parent_id,
+      agent_path: None,
+      agent_nickname: None,
+      agent_role: None,
+      title,
+      preview,
+      path: database_path,
+      cwd: session.directory,
+      timestamp: timestamp(session.time_updated.or(session.time_created)),
+      message_count: records.len() - 1,
+    },
+    records,
+    history_status: SessionHistoryStatus::Complete,
+  })
 }
 
 fn parse_optional_model(value: Option<String>) -> Option<SessionModel> {
