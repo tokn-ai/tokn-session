@@ -12,6 +12,7 @@ use crate::{
   session_ownership::{SessionLease, SessionOwnership},
 };
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::OwnedMutexGuard;
 pub use tokn_interaction_core::session_supervisor::SessionTransport;
@@ -90,6 +91,9 @@ impl VerifiedSession {
 pub(crate) struct SessionSupervisor {
   pub(crate) managed: ManagedSessions,
   pub(crate) runtimes: RpcRuntimeManager,
+  pub(crate) creations: Arc<OnceLock<Result<tokn_interaction_core::creation::CreationManager, String>>>,
+  pub(crate) creation_path: Option<PathBuf>,
+  pub(crate) creation_routes: Result<tokn_interaction_core::creation::CreationRouteLedger, String>,
   #[cfg(test)]
   ownership: SessionOwnership,
   controls: Arc<controls::ControlStore>,
@@ -112,6 +116,11 @@ impl SessionSupervisor {
     Ok(Self {
       managed,
       runtimes,
+      creations: Arc::new(OnceLock::new()),
+      creation_path: directory.as_ref().map(|path| path.join("session-creations.json")),
+      creation_routes: tokn_interaction_core::creation::CreationRouteLedger::new(
+        directory.as_ref().map(|path| path.join("session-creation-routes.json")),
+      ),
       coordinator: SessionCoordinator::new(ownership.clone()),
       #[cfg(test)]
       ownership,
@@ -119,6 +128,10 @@ impl SessionSupervisor {
         directory.as_ref().map(|path| path.join("session-controls.json")),
       )?),
     })
+  }
+
+  pub(crate) async fn creation_gate(&self, request_id: &str) -> OwnedMutexGuard<()> {
+    self.coordinator.gate(&format!("creation:{request_id}")).await
   }
 
   async fn gate(&self, target: &VerifiedSession) -> OwnedMutexGuard<()> {
@@ -259,6 +272,9 @@ impl SessionSupervisor {
   pub(crate) async fn shutdown(&self) {
     self.coordinator.close_admission();
     self.coordinator.drain_transitions().await;
+    if let Some(Ok(creations)) = self.creations.get() {
+      creations.shutdown().await;
+    }
     self.runtimes.shutdown().await;
     self.managed.shutdown().await;
     self.coordinator.shutdown().await;

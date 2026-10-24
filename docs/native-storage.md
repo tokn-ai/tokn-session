@@ -23,6 +23,8 @@ The desktop, CLI, and native services share one default root:
     session-controls.json
     session-leases/
     managed-sessions.json
+    session-creations.json
+    session-creation-routes.json
     managed-pi-<request-id>.lease
     import-state.json
 ```

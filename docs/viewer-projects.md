@@ -1,10 +1,64 @@
-# Viewer projects and Pi sessions
+# Viewer projects and session creation
 
-The desktop viewer can register existing folders and create Pi sessions on the
-viewing computer's local connection. The project registry and managed session
-controls are unavailable in browser, HTTP/Hub remote, session-share, and External
-reader connections. Other providers retain their existing history and input
-behavior; this feature adds no CLI `create` or `attach` command.
+The desktop viewer registers existing folders and creates Pi, Codex, OpenCode,
+and DSH sessions on the viewing computer’s local connection. The project registry
+and creation commands remain unavailable to browser, HTTP/Hub remote, session-share
+and External reader connections. There is no new CLI `create` or `attach` command.
+
+## Create a session
+
+Choose **New session** (or a project group’s `+`), select the agent, registered
+folder and runtime, then enter the first message. **Automatic** uses a suitable
+provider default or a single suitable saved profile. Ambiguous profiles require
+an explicit choice. Missing configuration shows an actionable reason before
+creation. Opening the dialog checks configuration without starting a runtime.
+
+Pi keeps its existing model/authentication settings and exclusive worker.
+Codex uses app-server RPC and its existing local executable discovery if no saved
+profile exists. OpenCode requires a runtime whose configured directory matches
+the selected project. DSH passes the project directory to native session creation
+and retains the deployment’s default agent preset.
+
+Initial images are supported for Pi, Codex and OpenCode, with host-side validation
+against the effective model before delivery. DSH currently advertises no verified
+image support. Switching agents keeps drafts and previews; unsupported images
+must be removed or used with another supported agent.
+
+The host publishes a conversation only after verifying the native identity and
+canonical project folder and indexing its local history. Codex/DSH can defer file
+creation until the first input, so initial delivery precedes history readiness.
+OpenCode V2 `session_message` history is now decoded locally with native sequence
+ordering; V1/ZCode display is preserved, and V1/mixed histories remain read-only.
+Remote-only endpoints and histories outside configured local sources cannot be
+opened through this flow. Configure readable sources, then check the existing
+creation rather than creating another native session.
+
+## Creation recovery and ownership
+
+The shared core durably admits one UUID before native effects. OpenCode/DSH use
+reserved native IDs; Codex returns its native thread ID. First-prompt admission
+has its own state, and a disconnect or timeout never automatically recreates a
+session or replays that prompt. **Check session start** observes the same original
+request, provider, runtime and revision. Verified history may open while a first
+admission awaits a native question; subsequent answers and controls use the
+normal session supervisor. An unconfirmed/rejected first message remains visible.
+If an OpenCode/DSH create acknowledgement is lost, the host can find history by
+its reserved native ID and adopt the exact existing runtime owner. The first
+prompt is still marked unsent and is never replayed during this reconciliation.
+Codex cannot recover an unacknowledged server-assigned ID through this receipt.
+
+`viewer/session-creations.json` stores bounded RPC creation identities, phases and
+fingerprints, not prompt/image bytes, environment or credentials. The existing
+Pi `managed-sessions.json` and its fingerprints/leases remain unchanged.
+`session-creation-routes.json` binds canonical creation UUIDs to one provider
+across processes and both strategies. Saturated or malformed catalogs reject new
+creation while preserving read-only viewing and their original data.
+
+Stop fences a pending first prompt, cancels only that native turn, and waits for
+admitted creation work to settle. It does not stop an RPC server shared by other
+sessions or an attached external server. Native ownership remains reserved until
+its exact runtime is cleaned up. After a host restart, receipts can verify and
+open existing saved history; only a new explicit Send resumes its runtime.
 
 ## Add a project
 
@@ -24,8 +78,7 @@ sessions. A folder can be a project without Git. The viewer reads Git metadata
 only in the recorded working directory; it never searches parent folders.
 Explicit Git worktrees can share their repository group, while a subfolder
 without its own Git metadata keeps its own project identity. Each registration
-retains its launch directory and remains separately selectable in **New Pi
-session**. A registration name does not retitle historical sessions.
+retains its launch directory and remains separately selectable in **New session**. A registration name does not retitle historical sessions.
 
 Migration 12 distinguishes explicit aliases from legacy inferred mappings.
 Legacy parent-repository mappings are reconsidered using direct Git or worktree
@@ -33,11 +86,9 @@ metadata, with an independent folder identity when that evidence is unavailable.
 Registration IDs, names, launch paths, ownership, and existing folder ordering
 anchors are preserved.
 
-## Start a Pi session
+## Pi worker behavior
 
-Choose **New Pi session**, select an available registered folder, enter the
-first message, and choose **Start Pi session**. A project group's `+` button
-opens the same dialog with that group preferred.
+Choose **Pi** in New session to retain the established managed-worker behavior.
 
 The viewer starts `pi --mode rpc` in the selected folder and sends the prompt.
 Pi owns the session identity and history location. The dialog waits until Pi

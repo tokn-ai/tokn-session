@@ -9,6 +9,9 @@ directory/workspace, and optional host-owned Basic credentials.
 `OpenCodeAdapter::launch` owns a loopback `opencode serve` child with fresh Basic
 credentials. Closing an attached adapter only detaches; closing a managed adapter
 stops its actual child. `create_session` creates a native V2 conversation.
+`create_session_with_id` accepts a host-preallocated ID (`new_session_id`) and
+returns the exact native location after checking both identity and directory/workspace.
+It does not infer a local history path, send a prompt, or retry creation.
 Managed startup waits for the child's native readiness URL and drains bounded
 stdout/stderr buffers. Port `0` follows OpenCode's native port selection, including
 its preference for `4096`; an already-running server is never adopted by probing a

@@ -74,6 +74,19 @@ pub(crate) trait ViewerRepository: Send + Sync {
     ))
   }
 
+  fn session_header_exact(
+    &self,
+    provider: ViewerProvider,
+    path: &Path,
+    session_id: &str,
+  ) -> Result<SessionHeader, String> {
+    let header = self.session_header_at_path(provider, path)?;
+    if header.id != session_id {
+      return Err("Session history identity changed".into());
+    }
+    Ok(header)
+  }
+
   /// Avoids parsing a JSONL file while an agent is actively appending to it.
   /// Alternate repositories are stable by construction unless they opt in.
   fn session_body_indexing(&self, _locator: &SessionLocator) -> Result<SessionBodyIndexing, String> {
@@ -111,6 +124,25 @@ impl ViewerRepository for NativeRepository {
 
   fn session_header_at_path(&self, provider: ViewerProvider, path: &Path) -> Result<SessionHeader, String> {
     AgentClient::session_header_at_path(provider.source(), None, path)
+  }
+
+  fn session_header_exact(
+    &self,
+    provider: ViewerProvider,
+    path: &Path,
+    session_id: &str,
+  ) -> Result<SessionHeader, String> {
+    if provider == ViewerProvider::Dsh {
+      return tokn_session_dsh::read_session_header_exact(path, session_id);
+    }
+    if provider == ViewerProvider::OpenCode {
+      return tokn_session_opencode::OpenCodeSessionSource::new(Some(path.to_owned())).session_header_exact(session_id);
+    }
+    let header = self.session_header_at_path(provider, path)?;
+    if header.id != session_id {
+      return Err("Session history identity changed".into());
+    }
+    Ok(header)
   }
 
   fn session_body_indexing(&self, locator: &SessionLocator) -> Result<SessionBodyIndexing, String> {

@@ -19,6 +19,10 @@ explicitly load and subscribe to saved work with `resume_thread`. Metadata and
 state use non-activating reads. Inspection alone never authorizes a mutation;
 control requires this connection's successful create/resume binding. Resume
 omits old turn bodies, and active-turn recovery reads only one metadata row.
+`create_thread_with_descriptor` additionally returns native cwd, history path,
+and ephemeral status for host verification; it checks explicit creation settings.
+The returned path can precede native file persistence. Creation never sends an
+initial prompt, discovers a history file by guessing, or retries an uncertain write.
 
 Register the adapter with `InteractionService` to reuse instance-bound dispatch,
 live pending requests, receipts, and shutdown. The adapter also protects direct

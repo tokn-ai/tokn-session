@@ -68,13 +68,25 @@ function renderSidebar(
 }
 
 describe("Sidebar session identity", () => {
+  it("offers provider-neutral desktop creation independently of provider filters", () => {
+    const start = vi.fn();
+    const extra = { workspace_available: true, on_new_session: start, registered_projects: [
+      { project_id: "saved", group_key: "/repo", folder_path: "/repo", name: "Saved repo", created_at_ms: 1, available: true },
+    ] };
+    renderSidebar([], [], null, undefined, "time", extra);
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    expect(start).toHaveBeenCalledExactlyOnceWith();
+    cleanup();
+    renderSidebar([], [], null, undefined, "time", { ...extra, workspace_available: false });
+    expect(screen.getByRole("button", { name: "New session" })).toBeDisabled();
+  });
   it("keeps an empty registered project visible and starts from its repository group", () => {
     const start = vi.fn();
     renderSidebar([], [], null, undefined, "project", { workspace_available: true, on_new_session: start,
       registered_projects: [{ project_id: "saved", group_key: "/repo", folder_path: "/trees/task/repo", name: "Saved repo", created_at_ms: 1, available: true }] });
     expect(screen.getByText("No sessions yet")).toBeInTheDocument();
     expect(screen.queryByText("No sessions found")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "New Pi session in Saved repo" }));
+    fireEvent.click(screen.getByRole("button", { name: "New session in Saved repo" }));
     expect(start).toHaveBeenCalledExactlyOnceWith("/repo");
     expect(screen.queryByRole("button", { name: /, Pi session / })).not.toBeInTheDocument();
   });

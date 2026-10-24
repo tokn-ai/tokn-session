@@ -113,6 +113,103 @@ async fn next_interaction(events: &mut broadcast::Receiver<RuntimeEvent>) -> Pen
 }
 
 #[tokio::test]
+async fn creation_preserves_native_history_descriptor_without_sending_input() {
+  let (adapter, mut peer) = attach().await;
+  let copy = adapter.clone();
+  let creation = tokio::spawn(async move {
+    copy
+      .create_thread_with_descriptor(ThreadOptions {
+        cwd: Some("/test/project".into()),
+        ephemeral: Some(false),
+        ..Default::default()
+      })
+      .await
+  });
+  let native = peer.next().await;
+  assert_eq!(native["method"], "thread/start");
+  assert_eq!(native["params"], json!({"cwd":"/test/project", "ephemeral":false}));
+  let mut created = thread("created-thread", "idle");
+  created["cwd"] = json!("/test/project");
+  created["path"] = json!("/native/history/not-created-yet.jsonl");
+  created["ephemeral"] = json!(false);
+  peer
+    .answer(
+      &native,
+      json!({"thread":created,"model":"native-model","modelProvider":"local","cwd":"/test/project"}),
+    )
+    .await;
+  let created = creation.await.unwrap().unwrap();
+  assert_eq!(created.target.session_id.as_deref(), Some("created-thread"));
+  assert_eq!(created.working_directory, PathBuf::from("/test/project"));
+  assert_eq!(
+    created.history_path,
+    Some(PathBuf::from("/native/history/not-created-yet.jsonl"))
+  );
+  assert!(!created.ephemeral);
+  assert!(
+    tokio::time::timeout(Duration::from_millis(30), peer.reader.read_frame())
+      .await
+      .is_err()
+  );
+  adapter.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn creation_descriptor_mismatches_remain_uncertain() {
+  for (field, value) in [
+    ("cwd", json!("/another/project")),
+    ("path", json!("relative.jsonl")),
+    ("ephemeral", json!(true)),
+  ] {
+    let (adapter, mut peer) = attach().await;
+    let copy = adapter.clone();
+    let creation = tokio::spawn(async move {
+      copy
+        .create_thread_with_descriptor(ThreadOptions {
+          cwd: Some("/test/project".into()),
+          ephemeral: Some(false),
+          ..Default::default()
+        })
+        .await
+    });
+    let native = peer.next().await;
+    let mut created = thread("created-thread", "idle");
+    created["cwd"] = json!("/test/project");
+    created["path"] = json!("/native/history/session.jsonl");
+    created["ephemeral"] = json!(false);
+    created[field] = value;
+    peer
+      .answer(
+        &native,
+        json!({"thread":created,"model":"native-model","modelProvider":"local"}),
+      )
+      .await;
+    assert_eq!(creation.await.unwrap().unwrap_err().kind, ErrorKind::Uncertain);
+    adapter.close().await.unwrap();
+  }
+}
+
+#[tokio::test]
+async fn lost_creation_response_is_uncertain_and_relative_cwd_is_rejected_before_write() {
+  let (adapter, mut peer) = attach().await;
+  let error = adapter
+    .create_thread_with_descriptor(ThreadOptions {
+      cwd: Some("relative".into()),
+      ..Default::default()
+    })
+    .await
+    .unwrap_err();
+  assert_eq!(error.kind, ErrorKind::InvalidRequest);
+  let copy = adapter.clone();
+  let creation = tokio::spawn(async move { copy.create_thread_with_descriptor(ThreadOptions::default()).await });
+  let native = peer.next().await;
+  assert_eq!(native["method"], "thread/start");
+  drop(peer);
+  assert_eq!(creation.await.unwrap().unwrap_err().kind, ErrorKind::Uncertain);
+  adapter.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn metadata_and_catalog_queries_never_resume_threads() {
   let (adapter, mut peer) = attach().await;
   let metadata = execute(

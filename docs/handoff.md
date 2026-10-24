@@ -4,6 +4,18 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
+The desktop’s **New session** dialog now creates Pi, Codex, OpenCode and DSH
+sessions in registered local projects. Provider/runtime choices are checked
+without starting agents. Codex retains executable discovery; OpenCode requires a
+runtime matching the project folder. Creation currently requires host-readable
+native history; HTTP/Hub/browser creation remains out of scope.
+`interaction-core::creation` owns durable phases, cancellation and no-replay
+receipts; `runtime` reserves/adopts created targets without an extra resume.
+Pi keeps its existing managed worker/catalog. UUID provider bindings are shared
+across both strategies. OpenCode V2 local SQLite history now displays alongside
+V1, while only V2 (or receipt-proven new empty sessions) can use RPC control.
+See [projects and creation](viewer-projects.md) for configuration and recovery.
+
 Live conversation input, model inspection, callback answers, and cancellation
 now route through one Rust `SessionSupervisor`. Codex defaults to app-server
 RPC with explicit per-thread Desktop selection; first Send verifies history and
@@ -11,8 +23,8 @@ binds/resumes through host-selected runtime configuration. Inspection does not
 activate sessions and transport failures never cause fallback or prompt replay.
 Cross-process provider/native-ID leases coordinate RPC, owned Pi, and explicit
 Desktop control independently of runtime profile leases. Pi retains its existing
-driver; arbitrary Pi history adoption, generalized creation, and OpenCode V2
-history/display remain follow-ups. See the
+driver; arbitrary Pi history adoption and remote-only RPC history remain
+follow-ups. See the
 [shared session supervisor](shared-session-supervisor.md) for routing, storage,
 capability limits, and ownership.
 
@@ -101,7 +113,7 @@ expose live catalogs or model mutation. See [session models](viewer-models.md).
 
 Recorded images from Codex, Pi, OpenCode, and ZCode now render through lazy
 thumbnail/full resources, including image-only messages. The composer and local
-New Pi Session dialog support picking, paste, drag/drop, and image-only sending.
+New session dialog support picking, paste, drag/drop, and image-only sending.
 Codex/Pi transports use host-validated uploads, model capabilities, and retained
 assets; image bytes stay outside timeline updates and shares remain read-only.
 Expanded tool cards also display Codex generation/MCP/structured image outputs,
@@ -141,7 +153,7 @@ folders separately from inferred project groups, including empty projects and
 distinct worktrees sharing one group. Migration 11 adds managed-session admission;
 upgrades preserve the original migration 10 and transactionally adopt the one
 known development build that combined both schemas. New conversations open only after their
-real Pi history is verified and indexed. Owned sessions support message input,
+real native history is verified and indexed. Pi-owned sessions support message input,
 Stop, automatic resume on Send, optional explicit Resume, and bounded native
 extension dialogs; private receipts and process leases preserve ownership across
 restarts. HTTP, Hub, session shares,

@@ -109,8 +109,23 @@ impl Transport {
         .result
         .error
         .ok_or_else(|| error(mutation, "DSH returned a malformed error response"))?;
+      // Creation can fail after native publication. Only native errors with a
+      // definite identity/configuration refusal authorize an editable failure.
+      let kind = if method == "session.create"
+        && !matches!(
+          rejected.code.as_str(),
+          "session-conflict"
+            | "agent-preset-conflict"
+            | "agent-preset-not-found"
+            | "agent-preset-invalid"
+            | "agent-busy"
+        ) {
+        tokn_interaction_core::ErrorKind::Uncertain
+      } else {
+        tokn_interaction_core::ErrorKind::Rejected
+      };
       return Err(InteractionError::new(
-        tokn_interaction_core::ErrorKind::Rejected,
+        kind,
         format!("{}: {}", rejected.code, rejected.message),
       ));
     }

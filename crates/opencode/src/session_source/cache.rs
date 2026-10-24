@@ -78,6 +78,7 @@ impl OpenCodeSessionCache {
           DecodedRecord::Session(row) => normalizer.normalize_session(row),
           DecodedRecord::Message(row) => normalizer.normalize_message(row.clone()),
           DecodedRecord::Entry(row) => vec![normalizer.normalize_session_entry(row.clone())],
+          DecodedRecord::V2Message(row) => normalizer.normalize_v2_message(row),
         };
         #[cfg(test)]
         {
@@ -88,6 +89,7 @@ impl OpenCodeSessionCache {
             DecodedRecord::Session(row) => serde_json::to_value(row),
             DecodedRecord::Message(row) => serde_json::to_value(row),
             DecodedRecord::Entry(row) => serde_json::to_value(row),
+            DecodedRecord::V2Message(row) => serde_json::to_value(row),
           })
           .transpose()
           .map_err(|e| e.to_string())?;
@@ -107,7 +109,7 @@ impl OpenCodeSessionCache {
         })
       };
       normalizer = cached.after.clone();
-      if matches!(cached.raw.kind, RawKind::Message) {
+      if matches!(cached.raw.kind, RawKind::Message | RawKind::V2Message(_)) {
         message_count += 1;
       }
       if preview.is_none() {
@@ -182,6 +184,7 @@ impl SourceBudget {
 enum RawKind {
   Session,
   Message,
+  V2Message(String),
   Entry(String),
 }
 #[derive(PartialEq, Eq)]
@@ -202,6 +205,7 @@ enum DecodedRecord {
   Session(OpenCodeSessionRow),
   Message(OpenCodeMessageRow),
   Entry(OpenCodeSessionEntryRow),
+  V2Message(tokn_opencode_protocol::v2::MessageData),
 }
 struct CachedRow {
   raw: RawRecord,
@@ -235,6 +239,7 @@ impl RawRecord {
           })
           .collect::<Result<_, String>>()?,
       }),
+      RawKind::V2Message(kind) => DecodedRecord::V2Message(decode_v2_message(self.source_id(), kind, &self.data)?),
       RawKind::Entry(kind) => DecodedRecord::Entry(OpenCodeSessionEntryRow {
         id: self.source_id().into(),
         native_type: kind.clone(),
@@ -247,6 +252,12 @@ impl RawRecord {
 
 impl DecodedRecord {
   fn preview(&self) -> Option<String> {
+    if let Self::V2Message(message) = self {
+      return match message.item() {
+        tokn_opencode_protocol::v2::MessageItem::User(user) => non_blank(&user.text).map(str::to_owned),
+        _ => None,
+      };
+    }
     let Self::Message(message) = self else {
       return None;
     };
@@ -349,7 +360,12 @@ fn read_snapshot_rows(
     kind: RawKind::Session,
     parts: Vec::new(),
   }];
-  let mut timeline = read_message_rows(&transaction, session_id, &mut budget)?;
+  let v2 = source.v2_history(&transaction, capabilities, session_id)?;
+  let mut timeline = if v2 {
+    read_v2_message_rows(&transaction, session_id, &mut budget)?
+  } else {
+    read_message_rows(&transaction, session_id, &mut budget)?
+  };
   if matches!(source.flavor, SessionDatabaseFlavor::ZCode) && capabilities.has_session_entry {
     let mut statement = transaction
       .prepare("select id, type, time_created, data from session_entry where session_id = ?1")
@@ -376,10 +392,45 @@ fn read_snapshot_rows(
       });
     }
   }
-  timeline.sort_by(|a, b| a.time.cmp(&b.time).then_with(|| a.source_id().cmp(b.source_id())));
+  if !v2 {
+    timeline.sort_by(|a, b| a.time.cmp(&b.time).then_with(|| a.source_id().cmp(b.source_id())));
+  }
   raw.extend(timeline);
   transaction
     .commit()
     .map_err(|e| format!("failed to finish session snapshot: {e}"))?;
   Ok((session, raw))
+}
+
+fn read_v2_message_rows(
+  connection: &Connection,
+  session_id: &str,
+  budget: &mut SourceBudget,
+) -> Result<Vec<RawRecord>, String> {
+  let mut statement = connection
+    .prepare("select id, type, time_created, data from session_message where session_id = ?1 order by seq")
+    .map_err(|error| error.to_string())?;
+  let rows = statement
+    .query_map([session_id], |row| {
+      Ok((
+        row.get::<_, String>(0)?,
+        row.get::<_, String>(1)?,
+        row.get::<_, Option<i64>>(2)?,
+        row.get::<_, String>(3)?,
+      ))
+    })
+    .map_err(|error| error.to_string())?;
+  let mut result = Vec::new();
+  for row in rows {
+    let (id, kind, time, data) = row.map_err(|error| error.to_string())?;
+    budget.add(id.len().saturating_add(kind.len()).saturating_add(data.len()))?;
+    result.push(RawRecord {
+      id: format!("v2:{id}"),
+      time,
+      data,
+      kind: RawKind::V2Message(kind),
+      parts: Vec::new(),
+    });
+  }
+  Ok(result)
 }

@@ -8,6 +8,7 @@ pub use managed::ManagedOptions;
 use serde_json::{Value, json};
 use std::{
   collections::BTreeMap,
+  path::PathBuf,
   sync::{
     Arc, Mutex as StdMutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -35,6 +36,25 @@ pub struct ApiProxyConfig {
   /// RFC WebSocket control-frame liveness; native downlinks accept no application messages.
   pub heartbeat_interval: Duration,
   pub heartbeat_timeout: Duration,
+}
+
+#[derive(Clone, Debug)]
+pub struct CreateSessionOptions {
+  pub session_id: String,
+  pub working_directory: PathBuf,
+  /// Omitted uses the native host's effective default composition.
+  pub agent_preset: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CreatedSession {
+  pub target: SessionTarget,
+  pub working_directory: PathBuf,
+  pub agent_preset: Option<String>,
+}
+
+pub fn new_session_id() -> String {
+  format!("session-{}", uuid::Uuid::new_v4())
 }
 
 impl ApiProxyConfig {
@@ -78,6 +98,98 @@ pub struct DshAdapter {
 }
 
 impl DshAdapter {
+  /// Create a real idle agent at a preallocated identity. The adapter never
+  /// retries this mutation and never sends an initial prompt implicitly.
+  pub async fn create_session(&self, options: CreateSessionOptions) -> Result<CreatedSession, InteractionError> {
+    self.inner.ensure_live()?;
+    if options.session_id.is_empty()
+      || options.session_id.len() > 512
+      || !options
+        .session_id
+        .bytes()
+        .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'-' | b'_'))
+      || !options.working_directory.is_absolute()
+      || options
+        .working_directory
+        .to_str()
+        .is_none_or(|path| path.contains('\0'))
+      || options
+        .agent_preset
+        .as_ref()
+        .is_some_and(|preset| preset.trim().is_empty() || preset.len() > 512 || preset.chars().any(char::is_control))
+    {
+      return Err(InteractionError::invalid(
+        "DSH creation requires a safe native identity, absolute working directory, and valid preset",
+      ));
+    }
+    let payload = serde_json::to_value(api::SessionCreateRequest {
+      session_id: options.session_id.clone(),
+      cwd: options.working_directory.to_string_lossy().into_owned(),
+      agent_preset: options.agent_preset.clone(),
+    })
+    .map_err(|_| InteractionError::invalid("Invalid DSH creation request"))?;
+    let created: api::SessionCreateResponse = self
+      .inner
+      .transport
+      .call(&uuid::Uuid::new_v4().to_string(), "session.create", payload, true)
+      .await?;
+    if created.session_id != options.session_id
+      || created
+        .agent_preset
+        .as_ref()
+        .is_some_and(|preset| preset.trim().is_empty() || preset.len() > 512 || preset.chars().any(char::is_control))
+      || options
+        .agent_preset
+        .as_ref()
+        .is_some_and(|preset| created.agent_preset.as_ref() != Some(preset))
+    {
+      return Err(InteractionError::uncertain(
+        "DSH may have created a session, but returned an unexpected identity or preset",
+      ));
+    }
+    self
+      .inner
+      .ensure_live()
+      .map_err(|_| InteractionError::uncertain("DSH created a session, but its live connection was lost"))?;
+    // session.create returns no cwd or history path. Verify location through
+    // the non-activating directory; never guess a history filename.
+    let sessions: api::SessionList = self
+      .inner
+      .transport
+      .call(&uuid::Uuid::new_v4().to_string(), "session.list", json!({}), false)
+      .await
+      .map_err(|_| {
+        InteractionError::uncertain("DSH created a session, but its working directory could not be verified")
+      })?;
+    let mut matches = sessions
+      .items
+      .into_iter()
+      .filter(|entry| entry.session_id == options.session_id);
+    let matched = matches.next().ok_or_else(|| {
+      InteractionError::uncertain("DSH created a session, but it is absent from the native directory")
+    })?;
+    if matches.next().is_some()
+      || matched.cwd.as_deref().map(PathBuf::from).as_ref() != Some(&options.working_directory)
+    {
+      return Err(InteractionError::uncertain(
+        "DSH created a session, but its native working directory does not match",
+      ));
+    }
+    self
+      .inner
+      .ensure_live()
+      .map_err(|_| InteractionError::uncertain("DSH created a session, but its live connection was lost"))?;
+    Ok(CreatedSession {
+      target: SessionTarget {
+        runtime_id: self.inner.descriptor.runtime_id.clone(),
+        instance_id: self.inner.descriptor.instance_id.clone(),
+        session_id: Some(created.session_id),
+      },
+      working_directory: options.working_directory,
+      agent_preset: created.agent_preset,
+    })
+  }
+
   /// Attach an explicitly configured ApiProxy endpoint. No sessions are resumed
   /// by connection, metadata/state/model queries, or pending-interaction reads.
   pub async fn attach(config: ApiProxyConfig) -> Result<Self, InteractionError> {

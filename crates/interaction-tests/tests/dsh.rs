@@ -165,7 +165,10 @@ impl Driver<'_> {
       .json(&json!({"type":"client-request","rpcId":format!("create-{session}"),"method":"session.create","payload":{"sessionId":session,"agentPreset":"standard"}}))
       .send().await?.error_for_status()?.json().await?;
     assert_eq!(result["result"]["ok"], true, "native create: {result}");
-    assert_eq!(result["result"]["value"]["sessionId"], session);
+    let created: tokn_dsh_rpc_protocol::api::SessionCreateResponse =
+      serde_json::from_value(result["result"]["value"].clone())?;
+    assert_eq!(created.session_id, session);
+    assert_eq!(created.agent_preset.as_deref(), Some("standard"));
     Ok(())
   }
   async fn send(&mut self, session: &str, text: &str, delivery: DeliveryMode) -> TestResult {

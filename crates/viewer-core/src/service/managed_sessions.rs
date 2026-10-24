@@ -22,19 +22,70 @@ impl ViewerService {
     self
       .check_managed_workspace()
       .map_err(SessionCreationError::not_started)?;
-    self
-      .sessions
-      .managed
-      .available()
+    tokn_interaction_core::managed_sessions::validate_creation_request(&request.pi_request())
       .map_err(SessionCreationError::not_started)?;
-    tokn_interaction_core::managed_sessions::validate_creation_request(&request)
-      .map_err(SessionCreationError::not_started)?;
-    if let Some(snapshot) = self
-      .sessions
-      .managed
-      .creation_receipt(&request)
-      .map_err(SessionCreationError::uncertain)?
+    if uuid::Uuid::parse_str(&request.request_id)
+      .map(|id| id.to_string())
+      .as_deref()
+      != Ok(request.request_id.as_str())
     {
+      return Err(SessionCreationError::not_started(
+        "Use a canonical UUID for the creation request ID",
+      ));
+    }
+    let _admission = self.sessions.creation_gate(&request.request_id).await;
+    if request.provider == tokn_interaction_core::Provider::Pi {
+      if let Ok(manager) = self.creation_manager() {
+        if manager
+          .get(&request.request_id)
+          .map_err(SessionCreationError::not_started)?
+          .is_some()
+        {
+          return Err(SessionCreationError::not_started(
+            "This creation request ID belongs to another agent",
+          ));
+        }
+      }
+    } else if self
+      .sessions
+      .managed
+      .get(&ManagedSessionRequest {
+        request_id: Some(request.request_id.clone()),
+        session_key: None,
+      })
+      .map_err(SessionCreationError::not_started)?
+      .is_some()
+    {
+      return Err(SessionCreationError::not_started(
+        "This creation request ID belongs to a Pi session",
+      ));
+    }
+    if request.provider != tokn_interaction_core::Provider::Pi {
+      if let Some(snapshot) = self.existing_rpc_creation(&request).await? {
+        return Ok(snapshot);
+      }
+    } else {
+      if request.runtime_profile_id.is_some() || request.runtime_revision.is_some() {
+        return Err(SessionCreationError::not_started(
+          "Pi uses its managed-session configuration; choose Automatic",
+        ));
+      }
+      self
+        .sessions
+        .managed
+        .available()
+        .map_err(SessionCreationError::not_started)?;
+    }
+    if let Some(snapshot) = (request.provider == tokn_interaction_core::Provider::Pi)
+      .then(|| self.sessions.managed.creation_receipt(&request))
+      .transpose()
+      .map_err(SessionCreationError::uncertain)?
+      .flatten()
+    {
+      self
+        .claim_creation_route(&request)
+        .await
+        .map_err(SessionCreationError::not_started)?;
       return self
         .enrich_managed_session(snapshot)
         .await
@@ -46,6 +97,12 @@ impl ViewerService {
       .await
       .map_err(|_| SessionCreationError::not_started("Could not validate the project folder"))?
       .map_err(SessionCreationError::not_started)?;
+    if request.provider != tokn_interaction_core::Provider::Pi {
+      self
+        .preflight_rpc_creation(&request, &project)
+        .await
+        .map_err(SessionCreationError::not_started)?;
+    }
     let images = if request.image_ids.is_empty() {
       Vec::new()
     } else {
@@ -63,6 +120,13 @@ impl ViewerService {
       .map_err(|_| SessionCreationError::not_started("Could not load image attachments"))?
       .map_err(SessionCreationError::not_started)?
     };
+    self
+      .claim_creation_route(&request)
+      .await
+      .map_err(SessionCreationError::not_started)?;
+    if request.provider != tokn_interaction_core::Provider::Pi {
+      return self.start_rpc_creation(request, project, images).await;
+    }
     let snapshot = self
       .sessions
       .managed
@@ -80,6 +144,14 @@ impl ViewerService {
     request: ManagedSessionRequest,
   ) -> Result<Option<ManagedSessionSnapshot>, String> {
     self.check_managed_workspace()?;
+    if let Some(receipt) = self.rpc_creation(&request)? {
+      let snapshot = self
+        .creation_manager()?
+        .refresh(&receipt.request_id)
+        .await?
+        .unwrap_or(receipt);
+      return self.creation_snapshot(snapshot).map(Some);
+    }
     match self.sessions.managed.get(&request)? {
       Some(snapshot) => self.enrich_managed_session(snapshot).await.map(Some),
       None => Ok(None),
@@ -88,12 +160,23 @@ impl ViewerService {
 
   pub async fn stop_managed_session(&self, request: ManagedSessionRequest) -> Result<ManagedSessionSnapshot, String> {
     self.check_managed_workspace()?;
+    if let Some(receipt) = self.rpc_creation(&request)? {
+      let snapshot = self
+        .creation_manager()?
+        .cancel(&receipt.request_id)
+        .await?
+        .ok_or("Creation receipt disappeared")?;
+      return self.creation_snapshot(snapshot);
+    }
     let snapshot = self.sessions.managed.stop(request).await?;
     self.enrich_managed_session(snapshot).await
   }
 
   pub async fn resume_managed_session(&self, request: ManagedSessionRequest) -> Result<ManagedSessionSnapshot, String> {
     self.check_managed_workspace()?;
+    if let Some(receipt) = self.rpc_creation(&request)? {
+      return self.creation_snapshot(receipt);
+    }
     let previous = self
       .sessions
       .managed
@@ -447,6 +530,9 @@ for line in sys.stdin:
       crate::managed_sessions::ManagedSessions::with_test_executable(Some(receipts.clone()), executable.clone())
         .unwrap();
     let creation = CreateProjectSessionRequest {
+      provider: tokn_interaction_core::Provider::Pi,
+      runtime_profile_id: None,
+      runtime_revision: None,
       request_id: uuid::Uuid::new_v4().to_string(),
       project_id: project.project_id,
       prompt: "first prompt".into(),
@@ -692,6 +778,9 @@ for line in sys.stdin:
     assert!(
       shared
         .create_project_session(CreateProjectSessionRequest {
+          provider: tokn_interaction_core::Provider::Pi,
+          runtime_profile_id: None,
+          runtime_revision: None,
           request_id: uuid::Uuid::new_v4().to_string(),
           project_id: project.project_id,
           prompt: "hello".into(),
@@ -734,6 +823,9 @@ for line in sys.stdin:
       "x".repeat(crate::input::MAX_INPUT_LENGTH + 1),
     ] {
       let request = CreateProjectSessionRequest {
+        provider: tokn_interaction_core::Provider::Pi,
+        runtime_profile_id: None,
+        runtime_revision: None,
         request_id: uuid::Uuid::new_v4().to_string(),
         project_id: project.project_id.clone(),
         prompt,
