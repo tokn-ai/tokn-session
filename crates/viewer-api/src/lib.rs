@@ -148,6 +148,9 @@ async fn command(
       | "upload_image_chunk"
       | "get_session_model_status"
       | "list_session_models"
+      | "get_session_control"
+      | "set_session_control"
+      | "cancel_session_turn"
       | "get_rpc_runtime_profiles"
       | "validate_rpc_runtime_profile"
       | "save_rpc_runtime_profile"
@@ -172,6 +175,9 @@ async fn command(
       }};
     }
     let response = match command.as_str() {
+      "get_session_control" => rpc_call!(get_session_control),
+      "set_session_control" => rpc_call!(set_session_control),
+      "cancel_session_turn" => rpc_call!(cancel_session_turn),
       "get_rpc_runtime_profiles" => serde_json::to_value(
         state
           .service

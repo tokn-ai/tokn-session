@@ -33,12 +33,12 @@ provider endpoints and authentication headers never leave the host. Pi catalogs
 are bounded to 512 distinct identities. Unsupported runtimes and older bridge
 versions return a reason instead of guessed choices.
 
-The composer keeps its model choice in the local per-session draft. Picking a
+Supported Pi controls keep their model choice in the local per-session draft. Picking a
 model never mutates the runtime or global defaults, and the picker remains usable
 while a turn is running. The header always shows confirmed runtime context.
 Hosts advertise `supports_model_input`; older hosts keep the picker read-only.
 
-Send captures text, image IDs, and an optional model intent (provider/ID, expected
+For Pi, Send captures text, image IDs, and an optional model intent (provider/ID, expected
 revision, runtime generation) under one UUID. The host uses fresh native state:
 an idle runtime validates ownership, generation, revision, and catalog membership,
 sets and reads back the chosen model, then sends. A busy runtime ignores the model
@@ -61,7 +61,14 @@ to choose a vision model without an early model change. Pi's native setter may
 also persist its default provider/model for new sessions, but this happens only
 when sending an idle prompt with that choice. New Pi Session inherits defaults.
 
-Codex status first uses local `thread-owner-discovery`, then binds
+Codex defaults to RPC. Model reads use an already bound app-server and native
+catalog; an unbound thread retains recorded context without starting or resuming
+it. The common RPC adapters do not guarantee atomic model-on-send, so these
+catalogs remain inspectable metadata with read-only selection and an explicit
+reason. Opening the picker does not activate a runtime. See
+[shared session supervision](shared-session-supervisor.md).
+
+When Codex Desktop is explicitly selected, status uses local `thread-owner-discovery`, then binds
 `thread-follower-read-model-settings` to that exact Desktop client and verifies
 its response owner. Both reads share one bounded metadata budget. Missing owners
 and pending settings preserve recorded context with an unavailable reason; they

@@ -18,8 +18,10 @@ and fragments. OpenCode/DSH managed launch arguments are fixed by their adapters
 Native storage defaults to `~/.tokn/sessions/viewer/rpc-runtimes.json`, beside
 the configured viewer index, with private permissions, bounded size, atomic
 writes, and a revision fence. There are at most 32 profiles and one optional
-default per provider. Defaults are saved intent for future routing; they do not
-change the existing composer. Corrupt or newer-format storage is preserved;
+default per provider. The session supervisor uses the default, or a single
+suitable profile, when an explicit first Send needs a runtime. Saving a default
+does not start it or replace an already connected binding. Corrupt or newer-format
+storage is preserved;
 repairing the file and choosing Refresh retries the read without restarting.
 
 Reads expose environment variable names and credential kinds, never their
@@ -70,20 +72,22 @@ machine, and profile revisions reject stale edits.
 
 ## Current integration boundary
 
-This slice provides real runtime setup/lifecycle and host-verified Rust session
-bindings. Bindings verify catalog identity and provider, fence the runtime
-instance, recover live state/pending interactions, and reserve native session
-ownership even after uncertain resume or lost transport. Codex subagents are
-controlled through their parent. OpenCode V1 history cannot bind to a V2 runtime.
-Native binding ownership is currently process-local; the profile lease prevents
-duplicate ownership of that same saved profile across viewer processes. Native
-session leases across different profiles and legacy transports need coordination
-before general conversation controls consume these bindings.
+Host-verified session bindings now serve the shared conversation controls.
+Bindings verify catalog identity/provider, fence the runtime instance, recover
+state/pending interactions, and reserve native ownership even after uncertain
+resume or lost transport. A separate provider/native-ID cross-process lease
+prevents another profile, owned Pi driver, or explicit Desktop route from
+claiming that same session. Codex subagents remain controlled through their
+parent. OpenCode V1 history cannot bind to a V2 runtime.
 
-The existing Codex/Pi composer, model, and question routes remain in use.
-Automatic resume on first Send, generalized creation, and frontend controls
-using these shared bindings are the next integration slice. Merely opening a
-historical session remains view-only.
+First Send can start/connect the selected runtime and resume/bind an existing
+session. Codex defaults to RPC and can discover a local executable when no
+suitable saved profile exists; Desktop control must be explicitly selected.
+Bound metadata and live callback answers use the common service. Runtime
+failures do not automatically select another transport or replay a prompt.
+Opening historical work remains view-only. Generalized session creation,
+arbitrary Pi history adoption, and OpenCode V2 historical display remain future
+work. See [shared session supervision](shared-session-supervisor.md).
 
 Tests exercise profile persistence/redaction/revision rules, all four factory
 paths with scripted native RPC peers, process reaping and leases, binding

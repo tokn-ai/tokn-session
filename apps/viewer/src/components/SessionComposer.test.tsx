@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getSessionInputStatus, submitSessionInput } from "../lib/tauri";
 import type { SessionInputStatus, SessionSummary, SubmitSessionInputResponse } from "../lib/types";
 import { SessionComposer } from "./SessionComposer";
+import type { SessionControlController } from "../lib/useSessionControl";
 
 vi.mock("../lib/tauri", () => ({ getSessionInputStatus: vi.fn(), submitSessionInput: vi.fn() }));
 
@@ -29,6 +30,42 @@ function textbox() { return screen.getByRole("textbox", { name: "Message this se
 function draft(text: string) { fireEvent.change(textbox(), { target: { value: text } }); }
 function send() { fireEvent.click(screen.getByRole("button", { name: "Send" })); }
 async function ready() { await waitFor(() => expect(textbox()).toBeEnabled()); }
+
+function control(revision: string, blocked = false): SessionControlController {
+  return { owner: "one", provider: "codex", status: { session_key: SESSION.session_key, provider: "codex", transport: "rpc", can_select: true, can_cancel: true,
+    available: true, message: "", runtime_id: "runtime", instance_id: "instance" }, checking: false, changing: blocked,
+    stopping: false, error: null, notice: null, revision, binding_key: null, enabled: true, blocked,
+    choose: vi.fn(), cancel: vi.fn(), refresh: vi.fn() };
+}
+
+it("blocks Send during route changes, preserves text, and ignores an old-route availability reply", async () => {
+  const older = deferred<SessionInputStatus>();
+  const view = render(<SessionComposer session={SESSION} control={control("rpc")} />);
+  await ready();
+  draft("Keep my message");
+  vi.mocked(getSessionInputStatus).mockReturnValueOnce(older.promise);
+  view.rerender(<SessionComposer session={SESSION} control={control("rpc")} input_refresh_key={1} />);
+  view.rerender(<SessionComposer session={SESSION} control={control("switching", true)} input_refresh_key={1} />);
+  expect(textbox()).toBeDisabled();
+  vi.mocked(getSessionInputStatus).mockResolvedValueOnce({ ...AVAILABLE, available: false, message: "Desktop session unavailable" });
+  view.rerender(<SessionComposer session={SESSION} control={control("desktop")} input_refresh_key={1} />);
+  await screen.findByText("Desktop session unavailable");
+  await act(async () => older.resolve(AVAILABLE));
+  expect(textbox()).toBeDisabled();
+  expect(textbox()).toHaveValue("Keep my message");
+  expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+  expect(submitSessionInput).not.toHaveBeenCalled();
+});
+
+it("refreshes session control after the first accepted RPC activation", async () => {
+  const route = control("rpc");
+  render(<SessionComposer session={SESSION} control={route} />);
+  await ready();
+  draft("Start this RPC session");
+  send();
+  await waitFor(() => expect(route.refresh).toHaveBeenCalledTimes(1));
+  expect(submitSessionInput).toHaveBeenCalledTimes(1);
+});
 
 beforeEach(() => {
   vi.resetAllMocks();

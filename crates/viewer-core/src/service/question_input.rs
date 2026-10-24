@@ -143,11 +143,15 @@ impl ViewerService {
     &self,
     request: SessionQuestionStatusRequest,
   ) -> Result<SessionQuestionStatus, String> {
+    if let Some(status) = self.rpc_question_status(&request).await? {
+      return Ok(status);
+    }
     let service = self.clone();
     let pending = tokio::task::spawn_blocking(move || service.pending_question_input(&request))
       .await
       .map_err(|_| "Could not check questions")?;
     let unavailable = |message| SessionQuestionStatus {
+      secret_question_ids: Vec::new(),
       available: false,
       message,
       question_ids: vec![],
@@ -180,6 +184,7 @@ impl ViewerService {
     }
     match input::status(&pending.target).await {
       Ok(_) => Ok(SessionQuestionStatus {
+        secret_question_ids: Vec::new(),
         available: true,
         message: "Choose an option or write an answer.".into(),
         question_ids: ids,
@@ -193,6 +198,9 @@ impl ViewerService {
     &self,
     request: SubmitSessionQuestionAnswersRequest,
   ) -> Result<SubmitSessionInputResponse, String> {
+    if let Some(response) = self.submit_rpc_question(&request).await? {
+      return Ok(response);
+    }
     let attempt = request.request_id.clone();
     let service = self.clone();
     let prepared = tokio::task::spawn_blocking(move || {
@@ -238,7 +246,7 @@ impl ViewerService {
       return Ok(
         self
           .input_broker
-          .receipt(&target, &message)
+          .control_receipt(&target, &message)
           .unwrap_or(SubmitSessionInputResponse {
             model_result: None,
             request_id: attempt,
@@ -250,16 +258,21 @@ impl ViewerService {
     let claims = self.question_claims.clone();
     let delivery_keys = keys.clone();
     let delivery_attempt = attempt.clone();
-    let delivery_target = InputTarget {
-      provider: target.provider,
-      session_id: target.session_id.clone(),
-      session_file: target.session_file.clone(),
-    };
+    let delivery_key = message.session_key.clone();
+    let service = self.clone();
     let delivery_text = message.text.clone();
     let result = self
       .input_broker
-      .submit_custom(&target, message, async move {
-        let result = input::codex::submit_question(&delivery_target, &delivery_attempt, &delivery_text).await;
+      .submit_control(&target, message, async move {
+        let result = match service.control_target(delivery_key).await {
+          Ok(verified) => {
+            service
+              .sessions
+              .submit_desktop_question(&verified, &delivery_attempt, &delivery_text)
+              .await
+          }
+          Err(error) => Err(input::DeliveryError::not_sent(error)),
+        };
         if result.as_ref().is_err_and(|error| !error.may_have_been_sent) {
           if let Ok(mut claims) = claims.lock() {
             claims.release(&delivery_keys, &delivery_attempt);

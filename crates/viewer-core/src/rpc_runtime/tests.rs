@@ -4,24 +4,31 @@ use serde_json::{Value, json};
 use std::{path::Path, sync::atomic::AtomicUsize, time::Duration};
 use tokio::{sync::watch, task::JoinSet};
 mod http_peer;
+mod workflow_tests;
 
-struct CodexPeer {
-  endpoint: String,
+pub(crate) struct CodexPeer {
+  pub(crate) endpoint: String,
   requests: Arc<Mutex<Vec<Value>>>,
   connections: Arc<AtomicUsize>,
+  active: Arc<AtomicBool>,
+  drop_prompt_ack: Arc<AtomicBool>,
   initialize_gate: Arc<tokio::sync::Semaphore>,
   stop: watch::Sender<bool>,
   task: tokio::task::JoinHandle<()>,
 }
 
 impl CodexPeer {
-  async fn start(gated: bool) -> Self {
+  pub(crate) async fn start(gated: bool) -> Self {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("ws://{}", listener.local_addr().unwrap());
     let requests = Arc::new(Mutex::new(Vec::new()));
     let recorded = requests.clone();
     let connections = Arc::new(AtomicUsize::new(0));
     let accepted = connections.clone();
+    let active = Arc::new(AtomicBool::new(false));
+    let native_active = active.clone();
+    let drop_prompt_ack = Arc::new(AtomicBool::new(false));
+    let drop_ack = drop_prompt_ack.clone();
     let initialize_gate = Arc::new(tokio::sync::Semaphore::new(if gated { 0 } else { 32 }));
     let gate = initialize_gate.clone();
     let (stop, mut stopping) = watch::channel(false);
@@ -35,12 +42,15 @@ impl CodexPeer {
             accepted.fetch_add(1, Ordering::Relaxed);
             let requests = recorded.clone();
             let gate = gate.clone();
+            let active = native_active.clone();
+            let drop_ack = drop_ack.clone();
             peers.spawn(async move {
               let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else { return };
               while let Some(Ok(frame)) = socket.next().await {
                 let tokio_tungstenite::tungstenite::Message::Text(text) = frame else { continue };
                 let request: Value = serde_json::from_str(&text).unwrap();
                 requests.lock().unwrap().push(request.clone());
+                if request["method"] == "turn/start" && drop_ack.load(Ordering::Relaxed) { break; }
                 let Some(id) = request.get("id") else { continue };
                 let result = match request["method"].as_str().unwrap_or_default() {
                   "initialize" => {
@@ -50,11 +60,12 @@ impl CodexPeer {
                   }
                   "thread/resume" | "thread/read" => json!({
                     "thread":{
-                      "id":request["params"]["threadId"], "status":{"type":"idle"},
+                      "id":request["params"]["threadId"], "status":{"type":if active.load(Ordering::Relaxed){"active"}else{"idle"}},
                       "model":"test-model", "modelProvider":"test", "turns":[]
                     }
                   }),
                   "model/list" => json!({"data":[],"nextCursor":null}),
+                  "turn/start" => {active.store(true,Ordering::Relaxed);json!({"turn":{"id":"test-turn","status":"inProgress","items":[]}})},
                   other => panic!("unexpected native method: {other}"),
                 };
                 if socket.send(tokio_tungstenite::tungstenite::Message::Text(
@@ -70,13 +81,15 @@ impl CodexPeer {
       endpoint,
       requests,
       connections,
+      active,
+      drop_prompt_ack,
       initialize_gate,
       stop,
       task,
     }
   }
 
-  fn methods(&self) -> Vec<String> {
+  pub(crate) fn methods(&self) -> Vec<String> {
     self
       .requests
       .lock()
@@ -84,6 +97,10 @@ impl CodexPeer {
       .iter()
       .filter_map(|request| request["method"].as_str().map(str::to_owned))
       .collect()
+  }
+
+  pub(crate) fn drop_prompt_acknowledgements(&self) {
+    self.drop_prompt_ack.store(true, Ordering::Relaxed);
   }
 }
 

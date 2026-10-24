@@ -4,14 +4,26 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
+Live conversation input, model inspection, callback answers, and cancellation
+now route through one Rust `SessionSupervisor`. Codex defaults to app-server
+RPC with explicit per-thread Desktop selection; first Send verifies history and
+binds/resumes through host-selected runtime configuration. Inspection does not
+activate sessions and transport failures never cause fallback or prompt replay.
+Cross-process provider/native-ID leases coordinate RPC, owned Pi, and explicit
+Desktop control independently of runtime profile leases. Pi retains its existing
+driver; arbitrary Pi history adoption, generalized creation, and OpenCode V2
+history/display remain follow-ups. See the
+[shared session supervisor](shared-session-supervisor.md) for routing, storage,
+capability limits, and ownership.
+
 Viewer-owned Pi sessions now use `PiAdapter::spawn_supervised` for child/pipe
 ownership, framing, typed command writes, response correlation, compact ordered
 control events, stderr, and cleanup. `managed_pi` retains durable receipts,
 session leases, verified history, model-on-send workflows, dialogs, idle retirement,
 and restart policy; it no longer starts or speaks directly to the child.
 The exclusive supervised API preserves these workflows without advertising
-stronger guarantees on the common interaction API. Existing public commands and
-wire models are unchanged. Native Pi fixtures also replay through this path.
+stronger guarantees on the common interaction API. Native Pi fixtures also
+replay through this path.
 
 Settings → Agent runtimes now manages selected-machine Codex/Pi/OpenCode/DSH
 RPC profiles and real managed/attached adapters through the shared Rust registry.
@@ -19,12 +31,10 @@ Private versioned profiles live under `viewer/rpc-runtimes.json`; public reads
 redact environment/credential values. Explicit lifecycle actions use instance
 fences, cross-process profile leases, cancellation-safe receipts, and awaited
 shutdown. Encrypted remote management requires paired control plus a separate
-host-owned opt-in, disabled by default. Host-verified internal session bindings
-recover native state and reserve ownership; existing composer/model/question
-routes are unchanged. Automatic first-Send resume, generalized creation, and
-OpenCode V2 history/display remain follow-ups. Native binding ownership is
-process-local; coordinate per-session leases across distinct profiles and legacy
-transports before routing general input through it. See
+host-owned opt-in, disabled by default. Host-verified session bindings recover
+native state and reserve ownership before the shared conversation controls use
+them. Per-session leases prevent a different profile from taking over the same
+native session. See
 [viewer RPC runtimes](viewer-rpc-runtimes.md) for scope and tests.
 
 The private `interaction-tests` crate captures native Codex/Pi/OpenCode/DSH RPC.
@@ -52,8 +62,8 @@ honestly. Inspection never starts or resumes a session. See
 [live interaction](interaction-core.md) for APIs, recovery, ownership, and limits.
 The viewer reuses Pi state/dialog normalization, common model DTOs and the core
 receipt ledger. Its Pi project/history supervisor runs through the adapter's
-exclusive supervised session API; Codex/Pi public conversation controls retain
-their routes while selected-machine runtime setup uses the shared registry.
+exclusive supervised session API; the shared supervisor coordinates public
+conversation controls with the selected-machine runtime registry.
 
 Codex app-server control requires explicit thread create/resume; reads never
 activate saved work. Its ordered response/event pump and epoch guards preserve
@@ -63,9 +73,9 @@ callback question/command/file replies are available through the Rust adapter.
 Strict idle-only start, automatic follow-up queue, atomic model-on-send, and
 permanent generic approval grants reject honestly. Question DTOs retain secret
 input and selected-option notes. The distinct `request_user_input_async` tool's
-assistant-item metadata stays native-only; it has no server callback. Viewer
-Desktop IPC routes are unchanged. The Codex fixture records executable version
-and digest separately from inspected source provenance; inference uses only a
+assistant-item metadata has no server callback and cannot be answered through
+RPC; Desktop control remains an explicit alternative. The Codex fixture records
+executable version and digest separately from inspected source provenance; inference uses only a
 local Responses server. See the [adapter](../crates/codex-adapter/README.md).
 
 Existing sessions expose model context in the header and composer. Historical
@@ -77,11 +87,13 @@ drafts until Send: idle sends validate and apply them; running sends ignore them
 steer with the active model, and reset the draft choice. Model intent and message
 share admission/receipts; only actual idle selection may update Pi defaults.
 Image staging does not change models, and delivery checks the effective model.
-Codex model reads discover the local owner first, bind the read to that client,
-and retain recorded context when the bounded live lookup is unavailable.
-Desktop supplies no verifiable catalog through follower IPC, so its picker
-remains read-only with a reason. Shares and viewing grants never expose live
-catalogs or model mutation. See [session models](viewer-models.md).
+Codex RPC model reads use an already bound app-server; an unbound session keeps
+recorded context without activation. Explicit Desktop model reads discover the
+local owner and retain recorded context when the bounded lookup is unavailable.
+The common RPC adapters expose verified catalogs while model-on-send remains
+unsupported; Desktop supplies no verifiable catalog through follower IPC.
+These pickers remain read-only with a reason. Shares and viewing grants never
+expose live catalogs or model mutation. See [session models](viewer-models.md).
 
 Recorded images from Codex, Pi, OpenCode, and ZCode now render through lazy
 thumbnail/full resources, including image-only messages. The composer and local

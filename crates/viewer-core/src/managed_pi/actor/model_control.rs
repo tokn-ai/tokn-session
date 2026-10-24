@@ -104,7 +104,7 @@ impl Actor {
             return Ok(());
           }
         };
-        if let Err(error) = self.accept_state(state) {
+        if let Err(error) = self.accept_state(state).await {
           pending.reject(&error, false);
           return Err(error);
         }

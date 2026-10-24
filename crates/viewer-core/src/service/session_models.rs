@@ -1,51 +1,39 @@
 use super::*;
-use crate::{input::InputTarget, models::*};
+use crate::{models::*, session_supervisor::SessionTransport};
 
 impl ViewerService {
   pub async fn get_session_model_status(
     &self,
     request: SessionModelStatusRequest,
   ) -> Result<SessionModelStatus, String> {
-    if self.session_scope.is_some() {
-      self.validate_session_key(&request.session_key)?;
-      return Ok(SessionModelStatus::unavailable(
-        "Shared sessions do not expose live model controls",
-      ));
-    }
-    if self.relay.status().settings.mode != crate::relay::RelayMode::External
-      && let Some(result) = self.managed_pi.model_status(&request.session_key).await
-    {
-      return Ok(result.unwrap_or_else(SessionModelStatus::unavailable));
-    }
-    let target = match self.model_target(&request.session_key).await {
+    let target = match self.control_target(request.session_key).await {
       Ok(target) => target,
       Err(reason) => return Ok(SessionModelStatus::unavailable(reason)),
     };
-    let status = match target.provider {
-      ViewerProvider::Codex => crate::input::codex::model_status(&target).await,
-      ViewerProvider::Pi => crate::input::pi::model_status(&target).await,
-      _ => unreachable!(),
+    if let Some(result) = self.sessions.pi.model_status(&target.session_key).await {
+      return Ok(result.unwrap_or_else(SessionModelStatus::unavailable));
+    }
+    let result = match (target.input.provider, self.sessions.transport(&target).await?) {
+      (ViewerProvider::Codex, SessionTransport::Desktop) => crate::input::codex::model_status(&target.input)
+        .await
+        .map_err(|error| error.message),
+      (ViewerProvider::Pi, _) => crate::input::pi::model_status(&target.input)
+        .await
+        .map_err(|error| error.message),
+      _ => self
+        .sessions
+        .rpc_models(&target, false)
+        .await
+        .map(|response| response.status),
     };
-    Ok(status.unwrap_or_else(|error| SessionModelStatus::unavailable(error.message)))
+    Ok(result.unwrap_or_else(SessionModelStatus::unavailable))
   }
 
   pub async fn list_session_models(
     &self,
     request: ListSessionModelsRequest,
   ) -> Result<ListSessionModelsResponse, String> {
-    if self.session_scope.is_some() {
-      self.validate_session_key(&request.session_key)?;
-      return Ok(ListSessionModelsResponse {
-        status: SessionModelStatus::unavailable("Shared sessions do not expose model catalogs"),
-        models: Vec::new(),
-      });
-    }
-    if self.relay.status().settings.mode != crate::relay::RelayMode::External
-      && let Some(result) = self.managed_pi.list_models(&request.session_key).await
-    {
-      return result;
-    }
-    let target = match self.model_target(&request.session_key).await {
+    let target = match self.control_target(request.session_key).await {
       Ok(target) => target,
       Err(reason) => {
         return Ok(ListSessionModelsResponse {
@@ -54,28 +42,20 @@ impl ViewerService {
         });
       }
     };
-    match target.provider {
-      ViewerProvider::Codex => {
-        let status = crate::input::codex::model_status(&target)
+    if let Some(result) = self.sessions.pi.list_models(&target.session_key).await {
+      return result;
+    }
+    match (target.input.provider, self.sessions.transport(&target).await?) {
+      (ViewerProvider::Codex, SessionTransport::Desktop) => Ok(ListSessionModelsResponse {
+        status: crate::input::codex::model_status(&target.input)
           .await
-          .unwrap_or_else(|error| SessionModelStatus::unavailable(error.message));
-        Ok(ListSessionModelsResponse {
-          status,
-          models: Vec::new(),
-        })
-      }
-      ViewerProvider::Pi => crate::input::pi::list_models(&target)
+          .unwrap_or_else(|error| SessionModelStatus::unavailable(error.message)),
+        models: Vec::new(),
+      }),
+      (ViewerProvider::Pi, _) => crate::input::pi::list_models(&target.input)
         .await
         .map_err(|error| error.message),
-      _ => unreachable!(),
+      _ => self.sessions.rpc_models(&target, true).await,
     }
-  }
-
-  async fn model_target(&self, session_key: &str) -> Result<InputTarget, String> {
-    let service = self.clone();
-    let key = session_key.to_owned();
-    tokio::task::spawn_blocking(move || service.resolve_input_target(&key))
-      .await
-      .map_err(|_| "Could not resolve the model control target".to_string())?
   }
 }

@@ -5,6 +5,7 @@ import { useSessionModel } from "../lib/useSessionModel";
 import { getSessionInputStatus, getSessionModelStatus, listSessionModels, submitSessionInput, uploadImageChunk, releaseImageUpload } from "../lib/tauri";
 import { DEFAULT_IMAGE_LIMITS } from "../lib/imageDrafts";
 import type { SessionSummary, SubmitSessionInputResponse, SessionModelStatus } from "../lib/types";
+import type { SessionControlController } from "../lib/useSessionControl";
 
 const transport = vi.hoisted(() => ({ scope: "local", invoke: vi.fn() }));
 vi.mock("../lib/transport", () => ({ invoke: vi.fn(), listen: vi.fn(), viewerStorageScope: () => transport.scope,
@@ -15,10 +16,10 @@ const session = { session_key: "pi:one", provider: "pi" } as SessionSummary;
 const first = { model_provider: "anthropic", model_id: "first", display_name: "First model" };
 const second = { model_provider: "anthropic", model_id: "second", display_name: "Second model" };
 let actual: SessionModelStatus;
-function Composer({ target = session, running = false, refresh_key = 0 }: { target?: SessionSummary; running?: boolean; refresh_key?: number }) {
+function Composer({ target = session, running = false, refresh_key = 0, control }: { target?: SessionSummary; running?: boolean; refresh_key?: number; control?: SessionControlController }) {
   const model = useSessionModel(target.session_key, undefined, running, refresh_key);
   return <><span aria-label="Runtime model">{model.state?.model?.display_name}</span>
-    <SessionComposer session={target} model={model} input_refresh_key={model.input_revision} /></>;
+    <SessionComposer session={target} model={model} control={control} input_refresh_key={model.input_revision} /></>;
 }
 const field = () => screen.getByRole("textbox", { name: "Message this session" });
 const prompt = (text = "Keep this message") => fireEvent.change(field(), { target: { value: text } });
@@ -59,6 +60,21 @@ it("chooses locally, keeps the header actual, and applies the captured choice on
       model_id: "second", expected_revision: "1", runtime_generation: "runtime" } }, transport.invoke);
   expect(screen.getByLabelText("Runtime model")).toHaveTextContent("Second model");
   expect(screen.queryByRole("button", { name: "Use current model" })).not.toBeInTheDocument();
+});
+
+it("preserves a draft model through a control readiness check on the same route", async () => {
+  const control: SessionControlController = { owner: "one", provider: "pi", status: null, checking: false, changing: false,
+    stopping: false, error: null, notice: null, revision: "same-instance", binding_key: null,
+    enabled: false, blocked: false, choose: vi.fn(), cancel: vi.fn(), refresh: vi.fn() };
+  const view = render(<Composer control={control} />);
+  await waitFor(() => expect(field()).toBeEnabled());
+  prompt(); await chooseSecond();
+  view.rerender(<Composer control={{ ...control, checking: true, blocked: true }} />);
+  expect(field()).toBeDisabled();
+  view.rerender(<Composer control={control} />);
+  await waitFor(() => expect(field()).toBeEnabled());
+  expect(screen.getByRole("button", { name: /Model: Second model/ })).toBeInTheDocument();
+  expect(field()).toHaveValue("Keep this message");
 });
 
 it.each(["accepted", "not_sent", "unknown"] as const)("resets a busy ignored choice from actual state even when delivery is %s", async (status) => {

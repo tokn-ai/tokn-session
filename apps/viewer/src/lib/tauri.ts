@@ -40,6 +40,7 @@ import type {
   StartRpcRuntimeRequest, CloseRpcRuntimeRequest, CloseRpcRuntimeResponse,
   RpcRuntimeAccess,
   SessionModelStatusRequest, SessionModelStatus, ListSessionModelsResponse,
+  SessionControlRequest, SetSessionControlRequest, SessionControlStatus, CancelSessionTurnRequest,
 } from "./types";
 
 export function getRpcRuntimeProfiles(send: CommandInvoker = invoke): Promise<RpcRuntimeProfilesSnapshot> {
@@ -95,8 +96,18 @@ export function listenForManagedSessionChanges(handler: (snapshot: ManagedSessio
   return subscribe<ManagedSessionSnapshot>("managed-session-changed", (event) => handler(event.payload));
 }
 
-export function getSessionInputStatus(request: SessionInputStatusRequest): Promise<SessionInputStatus> {
-  return invoke<SessionInputStatus>("get_session_input_status", { request });
+export function getSessionInputStatus(request: SessionInputStatusRequest, send: CommandInvoker = invoke): Promise<SessionInputStatus> {
+  return send<SessionInputStatus>("get_session_input_status", { request });
+}
+
+export function getSessionControl(request: SessionControlRequest, send: CommandInvoker = invoke): Promise<SessionControlStatus> {
+  return send("get_session_control", { request });
+}
+export function setSessionControl(request: SetSessionControlRequest, send: CommandInvoker = invoke): Promise<SessionControlStatus> {
+  return send("set_session_control", { request });
+}
+export function cancelSessionTurn(request: CancelSessionTurnRequest, send: CommandInvoker = invoke): Promise<SubmitSessionInputResponse> {
+  return send("cancel_session_turn", { request });
 }
 
 export function getSessionModelStatus(request: SessionModelStatusRequest, send: CommandInvoker = invoke): Promise<SessionModelStatus> {

@@ -193,7 +193,7 @@ impl Actor {
             return Err(error);
           }
         };
-        if let Err(error) = self.accept_state(state) {
+        if let Err(error) = self.accept_state(state).await {
           self.reject_message(pending, &error, true);
           return Err(error);
         }

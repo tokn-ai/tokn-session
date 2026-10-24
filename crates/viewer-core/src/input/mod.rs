@@ -18,7 +18,7 @@ use tokn_interaction_core::{ReceiptAdmission, ReceiptError, ReceiptLedger};
 pub(crate) const MAX_INPUT_LENGTH: usize = 16 * 1024;
 const MAX_RECENT_REQUESTS: usize = 1024;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct InputTarget {
   pub provider: ViewerProvider,
   pub session_id: String,
@@ -104,7 +104,7 @@ pub(crate) async fn status(target: &InputTarget) -> Result<InputCapability, Deli
   }
 }
 
-async fn deliver(
+pub(crate) async fn deliver(
   target: InputTarget,
   request: SubmitSessionInputRequest,
   images: Vec<ResolvedImage>,
@@ -187,9 +187,21 @@ fn input_fingerprint(request: &SubmitSessionInputRequest) -> [u8; 32] {
     .into()
 }
 
+fn request_fingerprint(request: &SubmitSessionInputRequest, control: bool) -> [u8; 32] {
+  let message = input_fingerprint(request);
+  if control {
+    Sha256::digest([b"session-control:".as_slice(), message.as_slice()].concat()).into()
+  } else {
+    message
+  }
+}
+
 struct RequestState {
   receipts: ReceiptLedger<SubmitSessionInputResponse>,
   in_flight: HashSet<String>,
+  pending_controls: std::collections::HashMap<String, usize>,
+  uncertain_sessions: HashSet<String>,
+  transitions: HashSet<String>,
 }
 
 impl Default for RequestState {
@@ -197,6 +209,9 @@ impl Default for RequestState {
     Self {
       receipts: ReceiptLedger::new(MAX_RECENT_REQUESTS),
       in_flight: HashSet::new(),
+      pending_controls: std::collections::HashMap::new(),
+      uncertain_sessions: HashSet::new(),
+      transitions: HashSet::new(),
     }
   }
 }
@@ -204,18 +219,50 @@ impl Default for RequestState {
 #[derive(Clone, Default)]
 pub(crate) struct InputBroker(Arc<Mutex<RequestState>>);
 
-impl InputBroker {
-  pub async fn submit_images(
-    &self,
-    target: InputTarget,
-    mut request: SubmitSessionInputRequest,
-    images: Vec<ResolvedImage>,
-  ) -> SubmitSessionInputResponse {
-    request.session_key = target.identity();
-    let delivery_request = request.clone();
+/// Reserves the broker while a transport releases ownership and saves its new
+/// route. Controls cannot enter after the switch has passed its idle check.
+pub(crate) struct TransportTransition {
+  broker: InputBroker,
+  identity: String,
+}
+
+impl Drop for TransportTransition {
+  fn drop(&mut self) {
     self
-      .submit_with(request, deliver(target, delivery_request, images))
-      .await
+      .broker
+      .0
+      .lock()
+      .unwrap_or_else(|error| error.into_inner())
+      .transitions
+      .remove(&self.identity);
+  }
+}
+
+impl InputBroker {
+  pub(crate) fn begin_transition(&self, target: &InputTarget) -> Result<TransportTransition, String> {
+    let identity = target.identity();
+    let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
+    if state.in_flight.contains(&identity)
+      || state.pending_controls.contains_key(&identity)
+      || state.uncertain_sessions.contains(&identity)
+      || state.transitions.contains(&identity)
+    {
+      return Err(
+        "A submission is pending or uncertain, or its transport is changing; reconcile it before switching".into(),
+      );
+    }
+    state.transitions.insert(identity.clone());
+    Ok(TransportTransition {
+      broker: self.clone(),
+      identity,
+    })
+  }
+
+  pub(crate) fn has_unresolved(&self, target: &InputTarget) -> bool {
+    let state = self.0.lock().unwrap_or_else(|error| error.into_inner());
+    state.in_flight.contains(&target.identity())
+      || state.pending_controls.contains_key(&target.identity())
+      || state.uncertain_sessions.contains(&target.identity())
   }
 
   pub(crate) fn receipt(
@@ -223,11 +270,29 @@ impl InputBroker {
     target: &InputTarget,
     request: &SubmitSessionInputRequest,
   ) -> Option<SubmitSessionInputResponse> {
+    self.lookup_receipt(target, request, false)
+  }
+
+  pub(crate) fn control_receipt(
+    &self,
+    target: &InputTarget,
+    request: &SubmitSessionInputRequest,
+  ) -> Option<SubmitSessionInputResponse> {
+    self.lookup_receipt(target, request, true)
+  }
+
+  fn lookup_receipt(
+    &self,
+    target: &InputTarget,
+    request: &SubmitSessionInputRequest,
+    control: bool,
+  ) -> Option<SubmitSessionInputResponse> {
     let state = self.0.lock().unwrap_or_else(|error| error.into_inner());
-    match state
-      .receipts
-      .lookup(&request.request_id, &target.identity(), &input_fingerprint(request))
-    {
+    match state.receipts.lookup(
+      &request.request_id,
+      &target.identity(),
+      &request_fingerprint(request, control),
+    ) {
       Ok(receipt) => receipt,
       Err(_) => Some(SubmitSessionInputResponse {
         model_result: None,
@@ -248,14 +313,42 @@ impl InputBroker {
     F: Future<Output = Result<Admission, DeliveryError>> + Send + 'static,
   {
     request.session_key = target.identity();
-    self.submit_with(request, delivery).await
+    self.submit_with_mode(request, delivery, false).await
   }
 
+  /// Answers and cancellation can unblock a message whose native admission is
+  /// pending. They share receipts/uncertainty, but never wait on message admission.
+  pub(crate) async fn submit_control<F>(
+    &self,
+    target: &InputTarget,
+    mut request: SubmitSessionInputRequest,
+    delivery: F,
+  ) -> SubmitSessionInputResponse
+  where
+    F: Future<Output = Result<Admission, DeliveryError>> + Send + 'static,
+  {
+    request.session_key = target.identity();
+    self.submit_with_mode(request, delivery, true).await
+  }
+
+  #[cfg(test)]
   async fn submit_with<F>(&self, request: SubmitSessionInputRequest, delivery: F) -> SubmitSessionInputResponse
   where
     F: Future<Output = Result<Admission, DeliveryError>> + Send + 'static,
   {
-    let text_hash = input_fingerprint(&request);
+    self.submit_with_mode(request, delivery, false).await
+  }
+
+  async fn submit_with_mode<F>(
+    &self,
+    request: SubmitSessionInputRequest,
+    delivery: F,
+    control: bool,
+  ) -> SubmitSessionInputResponse
+  where
+    F: Future<Output = Result<Admission, DeliveryError>> + Send + 'static,
+  {
+    let text_hash = request_fingerprint(&request, control);
     let request_id = request.request_id.clone();
     let response = |status, message: &str| SubmitSessionInputResponse {
       model_result: None,
@@ -278,7 +371,15 @@ impl InputBroker {
         }
         Ok(None) => {}
       }
-      if state.in_flight.contains(&request.session_key) {
+      if state.transitions.contains(&request.session_key) {
+        return response(
+          InputDeliveryStatus::NotSent,
+          "Session transport is changing; review its control route before sending",
+        );
+      }
+      if !control
+        && (state.in_flight.contains(&request.session_key) || state.pending_controls.contains_key(&request.session_key))
+      {
         return response(
           InputDeliveryStatus::NotSent,
           "A message is already pending for this session.",
@@ -296,7 +397,11 @@ impl InputBroker {
       ) {
         Ok(ReceiptAdmission::Replay(previous)) => return previous,
         Ok(ReceiptAdmission::New) => {
-          state.in_flight.insert(request.session_key.clone());
+          if control {
+            *state.pending_controls.entry(request.session_key.clone()).or_default() += 1;
+          } else {
+            state.in_flight.insert(request.session_key.clone());
+          }
         }
         Err(error) => {
           return response(
@@ -334,18 +439,18 @@ impl InputBroker {
         other => (other, None),
       };
       let (status, message) = match outcome {
-        Ok(Admission::Accepted) => (InputDeliveryStatus::Accepted, "Codex App accepted the message.".into()),
+        Ok(Admission::Accepted) => (InputDeliveryStatus::Accepted, "Agent accepted the input.".into()),
         Ok(Admission::Started) => (
           InputDeliveryStatus::Accepted,
-          "Message accepted. Pi started a turn.".into(),
+          "Message accepted. Started a turn.".into(),
         ),
         Ok(Admission::QueuedFollowUp) => (
           InputDeliveryStatus::Accepted,
-          "Message queued after Pi's current turn.".into(),
+          "Message queued after the current turn.".into(),
         ),
         Ok(Admission::Steered) => (
           InputDeliveryStatus::Accepted,
-          "Message accepted as steering for Pi's active turn.".into(),
+          "Message accepted as steering for the active turn.".into(),
         ),
         Ok(Admission::WithModel { .. }) => unreachable!("model admission was unwrapped"),
         Err(error) => (
@@ -364,8 +469,18 @@ impl InputBroker {
         message,
       };
       let mut state = broker.0.lock().unwrap_or_else(|error| error.into_inner());
-      state.in_flight.remove(&request.session_key);
+      if control {
+        if let Some(count) = state.pending_controls.get_mut(&request.session_key) {
+          *count = count.saturating_sub(1);
+          if *count == 0 {
+            state.pending_controls.remove(&request.session_key);
+          }
+        }
+      } else {
+        state.in_flight.remove(&request.session_key);
+      }
       if result.status == InputDeliveryStatus::Unknown {
+        state.uncertain_sessions.insert(request.session_key.clone());
         state.receipts.retain_outcome(&request.request_id, result.clone());
       } else {
         state.receipts.complete(&request.request_id, result.clone());

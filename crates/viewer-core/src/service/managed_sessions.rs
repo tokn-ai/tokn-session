@@ -22,10 +22,15 @@ impl ViewerService {
     self
       .check_managed_workspace()
       .map_err(SessionCreationError::not_started)?;
-    self.managed_pi.available().map_err(SessionCreationError::not_started)?;
+    self
+      .sessions
+      .pi
+      .available()
+      .map_err(SessionCreationError::not_started)?;
     crate::managed_pi::validate_creation_request(&request).map_err(SessionCreationError::not_started)?;
     if let Some(snapshot) = self
-      .managed_pi
+      .sessions
+      .pi
       .creation_receipt(&request)
       .map_err(SessionCreationError::uncertain)?
     {
@@ -58,7 +63,8 @@ impl ViewerService {
       .map_err(SessionCreationError::not_started)?
     };
     let snapshot = self
-      .managed_pi
+      .sessions
+      .pi
       .create_with_images(request, project, images)
       .await
       .map_err(SessionCreationError::uncertain)?;
@@ -73,7 +79,7 @@ impl ViewerService {
     request: ManagedSessionRequest,
   ) -> Result<Option<ManagedSessionSnapshot>, String> {
     self.check_managed_workspace()?;
-    match self.managed_pi.get(&request)? {
+    match self.sessions.pi.get(&request)? {
       Some(snapshot) => self.enrich_managed_session(snapshot).await.map(Some),
       None => Ok(None),
     }
@@ -81,21 +87,22 @@ impl ViewerService {
 
   pub async fn stop_managed_session(&self, request: ManagedSessionRequest) -> Result<ManagedSessionSnapshot, String> {
     self.check_managed_workspace()?;
-    let snapshot = self.managed_pi.stop(request).await?;
+    let snapshot = self.sessions.pi.stop(request).await?;
     self.enrich_managed_session(snapshot).await
   }
 
   pub async fn resume_managed_session(&self, request: ManagedSessionRequest) -> Result<ManagedSessionSnapshot, String> {
     self.check_managed_workspace()?;
     let previous = self
-      .managed_pi
+      .sessions
+      .pi
       .get(&request)?
       .ok_or("This session is not managed by the viewer")?;
     let service = self.clone();
     tokio::task::spawn_blocking(move || service.validated_project(&previous.project_id))
       .await
       .map_err(|_| "Could not validate the project folder")??;
-    let snapshot = self.managed_pi.resume(request).await?;
+    let snapshot = self.sessions.pi.resume(request).await?;
     self.enrich_managed_session(snapshot).await
   }
 
@@ -104,13 +111,12 @@ impl ViewerService {
     response: ManagedSessionDialogResponse,
   ) -> Result<ManagedSessionSnapshot, String> {
     self.check_managed_workspace()?;
-    let snapshot = self.managed_pi.respond_dialog(response).await?;
+    let snapshot = self.sessions.pi.respond_dialog(response).await?;
     self.enrich_managed_session(snapshot).await
   }
 
   pub async fn shutdown_managed_sessions(&self) {
-    self.rpc_runtimes.shutdown().await;
-    self.managed_pi.shutdown().await;
+    self.sessions.shutdown().await;
   }
 
   /// Pi owns the file and identity. Register only that verified source rather
@@ -436,7 +442,7 @@ for line in sys.stdin:
 "#).unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     let receipts = directory.path().join("viewer/owned-test.json");
-    service.managed_pi =
+    service.sessions.pi =
       crate::managed_pi::ManagedPiSessions::with_test_executable(Some(receipts.clone()), executable.clone()).unwrap();
     let creation = CreateProjectSessionRequest {
       request_id: uuid::Uuid::new_v4().to_string(),
@@ -506,7 +512,7 @@ for line in sys.stdin:
         .available
     );
     // Reloading ownership does not launch a process or replay either prompt.
-    service.managed_pi =
+    service.sessions.pi =
       crate::managed_pi::ManagedPiSessions::with_test_executable(Some(receipts), executable).unwrap();
     let status = service.get_session_input_status(status_request.clone()).await.unwrap();
     assert!(status.available);
@@ -735,7 +741,8 @@ for line in sys.stdin:
       assert!(!error.may_have_started);
       assert!(
         service
-          .managed_pi
+          .sessions
+          .pi
           .get(&ManagedSessionRequest {
             request_id: Some(request.request_id),
             session_key: None

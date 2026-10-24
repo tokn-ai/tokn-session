@@ -983,6 +983,8 @@ pub struct SessionQuestionStatusRequest {
 
 #[derive(Debug, Serialize)]
 pub struct SessionQuestionStatus {
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub secret_question_ids: Vec<String>,
   pub available: bool,
   pub message: String,
   pub question_ids: Vec<String>,

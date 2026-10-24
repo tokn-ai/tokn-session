@@ -63,6 +63,8 @@ vi.mock("./tauri", () => ({
   acknowledgeSessionAttention: vi.fn(() => Promise.resolve({ changed: false })),
   getSessionIndexProgress: vi.fn(() => new Promise(() => undefined)),
   getSessionInputStatus: vi.fn(),
+  getSessionControl: vi.fn(async ({ session_key }: { session_key: string }) => ({ session_key, provider: "codex", transport: "rpc",
+    can_select: true, can_cancel: true, available: true, message: "", runtime_id: "runtime", instance_id: "instance" })),
   submitSessionInput: vi.fn(),
   listSessionChildren: vi.fn(() => new Promise(() => undefined)),
   listSessions: vi.fn(() => new Promise(() => undefined)),

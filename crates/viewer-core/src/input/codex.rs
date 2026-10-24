@@ -45,7 +45,7 @@ pub(crate) async fn model_status(target: &InputTarget) -> Result<SessionModelSta
   client.read_model_status(&target.session_id).await
 }
 
-pub(super) async fn submit_images(
+pub(crate) async fn submit_images(
   target: &InputTarget,
   request_id: &str,
   text: &str,

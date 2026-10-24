@@ -25,6 +25,8 @@ mod service_metadata;
 pub mod service_protocol;
 pub mod service_server;
 mod service_source;
+mod session_ownership;
+pub mod session_supervisor;
 pub mod settings;
 pub mod updates;
 mod watcher;

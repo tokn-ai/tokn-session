@@ -1,7 +1,8 @@
 //! Host-owned runtime factories and ephemeral, instance-fenced session bindings.
 mod factory;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
+mod workflow;
 
 use crate::rpc_profiles::*;
 use serde::{Deserialize, Serialize};
@@ -82,6 +83,7 @@ pub struct RpcSessionBinding {
 pub(crate) struct RpcRuntimeManager(Arc<Inner>);
 struct Inner {
   profiles: Arc<RpcProfileStore>,
+  session_ownership: Result<crate::session_ownership::SessionOwnership, String>,
   interactions: InteractionService,
   lease_directory: Option<PathBuf>,
   state: Mutex<State>,
@@ -90,13 +92,19 @@ struct Inner {
   settled: Notify,
 }
 struct State {
+  transient_profiles: BTreeMap<String, RpcResolvedProfile>,
   runtimes: BTreeMap<String, Record>,
   quarantined: BTreeMap<String, QuarantinedRecord>,
   bindings: BTreeMap<String, RpcSessionBinding>,
-  binding_owners: BTreeMap<String, (String, String)>,
+  binding_owners: BTreeMap<String, BindingOwner>,
   gates: BTreeMap<String, Weak<AsyncMutex<()>>>,
   receipts: ReceiptLedger<Result<ActionReply, String>>,
   active_actions: usize,
+}
+struct BindingOwner {
+  runtime_id: String,
+  instance_id: String,
+  _lease: crate::session_ownership::SessionLease,
 }
 struct Record {
   info: RpcRuntimeInfo,
@@ -148,10 +156,17 @@ impl RpcRuntimeManager {
       .and_then(|path| path.parent())
       .map(|path| path.join("rpc-leases"));
     Self(Arc::new(Inner {
+      session_ownership: crate::session_ownership::SessionOwnership::new(
+        path
+          .as_ref()
+          .and_then(|path| path.parent())
+          .map(|path| path.join("session-leases")),
+      ),
       profiles: Arc::new(RpcProfileStore::configured(path)),
       interactions,
       lease_directory,
       state: Mutex::new(State {
+        transient_profiles: BTreeMap::new(),
         runtimes: BTreeMap::new(),
         quarantined: BTreeMap::new(),
         bindings: BTreeMap::new(),
@@ -164,6 +179,33 @@ impl RpcRuntimeManager {
       stopping: AtomicBool::new(false),
       settled: Notify::new(),
     }))
+  }
+  pub(crate) fn with_session_ownership(
+    mut self,
+    ownership: crate::session_ownership::SessionOwnership,
+  ) -> Result<Self, String> {
+    Arc::get_mut(&mut self.0)
+      .ok_or("Session ownership must be configured before sharing the runtime manager")?
+      .session_ownership = Ok(ownership);
+    Ok(self)
+  }
+
+  fn resolve_profile(&self, profile_id: &str, revision: u64) -> Result<RpcResolvedProfile, String> {
+    if let Some(profile) = self
+      .0
+      .state
+      .lock()
+      .unwrap_or_else(|error| error.into_inner())
+      .transient_profiles
+      .get(profile_id)
+      .cloned()
+    {
+      if profile.revision != revision {
+        return Err("Runtime profile changed before connection".into());
+      }
+      return Ok(profile);
+    }
+    self.0.profiles.resolve_at_revision(profile_id, revision)
   }
   pub(crate) fn profiles(&self) -> Result<Arc<RpcProfileStore>, String> {
     Ok(self.0.profiles.clone())
@@ -349,11 +391,11 @@ impl RpcRuntimeManager {
     let gate = self.gate(&request.profile_id);
     let _guard = gate.lock().await;
     self.ensure_open()?;
-    let profiles = self.profiles()?;
+    let manager = self.clone();
     let id = request.profile_id.clone();
     let revision = request.expected_revision;
     let resolved = tokio::task::spawn_blocking(move || {
-      let resolved = profiles.resolve_at_revision(&id, revision)?;
+      let resolved = manager.resolve_profile(&id, revision)?;
       resolved.validate_launch_ready()?;
       Ok::<_, String>(resolved)
     })
@@ -388,10 +430,10 @@ impl RpcRuntimeManager {
     };
     // Another viewer may have deleted this profile after the first read but
     // before we acquired ownership. Recheck while deletion is fenced by lease.
-    let profiles = self.profiles()?;
+    let manager = self.clone();
     let profile_id = request.profile_id.clone();
     let revision = resolved.revision;
-    tokio::task::spawn_blocking(move || profiles.resolve_at_revision(&profile_id, revision).map(|_| ()))
+    tokio::task::spawn_blocking(move || manager.resolve_profile(&profile_id, revision).map(|_| ()))
       .await
       .map_err(|_| "Could not recheck runtime configuration")??;
     let handle = match factory::open(&runtime_id, &resolved).await {
@@ -609,7 +651,7 @@ impl RpcRuntimeManager {
     state.runtimes.remove(&request.runtime_id);
     state
       .binding_owners
-      .retain(|_, (owner, _)| owner != &request.runtime_id);
+      .retain(|_, owner| owner.runtime_id != request.runtime_id);
     state
       .bindings
       .retain(|_, binding| binding.target.runtime_id != request.runtime_id);
@@ -702,9 +744,9 @@ impl RpcRuntimeManager {
       }
     }
     {
-      let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
-      if let Some((runtime, instance)) = state.binding_owners.get(&owner_key) {
-        if runtime != &target.runtime_id || instance != &target.instance_id {
+      let state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
+      if let Some(owner) = state.binding_owners.get(&owner_key) {
+        if owner.runtime_id != target.runtime_id || owner.instance_id != target.instance_id {
           return Err("This session already has another runtime owner; detach it first".into());
         }
       }
@@ -714,12 +756,38 @@ impl RpcRuntimeManager {
       if state.bindings.len() >= 1024 && !state.bindings.contains_key(&key) {
         return Err("Runtime session-binding limit reached".into());
       }
-      // A failed/uncertain resume still reserves ownership until this exact
-      // runtime closes; a second runtime must not silently take over its work.
-      state
-        .binding_owners
-        .insert(owner_key, (target.runtime_id.clone(), target.instance_id.clone()));
     }
+    let needs_lease = !self
+      .0
+      .state
+      .lock()
+      .unwrap_or_else(|error| error.into_inner())
+      .binding_owners
+      .contains_key(&owner_key);
+    if needs_lease {
+      let ownership = self.0.session_ownership.as_ref().map_err(Clone::clone)?.clone();
+      let id = native_id.clone();
+      let lease = tokio::task::spawn_blocking(move || ownership.acquire(provider, &id))
+        .await
+        .map_err(|_| "Could not acquire session ownership")??;
+      // Uncertain activation retains this canonical lease until exact runtime
+      // close, across both profile choices and independent viewer processes.
+      self
+        .0
+        .state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .binding_owners
+        .insert(
+          owner_key,
+          BindingOwner {
+            runtime_id: target.runtime_id.clone(),
+            instance_id: target.instance_id.clone(),
+            _lease: lease,
+          },
+        );
+    }
+    self.ensure_open()?;
     handle.bind_native(&native_id).await?;
     for (id, command) in [("state", Command::State), ("pending", Command::PendingInteractions)] {
       self

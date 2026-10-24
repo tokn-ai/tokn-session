@@ -6,14 +6,20 @@ import type { SessionSummary } from "../lib/types";
 import { providerLabel } from "../lib/state";
 import type { SessionModelController } from "../lib/useSessionModel";
 import { SessionModelPicker } from "./SessionModelPicker";
+import { SessionControlSelector } from "./SessionControlSelector";
+import type { SessionControlController } from "../lib/useSessionControl";
 
-export function SessionComposer({ session, on_accepted, input_refresh_key, model }: {
+export function SessionComposer({ session, on_accepted, input_refresh_key, model, control }: {
   session: SessionSummary | null;
   on_accepted?: (session_key: string) => void;
   input_refresh_key?: number;
   model?: SessionModelController;
+  control?: SessionControlController;
 }) {
-  const input = useSessionInput(session?.session_key ?? null, on_accepted, input_refresh_key, model);
+  const input = useSessionInput(session?.session_key ?? null, (session_key) => {
+    if (session?.session_key === session_key && control) void control.refresh();
+    return on_accepted?.(session_key);
+  }, input_refresh_key, model, control);
   const inputId = useId();
   const textarea = useRef<HTMLTextAreaElement>(null);
   const [focused_session, setFocusedSession] = useState<string | null>(null);
@@ -55,6 +61,7 @@ export function SessionComposer({ session, on_accepted, input_refresh_key, model
       }}
     >
       <div className="session-composer__content">
+        {control ? <SessionControlSelector control={control} input_busy={input.sending || input.delivery_uncertain} running={session.is_running} /> : null}
         <label className="sr-only" htmlFor={inputId}>Message this session</label>
         <div className="session-composer__box">
           <ImageAttachmentPreviews images={input.images} disabled={disabled} on_remove={input.removeImage} />

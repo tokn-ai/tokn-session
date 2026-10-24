@@ -1,10 +1,11 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CommandInvoker } from "../lib/transport";
 import { parseQuestionDisplay } from "../lib/questionDisplay";
 import type { SubmitSessionInputResponse, SubmitSessionQuestionAnswersRequest } from "../lib/types";
 import { QuestionAnswerForm } from "./QuestionAnswerForm";
 import { QuestionAnswersProvider } from "./QuestionAnswersProvider";
+import { SessionControlContext } from "../lib/useSessionControl";
 
 afterEach(cleanup);
 const display = parseQuestionDisplay({ type: "question_request", request_id: "call", is_blocking: false, questions: [
@@ -20,7 +21,35 @@ function form(session_key = "session") {
   return <QuestionAnswerForm session_key={session_key} display={display} recorded_card={<p>Recorded card</p>} />;
 }
 
+it("refreshes question availability after a route change and ignores the old-route status", async () => {
+  const older = deferred<typeof status>();
+  const send = vi.fn().mockReturnValueOnce(older.promise)
+    .mockResolvedValue({ ...status, available: false, question_ids: [], message: "Question belongs to the other connection" });
+  const content = (revision: string, blocked = false) => <QuestionAnswersProvider send={send as CommandInvoker}>
+    <SessionControlContext.Provider value={{ session_key: "session", revision, blocked }}>{form()}</SessionControlContext.Provider>
+  </QuestionAnswersProvider>;
+  const view = render(content("rpc"));
+  await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+  view.rerender(content("switching", true));
+  expect(send).toHaveBeenCalledTimes(1);
+  view.rerender(content("desktop"));
+  await screen.findByText("Question belongs to the other connection");
+  await act(async () => older.resolve(status));
+  expect(screen.queryByRole("radio")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Submit answers" })).not.toBeInTheDocument();
+  expect(send).toHaveBeenCalledTimes(2);
+});
+
 describe("async question answering", () => {
+  it("masks written answers when live RPC metadata marks an otherwise unmarked question secret", async () => {
+    const send = vi.fn(async () => ({ ...status, secret_question_ids: ["q1"] }));
+    render(<QuestionAnswersProvider send={send as CommandInvoker}>{form()}</QuestionAnswersProvider>);
+    const field = await screen.findByLabelText("Written answer for Storage");
+    expect(field).toHaveAttribute("type", "password");
+    fireEvent.change(field, { target: { value: "Private answer" } });
+    expect(field).toHaveAttribute("type", "password");
+    expect(field).toHaveValue("Private answer");
+  });
   it("sends option identities once and waits for the recorded reply after acceptance", async () => {
     const pending = deferred<SubmitSessionInputResponse>();
     const send = vi.fn((command: string) => command === "get_session_question_status" ? Promise.resolve(status) : pending.promise);

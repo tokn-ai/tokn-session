@@ -2,6 +2,8 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EventDetail, EventSummary } from "../lib/types";
 import { EventCard } from "./EventCard";
+import { QuestionAnswersProvider } from "./QuestionAnswersProvider";
+import type { CommandInvoker } from "../lib/transport";
 
 afterEach(cleanup);
 
@@ -37,6 +39,15 @@ function card(props: Partial<React.ComponentProps<typeof EventCard>> = {}) {
 }
 
 describe("historical question cards", () => {
+  it("asks the selected host to verify pending blocking questions before offering answers", async () => {
+    const send = vi.fn(async () => ({ available: true, message: "", question_ids: ["q1"], max_length: 1000 }));
+    const native = detail({ event: { type: "question_request", request_id: "callback", is_blocking: true,
+      questions: [{ id: "q1", header: "Choice", question: "Continue?", options: [{ label: "Yes" }], allows_free_text: true }] } });
+    render(<QuestionAnswersProvider send={send as CommandInvoker}>{card({ session_key: "session", question_is_pending: true, detail: native })}</QuestionAnswersProvider>);
+    expect(await screen.findByRole("radio", { name: "Yes" })).toBeVisible();
+    expect(send).toHaveBeenCalledWith("get_session_question_status", { request: { session_key: "session", question_request_id: "callback" } });
+    expect(screen.queryByText("Answer this question in Codex Desktop.")).not.toBeInTheDocument();
+  });
   it("renders recorded replies as user input without requiring expansion or details", () => {
     const reply = { ...event, type: "question_reply", title: "Question answers", summary: "Which **storage engine**?\n\n> SQLite\n> \n> Keep it **local**.", role: "user" };
     const on_toggle = vi.fn();

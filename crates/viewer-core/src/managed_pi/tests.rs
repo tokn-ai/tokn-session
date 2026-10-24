@@ -1757,6 +1757,94 @@ if mode == 'ignore_eof':
   }
 
   #[tokio::test]
+  async fn native_session_ownership_is_claimed_before_the_initial_prompt() {
+    let fixture = Fixture::new("normal", "synthetic initial prompt");
+    let ownership = fixture.manager.inner.ownership.clone().unwrap();
+    let external = ownership
+      .acquire(tokn_interaction_core::Provider::Pi, &fixture.session_id)
+      .unwrap();
+    fixture.create().await;
+    let failed = fixture
+      .wait_for(|snapshot| snapshot.status == ManagedSessionStatus::Failed)
+      .await;
+    assert!(failed.message.unwrap().contains("owner"));
+    assert!(
+      fixture.prompts().is_empty(),
+      "a different owner must block the first prompt"
+    );
+    fixture.manager.shutdown().await;
+    fixture.wait_reaped().await;
+    assert!(
+      ownership
+        .acquire(tokn_interaction_core::Provider::Pi, &fixture.session_id)
+        .is_err()
+    );
+    drop(external);
+    assert!(
+      ownership
+        .acquire(tokn_interaction_core::Provider::Pi, &fixture.session_id)
+        .is_ok()
+    );
+  }
+
+  #[tokio::test]
+  async fn native_session_ownership_outlives_the_turn_and_releases_after_shutdown() {
+    let fixture = Fixture::new("normal", "handled");
+    let ownership = fixture.manager.inner.ownership.clone().unwrap();
+    fixture.create().await;
+    fixture.idle().await;
+    assert!(
+      ownership
+        .acquire(tokn_interaction_core::Provider::Pi, &fixture.session_id)
+        .is_err()
+    );
+    fixture.manager.shutdown().await;
+    fixture.wait_reaped().await;
+    assert!(
+      ownership
+        .acquire(tokn_interaction_core::Provider::Pi, &fixture.session_id)
+        .is_ok()
+    );
+  }
+
+  #[tokio::test]
+  async fn native_session_ownership_blocks_resume_before_launching_another_process() {
+    let fixture = Fixture::new("normal", "handled");
+    let ownership = fixture.manager.inner.ownership.clone().unwrap();
+    fixture.create().await;
+    fixture.idle().await;
+    fixture.manager.shutdown().await;
+    fixture.wait_reaped().await;
+    let external = ownership
+      .acquire(tokn_interaction_core::Provider::Pi, &fixture.session_id)
+      .unwrap();
+    let next = ManagedPiSessions::with_configuration(
+      Some(fixture.state_path.clone()),
+      fixture.executable.clone(),
+      IDLE_TIMEOUT,
+      ownership.clone(),
+    )
+    .unwrap();
+    let error = next.resume(fixture.identity()).await.unwrap_err();
+    assert!(error.contains("owner"), "{error}");
+    assert_eq!(
+      fixture.launches().len(),
+      1,
+      "ownership must be checked before launching a resumed child"
+    );
+    assert_eq!(fixture.prompts(), ["handled"]);
+    drop(external);
+    next.resume(fixture.identity()).await.unwrap();
+    next.shutdown().await;
+    assert_eq!(fixture.launches().len(), 2);
+    assert!(
+      ownership
+        .acquire(tokn_interaction_core::Provider::Pi, &fixture.session_id)
+        .is_ok()
+    );
+  }
+
+  #[tokio::test]
   async fn a_later_owner_resumes_from_the_latest_durable_revision() {
     let fixture = Fixture::new("normal", "synthetic initial prompt");
     fixture.create().await;
@@ -1778,6 +1866,56 @@ if mode == 'ignore_eof':
     let durable = later.inner.store.latest(&fixture.request.request_id).unwrap().unwrap();
     assert!(durable.revision >= resumed.revision);
     later.shutdown().await;
+  }
+
+  #[tokio::test]
+  async fn shared_supervisor_can_cancel_a_prompt_waiting_for_extension_input() {
+    use crate::session_supervisor::{SessionSupervisor, SessionTransport, VerifiedSession};
+    let fixture = Fixture::new("normal", "handled");
+    fixture.create().await;
+    let key = fixture.idle().await.session_key.unwrap();
+    let mut sessions = SessionSupervisor::new(None, tokn_interaction_core::InteractionService::default()).unwrap();
+    sessions.pi = fixture.manager.clone();
+    let target = || VerifiedSession {
+      session_key: key.clone(),
+      input: crate::input::InputTarget {
+        provider: crate::model::ViewerProvider::Pi,
+        session_id: fixture.session_id.clone(),
+        session_file: fixture.folder().join("synthetic-history.jsonl"),
+      },
+      cwd: fixture.folder().to_path_buf(),
+    };
+    let request = crate::model::SubmitSessionInputRequest {
+      request_id: uuid::Uuid::new_v4().to_string(),
+      session_key: key.clone(),
+      text: "dialog:confirm".into(),
+      image_ids: Vec::new(),
+      model_selection: None,
+    };
+    let delivery = sessions.clone();
+    let delivery_target = target();
+    let submission = tokio::spawn(async move {
+      delivery
+        .submit(delivery_target, request, Vec::new(), SessionTransport::Rpc)
+        .await
+    });
+    fixture.wait_for(|snapshot| snapshot.pending_dialog.is_some()).await;
+    let cancellation = tokio::time::timeout(
+      Duration::from_secs(2),
+      sessions.cancel(&target(), uuid::Uuid::new_v4().to_string()),
+    )
+    .await
+    .expect("Stop must not wait behind the prompt that needs extension input");
+    assert!(cancellation.is_ok(), "{cancellation:?}");
+    let _outcome = tokio::time::timeout(Duration::from_secs(2), submission)
+      .await
+      .expect("cancelled prompt admission must finish")
+      .unwrap();
+    fixture.wait_for(|snapshot| snapshot.pending_dialog.is_none()).await;
+    assert!(fixture.log().iter().any(|event| event["type"] == "abort"));
+    assert_eq!(fixture.prompts(), ["handled", "dialog:confirm"]);
+    sessions.shutdown().await;
+    fixture.wait_reaped().await;
   }
 
   #[tokio::test]

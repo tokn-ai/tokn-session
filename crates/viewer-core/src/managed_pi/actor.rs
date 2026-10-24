@@ -1,5 +1,5 @@
 use super::{
-  Inner, WorkerState,
+  Inner, NativeSessionLease, WorkerState,
   persistence::{Receipt, SessionLease, validate_session},
   protocol::{RpcState, parse_extension_dialog, parse_state},
 };
@@ -71,6 +71,7 @@ struct Pending {
 pub(super) async fn run(
   inner: Weak<Inner>,
   lease: SessionLease,
+  native_lease: Option<NativeSessionLease>,
   executable: PathBuf,
   receipt: Receipt,
   generation: u64,
@@ -90,6 +91,7 @@ pub(super) async fn run(
     resume,
     worker_state.clone(),
     termination,
+    native_lease.clone(),
   )
   .await
   {
@@ -100,6 +102,8 @@ pub(super) async fn run(
       let _retirement = retirement_gate(&inner, &id).await;
       reject_queued_commands(&mut commands, &error);
       let finished = finish(&inner, &id, generation, Some(error.clone())).await;
+      release_native_ownership(&inner, &id, generation);
+      drop(native_lease);
       drop(lease);
       worker_state.send_replace(WorkerState::Stopped(Some(error)));
       publish_finished(&inner, finished);
@@ -144,6 +148,7 @@ pub(super) async fn run(
   // PiAdapter owns stdin, the child, stderr, and bounded cleanup. Keep the
   // session lease until cleanup and final durable metadata both complete.
   let cleanup = actor.session.close().await;
+  let cleanup_confirmed = cleanup.is_ok();
   let error = result.err().or_else(|| cleanup.err().map(|error| error.to_string()));
   let error = error.map(|error| actor.exit_message(error));
   let stopped = actor.stop_reply.take();
@@ -152,7 +157,11 @@ pub(super) async fn run(
   // actor is still publishing its terminal metadata.
   let finished = finish(&inner, &id, generation, error.clone()).await;
   let retirement = actor.retirement.take();
+  if cleanup_confirmed {
+    release_native_ownership(&inner, &id, generation);
+  }
   drop(actor);
+  drop(native_lease);
   drop(lease);
   worker_state.send_replace(WorkerState::Stopped(error));
   publish_finished(&inner, finished);
@@ -167,6 +176,7 @@ struct Actor {
   receipt: Receipt,
   generation: u64,
   session: SupervisedSession,
+  native_lease: Option<NativeSessionLease>,
   pending: HashMap<String, Pending>,
   recent: HashMap<String, (String, Option<Result<Admission, DeliveryError>>)>,
   initial_prompt: Option<(String, Vec<ResolvedImage>)>,
@@ -197,6 +207,7 @@ impl Actor {
     resume: bool,
     worker_state: watch::Sender<WorkerState>,
     termination: CancellationToken,
+    native_lease: Option<NativeSessionLease>,
   ) -> Result<Self, String> {
     if inner
       .upgrade()
@@ -255,6 +266,7 @@ impl Actor {
       receipt,
       generation,
       session,
+      native_lease,
       pending: HashMap::new(),
       recent: HashMap::new(),
       initial_prompt: prompt,
@@ -398,7 +410,7 @@ impl Actor {
               return Err(error);
             }
             let state = parse_state(value.get("data").ok_or("Pi get_state response has no data")?)?;
-            self.accept_state(state)?;
+            self.accept_state(state).await?;
             self.probe_file().await?;
             if initial {
               if let Some((prompt, images)) = self.initial_prompt.take() {
@@ -565,7 +577,7 @@ impl Actor {
     Ok(())
   }
 
-  fn accept_state(&mut self, state: RpcState) -> Result<(), String> {
+  async fn accept_state(&mut self, state: RpcState) -> Result<(), String> {
     if let Some(expected) = self
       .state
       .as_ref()
@@ -575,6 +587,21 @@ impl Actor {
       if state.session_id != expected {
         return Err("Pi resumed a different session identity".into());
       }
+    }
+    if self.native_lease.is_none() {
+      let owner = self.inner.upgrade().ok_or("Managed Pi runtime has stopped")?;
+      let ownership = owner.ownership.clone().ok_or("Managed Pi runtime is unavailable")?;
+      let id = state.session_id.clone();
+      let lease = tokio::task::spawn_blocking(move || ownership.acquire(tokn_interaction_core::Provider::Pi, &id))
+        .await
+        .map_err(|error| error.to_string())??;
+      let mut records = owner.records.lock().unwrap();
+      let record = records
+        .get_mut(&self.receipt.request_id)
+        .filter(|record| record.generation == self.generation)
+        .ok_or("Managed Pi worker changed while claiming native session ownership")?;
+      record.native_lease = Some(lease.clone());
+      self.native_lease = Some(lease);
     }
     if self.state.as_ref().is_none_or(|previous| previous.model != state.model) {
       self.model_revision = self.model_revision.saturating_add(1);
@@ -1171,6 +1198,20 @@ async fn finish(
 async fn retirement_gate(inner: &Weak<Inner>, id: &str) -> Option<OwnedMutexGuard<()>> {
   let gate = inner.upgrade()?.records.lock().unwrap().get(id)?.start_gate.clone();
   Some(gate.lock_owned().await)
+}
+
+fn release_native_ownership(inner: &Weak<Inner>, id: &str, generation: u64) {
+  if let Some(inner) = inner.upgrade() {
+    if let Some(record) = inner
+      .records
+      .lock()
+      .unwrap()
+      .get_mut(id)
+      .filter(|record| record.generation == generation)
+    {
+      record.native_lease = None;
+    }
+  }
 }
 
 fn reject_queued_commands(commands: &mut mpsc::Receiver<Command>, message: &str) {

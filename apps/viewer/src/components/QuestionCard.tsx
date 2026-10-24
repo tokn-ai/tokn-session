@@ -53,8 +53,8 @@ export function QuestionCard({ event, detail, error, is_loading, on_retry, sessi
       ))}
     </div>
   );
-  if (is_pending && session_key && display.kind === "request" && display.is_blocking === false && display.request_id) {
+  if (is_pending && session_key && display.kind === "request" && display.request_id) {
     return <QuestionAnswerForm session_key={session_key} display={display} recorded_card={recorded_card} on_accepted={on_accepted} />;
   }
-  return <>{recorded_card}{is_pending && display.is_blocking !== false ? <p className="question-card__notice">Answer this question in Codex Desktop.</p> : null}</>;
+  return recorded_card;
 }

@@ -10,6 +10,7 @@ mod runtimes;
 
 #[cfg(test)]
 use crate::input::ModelInputDisposition;
+use crate::session_ownership::{SessionLease as NativeSessionLease, SessionOwnership};
 use crate::{
   images::ResolvedImage,
   input::{Admission, DeliveryError, MAX_INPUT_LENGTH},
@@ -52,6 +53,7 @@ struct Inner {
   shutting_down: AtomicBool,
   shutdown: watch::Sender<bool>,
   idle_timeout: std::time::Duration,
+  ownership: Option<SessionOwnership>,
 }
 
 struct Record {
@@ -66,6 +68,7 @@ struct Record {
   termination: Option<CancellationToken>,
   restarting: Option<watch::Receiver<bool>>,
   images_available: bool,
+  native_lease: Option<NativeSessionLease>,
 }
 
 impl Record {
@@ -82,6 +85,7 @@ impl Record {
       termination: None,
       restarting: None,
       images_available: false,
+      native_lease: None,
     }
   }
 }
@@ -103,21 +107,51 @@ pub(crate) struct OwnedInputStatus {
 impl ManagedPiSessions {
   /// Called during blocking service setup. All async mutations persist through
   /// spawn_blocking; lookups never access disk.
-  pub(crate) fn new(state_path: Option<PathBuf>) -> Result<Self, String> {
+  pub(crate) fn new_with_session_ownership(
+    state_path: Option<PathBuf>,
+    ownership: SessionOwnership,
+  ) -> Result<Self, String> {
     let executable = std::env::var_os("TOKN_SESSION_PI_EXECUTABLE")
       .map(PathBuf::from)
       .unwrap_or_else(|| "pi".into());
-    Self::with_executable(state_path, executable)
+    Self::with_configuration(state_path, executable, IDLE_TIMEOUT, ownership)
   }
 
+  #[cfg(test)]
   fn with_executable(state_path: Option<PathBuf>, executable: PathBuf) -> Result<Self, String> {
     Self::with_executable_and_idle_timeout(state_path, executable, IDLE_TIMEOUT)
   }
 
+  #[cfg(test)]
   fn with_executable_and_idle_timeout(
     state_path: Option<PathBuf>,
     executable: PathBuf,
     idle_timeout: std::time::Duration,
+  ) -> Result<Self, String> {
+    let directory = state_path
+      .as_ref()
+      .and_then(|path| path.parent())
+      .map(|parent| parent.join("session-leases"));
+    let directory = directory
+      .map(|path| {
+        if path.is_absolute() {
+          Ok(path)
+        } else {
+          std::env::current_dir()
+            .map(|root| root.join(path))
+            .map_err(|error| error.to_string())
+        }
+      })
+      .transpose()?;
+    let ownership = SessionOwnership::new(directory)?;
+    Self::with_configuration(state_path, executable, idle_timeout, ownership)
+  }
+
+  fn with_configuration(
+    state_path: Option<PathBuf>,
+    executable: PathBuf,
+    idle_timeout: std::time::Duration,
+    ownership: SessionOwnership,
   ) -> Result<Self, String> {
     if executable.as_os_str().is_empty() {
       return Err("Pi executable path cannot be empty".into());
@@ -138,6 +172,7 @@ impl ManagedPiSessions {
         shutting_down: AtomicBool::new(false),
         shutdown: watch::channel(false).0,
         idle_timeout,
+        ownership: Some(ownership),
       }),
     })
   }
@@ -159,6 +194,7 @@ impl ManagedPiSessions {
         shutting_down: AtomicBool::new(false),
         shutdown: watch::channel(false).0,
         idle_timeout: IDLE_TIMEOUT,
+        ownership: None,
       }),
     }
   }
@@ -596,9 +632,22 @@ impl ManagedPiSessions {
       record.receipt.clone()
     };
     let store = self.inner.store.clone();
-    let (lease, latest) = tokio::task::spawn_blocking(move || prepare_start(&store, validation, resume))
-      .await
-      .map_err(|error| error.to_string())??;
+    let ownership = self
+      .inner
+      .ownership
+      .clone()
+      .ok_or("Managed Pi runtime is unavailable")?;
+    let (lease, latest, native_lease) = tokio::task::spawn_blocking(move || {
+      let (lease, latest) = prepare_start(&store, validation, resume)?;
+      let native_lease = latest
+        .session_id
+        .as_deref()
+        .map(|id| ownership.acquire(tokn_interaction_core::Provider::Pi, id))
+        .transpose()?;
+      Ok::<_, String>((lease, latest, native_lease))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
     let (sender, receive) = mpsc::channel(COMMAND_CAPACITY);
     let (worker_state, state) = watch::channel(WorkerState::Starting);
     let termination = CancellationToken::new();
@@ -627,17 +676,23 @@ impl ManagedPiSessions {
       record.started_at_ms = None;
       record.termination = Some(termination.clone());
       record.images_available = false;
+      record.native_lease = native_lease.clone();
       (record.receipt.clone(), record.generation)
     };
     if let Err(error) = self.inner.publish(receipt.clone()).await {
-      let mut records = self.inner.records.lock().unwrap();
-      if let Some(record) = records.get_mut(&id) {
-        record.sender = None;
-        record.receipt.status = ManagedSessionStatus::Failed;
-        record.receipt.message = Some(error.clone());
-        record.receipt.revision = record.receipt.revision.saturating_add(1);
-        let _ = self.inner.events.send(record.receipt.snapshot());
+      {
+        let mut records = self.inner.records.lock().unwrap();
+        if let Some(record) = records.get_mut(&id) {
+          record.sender = None;
+          record.receipt.status = ManagedSessionStatus::Failed;
+          record.receipt.message = Some(error.clone());
+          record.receipt.revision = record.receipt.revision.saturating_add(1);
+          record.native_lease = None;
+          let _ = self.inner.events.send(record.receipt.snapshot());
+        }
       }
+      drop(native_lease);
+      drop(lease);
       worker_state.send_replace(WorkerState::Stopped(Some(error.clone())));
       return Err(error);
     }
@@ -646,6 +701,7 @@ impl ManagedPiSessions {
     tokio::spawn(actor::run(
       inner,
       lease,
+      native_lease,
       executable,
       receipt,
       generation,
