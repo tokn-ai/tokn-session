@@ -33,6 +33,17 @@ pub struct ModelRef {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SessionCreateRequest {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub id: Option<String>,
+  pub location: Location,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub agent: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub model: Option<ModelRef>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SessionInfo {
   pub id: String,
   pub location: Location,
@@ -178,6 +189,24 @@ mod tests {
     let native = json!({"id":"evt_1","type":"future.event","data":{"new":true},"next":42});
     let event: NativeEvent = serde_json::from_value(native.clone()).unwrap();
     assert_eq!(serde_json::to_value(event).unwrap(), native);
+  }
+
+  #[test]
+  fn creation_uses_preallocated_id_and_native_workspace_name() {
+    let request = SessionCreateRequest {
+      id: Some("ses_reserved".into()),
+      location: Location {
+        directory: "/workspace".into(),
+        workspace_id: Some("wrk_native".into()),
+        extra: BTreeMap::new(),
+      },
+      agent: None,
+      model: None,
+    };
+    assert_eq!(
+      serde_json::to_value(request).unwrap(),
+      json!({"id":"ses_reserved","location":{"directory":"/workspace","workspaceID":"wrk_native"}})
+    );
   }
 
   #[test]

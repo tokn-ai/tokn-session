@@ -7,6 +7,8 @@ use tokn_session_core::{
   ToolTransport, UnknownEvent, UsageEvent, UsageKind, tool_kind_for_optional_name, tool_summary_for_io,
 };
 
+mod v2;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenCodeNormalizer {
   compaction_requests: std::collections::BTreeSet<String>,

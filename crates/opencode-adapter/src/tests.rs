@@ -11,6 +11,8 @@ struct ServerState {
   corrupt_admission: AtomicBool,
   fail_mutation: AtomicBool,
   wrong_created_location: AtomicBool,
+  wrong_created_id: AtomicBool,
+  malformed_creation: AtomicBool,
   disconnect: AtomicBool,
   admissions: StdMutex<BTreeMap<String, Value>>,
   requests: StdMutex<Vec<(String, String, Value)>>,
@@ -236,7 +238,19 @@ fn response(state: &ServerState, method: &str, path: &str, body: Value) -> (u16,
       | "/api/session/ses_1/permission/per_1/reply",
     ) => return (204, Value::Null),
     ("POST", "/api/session") => {
+      if state.fail_mutation.load(Ordering::Relaxed) {
+        return (503, json!({"message":"internal"}));
+      }
+      if state.malformed_creation.load(Ordering::Relaxed) {
+        return (200, json!({"data":{}}));
+      }
       let mut created = session();
+      if let Some(id) = body.get("id") {
+        created["id"] = id.clone();
+      }
+      if state.wrong_created_id.load(Ordering::Relaxed) {
+        created["id"] = json!("ses_unexpected");
+      }
       if state.wrong_created_location.load(Ordering::Relaxed) {
         created["location"]["directory"] = json!("/another/project");
       }
@@ -245,6 +259,60 @@ fn response(state: &ServerState, method: &str, path: &str, body: Value) -> (u16,
     _ => return (404, json!({"message":"not found"})),
   };
   (200, result)
+}
+
+#[tokio::test]
+async fn creation_uses_preallocated_identity_and_native_location_without_prompting() {
+  let server = Server::start().await;
+  let adapter = server.adapter().await;
+  let id = new_session_id();
+  let created = adapter
+    .create_session_with_id(
+      &id,
+      Some("build".into()),
+      Some(ModelIdentity {
+        model_id: "model-1".into(),
+        model_provider: Some("provider-1".into()),
+        display_name: None,
+      }),
+    )
+    .await
+    .unwrap();
+  assert_eq!(created.target.session_id.as_deref(), Some(id.as_str()));
+  assert_eq!(created.working_directory, PathBuf::from("/test/project"));
+  assert_eq!(created.workspace_id, None);
+  let writes = server.mutations();
+  assert_eq!(writes.len(), 1);
+  assert_eq!(
+    writes[0].2,
+    json!({"id":id,"location":{"directory":"/test/project"},"agent":"build","model":{"id":"model-1","providerID":"provider-1"}})
+  );
+  assert!(adapter.create_session_with_id("invalid", None, None).await.is_err());
+  assert_eq!(server.mutations().len(), 1);
+  adapter.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn uncertain_creation_is_never_retried_or_published_with_a_different_identity() {
+  let server = Server::start().await;
+  let adapter = server.adapter().await;
+  for fault in [
+    &server.state.wrong_created_id,
+    &server.state.wrong_created_location,
+    &server.state.malformed_creation,
+    &server.state.fail_mutation,
+  ] {
+    fault.store(true, Ordering::Relaxed);
+    let before = server.mutations().len();
+    let error = adapter
+      .create_session_with_id("ses_reserved", None, None)
+      .await
+      .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Uncertain);
+    assert_eq!(server.mutations().len(), before + 1);
+    fault.store(false, Ordering::Relaxed);
+  }
+  adapter.close().await.unwrap();
 }
 
 fn request(adapter: &OpenCodeAdapter, id: &str, command: Command) -> InteractionRequest {

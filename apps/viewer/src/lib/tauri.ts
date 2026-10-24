@@ -32,7 +32,7 @@ import type {
   MachinePreferences,
   NativePreferenceUpdate,
   ViewerPreferences,
-  RegisteredProject, ProjectWorkspaceSnapshot, RegisterProjectRequest, CreateProjectSessionRequest,
+  RegisteredProject, ProjectWorkspaceSnapshot, RegisterProjectRequest, CreateProjectSessionRequest, SessionCreationOptions,
   ManagedSessionRequest, ManagedSessionSnapshot, ManagedSessionDialogResponse,
   RuntimeInventory, RuntimeRestartRequest, RuntimeRestartResponse,
   RpcRuntimeProfilesSnapshot, SaveRpcRuntimeProfileRequest, DeleteRpcRuntimeProfileRequest,
@@ -76,6 +76,9 @@ export function listRegisteredProjects(send: CommandInvoker = invoke): Promise<P
 }
 export function registerProject(request: RegisterProjectRequest, send: CommandInvoker = invoke): Promise<RegisteredProject> {
   return send("register_project", { request });
+}
+export function getSessionCreationOptions(project_id: string, send: CommandInvoker = invoke): Promise<SessionCreationOptions> {
+  return send("get_session_creation_options", { request: { project_id } });
 }
 export function createProjectSession(request: CreateProjectSessionRequest, send: CommandInvoker = invoke): Promise<ManagedSessionSnapshot> {
   return send("create_project_session", { request });

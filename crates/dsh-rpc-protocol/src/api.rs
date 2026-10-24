@@ -104,6 +104,25 @@ pub struct SessionList {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCreateRequest {
+  pub session_id: String,
+  pub cwd: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub agent_preset: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCreateResponse {
+  pub session_id: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub agent_preset: Option<String>,
+  #[serde(flatten)]
+  pub extra: ExtraFields,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelCatalog {
   pub groups: Vec<ModelGroup>,
   #[serde(default)]
@@ -167,5 +186,22 @@ mod tests {
     assert_eq!(serde_json::to_value(decoded).unwrap(), native);
     let question: Question = serde_json::from_value(native["payload"]["questions"][0].clone()).unwrap();
     assert_eq!(question.extra["future"], true);
+  }
+
+  #[test]
+  fn creation_preserves_native_names_and_omits_unselected_preset() {
+    let request = SessionCreateRequest {
+      session_id: "session-reserved".into(),
+      cwd: "/workspace".into(),
+      agent_preset: None,
+    };
+    assert_eq!(
+      serde_json::to_value(request).unwrap(),
+      json!({"sessionId":"session-reserved","cwd":"/workspace"})
+    );
+    let native = json!({"sessionId":"session-reserved","agentPreset":"default-preset","future":true});
+    let response: SessionCreateResponse = serde_json::from_value(native.clone()).unwrap();
+    assert_eq!(response.agent_preset.as_deref(), Some("default-preset"));
+    assert_eq!(serde_json::to_value(response).unwrap(), native);
   }
 }

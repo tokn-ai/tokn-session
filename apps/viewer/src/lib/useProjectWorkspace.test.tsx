@@ -2,10 +2,16 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useProjectWorkspace } from "./useProjectWorkspace";
 import type { CommandInvoker, EventSubscriber } from "./transport";
-import type { ManagedSessionSnapshot, RegisteredProject, SessionSummary } from "./types";
+import type { CreateProjectSessionRequest, ManagedSessionSnapshot, RegisteredProject, SessionCreationOptions, SessionCreationSelection, SessionSummary } from "./types";
 
 afterEach(cleanup);
 const project: RegisteredProject = { project_id: "project", group_key: "/repo", folder_path: "/repo", name: "Repo", created_at_ms: 1, available: true };
+const creation_options: SessionCreationOptions = { project_id: "project", providers: [
+  { provider: "pi", available: true, reason: null, supports_images: true, default_profile_id: null, runtimes: [] },
+  { provider: "codex", available: true, reason: null, supports_images: true, default_profile_id: "rpc", runtimes: [
+    { profile_id: "rpc", revision: 7, name: "Configured runtime", available: true, reason: null },
+  ] },
+] };
 const summary: SessionSummary = {
   session_key: "pi:real", session_id: "real", parent_session_id: null, is_subagent: false, provider: "pi", title: "New task", preview: "Hello",
   project: "Repo", cwd: "/repo", updated_at_ms: 1, timestamp: null, agent_path: null, agent_nickname: null, agent_role: null,
@@ -21,6 +27,7 @@ function connection() {
   const invoke = vi.fn(async (command: string, payload?: Record<string, unknown>): Promise<unknown> => {
     if (command === "list_registered_projects") return { available: true, unavailable_reason: null, projects: [project] };
     if (command === "get_managed_session") return null;
+    if (command === "get_session_creation_options") return creation_options;
     if (command === "create_project_session") return state((payload?.request as { request_id: string }).request_id);
     if (command === "stop_managed_session") return state((payload?.request as { request_id: string }).request_id, { status: "stopped" });
     throw new Error(`Unexpected command ${command}`);
@@ -32,6 +39,144 @@ function connection() {
 const options = (on_created = vi.fn()) => ({ enabled: true, machine_key: "local", selected_session_key: null as string | null, on_created });
 
 describe("local project workspace", () => {
+  it("loads creation choices through the selected desktop transport", async () => {
+    const host = connection();
+    const { result } = renderHook(() => useProjectWorkspace(options(), host.transport));
+    await waitFor(() => expect(result.current.workspace?.available).toBe(true));
+    let loaded!: SessionCreationOptions;
+    await act(async () => { loaded = await result.current.loadCreationOptions("project"); });
+    expect(host.invoke).toHaveBeenCalledWith("get_session_creation_options", { request: { project_id: "project" } });
+    expect(loaded).toEqual(creation_options);
+    expect(host.invoke.mock.calls.some(([command]) => command === "create_project_session")).toBe(false);
+  });
+
+  it.each(["codex", "open_code", "dsh"] as const)("submits %s creation with its exact host runtime selection", async (provider) => {
+    const host = connection();
+    const { result } = renderHook(() => useProjectWorkspace(options(), host.transport));
+    await waitFor(() => expect(result.current.workspace?.available).toBe(true));
+    await act(async () => { await result.current.createSession("project", "Native defaults", [], { provider, runtime_profile_id: "rpc", runtime_revision: 7 }); });
+    expect(host.invoke).toHaveBeenCalledWith("create_project_session", { request: { request_id: expect.any(String), project_id: "project", prompt: "Native defaults", provider, runtime_profile_id: "rpc", runtime_revision: 7 } });
+  });
+
+  it.each([
+    { provider: "open_code", runtime_profile_id: "rpc", runtime_revision: 7 },
+    { provider: "codex", runtime_profile_id: "another-rpc", runtime_revision: 7 },
+    { provider: "codex", runtime_profile_id: "rpc", runtime_revision: 8 },
+    { provider: "codex" },
+  ] satisfies SessionCreationSelection[])("rejects a changed provider or runtime fingerprint while preserving uncertain delivery: %j", async (changed) => {
+    const host = connection(); const original = host.invoke.getMockImplementation()!;
+    host.invoke.mockImplementation((command, payload) => command === "create_project_session" ? Promise.reject(new Error("Acknowledgement lost")) : original(command, payload));
+    const { result } = renderHook(() => useProjectWorkspace(options(), host.transport));
+    await waitFor(() => expect(result.current.workspace?.available).toBe(true));
+    const initial = { provider: "codex", runtime_profile_id: "rpc", runtime_revision: 7 } as const;
+    await act(async () => { await result.current.createSession("project", "Original", [], initial); });
+    expect(result.current.creation_uncertain).toBe(true);
+    await act(async () => { await result.current.createSession("project", "Original", [], changed); });
+    expect(result.current.creation_error).toContain("Check the pending session");
+    expect(result.current.creation_uncertain).toBe(true);
+    const calls = host.invoke.mock.calls.filter(([command]) => command === "create_project_session");
+    expect(calls).toHaveLength(1);
+    const request = calls[0][1]!.request as CreateProjectSessionRequest;
+    expect(request).toMatchObject(initial);
+    host.invoke.mockImplementation((command, payload) => command === "get_managed_session" ? Promise.resolve(state(request.request_id, { provider: "codex", creation_phase: "native_create_uncertain" })) : original(command, payload));
+    await act(async () => { await result.current.createSession("project", "Original", [], initial); });
+    expect(result.current.creation?.request_id).toBe(request.request_id);
+    expect(host.invoke.mock.calls.filter(([command]) => command === "create_project_session")).toHaveLength(1);
+  });
+
+  it("checks a failed RPC receipt on its original UUID and starts a new one only through explicit New session", async () => {
+    const host = connection(); const original = host.invoke.getMockImplementation()!;
+    let request_id: string | null = null;
+    host.invoke.mockImplementation((command, payload) => {
+      if (command === "create_project_session") {
+        request_id = (payload!.request as CreateProjectSessionRequest).request_id;
+        return Promise.resolve(state(request_id, { provider: "codex", status: "failed", creation_phase: "failed", message: "Native session exists; first input failed" }));
+      }
+      if (command === "get_managed_session" && request_id) return Promise.resolve(state(request_id, { provider: "codex", status: "failed", creation_phase: "failed" }));
+      return original(command, payload);
+    });
+    const { result } = renderHook(() => useProjectWorkspace(options(), host.transport));
+    await waitFor(() => expect(result.current.workspace?.available).toBe(true));
+    await act(async () => { await result.current.createSession("project", "Original", [], { provider: "codex" }); });
+    const original_id = result.current.creation!.request_id;
+    await act(async () => { await result.current.createSession("project", "Original", [], { provider: "codex" }); });
+    expect(result.current.creation?.request_id).toBe(original_id);
+    expect(host.invoke.mock.calls.filter(([command]) => command === "create_project_session")).toHaveLength(1);
+    act(() => result.current.beginCreation());
+    expect(result.current.creation).toBeNull();
+    await act(async () => { await result.current.createSession("project", "New explicit task", [], { provider: "codex" }); });
+    const calls = host.invoke.mock.calls.filter(([command]) => command === "create_project_session");
+    expect(calls).toHaveLength(2);
+    const next_request = calls[1][1]!.request as CreateProjectSessionRequest;
+    expect(next_request.request_id).not.toBe(original_id);
+    expect(next_request.prompt).toBe("New explicit task");
+  });
+
+  it.each(["native_create_uncertain", "first_input_uncertain", "history_pending"] as const)("keeps %s receipts pinned when New session is requested", async (creation_phase) => {
+    const host = connection(); const original = host.invoke.getMockImplementation()!;
+    let request_id: string | null = null;
+    host.invoke.mockImplementation((command, payload) => {
+      if (command === "create_project_session") {
+        request_id = (payload!.request as CreateProjectSessionRequest).request_id;
+        return Promise.resolve(state(request_id, { provider: "codex", creation_phase }));
+      }
+      if (command === "get_managed_session" && request_id) return Promise.resolve(state(request_id, { provider: "codex", creation_phase }));
+      return original(command, payload);
+    });
+    const { result } = renderHook(() => useProjectWorkspace(options(), host.transport));
+    await waitFor(() => expect(result.current.workspace?.available).toBe(true));
+    await act(async () => { await result.current.createSession("project", "Original", [], { provider: "codex" }); });
+    const pending = result.current.creation;
+    act(() => result.current.beginCreation());
+    expect(result.current.creation).toEqual(pending);
+    await act(async () => { await result.current.createSession("project", "Original", [], { provider: "codex" }); });
+    expect(result.current.creation?.request_id).toBe(pending!.request_id);
+    expect(host.invoke.mock.calls.filter(([command]) => command === "create_project_session")).toHaveLength(1);
+  });
+
+  it("allows a fresh Pi retry after its owned process failed", async () => {
+    const host = connection(); const original = host.invoke.getMockImplementation()!;
+    host.invoke.mockImplementation((command, payload) => command === "create_project_session"
+      ? Promise.resolve(state((payload!.request as CreateProjectSessionRequest).request_id, { status: "failed" })) : original(command, payload));
+    const { result } = renderHook(() => useProjectWorkspace(options(), host.transport));
+    await waitFor(() => expect(result.current.workspace?.available).toBe(true));
+    await act(async () => { await result.current.createSession("project", "Original"); });
+    const first_id = result.current.creation!.request_id;
+    await act(async () => { await result.current.createSession("project", "Corrected"); });
+    const calls = host.invoke.mock.calls.filter(([command]) => command === "create_project_session");
+    expect(calls).toHaveLength(2);
+    expect((calls[1][1]!.request as CreateProjectSessionRequest).request_id).not.toBe(first_id);
+  });
+
+  it("retains an accepted RPC receipt and original UUID when its status check fails", async () => {
+    const host = connection(); const original = host.invoke.getMockImplementation()!;
+    let request_id: string | null = null;
+    let fail_read = false;
+    host.invoke.mockImplementation((command, payload) => {
+      if (command === "create_project_session") {
+        request_id = (payload!.request as CreateProjectSessionRequest).request_id;
+        return Promise.resolve(state(request_id, { provider: "codex", status: "failed", creation_phase: "failed", message: "First input failed after native creation" }));
+      }
+      if (command === "get_managed_session" && request_id) {
+        if (fail_read) return Promise.reject(new Error("Runtime status unavailable"));
+        return Promise.resolve(state(request_id, { provider: "codex", status: "failed", creation_phase: "failed", message: "First input failed after native creation" }));
+      }
+      return original(command, payload);
+    });
+    const { result } = renderHook(() => useProjectWorkspace(options(), host.transport));
+    await waitFor(() => expect(result.current.workspace?.available).toBe(true));
+    await act(async () => { await result.current.createSession("project", "Original", [], { provider: "codex" }); });
+    const original_receipt = result.current.creation;
+    fail_read = true;
+    await act(async () => { await result.current.createSession("project", "Original", [], { provider: "codex" }); });
+    expect(result.current.creation).toEqual(original_receipt);
+    expect(result.current.creation_uncertain).toBe(true);
+    expect(result.current.creation_error).toContain("Runtime status unavailable");
+    fail_read = false;
+    await act(async () => { await result.current.createSession("project", "Original", [], { provider: "codex" }); });
+    expect(result.current.creation?.request_id).toBe(original_receipt!.request_id);
+    expect(host.invoke.mock.calls.filter(([command]) => command === "create_project_session")).toHaveLength(1);
+  });
   it("refreshes registrations from another window and on focus", async () => {
     const host = connection(); const original = host.invoke.getMockImplementation()!;
     const { result } = renderHook(() => useProjectWorkspace(options(), host.transport));
@@ -132,6 +277,8 @@ describe("local project workspace", () => {
     await waitFor(() => expect(result.current.workspace).not.toBeNull());
     await act(async () => { await result.current.createSession("project", "Original prompt"); });
     expect(result.current.creation_error).toContain("not confirmed");
+    act(() => result.current.beginCreation());
+    expect(result.current.creation_uncertain).toBe(true);
     await act(async () => { await result.current.createSession("project", "Original prompt"); });
     const requests = host.invoke.mock.calls.filter(([command]) => command === "create_project_session").map(([, payload]) => payload?.request);
     expect(requests).toHaveLength(2); expect(requests[1]).toEqual(requests[0]);

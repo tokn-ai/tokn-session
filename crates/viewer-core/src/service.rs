@@ -39,6 +39,8 @@ mod event_filter;
 mod image_resources;
 mod input;
 mod managed_sessions;
+mod session_creation;
+pub(crate) use session_creation::validate_creation_profile;
 mod model_projection;
 mod notifications;
 mod question_display;
@@ -707,6 +709,7 @@ impl ViewerService {
     };
     service.sessions =
       crate::session_supervisor::SessionSupervisor::new(Some(session_directory), service.interactions.clone())?;
+    let _ = service.creation_manager();
     service.images = crate::images::ImageStore::persistent(image_root.clone())
       .unwrap_or_else(|_| crate::images::ImageStore::configured(image_root));
     Ok(service)

@@ -85,9 +85,10 @@ session. Codex defaults to RPC and can discover a local executable when no
 suitable saved profile exists; Desktop control must be explicitly selected.
 Bound metadata and live callback answers use the common service. Runtime
 failures do not automatically select another transport or replay a prompt.
-Opening historical work remains view-only. Generalized session creation,
-arbitrary Pi history adoption, and OpenCode V2 historical display remain future
-work. See [shared session supervision](shared-session-supervisor.md).
+Opening historical work remains view-only. Local desktop projects can create
+Codex/OpenCode/DSH sessions through these configured runtimes; OpenCode V2 local
+history is supported. Arbitrary Pi history adoption and remote-only RPC history
+remain future work. See [shared session supervision](shared-session-supervisor.md).
 
 Tests exercise profile persistence/redaction/revision rules, all four factory
 paths with scripted native RPC peers, process reaping and leases, binding

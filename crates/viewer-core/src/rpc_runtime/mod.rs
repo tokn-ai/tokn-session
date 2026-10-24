@@ -93,6 +93,73 @@ struct Host {
 }
 
 impl RpcRuntimeManager {
+  pub(crate) fn creation_selection(
+    &self,
+    provider: Provider,
+    cwd: &std::path::Path,
+    selected: Option<&core_runtime::RuntimeSelection>,
+  ) -> Result<Option<core_runtime::RuntimeSelection>, String> {
+    let profiles = self.profiles()?;
+    let snapshot = profiles.snapshot()?;
+    let selection = if let Some(selected) = selected {
+      Some(selected.clone())
+    } else {
+      workflow::select_profile(&snapshot, provider, cwd)?.map(|profile| core_runtime::RuntimeSelection {
+        profile_id: profile.profile_id.clone(),
+        expected_revision: snapshot.revision,
+      })
+    };
+    if let Some(selection) = &selection {
+      let resolved = profiles.resolve_at_revision(&selection.profile_id, selection.expected_revision)?;
+      if resolved.profile.provider != provider {
+        return Err("The chosen runtime belongs to another agent".into());
+      }
+      resolved.validate_launch_ready()?;
+      crate::service::validate_creation_profile(&resolved, cwd)?;
+    } else {
+      workflow::builtin_codex(cwd)?;
+    }
+    Ok(selection)
+  }
+
+  pub(crate) async fn create_native_session(
+    &self,
+    provider: Provider,
+    cwd: PathBuf,
+    selection: Option<core_runtime::RuntimeSelection>,
+    native_id: Option<String>,
+  ) -> Result<core_runtime::CreatedNativeSession, InteractionError> {
+    self.0.runtimes.create_native(provider, cwd, selection, native_id).await
+  }
+  pub(crate) async fn execute_created(
+    &self,
+    created: &core_runtime::CreatedNativeSession,
+    request_id: String,
+    command: Command,
+  ) -> Result<Reply, InteractionError> {
+    self.0.runtimes.execute_created(created, request_id, command).await
+  }
+  pub(crate) async fn adopt_created(
+    &self,
+    created: &core_runtime::CreatedNativeSession,
+    key: String,
+  ) -> Result<RpcSessionBinding, InteractionError> {
+    self.0.runtimes.adopt_created(created, key).await.map(Into::into)
+  }
+  pub(crate) async fn adopt_verified_creation(
+    &self,
+    provider: Provider,
+    native_id: &str,
+    cwd: PathBuf,
+    key: String,
+  ) -> Result<Option<core_runtime::CreatedNativeSession>, InteractionError> {
+    self
+      .0
+      .runtimes
+      .adopt_verified_creation(provider, native_id, cwd, key)
+      .await
+  }
+
   pub(crate) fn new(path: Option<PathBuf>, interactions: InteractionService) -> Self {
     let parent = path.as_ref().and_then(|path| path.parent());
     let lease_directory = parent.map(|path| path.join("rpc-leases"));

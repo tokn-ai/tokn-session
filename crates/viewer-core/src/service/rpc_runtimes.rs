@@ -85,6 +85,36 @@ impl ViewerService {
     let key = encode_session_key(&decode_session_key(&request.session_key)?)?;
     Ok(self.sessions.runtimes.binding(&key))
   }
+  pub(super) fn verify_opencode_control(&self, locator: &SessionLocator) -> Result<(), String> {
+    use tokn_session_opencode::{OpenCodeHistoryFormat, OpenCodeSessionSource};
+    match OpenCodeSessionSource::new(Some(locator.source_path.clone())).history_format_exact(&locator.session_id)? {
+      OpenCodeHistoryFormat::V2 => Ok(()),
+      OpenCodeHistoryFormat::Empty
+        if self
+          .sessions
+          .creations
+          .get()
+          .and_then(|manager| manager.as_ref().ok())
+          .is_some_and(|manager| {
+            manager.list().iter().any(|receipt| {
+              receipt.provider == tokn_interaction_core::Provider::OpenCode
+                && receipt
+                  .session_key
+                  .as_deref()
+                  .and_then(|key| decode_session_key(key).ok())
+                  .as_ref()
+                  == Some(locator)
+            })
+          }) =>
+      {
+        Ok(())
+      }
+      _ => Err(
+        "Only verified OpenCode V2 history can use an OpenCode RPC runtime; V1 and mixed histories remain read-only"
+          .into(),
+      ),
+    }
+  }
   fn verify_rpc_history(&self, key: &str) -> Result<(tokn_interaction_core::Provider, String), String> {
     let locator = decode_session_key(key)?;
     let provider = match locator.provider {
@@ -92,9 +122,8 @@ impl ViewerService {
       ViewerProvider::Pi => tokn_interaction_core::Provider::Pi,
       ViewerProvider::Dsh => tokn_interaction_core::Provider::Dsh,
       ViewerProvider::OpenCode => {
-        return Err(
-          "OpenCode V1 history cannot bind to a V2 runtime; V2 conversation reading is a separate integration".into(),
-        );
+        self.verify_opencode_control(&locator)?;
+        tokn_interaction_core::Provider::OpenCode
       }
       _ => return Err("This provider has no RPC runtime adapter".into()),
     };
@@ -108,7 +137,7 @@ impl ViewerService {
       .ok_or("Session is not in this machine's catalog")?;
     let current = self
       .repository
-      .session_header_at_path(locator.provider, &header.path)
+      .session_header_exact(locator.provider, &header.path, &locator.session_id)
       .map_err(|_| "Session history is unavailable")?;
     if current.id != locator.session_id {
       return Err("Session history identity changed; refresh the catalog".into());

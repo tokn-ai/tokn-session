@@ -172,14 +172,18 @@ async fn admission(
 
 async fn exercise(adapter: CodexAdapter, work: &Path, gate: Option<ModelGate>) -> TestResult {
   let mut events = adapter.subscribe();
-  let target = adapter
-    .create_thread(ThreadOptions {
+  let created = adapter
+    .create_thread_with_descriptor(ThreadOptions {
       cwd: Some(work.into()),
       model: Some("fixture-model".into()),
       model_provider: Some("fixture".into()),
       ..ThreadOptions::default()
     })
     .await?;
+  assert_eq!(created.working_directory, work);
+  assert!(!created.ephemeral);
+  assert!(created.history_path.as_ref().is_some_and(|path| path.is_absolute()));
+  let target = created.target;
   let Reply::Metadata(metadata) = adapter.execute(request(&target, "metadata", Command::Metadata)).await? else {
     panic!("missing Codex metadata")
   };

@@ -119,7 +119,7 @@ impl ManagedSessions {
     self
       .manager
       .create_with_images(
-        request,
+        request.pi_request(),
         shared::RegisteredProject {
           project_id: project.project_id,
           folder_path: project.folder_path,
@@ -141,7 +141,7 @@ impl ManagedSessions {
   ) -> Result<Option<ManagedSessionSnapshot>, String> {
     self
       .manager
-      .creation_receipt(request)
+      .creation_receipt(&request.pi_request())
       .map(|snapshot| snapshot.map(Into::into))
   }
 

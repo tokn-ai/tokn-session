@@ -1,8 +1,10 @@
 //! Provider-independent runtime lifecycle, binding recovery and ownership.
 //! Host configuration and concrete adapter construction stay behind RuntimeHost.
+mod creation;
 #[cfg(test)]
 mod tests;
 mod workflow;
+pub use creation::{CreateNativeSessionRequest, CreatedNativeSession, NativeSessionDescriptor, RuntimeSelection};
 
 use crate::session_ownership::{SessionLease, SessionOwnership};
 use crate::*;
@@ -34,6 +36,18 @@ pub struct ProfileDescriptor {
 pub trait RuntimeHandle: Send + Sync + 'static {
   fn adapter(&self) -> Arc<dyn InteractionAdapter>;
   fn bind_native<'a>(&'a self, native_id: &'a str) -> AdapterFuture<'a, Result<(), String>>;
+  /// Explicit native creation. This never sends the first message or resumes an
+  /// existing session. Unsupported implementations must reject before writing.
+  fn create_native<'a>(
+    &'a self,
+    _request: &'a CreateNativeSessionRequest,
+  ) -> AdapterFuture<'a, Result<NativeSessionDescriptor, InteractionError>> {
+    Box::pin(async {
+      Err(InteractionError::unsupported(
+        "This runtime cannot create native sessions",
+      ))
+    })
+  }
 }
 
 /// Host-owned profile policy and native factory. Implementations select and

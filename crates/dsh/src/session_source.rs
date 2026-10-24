@@ -16,6 +16,11 @@ impl DshSessionSource {
     Self { session_dir }
   }
 
+  /// Verify one exact native file without discovery or conversation-body reads.
+  pub fn session_header_exact(&self, path: &Path, session_id: &str) -> Result<SessionHeader, String> {
+    crate::read_session_header_exact(path, session_id)
+  }
+
   pub fn list_sessions(&self) -> Result<Vec<SessionRef>, String> {
     let mut references = Vec::new();
     for path in self.paths()? {
@@ -252,7 +257,7 @@ fn collect(root: &Path, paths: &mut Vec<PathBuf>) -> Result<(), String> {
   Ok(())
 }
 
-fn header(line: DshSessionLine, path: &Path) -> Result<DshSessionHeader, String> {
+pub(crate) fn header(line: DshSessionLine, path: &Path) -> Result<DshSessionHeader, String> {
   let DshSessionItem::Session(header) = line.into_item() else {
     return Err(format!("invalid dsh session header in {}", path.display()));
   };
@@ -308,7 +313,7 @@ fn visit_session_records(path: &Path, mut visit: impl FnMut(DshSessionLine, bool
   Ok(header)
 }
 
-fn reference(path: &Path, header: &DshSessionHeader) -> SessionRef {
+pub(crate) fn reference(path: &Path, header: &DshSessionHeader) -> SessionRef {
   SessionRef {
     model_baseline: None,
     id: header.id.clone(),

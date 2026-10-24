@@ -4,6 +4,8 @@ use rusqlite::Connection;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct OpenCodeCapabilities {
+  pub(crate) has_v1: bool,
+  pub(crate) has_v2: bool,
   pub(crate) has_session_entry: bool,
   pub(crate) has_session_agent: bool,
   pub(crate) has_session_model: bool,
@@ -17,6 +19,7 @@ impl OpenCodeCapabilities {
     let message = table_columns(connection, "message")?;
     let part = table_columns(connection, "part")?;
     let session_entry = table_columns(connection, "session_entry")?;
+    let session_message = table_columns(connection, "session_message")?;
 
     let mut missing = Vec::new();
     require_columns(
@@ -33,18 +36,28 @@ impl OpenCodeCapabilities {
         &["id", "session_id", "type", "time_created", "data"],
       );
     }
-    require_columns(
-      &mut missing,
-      "message",
-      &message,
-      &["id", "session_id", "time_created", "data"],
-    );
-    require_columns(
-      &mut missing,
-      "part",
-      &part,
-      &["id", "message_id", "session_id", "time_created", "data"],
-    );
+    if !message.is_empty() || !part.is_empty() || session_message.is_empty() {
+      require_columns(
+        &mut missing,
+        "message",
+        &message,
+        &["id", "session_id", "time_created", "data"],
+      );
+      require_columns(
+        &mut missing,
+        "part",
+        &part,
+        &["id", "message_id", "session_id", "time_created", "data"],
+      );
+    }
+    if !session_message.is_empty() {
+      require_columns(
+        &mut missing,
+        "session_message",
+        &session_message,
+        &["id", "session_id", "type", "seq", "time_created", "data"],
+      );
+    }
     if !missing.is_empty() {
       return Err(format!(
         "unsupported session database schema: missing {}",
@@ -53,6 +66,8 @@ impl OpenCodeCapabilities {
     }
 
     Ok(Self {
+      has_v1: !message.is_empty() && !part.is_empty(),
+      has_v2: !session_message.is_empty(),
       has_session_entry: !session_entry.is_empty(),
       has_session_agent: session.contains("agent"),
       has_session_model: session.contains("model"),
@@ -85,6 +100,7 @@ fn table_columns(connection: &Connection, table: &str) -> Result<BTreeSet<String
     "message" => "pragma table_info(message)",
     "part" => "pragma table_info(part)",
     "session_entry" => "pragma table_info(session_entry)",
+    "session_message" => "pragma table_info(session_message)",
     _ => return Err(format!("unsupported session schema table `{table}`")),
   };
   let mut statement = connection
