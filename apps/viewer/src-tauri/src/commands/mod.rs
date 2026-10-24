@@ -12,6 +12,7 @@ pub(crate) mod projects;
 pub(crate) mod relay;
 pub(crate) mod rpc_runtimes;
 pub(crate) mod runtimes;
+pub(crate) mod session_control;
 pub(crate) mod sessions;
 pub(crate) mod settings;
 pub(crate) mod translation;

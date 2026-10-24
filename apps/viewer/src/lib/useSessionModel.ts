@@ -17,9 +17,9 @@ const emptyView = (): ModelView => ({ status: null, state: null, checking: true,
 
 /** Runtime state is read-only here. Model choices belong to the message draft. */
 export function useSessionModel(session_key: string | null, fallback: SessionModelState | undefined,
-  running = false, refresh_key = 0) {
+  running = false, refresh_key = 0, control_revision?: string) {
   const scope = viewerStorageScope();
-  const owner = JSON.stringify([scope, session_key]);
+  const owner = JSON.stringify([scope, session_key, control_revision]);
   const transport = useMemo(captureTransport, [scope]);
   const [view, setView] = useState<{ owner: string; value: ModelView }>(() => ({ owner, value: emptyView() }));
   const [input_revision, setInputRevision] = useState(0);
@@ -125,7 +125,8 @@ export function useSessionModel(session_key: string | null, fallback: SessionMod
   const display_state = !value.state?.model && fallback?.model ? fallback : value.state ?? fallback ?? null;
   const supported = value.status?.supports_model_input === true;
   return { ...value, state: display_state, input_revision, running,
-    reason: value.status?.can_list && !supported ? "Update this host to choose a model when sending a message."
+    reason: value.status?.can_list && !supported ? value.status.reason ?? (value.status.supports_model_input === false
+      ? "This runtime cannot apply a model choice when sending a message." : "Update this host to choose a model when sending a message.")
       : supported && value.status?.can_list ? null : value.status?.reason,
     can_open: supported && !!value.status?.can_list && !value.checking,
     can_select: supported && !!value.status?.can_list && !value.checking && !value.loading && !value.error,

@@ -6,7 +6,7 @@ use crate::{rpc_profiles::*, rpc_runtime::*};
 impl ViewerService {
   pub async fn get_rpc_runtime_profiles(&self) -> Result<RpcRuntimeProfilesSnapshot, String> {
     self.check_managed_workspace()?;
-    let profiles = self.rpc_runtimes.profiles()?;
+    let profiles = self.sessions.runtimes.profiles()?;
     tokio::task::spawn_blocking(move || profiles.snapshot())
       .await
       .map_err(|_| "Could not read runtime profiles")?
@@ -16,7 +16,7 @@ impl ViewerService {
     request: RpcRuntimeProfileInput,
   ) -> Result<RpcProfileValidation, String> {
     self.check_managed_workspace()?;
-    let profiles = self.rpc_runtimes.profiles()?;
+    let profiles = self.sessions.runtimes.profiles()?;
     tokio::task::spawn_blocking(move || profiles.validate(request))
       .await
       .map_err(|_| "Could not validate runtime profile")?
@@ -26,11 +26,11 @@ impl ViewerService {
     request: RpcSaveProfileRequest,
   ) -> Result<RpcRuntimeProfilesSnapshot, String> {
     self.check_managed_workspace()?;
-    let profiles = self.rpc_runtimes.profiles()?;
+    let profiles = self.sessions.runtimes.profiles()?;
     let snapshot = tokio::task::spawn_blocking(move || profiles.save(request))
       .await
       .map_err(|_| "Could not save runtime profile")??;
-    self.rpc_runtimes.changed();
+    self.sessions.runtimes.changed();
     Ok(snapshot)
   }
   pub async fn delete_rpc_runtime_profile(
@@ -38,19 +38,19 @@ impl ViewerService {
     request: RpcRemoveProfileRequest,
   ) -> Result<RpcRuntimeProfilesSnapshot, String> {
     self.check_managed_workspace()?;
-    self.rpc_runtimes.remove_profile(request).await
+    self.sessions.runtimes.remove_profile(request).await
   }
   pub async fn list_rpc_runtimes(&self) -> Result<RpcRuntimeInventory, String> {
     self.check_managed_workspace()?;
-    Ok(self.rpc_runtimes.inventory())
+    Ok(self.sessions.runtimes.inventory())
   }
   pub async fn start_rpc_runtime(&self, request: RpcStartRuntimeRequest) -> Result<RpcRuntimeInfo, String> {
     self.check_managed_workspace()?;
-    self.rpc_runtimes.start(request).await
+    self.sessions.runtimes.start(request).await
   }
   pub async fn close_rpc_runtime(&self, request: RpcCloseRuntimeRequest) -> Result<RpcCloseRuntimeResponse, String> {
     self.check_managed_workspace()?;
-    self.rpc_runtimes.close(request).await
+    self.sessions.runtimes.close(request).await
   }
   /// Internal composition API for a host-verified history selection. Session
   /// controls will consume these bindings without replacing historical readers.
@@ -64,7 +64,8 @@ impl ViewerService {
       .await
       .map_err(|_| "Could not verify session history")??;
     self
-      .rpc_runtimes
+      .sessions
+      .runtimes
       .bind(
         request.request_id,
         canonical_key,
@@ -82,7 +83,7 @@ impl ViewerService {
     self.check_managed_workspace()?;
     self.validate_session_key(&request.session_key)?;
     let key = encode_session_key(&decode_session_key(&request.session_key)?)?;
-    Ok(self.rpc_runtimes.binding(&key))
+    Ok(self.sessions.runtimes.binding(&key))
   }
   fn verify_rpc_history(&self, key: &str) -> Result<(tokn_interaction_core::Provider, String), String> {
     let locator = decode_session_key(key)?;

@@ -1,6 +1,7 @@
 import type { ExpandedActivityState } from "../lib/types";
 import { useLayoutEffect, type ReactNode } from "react";
 import { useSessionModel } from "../lib/useSessionModel";
+import { SessionControlContext, useSessionControl } from "../lib/useSessionControl";
 import { modelLabel } from "../lib/sessionModels";
 import { readingEventKey } from "../lib/readingPosition";
 import { useTimelineScroll } from "../lib/useTimelineScroll";
@@ -133,7 +134,9 @@ export function Conversation({
   on_retry,
   on_retry_expanded_detail,
 }: ConversationProps) {
-  const model = useSessionModel(session?.session_key ?? null, current_model, session?.is_running, input_refresh_key);
+  const control = useSessionControl(session, input_refresh_key);
+  const model = useSessionModel(control.blocked ? null : session?.session_key ?? null, current_model, session?.is_running,
+    input_refresh_key, control.enabled ? control.revision : undefined);
   const { preferences, updatePreferences } = useViewerPreferences();
   const hideLifecycle = !preferences.show_lifecycle;
   const visibleEvents = hideLifecycle ? events.filter((event) => !isBookkeepingEvent(event)) : events;
@@ -179,6 +182,7 @@ export function Conversation({
         : "Event count unavailable";
 
   return (
+    <SessionControlContext.Provider value={{ session_key: session?.session_key ?? null, revision: control.revision, blocked: control.blocked }}>
     <main className="conversation">
       <header className="conversation__header" data-tauri-drag-region>
         <button
@@ -462,7 +466,9 @@ export function Conversation({
         ) : null}
       </div>
       <SessionComposer session={session} on_accepted={on_input_accepted} model={model}
+        control={control.enabled ? control : undefined}
         input_refresh_key={(input_refresh_key ?? 0) + model.input_revision} />
     </main>
+    </SessionControlContext.Provider>
   );
 }

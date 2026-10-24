@@ -6,12 +6,16 @@ import type { QuestionDisplay, SessionQuestionStatus, SessionQuestionAnswer } fr
 import { QuestionAnswersContext, type QuestionDraft } from "./QuestionAnswersProvider";
 import { QuestionDisplaySection } from "./QuestionDisplaySection";
 import { MarkdownContent } from "./MarkdownContent";
+import { SessionControlContext } from "../lib/useSessionControl";
 
 export function QuestionAnswerForm({ session_key, display, recorded_card, on_accepted }: {
   session_key: string; display: QuestionDisplay; recorded_card: ReactNode;
   on_accepted?: (session_key: string) => void;
 }) {
   const store = useContext(QuestionAnswersContext);
+  const control = useContext(SessionControlContext);
+  const control_blocked = control?.session_key === session_key && control.blocked;
+  const control_revision = control?.session_key === session_key ? control.revision : undefined;
   const prefix = useId();
   const [status, setStatus] = useState<SessionQuestionStatus | null>(null);
   const [checking, setChecking] = useState(true);
@@ -26,14 +30,16 @@ export function QuestionAnswerForm({ session_key, display, recorded_card, on_acc
     let disposed = false;
     if (!send) return;
     setChecking(true);
+    setStatus(null);
+    if (control_blocked) return;
     void getSessionQuestionStatus({ session_key, question_request_id: request_id }, send)
       .then((result) => { if (!disposed) setStatus(result); })
       .catch((error) => { if (!disposed) setStatus({ available: false, message: errorMessage(error), question_ids: [], max_length: 0 }); })
       .finally(() => { if (!disposed) setChecking(false); });
     return () => { disposed = true; };
-  }, [session_key, request_id, send, retry, resolved_revision]);
+  }, [session_key, request_id, send, retry, resolved_revision, control_revision, control_blocked]);
   if (!store || !state) return recorded_card;
-  const disabled = state.sending;
+  const disabled = state.sending || control_blocked;
   // Live recorded selections can resolve one question before a status read
   // catches up. Preserve the other drafts without offering it for resubmission.
   const pending = display.questions.filter((question) => question.question_id && status?.question_ids.includes(question.question_id)
@@ -47,7 +53,7 @@ export function QuestionAnswerForm({ session_key, display, recorded_card, on_acc
       : question.options.some((option) => option.option_index === value.option_index);
   });
   async function submit() {
-    if (!status?.available || !valid || checking) return;
+    if (!status?.available || !valid || checking || control_blocked) return;
     const current = store!.get(key);
     if (current.sending || pending.some((question) => current.blocked_ids.includes(question.question_id!))) return;
     const answers: SessionQuestionAnswer[] = pending.map((question) => {
@@ -105,7 +111,7 @@ export function QuestionAnswerForm({ session_key, display, recorded_card, on_acc
         </div> : null}
         {question.allows_free_text ? <label className="question-answer__written" data-chosen={value.write}>
           <span className="sr-only">Written answer for {question.header ?? question.question}</span>
-          <input type={question.is_secret ? "password" : "text"} value={value.text} maxLength={status.max_length}
+          <input type={question.is_secret || status.secret_question_ids?.includes(id) ? "password" : "text"} value={value.text} maxLength={status.max_length}
             placeholder={question.options.length > 0 ? "Type your own answer…" : "Your answer…"}
             onFocus={() => { if (!value.write) setDraft(id, { ...value, write: true, option_index: null }); }}
             onChange={(event) => setDraft(id, { ...value, write: true, option_index: null, text: event.target.value })} />

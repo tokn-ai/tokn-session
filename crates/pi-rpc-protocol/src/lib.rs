@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 
+mod models;
+pub use models::{MAX_MODEL_CATALOG_ENTRIES, MAX_MODEL_ID_BYTES, PiModel, parse_model, parse_model_catalog};
+
 pub const MAX_DIALOG_TEXT_BYTES: usize = 16 * 1024;
 pub const MAX_DIALOG_OPTIONS: usize = 128;
 pub const MAX_ID_BYTES: usize = 256;
@@ -225,6 +228,14 @@ pub struct State {
   pub native: Value,
 }
 
+impl State {
+  /// Validated native model metadata, without changing the lossless state wire
+  /// projection or exposing provider credentials through a compact model DTO.
+  pub fn parsed_model(&self) -> Option<PiModel> {
+    self.model.as_ref().and_then(parse_model)
+  }
+}
+
 pub fn parse_state(data: &Value) -> Result<State, String> {
   if !data.is_object() {
     return Err("Pi RPC state must be an object".into());
@@ -265,6 +276,50 @@ pub struct ExtensionDialog {
   pub options: Vec<String>,
   pub initial_value: Option<String>,
   pub timeout_ms: Option<u64>,
+}
+
+impl ExtensionDialog {
+  /// Validate a native answer against this dialog and build its wire response.
+  /// Application interaction IDs and pending-dialog lifetime remain external.
+  pub fn response(
+    &self,
+    value: Option<String>,
+    confirmed: Option<bool>,
+    cancelled: bool,
+  ) -> Result<ExtensionUiResponse, String> {
+    let (value, confirmed) = if cancelled {
+      (None, None)
+    } else {
+      match self.kind.as_str() {
+        "confirm" => {
+          if value.is_some() {
+            return Err("Pi confirmation requires a boolean".into());
+          }
+          (None, Some(confirmed.ok_or("Pi confirmation requires yes or no")?))
+        }
+        "select" | "input" | "editor" => {
+          if confirmed.is_some() {
+            return Err("Pi selection/text dialogs require a value".into());
+          }
+          let value = value.ok_or("This Pi dialog requires a value")?;
+          if value.len() > MAX_DIALOG_TEXT_BYTES {
+            return Err("Pi dialog response exceeds its size limit".into());
+          }
+          if self.kind == "select" && !self.options.contains(&value) {
+            return Err("Pi dialog response is not an available option".into());
+          }
+          (Some(value), None)
+        }
+        _ => return Err("unsupported Pi extension dialog method".into()),
+      }
+    };
+    Ok(ExtensionUiResponse::ExtensionUiResponse {
+      id: self.dialog_id.clone(),
+      value,
+      confirmed,
+      cancelled: cancelled.then_some(true),
+    })
+  }
 }
 
 pub fn is_cosmetic_extension_method(method: &str) -> bool {
@@ -402,5 +457,111 @@ mod tests {
     .unwrap();
     assert_eq!(dialog.message.as_deref(), Some("A hint"));
     assert!(dialog.initial_value.is_none());
+  }
+
+  #[test]
+  fn state_retains_native_model_while_exposing_validated_metadata() {
+    let value = json!({
+      "sessionId":"native-session",
+      "sessionFile":null,
+      "isStreaming":false,
+      "isCompacting":true,
+      "pendingMessageCount":2,
+      "model":{"id":"model","provider":"custom","name":"Model","input":["text","image"],
+        "headers":{"authorization":"secret"}},
+      "futureField":true
+    });
+    let state = parse_state(&value).unwrap();
+    assert_eq!(state.native, value);
+    assert_eq!(state.model.as_ref().unwrap()["headers"]["authorization"], "secret");
+    assert_eq!(state.session_file, None);
+    let model = state.parsed_model().unwrap();
+    assert_eq!(model.id, "model");
+    assert!(model.supports_images);
+    assert!(state.images_available);
+    for input in [json!(["text"]), json!(null), json!("image")] {
+      let mut value = value.clone();
+      value["model"]["input"] = input;
+      let state = parse_state(&value).unwrap();
+      assert!(!state.images_available);
+      assert!(!state.parsed_model().unwrap().supports_images);
+    }
+  }
+
+  #[test]
+  fn state_requires_native_identity_boolean_and_count_shapes() {
+    let state = json!({
+      "sessionId":"native-session","isStreaming":false,"isCompacting":false,"pendingMessageCount":0
+    });
+    for (field, invalid) in [
+      ("sessionId", json!("")),
+      ("sessionId", json!(" leading")),
+      ("sessionId", json!("line\nbreak")),
+      ("sessionId", json!(42)),
+      ("isStreaming", json!("false")),
+      ("isCompacting", Value::Null),
+      ("pendingMessageCount", json!(-1)),
+      ("pendingMessageCount", json!(1.5)),
+      ("sessionFile", json!("")),
+      ("sessionFile", json!(false)),
+      ("sessionFile", json!("invalid\0path")),
+    ] {
+      let mut value = state.clone();
+      value[field] = invalid;
+      assert!(parse_state(&value).is_err(), "accepted invalid {field}");
+    }
+    assert!(parse_state(&Value::Null).is_err());
+  }
+
+  fn dialog(method: &str) -> ExtensionDialog {
+    parse_extension_dialog(&json!({
+      "type":"extension_ui_request","id":"dialog","method":method,"title":"Title",
+      "message":"Continue?","options":["Yes","No"]
+    }))
+    .unwrap()
+    .unwrap()
+  }
+
+  #[test]
+  fn dialog_responses_follow_native_type_and_option_constraints() {
+    assert_eq!(
+      serde_json::to_value(dialog("confirm").response(None, Some(false), false).unwrap()).unwrap(),
+      json!({"type":"extension_ui_response","id":"dialog","confirmed":false})
+    );
+    assert!(dialog("confirm").response(None, None, false).is_err());
+    assert!(
+      dialog("confirm")
+        .response(Some("Yes".into()), Some(true), false)
+        .is_err()
+    );
+    assert!(dialog("select").response(Some("Other".into()), None, false).is_err());
+    assert!(
+      dialog("select")
+        .response(Some("Yes".into()), Some(true), false)
+        .is_err()
+    );
+    assert!(dialog("select").response(Some("Yes".into()), None, false).is_ok());
+    for method in ["input", "editor"] {
+      assert!(dialog(method).response(None, None, false).is_err());
+      assert!(
+        dialog(method)
+          .response(Some("x".repeat(MAX_DIALOG_TEXT_BYTES)), None, false)
+          .is_ok()
+      );
+      assert!(
+        dialog(method)
+          .response(Some("x".repeat(MAX_DIALOG_TEXT_BYTES + 1)), None, false)
+          .is_err()
+      );
+    }
+    assert_eq!(
+      serde_json::to_value(
+        dialog("select")
+          .response(Some("ignored".into()), Some(true), true)
+          .unwrap()
+      )
+      .unwrap(),
+      json!({"type":"extension_ui_response","id":"dialog","cancelled":true})
+    );
   }
 }

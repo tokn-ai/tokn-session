@@ -137,6 +137,10 @@ Managed ownership receipts default to
 `~/.tokn/sessions/viewer/managed-sessions.json`; with a custom index path, they
 live in `viewer/managed-sessions.json` under the index's parent directory.
 Per-request `managed-pi-<request-id>.lease` files live beside the receipts.
+Provider/native-ID leases in `viewer/session-leases` additionally coordinate
+owned Pi sessions with the shared RPC/Desktop session supervisor. A known
+identity is claimed before resume; a new identity is claimed before its first
+prompt. The last owner releases its lease after confirmed cleanup.
 Receipt writes are private, bounded, locked, and atomic. Receipts retain project
 and session identity, lifecycle revisions, and a request fingerprint, rather
 than prompt text or credentials. Pi keeps its native histories at its own

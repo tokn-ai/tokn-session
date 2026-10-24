@@ -1,27 +1,38 @@
 use super::*;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use std::{path::Path, sync::atomic::AtomicUsize, time::Duration};
+use std::{
+  path::Path,
+  sync::atomic::{AtomicBool, AtomicUsize},
+  time::Duration,
+};
 use tokio::{sync::watch, task::JoinSet};
 mod http_peer;
+mod workflow_tests;
 
-struct CodexPeer {
-  endpoint: String,
+pub(crate) struct CodexPeer {
+  pub(crate) endpoint: String,
   requests: Arc<Mutex<Vec<Value>>>,
   connections: Arc<AtomicUsize>,
+  active: Arc<AtomicBool>,
+  drop_prompt_ack: Arc<AtomicBool>,
   initialize_gate: Arc<tokio::sync::Semaphore>,
   stop: watch::Sender<bool>,
   task: tokio::task::JoinHandle<()>,
 }
 
 impl CodexPeer {
-  async fn start(gated: bool) -> Self {
+  pub(crate) async fn start(gated: bool) -> Self {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("ws://{}", listener.local_addr().unwrap());
     let requests = Arc::new(Mutex::new(Vec::new()));
     let recorded = requests.clone();
     let connections = Arc::new(AtomicUsize::new(0));
     let accepted = connections.clone();
+    let active = Arc::new(AtomicBool::new(false));
+    let native_active = active.clone();
+    let drop_prompt_ack = Arc::new(AtomicBool::new(false));
+    let drop_ack = drop_prompt_ack.clone();
     let initialize_gate = Arc::new(tokio::sync::Semaphore::new(if gated { 0 } else { 32 }));
     let gate = initialize_gate.clone();
     let (stop, mut stopping) = watch::channel(false);
@@ -35,12 +46,15 @@ impl CodexPeer {
             accepted.fetch_add(1, Ordering::Relaxed);
             let requests = recorded.clone();
             let gate = gate.clone();
+            let active = native_active.clone();
+            let drop_ack = drop_ack.clone();
             peers.spawn(async move {
               let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else { return };
               while let Some(Ok(frame)) = socket.next().await {
                 let tokio_tungstenite::tungstenite::Message::Text(text) = frame else { continue };
                 let request: Value = serde_json::from_str(&text).unwrap();
                 requests.lock().unwrap().push(request.clone());
+                if request["method"] == "turn/start" && drop_ack.load(Ordering::Relaxed) { break; }
                 let Some(id) = request.get("id") else { continue };
                 let result = match request["method"].as_str().unwrap_or_default() {
                   "initialize" => {
@@ -50,11 +64,12 @@ impl CodexPeer {
                   }
                   "thread/resume" | "thread/read" => json!({
                     "thread":{
-                      "id":request["params"]["threadId"], "status":{"type":"idle"},
+                      "id":request["params"]["threadId"], "status":{"type":if active.load(Ordering::Relaxed){"active"}else{"idle"}},
                       "model":"test-model", "modelProvider":"test", "turns":[]
                     }
                   }),
                   "model/list" => json!({"data":[],"nextCursor":null}),
+                  "turn/start" => {active.store(true,Ordering::Relaxed);json!({"turn":{"id":"test-turn","status":"inProgress","items":[]}})},
                   other => panic!("unexpected native method: {other}"),
                 };
                 if socket.send(tokio_tungstenite::tungstenite::Message::Text(
@@ -70,13 +85,15 @@ impl CodexPeer {
       endpoint,
       requests,
       connections,
+      active,
+      drop_prompt_ack,
       initialize_gate,
       stop,
       task,
     }
   }
 
-  fn methods(&self) -> Vec<String> {
+  pub(crate) fn methods(&self) -> Vec<String> {
     self
       .requests
       .lock()
@@ -84,6 +101,10 @@ impl CodexPeer {
       .iter()
       .filter_map(|request| request["method"].as_str().map(str::to_owned))
       .collect()
+  }
+
+  pub(crate) fn drop_prompt_acknowledgements(&self) {
+    self.drop_prompt_ack.store(true, Ordering::Relaxed);
   }
 }
 
@@ -288,7 +309,7 @@ async fn shutdown_waits_for_cancelled_inflight_start_and_prevents_late_registrat
     let manager = manager.clone();
     tokio::spawn(async move { manager.shutdown().await })
   };
-  wait_until(|| manager.0.stopping.load(Ordering::Acquire)).await;
+  wait_until(|| manager.0.runtimes.is_stopping()).await;
   assert!(
     !shutdown.is_finished(),
     "shutdown returned before its starting runtime was cleaned up"
@@ -528,63 +549,6 @@ async fn http_factories_register_query_and_detach_opencode_and_dsh_without_sessi
     assert_ne!(reconnected.instance_id, info.instance_id);
     manager.shutdown().await;
   }
-}
-
-#[tokio::test]
-async fn unregistered_uncertain_cleanup_remains_visible_and_holds_profile_lease_until_shutdown() {
-  let server = CodexPeer::start(false).await;
-  let directory = tempfile::tempdir().unwrap();
-  let path = directory.path().join("profiles.json");
-  let first = RpcRuntimeManager::new(Some(path.clone()), InteractionService::default());
-  let second = RpcRuntimeManager::new(Some(path), InteractionService::default());
-  let request = save_profile(&first, attached_profile(server.endpoint.clone()));
-  let resolved = first.profiles().unwrap().resolve(&request.profile_id).unwrap();
-  let lease_path = first
-    .0
-    .lease_directory
-    .as_ref()
-    .unwrap()
-    .join(format!("{}.lock", request.profile_id));
-  let lease = tokn_session_storage::acquire_private_lock(&lease_path).unwrap();
-  let handle = factory::open(&format!("rpc:{}", request.profile_id), &resolved)
-    .await
-    .unwrap();
-  first.retain_unconfirmed_start(Some(handle), Some(lease), &resolved);
-  let info = first.inventory().runtimes[0].clone();
-  assert_eq!(info.status, "cleanup_failed");
-  assert!(info.last_error.is_some());
-  assert!(first.0.interactions.snapshots().is_empty());
-  assert!(first.start(request.clone()).await.is_err());
-  assert!(first.close(close_request(&info)).await.is_err());
-  assert!(
-    first
-      .remove_profile(RpcRemoveProfileRequest {
-        expected_revision: request.expected_revision,
-        profile_id: request.profile_id.clone(),
-      })
-      .await
-      .is_err()
-  );
-  let mut competing = request;
-  competing.request_id = uuid::Uuid::new_v4().to_string();
-  assert!(
-    second
-      .remove_profile(RpcRemoveProfileRequest {
-        expected_revision: competing.expected_revision,
-        profile_id: competing.profile_id.clone(),
-      })
-      .await
-      .is_err()
-  );
-  assert!(second.start(competing.clone()).await.is_err());
-  assert_eq!(server.connections.load(Ordering::Relaxed), 1);
-  assert_eq!(first.inventory().runtimes[0].status, "cleanup_failed");
-  first.shutdown().await;
-  assert!(first.inventory().runtimes.is_empty());
-  competing.request_id = uuid::Uuid::new_v4().to_string();
-  second.start(competing).await.unwrap();
-  assert_eq!(server.connections.load(Ordering::Relaxed), 2);
-  second.shutdown().await;
 }
 
 #[cfg(unix)]

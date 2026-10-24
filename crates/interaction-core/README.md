@@ -8,3 +8,19 @@ Runtime identity exists before a saved session. Attached endpoints and managed
 children have distinct ownership. Metadata is runtime/session scoped. Commands
 and live pending interactions use instance-bound identities and bounded receipts;
 uncertain mutations are never automatically replayed.
+
+
+The shared host orchestration modules are:
+
+- `managed_sessions`: durable creation receipts, coalesced resume, process leases,
+  worker admission, restart and idle retirement, behind native driver/host traits.
+- `admission`: bounded message/control receipts, uncertain-delivery retention and
+  atomic transport-transition fences.
+- `session_ownership` and `session_supervisor`: canonical cross-process native
+  leases, per-session gates and cancellation-safe, deduplicated route changes.
+- `runtime`: configured lifecycle, startup quarantine, native binding recovery,
+  event pumps and awaited shutdown, behind host configuration/factory traits.
+
+Provider-specific parsing and workflows belong to protocol/adapter crates. Hosts
+supply executable/profile configuration, authorization, verified native identities,
+opaque session keys and presentation; opening history never activates a runtime.

@@ -80,6 +80,11 @@ pub(super) async fn command(State(state): State<ApiState>, Json(mut share): Json
         "images_available": false, "images_stageable": false, "max_images": 0, "max_image_bytes": 0,
         "max_total_image_bytes": 0, "image_mime_types": []
       })),
+      "get_session_control" => Ok(json!({
+        "session_key": share.payload["request"]["session_key"], "provider":"codex",
+        "transport":"rpc", "available":false, "can_select":false, "can_cancel":false,
+        "message":"This session share is read-only", "runtime_id":null, "instance_id":null
+      })),
       "get_session_model_status" | "list_session_models" => {
         let status = json!({
           "state": {"model":null,"source":"unknown","revision":"read_only"},
@@ -183,6 +188,7 @@ fn prepare(share: &mut SharedRequest) -> Result<(), &'static str> {
     | "get_session_input_status"
     | "get_session_question_status"
     | "get_session_model_status"
+    | "get_session_control"
     | "list_session_models"
     | "load_session_image" => {
       let field = if share.command == "list_session_children" {
@@ -499,6 +505,7 @@ mod tests {
       "get_session_input_status",
       "get_session_question_status",
       "get_session_model_status",
+      "get_session_control",
       "list_session_models",
       "load_session_image",
     ] {
@@ -516,6 +523,8 @@ mod tests {
       "select_session_model",
       "submit_session_input",
       "submit_session_question_answers",
+      "set_session_control",
+      "cancel_session_turn",
       "upload_image_chunk",
       "release_image_upload",
       "retry_session_index",

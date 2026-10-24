@@ -1,0 +1,4 @@
+.session-control { display: flex; align-items: center; gap: 8px; padding: 0 2px 8px; font-size: 11px; color: var(--text-muted); }
+.session-control__choice { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.session-control__choice select { border: 1px solid var(--border); border-radius: 7px; padding: 3px 6px; background: var(--surface); color: var(--text); font: inherit; }
+.session-control__status { min-width: 0; overflow-wrap: anywhere; }

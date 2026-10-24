@@ -10,28 +10,22 @@ impl ViewerService {
     &self,
     request: SessionInputStatusRequest,
   ) -> Result<SessionInputStatus, String> {
-    if self.session_scope.is_none()
-      && self.relay.status().settings.mode != crate::relay::RelayMode::External
-      && let Some(status) = self.managed_pi.checked_input_status(&request.session_key).await
-    {
-      let resume_required = status.as_ref().is_ok_and(|status| status.resume_required);
-      return Ok(input_status_response(
-        status.map(|status| input::InputCapability {
-          message: status.message,
-          images_available: status.images_available,
-        }),
-        resume_required,
-      ));
-    }
-    let service = self.clone();
-    let target = tokio::task::spawn_blocking(move || service.resolve_input_target(&request.session_key))
-      .await
-      .map_err(|_| "Could not check session input")?;
-    let status = match target {
-      Ok(target) => input::status(&target).await,
-      Err(error) => Err(input::DeliveryError::not_sent(error)),
+    let target = match self.control_target(request.session_key).await {
+      Ok(target) => target,
+      Err(error) => return Ok(input_status_response(Err(input::DeliveryError::not_sent(error)), false)),
     };
-    Ok(input_status_response(status, false))
+    let resume_required = self
+      .sessions
+      .managed
+      .input_status(&target.session_key)
+      .is_some_and(|status| status.is_ok_and(|status| status.resume_required))
+      || (target.input.provider != ViewerProvider::Pi
+        && self.sessions.transport(&target).await? == crate::session_supervisor::SessionTransport::Rpc
+        && self.sessions.runtimes.binding(&target.session_key).is_none());
+    Ok(input_status_response(
+      self.sessions.input_status(&target).await,
+      resume_required,
+    ))
   }
 
   pub async fn submit_session_input(
@@ -39,8 +33,6 @@ impl ViewerService {
     mut request: SubmitSessionInputRequest,
   ) -> Result<SubmitSessionInputResponse, String> {
     if let Err(message) = input::validate_request(&mut request) {
-      // Validation never admits or modifies a broker receipt. A previous
-      // uncertain token remains recorded and cannot be replayed by this error.
       return Ok(SubmitSessionInputResponse {
         model_result: None,
         request_id: request.request_id,
@@ -48,63 +40,18 @@ impl ViewerService {
         message,
       });
     }
-    if self.session_scope.is_none()
-      && self.relay.status().settings.mode != crate::relay::RelayMode::External
-      && let Some(status) = self.managed_pi.input_status(&request.session_key)
-    {
-      let locator = decode_session_key(&request.session_key)?;
-      let target = InputTarget {
+    self.check_managed_workspace()?;
+    if let Ok(locator) = decode_session_key(&request.session_key) {
+      let receipt_target = InputTarget {
         provider: locator.provider,
         session_id: locator.session_id,
         session_file: locator.source_path,
       };
-      if let Some(receipt) = self.input_broker.receipt(&target, &request) {
+      if let Some(receipt) = self.input_broker.receipt(&receipt_target, &request) {
         return Ok(receipt);
       }
-      if let Err(error) = status {
-        return Ok(SubmitSessionInputResponse {
-          model_result: None,
-          request_id: request.request_id,
-          status: InputDeliveryStatus::NotSent,
-          message: error.message,
-        });
-      }
-      let images = match self
-        .resolve_message_images(&request.session_key, &request.image_ids, target.provider)
-        .await
-      {
-        Ok(images) => images,
-        Err(message) => {
-          return Ok(SubmitSessionInputResponse {
-            model_result: None,
-            request_id: request.request_id,
-            status: InputDeliveryStatus::NotSent,
-            message,
-          });
-        }
-      };
-      let manager = self.managed_pi.clone();
-      let session_key = request.session_key.clone();
-      let request_id = request.request_id.clone();
-      let text = request.text.clone();
-      let model_selection = request.model_selection.clone();
-      return Ok(
-        self
-          .input_broker
-          .submit_custom(&target, request, async move {
-            manager
-              .submit_owned_input_with_model(&session_key, &request_id, &text, images, model_selection)
-              .await
-          })
-          .await,
-      );
     }
-    let service = self.clone();
-    let key = request.session_key.clone();
-    let target = tokio::task::spawn_blocking(move || service.resolve_input_target(&key))
-      .await
-      .map_err(|_| "Could not resolve the message target")?;
-    let target = match target {
+    let target = match self.control_target(request.session_key.clone()).await {
       Ok(target) => target,
       Err(message) => {
         return Ok(SubmitSessionInputResponse {
@@ -115,11 +62,11 @@ impl ViewerService {
         });
       }
     };
-    if let Some(receipt) = self.input_broker.receipt(&target, &request) {
+    if let Some(receipt) = self.input_broker.receipt(&target.input, &request) {
       return Ok(receipt);
     }
     let images = match self
-      .resolve_message_images(&request.session_key, &request.image_ids, target.provider)
+      .resolve_message_images(&target.session_key, &request.image_ids, target.input.provider)
       .await
     {
       Ok(images) => images,
@@ -132,7 +79,22 @@ impl ViewerService {
         });
       }
     };
-    Ok(self.input_broker.submit_images(target, request, images).await)
+    let expected_transport = self.sessions.transport(&target).await?;
+    let broker_target = InputTarget {
+      provider: target.input.provider,
+      session_id: target.input.session_id.clone(),
+      session_file: target.input.session_file.clone(),
+    };
+    let sessions = self.sessions.clone();
+    let delivery = request.clone();
+    Ok(
+      self
+        .input_broker
+        .submit_custom(&broker_target, request, async move {
+          sessions.submit(target, delivery, images, expected_transport).await
+        })
+        .await,
+    )
   }
 
   async fn resolve_message_images(
@@ -167,8 +129,16 @@ impl ViewerService {
       return Err("Message input is unavailable through the external snapshot connection. Connect to that machine's viewer API instead.".into());
     }
     let locator = decode_session_key(session_key)?;
-    if !matches!(locator.provider, ViewerProvider::Codex | ViewerProvider::Pi) {
-      return Err("Message input is not available for this provider yet.".into());
+    if !matches!(
+      locator.provider,
+      ViewerProvider::Codex | ViewerProvider::Pi | ViewerProvider::Dsh
+    ) {
+      let reason = if locator.provider == ViewerProvider::OpenCode {
+        "This provider has no compatible live history binding yet (OpenCode V1 history cannot use the V2 RPC runtime)."
+      } else {
+        "This provider has no compatible live history binding yet."
+      };
+      return Err(reason.into());
     }
     // Never trust a client-supplied path, provider, working directory, or
     // parent identity. Resolve the exact catalog key, then recheck its header.

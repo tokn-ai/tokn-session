@@ -142,6 +142,8 @@ pub fn allowed_route(method: &str, path: &str, allow_control: bool) -> bool {
       "POST",
       "/api/v1/submit_session_input"
       | "/api/v1/submit_session_question_answers"
+      | "/api/v1/set_session_control"
+      | "/api/v1/cancel_session_turn"
       | "/api/v1/upload_image_chunk"
       | "/api/v1/release_image_upload",
     ) => allow_control,
@@ -170,6 +172,7 @@ pub fn allowed_route(method: &str, path: &str, allow_control: bool) -> bool {
       | "/api/v1/get_session_input_status"
       | "/api/v1/get_session_question_status"
       | "/api/v1/get_session_model_status"
+      | "/api/v1/get_session_control"
       | "/api/v1/list_session_models",
     ) => true,
     _ => false,
@@ -211,9 +214,46 @@ pub fn read_only_model_response(path: &str, reason: &str) -> Option<serde_json::
   })
 }
 
+/// A viewing client cannot discover the selected live route or runtime IDs.
+pub fn read_only_session_control_response(path: &str, body: &[u8], reason: &str) -> Option<serde_json::Value> {
+  if path != "/api/v1/get_session_control" {
+    return None;
+  }
+  let payload: serde_json::Value = serde_json::from_slice(body).ok()?;
+  let session_key = payload.get("request")?.get("session_key")?.as_str()?;
+  Some(serde_json::json!({
+    "session_key":session_key,"provider":"codex","transport":"rpc",
+    "available":false,"can_select":false,"can_cancel":false,"message":reason,
+    "runtime_id":null,"instance_id":null
+  }))
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn session_control_uses_agent_permission_and_viewing_never_discloses_the_live_route() {
+    let path = "/api/v1/get_session_control";
+    assert!(allowed_route("POST", path, false));
+    assert!(!runtime_management_route("POST", path));
+    let response =
+      read_only_session_control_response(path, br#"{"request":{"session_key":"one"}}"#, "Viewing only").unwrap();
+    assert_eq!(response["session_key"], "one");
+    assert_eq!(response["available"], false);
+    assert_eq!(response["can_select"], false);
+    assert_eq!(response["can_cancel"], false);
+    assert!(response["runtime_id"].is_null());
+    assert!(response["instance_id"].is_null());
+    for path in ["/api/v1/set_session_control", "/api/v1/cancel_session_turn"] {
+      assert!(allowed_route("POST", path, true));
+      assert!(!allowed_route("POST", path, false));
+      assert!(!allowed_route("GET", path, true));
+      assert!(!allowed_route("POST", &format!("{path}/"), true));
+      assert!(!runtime_management_route("POST", path));
+      assert!(read_only_session_control_response(path, b"{}", "Viewing only").is_none());
+    }
+  }
 
   #[test]
   fn runtime_routes_require_an_independent_paired_host_permission() {

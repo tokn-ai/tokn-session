@@ -16,7 +16,7 @@ use std::{
 #[cfg(test)]
 mod tests;
 
-pub const MAX_IMAGES: usize = 4;
+pub use tokn_interaction_core::managed_sessions::MAX_IMAGES;
 pub const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_TOTAL_IMAGE_BYTES: usize = 24 * 1024 * 1024;
 pub const IMAGE_CHUNK_BYTES: usize = 256 * 1024;

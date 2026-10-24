@@ -13,3 +13,13 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 sha2 = "0.10"
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tokn-session-storage.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

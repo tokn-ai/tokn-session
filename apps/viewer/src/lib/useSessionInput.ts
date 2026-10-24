@@ -6,12 +6,14 @@ import type { ModelChoice, SessionInputStatus } from "./types";
 import { captureTransport, viewerStorageScope } from "./transport";
 import { sameModel } from "./sessionModels";
 import type { SessionModelController } from "./useSessionModel";
+import type { SessionControlController } from "./useSessionControl";
 import { addImageDrafts, disposeImageDrafts, imageLimits, releaseImageUploads, uploadImageDrafts, type ImageDraft, type ImageUploadReceipt } from "./imageDrafts";
 
 const DEFAULT_MAX_LENGTH = 16_384;
 const UNCONFIRMED_MESSAGE = "Delivery not confirmed. Check the conversation before sending again.";
 
 interface InputState {
+  control_revision?: string;
   draft: string;
   model_draft: ModelChoice | null;
   images: ImageDraft[];
@@ -32,7 +34,8 @@ function emptyInput(): InputState {
 }
 
 /** Keep drafts and in-flight results attached to their original session. */
-export function useSessionInput(session_key: string | null, on_accepted?: (session_key: string) => void, refresh_key = 0, model?: SessionModelController) {
+export function useSessionInput(session_key: string | null, on_accepted?: (session_key: string) => void, refresh_key = 0,
+  model?: SessionModelController, control?: SessionControlController) {
   const scope = viewerStorageScope();
   const current_scope = useRef(scope);
   current_scope.current = scope;
@@ -80,15 +83,22 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
   }, []);
 
   useEffect(() => {
-    if (session_key) void checkAvailability(scopedKey(session_key), session_key);
-  }, [session_key, scope, checkAvailability, refresh_key]);
+    if (!session_key) return;
+    const key = scopedKey(session_key);
+    const check_id = ++check_sequence.current;
+    update(key, (old) => ({ ...old, control_revision: control?.revision, checking: true, availability: null, check_id,
+      model_draft: old.control_revision !== control?.revision ? null : old.model_draft }));
+    if (!control?.blocked) void checkAvailability(key, session_key);
+  }, [session_key, scope, checkAvailability, refresh_key, control?.revision, control?.blocked, update]);
 
-  const state = (session_key && states.current.get(scopedKey(session_key))) || emptyInput();
+  const saved = (session_key && states.current.get(scopedKey(session_key))) || emptyInput();
+  const state = control?.blocked || saved.control_revision !== control?.revision
+    ? { ...saved, checking: true, availability: null } : saved;
   const maxLength = state.availability?.max_length ?? DEFAULT_MAX_LENGTH;
   const length = Array.from(state.draft).length;
 
   async function send() {
-    if (!session_key) return;
+    if (!session_key || control?.blocked) return;
     const key = scopedKey(session_key);
     const source_session = session_key;
     // Read the ref, not the render snapshot: two clicks in one frame must send once.
@@ -237,7 +247,7 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
       if (session_key) update(scopedKey(session_key), (value) => ({ ...value, delivery_uncertain: false, notice: null }));
     },
     retryAvailability() {
-      if (session_key) void checkAvailability(scopedKey(session_key), session_key);
+      if (session_key && !control?.blocked) void checkAvailability(scopedKey(session_key), session_key);
     },
     send,
   };

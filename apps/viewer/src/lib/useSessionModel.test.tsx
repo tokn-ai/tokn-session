@@ -50,6 +50,14 @@ it("keeps older hosts read-only even when they expose the old immediate model ca
   expect(listSessionModels).not.toHaveBeenCalled();
 });
 
+it("keeps an explicit native capability limitation instead of suggesting an upgrade", async () => {
+  vi.mocked(getSessionModelStatus).mockResolvedValue(status({ supports_model_input: false,
+    reason: "This RPC cannot atomically apply a model on Send." }));
+  const { result } = renderHook(() => useSessionModel("one", undefined));
+  await waitFor(() => expect(result.current.checking).toBe(false));
+  expect(result.current.reason).toBe("This RPC cannot atomically apply a model on Send.");
+});
+
 it.each(["recorded", "catalog"] as const)("preserves %s context when model controls are unavailable", async (source) => {
   vi.mocked(getSessionModelStatus).mockResolvedValue(status({ state: { model: null, source: "unknown", revision: "unknown" },
     can_select: false, can_list: false, supports_model_input: false, reason: "This session is read-only." }));
@@ -135,4 +143,27 @@ it("rejects old-runtime receipts but accepts an applied revision on the current 
   act(() => { expect(result.current.acceptState(state(second, "applied"), true)).toBe(true); });
   expect(result.current.state?.model).toEqual(second);
   expect(result.current.input_revision).toBe(before + 1);
+});
+
+it("retires delayed model catalogs and receipts when the host control route changes", async () => {
+  const catalog = deferred<Awaited<ReturnType<typeof listSessionModels>>>();
+  vi.mocked(listSessionModels).mockReturnValueOnce(catalog.promise);
+  const { result, rerender } = renderHook(({ route }) => useSessionModel("one", undefined, false, 0, route), {
+    initialProps: { route: "rpc" },
+  });
+  await waitFor(() => expect(result.current.checking).toBe(false));
+  const accept_rpc = result.current.acceptState;
+  let loading!: Promise<void>;
+  act(() => { loading = result.current.loadChoices(); });
+  vi.mocked(getSessionModelStatus).mockResolvedValue(status({ runtime_generation: "desktop-owner", state: state(second, "desktop") }));
+  rerender({ route: "desktop" });
+  await waitFor(() => expect(result.current.status?.runtime_generation).toBe("desktop-owner"));
+  await act(async () => {
+    catalog.resolve({ status: status(), models: [{ model: first, supports_images: true }] });
+    await loading;
+  });
+  expect(result.current.choices).toBeNull();
+  expect(result.current.state?.model).toEqual(second);
+  act(() => { expect(accept_rpc(state(first, "late-rpc"))).toBe(false); });
+  expect(result.current.state?.revision).toBe("desktop");
 });

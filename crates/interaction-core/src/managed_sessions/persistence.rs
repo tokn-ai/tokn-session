@@ -1,5 +1,4 @@
 use super::*;
-use crate::workspace::ManagedSessionDialog;
 use serde::{Deserialize, Serialize};
 use std::{
   fs::{File, OpenOptions},
@@ -8,7 +7,7 @@ use std::{
 
 const MAX_STATE_BYTES: u64 = 1024 * 1024;
 
-pub(super) struct SessionLease(File);
+pub struct SessionLease(File);
 
 impl Drop for SessionLease {
   fn drop(&mut self) {
@@ -19,7 +18,10 @@ impl Drop for SessionLease {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(super) struct Receipt {
+pub struct Receipt {
+  /// Missing only while loading a legacy version-one catalog.
+  #[serde(default)]
+  pub provider: Option<crate::Provider>,
   pub request_id: String,
   pub project_id: String,
   pub folder: PathBuf,
@@ -37,8 +39,14 @@ pub(super) struct Receipt {
 }
 
 impl Receipt {
-  pub fn new(request: &CreateProjectSessionRequest, project: &RegisteredProject, fingerprint: String) -> Self {
+  pub fn new(
+    request: &CreateProjectSessionRequest,
+    project: &RegisteredProject,
+    provider: crate::Provider,
+    fingerprint: String,
+  ) -> Self {
     Self {
+      provider: Some(provider),
       request_id: request.request_id.clone(),
       project_id: project.project_id.clone(),
       folder: project.folder_path.clone().into(),
@@ -59,11 +67,10 @@ impl Receipt {
       revision: self.revision,
       request_id: self.request_id.clone(),
       project_id: self.project_id.clone(),
-      provider: "pi".into(),
+      provider: self.provider.map(provider_name).unwrap_or("unknown").into(),
       status: self.status,
       session_id: self.session_id.clone(),
       session_key: self.session_key.clone(),
-      session: None,
       message: self.message.clone(),
       last_turn_error: self.last_turn_error.clone(),
       pending_dialog: self.dialog.clone(),
@@ -78,31 +85,52 @@ struct Saved {
 }
 
 #[derive(Clone)]
-pub(super) struct ReceiptStore {
+pub struct ReceiptStore {
   path: Option<PathBuf>,
   ephemeral_locks: Option<Arc<tempfile::TempDir>>,
+  legacy_provider: Option<crate::Provider>,
+  lease_prefix: String,
+  driver: Arc<dyn ManagedSessionDriver>,
+  host: Arc<dyn ManagedSessionHost>,
 }
 
 impl ReceiptStore {
-  pub fn new(path: Option<PathBuf>) -> Result<(Self, Vec<Receipt>), String> {
+  pub fn new(
+    configuration: ManagedSessionConfiguration,
+    driver: Arc<dyn ManagedSessionDriver>,
+    host: Arc<dyn ManagedSessionHost>,
+  ) -> Result<(Self, Vec<Receipt>), String> {
+    let path = configuration.state_path;
+    if configuration.lease_prefix.is_empty()
+      || !configuration
+        .lease_prefix
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+      return Err("Invalid managed-session lease namespace".into());
+    }
     let temporary = tempfile::tempdir().map_err(|error| error.to_string())?;
     let store = Self {
       path: path.clone(),
       ephemeral_locks: Some(Arc::new(temporary)),
+      legacy_provider: configuration.legacy_provider,
+      lease_prefix: configuration.lease_prefix,
+      driver,
+      host,
     };
     let mut saved = if let Some(path) = &path {
       tokn_session_storage::read_private_json::<Saved>(path, MAX_STATE_BYTES)?.unwrap_or_default()
     } else {
       Saved::default()
     };
-    validate_saved(&saved)?;
+    store.validate_saved(&mut saved)?;
     let mut restarted = Vec::new();
     for receipt in &mut saved.receipts {
       let lease = match store.lease(&receipt.request_id) {
         Ok(lease) => lease,
         Err(_) => {
           receipt.status = ManagedSessionStatus::Stopped;
-          receipt.message = Some("This Pi session is owned by another viewer process".into());
+          receipt.message = Some("This agent session is owned by another host process".into());
           continue;
         }
       };
@@ -113,7 +141,7 @@ impl ReceiptStore {
       if receipt.status != ManagedSessionStatus::Failed {
         receipt.status = ManagedSessionStatus::Stopped;
         receipt.message =
-          Some("The owning viewer runtime has stopped. Send a message to resume the persisted session.".into());
+          Some("The owning host runtime has stopped. Send a message to resume the persisted session.".into());
       }
       receipt.dialog = None;
       restarted.push((receipt.clone(), lease));
@@ -124,16 +152,16 @@ impl ReceiptStore {
       if !restarted.is_empty() {
         saved = update_saved(path, |current: Option<Saved>| {
           let mut current = current.unwrap_or_default();
-          validate_saved(&current)?;
+          store.validate_saved(&mut current)?;
           for (receipt, _) in &restarted {
             merge(&mut current, receipt.clone());
           }
-          current.version = 1;
+          current.version = 2;
           Ok(current)
         })?;
       } else {
         saved = tokn_session_storage::read_private_json::<Saved>(path, MAX_STATE_BYTES)?.unwrap_or_default();
-        validate_saved(&saved)?;
+        store.validate_saved(&mut saved)?;
       }
     }
     for receipt in &mut saved.receipts {
@@ -142,17 +170,21 @@ impl ReceiptStore {
         .any(|(restarted, _)| restarted.request_id == receipt.request_id)
       {
         receipt.status = ManagedSessionStatus::Stopped;
-        receipt.message = Some("This Pi session is owned by another viewer process".into());
+        receipt.message = Some("This agent session is owned by another host process".into());
         receipt.dialog = None;
       }
     }
     Ok((store, saved.receipts))
   }
 
-  pub fn disabled() -> Self {
+  pub fn disabled(provider: crate::Provider) -> Self {
     Self {
       path: None,
       ephemeral_locks: None,
+      legacy_provider: None,
+      lease_prefix: "disabled".into(),
+      driver: Arc::new(DisabledDriver(provider)),
+      host: Arc::new(DisabledHost),
     }
   }
 
@@ -162,12 +194,13 @@ impl ReceiptStore {
     let Some(path) = &self.path else {
       return Ok(None);
     };
-    let saved = tokn_session_storage::read_private_json::<Saved>(path, MAX_STATE_BYTES)?.unwrap_or_default();
-    validate_saved(&saved)?;
+    let mut saved = tokn_session_storage::read_private_json::<Saved>(path, MAX_STATE_BYTES)?.unwrap_or_default();
+    self.validate_saved(&mut saved)?;
     Ok(saved.receipts.into_iter().find(|receipt| receipt.request_id == id))
   }
 
   pub fn admit(&self, receipt: Receipt) -> Result<(Receipt, bool), String> {
+    self.validate_receipt(&receipt)?;
     let Some(path) = &self.path else {
       return Ok((receipt, true));
     };
@@ -175,7 +208,7 @@ impl ReceiptStore {
     let id = receipt.request_id.clone();
     let saved = update_saved(path, |current: Option<Saved>| {
       let mut current = current.unwrap_or_default();
-      validate_saved(&current)?;
+      self.validate_saved(&mut current)?;
       if !current
         .receipts
         .iter()
@@ -187,7 +220,7 @@ impl ReceiptStore {
         current.receipts.push(receipt.clone());
         inserted = true;
       }
-      current.version = 1;
+      current.version = 2;
       Ok(current)
     })?;
     Ok((
@@ -201,14 +234,15 @@ impl ReceiptStore {
   }
 
   pub fn save(&self, receipt: Receipt) -> Result<(), String> {
+    self.validate_receipt(&receipt)?;
     let Some(path) = &self.path else {
       return Ok(());
     };
     update_saved(path, |current: Option<Saved>| {
       let mut current = current.unwrap_or_default();
-      validate_saved(&current)?;
+      self.validate_saved(&mut current)?;
       merge(&mut current, receipt.clone());
-      current.version = 1;
+      current.version = 2;
       Ok(current)
     })
     .map(|_| ())
@@ -221,8 +255,8 @@ impl ReceiptStore {
       .as_ref()
       .and_then(|path| path.parent())
       .or_else(|| self.ephemeral_locks.as_ref().map(|directory| directory.path()))
-      .ok_or("Managed Pi runtime is unavailable")?;
-    let path = directory.join(format!("managed-pi-{id}.lease"));
+      .ok_or("Managed session runtime is unavailable")?;
+    let path = directory.join(format!("{}-{id}.lease", self.lease_prefix));
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
@@ -232,13 +266,13 @@ impl ReceiptStore {
     }
     let file = options
       .open(&path)
-      .map_err(|error| format!("Could not acquire managed Pi ownership: {error}"))?;
+      .map_err(|error| format!("Could not acquire managed session ownership: {error}"))?;
     if !file.metadata().map_err(|error| error.to_string())?.is_file() {
-      return Err("Managed Pi ownership requires a regular lease file".into());
+      return Err("Managed session ownership requires a regular lease file".into());
     }
     file
       .try_lock()
-      .map_err(|error| format!("This Pi session already has an owning viewer runtime: {error}"))?;
+      .map_err(|error| format!("This agent session already has an owning host runtime: {error}"))?;
     Ok(SessionLease(file))
   }
 }
@@ -259,34 +293,85 @@ fn update_saved(path: &Path, mut update: impl FnMut(Option<Saved>) -> Result<Sav
   }
 }
 
-fn validate_saved(saved: &Saved) -> Result<(), String> {
-  if saved.version > 1 || (saved.version == 0 && !saved.receipts.is_empty()) || saved.receipts.len() > MAX_RECEIPTS {
-    return Err("Unsupported managed Pi ownership file".into());
+impl ReceiptStore {
+  fn validate_receipt(&self, receipt: &Receipt) -> Result<(), String> {
+    self.validate_saved(&mut Saved {
+      version: 2,
+      receipts: vec![receipt.clone()],
+    })
   }
-  let mut ids = std::collections::HashSet::new();
-  for receipt in &saved.receipts {
-    validate_uuid(&receipt.request_id, "saved creation request")?;
-    if !ids.insert(&receipt.request_id) || !receipt.folder.is_absolute() || receipt.fingerprint.len() != 64 {
-      return Err("Invalid managed Pi ownership receipt".into());
+
+  fn validate_saved(&self, saved: &mut Saved) -> Result<(), String> {
+    if saved.version > 2 || (saved.version == 0 && !saved.receipts.is_empty()) || saved.receipts.len() > MAX_RECEIPTS {
+      return Err("Unsupported managed session ownership file".into());
     }
-    if receipt.session_file.as_ref().is_some_and(|path| !path.is_absolute()) {
-      return Err("Managed Pi session path must be absolute".into());
-    }
-    match (&receipt.session_id, &receipt.session_file, &receipt.session_key) {
-      (None, None, None) => {}
-      (Some(id), Some(path), Some(key)) => {
-        let locator = crate::model::decode_session_key(key)?;
-        if locator.provider != crate::model::ViewerProvider::Pi
-          || &locator.session_id != id
-          || &locator.source_path != path
-        {
-          return Err("Managed Pi ownership identity is inconsistent".into());
-        }
+    let mut ids = std::collections::HashSet::new();
+    for receipt in &mut saved.receipts {
+      if receipt.provider.is_none() && saved.version == 1 {
+        receipt.provider = self.legacy_provider;
       }
-      _ => return Err("Managed Pi ownership identity is incomplete".into()),
+      let provider = receipt.provider.ok_or(if saved.version == 1 {
+        "Legacy managed-session receipts require an explicit provider migration"
+      } else {
+        "Managed session receipt has no provider identity"
+      })?;
+      if provider != self.driver.provider() {
+        return Err("Managed session receipt belongs to a different provider".into());
+      }
+      validate_uuid(&receipt.request_id, "saved creation request")?;
+      if !ids.insert(&receipt.request_id) || !receipt.folder.is_absolute() || receipt.fingerprint.len() != 64 {
+        return Err("Invalid managed session ownership receipt".into());
+      }
+      if receipt.session_file.as_ref().is_some_and(|path| !path.is_absolute()) {
+        return Err("Managed session path must be absolute".into());
+      }
+      match (&receipt.session_id, &receipt.session_file, &receipt.session_key) {
+        (None, None, None) => {}
+        (Some(id), Some(path), Some(key)) => {
+          self.host.validate_identity(
+            &ManagedHistoryIdentity {
+              provider,
+              session_id: id.clone(),
+              session_file: path.clone(),
+            },
+            key,
+          )?;
+        }
+        _ => return Err("Managed session ownership identity is incomplete".into()),
+      }
     }
+    Ok(())
   }
-  Ok(())
+
+  pub fn validate_resume_target(&self, receipt: &Receipt) -> Result<(), String> {
+    if !receipt.folder.is_dir()
+      || std::fs::canonicalize(&receipt.folder).map_err(|error| error.to_string())? != receipt.folder
+    {
+      return Err("The registered project folder is unavailable".into());
+    }
+    let file = receipt
+      .session_file
+      .as_ref()
+      .ok_or("The agent has not persisted a session file to resume")?;
+    let id = receipt
+      .session_id
+      .as_deref()
+      .ok_or("The agent session identity is unavailable")?;
+    let identity = self
+      .driver
+      .validate_history(file, id, &receipt.folder)?
+      .ok_or("The owned session file is unavailable")?;
+    if identity.provider != self.driver.provider() || identity.session_id != id || &identity.session_file != file {
+      return Err("Managed session ownership identity is inconsistent".into());
+    }
+    self.host.validate_identity(
+      &identity,
+      receipt
+        .session_key
+        .as_deref()
+        .ok_or("The agent session key is unavailable")?,
+    )
+  }
 }
 
 fn merge(saved: &mut Saved, receipt: Receipt) {
@@ -303,60 +388,52 @@ fn merge(saved: &mut Saved, receipt: Receipt) {
   }
 }
 
-/// Only the native header is read, with a strict bound independent of the
-/// provider's historical reader. A planned file name alone is never identity.
-pub(super) fn validate_session(
-  path: &Path,
-  session_id: &str,
-  folder: &Path,
-) -> Result<Option<(PathBuf, String)>, String> {
-  use std::io::{BufRead, BufReader, Read};
-  let file = match File::open(path) {
-    Ok(file) => file,
-    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-    Err(error) => return Err(format!("Could not inspect Pi history: {error}")),
-  };
-  if !file.metadata().map_err(|error| error.to_string())?.is_file() {
-    return Err("Pi session history must be a regular file".into());
-  }
-  let mut line = String::new();
-  BufReader::new(file.take(65537))
-    .read_line(&mut line)
-    .map_err(|error| error.to_string())?;
-  if line.len() > 65536 {
-    return Err("Pi session header exceeds its size limit".into());
-  }
-  if !line.ends_with('\n') {
-    return Ok(None);
-  }
-  let header: serde_json::Value = serde_json::from_str(&line).map_err(|_| "Pi persisted an invalid session header")?;
-  if header.get("type").and_then(|value| value.as_str()) != Some("session")
-    || header.get("id").and_then(|value| value.as_str()) != Some(session_id)
-  {
-    return Err("Pi persisted a different session identity".into());
-  }
-  let cwd = header
-    .get("cwd")
-    .and_then(|value| value.as_str())
-    .ok_or("Pi session header has no working directory")?;
-  if std::fs::canonicalize(cwd).map_err(|error| error.to_string())? != folder
-    || std::fs::canonicalize(folder).map_err(|error| error.to_string())? != folder
-  {
-    return Err("Pi session working directory differs from its registered project".into());
-  }
-  let path = std::fs::canonicalize(path).map_err(|error| error.to_string())?;
-  let key = crate::model::encode_session_key(&crate::model::SessionLocator {
-    version: 1,
-    provider: crate::model::ViewerProvider::Pi,
-    session_id: session_id.into(),
-    source_path: path.clone(),
-  })?;
-  Ok(Some((path, key)))
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  struct TestDriver;
+  impl ManagedSessionDriver for TestDriver {
+    fn provider(&self) -> crate::Provider {
+      crate::Provider::Pi
+    }
+    fn label(&self) -> &str {
+      "test"
+    }
+    fn spawn(&self, _worker: ManagedWorker) -> crate::AdapterFuture<'static, ()> {
+      Box::pin(async {})
+    }
+    fn validate_history(
+      &self,
+      path: &Path,
+      session_id: &str,
+      _folder: &Path,
+    ) -> Result<Option<ManagedHistoryIdentity>, String> {
+      Ok(Some(ManagedHistoryIdentity {
+        provider: self.provider(),
+        session_id: session_id.into(),
+        session_file: path.into(),
+      }))
+    }
+  }
+  struct TestHost;
+  impl ManagedSessionHost for TestHost {
+    fn session_key(&self, identity: &ManagedHistoryIdentity) -> Result<String, String> {
+      Ok(format!("{}:{}", identity.session_id, identity.session_file.display()))
+    }
+  }
+  fn new_store(path: Option<PathBuf>) -> Result<(ReceiptStore, Vec<Receipt>), String> {
+    ReceiptStore::new(
+      ManagedSessionConfiguration {
+        state_path: path,
+        idle_timeout: IDLE_TIMEOUT,
+        legacy_provider: Some(crate::Provider::Pi),
+        lease_prefix: "managed-pi".into(),
+      },
+      Arc::new(TestDriver),
+      Arc::new(TestHost),
+    )
+  }
 
   fn receipt(folder: &Path) -> Receipt {
     Receipt::new(
@@ -368,12 +445,10 @@ mod tests {
       },
       &RegisteredProject {
         project_id: "project".into(),
-        group_key: "group".into(),
         folder_path: folder.canonicalize().unwrap().to_string_lossy().into(),
-        name: "Project".into(),
-        created_at_ms: 0,
         available: true,
       },
+      crate::Provider::Pi,
       "a".repeat(64),
     )
   }
@@ -382,7 +457,7 @@ mod tests {
   fn durable_admission_is_idempotent_and_never_persists_prompt_text() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state/managed.json");
-    let (store, _) = ReceiptStore::new(Some(path.clone())).unwrap();
+    let (store, _) = new_store(Some(path.clone())).unwrap();
     let original = receipt(directory.path());
     let (_, inserted) = store.admit(original.clone()).unwrap();
     assert!(inserted);
@@ -398,21 +473,21 @@ mod tests {
   fn restart_does_not_claim_a_live_owner_and_releases_lease_on_drop() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("managed.json");
-    let (store, _) = ReceiptStore::new(Some(path.clone())).unwrap();
+    let (store, _) = new_store(Some(path.clone())).unwrap();
     let mut original = receipt(directory.path());
     original.status = ManagedSessionStatus::Running;
     store.admit(original.clone()).unwrap();
     let lease = store.lease(&original.request_id).unwrap();
     assert!(store.lease(&original.request_id).is_err());
-    let (_, concurrent) = ReceiptStore::new(Some(path.clone())).unwrap();
+    let (_, concurrent) = new_store(Some(path.clone())).unwrap();
     assert_eq!(concurrent[0].revision, original.revision);
-    assert!(concurrent[0].message.as_deref().unwrap().contains("another viewer"));
+    assert!(concurrent[0].message.as_deref().unwrap().contains("another host"));
     let disk: Saved = tokn_session_storage::read_private_json(&path, MAX_STATE_BYTES)
       .unwrap()
       .unwrap();
     assert_eq!(disk.receipts[0].status, ManagedSessionStatus::Running);
     drop(lease);
-    let (_, restarted) = ReceiptStore::new(Some(path)).unwrap();
+    let (_, restarted) = new_store(Some(path)).unwrap();
     assert_eq!(restarted[0].status, ManagedSessionStatus::Stopped);
     assert_eq!(restarted[0].revision, original.revision + 1);
     assert!(store.lease(&original.request_id).is_ok());
@@ -422,7 +497,7 @@ mod tests {
   #[test]
   fn releasing_ownership_unlocks_descriptors_inherited_by_another_child() {
     let directory = tempfile::tempdir().unwrap();
-    let (store, _) = ReceiptStore::new(Some(directory.path().join("managed.json"))).unwrap();
+    let (store, _) = new_store(Some(directory.path().join("managed.json"))).unwrap();
     let id = uuid::Uuid::new_v4().to_string();
     let lease = store.lease(&id).unwrap();
     // Model the shared file description a concurrent fork can retain before
@@ -443,35 +518,10 @@ mod tests {
   }
 
   #[test]
-  fn header_identity_requires_complete_matching_native_header() {
-    let directory = tempfile::tempdir().unwrap();
-    let folder = directory.path().canonicalize().unwrap();
-    let path = directory.path().join("native.jsonl");
-    assert!(validate_session(&path, "native-id", &folder).unwrap().is_none());
-    std::fs::write(&path, "{\"type\":\"session\"").unwrap();
-    assert!(validate_session(&path, "native-id", &folder).unwrap().is_none());
-    let header = serde_json::json!({"type":"session","id":"native-id","cwd":folder});
-    std::fs::write(&path, format!("{header}\n")).unwrap();
-    let (_, key) = validate_session(&path, "native-id", &folder).unwrap().unwrap();
-    let locator = crate::model::decode_session_key(&key).unwrap();
-    assert_eq!(locator.session_id, "native-id");
-    assert_eq!(locator.source_path, path.canonicalize().unwrap());
-    assert!(validate_session(&path, "wrong-id", &folder).is_err());
-    let other = tempfile::tempdir().unwrap();
-    assert!(validate_session(&path, "native-id", &other.path().canonicalize().unwrap()).is_err());
-    std::fs::write(&path, format!("{}\n", "x".repeat(65537))).unwrap();
-    assert!(
-      validate_session(&path, "native-id", &folder)
-        .unwrap_err()
-        .contains("size limit")
-    );
-  }
-
-  #[test]
   fn stale_metadata_cannot_overwrite_a_later_revision() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("managed.json");
-    let (store, _) = ReceiptStore::new(Some(path.clone())).unwrap();
+    let (store, _) = new_store(Some(path.clone())).unwrap();
     let original = receipt(directory.path());
     store.admit(original.clone()).unwrap();
     let mut newer = original.clone();
@@ -487,10 +537,31 @@ mod tests {
   }
 
   #[test]
+  fn current_catalogs_never_guess_missing_or_conflicting_provider_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("managed.json");
+    let (store, _) = new_store(Some(path.clone())).unwrap();
+    store.admit(receipt(directory.path())).unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    for (provider, expected) in [
+      (serde_json::Value::Null, "no provider identity"),
+      (serde_json::json!("codex"), "different provider"),
+    ] {
+      let mut invalid = saved.clone();
+      invalid["receipts"][0]["provider"] = provider;
+      let bytes = serde_json::to_vec(&invalid).unwrap();
+      std::fs::write(&path, &bytes).unwrap();
+      let error = new_store(Some(path.clone())).err().unwrap();
+      assert!(error.contains(expected), "{error}");
+      assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+  }
+
+  #[test]
   fn short_receipt_lock_contention_does_not_fail_an_independent_actor() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("managed.json");
-    let (store, _) = ReceiptStore::new(Some(path.clone())).unwrap();
+    let (store, _) = new_store(Some(path.clone())).unwrap();
     let mut original = receipt(directory.path());
     store.admit(original.clone()).unwrap();
     let lock = OpenOptions::new()

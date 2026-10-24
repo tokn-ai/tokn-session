@@ -312,6 +312,25 @@ export interface SessionInputStatusRequest {
   session_key: string;
 }
 
+export type SessionTransport = "rpc" | "desktop";
+export interface SessionControlRequest { session_key: string }
+export interface SetSessionControlRequest extends SessionControlRequest {
+  request_id: string;
+  transport: SessionTransport;
+}
+export interface CancelSessionTurnRequest extends SessionControlRequest { request_id: string }
+export interface SessionControlStatus {
+  session_key: string;
+  provider: ViewerProvider;
+  transport: SessionTransport;
+  can_select: boolean;
+  can_cancel: boolean;
+  available: boolean;
+  message: string;
+  runtime_id: string | null;
+  instance_id: string | null;
+}
+
 export interface ModelIdentity {
   model_provider: string | null;
   model_id: string;
@@ -1030,6 +1049,8 @@ export interface SessionQuestionStatus {
   available: boolean;
   message: string;
   question_ids: string[];
+  /** Live callbacks can request secrecy absent from the recorded projection. */
+  secret_question_ids?: string[];
   max_length: number;
 }
 export interface SessionQuestionAnswer {

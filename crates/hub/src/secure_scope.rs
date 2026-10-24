@@ -24,6 +24,11 @@ pub async fn forward(
   let request = match &grant.scope {
     GrantScope::All {} => {
       if !(config.allow_control && grant.allow_control)
+        && let Some(value) = protocol::read_only_session_control_response(path, &body, "This grant allows viewing only")
+      {
+        return json_response(value);
+      }
+      if !(config.allow_control && grant.allow_control)
         && let Some(value) = protocol::read_only_model_response(path, "This grant allows viewing only")
       {
         return json_response(value);
@@ -58,6 +63,8 @@ pub async fn forward(
         "select_session_model"
           | "submit_session_input"
           | "submit_session_question_answers"
+          | "set_session_control"
+          | "cancel_session_turn"
           | "retry_session_index"
           | "upload_image_chunk"
           | "release_image_upload"
