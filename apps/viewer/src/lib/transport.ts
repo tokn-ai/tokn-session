@@ -1,3 +1,4 @@
+import { isMobileApp } from "./platform";
 import { LiveSessionSocket } from "./liveSessionSocket";
 import type { BackgroundUpdatesRequest, SessionUpdatesRequest, TransportState } from "./types";
 export type UnlistenFn = () => void;
@@ -12,6 +13,8 @@ const MAX_SESSION_UPDATE_FRAME_LENGTH = 64 * 1024 * 1024;
 export function eventFrameLimit(frame: string): number {
   return /^event: ?session-updated\n/.test(frame) ? MAX_SESSION_UPDATE_FRAME_LENGTH : MAX_EVENT_FRAME_LENGTH;
 }
+// Legacy name: this detects Tauri IPC on both desktop and mobile. Local
+// capabilities additionally require !isMobileApp().
 export const isDesktop = () => "__TAURI_INTERNALS__" in window;
 
 export interface ViewerClient {
@@ -238,12 +241,12 @@ export function deselectMachine(client: ViewerClient) {
 }
 export async function invoke<T>(command: string, payload?: Record<string, unknown>): Promise<T> {
   if (selected) return selected.invoke<T>(command, payload);
-  if (isDesktop()) return (await import("@tauri-apps/api/core")).invoke<T>(command, payload);
+  if (isDesktop() && !isMobileApp()) return (await import("@tauri-apps/api/core")).invoke<T>(command, payload);
   throw new Error("Connect to a machine first");
 }
 export async function listen<T>(event: string, handler: (event: { payload: T }) => void): Promise<UnlistenFn> {
   if (selected) return selected.listen<T>(event, handler);
-  if (isDesktop()) return (await import("@tauri-apps/api/event")).listen<T>(event, handler);
+  if (isDesktop() && !isMobileApp()) return (await import("@tauri-apps/api/event")).listen<T>(event, handler);
   throw new Error("Connect to a machine first");
 }
 
@@ -254,7 +257,7 @@ export function captureTransport(): {
   release: (command: string, payload?: Record<string, unknown>) => Promise<void>;
   on_close: (handler: () => void) => UnlistenFn;
 } {
-  if (!selected && isDesktop()) {
+  if (!selected && isDesktop() && !isMobileApp()) {
     const local: CommandInvoker = async <T>(command: string, payload?: Record<string, unknown>) =>
       (await import("@tauri-apps/api/core")).invoke<T>(command, payload);
     const subscribe: EventSubscriber = async <T>(event: string, handler: (event: { payload: T }) => void) =>

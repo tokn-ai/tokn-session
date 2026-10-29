@@ -4,6 +4,19 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
+The viewer now has a remote-only Android/iOS Tauri entry point, shared native
+Hub pairing/remembered identities, and mobile-private preference storage. Mobile
+does not register local history, hosting, or process commands; onboarding uses
+authenticator codes (mobile passkey ceremonies remain unimplemented). Android
+scaffolding and platform build scripts/configuration are in `apps/viewer`.
+Phone layouts account for safe areas and the visual viewport when keyboards open.
+`hub-remote` now owns native client trust persistence, with the existing Hub
+onboarding exports preserved, so mobile avoids server/SQLite/WebAuthn dependencies.
+Android ARM64 checking, linking, and debug APK packaging pass, along with the
+workspace/viewer tests and Chromium phone/tablet layout checks. iOS is configured
+for 16.4+ but remains unbuilt; native device pairing and keyboard checks remain.
+See [mobile viewer](viewer-mobile.md) for build setup and device verification.
+
 The desktop’s **New session** dialog now creates Pi, Codex, OpenCode and DSH
 sessions in registered local projects. Provider/runtime choices are checked
 without starting agents. Codex retains executable discovery; OpenCode requires a

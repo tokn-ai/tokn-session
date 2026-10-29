@@ -7,6 +7,13 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   --sidebar-width: 260px;
+  --app-height: 100dvh;
+  --app-top: 0px;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --app-content-height: calc(var(--app-height) - var(--safe-top) - var(--safe-bottom));
   --conversation-width: 760px;
   --app-bg: #ffffff;
   --sidebar-bg: #f7f7f7;
@@ -84,6 +91,13 @@ body {
   background: var(--app-bg);
 }
 
+#root {
+  position: fixed;
+  top: var(--app-top);
+  height: var(--app-height);
+  padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+}
+
 button,
 input {
   color: inherit;
@@ -155,7 +169,7 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   min-height: 32px;
-  padding: 0 10px env(safe-area-inset-bottom) 13px;
+  padding: 0 10px 0 13px;
   color: var(--text-soft);
   background: var(--surface-raised);
   border-top: 1px solid var(--border);
@@ -288,7 +302,7 @@ button:disabled {
   left: 8px;
   bottom: calc(100% + 8px);
   width: min(352px, calc(100vw - 16px));
-  max-height: calc(100dvh - 64px);
+  max-height: calc(var(--app-height) - 64px);
   overflow: auto;
   padding: 0;
   color: var(--text);
@@ -505,7 +519,7 @@ button:disabled {
   right: 8px;
   bottom: calc(100% + 8px);
   width: min(390px, calc(100vw - 16px));
-  max-height: min(540px, calc(100dvh - 54px));
+  max-height: min(540px, calc(var(--app-height) - 54px));
   overflow: auto;
   color: var(--text);
   background: var(--surface-raised);
@@ -1728,7 +1742,7 @@ button:disabled {
   display: block;
   width: 100%;
   min-height: 64px;
-  max-height: min(220px, 32dvh);
+  max-height: min(220px, calc(var(--app-content-height) * 0.25));
   padding: 16px 18px 8px;
   resize: none;
   overflow-y: auto;
@@ -1742,7 +1756,7 @@ button:disabled {
 }
 
 .session-composer[data-expanded="true"] textarea {
-  min-height: min(110px, 32dvh);
+  min-height: min(110px, calc(var(--app-content-height) * 0.2));
 }
 
 .session-composer textarea:disabled {
@@ -1770,6 +1784,7 @@ button:disabled {
 
 .session-composer__send {
   display: grid;
+  flex: none;
   width: 32px;
   height: 32px;
   place-items: center;
@@ -1799,7 +1814,7 @@ button:disabled {
 }
 
 .session-composer__status {
-  max-height: min(120px, 20dvh);
+  max-height: min(120px, calc(var(--app-content-height) * 0.2));
   overflow: auto;
   overflow-wrap: anywhere;
   display: flex;
@@ -3616,10 +3631,10 @@ button:disabled {
 
   .sidebar-shell {
     position: fixed;
-    inset: 0 auto 0 0;
+    inset: var(--app-top) auto auto 0;
     width: min(350px, calc(100vw - 32px));
-    height: 100%;
-    height: 100dvh;
+    height: var(--app-height);
+    padding: var(--safe-top) 0 var(--safe-bottom) var(--safe-left);
     box-shadow: var(--shadow);
   }
 
@@ -3667,6 +3682,7 @@ button:disabled {
   .icon-button {
     width: 40px;
     height: 40px;
+    flex-basis: 40px;
   }
 
   .search-field {
@@ -3829,7 +3845,7 @@ button:disabled {
   height: 100%;
   overflow: auto;
   display: grid;
-  place-items: center;
+  place-items: safe center;
   padding: 24px;
 }
 .machine-connect form {

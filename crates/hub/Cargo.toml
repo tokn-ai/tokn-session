@@ -27,6 +27,7 @@ serde_json.workspace = true
 sha2 = "0.10"
 subtle = "2"
 tokn-hub-client-core.workspace = true
+tokn-hub-remote.workspace = true
 tokn-hub-transport.workspace = true
 tokn-session-storage.workspace = true
 tokio.workspace = true

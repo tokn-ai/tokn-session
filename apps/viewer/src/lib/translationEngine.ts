@@ -1,6 +1,7 @@
 import { createUuid } from "./id";
 import { browserTranslationEngine } from "./browserTranslation";
 import { cancelTranslation, getTranslationStatus, openTranslationSettings, translateText } from "./tauri";
+import { isMobileApp } from "./platform";
 import { isDesktop } from "./transport";
 import type { TranslationFailure, TranslationStatus } from "./types";
 
@@ -78,5 +79,5 @@ const appleTranslationEngine: TranslationEngine = {
 };
 
 export function createTranslationEngine(): TranslationEngine {
-  return isDesktop() ? appleTranslationEngine : browserTranslationEngine;
+  return isDesktop() && !isMobileApp() ? appleTranslationEngine : browserTranslationEngine;
 }

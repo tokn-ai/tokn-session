@@ -202,6 +202,11 @@
 .settings-page__location code { font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
 .settings-page__location > span { color: var(--text-muted); font-size: 10px; }
 
+@media (max-width: 860px) {
+  .settings-page :is(input:not([type="checkbox"]), select, textarea) { font-size: 16px; }
+  .settings-page :where(button:not(.icon-button):not(.settings-page__nav-item)) { min-height: 44px; }
+}
+
 @media (max-width: 760px) {
   .settings-page__header { padding: 20px; }
   .settings-page__layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }

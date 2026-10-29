@@ -19,12 +19,15 @@ tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tokn-hub-client-core.workspace = true
 tokn-hub-transport.workspace = true
-tokn-session-hub.workspace = true
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
+tokn-session-hub.workspace = true
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors"] }
 tempfile = "3"
