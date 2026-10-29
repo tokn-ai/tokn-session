@@ -2,6 +2,7 @@
 //! Explicit turn starts are safe normalization boundaries. Older formats with
 //! no provable boundary retain the full-reader correctness fallback.
 use super::*;
+use crate::storage::{ReadWorkBudget, ScratchFile};
 use serde::Deserialize;
 use tokn_session_core::{ModelIdentity, ModelObservation, ModelOrigin};
 
@@ -35,9 +36,11 @@ struct ModelSettings {
 /// Find state immediately before the retained range. This is separate from
 /// event normalization and never manufactures source rows or changes offsets.
 pub(super) fn model_baseline(
-  files: &mut [File],
+  files: &mut [ScratchFile],
   lengths: &[u64],
   source_start: u64,
+  max_record_bytes: usize,
+  work: &ReadWorkBudget,
   stats: &mut CodexHistoryReadStats,
 ) -> Result<Option<ModelObservation>, String> {
   let mut logical = lengths.iter().sum::<u64>();
@@ -56,7 +59,13 @@ pub(super) fn model_baseline(
     if remaining == 0 {
       break;
     }
-    let mut lines = ReverseLines::within(file, end, end.saturating_sub(remaining));
+    let mut lines = ReverseLines::within(
+      file,
+      end,
+      end.saturating_sub(remaining.min(max_record_bytes as u64)),
+      max_record_bytes,
+      work,
+    );
     while let Some((_, row)) = lines.next(&mut probes)? {
       stats.model_checkpoint_rows_scanned += 1;
       let Ok(probe) = serde_json::from_slice::<ModelProbe>(&row) else {
@@ -118,16 +127,18 @@ struct Payload {
 }
 
 pub(super) fn start(
-  files: &mut [File],
+  files: &mut [ScratchFile],
   lengths: &[u64],
   turns: usize,
+  max_record_bytes: usize,
+  work: &ReadWorkBudget,
   stats: &mut CodexHistoryReadStats,
 ) -> Result<u64, String> {
   let mut logical = lengths.iter().sum::<u64>();
   let mut remaining = turns;
   for (file, length) in files.iter_mut().zip(lengths).rev() {
     logical -= length;
-    let mut lines = ReverseLines::new(file, *length);
+    let mut lines = ReverseLines::within(file, *length, 0, max_record_bytes, work);
     while let Some((offset, row)) = lines.next(stats)? {
       stats.boundary_rows_scanned += 1;
       let Ok(probe) = serde_json::from_slice::<Probe>(&row) else {
@@ -169,14 +180,18 @@ struct ReverseLines<'a> {
   buffer: Vec<u8>,
   discard_partial: bool,
   first: bool,
+  max_record_bytes: usize,
+  work: &'a ReadWorkBudget,
 }
 
 impl<'a> ReverseLines<'a> {
-  fn new(file: &'a mut File, length: u64) -> Self {
-    Self::within(file, length, 0)
-  }
-
-  fn within(file: &'a mut File, length: u64, lower_bound: u64) -> Self {
+  fn within(
+    file: &'a mut File,
+    length: u64,
+    lower_bound: u64,
+    max_record_bytes: usize,
+    work: &'a ReadWorkBudget,
+  ) -> Self {
     Self {
       file,
       position: length,
@@ -184,17 +199,23 @@ impl<'a> ReverseLines<'a> {
       buffer: Vec::new(),
       discard_partial: false,
       first: true,
+      max_record_bytes,
+      work,
     }
   }
 
   fn next(&mut self, stats: &mut CodexHistoryReadStats) -> Result<Option<(u64, Vec<u8>)>, String> {
     loop {
+      self.work.check()?;
       let end = self
         .buffer
         .len()
         .saturating_sub(usize::from(self.buffer.last() == Some(&b'\n')));
       if let Some(previous) = self.buffer[..end].iter().rposition(|byte| *byte == b'\n') {
         let start = previous + 1;
+        if self.buffer.len() - start > self.max_record_bytes {
+          return Err("Codex history record exceeds the record size limit".into());
+        }
         let row = self.buffer[start..end].to_vec();
         let offset = self.position + start as u64;
         self.buffer.truncate(start);
@@ -209,6 +230,9 @@ impl<'a> ReverseLines<'a> {
         if self.buffer.is_empty() || self.lower_bound != 0 {
           return Ok(None);
         }
+        if self.buffer.len() > self.max_record_bytes {
+          return Err("Codex history record exceeds the record size limit".into());
+        }
         let mut row = std::mem::take(&mut self.buffer);
         if row.last() == Some(&b'\n') {
           row.pop();
@@ -219,7 +243,12 @@ impl<'a> ReverseLines<'a> {
         return Ok(Some((0, row)));
       }
       // Grow reads for long rows, avoiding quadratic prefix copying.
-      let length = (self.position - self.lower_bound).min(self.buffer.len().max(64 * 1024) as u64);
+      if self.buffer.len() > self.max_record_bytes {
+        return Err("Codex history record exceeds the record size limit".into());
+      }
+      let length = (self.position - self.lower_bound)
+        .min(self.buffer.len().max(64 * 1024) as u64)
+        .min(self.max_record_bytes.saturating_add(1) as u64);
       self.position -= length;
       self
         .file
@@ -234,9 +263,6 @@ impl<'a> ReverseLines<'a> {
         self.first = false;
       }
       self.buffer = bytes;
-      if self.buffer.len() > 128 * 1024 * 1024 {
-        return Err("Codex history row exceeds the snapshot size limit".into());
-      }
     }
   }
 }

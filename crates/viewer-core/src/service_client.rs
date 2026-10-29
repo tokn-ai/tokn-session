@@ -110,13 +110,13 @@ pub async fn load_catalog(endpoint: &str) -> Result<RelayCatalog, String> {
 pub async fn load_catalog_from(connection: &Connection) -> Result<RelayCatalog, String> {
   let (mut stream, providers, native) = connect(connection, Action::Catalog).await?;
   let mut entries = Vec::new();
-  let mut bytes = 0;
+  let mut bytes = 0usize;
   loop {
     match receive(&mut stream).await? {
       Frame::Header { entry } => {
-        bytes += serde_json::to_vec(&entry).map_err(|e| e.to_string())?.len();
-        if bytes > MAX_SNAPSHOT_BYTES {
-          return Err("Relay catalog exceeds memory limit".into());
+        bytes = bytes.saturating_add(serde_json::to_vec(&entry).map_err(|e| e.to_string())?.len());
+        if bytes > MAX_CATALOG_PAYLOAD_BYTES {
+          return Err("Relay catalog exceeds the buffered catalog budget".into());
         }
         entries.push(entry);
       }
@@ -208,6 +208,10 @@ impl RelaySubscription {
   /// No partial snapshot escapes this method. Interrupted transactions leave
   /// the caller's last committed snapshot intact and require reconnection.
   pub async fn next_snapshot(&mut self) -> Result<SessionSnapshot, String> {
+    self.next_snapshot_with_limit(MAX_RETAINED_WINDOW_BYTES).await
+  }
+
+  async fn next_snapshot_with_limit(&mut self, max_retained_bytes: usize) -> Result<SessionSnapshot, String> {
     let (generation, revision, reset, header) = loop {
       match receive(&mut self.stream).await? {
         Frame::Begin {
@@ -265,9 +269,9 @@ impl RelaySubscription {
           if record.path != header.path || record.session.session_id != header.id {
             return Err("Relay snapshot contains a record outside its session".into());
           }
-          bytes += serde_json::to_vec(&record).map_err(|e| e.to_string())?.len();
-          if bytes > MAX_SNAPSHOT_BYTES {
-            return Err("Relay snapshot exceeds memory limit".into());
+          bytes = bytes.saturating_add(serde_json::to_vec(&record).map_err(|e| e.to_string())?.len());
+          if bytes > max_retained_bytes {
+            return Err("Relay history window exceeds the retained payload budget".into());
           }
           let redacted = record
             .record
@@ -403,6 +407,39 @@ mod tests {
       has_earlier: false,
       bytes: 0,
     }
+  }
+
+  #[tokio::test]
+  async fn retained_window_budget_counts_live_appends_and_keeps_the_last_commit() {
+    let frames = (1..=2)
+      .flat_map(|revision| {
+        [
+          Frame::Begin {
+            generation: "generation".into(),
+            revision: revision.to_string(),
+            reset: revision == 1,
+            header: fixture_header(),
+          },
+          fixture_record(),
+          Frame::Commit {
+            generation: "generation".into(),
+            revision: revision.to_string(),
+          },
+        ]
+      })
+      .collect();
+    let mut subscription = scripted_subscription(false, frames);
+    let Frame::Record { record } = fixture_record() else {
+      unreachable!()
+    };
+    let one_record = serde_json::to_vec(&record).unwrap().len();
+    let budget = one_record + one_record / 2;
+    let first = subscription.next_snapshot_with_limit(budget).await.unwrap();
+    let error = subscription.next_snapshot_with_limit(budget).await.err().unwrap();
+    assert!(error.contains("retained payload budget"));
+    assert_eq!(subscription.revision, 1);
+    assert_eq!(subscription.bytes, one_record);
+    assert_eq!(subscription.events.len(), first.loaded.events.len());
   }
 
   #[tokio::test]

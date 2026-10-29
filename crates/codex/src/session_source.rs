@@ -1,7 +1,8 @@
+use crate::storage::ReadWorkBudget;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use crate::event::CodexLine;
@@ -211,8 +212,14 @@ impl CodexSessionSource {
     let mut normalizer = CodexNormalizer::new_historical();
     let mut events = Vec::new();
 
-    for (index, line) in reader.lines().enumerate() {
+    let limits = crate::CodexHistoryLimits::default();
+    let mut materialized_bytes = 0usize;
+    for (index, line) in crate::bounded_lines::lines(reader, limits.max_record_bytes).enumerate() {
       let line = line.map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+      materialized_bytes = materialized_bytes.saturating_add(line.len() + 1);
+      if materialized_bytes > limits.max_snapshot_bytes {
+        return Err("Codex history exceeds the snapshot size limit".into());
+      }
       if line.trim().is_empty() {
         continue;
       }
@@ -588,7 +595,7 @@ fn inspect_session(path: &Path) -> Result<SessionRef, String> {
   let mut history_boundary = CodexHistoryBoundary::new();
   let mut saw_session_meta = false;
 
-  for line in reader.lines() {
+  for line in crate::bounded_lines::lines(reader, crate::CodexHistoryLimits::default().max_record_bytes) {
     let line = line.map_err(|err| format!("failed to read {}: {err}", path.display()))?;
     if line.trim().is_empty() {
       continue;
@@ -616,8 +623,12 @@ fn inspect_session(path: &Path) -> Result<SessionRef, String> {
 }
 
 pub(crate) fn inspect_session_header(path: &Path) -> Result<SessionRef, String> {
+  inspect_session_header_with_budget(path, &ReadWorkBudget::default())
+}
+
+pub(crate) fn inspect_session_header_with_budget(path: &Path, work: &ReadWorkBudget) -> Result<SessionRef, String> {
   let path = crate::storage::resolve_path(path);
-  let reader = crate::storage::reader(&path)?;
+  let reader = crate::storage::reader_with_budget(&path, work)?.take(8 * 1024 * 1024);
   let mut reference = SessionRef {
     model_baseline: None,
     id: session_id_from_path(&path),
@@ -633,7 +644,7 @@ pub(crate) fn inspect_session_header(path: &Path) -> Result<SessionRef, String> 
     message_count: 0,
   };
 
-  for line in reader.lines() {
+  for line in crate::bounded_lines::lines(reader, crate::CodexHistoryLimits::default().max_record_bytes) {
     let line = line.map_err(|err| format!("failed to read {}: {err}", path.display()))?;
     if line.trim().is_empty() {
       continue;
@@ -684,7 +695,7 @@ fn inspect_session_preview(path: &Path) -> Result<Option<String>, String> {
   let mut saw_session_meta = false;
   let mut scanned = 0;
 
-  for line in reader.lines() {
+  for line in crate::bounded_lines::lines(reader, crate::CodexHistoryLimits::default().max_record_bytes) {
     let line = line.map_err(|err| format!("failed to read {}: {err}", path.display()))?;
     if line.trim().is_empty() {
       continue;

@@ -280,7 +280,7 @@ fn projection_bounds_complete_and_incomplete_rows_before_allocating_the_source()
       .poll(&source, |_, _| {})
       .err()
       .unwrap()
-      .contains("history row exceeds")
+      .contains("history record exceeds")
   );
   assert_eq!(
     reader.stats().source_bytes_read,
@@ -303,7 +303,7 @@ fn projection_bounds_complete_and_incomplete_rows_before_allocating_the_source()
       .poll(&source, |_, _| {})
       .err()
       .unwrap()
-      .contains("history row exceeds")
+      .contains("history record exceeds")
   );
   assert_eq!(reader.stats().source_bytes_read - before, RECORD_LIMIT as u64 + 1);
 }

@@ -13,6 +13,8 @@ use crate::{
   service_source::{FileVersion, versions},
 };
 
+const MAX_QUESTION_STATE_BYTES: usize = 8 * 1024 * 1024;
+
 /// Only the first nonempty display line survives streaming. Whitespace and
 /// line boundaries can cross chunks; no complete message text is retained.
 #[derive(Clone, Default)]
@@ -73,8 +75,8 @@ struct AssistantStream {
 pub(crate) struct Activity {
   pub final_count: u64,
   pub running: bool,
-  active_turn: Option<String>,
-  last_final_id: Option<String>,
+  active_turn: Option<[u8; 32]>,
+  last_final_id: Option<[u8; 32]>,
   assistant_stream: Option<AssistantStream>,
   pub presentation: SessionPresentation,
   questions: crate::questions::Questions,
@@ -150,10 +152,11 @@ impl Activity {
     self.question_attention = self.questions.summary();
     match event {
       AgentEvent::Lifecycle(l) if matches!(l.scope, LifecycleScope::Turn) => {
+        let identity: [u8; 32] = Sha256::digest(l.turn_id.as_bytes()).into();
         if l.phase == Phase::Started {
-          self.active_turn = Some(l.turn_id.clone());
+          self.active_turn = Some(identity);
           self.running = true;
-        } else if l.phase == Phase::Finished && self.active_turn.as_ref().is_none_or(|id| id == &l.turn_id) {
+        } else if l.phase == Phase::Finished && self.active_turn.is_none_or(|id| id == identity) {
           self.running = false;
           self.active_turn = None;
           self.assistant_stream = None;
@@ -162,10 +165,11 @@ impl Activity {
       AgentEvent::Message(m)
         if m.role == Role::Assistant && m.delivery == MessageDelivery::Final && m.phase == Phase::Finished =>
       {
-        if m.message_id.is_none() || m.message_id != self.last_final_id {
+        let identity: Option<[u8; 32]> = m.message_id.as_ref().map(|id| Sha256::digest(id.as_bytes()).into());
+        if identity.is_none() || identity != self.last_final_id {
           self.final_count = self.final_count.saturating_add(1);
         }
-        self.last_final_id = m.message_id.clone();
+        self.last_final_id = identity;
         self.running = false;
         self.active_turn = None;
       }
@@ -303,14 +307,25 @@ impl ActivityReaders {
   }
 
   pub fn read(&mut self, locator: &SessionLocator) -> Result<Activity, String> {
+    self.read_with_question_budget(locator, MAX_QUESTION_STATE_BYTES)
+  }
+
+  fn read_with_question_budget(
+    &mut self,
+    locator: &SessionLocator,
+    max_question_bytes: usize,
+  ) -> Result<Activity, String> {
     // Removing the entry makes every error invalidate the cursor atomically.
     let version = versions(&locator.source_path, false);
-    if version
-      .first()
-      .and_then(Option::as_ref)
-      .is_some_and(|v| v.length > crate::service_protocol::MAX_SNAPSHOT_BYTES as u64)
+    // Pi still buffers a whole changed batch. Codex folds bounded records and
+    // its source length is unrelated to the retained activity state.
+    if locator.provider == ViewerProvider::Pi
+      && version
+        .first()
+        .and_then(Option::as_ref)
+        .is_some_and(|v| v.length > crate::service_protocol::MAX_MATERIALIZED_SOURCE_BYTES as u64)
     {
-      return Err("Session activity exceeds the source size limit".into());
+      return Err("Pi activity exceeds the buffered source budget".into());
     }
     let mut entry = self.entries.remove(locator);
     if locator.provider == ViewerProvider::Pi
@@ -336,7 +351,7 @@ impl ActivityReaders {
         reader: match locator.provider {
           ViewerProvider::Codex => Reader::Codex(Box::new(tokn_session_codex::CodexHistoryProjectionReader::new(
             locator.source_path.clone(),
-            crate::service_protocol::MAX_SNAPSHOT_BYTES,
+            tokn_session_codex::CodexHistoryLimits::default().max_record_bytes,
           ))),
           ViewerProvider::Pi => Reader::Pi(Box::new(tokn_session_relay::JsonlReader::for_snapshot(
             locator.source_path.clone(),
@@ -353,16 +368,32 @@ impl ActivityReaders {
     };
     match &mut entry.reader {
       Reader::Codex(reader) => {
+        let mut question_budget_exceeded = false;
         // The entry is detached until the whole update validates. A late parse,
         // lineage, or owner error discards both the staged activity and cursor.
         if let Some(update) = reader.poll(&tokn_session_codex::CodexSessionSource::new(None), |reset, record| {
+          if question_budget_exceeded {
+            return;
+          }
           if reset {
             entry.activity = Activity::default();
           }
           for event in record.events {
             entry.activity.observe(&event);
+            if matches!(event, AgentEvent::QuestionRequest(_) | AgentEvent::Lifecycle(_))
+              && entry.activity.questions.retained_bytes() > max_question_bytes
+            {
+              // Preserve the last published attention instead of silently
+              // dropping unanswered identities to make the cache fit.
+              entry.activity = Activity::default();
+              question_budget_exceeded = true;
+              return;
+            }
           }
         })? {
+          if question_budget_exceeded {
+            return Err("Codex question attention exceeds the retained state budget".into());
+          }
           if update.reference.id != locator.session_id {
             return Err("Session activity owner changed".into());
           }
@@ -520,7 +551,7 @@ mod tests {
         activity.observe(&event);
       }
       assert!(activity.running);
-      assert_eq!(activity.active_turn.as_deref(), Some("turn"));
+      assert_eq!(activity.active_turn, Some(Sha256::digest(b"turn").into()));
       assert_eq!(activity.question_attention.required_count, 1);
       assert_eq!(activity.final_count, 0);
     }
@@ -627,7 +658,7 @@ mod tests {
       .unwrap();
       activity.observe(&diagnostic);
       assert!(activity.running);
-      assert_eq!(activity.active_turn.as_deref(), Some("existing-turn"));
+      assert_eq!(activity.active_turn, Some(Sha256::digest(b"existing-turn").into()));
       assert!(activity.assistant_stream.is_some());
     }
     let tool = tokn_session_opencode::OpenCodeLiveNormalizer::normalize_line(
@@ -1008,6 +1039,55 @@ mod tests {
     assert!(!activity.running);
     assert_eq!(activity.question_attention.required_count, 0);
     assert_eq!(latest(&activity)["preview"], "Completed");
+  }
+
+  #[test]
+  fn codex_activity_rejects_excess_retained_question_state_without_publishing_it() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("session.jsonl");
+    let header = json!({"type":"session_meta","payload":{"id":"session"}}).to_string();
+    let question = |id: &str| {
+      json!({"type":"event_msg","payload":{
+        "type":"request_user_input","call_id":id.repeat(40),
+        "questions":[{"id":"q","header":"Choice","question":"Which option?"}]
+      }})
+      .to_string()
+    };
+    let original = format!("{header}\n{}\n", question("first"));
+    std::fs::write(&path, &original).unwrap();
+    let locator = SessionLocator {
+      version: 1,
+      provider: ViewerProvider::Codex,
+      session_id: "session".into(),
+      source_path: path.clone(),
+    };
+    let mut readers = ActivityReaders::default();
+    let last_good = readers.read_with_question_budget(&locator, 1024).unwrap();
+    assert_eq!(last_good.question_attention.required_count, 1);
+    writeln!(
+      std::fs::OpenOptions::new().append(true).open(&path).unwrap(),
+      "{}",
+      question("other")
+    )
+    .unwrap();
+    assert!(
+      readers
+        .read_with_question_budget(&locator, 1024)
+        .err()
+        .unwrap()
+        .contains("retained state budget")
+    );
+    assert!(!readers.contains(&locator));
+    assert_eq!(last_good.question_attention.required_count, 1);
+    std::fs::write(&path, original).unwrap();
+    assert_eq!(
+      readers
+        .read_with_question_budget(&locator, 1024)
+        .unwrap()
+        .question_attention
+        .required_count,
+      1
+    );
   }
 
   #[test]

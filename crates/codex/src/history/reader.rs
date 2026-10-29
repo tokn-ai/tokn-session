@@ -1,8 +1,33 @@
 use super::*;
-use std::time::SystemTime;
+use crate::storage::{CodexScratchBudget, ReadWorkBudget};
+use sha2::{Digest, Sha256};
+use std::time::{Duration, SystemTime};
 use tokn_session_core::{SessionHistoryStatus, SessionRef};
 
 const TAIL_GUARD_BYTES: usize = 4096;
+
+/// Independent limits for record parsing, materialized batches, disk, and work.
+/// None of these limits describes the total size of a streamed source.
+#[derive(Clone)]
+pub struct CodexHistoryLimits {
+  pub max_record_bytes: usize,
+  pub max_snapshot_bytes: usize,
+  pub scratch: CodexScratchBudget,
+  pub max_duration: Duration,
+}
+
+impl Default for CodexHistoryLimits {
+  fn default() -> Self {
+    Self {
+      max_record_bytes: DEFAULT_RECORD_BYTES,
+      max_snapshot_bytes: 128 * 1024 * 1024,
+      scratch: CodexScratchBudget::default(),
+      max_duration: Duration::from_secs(120),
+    }
+  }
+}
+
+pub(crate) const DEFAULT_RECORD_BYTES: usize = 128 * 1024 * 1024;
 
 /// Work performed by a reader, useful for diagnosing history amplification.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -39,8 +64,8 @@ pub struct CodexHistoryProjectionUpdate {
 /// A full-history cursor that delivers one bounded normalized record at a time.
 ///
 /// Unlike a snapshot, a projection does not retain the complete transcript or
-/// impose a combined size limit on its inherited segments. Each source still
-/// obeys the decoded source limit, and `max_record_bytes` bounds incomplete rows.
+/// impose a source-size limit. `max_record_bytes` bounds complete and incomplete
+/// rows; each poll has a separate work deadline. Streaming uses no scratch disk.
 pub struct CodexHistoryProjectionReader {
   reader: CodexHistoryReader,
 }
@@ -48,7 +73,20 @@ pub struct CodexHistoryProjectionReader {
 impl CodexHistoryProjectionReader {
   pub fn new(path: PathBuf, max_record_bytes: usize) -> Self {
     Self {
-      reader: CodexHistoryReader::new(path, false, max_record_bytes),
+      reader: CodexHistoryReader::with_limits(
+        path,
+        false,
+        CodexHistoryLimits {
+          max_record_bytes,
+          ..Default::default()
+        },
+      ),
+    }
+  }
+
+  pub fn with_limits(path: PathBuf, limits: CodexHistoryLimits) -> Self {
+    Self {
+      reader: CodexHistoryReader::with_limits(path, false, limits),
     }
   }
 
@@ -105,7 +143,7 @@ fn emit_record(
 pub struct CodexHistoryReader {
   path: PathBuf,
   include_native: bool,
-  max_bytes: usize,
+  limits: CodexHistoryLimits,
   state: Option<ReaderState>,
   stats: CodexHistoryReadStats,
   window_turns: Option<usize>,
@@ -124,19 +162,23 @@ struct ReaderState {
   versions: Vec<FileVersion>,
   reference: SessionRef,
   normalizer: CodexNormalizer,
-  prefix_bytes: u64,
   offset: u64,
   pending: Vec<u8>,
   ordinals: HistoryOrdinals,
-  header_guard: Vec<u8>,
+  header_guard: HeaderGuard,
   tail_guard: Vec<u8>,
   prefix_guards: Vec<PrefixGuard>,
   source_start: u64,
   dependencies: super::window::Dependencies,
 }
 
+struct HeaderGuard {
+  length: u64,
+  digest: [u8; 32],
+}
+
 struct PrefixGuard {
-  header: Vec<u8>,
+  header: HeaderGuard,
   tail: Vec<u8>,
   cutoff: u64,
 }
@@ -169,10 +211,21 @@ impl FileVersion {
 
 impl CodexHistoryReader {
   pub fn new(path: PathBuf, include_native: bool, max_bytes: usize) -> Self {
+    Self::with_limits(
+      path,
+      include_native,
+      CodexHistoryLimits {
+        max_snapshot_bytes: max_bytes,
+        ..Default::default()
+      },
+    )
+  }
+
+  pub fn with_limits(path: PathBuf, include_native: bool, limits: CodexHistoryLimits) -> Self {
     Self {
       path,
       include_native,
-      max_bytes,
+      limits,
       state: None,
       stats: CodexHistoryReadStats::default(),
       window_turns: None,
@@ -187,7 +240,19 @@ impl CodexHistoryReader {
   /// Start at the requested number of latest provable turns, leaving older history on disk.
   /// Formats without checkpoints and dependencies can require a wider range.
   pub fn new_window(path: PathBuf, include_native: bool, max_bytes: usize, turns: usize) -> Self {
-    let mut reader = Self::new(path, include_native, max_bytes);
+    Self::new_window_with_limits(
+      path,
+      include_native,
+      CodexHistoryLimits {
+        max_snapshot_bytes: max_bytes,
+        ..Default::default()
+      },
+      turns,
+    )
+  }
+
+  pub fn new_window_with_limits(path: PathBuf, include_native: bool, limits: CodexHistoryLimits, turns: usize) -> Self {
+    let mut reader = Self::with_limits(path, include_native, limits);
     reader.window_turns = Some(turns.max(1));
     reader
   }
@@ -212,20 +277,32 @@ impl CodexHistoryReader {
     source: &CodexSessionSource,
     projection: &mut ProjectionSink<'_>,
   ) -> Result<Option<CodexHistoryUpdate>, String> {
+    let work = ReadWorkBudget::new(self.limits.max_duration);
+    self.poll_budgeted(source, projection, &work)
+  }
+
+  fn poll_budgeted(
+    &mut self,
+    source: &CodexSessionSource,
+    projection: &mut ProjectionSink<'_>,
+    work: &ReadWorkBudget,
+  ) -> Result<Option<CodexHistoryUpdate>, String> {
     // Take the state before doing fallible work. Only a fully successful read
     // returns it to the cache; callers retain their last-good published records.
-    let Some(mut state) = self.state.take() else {
-      return self.rebuild(source, projection).map(Some);
+    let previous = self.state.take();
+    work.check()?;
+    let Some(mut state) = previous else {
+      return self.rebuild(source, projection, work).map(Some);
     };
     if source.history_roots(&self.path)? != state.roots {
-      return self.rebuild(source, projection).map(Some);
+      return self.rebuild(source, projection, work).map(Some);
     }
     if state
       .segments
       .iter()
       .any(|segment| crate::storage::resolve_path(&segment.path) != segment.path)
     {
-      return self.rebuild(source, projection).map(Some);
+      return self.rebuild(source, projection, work).map(Some);
     }
     let versions = state
       .segments
@@ -235,9 +312,10 @@ impl CodexHistoryReader {
     // Native compression can retire a plain physical file while preserving
     // every decoded byte. Resolve the replacement before reporting it missing.
     let Ok(versions) = versions else {
-      return self.rebuild(source, projection).map(Some);
+      return self.rebuild(source, projection, work).map(Some);
     };
     if versions == state.versions {
+      work.check()?;
       self.state = Some(state);
       return Ok(None);
     }
@@ -250,7 +328,7 @@ impl CodexHistoryReader {
     {
       // Compressed offsets describe decoded bytes, so physical growth cannot
       // use the append cursor. Rebuild and validate the entire selected range.
-      return self.rebuild(source, projection).map(Some);
+      return self.rebuild(source, projection, work).map(Some);
     }
     let head = versions.last().unwrap();
     let previous = state.versions.last().unwrap();
@@ -261,30 +339,24 @@ impl CodexHistoryReader {
         continue;
       }
       if !guarded_prefix_growth(&state.segments[index].path, before, after, guard, &mut self.stats)? {
-        return self.rebuild(source, projection).map(Some);
+        return self.rebuild(source, projection, work).map(Some);
       }
     }
     if head == previous {
       // A referenced parent can keep growing beyond this child's exclusive
       // cutoff. Its new rows do not change this already verified history.
       state.versions = versions;
+      work.check()?;
       self.state = Some(state);
       return Ok(None);
     }
     if head.identity != previous.identity || head.length <= state.offset {
-      return self.rebuild(source, projection).map(Some);
+      return self.rebuild(source, projection, work).map(Some);
     }
     if projection.is_none()
-      && state
-        .prefix_bytes
-        .saturating_add(head.length)
-        .saturating_sub(state.source_start)
-        > self.max_bytes as u64
+      && (state.pending.len() as u64).saturating_add(head.length - state.offset) > self.limits.max_snapshot_bytes as u64
     {
       return Err("Codex history exceeds the snapshot size limit".into());
-    }
-    if projection.is_some() && head.length > crate::storage::MAX_DECODED_BYTES {
-      return Err("Codex source exceeds the projection size limit".into());
     }
     let mut file = File::open(&state.segments.last().unwrap().path).map_err(|err| err.to_string())?;
     if !guards_match(
@@ -294,7 +366,7 @@ impl CodexHistoryReader {
       state.offset,
       &mut self.stats,
     )? {
-      return self.rebuild(source, projection).map(Some);
+      return self.rebuild(source, projection, work).map(Some);
     }
     let mut records = Vec::new();
     let mut emitted = false;
@@ -303,7 +375,8 @@ impl CodexHistoryReader {
       state.offset,
       head.length - state.offset,
       &mut state.pending,
-      self.max_bytes,
+      self.limits.max_record_bytes,
+      work,
       &mut self.stats,
       Some(&mut state.tail_guard),
       |row, row_offset, stats| {
@@ -339,10 +412,11 @@ impl CodexHistoryReader {
     state.offset = head.length;
     if state.source_start > 0 && state.dependencies.missing {
       self.widen_dependencies();
-      return self.rebuild(source, projection).map(Some);
+      return self.rebuild(source, projection, work).map(Some);
     }
     validate_versions(&state.segments, &versions, &state.prefix_guards, &mut self.stats)?;
     state.versions = versions;
+    work.check()?;
     let update = emitted.then(|| CodexHistoryUpdate {
       reference: state.reference.clone(),
       records,
@@ -358,15 +432,16 @@ impl CodexHistoryReader {
     &mut self,
     source: &CodexSessionSource,
     projection: &mut ProjectionSink<'_>,
+    work: &ReadWorkBudget,
   ) -> Result<CodexHistoryUpdate, String> {
     self.stats.lineage_resolutions += 1;
     let roots = source.history_roots(&self.path)?;
-    let segments = source.history_segments(&self.path)?;
+    let segments = source.history_segments_with_budget(&self.path, self.limits.max_record_bytes, work)?;
     let versions = segments
       .iter()
       .map(|segment| FileVersion::read(&segment.path))
       .collect::<Result<Vec<_>, _>>()?;
-    let owner = history_header(&self.path)?;
+    let owner = history_header_with_budget(&self.path, work)?;
     if segments
       .last()
       .is_none_or(|segment| segment.header_key != header_key(&owner))
@@ -375,39 +450,54 @@ impl CodexHistoryReader {
     }
     let thread_spawn =
       matches!(owner.item(), RolloutItem::SessionMeta(meta) if crate::normalize::requires_thread_spawn_boundary(meta));
-    let mut reference = inspect_session_header(&self.path)?;
+    let mut reference = crate::session_source::inspect_session_header_with_budget(&self.path, work)?;
     if owner.native()["payload"]["id"].as_str() != Some(reference.id.as_str()) {
       return Err("Codex history owner changed while reading its metadata".into());
     }
     source.apply_indexed_metadata(std::slice::from_mut(&mut reference));
-    let mut files = segments
-      .iter()
-      .map(|segment| crate::storage::seekable(&segment.path, segment.end_byte_offset))
-      .collect::<Result<Vec<_>, _>>()?;
-    let lengths = segments
-      .iter()
-      .zip(&files)
-      .map(|(segment, file)| {
-        segment.end_byte_offset.map_or_else(
-          || {
-            file
-              .metadata()
-              .map(|metadata| metadata.len())
-              .map_err(|err| err.to_string())
-          },
-          Ok,
-        )
-      })
-      .collect::<Result<Vec<_>, _>>()?;
-    // Thread-spawn filtering requires an earlier trigger; keep its proven full
-    // reader until a provider checkpoint can seed that boundary safely.
-    let source_start = if !thread_spawn {
-      match self.window_turns {
-        Some(turns) => super::window::start(&mut files, &lengths, turns, &mut self.stats)?,
-        None => 0,
-      }
+    work.check()?;
+    // Only backward discovery needs seekable decoded storage. Projections and
+    // full snapshots stream each source directly, with no total-source budget.
+    let mut files = if self.window_turns.is_some() && !thread_spawn {
+      Some(
+        segments
+          .iter()
+          .map(|segment| crate::storage::seekable(&segment.path, segment.end_byte_offset, &self.limits.scratch, work))
+          .collect::<Result<Vec<_>, _>>()?,
+      )
     } else {
-      0
+      None
+    };
+    let lengths = match &files {
+      Some(files) => segments
+        .iter()
+        .zip(files)
+        .map(|(segment, file)| {
+          segment.end_byte_offset.map_or_else(
+            || {
+              file
+                .metadata()
+                .map(|metadata| metadata.len())
+                .map_err(|err| err.to_string())
+            },
+            Ok,
+          )
+        })
+        .collect::<Result<Vec<_>, _>>()?,
+      None => Vec::new(),
+    };
+    // Thread-spawn filtering requires an earlier trigger. Its full range is
+    // streamed until a provider checkpoint can safely seed that boundary.
+    let source_start = match (&mut files, self.window_turns) {
+      (Some(files), Some(turns)) => super::window::start(
+        files,
+        &lengths,
+        turns,
+        self.limits.max_record_bytes,
+        work,
+        &mut self.stats,
+      )?,
+      _ => 0,
     };
     reference.model_baseline = if source_start == 0 {
       None
@@ -418,7 +508,14 @@ impl CodexHistoryReader {
     {
       checkpoint.baseline.clone()
     } else {
-      let baseline = super::window::model_baseline(&mut files, &lengths, source_start, &mut self.stats)?;
+      let baseline = super::window::model_baseline(
+        files.as_mut().unwrap(),
+        &lengths,
+        source_start,
+        self.limits.max_record_bytes,
+        work,
+        &mut self.stats,
+      )?;
       self.model_checkpoint = Some(ModelCheckpoint {
         source_start,
         versions: versions.clone(),
@@ -447,37 +544,61 @@ impl CodexHistoryReader {
     let mut selected_bytes = 0u64;
     let mut head_state = None;
     let mut prefix_guards = Vec::new();
-    for ((segment, length), file) in segments.iter().zip(&lengths).zip(&mut files) {
-      let length = *length;
-      let start = source_start.saturating_sub(consumed).min(length);
-      let header_guard = read_header_guard(file)?;
-      let header = history_header(&segment.path)?;
+    for (index, segment) in segments.iter().enumerate() {
+      work.check()?;
+      let known_length = files
+        .as_ref()
+        .map(|_| lengths[index])
+        .or(segment.end_byte_offset)
+        .or_else(|| (!crate::storage::is_compressed(&segment.path)).then_some(versions[index].length));
+      let start = source_start.saturating_sub(consumed).min(known_length.unwrap_or(0));
+      let header_guard = read_header_guard_stream(crate::storage::reader_with_budget(&segment.path, work)?)?;
+      let header = history_header_with_budget(&segment.path, work)?;
       if header_key(&header) != segment.header_key {
         return Err("Codex history changed while reading its prefix".into());
       }
-      let tail_guard = read_range(
-        file,
-        length.saturating_sub(TAIL_GUARD_BYTES as u64),
-        length.min(TAIL_GUARD_BYTES as u64),
-      )?;
-      if projection.is_none() && selected_bytes.saturating_add(length - start) > self.max_bytes as u64 {
+      let mut tail_guard = Vec::new();
+      let sequential = files.is_none();
+      let mut input: Box<dyn BufRead + '_> = match &mut files {
+        Some(files) => {
+          let file = &mut *files[index];
+          let length = known_length.unwrap();
+          tail_guard = read_range(
+            file,
+            length.saturating_sub(TAIL_GUARD_BYTES as u64),
+            length.min(TAIL_GUARD_BYTES as u64),
+          )?;
+          file.seek(SeekFrom::Start(start)).map_err(|err| err.to_string())?;
+          Box::new(BufReader::new(Read::by_ref(file).take(length - start)))
+        }
+        None => {
+          let input = crate::storage::reader_with_budget(&segment.path, work)?;
+          match known_length {
+            Some(length) => Box::new(input.take(length)),
+            None => input,
+          }
+        }
+      };
+      let snapshot_remaining = projection
+        .is_none()
+        .then(|| (self.limits.max_snapshot_bytes as u64).saturating_sub(selected_bytes));
+      if known_length.is_some_and(|length| snapshot_remaining.is_some_and(|remaining| length - start > remaining)) {
         return Err("Codex history exceeds the snapshot size limit".into());
       }
-      if projection.is_some() && length > crate::storage::MAX_DECODED_BYTES {
-        return Err("Codex source exceeds the projection size limit".into());
-      }
-      selected_bytes += length - start;
       let mut pending = Vec::new();
-      let mut ordinals = HistoryOrdinals::new(segment.header_key["history_mode"].as_str() == Some("paginated"));
+      let mut ordinals = HistoryOrdinals::new(segment.header_key.paginated);
       let inherited_parent = thread_spawn && header.native()["payload"]["id"].as_str() != Some(reference.id.as_str());
-      read_rows(
-        file,
+      let bytes = read_stream_rows(
+        &mut input,
         start,
-        length - start,
         &mut pending,
-        self.max_bytes,
+        self.limits.max_record_bytes,
+        snapshot_remaining,
+        work,
         &mut self.stats,
-        None,
+        // Seekable input already supplied its exact tail, including omitted
+        // bytes if this segment is outside the selected window.
+        sequential.then_some(&mut tail_guard),
         |row, row_offset, stats| {
           let line = parse_row(row, &segment.path, row_offset, stats)?;
           ordinals.accept(&line, &segment.path, row_offset)?;
@@ -504,6 +625,12 @@ impl CodexHistoryReader {
           Ok(())
         },
       )?;
+      drop(input);
+      let length = start + bytes;
+      if known_length.is_some_and(|expected| length != expected) {
+        return Err("Codex history changed while reading its prefix".into());
+      }
+      selected_bytes += bytes;
       if segment.end_byte_offset.is_some() && !pending.is_empty() {
         return Err("invalid Codex history lineage: cutoff is not a complete record".into());
       }
@@ -515,7 +642,7 @@ impl CodexHistoryReader {
         return Err("invalid Codex history lineage: cutoff ordinal disagrees with its bytes".into());
       }
       if segment.end_byte_offset.is_none() {
-        head_state = Some((consumed, length, pending, ordinals, header_guard, tail_guard));
+        head_state = Some((length, pending, ordinals, header_guard, tail_guard));
       } else {
         prefix_guards.push(PrefixGuard {
           header: header_guard,
@@ -529,9 +656,12 @@ impl CodexHistoryReader {
     // dependency is actually needed, before publishing a partial operation.
     if source_start > 0 && dependencies.missing {
       self.widen_dependencies();
-      return self.rebuild(source, projection);
+      // A retry must release its decoded files before reserving a wider range.
+      drop(files);
+      return self.rebuild(source, projection, work);
     }
     validate_versions(&segments, &versions, &prefix_guards, &mut self.stats)?;
+    work.check()?;
     let update = CodexHistoryUpdate {
       reference: reference.clone(),
       records,
@@ -539,14 +669,13 @@ impl CodexHistoryReader {
       reset: true,
       source_start: self.window_turns.map(|_| source_start),
     };
-    let (prefix_bytes, offset, pending, ordinals, header_guard, tail_guard) = head_state.unwrap();
+    let (offset, pending, ordinals, header_guard, tail_guard) = head_state.unwrap();
     self.state = Some(ReaderState {
       roots,
       segments,
       versions,
       reference,
       normalizer,
-      prefix_bytes,
       offset,
       pending,
       ordinals,
@@ -567,9 +696,8 @@ impl CodexHistoryReader {
   }
 }
 
-fn read_header_guard(file: &mut File) -> Result<Vec<u8>, String> {
-  file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-  let mut reader = BufReader::new(Read::by_ref(file).take(MAX_HEADER_BYTES));
+fn read_header_guard_stream(input: impl Read) -> Result<HeaderGuard, String> {
+  let mut reader = BufReader::new(input.take(MAX_HEADER_BYTES));
   let mut bytes = Vec::new();
   loop {
     let mut row = Vec::new();
@@ -580,7 +708,10 @@ fn read_header_guard(file: &mut File) -> Result<Vec<u8>, String> {
     if !row.iter().all(u8::is_ascii_whitespace) {
       let line: CodexLine = serde_json::from_slice(&row).map_err(|e| e.to_string())?;
       if matches!(line.item(), RolloutItem::SessionMeta(_)) {
-        return Ok(bytes);
+        return Ok(HeaderGuard {
+          length: bytes.len() as u64,
+          digest: Sha256::digest(&bytes).into(),
+        });
       }
     }
   }
@@ -609,26 +740,62 @@ fn read_rows(
   length: u64,
   pending: &mut Vec<u8>,
   max_record_bytes: usize,
+  work: &ReadWorkBudget,
   stats: &mut CodexHistoryReadStats,
-  mut tail: Option<&mut Vec<u8>>,
-  mut consume: impl FnMut(&[u8], u64, &mut CodexHistoryReadStats) -> Result<(), String>,
+  tail: Option<&mut Vec<u8>>,
+  consume: impl FnMut(&[u8], u64, &mut CodexHistoryReadStats) -> Result<(), String>,
 ) -> Result<(), String> {
   file.seek(SeekFrom::Start(offset)).map_err(|err| err.to_string())?;
   let mut reader = BufReader::new(Read::by_ref(file).take(length));
+  let consumed = read_stream_rows(
+    &mut reader,
+    offset,
+    pending,
+    max_record_bytes,
+    None,
+    work,
+    stats,
+    tail,
+    consume,
+  )?;
+  if consumed != length {
+    return Err("Codex history changed while reading its prefix".into());
+  }
+  Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_stream_rows(
+  reader: &mut dyn BufRead,
+  offset: u64,
+  pending: &mut Vec<u8>,
+  max_record_bytes: usize,
+  max_snapshot_bytes: Option<u64>,
+  work: &ReadWorkBudget,
+  stats: &mut CodexHistoryReadStats,
+  mut tail: Option<&mut Vec<u8>>,
+  mut consume: impl FnMut(&[u8], u64, &mut CodexHistoryReadStats) -> Result<(), String>,
+) -> Result<u64, String> {
   let mut row_offset = offset - pending.len() as u64;
   let initial_row_offset = row_offset;
   let mut consumed = 0u64;
   loop {
+    work.check()?;
     let previous = pending.len();
-    let allowance = max_record_bytes.saturating_sub(previous).saturating_add(1) as u64;
-    let read = Read::by_ref(&mut reader)
-      .take(allowance)
+    let mut allowance = max_record_bytes.saturating_sub(previous).saturating_add(1) as u64;
+    if let Some(limit) = max_snapshot_bytes {
+      allowance = allowance.min(limit.saturating_sub(consumed).saturating_add(1));
+    }
+    let read = Read::take(&mut *reader, allowance)
       .read_until(b'\n', pending)
       .map_err(|err| err.to_string())?;
     consumed += read as u64;
     stats.source_bytes_read += read as u64;
+    if max_snapshot_bytes.is_some_and(|limit| consumed > limit) {
+      return Err("Codex history exceeds the snapshot size limit".into());
+    }
     if pending.len() > max_record_bytes {
-      return Err("Codex history row exceeds the snapshot size limit".into());
+      return Err("Codex history record exceeds the record size limit".into());
     }
     if read == 0 {
       break;
@@ -644,27 +811,24 @@ fn read_rows(
       pending.clear();
     }
   }
-  if consumed != length {
-    return Err("Codex history changed while reading its prefix".into());
-  }
   // Do not cache the allocation for a completed large record. Keep only the
   // unfinished suffix, without repeatedly copying an ever-growing fragment.
   if row_offset != initial_row_offset {
     pending.shrink_to_fit();
   }
-  Ok(())
+  Ok(consumed)
 }
 
 fn guards_match(
   file: &mut File,
-  header_guard: &[u8],
+  header_guard: &HeaderGuard,
   tail_guard: &[u8],
   offset: u64,
   stats: &mut CodexHistoryReadStats,
 ) -> Result<bool, String> {
-  let header = read_range(file, 0, header_guard.len() as u64)?;
+  let header = read_range(file, 0, header_guard.length)?;
   stats.guard_bytes_read += header.len() as u64;
-  if header != header_guard {
+  if <[u8; 32]>::from(Sha256::digest(&header)) != header_guard.digest {
     return Ok(false);
   }
   let tail = read_range(file, offset - tail_guard.len() as u64, tail_guard.len() as u64)?;

@@ -17,8 +17,11 @@ fn profile_local_codex_open() {
   let segments = source.history_segments(&path).unwrap();
   eprintln!("lineage_ms={} segments={}", start.elapsed().as_millis(), segments.len());
   let start = std::time::Instant::now();
-  let mut history =
-    tokn_session_codex::CodexHistoryReader::new(path.clone(), false, crate::service_protocol::MAX_SNAPSHOT_BYTES);
+  let mut history = tokn_session_codex::CodexHistoryReader::new(
+    path.clone(),
+    false,
+    crate::service_protocol::MAX_MATERIALIZED_SOURCE_BYTES,
+  );
   let decoded = history.poll(&source).unwrap().unwrap();
   eprintln!(
     "decode_ms={} records={}",
