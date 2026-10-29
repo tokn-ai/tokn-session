@@ -17,9 +17,35 @@ workspace/viewer tests and Chromium phone/tablet layout checks. iOS is configure
 for 16.4+ but remains unbuilt; native device pairing and keyboard checks remain.
 See [mobile viewer](viewer-mobile.md) for build setup and device verification.
 
-The desktop’s **New session** dialog now creates Pi, Codex, OpenCode and DSH
-sessions in registered local projects. Provider/runtime choices are checked
-without starting agents. Codex retains executable discovery; OpenCode requires a
+Local folders discovered in saved session `cwd` metadata now register
+automatically across all six historical providers. Migration 13 preserves
+existing registrations as manual and tracks per-provider presence separately
+from directory availability. Only complete, stable scans of the same readable
+scope can remove a provider's claim; partial reads and unavailable roots retain
+the last known state. Verified warm indexes seed folders without reparsing histories. Legacy indexes
+first reread lightweight headers because older cwd normalization could change
+spaces in paths; no message-body parsing is required.
+Indexes created by the early migration 13 development build are recognized by
+their exact checksum and schema, then upgraded atomically with the missing
+revision table/triggers. Existing rows and application timestamps are retained;
+unknown migration drift still fails closed.
+The desktop’s **New session** opens an app-only blank conversation. Multiple
+drafts retain project/provider/runtime, text and image choices in memory across
+session and machine navigation; closing/reloading the window clears them.
+Projects view places each draft under its target project (including shared
+worktree groups); changing its folder moves the row. Time view retains project
+labels, and drafts awaiting a folder remain separately accessible. No
+native session, upload or runtime starts until the first Send. Draft IDs never
+enter native history/subscription APIs. The first Send uses existing guarded
+creation receipts and promotes only verified history with confirmed input;
+uncertain/rejected input retains the original draft and checks the same receipt
+without replay. Managed Pi now persists its explicit first-input acknowledgement
+independently of history readiness; legacy receipts remain unknown. New session
+can add a project with an empty registry. See [projects and creation](viewer-projects.md).
+
+Pi, Codex, OpenCode and DSH creation remains local desktop only.
+Provider/runtime choices are checked without starting agents.
+Codex retains executable discovery; OpenCode requires a
 runtime matching the project folder. Creation currently requires host-readable
 native history; HTTP/Hub/browser creation remains out of scope.
 `interaction-core::creation` owns durable phases, cancellation and no-replay

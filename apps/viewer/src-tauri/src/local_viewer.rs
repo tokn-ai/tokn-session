@@ -149,6 +149,7 @@ async fn forward_events(mut events: broadcast::Receiver<ViewerEvent>, app: AppHa
       }
       Err(broadcast::error::RecvError::Lagged(_)) => {
         crate::runtime_management::changed(&app);
+        let _ = app.emit("registered-projects-changed", serde_json::json!({}));
         let _ = app.emit(
           "relay-changed",
           relay::RelayChange {

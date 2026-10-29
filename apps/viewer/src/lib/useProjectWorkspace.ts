@@ -1,42 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { releaseImageUploads, uploadImageDrafts, type ImageDraft, type ImageUploadReceipt } from "./imageDrafts";
-import { createUuid } from "./id";
 import { errorMessage } from "./state";
 import { captureTransport, type CommandInvoker, type EventSubscriber } from "./transport";
 import {
-  createProjectSession, getSessionCreationOptions, getManagedSession, listRegisteredProjects, listenForManagedSessionChanges, listenForRelayStatus,
+  getSessionCreationOptions, getManagedSession, listRegisteredProjects, listenForManagedSessionChanges, listenForRelayStatus,
   registerProject, respondManagedSessionDialog, resumeManagedSession, stopManagedSession,
 } from "./tauri";
 import type {
-  CreateProjectSessionRequest, ManagedSessionDialogResponse, ManagedSessionSnapshot,
-  ProjectWorkspaceSnapshot, RegisterProjectRequest, SessionCreationError, SessionSummary, SessionCreationSelection,
+  ManagedSessionDialogResponse, ManagedSessionSnapshot,
+  ProjectWorkspaceSnapshot, RegisterProjectRequest,
 } from "./types";
 
 interface WorkspaceOptions {
   enabled: boolean;
   machine_key: string;
   selected_session_key: string | null;
-  on_created: (session: SessionSummary) => void;
 }
 type WorkspaceTransport = { invoke: CommandInvoker; listen: EventSubscriber; release?: (command: string, payload?: Record<string, unknown>) => Promise<void> };
 interface PendingManagedRead {
   epoch: number;
   transport: WorkspaceTransport;
   promise: Promise<ManagedSessionSnapshot | null>;
-}
-interface CreationAttempt {
-  request: CreateProjectSessionRequest;
-  images_key: string;
-  uploads: ImageUploadReceipt[];
-  release_uploads: () => Promise<void>;
-  selection_version: number;
-  opened: boolean;
-}
-function creationFailure(value: unknown): SessionCreationError | null {
-  if (!value || typeof value !== "object") return null;
-  const failure = value as Partial<SessionCreationError>;
-  return typeof failure.message === "string" && typeof failure.may_have_started === "boolean"
-    ? { message: failure.message, may_have_started: failure.may_have_started } : null;
 }
 function inputCapabilityClass(snapshot: ManagedSessionSnapshot): string {
   if (snapshot.status === "stopped" || snapshot.status === "failed") return "saved";
@@ -52,10 +35,6 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
   const [workspace, setWorkspace] = useState<ProjectWorkspaceSnapshot | null>(null);
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<string | null>(null);
-  const [creation, setCreation] = useState<ManagedSessionSnapshot | null>(null);
-  const [creation_error, setCreationError] = useState<string | null>(null);
-  const [creation_uncertain, setCreationUncertain] = useState(false);
-  const [creating, setCreating] = useState(false);
   const [managed, setManaged] = useState<ManagedSessionSnapshot | null>(null);
   const [pending_dialog_session, setPendingDialogSession] = useState<ManagedSessionSnapshot | null>(null);
   const [control_failure, setControlFailure] = useState<{ request_id: string; message: string } | null>(null);
@@ -64,19 +43,12 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
   const [retry, setRetry] = useState(0);
   const lifetime = useRef(0);
   const alive = useRef(false);
-  const busy = useRef(false);
   const control_busy = useRef(false);
-  const attempt = useRef<CreationAttempt | null>(null);
   const snapshots = useRef(new Map<string, ManagedSessionSnapshot>());
   const pending_reads = useRef(new Map<string, PendingManagedRead>());
   const catalog_read = useRef(0);
   const current = useRef(options);
   current.current = options;
-  const selection = useRef({ key: selected_session_key, version: 0 });
-  if (selection.current.key !== selected_session_key) {
-    selection.current = { key: selected_session_key, version: selection.current.version + 1 };
-  }
-
   const accept = useCallback((snapshot: ManagedSessionSnapshot, epoch: number) => {
     if (!alive.current || lifetime.current !== epoch) return;
     const old = snapshots.current.get(snapshot.request_id);
@@ -89,16 +61,6 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
     if (next.session_key && next.session_key === current.current.selected_session_key) {
       setManaged(next);
       if (!old || inputCapabilityClass(old) !== inputCapabilityClass(next)) setInputRefreshKey((value) => value + 1);
-    }
-    const pending = attempt.current;
-    if (pending?.request.request_id !== next.request_id) return;
-    setCreation(next);
-    // A managed receipt means the host retained its admitted attachments.
-    // Releasing their staging tokens cannot remove provider history images.
-    void pending.release_uploads();
-    if (next.session && !pending.opened && pending.selection_version === selection.current.version) {
-      pending.opened = true;
-      current.current.on_created(next.session);
     }
   }, []);
 
@@ -129,11 +91,11 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
   useEffect(() => {
     const epoch = ++lifetime.current;
     alive.current = enabled;
-    setWorkspace(null); setCreation(null); setManaged(null); setPendingDialogSession(null);
-    setCreationError(null); setCreationUncertain(false); setControlFailure(null); setError(null);
-    snapshots.current.clear(); void attempt.current?.release_uploads(); attempt.current = null;
-    busy.current = false; control_busy.current = false;
-    setCreating(false); setControlling(false); setLoading(enabled);
+    setWorkspace(null); setManaged(null); setPendingDialogSession(null);
+    setControlFailure(null); setError(null);
+    snapshots.current.clear();
+    control_busy.current = false;
+    setControlling(false); setLoading(enabled);
     if (!enabled) return;
     const unlisteners: (() => void)[] = [];
     let cancelled = false;
@@ -141,14 +103,13 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
       try {
         const stop = await listenForManagedSessionChanges((snapshot) => {
           accept(snapshot, epoch);
-          const requested = attempt.current?.request.request_id === snapshot.request_id;
-          if (snapshot.session_key && !snapshot.session && (requested || snapshot.session_key === current.current.selected_session_key)) {
+          if (snapshot.session_key && !snapshot.session && snapshot.session_key === current.current.selected_session_key) {
             void refreshRequest(snapshot.request_id, epoch).catch(() => {});
           }
         }, transport.listen);
         if (cancelled) { stop(); return; }
         unlisteners.push(stop);
-      } catch { /* Explicit refresh and bounded creation polling still recover state. */ }
+      } catch { /* Selected-session reads still recover managed status. */ }
       try {
         const stop = await transport.listen("registered-projects-changed", () => {
           if (!cancelled) void refreshProjects(epoch).catch(() => {});
@@ -174,11 +135,6 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
       cancelled = true; alive.current = false; lifetime.current += 1;
       for (const unlisten of unlisteners) unlisten();
       window.removeEventListener("focus", focus);
-      const pending = attempt.current;
-      void pending?.release_uploads();
-      if (pending && !pending.opened) {
-        void stopManagedSession({ request_id: pending.request.request_id }, transport.invoke).catch(() => {});
-      }
     };
   }, [accept, enabled, machine_key, refreshProjects, refreshRequest, transport]);
 
@@ -202,16 +158,6 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
     return () => { cancelled = true; };
   }, [accept, enabled, selected_session_key, transport]);
 
-  useEffect(() => {
-    if (!enabled || !creation || creation.session || creation.status === "failed" || creation.status === "stopped"
-      || creation.creation_phase === "native_create_uncertain" || creation.creation_input_state === "rejected") return;
-    const epoch = lifetime.current;
-    // Pi creates its durable file after the first assistant reply. Poll only
-    // this pending identity; no catalog or history scans originate in the UI.
-    const timer = window.setInterval(() => { void refreshRequest(creation.request_id, epoch).catch(() => {}); }, 1000);
-    return () => window.clearInterval(timer);
-  }, [creation, enabled, refreshRequest]);
-
   const addProject = useCallback(async (request: RegisterProjectRequest) => {
     if (!enabled || !alive.current || active_transport.current !== transport || !workspace?.available) throw new Error("Project registration is available on this machine’s desktop app.");
     const epoch = lifetime.current;
@@ -224,74 +170,6 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
   }, [enabled, transport, workspace?.available]);
 
   const loadCreationOptions = useCallback((project_id: string) => getSessionCreationOptions(project_id, transport.invoke), [transport]);
-
-  const createSession = useCallback(async (project_id: string, prompt: string, images: ImageDraft[] = [], selection_options: SessionCreationSelection = { provider: "pi" }) => {
-    if (!enabled || !alive.current || active_transport.current !== transport || !workspace?.available || busy.current || (!prompt.trim() && !images.length)) return;
-    busy.current = true; setCreating(true); setCreationError(null);
-    const epoch = lifetime.current;
-    const images_key = images.map((image) => image.draft_id).join(";");
-    let pending = attempt.current;
-    const previous = pending && snapshots.current.get(pending.request.request_id);
-    const pinned_rpc = previous?.provider !== "pi" && !!previous?.creation_phase;
-    if (!pending || pending.opened || !pinned_rpc && (previous?.status === "failed" || previous?.status === "stopped")) {
-      let request_id: string;
-      try { request_id = createUuid(); }
-      catch (failure) { busy.current = false; setCreating(false); setCreationError(errorMessage(failure)); return; }
-      void pending?.release_uploads();
-      const uploads: ImageUploadReceipt[] = [];
-      pending = { request: { request_id, project_id, prompt, ...selection_options }, images_key, uploads,
-        release_uploads: () => releaseImageUploads(uploads, transport.release ?? transport.invoke),
-        selection_version: selection.current.version, opened: false };
-      attempt.current = pending;
-      setCreation(null); setCreationUncertain(false);
-    } else if (pending.request.project_id !== project_id || pending.request.prompt !== prompt || pending.images_key !== images_key
-      || (pending.request.provider ?? "pi") !== selection_options.provider
-      || (pending.request.runtime_profile_id ?? null) !== (selection_options.runtime_profile_id ?? null)
-      || (pending.request.runtime_revision ?? null) !== (selection_options.runtime_revision ?? null)) {
-      setCreationError("Check the pending session before changing its agent, runtime, folder, or prompt.");
-      busy.current = false; setCreating(false); return;
-    }
-    const request = pending.request;
-    // A failed status read cannot undo a known admission or prove that an
-    // earlier uncertain mutation never reached the native runtime.
-    let provider_attempted = creation_uncertain || pinned_rpc;
-    let checking_receipt = creation_uncertain || pinned_rpc;
-    try {
-      if (checking_receipt) {
-        const existing = await refreshRequest(request.request_id, epoch);
-        checking_receipt = false;
-        if (existing) return;
-      }
-      if (images.length && !request.image_ids) {
-        request.image_ids = await uploadImageDrafts(images, { type: "project", project_id }, transport.invoke,
-          () => alive.current && lifetime.current === epoch && active_transport.current === transport, (receipt) => pending.uploads.push(receipt));
-      }
-      if (!alive.current || lifetime.current !== epoch || active_transport.current !== transport) return;
-      provider_attempted = true;
-      const snapshot = await createProjectSession(request, transport.invoke);
-      if (!alive.current || lifetime.current !== epoch) {
-        void stopManagedSession({ request_id: request.request_id }, transport.invoke).catch(() => {});
-        return;
-      }
-      accept(snapshot, epoch);
-      if (!snapshot.session) await refreshRequest(request.request_id, epoch);
-    } catch (failure) {
-      if (alive.current && lifetime.current === epoch) {
-        const known = creationFailure(failure);
-        if (!checking_receipt && (!provider_attempted || known && !known.may_have_started)) {
-          await pending.release_uploads();
-          if (attempt.current?.request.request_id === request.request_id) attempt.current = null;
-          setCreation(null); setCreationUncertain(false); setCreationError(known?.message ?? errorMessage(failure));
-        } else {
-          setCreationUncertain(true);
-          setCreationError(`Session start was not confirmed. ${known?.message ?? errorMessage(failure)} Retry checks the same request.`);
-        }
-      }
-    } finally {
-      if (!alive.current || lifetime.current !== epoch) await pending.release_uploads();
-      if (alive.current && lifetime.current === epoch) { busy.current = false; setCreating(false); }
-    }
-  }, [accept, creation_uncertain, enabled, refreshRequest, transport, workspace?.available]);
 
   const control = useCallback(async (kind: "stop" | "resume", snapshot: ManagedSessionSnapshot) => {
     if (!enabled || !alive.current || active_transport.current !== transport || control_busy.current) return;
@@ -318,33 +196,13 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
     finally { if (alive.current && lifetime.current === epoch) { control_busy.current = false; setControlling(false); } }
   }, [accept, enabled, transport]);
 
+  const controlErrorFor = useCallback((request_id?: string | null) => control_failure && control_failure.request_id === request_id ? control_failure.message : null, [control_failure]);
+
   return {
-    workspace, loading, error, creation, creation_error, creation_uncertain, creating, managed, pending_dialog_session, controlling, input_refresh_key,
+    workspace, loading, error, managed, pending_dialog_session, controlling, input_refresh_key,
     control_error: managed?.request_id === control_failure?.request_id ? control_failure?.message ?? null : null,
-    creation_control_error: creation?.request_id === control_failure?.request_id ? control_failure?.message ?? null : null,
     dialog_error: pending_dialog_session?.request_id === control_failure?.request_id ? control_failure?.message ?? null : null,
-    addProject, createSession, loadCreationOptions, control, respond,
+    addProject, loadCreationOptions, control, respond, controlErrorFor,
     retry: () => setRetry((value) => value + 1),
-    beginCreation: () => {
-      const pending = attempt.current;
-      const previous = pending && snapshots.current.get(pending.request.request_id);
-      const failed_rpc = previous?.provider !== "pi" && previous?.creation_phase === "failed";
-      // The sidebar action explicitly starts a separate conversation after a
-      // terminal failure. In-dialog checks keep their existing receipt/UUID.
-      if (!pending || pending.opened || failed_rpc) {
-        void pending?.release_uploads();
-        attempt.current = null;
-        setCreation(null); setCreationError(null); setCreationUncertain(false);
-      }
-    },
-    dismissCreation: () => { if (attempt.current) attempt.current.selection_version = -1; },
-    openCreation: () => {
-      const pending = attempt.current;
-      const snapshot = pending && snapshots.current.get(pending.request.request_id);
-      if (pending && snapshot?.session) {
-        pending.opened = true;
-        current.current.on_created(snapshot.session);
-      }
-    },
   };
 }

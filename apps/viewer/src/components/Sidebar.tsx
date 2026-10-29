@@ -17,8 +17,14 @@ import {
 import { BranchIcon, ChevronIcon, CloseIcon, PanelIcon, SearchIcon, WarningIcon } from "./Icons";
 import { useSidebarGroups } from "../lib/useSidebarGroups";
 import { LoadingRows } from "./StateView";
+import { SessionDraftRows } from "./SessionDraftRows";
+import type { SessionDraft } from "../lib/useSessionDrafts";
+import { sidebarDraftEntries, type SidebarDraftEntry } from "../lib/sidebarDrafts";
 
 interface SidebarProps {
+  drafts?: readonly SessionDraft[];
+  selected_draft_id?: string | null;
+  on_draft_select?: (draft_id: string) => void;
   registered_projects?: RegisteredProject[];
   workspace_available?: boolean;
   workspace_notice?: string | null;
@@ -244,6 +250,9 @@ function SessionBranch({
 }
 
 export function Sidebar({
+  drafts = [],
+  selected_draft_id = null,
+  on_draft_select,
   registered_projects = NO_PROJECTS,
   workspace_available = false,
   workspace_notice,
@@ -275,9 +284,24 @@ export function Sidebar({
   on_retry,
   on_load_more,
 }: SidebarProps) {
+  const draft_entries = useMemo(() => sidebarDraftEntries(drafts, registered_projects, selected_draft_id, search),
+    [drafts, registered_projects, selected_draft_id, search]);
+  const draft_projects = useMemo(() => new Set(draft_entries.flatMap(({ project }) => project ? [project.project_id] : [])), [draft_entries]);
   const visible_projects = useMemo(() => registered_projects.filter((project) => !search.trim()
-    || `${project.name} ${project.folder_path}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())), [registered_projects, search]);
+    || draft_projects.has(project.project_id)
+    || `${project.name} ${project.folder_path}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())), [registered_projects, search, draft_projects]);
   const groups = useSidebarGroups(sessions, order, visible_projects);
+  const project_drafts = useMemo(() => {
+    const grouped = new Map<string, SidebarDraftEntry[]>();
+    if (order === "project") for (const entry of draft_entries) {
+      if (!entry.project) continue;
+      const entries = grouped.get(entry.project.group_key) ?? [];
+      entries.push(entry);
+      grouped.set(entry.project.group_key, entries);
+    }
+    return grouped;
+  }, [draft_entries, order]);
+  const ungrouped_drafts = order === "project" ? draft_entries.filter(({ project }) => !project) : draft_entries;
   const noProviders = enabled_providers.size === 0;
   const isIndexingCatalog = pending_providers.length > 0;
   const indexingLabel = pendingProviderLabel(pending_providers);
@@ -326,8 +350,8 @@ export function Sidebar({
 
       <div className="sidebar__controls">
         {on_add_project || on_new_session ? <div className="workspace-actions">
-          <button type="button" disabled={!workspace_available || !registered_projects.some((project) => project.available)} onClick={() => on_new_session?.()}>New session</button>
-          <button type="button" disabled={!workspace_available} onClick={on_add_project}>Add project</button>
+          {on_new_session ? <button type="button" disabled={!workspace_available} onClick={() => on_new_session()}>New session</button> : null}
+          {on_add_project ? <button type="button" disabled={!workspace_available} onClick={on_add_project}>Add project</button> : null}
         </div> : null}
         {workspace_notice ? <p className="workspace-sidebar-notice" role="status">{workspace_notice}
           {on_workspace_retry ? <button className="text-button" type="button" onClick={on_workspace_retry}>Retry projects</button> : null}</p> : null}
@@ -405,6 +429,11 @@ export function Sidebar({
       ) : null}
 
       <div className="sidebar__list">
+        {on_draft_select && ungrouped_drafts.length ? <section className="session-group" aria-label="Draft sessions">
+          <h2>{order === "project" ? "Choose a project" : "Drafts"} <span className="session-group__count">{ungrouped_drafts.length}</span></h2>
+          <div className="session-group__items"><SessionDraftRows entries={ungrouped_drafts}
+            selected_draft_id={selected_draft_id} on_select={on_draft_select} /></div>
+        </section> : null}
         {is_loading && sessions.length === 0 ? <LoadingRows count={6} /> : null}
 
         {!is_loading && error && sessions.length === 0 ? (
@@ -427,7 +456,7 @@ export function Sidebar({
           </div>
         ) : null}
 
-        {!is_loading && !error && sessions.length === 0 && groups.length === 0 ? (
+        {!is_loading && !error && sessions.length === 0 && groups.length === 0 && draft_entries.length === 0 ? (
           <div className="sidebar-state">
             <strong>
               {noProviders
@@ -455,39 +484,45 @@ export function Sidebar({
           </div>
         ) : null}
 
-        {groups.map((group) => (
-          <section className="session-group" key={group.key}>
-            <h2 title={group.project}>
-              {group.project}
-              <span className="session-group__count" title={`${group.sessions.length} loaded sessions`}>
-                {group.sessions.length}
-              </span>
-              {group.registered_projects && on_new_session ? <button type="button" className="session-group__new"
-                aria-label={`New session in ${group.project}`} disabled={!workspace_available || !group.registered_projects.some((project) => project.available)}
-                onClick={() => on_new_session(group.key)}>+</button> : null}
-            </h2>
-            <div className="session-group__items">
-              {group.sessions.length === 0 ? <p className="workspace-empty-project">No sessions yet</p> : null}
-              {group.sessions.map((session) => (
-                <SessionBranch
-                  order={order}
-                  depth={0}
-                  expanded_session_keys={expandedSessionKeys}
-                  key={session.session_key}
-                  on_children_load={on_children_load}
-                  on_children_load_more={on_children_load_more}
-                  on_children_retry={on_children_retry}
-                  on_session_select={on_session_select}
-                  on_question_session_select={on_question_session_select}
-                  on_toggle={toggleSessionBranch}
-                  selected_session_key={selected_session_key}
-                  session={session}
-                  session_children={session_children}
-                />
-              ))}
-            </div>
-          </section>
-        ))}
+        {groups.map((group) => {
+          const entries = project_drafts.get(group.key) ?? [];
+          return (
+            <section className="session-group" key={group.key}>
+              <h2 title={group.project}>
+                {group.project}
+                <span className="session-group__count" title={`${group.sessions.length} loaded sessions${entries.length ? ` · ${entries.length} ${entries.length === 1 ? "draft" : "drafts"}` : ""}`}>
+                  {group.sessions.length + entries.length}
+                </span>
+                {group.registered_projects && on_new_session ? <button type="button" className="session-group__new"
+                  aria-label={`New session in ${group.project}`} disabled={!workspace_available || !group.registered_projects.some((project) => project.available)}
+                  title={group.registered_projects.some((project) => project.available) ? undefined : group.registered_projects.map((project) => project.unavailable_reason ?? "This folder is unavailable.").join("\n")}
+                  onClick={() => on_new_session(group.key)}>+</button> : null}
+              </h2>
+              <div className="session-group__items">
+                {on_draft_select ? <SessionDraftRows entries={entries} selected_draft_id={selected_draft_id}
+                  show_project={false} on_select={on_draft_select} /> : null}
+                {group.sessions.length === 0 && entries.length === 0 ? <p className="workspace-empty-project">No sessions yet</p> : null}
+                {group.sessions.map((session) => (
+                  <SessionBranch
+                    order={order}
+                    depth={0}
+                    expanded_session_keys={expandedSessionKeys}
+                    key={session.session_key}
+                    on_children_load={on_children_load}
+                    on_children_load_more={on_children_load_more}
+                    on_children_retry={on_children_retry}
+                    on_session_select={on_session_select}
+                    on_question_session_select={on_question_session_select}
+                    on_toggle={toggleSessionBranch}
+                    selected_session_key={selected_session_key}
+                    session={session}
+                    session_children={session_children}
+                  />
+                ))}
+              </div>
+            </section>
+          );
+        })}
 
         {has_more ? (
           <button

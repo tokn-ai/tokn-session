@@ -1,7 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ComponentProps } from "react";
-import type { SessionOrder, SessionSummary, ViewerProvider } from "../lib/types";
+import type { RegisteredProject, SessionOrder, SessionSummary, ViewerProvider } from "../lib/types";
+import type { SessionDraft } from "../lib/useSessionDrafts";
 import { Sidebar } from "./Sidebar";
 
 afterEach(cleanup);
@@ -67,6 +68,83 @@ function renderSidebar(
   );
 }
 
+describe("draft project membership", () => {
+  const projects: RegisteredProject[] = [
+    { project_id: "alpha", name: "Alpha", group_key: "/alpha", folder_path: "/alpha", created_at_ms: 2, available: true },
+    { project_id: "beta", name: "Beta", group_key: "/beta", folder_path: "/beta", created_at_ms: 1, available: true },
+  ];
+  function draft(project_id: string, overrides: Partial<SessionDraft> = {}): SessionDraft {
+    return { draft_id: "draft", project_id, prompt: "Planned task", selection: { provider: "codex" }, images: [],
+      snapshot: null, sending: false, uncertain: false, locked: false, can_discard: true, error: null, image_error: null, ...overrides };
+  }
+  function ProjectSidebar(props: Partial<ComponentProps<typeof Sidebar>>) {
+    return <Sidebar order="project" registered_projects={projects} workspace_available on_draft_select={vi.fn()}
+      sessions={[]} session_children={new Map()} selected_session_key={null} enabled_providers={new Set(["codex"])}
+      search="" is_loading={false} error={null} source_errors={[]} pending_providers={[]} has_more={false} is_loading_more={false}
+      on_search_change={vi.fn()} on_provider_toggle={vi.fn()} on_session_select={vi.fn()}
+      on_children_load={vi.fn()} on_children_retry={vi.fn()} on_children_load_more={vi.fn()} on_retry={vi.fn()} on_load_more={vi.fn()}
+      {...props} />;
+  }
+  const group = (name: string) => screen.getByRole("heading", { name: new RegExp(`^${name}`) }).closest("section")!;
+
+  it("places a draft inside its target project and keeps draft selection separate from native history", () => {
+    const select_draft = vi.fn(); const select_native = vi.fn();
+    render(<ProjectSidebar drafts={[draft("beta")]} on_draft_select={select_draft} on_session_select={select_native} />);
+    const row = within(group("Beta")).getByRole("button", { name: "Planned task, Codex draft in Beta" });
+    expect(within(group("Alpha")).queryByRole("button", { name: /Codex draft/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^Drafts/ })).not.toBeInTheDocument();
+    expect(within(group("Beta")).queryByText("No sessions yet")).not.toBeInTheDocument();
+    expect(within(group("Alpha")).getByText("No sessions yet")).toBeInTheDocument();
+    expect(within(row).queryByText("Beta")).not.toBeInTheDocument();
+    fireEvent.click(row);
+    expect(select_draft).toHaveBeenCalledExactlyOnceWith("draft");
+    expect(select_native).not.toHaveBeenCalled();
+  });
+
+  it("moves the same draft when its target project changes", () => {
+    const view = render(<ProjectSidebar drafts={[draft("alpha")]} selected_draft_id="draft" />);
+    expect(within(group("Alpha")).getByRole("button", { name: /Codex draft/ })).toHaveAttribute("aria-current", "page");
+    view.rerender(<ProjectSidebar drafts={[draft("beta")]} selected_draft_id="draft" />);
+    expect(within(group("Alpha")).queryByRole("button", { name: /Codex draft/ })).not.toBeInTheDocument();
+    expect(within(group("Beta")).getByRole("button", { name: /Codex draft/ })).toHaveAttribute("aria-current", "page");
+    expect(screen.getAllByRole("button", { name: /Codex draft/ })).toHaveLength(1);
+  });
+
+  it("keeps the target group visible for matching draft text and for the selected draft", () => {
+    const view = render(<ProjectSidebar drafts={[draft("beta", { prompt: "Investigate cache" })]} search="cache" />);
+    expect(within(group("Beta")).getByRole("button", { name: /Investigate cache/ })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^Alpha/ })).not.toBeInTheDocument();
+    view.rerender(<ProjectSidebar drafts={[draft("beta")]} selected_draft_id="draft" search="unrelated text" />);
+    expect(within(group("Beta")).getByRole("button", { name: /Planned task/ })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("renders exact folder drafts once when their registrations share a repository group", () => {
+    const folders = [projects[0], { ...projects[1], group_key: "/alpha", folder_path: "/worktrees/alpha" }];
+    render(<ProjectSidebar registered_projects={folders}
+      drafts={[draft("alpha", { draft_id: "main", prompt: "Main work" }), draft("beta", { draft_id: "worktree", prompt: "Worktree work" })]} />);
+    const repository = group("Alpha");
+    expect(within(repository).getByRole("button", { name: "Main work, Codex draft in Alpha" })).toBeInTheDocument();
+    expect(within(repository).getByRole("button", { name: "Worktree work, Codex draft in Beta" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /Codex draft/ })).toHaveLength(2);
+    expect(screen.queryByRole("heading", { name: /^Beta/ })).not.toBeInTheDocument();
+  });
+
+  it("keeps unassigned and missing-registration drafts accessible without assigning another project", () => {
+    render(<ProjectSidebar drafts={[draft("", { draft_id: "unassigned", prompt: "Choose later" }), draft("removed", { draft_id: "missing", prompt: "Missing folder" })]} />);
+    expect(screen.getByRole("button", { name: "Choose later, Codex draft" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Missing folder, Codex draft" })).toBeInTheDocument();
+    expect(within(group("Alpha")).queryByRole("button", { name: /Codex draft/ })).not.toBeInTheDocument();
+    expect(within(group("Beta")).queryByRole("button", { name: /Codex draft/ })).not.toBeInTheDocument();
+  });
+
+  it("keeps target project information on time-view draft rows", () => {
+    render(<ProjectSidebar order="time" drafts={[draft("beta")]} />);
+    const row = screen.getByRole("button", { name: "Planned task, Codex draft in Beta" });
+    expect(within(row).getByText("Beta")).toHaveClass("session-row__project");
+    expect(screen.getByRole("heading", { name: /^Drafts/ })).toBeInTheDocument();
+  });
+});
+
 describe("Sidebar session identity", () => {
   it("offers provider-neutral desktop creation independently of provider filters", () => {
     const start = vi.fn();
@@ -89,6 +167,22 @@ describe("Sidebar session identity", () => {
     fireEvent.click(screen.getByRole("button", { name: "New session in Saved repo" }));
     expect(start).toHaveBeenCalledExactlyOnceWith("/repo");
     expect(screen.queryByRole("button", { name: /, Pi session / })).not.toBeInTheDocument();
+  });
+  it("keeps New session accessible before any folders have been discovered or registered", () => {
+    const start = vi.fn();
+    renderSidebar([], [], null, undefined, "project", { workspace_available: true, on_new_session: start, registered_projects: [] });
+    expect(screen.getByRole("button", { name: "New session" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    expect(start).toHaveBeenCalledExactlyOnceWith();
+  });
+  it("explains a disabled discovered group while allowing another folder to be chosen", () => {
+    const reason = "No saved sessions reference this folder.";
+    renderSidebar([], [], null, undefined, "project", { workspace_available: true, on_new_session: vi.fn(),
+      registered_projects: [{ project_id: "saved", group_key: "/repo", folder_path: "/repo", name: "Saved repo", created_at_ms: 1,
+        available: false, origin: "discovered", discovery_state: "absent", unavailable_reason: reason }] });
+    expect(screen.getByRole("button", { name: "New session" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "New session in Saved repo" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "New session in Saved repo" })).toHaveAttribute("title", reason);
   });
   it("keeps provider controls in a disclosure and delegates desktop collapse", () => {
     const collapse = vi.fn();

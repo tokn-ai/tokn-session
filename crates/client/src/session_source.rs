@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokn_session_codex::CodexSessionSource;
-use tokn_session_core::{LoadedSession, LoadedSessionTree, SessionHeader, SessionRef};
+use tokn_session_core::{
+  FileSessionCatalog, LoadedSession, LoadedSessionTree, SessionHeader, SessionHeaderCatalog, SessionRef,
+  SessionRelationCatalog,
+};
 use tokn_session_dsh::DshSessionSource;
 use tokn_session_opencode::OpenCodeSessionSource;
 use tokn_session_pi::PiSessionSource;
@@ -31,15 +34,32 @@ impl SessionSourceClient {
       Self::WorkBuddy(source) => source.list_session_headers()?,
       Self::ZCode(source) => source.list_session_headers()?,
     };
-    headers.sort_by(|left, right| {
-      right
-        .updated_at_ms
-        .cmp(&left.updated_at_ms)
-        .then_with(|| right.updated_at.cmp(&left.updated_at))
-        .then_with(|| right.timestamp.cmp(&left.timestamp))
-        .then_with(|| right.path.cmp(&left.path))
-    });
+    sort_headers(&mut headers);
     Ok(headers)
+  }
+
+  pub(crate) fn list_session_header_catalog(&self) -> Result<SessionHeaderCatalog, String> {
+    let mut catalog = match self {
+      Self::Dsh(source) => file_header_catalog(source.list_session_relation_catalog()?),
+      Self::Codex(source) => file_header_catalog(source.list_session_relation_catalog()?),
+      Self::OpenCode(source) => source.list_session_header_catalog()?,
+      Self::Pi(source) => file_header_catalog(source.list_session_relation_catalog()?),
+      Self::WorkBuddy(source) => source.list_session_header_catalog()?,
+      Self::ZCode(source) => source.list_session_header_catalog()?,
+    };
+    sort_headers(&mut catalog.headers);
+    Ok(catalog)
+  }
+
+  pub(crate) fn session_catalog_roots(&self) -> Result<Vec<PathBuf>, String> {
+    match self {
+      Self::Codex(source) => source.session_roots(),
+      Self::Pi(source) => source.session_roots(),
+      Self::Dsh(source) => Ok(vec![source.session_root()?]),
+      Self::OpenCode(source) => Ok(vec![source.database_path()?]),
+      Self::WorkBuddy(source) => Ok(vec![source.config_dir()?]),
+      Self::ZCode(source) => Ok(vec![source.database_path()?]),
+    }
   }
 
   pub(crate) fn file_session_roots(&self) -> Result<Vec<PathBuf>, String> {
@@ -57,6 +77,17 @@ impl SessionSourceClient {
     match self {
       Self::Codex(source) => source.session_paths(),
       Self::Pi(source) => source.session_paths(),
+      Self::Dsh(_) => Err(path_targeting_unsupported("dsh")),
+      Self::OpenCode(_) => Err(path_targeting_unsupported("opencode")),
+      Self::WorkBuddy(_) => Err(path_targeting_unsupported("workbuddy")),
+      Self::ZCode(_) => Err(path_targeting_unsupported("zcode")),
+    }
+  }
+
+  pub(crate) fn file_session_catalog(&self) -> Result<FileSessionCatalog, String> {
+    match self {
+      Self::Codex(source) => source.session_path_catalog(),
+      Self::Pi(source) => source.session_path_catalog(),
       Self::Dsh(_) => Err(path_targeting_unsupported("dsh")),
       Self::OpenCode(_) => Err(path_targeting_unsupported("opencode")),
       Self::WorkBuddy(_) => Err(path_targeting_unsupported("workbuddy")),
@@ -219,6 +250,23 @@ impl SessionSourceClient {
 
 fn file_headers(references: Vec<SessionRef>) -> Vec<SessionHeader> {
   references.into_iter().map(file_header).collect()
+}
+
+fn file_header_catalog(relations: SessionRelationCatalog) -> SessionHeaderCatalog {
+  let headers = file_headers(relations.references);
+  let complete = relations.complete && headers.iter().all(|header| header.updated_at_ms.is_some());
+  SessionHeaderCatalog { headers, complete }
+}
+
+fn sort_headers(headers: &mut [SessionHeader]) {
+  headers.sort_by(|left, right| {
+    right
+      .updated_at_ms
+      .cmp(&left.updated_at_ms)
+      .then_with(|| right.updated_at.cmp(&left.updated_at))
+      .then_with(|| right.timestamp.cmp(&left.timestamp))
+      .then_with(|| right.path.cmp(&left.path))
+  });
 }
 
 fn path_targeting_unsupported(source: &str) -> String {
