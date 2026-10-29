@@ -14,6 +14,18 @@ function session(session_key: string, updated_at_ms: number | null, overrides: P
 const keys = (entries: { session_key: string }[]) => entries.map((entry) => entry.session_key);
 
 describe("sidebar ordering", () => {
+  it.each(["project_key", "cwd"] as const)("orders exact %s identities and attaches each registered folder to its own group", (field) => {
+    const sessions = [session("spaced", 500, { [field]: "/repo ", project: "Repo", project_order_ms: 10 }),
+      session("plain", 100, { [field]: "/repo", project: "Repo", project_order_ms: 10 })];
+    const projects: RegisteredProject[] = [
+      { project_id: "spaced", group_key: "/repo ", folder_path: "/repo ", name: "Repo", created_at_ms: 20, available: true },
+      { project_id: "plain", group_key: "/repo", folder_path: "/repo", name: "Repo", created_at_ms: 10, available: true },
+    ];
+    const groups = sidebarGroups(sessions, "project", [], Date.now(), projects);
+    expect(groups.map((group) => [group.key, keys(group.sessions), group.registered_projects?.map((project) => project.project_id)]))
+      .toEqual([["/repo", ["plain"], ["plain"]], ["/repo ", ["spaced"], ["spaced"]]]);
+  });
+
   it("retains registered empty projects and merges worktree folders into their existing repository group", () => {
     const project = (project_id: string, folder_path: string, group_key = "/repo"): RegisteredProject => ({ project_id, group_key, folder_path, name: "Repo", created_at_ms: 10, available: true });
     const sessions = [session("existing", 500, { project_key: "/repo", cwd: "/repo", project: "Existing repository" })];

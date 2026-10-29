@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use tokn_session_core::{LoadedSession, SessionHeader, SessionRef};
+use tokn_session_core::{LoadedSession, SessionHeader, SessionHeaderCatalog, SessionRef};
 use tokn_session_opencode::OpenCodeSessionSource;
 
 /// Read-only access to ZCode's OpenCode-compatible SQLite session store.
@@ -29,6 +29,10 @@ impl ZCodeSessionSource {
 
   pub fn list_session_headers(&self) -> Result<Vec<SessionHeader>, String> {
     self.inner.list_session_headers()
+  }
+
+  pub fn list_session_header_catalog(&self) -> Result<SessionHeaderCatalog, String> {
+    self.inner.list_session_header_catalog()
   }
 
   pub fn hydrate_session_header(&self, header: SessionHeader) -> Result<SessionHeader, String> {

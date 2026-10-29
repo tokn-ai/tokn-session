@@ -79,6 +79,45 @@ pub(crate) fn collect_rollouts(root: &Path, paths: &mut Vec<PathBuf>) -> Result<
   Ok(())
 }
 
+pub(crate) fn collect_rollout_catalog(
+  root: &Path,
+  catalog: &mut tokn_session_core::FileSessionCatalog,
+  optional: bool,
+) {
+  let entries = match std::fs::read_dir(root) {
+    Ok(entries) => entries,
+    Err(error) if optional && error.kind() == std::io::ErrorKind::NotFound => return,
+    Err(_) => {
+      catalog.complete = false;
+      return;
+    }
+  };
+  for entry in entries {
+    let Ok(entry) = entry else {
+      catalog.complete = false;
+      continue;
+    };
+    let Ok(kind) = entry.file_type() else {
+      catalog.complete = false;
+      continue;
+    };
+    let path = entry.path();
+    if kind.is_dir() {
+      collect_rollout_catalog(&path, catalog, false);
+    } else if kind.is_file() && is_rollout(&path) {
+      if is_compressed(&path) {
+        match std::fs::metadata(logical_path(&path)) {
+          Ok(metadata) if metadata.is_file() => continue,
+          Ok(_) => {}
+          Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+          Err(_) => catalog.complete = false,
+        }
+      }
+      catalog.paths.push(path);
+    }
+  }
+}
+
 /// Pin the physical EOF, including across concatenated compressed frames, so
 /// a historical read cannot follow a concurrently growing source indefinitely.
 pub(crate) fn reader(path: &Path) -> Result<Box<dyn BufRead>, String> {

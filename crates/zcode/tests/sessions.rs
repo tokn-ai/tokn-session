@@ -14,6 +14,34 @@ fn fixture_database() -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 #[test]
+fn observed_zcode_catalog_distinguishes_empty_from_missing_database() {
+  let (_directory, database) = fixture_database();
+  let source = ZCodeSessionSource::new(Some(database.clone()));
+  let observed = source.list_session_header_catalog().unwrap();
+  assert!(observed.complete);
+  assert_eq!(observed.headers, source.list_session_headers().unwrap());
+  let connection = Connection::open(&database).unwrap();
+  connection.execute("delete from session", []).unwrap();
+  assert!(source.list_session_header_catalog().unwrap().complete);
+  assert!(source.list_session_header_catalog().unwrap().headers.is_empty());
+  drop(connection);
+  std::fs::remove_file(database).unwrap();
+  assert!(!source.list_session_header_catalog().unwrap().complete);
+}
+
+#[test]
+fn observed_zcode_catalog_retains_existing_database_errors() {
+  let (_directory, database) = fixture_database();
+  let source = ZCodeSessionSource::new(Some(database.clone()));
+  let connection = Connection::open(&database).unwrap();
+  connection.execute("drop table session", []).unwrap();
+  assert_eq!(
+    source.list_session_header_catalog().unwrap_err(),
+    source.list_session_headers().unwrap_err()
+  );
+}
+
+#[test]
 fn lists_relationships_and_normalizes_zcode_events() {
   let (_directory, database) = fixture_database();
   let source = ZCodeSessionSource::new(Some(database.clone()));

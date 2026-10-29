@@ -1,5 +1,5 @@
 import type { RegisteredProject, SessionOrder, SessionSummary } from "./types";
-import { groupSessions } from "./state";
+import { groupSessions, sessionProjectKey } from "./state";
 import { readViewerPreferences, updateViewerPreferences } from "./viewerPreferences";
 
 export const RECENT_WINDOW_MS = 60 * 60 * 1000;
@@ -36,7 +36,7 @@ export function compareActivity(left: SessionSummary, right: SessionSummary): nu
 }
 
 export function projectKey(session: SessionSummary): string {
-  return session.project_key?.trim() || session.cwd?.trim() || session.project?.trim() || "";
+  return sessionProjectKey(session);
 }
 
 export function compareProjects(left: SessionSummary, right: SessionSummary): number {

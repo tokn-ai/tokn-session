@@ -68,6 +68,9 @@ pub struct ManagedSessionSnapshot {
   pub message: Option<String>,
   /// Latest settled provider-turn failure; the owned runtime can remain ready.
   pub last_turn_error: Option<String>,
+  /// Initial input acknowledgement, independent of native history readiness.
+  /// Legacy receipts without this evidence remain unknown.
+  pub creation_input_state: Option<crate::creation::FirstInputState>,
   pub pending_dialog: Option<ManagedSessionDialog>,
 }
 

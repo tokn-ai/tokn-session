@@ -9,8 +9,9 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 use tokn_session_client::SessionHeader;
 use tokn_session_core::{
-  AgentActivity, AgentEvent, LifecycleOutcome, LoadedSession, MessageDelivery, Phase, Provider, Role, TerminalAction,
-  ToolCallEvent, ToolKind, ToolOperation, ToolOperationStatus, ToolSummary, UsageKind, assemble_tool_operations,
+  AgentActivity, AgentEvent, LifecycleOutcome, LoadedSession, MessageDelivery, Phase, Provider, Role,
+  SessionHeaderCatalog, TerminalAction, ToolCallEvent, ToolKind, ToolOperation, ToolOperationStatus, ToolSummary,
+  UsageKind, assemble_tool_operations,
 };
 use tokn_session_index::{
   IndexedSession, SessionBaselineCompletionRequest, SessionIndex, SessionIndexError, SessionKey as IndexedSessionKey,
@@ -39,6 +40,8 @@ mod event_filter;
 mod image_resources;
 mod input;
 mod managed_sessions;
+#[cfg(test)]
+mod project_discovery_tests;
 mod session_creation;
 pub(crate) use session_creation::validate_creation_profile;
 mod model_projection;
@@ -69,7 +72,6 @@ const MAX_TOOL_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_TRAJECTORY_TIMESTAMP_CHARS: usize = 128;
 const MAX_TRAJECTORY_DETAIL_SOURCE_RECORDS: usize = 100;
 const MAX_TRAJECTORY_DETAIL_SOURCE_RECORD_BYTES: usize = 64 * 1024;
-const MAX_INDEXED_CWD_CHARS: usize = 4 * 1024;
 const MAX_INDEXED_TIMESTAMP_CHARS: usize = 256;
 const INDEX_CATALOG_SOURCE_KEY: &str = "catalog.v1";
 const INDEX_MISSING_SOURCE_CURSOR: &str = "missing.v1";
@@ -86,6 +88,7 @@ pub struct ViewerService {
   pub(crate) indexer_lock: Option<crate::indexer::IndexerLock>,
   repository: Arc<dyn ViewerRepository>,
   pub(crate) session_index: Arc<SessionIndex>,
+  pub(crate) project_registry: Arc<crate::projects::ProjectRegistryState>,
   index_refresh_gate: Arc<Mutex<()>>,
   index_progress: IndexProgressStore,
   index_retry_sender: Arc<Mutex<Option<mpsc::UnboundedSender<SessionIndexWake>>>>,
@@ -477,8 +480,17 @@ struct ProviderIndexRefresh {
 /// identical.
 struct CatalogIndexSnapshot {
   provider_ready: bool,
+  exact_cwds: bool,
   existing_sources: Vec<SourceState>,
   existing_sessions: Vec<IndexedSession>,
+}
+
+/// Only actual catalog observations can establish provider folder presence.
+/// Cached rows retained after a partial scan are deliberately excluded.
+#[derive(Default)]
+struct ProjectDiscoveryEvidence {
+  cwds: BTreeSet<String>,
+  complete: bool,
 }
 
 /// A source whose metadata catalog has committed but whose message body still
@@ -738,6 +750,7 @@ impl ViewerService {
       indexer_lock: None,
       repository,
       session_index,
+      project_registry: Arc::new(crate::projects::ProjectRegistryState::default()),
       index_refresh_gate: Arc::new(Mutex::new(())),
       index_progress: IndexProgressStore::new(INDEX_BODY_SCAN_BATCH_SIZE),
       index_retry_sender: Arc::new(Mutex::new(None)),
@@ -1915,6 +1928,9 @@ impl ViewerService {
   }
 
   pub(crate) fn observe_shared_index_change(&self) -> Result<bool, String> {
+    if self.session_scope.is_some() {
+      return Ok(false);
+    }
     let current = self
       .session_index
       .data_version()
@@ -1930,17 +1946,23 @@ impl ViewerService {
       Some(previous) => previous != current,
       None => true,
     };
+    if changed {
+      self.refresh_project_registry_if_changed()?;
+    }
+    // Do not consume the shared change if a transient registry read failed;
+    // the next follower poll must retry even without another SQLite write.
     *observed = Some(current);
     Ok(changed)
   }
 
   fn catalog_index_snapshot(&self, provider: ViewerProvider) -> Result<CatalogIndexSnapshot, String> {
     let catalog_key = index_catalog_source_key(provider);
-    let provider_ready = self
+    let catalog = self
       .session_index
       .source_state(&catalog_key)
-      .map_err(|error| format!("failed to read the {provider:?} index baseline: {error}"))?
-      .is_some();
+      .map_err(|error| format!("failed to read the {provider:?} index baseline: {error}"))?;
+    let provider_ready = catalog.is_some();
+    let exact_cwds = catalog.as_ref().is_some_and(|catalog| catalog.cursor == "headers.v3");
     let existing_sources = self
       .session_index
       .list_sources(provider.as_str())
@@ -1951,6 +1973,7 @@ impl ViewerService {
       .map_err(|error| format!("failed to read indexed {provider:?} session metadata: {error}"))?;
     Ok(CatalogIndexSnapshot {
       provider_ready,
+      exact_cwds,
       existing_sources,
       existing_sessions,
     })
@@ -1965,9 +1988,11 @@ impl ViewerService {
     provider: ViewerProvider,
     snapshot: &CatalogIndexSnapshot,
     apply_catalog_metadata: bool,
-  ) -> Result<Vec<SessionHeader>, String> {
-    if !snapshot.provider_ready || !matches!(provider, ViewerProvider::Codex | ViewerProvider::Pi) {
-      return self.repository.list_session_headers(provider);
+  ) -> Result<SessionHeaderCatalog, String> {
+    // Old catalogs normalized cwd like prose. Reread lightweight headers once
+    // before cached paths can become automatically registered launch folders.
+    if !snapshot.exact_cwds || !matches!(provider, ViewerProvider::Codex | ViewerProvider::Pi) {
+      return self.repository.list_session_header_catalog(provider);
     }
 
     let existing_by_source = snapshot
@@ -1986,16 +2011,19 @@ impl ViewerService {
           .push(session);
         grouped
       });
-    let paths = match self.repository.file_session_paths(provider) {
+    let files = match self.repository.file_session_catalog(provider) {
       Ok(paths) => paths,
-      Err(_) => return self.repository.list_session_headers(provider),
+      Err(_) => return self.repository.list_session_header_catalog(provider),
     };
     let mut headers = Vec::new();
-    for path in paths {
+    let mut complete = files.complete;
+    for path in files.paths {
       let Ok(source_key) = index_source_key_for_path(provider, &path) else {
+        complete = false;
         continue;
       };
       let Ok(cursor) = source_cursor(provider, &path) else {
+        complete = false;
         continue;
       };
       let previous = existing_by_source.get(source_key.source_key.as_str()).copied();
@@ -2012,6 +2040,7 @@ impl ViewerService {
       }
 
       let Ok(mut header) = self.repository.session_header_at_path(provider, &path) else {
+        complete = false;
         continue;
       };
       if let Some(existing) = existing.filter(|session| session.key.session_id == header.id) {
@@ -2022,16 +2051,51 @@ impl ViewerService {
     if apply_catalog_metadata {
       self.repository.apply_catalog_metadata(provider, &mut headers)?;
     }
-    Ok(headers)
+    Ok(SessionHeaderCatalog { headers, complete })
   }
 
-  /// Builds one provider's complete header catalog without reading any message
-  /// bodies. A catalog sentinel becomes visible only after a stable complete
-  /// pass commits atomically, so a first-run sidebar never observes a partial
-  /// provider snapshot.
+  /// Builds a provider's header catalog without reading message bodies, then
+  /// reconciles folder presence using only the successfully observed metadata.
   fn refresh_provider_catalog(&self, provider: ViewerProvider) -> Result<ProviderIndexRefresh, String> {
+    let mut evidence = ProjectDiscoveryEvidence::default();
+    let result = self.refresh_provider_catalog_sources(provider, &mut evidence);
+    // Failed or racing catalogs may establish presence but never absence.
+    let complete = result.as_ref().is_ok_and(|refresh| !refresh.retry_catalog_soon) && evidence.complete;
+    let projects = self.reconcile_discovered_project_folders(provider, &evidence.cwds, complete);
+    let refresh = result?;
+    projects?;
+    Ok(refresh)
+  }
+
+  fn refresh_provider_catalog_sources(
+    &self,
+    provider: ViewerProvider,
+    evidence: &mut ProjectDiscoveryEvidence,
+  ) -> Result<ProviderIndexRefresh, String> {
     let snapshot = self.catalog_index_snapshot(provider)?;
-    let headers = self.provider_catalog_headers(provider, &snapshot, true)?;
+    let catalog = self.provider_catalog_headers(provider, &snapshot, true)?;
+    let mut complete = catalog.complete && self.catalog_covers_previous_sources(provider, &snapshot);
+    let headers = catalog.headers;
+    complete &= headers
+      .iter()
+      .filter_map(|header| header.cwd.as_deref())
+      .all(crate::projects::valid_discovered_cwd);
+    evidence.cwds = headers
+      .iter()
+      .filter_map(|header| header.cwd.clone())
+      .filter(|cwd| crate::projects::valid_discovered_cwd(cwd))
+      .collect();
+    // A readable fallback header can temporarily lose cwd while its file is
+    // being rewritten. It cannot erase a previously known folder claim.
+    let known_cwd_ids = snapshot
+      .existing_sessions
+      .iter()
+      .filter(|session| session.present && session.cwd.is_some())
+      .map(|session| session.key.session_id.as_str())
+      .collect::<HashSet<_>>();
+    complete &= !headers
+      .iter()
+      .any(|header| header.cwd.is_none() && known_cwd_ids.contains(header.id.as_str()));
     let catalog_topology = session_catalog_topology(provider, &headers)?;
     let catalog_key = index_catalog_source_key(provider);
     let provider_ready = snapshot.provider_ready;
@@ -2136,6 +2200,10 @@ impl ViewerService {
           let existing = existing_by_session_key.get(&key).copied();
           let mut metadata =
             catalog_session_metadata(&source_key, header.clone(), existing, provider_ready, source_changed)?;
+          if !snapshot.exact_cwds && !header.cwd.as_deref().is_some_and(crate::projects::valid_discovered_cwd) {
+            // A legacy display-normalized cwd is not a verified launch path.
+            metadata.cwd = None;
+          }
           // Codex commonly moves a completed rollout to the archive directory.
           // The new path must not masquerade as a freshly-created conversation.
           if existing.is_none()
@@ -2185,7 +2253,8 @@ impl ViewerService {
     }
 
     for source in &snapshot.existing_sources {
-      if source.key.source_key == INDEX_CATALOG_SOURCE_KEY
+      if !complete
+        || source.key.source_key == INDEX_CATALOG_SOURCE_KEY
         || current_source_keys.contains(&source.key.source_key)
         || source.cursor == INDEX_MISSING_SOURCE_CURSOR
       {
@@ -2199,7 +2268,8 @@ impl ViewerService {
       });
     }
 
-    if replacements.is_empty() && provider_ready {
+    if replacements.is_empty() && snapshot.exact_cwds {
+      evidence.complete = complete;
       return Ok(ProviderIndexRefresh::default());
     }
 
@@ -2208,8 +2278,9 @@ impl ViewerService {
     // intentionally not part of this comparison: Codex updates both while a
     // rollout is active, and that is ordinary provider activity rather than a
     // read failure.
-    let confirmed_headers = self.provider_catalog_headers(provider, &snapshot, false)?;
-    let confirmed_topology = session_catalog_topology(provider, &confirmed_headers)?;
+    let confirmed = self.provider_catalog_headers(provider, &snapshot, false)?;
+    complete &= confirmed.complete;
+    let confirmed_topology = session_catalog_topology(provider, &confirmed.headers)?;
     let mut retry_catalog_soon = catalog_topology != confirmed_topology;
 
     if retry_catalog_soon {
@@ -2232,6 +2303,29 @@ impl ViewerService {
         .retain(|(source_key, _, _)| catalog_topology.get(source_key) == confirmed_topology.get(source_key));
     }
 
+    if !complete {
+      // A missing row in an incomplete SQL/file inventory is not deletion.
+      // Keep the last source snapshot until membership can be established;
+      // independent valid sources can still advance in the same pass.
+      let mut present_ids_by_source = HashMap::<&str, HashSet<&str>>::new();
+      for session in snapshot.existing_sessions.iter().filter(|session| session.present) {
+        present_ids_by_source
+          .entry(&session.key.source_key)
+          .or_default()
+          .insert(&session.key.session_id);
+      }
+      replacements.retain(|replacement| {
+        let incoming = replacement
+          .sessions
+          .iter()
+          .map(|metadata| metadata.key.session_id.as_str())
+          .collect::<HashSet<_>>();
+        present_ids_by_source
+          .get(replacement.source.key.source_key.as_str())
+          .is_none_or(|existing| existing.is_subset(&incoming))
+      });
+    }
+
     // Per-source cursor verification is deliberately granular. One active
     // rollout should not prevent thousands of unrelated catalog rows from
     // committing; its previous row remains until the next catalog observes a
@@ -2251,13 +2345,16 @@ impl ViewerService {
       replacements.retain(|replacement| !changed_sources.contains(&replacement.source.key.source_key));
     }
 
-    // The sentinel means a complete header catalog is available, not that every
-    // source body has been read. It also makes an empty provider catalog
-    // explicit, so a later first session is correctly identified as new.
-    if !provider_ready && !retry_catalog_soon {
+    // Readiness exposes the usable catalog, including valid rows from a
+    // partial provider. Completeness separately governs removal evidence;
+    // a malformed historical file must not hide all other sessions forever.
+    evidence.complete = complete && !retry_catalog_soon;
+    if !retry_catalog_soon && (!provider_ready || !snapshot.exact_cwds && complete) {
+      let cursor = if complete { "headers.v3" } else { "headers.v2" };
+      let previous = existing_by_key.get(INDEX_CATALOG_SOURCE_KEY).copied();
       replacements.push(
-        SourceReplacement::new(SourceState::new(catalog_key, "headers.v2", indexed_at_ms), Vec::new())
-          .with_source_cursor_precondition(SourceCursorPrecondition::missing()),
+        SourceReplacement::new(SourceState::new(catalog_key, cursor, indexed_at_ms), Vec::new())
+          .with_source_cursor_precondition(source_cursor_precondition(previous)),
       );
     }
 
@@ -2292,6 +2389,51 @@ impl ViewerService {
       attention_session_keys: Vec::new(),
       retry_catalog_soon,
       ..Default::default()
+    })
+  }
+
+  /// A complete scan of a new configured root says nothing about the old
+  /// root. Likewise, disappearance of an optional archive is not an empty
+  /// archive. Keep old rows and folder claims until their scope is readable.
+  fn catalog_covers_previous_sources(&self, provider: ViewerProvider, snapshot: &CatalogIndexSnapshot) -> bool {
+    let roots = match self.repository.session_catalog_roots(provider) {
+      Ok(None) => return true,
+      Ok(Some(roots)) => roots,
+      Err(_) => return false,
+    };
+    let roots = roots
+      .into_iter()
+      .filter_map(|root| {
+        let metadata = std::fs::metadata(&root).ok()?;
+        let canonical = root.canonicalize().ok();
+        Some((root, canonical, metadata.is_dir()))
+      })
+      .collect::<Vec<_>>();
+    let previous_paths = snapshot
+      .existing_sessions
+      .iter()
+      .filter(|session| session.present)
+      .map(|session| session.source_path.as_str())
+      .collect::<HashSet<_>>();
+    previous_paths.into_iter().all(|path| {
+      let path = Path::new(path);
+      let covers = |path: &Path, root: &Path, directory: bool| {
+        if directory {
+          path.starts_with(root)
+        } else {
+          path == root
+        }
+      };
+      if roots.iter().any(|(root, _, directory)| covers(path, root, *directory)) {
+        return true;
+      }
+      // Most histories already use their configured root's spelling. Resolve
+      // only aliases, without another filesystem lookup per ordinary source.
+      path.canonicalize().ok().is_some_and(|canonical| {
+        roots
+          .iter()
+          .any(|(_, root, directory)| root.as_deref().is_some_and(|root| covers(&canonical, root, *directory)))
+      })
     })
   }
 
@@ -2472,6 +2614,9 @@ impl ViewerService {
 
       let metadata = catalog_session_metadata(&source_key, header, Some(&existing), true, true)?;
       background_reconciliation_required |= metadata.parent_session_id != existing.parent_session_id;
+      // Ordinary appends remain path-only. A changed launch folder needs a
+      // fresh provider inventory before updating shared folder membership.
+      retry_catalog_soon |= metadata.cwd != existing.cwd;
       replacements.push(
         SourceReplacement::new(
           SourceState::new(source_key, pending_body_cursor(&cursor), indexed_at_ms),
@@ -3652,7 +3797,8 @@ fn session_metadata_from_header(
   // payload, tool input, or tool output enters this record.
   metadata.title = normalize_session_text(header.title, MAX_SESSION_TITLE_CHARS);
   metadata.preview = normalize_session_text(header.preview, MAX_SESSION_PREVIEW_CHARS);
-  metadata.cwd = normalize_session_text(header.cwd, MAX_INDEXED_CWD_CHARS);
+  // A working directory is an exact launch identity, never display prose.
+  metadata.cwd = header.cwd.filter(|cwd| crate::projects::valid_discovered_cwd(cwd));
   metadata.timestamp = normalize_session_text(header.timestamp, MAX_INDEXED_TIMESTAMP_CHARS);
   metadata.updated_at = normalize_session_text(header.updated_at, MAX_INDEXED_TIMESTAMP_CHARS);
   metadata.updated_at_ms = header.updated_at_ms;
@@ -3686,6 +3832,14 @@ fn catalog_session_metadata(
     }
   });
   let mut metadata = session_metadata_from_header(source_key, header, attention_marker, false)?;
+  // A fallback/partial native header does not disprove a saved working
+  // directory for the same session. Keep it until a real replacement arrives
+  // or complete discovery removes the session itself.
+  if metadata.cwd.is_none() {
+    metadata.cwd = existing
+      .and_then(|session| session.cwd.clone())
+      .filter(|cwd| crate::projects::valid_discovered_cwd(cwd));
+  }
   match existing {
     Some(indexed) if source_changed || needs_activity_upgrade(indexed) => {
       metadata.attention_baselined = false;
@@ -4168,11 +4322,11 @@ fn relation_would_cycle(parent_indices: &[Option<usize>], child_index: usize, pa
 }
 
 fn project_key(header: &SessionHeader) -> Option<&str> {
-  header.cwd.as_deref().map(str::trim).filter(|key| !key.is_empty())
+  header.cwd.as_deref().filter(|key| !key.trim().is_empty())
 }
 
 fn apply_project_group(summary: &mut SessionSummary, projects: &HashMap<String, tokn_session_index::ProjectGroup>) {
-  if let Some(group) = summary.cwd.as_deref().and_then(|cwd| projects.get(cwd.trim())) {
+  if let Some(group) = summary.cwd.as_deref().and_then(|cwd| projects.get(cwd)) {
     summary.project_key = Some(group.project_key.clone());
     summary.project = path_name(&group.project_key).map(str::to_owned);
     summary.project_order_ms = Some(group.order_ms);

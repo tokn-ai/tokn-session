@@ -62,6 +62,9 @@ for line in sys.stdin:
         name: "Project".into(),
         created_at_ms: 0,
         available: true,
+        origin: crate::workspace::ProjectOrigin::Manual,
+        discovery_state: crate::workspace::ProjectDiscoveryState::Absent,
+        unavailable_reason: None,
       },
     )
     .await

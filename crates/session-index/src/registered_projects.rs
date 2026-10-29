@@ -1,8 +1,8 @@
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::{Result, SessionIndex, SessionIndexError, remember_project};
 
-/// One explicitly registered launch folder. The caller owns canonical path
+/// One saved launch folder. The caller owns canonical path
 /// resolution; the index preserves its identity independently of sessions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegisteredProjectRecord {
@@ -14,56 +14,15 @@ pub struct RegisteredProjectRecord {
 }
 
 impl SessionIndex {
-  /// Registers one canonical folder without renaming a previous registration.
+  /// Manually registers one canonical folder, pinning an existing discovered
+  /// folder without renaming it or replacing its identity.
   /// The existing group anchor keeps its original discovery and sort times.
   pub fn register_project(&self, project: RegisteredProjectRecord) -> Result<RegisteredProjectRecord> {
     validate_project(&project)?;
     let mut connection = self.connection()?;
     super::project_aliases::refresh_registrations(&mut connection)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if let Some(existing) = transaction
-      .query_row(
-        "SELECT project_id, group_key, folder_path, name, created_at_ms
-         FROM registered_projects WHERE folder_path = ?1",
-        [&project.folder_path],
-        project_from_row,
-      )
-      .optional()?
-    {
-      transaction.commit()?;
-      return Ok(existing);
-    }
-    let existing_group: Option<String> = transaction
-      .query_row(
-        "SELECT project_key FROM project_aliases WHERE cwd = ?1",
-        [&project.folder_path],
-        |row| row.get(0),
-      )
-      .optional()?;
-    if existing_group.is_some_and(|group| group != project.group_key) {
-      return Err(SessionIndexError::InvalidProject(
-        "folder already belongs to a different saved project group".into(),
-      ));
-    }
-    remember_project(&transaction, &project.group_key, project.created_at_ms)?;
-    // The launch folder can be a canonical spelling of an older inferred
-    // cwd. Bind it to the selected group without overwriting a saved alias.
-    super::project_aliases::insert(
-      &transaction,
-      &project.folder_path,
-      &super::project_aliases::Alias::registered(project.group_key.clone()),
-    )?;
-    transaction.execute(
-      "INSERT INTO registered_projects(project_id, group_key, folder_path, name, created_at_ms)
-       VALUES(?1, ?2, ?3, ?4, ?5)",
-      params![
-        project.project_id,
-        project.group_key,
-        project.folder_path,
-        project.name,
-        project.created_at_ms,
-      ],
-    )?;
+    let project = ensure_project(&transaction, &project, true)?;
     transaction.commit()?;
     Ok(project)
   }
@@ -96,7 +55,68 @@ impl SessionIndex {
   }
 }
 
-fn validate_project(project: &RegisteredProjectRecord) -> Result<()> {
+/// Shared insertion keeps automatic and manual folders on one stable identity.
+pub(super) fn ensure_project(
+  transaction: &Transaction<'_>,
+  project: &RegisteredProjectRecord,
+  manual: bool,
+) -> Result<RegisteredProjectRecord> {
+  validate_project(project)?;
+  if let Some(existing) = transaction
+    .query_row(
+      "SELECT project_id, group_key, folder_path, name, created_at_ms
+       FROM registered_projects WHERE folder_path = ?1",
+      [&project.folder_path],
+      project_from_row,
+    )
+    .optional()?
+  {
+    if manual {
+      transaction.execute(
+        "INSERT INTO project_folder_origins(project_id, manual) VALUES(?1, 1)
+         ON CONFLICT(project_id) DO UPDATE SET manual = 1",
+        [&existing.project_id],
+      )?;
+    }
+    return Ok(existing);
+  }
+  let existing_group: Option<String> = transaction
+    .query_row(
+      "SELECT project_key FROM project_aliases WHERE cwd = ?1",
+      [&project.folder_path],
+      |row| row.get(0),
+    )
+    .optional()?;
+  if existing_group.is_some_and(|group| group != project.group_key) {
+    return Err(SessionIndexError::InvalidProject(
+      "folder already belongs to a different saved project group".into(),
+    ));
+  }
+  remember_project(transaction, &project.group_key, project.created_at_ms)?;
+  super::project_aliases::insert(
+    transaction,
+    &project.folder_path,
+    &super::project_aliases::Alias::registered(project.group_key.clone()),
+  )?;
+  transaction.execute(
+    "INSERT INTO registered_projects(project_id, group_key, folder_path, name, created_at_ms)
+     VALUES(?1, ?2, ?3, ?4, ?5)",
+    params![
+      project.project_id,
+      project.group_key,
+      project.folder_path,
+      project.name,
+      project.created_at_ms
+    ],
+  )?;
+  transaction.execute(
+    "INSERT INTO project_folder_origins(project_id, manual) VALUES(?1, ?2)",
+    params![project.project_id, manual],
+  )?;
+  Ok(project.clone())
+}
+
+pub(super) fn validate_project(project: &RegisteredProjectRecord) -> Result<()> {
   for (field, value, max_bytes) in [
     ("project_id", project.project_id.as_str(), 128),
     ("group_key", project.group_key.as_str(), 4096),
@@ -117,7 +137,7 @@ fn validate_project(project: &RegisteredProjectRecord) -> Result<()> {
   Ok(())
 }
 
-fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RegisteredProjectRecord> {
+pub(super) fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RegisteredProjectRecord> {
   Ok(RegisteredProjectRecord {
     project_id: row.get(0)?,
     group_key: row.get(1)?,

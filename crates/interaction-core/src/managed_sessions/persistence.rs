@@ -34,6 +34,8 @@ pub struct Receipt {
   pub message: Option<String>,
   #[serde(default)]
   pub last_turn_error: Option<String>,
+  #[serde(default)]
+  pub creation_input_state: Option<crate::creation::FirstInputState>,
   #[serde(skip)]
   pub dialog: Option<ManagedSessionDialog>,
 }
@@ -58,6 +60,7 @@ impl Receipt {
       session_key: None,
       message: None,
       last_turn_error: None,
+      creation_input_state: Some(crate::creation::FirstInputState::NotAttempted),
       dialog: None,
     }
   }
@@ -73,6 +76,7 @@ impl Receipt {
       session_key: self.session_key.clone(),
       message: self.message.clone(),
       last_turn_error: self.last_turn_error.clone(),
+      creation_input_state: self.creation_input_state,
       pending_dialog: self.dialog.clone(),
     }
   }
@@ -451,6 +455,15 @@ mod tests {
       crate::Provider::Pi,
       "a".repeat(64),
     )
+  }
+
+  #[test]
+  fn legacy_receipts_do_not_infer_initial_input_acceptance() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut value = serde_json::to_value(receipt(directory.path())).unwrap();
+    value.as_object_mut().unwrap().remove("creation_input_state");
+    let old: Receipt = serde_json::from_value(value).unwrap();
+    assert_eq!(old.snapshot().creation_input_state, None);
   }
 
   #[test]

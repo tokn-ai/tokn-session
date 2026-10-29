@@ -259,6 +259,9 @@ export interface RegisteredProject {
   name: string;
   created_at_ms: number;
   available: boolean;
+  origin?: "manual" | "discovered";
+  discovery_state?: "present" | "absent" | "unknown";
+  unavailable_reason?: string | null;
 }
 
 export interface ProjectWorkspaceSnapshot {

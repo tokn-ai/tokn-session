@@ -15,10 +15,15 @@
 //! precondition, so a stale scan cannot overwrite a newer replacement.
 
 mod managed_admissions;
+mod migration_013_compatibility;
 mod migration_compatibility;
 mod project_aliases;
+mod project_discovery;
 mod projects;
 mod registered_projects;
+pub use project_discovery::{
+  ProjectDiscoveryCheckpoint, ProjectDiscoveryState, ProjectFolderObservation, ProjectFolderRecord, ProjectOrigin,
+};
 pub use registered_projects::RegisteredProjectRecord;
 
 use std::{
@@ -325,6 +330,93 @@ ALTER TABLE project_aliases ADD COLUMN provenance TEXT NOT NULL DEFAULT 'legacy'
 CREATE INDEX project_aliases_by_provenance ON project_aliases(provenance);
 "#;
 
+// Launch-folder identity survives changes to the provider inventories. Manual
+// registrations remain explicitly pinned; automatic records retain the last
+// confirmed provider membership through incomplete discovery attempts.
+const MIGRATION_013: &str = r#"
+CREATE TABLE project_folder_origins (
+  project_id TEXT PRIMARY KEY NOT NULL REFERENCES registered_projects(project_id) ON DELETE CASCADE,
+  manual INTEGER NOT NULL CHECK(manual IN (0, 1))
+);
+INSERT INTO project_folder_origins(project_id, manual)
+  SELECT project_id, 1 FROM registered_projects;
+
+CREATE TABLE project_folder_providers (
+  project_id TEXT NOT NULL REFERENCES registered_projects(project_id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('present', 'absent', 'unknown')),
+  last_known_present INTEGER NOT NULL CHECK(last_known_present IN (0, 1)),
+  PRIMARY KEY(project_id, provider)
+);
+CREATE INDEX project_folder_providers_by_provider ON project_folder_providers(provider);
+
+CREATE TABLE project_folder_cwds (
+  provider TEXT NOT NULL,
+  cwd TEXT NOT NULL,
+  project_id TEXT NOT NULL REFERENCES registered_projects(project_id) ON DELETE CASCADE,
+  PRIMARY KEY(provider, cwd)
+);
+
+CREATE TABLE project_discovery_revisions (
+  provider TEXT PRIMARY KEY NOT NULL,
+  revision INTEGER NOT NULL CHECK(revision >= 0)
+);
+
+CREATE TABLE project_folder_revision (
+  singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton = 1),
+  revision INTEGER NOT NULL CHECK(revision >= 0)
+);
+INSERT INTO project_folder_revision(singleton, revision) VALUES(1, 0);
+
+CREATE TRIGGER revise_registered_projects_insert AFTER INSERT ON registered_projects
+BEGIN
+  UPDATE project_folder_revision SET revision = revision + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER revise_registered_projects_update AFTER UPDATE ON registered_projects
+WHEN OLD.project_id IS NOT NEW.project_id OR OLD.group_key IS NOT NEW.group_key OR OLD.folder_path IS NOT NEW.folder_path OR OLD.name IS NOT NEW.name OR OLD.created_at_ms IS NOT NEW.created_at_ms
+BEGIN
+  UPDATE project_folder_revision SET revision = revision + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER revise_registered_projects_delete AFTER DELETE ON registered_projects
+BEGIN
+  UPDATE project_folder_revision SET revision = revision + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER revise_project_folder_origins_insert AFTER INSERT ON project_folder_origins
+BEGIN
+  UPDATE project_folder_revision SET revision = revision + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER revise_project_folder_origins_update AFTER UPDATE ON project_folder_origins
+WHEN OLD.project_id IS NOT NEW.project_id OR OLD.manual IS NOT NEW.manual
+BEGIN
+  UPDATE project_folder_revision SET revision = revision + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER revise_project_folder_origins_delete AFTER DELETE ON project_folder_origins
+BEGIN
+  UPDATE project_folder_revision SET revision = revision + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER revise_project_folder_providers_insert AFTER INSERT ON project_folder_providers
+BEGIN
+  UPDATE project_folder_revision SET revision = revision + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER revise_project_folder_providers_update AFTER UPDATE ON project_folder_providers
+WHEN OLD.project_id IS NOT NEW.project_id OR OLD.provider IS NOT NEW.provider OR OLD.state IS NOT NEW.state OR OLD.last_known_present IS NOT NEW.last_known_present
+BEGIN
+  UPDATE project_folder_revision SET revision = revision + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER revise_project_folder_providers_delete AFTER DELETE ON project_folder_providers
+BEGIN
+  UPDATE project_folder_revision SET revision = revision + 1 WHERE singleton = 1;
+END;
+"#;
+
 #[derive(Clone, Debug)]
 pub struct ProjectGroup {
   pub project_key: String,
@@ -385,6 +477,10 @@ const MIGRATIONS: &[Migration] = &[
     version: 12,
     sql: MIGRATION_012,
   },
+  Migration {
+    version: 13,
+    sql: MIGRATION_013,
+  },
 ];
 
 /// Errors returned by [`SessionIndex`].
@@ -398,6 +494,8 @@ pub enum SessionIndexError {
   InvalidReplacement(String),
   /// A registered launch folder contains invalid bounded metadata.
   InvalidProject(String),
+  /// Native source or folder discovery changed while a folder pass was planned.
+  ProjectDiscoveryConflict { provider: String },
   /// A managed session admission does not match a present indexed session.
   InvalidAdmission(String),
   /// A previously applied migration no longer matches the embedded migration.
@@ -428,6 +526,12 @@ impl fmt::Display for SessionIndexError {
       Self::ConnectionPoisoned => formatter.write_str("SQLite index connection lock was poisoned"),
       Self::InvalidReplacement(message) => write!(formatter, "invalid source replacement: {message}"),
       Self::InvalidProject(message) => write!(formatter, "invalid registered project: {message}"),
+      Self::ProjectDiscoveryConflict { provider } => {
+        write!(
+          formatter,
+          "project discovery changed before {provider} folders could commit"
+        )
+      }
       Self::InvalidAdmission(message) => write!(formatter, "invalid managed session admission: {message}"),
       Self::MigrationChecksumMismatch {
         version,
@@ -1176,7 +1280,7 @@ impl SessionIndex {
     let mut projects = HashSet::new();
     for replacement in replacements {
       for session in &replacement.sessions {
-        if let Some(key) = session.cwd.as_deref().map(str::trim).filter(|key| !key.is_empty()) {
+        if let Some(key) = session.cwd.as_deref().filter(|key| !key.trim().is_empty()) {
           if projects.insert(key) {
             remember_project(&transaction, key, replacement.source.scanned_at_ms)?;
           }
@@ -1582,6 +1686,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
   }
 
   let mut combined_project_migration = false;
+  let mut early_project_discovery_migration = false;
   for (index, (version, found_checksum)) in applied.iter().enumerate() {
     let migration = MIGRATIONS
       .get(index)
@@ -1598,6 +1703,10 @@ fn migrate(connection: &mut Connection) -> Result<()> {
     if *found_checksum != expected_checksum {
       if migration_compatibility::is_combined_project_migration(*version, found_checksum) {
         combined_project_migration = true;
+        continue;
+      }
+      if migration_013_compatibility::is_early_project_discovery(*version, found_checksum) {
+        early_project_discovery_migration = true;
         continue;
       }
       return Err(SessionIndexError::MigrationChecksumMismatch {
@@ -1621,6 +1730,14 @@ fn migrate(connection: &mut Connection) -> Result<()> {
   } else {
     applied.len()
   };
+  if early_project_discovery_migration {
+    if applied.len() != 13 {
+      return Err(SessionIndexError::MigrationHistoryInvalid(
+        "early migration 13 must be the final recorded migration".into(),
+      ));
+    }
+    migration_013_compatibility::adopt_early_project_discovery(&transaction)?;
+  }
   for migration in MIGRATIONS.iter().skip(applied_count) {
     transaction.execute_batch(migration.sql)?;
     if migration.version == 12 {
@@ -2467,14 +2584,16 @@ mod tests {
   fn catalog_project_anchor_survives_removal_and_older_history() {
     let index = SessionIndex::open_in_memory().unwrap();
     let mut row = session("a", None);
-    row.cwd = Some(" /project ".into());
+    row.cwd = Some("/project ".into());
     index
       .replace_source(baseline_replacement("one", 100, vec![row.clone()]))
       .unwrap();
     index.replace_source(replacement("two", 200, vec![])).unwrap();
     row.timestamp = Some("2000-01-01T00:00:00Z".into());
     index.replace_source(replacement("three", 300, vec![row])).unwrap();
-    assert_eq!(index.project_order(&[], 400).unwrap()["/project"], 100);
+    let order = index.project_order(&[], 400).unwrap();
+    assert_eq!(order["/project "], 100);
+    assert!(!order.contains_key("/project"));
   }
 
   #[test]
@@ -2521,6 +2640,7 @@ mod tests {
         (10, migration_checksum(MIGRATION_010)),
         (11, migration_checksum(MIGRATION_011)),
         (12, migration_checksum(MIGRATION_012)),
+        (13, migration_checksum(MIGRATION_013)),
       ]
     );
   }
@@ -2798,7 +2918,7 @@ mod tests {
       .expect("migration query should run")
       .collect::<rusqlite::Result<Vec<_>>>()
       .expect("migration versions should decode");
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
   }
 
   #[test]
