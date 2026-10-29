@@ -177,15 +177,17 @@ describe("local project workspace", () => {
     expect(result.current.creation?.request_id).toBe(original_receipt!.request_id);
     expect(host.invoke.mock.calls.filter(([command]) => command === "create_project_session")).toHaveLength(1);
   });
-  it("refreshes registrations from another window and on focus", async () => {
+  it("refreshes discovered folder availability from registry events and on focus", async () => {
     const host = connection(); const original = host.invoke.getMockImplementation()!;
     const { result } = renderHook(() => useProjectWorkspace(options(), host.transport));
     await waitFor(() => expect(result.current.workspace?.projects).toHaveLength(1));
+    const unavailable = { ...project, available: false, origin: "discovered", discovery_state: "absent", unavailable_reason: "No saved sessions reference this folder." };
     host.invoke.mockImplementation((command, payload) => command === "list_registered_projects"
-      ? Promise.resolve({ available: true, unavailable_reason: null, projects: [project, { ...project, project_id: "second", folder_path: "/trees/repo" }] })
+      ? Promise.resolve({ available: true, unavailable_reason: null, projects: [unavailable, { ...project, project_id: "second", folder_path: "/trees/repo", origin: "discovered", discovery_state: "present" }] })
       : original(command, payload));
     act(() => host.registryChanged());
     await waitFor(() => expect(result.current.workspace?.projects).toHaveLength(2));
+    expect(result.current.workspace?.projects[0]).toEqual(unavailable);
     const before = host.invoke.mock.calls.length;
     act(() => window.dispatchEvent(new Event("focus")));
     await waitFor(() => expect(host.invoke.mock.calls.length).toBeGreaterThan(before));

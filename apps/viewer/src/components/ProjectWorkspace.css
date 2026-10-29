@@ -1,5 +1,5 @@
 .workspace-actions { display: flex; gap: 6px; }
-.workspace-actions button, .workspace-dialog footer button, .managed-session-controls button {
+.workspace-actions button, .workspace-dialog footer button, .workspace-add-folder, .managed-session-controls button {
   padding: 7px 10px;
   border: 1px solid var(--border);
   border-radius: 7px;
@@ -9,7 +9,7 @@
   cursor: pointer;
 }
 .workspace-actions button { flex: 1; font-size: 12px; }
-.workspace-actions button:hover, .workspace-dialog footer button:hover, .managed-session-controls button:hover { background: var(--surface-hover); }
+.workspace-actions button:hover, .workspace-dialog footer button:hover, .workspace-add-folder:hover, .managed-session-controls button:hover { background: var(--surface-hover); }
 .workspace-actions button:disabled, .workspace-dialog button:disabled, .managed-session-controls button:disabled { opacity: .5; cursor: default; }
 .workspace-sidebar-notice, .workspace-empty-project { color: var(--text-muted); font-size: 12px; padding: 4px 8px; }
 .session-group__new { margin-left: auto; border: 0; border-radius: 4px; background: transparent; color: var(--text-soft); font-size: 19px; cursor: pointer; }
@@ -26,6 +26,11 @@
 .workspace-dialog footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .workspace-dialog footer button[type="submit"] { font-weight: 600; border-color: var(--border-strong); }
 .workspace-folder { color: var(--text-muted); overflow-wrap: anywhere; }
+.workspace-add-folder { justify-self: start; }
+.workspace-unavailable-folders { color: var(--text-muted); font-size: 12px; }
+.workspace-unavailable-folders summary { cursor: pointer; }
+.workspace-unavailable-folders ul { list-style: none; padding: 0; margin: 12px 0 0; display: grid; gap: 12px; }
+.workspace-unavailable-folders li { display: grid; gap: 3px; overflow-wrap: anywhere; }
 .workspace-optional, .workspace-notice { color: var(--text-muted); }
 .workspace-error { color: var(--danger, #b43232); overflow-wrap: anywhere; }
 .workspace-progress, .managed-session-controls { display: flex; align-items: center; gap: 8px; }

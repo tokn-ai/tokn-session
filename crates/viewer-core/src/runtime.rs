@@ -139,6 +139,19 @@ impl ViewerRuntime {
   pub fn start(service: ViewerService) -> Self {
     let (events, _) = broadcast::channel(128);
     let mut tasks = Vec::new();
+    let mut project_changes = service.subscribe_project_registry_changes();
+    let project_events = events.clone();
+    tasks.push(tokio::spawn(async move {
+      loop {
+        match project_changes.recv().await {
+          Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+          Err(_) => return,
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        while project_changes.try_recv().is_ok() {}
+        let _ = emit(&project_events, "registered-projects-changed", serde_json::json!({}));
+      }
+    }));
     let mut rpc_changes = service.sessions.runtimes.subscribe();
     let rpc_events = events.clone();
     tasks.push(tokio::spawn(async move {

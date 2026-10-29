@@ -326,8 +326,8 @@ export function Sidebar({
 
       <div className="sidebar__controls">
         {on_add_project || on_new_session ? <div className="workspace-actions">
-          <button type="button" disabled={!workspace_available || !registered_projects.some((project) => project.available)} onClick={() => on_new_session?.()}>New session</button>
-          <button type="button" disabled={!workspace_available} onClick={on_add_project}>Add project</button>
+          {on_new_session ? <button type="button" disabled={!workspace_available} onClick={() => on_new_session()}>New session</button> : null}
+          {on_add_project ? <button type="button" disabled={!workspace_available} onClick={on_add_project}>Add project</button> : null}
         </div> : null}
         {workspace_notice ? <p className="workspace-sidebar-notice" role="status">{workspace_notice}
           {on_workspace_retry ? <button className="text-button" type="button" onClick={on_workspace_retry}>Retry projects</button> : null}</p> : null}
@@ -464,6 +464,7 @@ export function Sidebar({
               </span>
               {group.registered_projects && on_new_session ? <button type="button" className="session-group__new"
                 aria-label={`New session in ${group.project}`} disabled={!workspace_available || !group.registered_projects.some((project) => project.available)}
+                title={group.registered_projects.some((project) => project.available) ? undefined : group.registered_projects.map((project) => project.unavailable_reason ?? "This folder is unavailable.").join("\n")}
                 onClick={() => on_new_session(group.key)}>+</button> : null}
             </h2>
             <div className="session-group__items">

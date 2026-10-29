@@ -63,7 +63,22 @@ pub struct SessionCreationOptions {
   pub providers: Vec<SessionCreationProvider>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectOrigin {
+  Manual,
+  Discovered,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectDiscoveryState {
+  Present,
+  Absent,
+  Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RegisteredProject {
   pub project_id: String,
   pub group_key: String,
@@ -71,9 +86,12 @@ pub struct RegisteredProject {
   pub name: String,
   pub created_at_ms: i64,
   pub available: bool,
+  pub origin: ProjectOrigin,
+  pub discovery_state: ProjectDiscoveryState,
+  pub unavailable_reason: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ProjectWorkspaceSnapshot {
   pub available: bool,
   pub unavailable_reason: Option<String>,

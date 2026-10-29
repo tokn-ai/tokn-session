@@ -14,7 +14,8 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 use serde_json::Value;
 use tokn_opencode_protocol::v1::{MessageData, MessageItem, PartData, PartItem, SessionModel};
 use tokn_session_core::{
-  LoadedSession, LoadedSessionRecords, NormalizedRecord, Provider, SessionHeader, SessionHistoryStatus, SessionRef,
+  LoadedSession, LoadedSessionRecords, NormalizedRecord, Provider, SessionHeader, SessionHeaderCatalog,
+  SessionHistoryStatus, SessionRef,
 };
 
 #[derive(Clone, Copy)]
@@ -169,24 +170,29 @@ impl OpenCodeSessionSource {
     let database_path = self.database_path()?;
     list_session_catalog(&connection, capabilities, self.flavor.name())?
       .into_iter()
-      .map(|row| {
-        let updated_at_ms = row.time_updated.or(row.time_created);
-        Ok(SessionHeader {
-          id: row.id,
-          parent_session_id: row.parent_id,
-          agent_path: None,
-          agent_nickname: None,
-          agent_role: None,
-          title: row.title,
-          preview: row.preview,
-          path: database_path.clone(),
-          cwd: row.directory,
-          timestamp: timestamp(row.time_created),
-          updated_at: timestamp(updated_at_ms),
-          updated_at_ms,
-        })
-      })
+      .map(|row| Ok(catalog_header(row, &database_path)))
       .collect()
+  }
+
+  /// An empty readable database is authoritative. Missing storage and skipped
+  /// rows are incomplete; an unusable existing database retains its diagnostic.
+  pub fn list_session_header_catalog(&self) -> Result<SessionHeaderCatalog, String> {
+    let database_path = self.database_path()?;
+    let (connection, capabilities) = match self.connect() {
+      Ok(connected) => connected,
+      Err(_) if database_path.try_exists().is_ok_and(|exists| !exists) => {
+        return Ok(SessionHeaderCatalog::default());
+      }
+      Err(error) => return Err(error),
+    };
+    let (rows, complete) = read_session_catalog(&connection, capabilities, self.flavor.name(), true)?;
+    Ok(SessionHeaderCatalog {
+      headers: rows
+        .into_iter()
+        .map(|row| catalog_header(row, &database_path))
+        .collect(),
+      complete,
+    })
   }
 
   /// Populate presentation metadata that is not available from OpenCode's
@@ -512,6 +518,15 @@ fn list_session_catalog(
   capabilities: OpenCodeCapabilities,
   source_name: &str,
 ) -> Result<Vec<SessionCatalogRow>, String> {
+  read_session_catalog(connection, capabilities, source_name, false).map(|(rows, _)| rows)
+}
+
+fn read_session_catalog(
+  connection: &Connection,
+  capabilities: OpenCodeCapabilities,
+  source_name: &str,
+  allow_partial: bool,
+) -> Result<(Vec<SessionCatalogRow>, bool), String> {
   let mut statement = connection
     .prepare(&format!(
       "select {}
@@ -534,9 +549,37 @@ fn list_session_catalog(
     })
     .map_err(|err| format!("failed to query {source_name} sessions: {err}"))?;
 
-  rows
-    .map(|row| row.map_err(|err| format!("failed to read {source_name} session row: {err}")))
-    .collect()
+  let mut catalog = Vec::new();
+  let mut complete = true;
+  for row in rows {
+    match row {
+      Ok(row) => catalog.push(row),
+      Err(error @ rusqlite::Error::SqliteFailure(..)) if catalog.is_empty() => {
+        return Err(format!("failed to read {source_name} session row: {error}"));
+      }
+      Err(_) if allow_partial => complete = false,
+      Err(error) => return Err(format!("failed to read {source_name} session row: {error}")),
+    }
+  }
+  Ok((catalog, complete))
+}
+
+fn catalog_header(row: SessionCatalogRow, path: &Path) -> SessionHeader {
+  let updated_at_ms = row.time_updated.or(row.time_created);
+  SessionHeader {
+    id: row.id,
+    parent_session_id: row.parent_id,
+    agent_path: None,
+    agent_nickname: None,
+    agent_role: None,
+    title: row.title,
+    preview: row.preview,
+    path: path.to_path_buf(),
+    cwd: row.directory,
+    timestamp: timestamp(row.time_created),
+    updated_at: timestamp(updated_at_ms),
+    updated_at_ms,
+  }
 }
 
 fn resolve_database_path(

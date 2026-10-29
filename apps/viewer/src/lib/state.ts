@@ -247,6 +247,13 @@ export function preserveEventSelection(
   return null;
 }
 
+export function sessionProjectKey(session: SessionSummary): string {
+  for (const value of [session.project_key, session.cwd]) {
+    if (value?.trim()) return value;
+  }
+  return session.project?.trim() || "";
+}
+
 export function groupSessions(sessions: SessionSummary[]): Array<{
   key: string;
   project: string;
@@ -255,7 +262,7 @@ export function groupSessions(sessions: SessionSummary[]): Array<{
   const groups = new Map<string, { project: string; sessions: SessionSummary[] }>();
   for (const session of sessions) {
     const project = session.project?.trim() || session.cwd?.trim() || "Other sessions";
-    const key = session.project_key?.trim() || session.cwd?.trim() || project;
+    const key = sessionProjectKey(session) || project;
     const group = groups.get(key) ?? { project, sessions: [] };
     group.sessions.push(session);
     groups.set(key, group);

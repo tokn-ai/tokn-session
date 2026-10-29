@@ -7,7 +7,8 @@ use std::time::UNIX_EPOCH;
 
 use rusqlite::{Connection, OpenFlags, Row};
 use tokn_session_core::{
-  LoadedSession, LoadedSessionRecords, NormalizedRecord, SessionHeader, SessionHistoryStatus, SessionRef,
+  FileSessionCatalog, LoadedSession, LoadedSessionRecords, NormalizedRecord, SessionHeader, SessionHeaderCatalog,
+  SessionHistoryStatus, SessionRef,
 };
 use tokn_workbuddy_protocol::{WorkBuddySessionItem, WorkBuddySessionLine};
 
@@ -78,12 +79,53 @@ impl WorkBuddySessionSource {
   }
 
   pub fn list_session_headers(&self) -> Result<Vec<SessionHeader>, String> {
+    self.read_session_header_catalog(false).map(|catalog| catalog.headers)
+  }
+
+  /// Keep useful metadata from either storage component when the other fails.
+  /// Without any usable headers, retain existing database diagnostics; missing
+  /// storage remains a quiet incomplete observation.
+  pub fn list_session_header_catalog(&self) -> Result<SessionHeaderCatalog, String> {
+    self.read_session_header_catalog(true)
+  }
+
+  fn read_session_header_catalog(&self, allow_partial: bool) -> Result<SessionHeaderCatalog, String> {
     let config_dir = self.config_dir()?;
-    let history_paths = collect_history_paths(&config_dir.join("projects"))?;
-    let catalog = self.catalog(&config_dir)?;
+    let mut complete = true;
+    let mut catalog_error = None;
+    let history_paths = if allow_partial {
+      let mut paths = FileSessionCatalog {
+        paths: Vec::new(),
+        complete: true,
+      };
+      collect_history_catalog(&config_dir.join("projects"), &mut paths);
+      complete &= paths.complete;
+      paths.paths
+    } else {
+      collect_history_paths(&config_dir.join("projects"))?
+    };
+    let catalog = if allow_partial {
+      let database_path = config_dir.join("workbuddy.db");
+      match connect_database(&database_path).and_then(|connection| read_catalog(&connection, true)) {
+        Ok((catalog, catalog_complete)) => {
+          complete &= catalog_complete;
+          catalog
+        }
+        Err(error) => {
+          complete = false;
+          if !database_path.try_exists().is_ok_and(|exists| !exists) {
+            catalog_error = Some(error);
+          }
+          Catalog::default()
+        }
+      }
+    } else {
+      self.catalog(&config_dir)?
+    };
     let mut histories_by_id: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
     for path in history_paths {
       let Some(id) = history_id(&path) else {
+        complete = false;
         continue;
       };
       histories_by_id.entry(id).or_default().push(path);
@@ -113,8 +155,16 @@ impl WorkBuddySessionSource {
 
     for (id, paths) in histories_by_id {
       for path in paths {
-        let summary = read_history_head(&path, &id)?;
+        let summary = match read_history_head(&path, &id) {
+          Ok(summary) => summary,
+          Err(_) if allow_partial => {
+            complete = false;
+            continue;
+          }
+          Err(error) => return Err(error),
+        };
         let updated_at_ms = file_modified_ms(&path);
+        complete &= updated_at_ms.is_some();
         headers.push(SessionHeader {
           id: summary.id,
           parent_session_id: None,
@@ -132,8 +182,13 @@ impl WorkBuddySessionSource {
       }
     }
 
+    if headers.is_empty()
+      && let Some(error) = catalog_error
+    {
+      return Err(error);
+    }
     sort_headers(&mut headers);
-    Ok(headers)
+    Ok(SessionHeaderCatalog { headers, complete })
   }
 
   pub fn hydrate_session_header(&self, mut header: SessionHeader) -> Result<SessionHeader, String> {
@@ -405,6 +460,10 @@ fn non_empty(value: Option<OsString>) -> Option<OsString> {
 }
 
 fn load_catalog(connection: &Connection) -> Result<Catalog, String> {
+  read_catalog(connection, false).map(|(catalog, _)| catalog)
+}
+
+fn read_catalog(connection: &Connection, allow_partial: bool) -> Result<(Catalog, bool), String> {
   let columns = table_columns(connection, "sessions")?;
   for required in ["id", "cwd"] {
     if !columns.contains(required) {
@@ -442,15 +501,26 @@ fn load_catalog(connection: &Connection) -> Result<Catalog, String> {
     .query_map([], read_catalog_row)
     .map_err(|err| format!("failed to query workbuddy sessions: {err}"))?;
   let mut catalog = Catalog::default();
+  let mut complete = true;
   for row in rows {
-    let (row, deleted) = row.map_err(|err| format!("failed to read workbuddy session row: {err}"))?;
+    let (row, deleted) = match row {
+      Ok(row) => row,
+      Err(error @ rusqlite::Error::SqliteFailure(..)) if catalog.rows.is_empty() && catalog.deleted_ids.is_empty() => {
+        return Err(format!("failed to read workbuddy session row: {error}"));
+      }
+      Err(_) if allow_partial => {
+        complete = false;
+        continue;
+      }
+      Err(error) => return Err(format!("failed to read workbuddy session row: {error}")),
+    };
     if deleted {
       catalog.deleted_ids.insert(row.id);
     } else {
       catalog.rows.push(row);
     }
   }
-  Ok(catalog)
+  Ok((catalog, complete))
 }
 
 fn read_catalog_row(row: &Row<'_>) -> rusqlite::Result<(CatalogRow, bool)> {
@@ -565,6 +635,28 @@ fn collect_history_paths_into(root: &Path, paths: &mut Vec<PathBuf>) -> Result<(
     }
   }
   Ok(())
+}
+
+fn collect_history_catalog(root: &Path, catalog: &mut FileSessionCatalog) {
+  let Ok(entries) = std::fs::read_dir(root) else {
+    catalog.complete = false;
+    return;
+  };
+  for entry in entries {
+    let Ok(entry) = entry else {
+      catalog.complete = false;
+      continue;
+    };
+    let Ok(kind) = entry.file_type() else {
+      catalog.complete = false;
+      continue;
+    };
+    if kind.is_dir() {
+      collect_history_catalog(&entry.path(), catalog);
+    } else if kind.is_file() && entry.path().extension() == Some(OsStr::new("jsonl")) {
+      catalog.paths.push(entry.path());
+    }
+  }
 }
 
 fn history_path(config_dir: &Path, cwd: &str, session_id: &str) -> PathBuf {
@@ -931,6 +1023,103 @@ mod tests {
         .expect("missing storage should be empty")
         .is_empty()
     );
+  }
+
+  #[test]
+  fn observed_catalog_preserves_readable_components_without_claiming_absence() {
+    let root = tempdir().unwrap();
+    let database = root.path().join("workbuddy.db");
+    std::fs::copy(fixture_root().join("workbuddy.db"), &database).unwrap();
+    let histories = root.path().join("projects/test");
+    std::fs::create_dir_all(&histories).unwrap();
+    let source = WorkBuddySessionSource::new(Some(root.path().to_path_buf()));
+    let connection = Connection::open(&database).unwrap();
+    connection.execute("delete from sessions", []).unwrap();
+    let empty = source.list_session_header_catalog().unwrap();
+    assert!(empty.complete);
+    assert!(empty.headers.is_empty());
+
+    let first = std::fs::read_to_string(fixture_root().join("projects/fixture-workspace/wb-file-read.jsonl")).unwrap();
+    std::fs::write(
+      histories.join("wb-file-read.jsonl"),
+      format!("{}\ninvalid body\n", first.lines().next().unwrap()),
+    )
+    .unwrap();
+    let readable = source.list_session_header_catalog().unwrap();
+    assert!(readable.complete);
+    assert_eq!(readable.headers.len(), 1);
+    std::fs::write(histories.join("broken.jsonl"), "invalid header\n").unwrap();
+    let partial = source.list_session_header_catalog().unwrap();
+    assert!(!partial.complete);
+    assert_eq!(partial.headers, readable.headers);
+    assert!(source.list_session_headers().is_err());
+    std::fs::remove_file(histories.join("broken.jsonl")).unwrap();
+
+    connection.execute("drop table sessions", []).unwrap();
+    let partial = source.list_session_header_catalog().unwrap();
+    assert!(!partial.complete);
+    assert_eq!(partial.headers, readable.headers);
+    std::fs::remove_file(histories.join("wb-file-read.jsonl")).unwrap();
+    assert_eq!(
+      source.list_session_header_catalog().unwrap_err(),
+      source.list_session_headers().unwrap_err()
+    );
+    drop(connection);
+    std::fs::remove_file(&database).unwrap();
+    let missing_database = source.list_session_header_catalog().unwrap();
+    assert!(!missing_database.complete);
+    assert!(missing_database.headers.is_empty());
+    assert!(!database.exists());
+  }
+
+  #[test]
+  fn observed_catalog_preserves_diagnostics_for_corrupt_existing_database() {
+    let root = tempdir().unwrap();
+    let database = root.path().join("workbuddy.db");
+    std::fs::write(&database, "not a SQLite database").unwrap();
+    let source = WorkBuddySessionSource::new(Some(root.path().to_path_buf()));
+    assert_eq!(
+      source.list_session_header_catalog().unwrap_err(),
+      source.list_session_headers().unwrap_err()
+    );
+  }
+
+  #[test]
+  fn observed_catalog_retains_errors_while_executing_a_readable_schema() {
+    let root = tempdir().unwrap();
+    let connection = Connection::open(root.path().join("workbuddy.db")).unwrap();
+    connection
+      .execute_batch(
+        "create view sessions as select 'broken' as id, '/work' as cwd,
+         abs(-9223372036854775808) as created_at, 0 as updated_at;",
+      )
+      .unwrap();
+    let source = WorkBuddySessionSource::new(Some(root.path().to_path_buf()));
+    let error = source.list_session_header_catalog().unwrap_err();
+    assert!(error.contains("integer overflow"));
+    assert_eq!(error, source.list_session_headers().unwrap_err());
+  }
+
+  #[test]
+  fn observed_catalog_skips_unreadable_database_rows_but_retains_readable_rows() {
+    let root = tempdir().unwrap();
+    let database = root.path().join("workbuddy.db");
+    std::fs::copy(fixture_root().join("workbuddy.db"), &database).unwrap();
+    std::fs::create_dir(root.path().join("projects")).unwrap();
+    let source = WorkBuddySessionSource::new(Some(root.path().to_path_buf()));
+    let complete = source.list_session_header_catalog().unwrap();
+    assert!(complete.complete);
+    let connection = Connection::open(&database).unwrap();
+    connection
+      .execute(
+        "update sessions set cwd = X'00' where id = ?1",
+        [&complete.headers[0].id],
+      )
+      .unwrap();
+    let partial = source.list_session_header_catalog().unwrap();
+    assert!(!partial.complete);
+    assert_eq!(partial.headers.len(), complete.headers.len() - 1);
+    assert!(source.list_session_headers().is_err());
   }
 
   #[test]

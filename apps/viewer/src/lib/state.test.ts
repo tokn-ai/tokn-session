@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { SessionSummary } from "./types";
 import {
   findKnownSession,
+  groupSessions,
   knownSessionAncestors,
   preserveSessionSelection,
   providerLabel,
@@ -35,6 +36,20 @@ function session(overrides: Partial<SessionSummary> = {}): SessionSummary {
 }
 
 describe("session identity", () => {
+  it.each(["project_key", "cwd"] as const)("preserves significant trailing spaces in %s when grouping", (field) => {
+    const plain = session({ session_key: "plain", project: "  Repo  ", [field]: "/repo" });
+    const spaced = session({ session_key: "spaced", project: "  Repo  ", [field]: "/repo " });
+    expect(groupSessions([plain, spaced])).toEqual([
+      { key: "/repo", project: "Repo", sessions: [plain] },
+      { key: "/repo ", project: "Repo", sessions: [spaced] },
+    ]);
+  });
+
+  it("ignores blank project identities while preserving the exact cwd fallback", () => {
+    const entry = session({ project_key: " \t", cwd: "/repo ", project: "Repo" });
+    expect(groupSessions([entry])).toEqual([{ key: "/repo ", project: "Repo", sessions: [entry] }]);
+  });
+
   it("labels WorkBuddy sessions by their product name", () => {
     expect(providerLabel("workbuddy")).toBe("WorkBuddy");
   });

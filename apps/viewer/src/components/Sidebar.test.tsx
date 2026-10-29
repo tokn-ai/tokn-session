@@ -90,6 +90,22 @@ describe("Sidebar session identity", () => {
     expect(start).toHaveBeenCalledExactlyOnceWith("/repo");
     expect(screen.queryByRole("button", { name: /, Pi session / })).not.toBeInTheDocument();
   });
+  it("keeps New session accessible before any folders have been discovered or registered", () => {
+    const start = vi.fn();
+    renderSidebar([], [], null, undefined, "project", { workspace_available: true, on_new_session: start, registered_projects: [] });
+    expect(screen.getByRole("button", { name: "New session" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    expect(start).toHaveBeenCalledExactlyOnceWith();
+  });
+  it("explains a disabled discovered group while allowing another folder to be chosen", () => {
+    const reason = "No saved sessions reference this folder.";
+    renderSidebar([], [], null, undefined, "project", { workspace_available: true, on_new_session: vi.fn(),
+      registered_projects: [{ project_id: "saved", group_key: "/repo", folder_path: "/repo", name: "Saved repo", created_at_ms: 1,
+        available: false, origin: "discovered", discovery_state: "absent", unavailable_reason: reason }] });
+    expect(screen.getByRole("button", { name: "New session" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "New session in Saved repo" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "New session in Saved repo" })).toHaveAttribute("title", reason);
+  });
   it("keeps provider controls in a disclosure and delegates desktop collapse", () => {
     const collapse = vi.fn();
     renderSidebar([session()], [], null, collapse);

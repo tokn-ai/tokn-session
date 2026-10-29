@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use tokn_session_client::{AgentClient, SessionHeader};
-use tokn_session_core::LoadedSession;
+use tokn_session_core::{FileSessionCatalog, LoadedSession, SessionHeaderCatalog};
 
 use crate::model::{SessionLocator, ViewerProvider};
 
@@ -39,6 +39,25 @@ fn jsonl_body_indexing(len: u64, age: std::time::Duration) -> SessionBodyIndexin
 
 pub(crate) trait ViewerRepository: Send + Sync {
   fn list_session_headers(&self, provider: ViewerProvider) -> Result<Vec<SessionHeader>, String>;
+
+  fn list_session_header_catalog(&self, provider: ViewerProvider) -> Result<SessionHeaderCatalog, String> {
+    self.list_session_headers(provider).map(|headers| SessionHeaderCatalog {
+      headers,
+      complete: true,
+    })
+  }
+
+  fn file_session_catalog(&self, provider: ViewerProvider) -> Result<FileSessionCatalog, String> {
+    self
+      .file_session_paths(provider)
+      .map(|paths| FileSessionCatalog { paths, complete: true })
+  }
+
+  /// Native discovery scope, independent of whether it currently has sessions.
+  /// Synthetic repositories already supply authoritative inventories.
+  fn session_catalog_roots(&self, _provider: ViewerProvider) -> Result<Option<Vec<PathBuf>>, String> {
+    Ok(None)
+  }
 
   /// Resolves file roots for providers that can be incrementally cataloged
   /// from individual filesystem changes. The default keeps existing test and
@@ -106,6 +125,18 @@ pub(crate) struct NativeRepository {
 }
 
 impl ViewerRepository for NativeRepository {
+  fn session_catalog_roots(&self, provider: ViewerProvider) -> Result<Option<Vec<PathBuf>>, String> {
+    AgentClient::session_catalog_roots(provider.source(), None).map(Some)
+  }
+
+  fn list_session_header_catalog(&self, provider: ViewerProvider) -> Result<SessionHeaderCatalog, String> {
+    AgentClient::list_session_header_catalog(provider.source(), None)
+  }
+
+  fn file_session_catalog(&self, provider: ViewerProvider) -> Result<FileSessionCatalog, String> {
+    AgentClient::file_session_catalog(provider.source(), None)
+  }
+
   fn list_session_headers(&self, provider: ViewerProvider) -> Result<Vec<SessionHeader>, String> {
     AgentClient::list_session_headers(provider.source(), None)
   }

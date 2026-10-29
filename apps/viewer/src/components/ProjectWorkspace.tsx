@@ -71,14 +71,17 @@ export function RegisterProjectDialog({ open, on_close, on_register, on_register
 
 const AGENT_NAMES: Record<RpcProvider, string> = { pi: "Pi", codex: "Codex", open_code: "OpenCode", dsh: "DSH" };
 
-export function NewSessionDialog({ open, projects, preferred_group_key, snapshot, creating, uncertain = false, error, control_error, controlling, on_close, on_create, on_stop, on_open, on_load_options }: {
+export function NewSessionDialog({ open, projects, preferred_group_key, snapshot, creating, uncertain = false, error, control_error, controlling, on_close, on_create, on_stop, on_open, on_load_options, on_register }: {
   open: boolean; projects: RegisteredProject[]; preferred_group_key?: string;
   snapshot: ManagedSessionSnapshot | null; creating: boolean; uncertain?: boolean; error: string | null; control_error: string | null; controlling: boolean;
   on_close: () => void; on_create: (project_id: string, prompt: string, images?: ImageDraft[], selection?: SessionCreationSelection) => Promise<void>;
   on_load_options: (project_id: string) => Promise<SessionCreationOptions>;
+  on_register?: (request: RegisterProjectRequest) => Promise<RegisteredProject>;
   on_stop: (snapshot: ManagedSessionSnapshot) => void; on_open: () => void;
 }) {
   const [project_id, setProjectId] = useState("");
+  const [adding_project, setAddingProject] = useState(false);
+  const selected = projects.find((project) => project.project_id === project_id);
   const submitted_selection = useRef<SessionCreationSelection | null>(null);
   const [prompt, setPrompt] = useState("");
   const [provider, setProvider] = useState<RpcProvider>("pi");
@@ -88,7 +91,10 @@ export function NewSessionDialog({ open, projects, preferred_group_key, snapshot
   const [options_error, setOptionsError] = useState<string | null>(null);
   const [options_retry, setOptionsRetry] = useState(0);
   useEffect(() => {
-    if (!open || !project_id) return;
+    if (!open || !selected?.available) {
+      setOptions(null); setOptionsLoading(false); setOptionsError(null);
+      return;
+    }
     let cancelled = false;
     setOptions(null); setOptionsLoading(true); setOptionsError(null);
     void on_load_options(project_id).then((result) => {
@@ -96,7 +102,7 @@ export function NewSessionDialog({ open, projects, preferred_group_key, snapshot
     }).catch((failure) => { if (!cancelled) setOptionsError(errorMessage(failure)); })
       .finally(() => { if (!cancelled) setOptionsLoading(false); });
     return () => { cancelled = true; };
-  }, [open, project_id, on_load_options, options_retry]);
+  }, [open, project_id, selected?.available, on_load_options, options_retry]);
   useEffect(() => { setRuntimeProfileId(""); }, [project_id, provider]);
   const [images, setImages] = useState<ImageDraft[]>([]);
   const [image_error, setImageError] = useState<string | null>(null);
@@ -119,7 +125,10 @@ export function NewSessionDialog({ open, projects, preferred_group_key, snapshot
   const checking_existing = uncertain || rpc_receipt;
   const rpc_settled = rpc_receipt && (["native_create_uncertain", "first_input_uncertain", "failed", "history_pending"].includes(snapshot.creation_phase!) || snapshot.creation_input_state === "rejected");
   const pending = creating || !!snapshot && !rpc_settled && snapshot.status !== "failed" && snapshot.status !== "stopped" && !snapshot.session;
-  const selected = projects.find((project) => project.project_id === project_id);
+  const input_locked = pending || checking_existing || controlling;
+  const registration_flow = useRef({ open, adding_project, input_locked });
+  registration_flow.current = { open, adding_project, input_locked };
+  const unavailable_projects = projects.filter((project) => !project.available);
   const agent = options?.project_id === project_id ? options.providers.find((option) => option.provider === provider) : undefined;
   const runtime = agent?.runtimes.find((entry) => entry.profile_id === runtime_profile_id);
   const agent_name = AGENT_NAMES[provider];
@@ -131,9 +140,9 @@ export function NewSessionDialog({ open, projects, preferred_group_key, snapshot
     const result = addImageDrafts(image_ref.current, files, DEFAULT_IMAGE_LIMITS);
     setImages(result.images); setImageError(result.error);
   };
-  return <WorkspaceDialog title="New session" open={open} on_close={on_close}>
+  return <><WorkspaceDialog title="New session" open={open && (!adding_project || input_locked)} on_close={on_close}>
     <form onSubmit={(event) => { event.preventDefault();
-      if (!pending && !checking_existing && (!can_create || images.length && !images_allowed)) return;
+      if (pending || controlling || !checking_existing && (!selected?.available || !can_create || images.length && !images_allowed)) return;
       const chosen = checking_existing ? submitted_selection.current ?? selection : selection;
       if (!checking_existing) submitted_selection.current = { ...selection };
       void on_create(project_id, prompt, images, chosen);
@@ -144,11 +153,23 @@ export function NewSessionDialog({ open, projects, preferred_group_key, snapshot
       <label>Agent<select value={provider} disabled={pending || checking_existing} onChange={(event) => setProvider(event.target.value as RpcProvider)}>
         {(Object.keys(AGENT_NAMES) as RpcProvider[]).map((value) => <option key={value} value={value}>{AGENT_NAMES[value]}</option>)}
       </select></label>
-      <label>Project folder<select required disabled={pending || checking_existing} value={project_id} onChange={(event) => setProjectId(event.target.value)}>
+      <label>Project folder<select required disabled={input_locked} value={project_id} onChange={(event) => setProjectId(event.target.value)}>
         <option value="" disabled>Choose a folder</option>
         {projects.map((project) => <option key={project.project_id} value={project.project_id} disabled={!project.available}>{project.name} · {project.folder_path}{project.available ? "" : " (unavailable)"}</option>)}
       </select></label>
       {selected ? <p className="workspace-folder">{selected.folder_path}</p> : null}
+      {!projects.some((project) => project.available) ? <p className="workspace-notice">No folders are available. Add an existing folder to start a session.</p> : null}
+      {selected && !selected.available ? <p className="workspace-error" role="alert">{selected.unavailable_reason ?? "This folder is unavailable."}</p> : null}
+      {on_register ? <button className="workspace-add-folder" type="button" disabled={input_locked} onClick={() => {
+        if (!input_locked) setAddingProject(true);
+      }}>Add project</button> : null}
+      {unavailable_projects.length > 0 ? <details className="workspace-unavailable-folders">
+        <summary>{unavailable_projects.length} unavailable {unavailable_projects.length === 1 ? "folder" : "folders"}</summary>
+        <ul>{unavailable_projects.map((project) => <li key={project.project_id}>
+          <strong>{project.name}</strong><span className="workspace-folder">{project.folder_path}</span>
+          <span>{project.unavailable_reason ?? "This folder is unavailable."}</span>
+        </li>)}</ul>
+      </details> : null}
       {options_loading ? <p role="status">Checking agent configuration…</p> : null}
       {options_error ? <p className="workspace-error" role="alert">{options_error} <button type="button" onClick={() => setOptionsRetry((value) => value + 1)}>Retry</button></p> : null}
       {!!agent?.runtimes.length && <label>Runtime<select value={runtime_profile_id} disabled={pending || checking_existing} onChange={(event) => setRuntimeProfileId(event.target.value)}>
@@ -173,10 +194,19 @@ export function NewSessionDialog({ open, projects, preferred_group_key, snapshot
         <button type="button" onClick={on_close}>Close</button>
         {snapshot && !snapshot.session && !["failed", "stopped"].includes(snapshot.status) ? <button type="button" disabled={controlling || snapshot.status === "stopping"} onClick={() => on_stop(snapshot)}>Stop</button> : null}
         {snapshot?.session ? <button type="button" onClick={on_open}>Open conversation</button>
-          : <button type="submit" disabled={pending || !checking_existing && (!selected?.available || !can_create || !!images.length && !images_allowed || (!prompt.trim() && !images.length))}>{checking_existing ? "Check session start" : error || snapshot?.status === "failed" || snapshot?.status === "stopped" ? "Try again" : `Start ${agent_name} session`}</button>}
+          : <button type="submit" disabled={pending || controlling || !checking_existing && (!selected?.available || !can_create || !!images.length && !images_allowed || (!prompt.trim() && !images.length))}>{checking_existing ? "Check session start" : error || snapshot?.status === "failed" || snapshot?.status === "stopped" ? "Try again" : `Start ${agent_name} session`}</button>}
       </footer>
     </form>
-  </WorkspaceDialog>;
+  </WorkspaceDialog>
+    {on_register ? <RegisterProjectDialog open={open && adding_project && !input_locked} on_register={async (request) => {
+      if (registration_flow.current.input_locked) throw new Error("Check the pending session before adding another folder.");
+      return on_register(request);
+    }}
+      on_close={() => setAddingProject(false)} on_registered={(project) => {
+        if (!registration_flow.current.open || !registration_flow.current.adding_project || registration_flow.current.input_locked) return;
+        setProjectId(project.project_id); setAddingProject(false);
+      }} /> : null}
+  </>;
 }
 
 export function ManagedSessionControls({ snapshot, busy, error, on_control }: {

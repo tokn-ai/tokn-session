@@ -1,8 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ComponentProps } from "react";
+import { useState, type ComponentProps } from "react";
 import { ManagedPiDialog, ManagedSessionControls, NewSessionDialog as CreationDialog, RegisterProjectDialog } from "./ProjectWorkspace";
-import type { ManagedSessionSnapshot, RegisteredProject, SessionCreationOptions } from "../lib/types";
+import type { ManagedSessionSnapshot, RegisteredProject, RegisterProjectRequest, SessionCreationOptions } from "../lib/types";
 
 afterEach(cleanup);
 const project = (project_id = "repo", folder_path = "/repo"): RegisteredProject => ({ project_id, folder_path, group_key: "/repo", name: "Repo", created_at_ms: 1, available: true });
@@ -29,6 +29,103 @@ const creationProps = () => ({ open: true, projects: [project()], snapshot: null
   control_error: null, controlling: false, on_close: vi.fn(), on_create: vi.fn(async () => {}), on_stop: vi.fn(), on_open: vi.fn() });
 
 describe("agent session creation", () => {
+  it("opens with an empty registry and offers folder registration without querying agent options", () => {
+    const load = vi.fn(loadOptions);
+    const register = vi.fn();
+    render(<NewSessionDialog {...creationProps()} projects={[]} on_load_options={load} on_register={register} />);
+    expect(screen.getByText("No folders are available. Add an existing folder to start a session.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start Pi session" })).toBeDisabled();
+    expect(load).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole("textbox", { name: "First message" }), { target: { value: "Keep my first task" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add project" }));
+    expect(screen.getByRole("dialog", { name: "Add project" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "New session" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("textbox", { name: "First message" })).toHaveValue("Keep my first task");
+    expect(register).not.toHaveBeenCalled();
+  });
+
+  it("selects an added folder and preserves the provider, prompt, and attachments", async () => {
+    Object.defineProperties(URL, { createObjectURL: { configurable: true, value: vi.fn(() => "blob:creation") }, revokeObjectURL: { configurable: true, value: vi.fn() } });
+    const props = creationProps();
+    const added = project("worktree", "/trees/task/repo");
+    const register = vi.fn(async (_request: RegisterProjectRequest) => added);
+    const load = vi.fn(loadOptions);
+    function Workspace() {
+      const [projects, setProjects] = useState([project()]);
+      return <NewSessionDialog {...props} projects={projects} on_load_options={load} on_register={async (request) => {
+        const registered = await register(request);
+        setProjects((current) => [...current, registered]);
+        return registered;
+      }} />;
+    }
+    render(<Workspace />);
+    await optionsReady();
+    fireEvent.change(screen.getByRole("combobox", { name: "Agent" }), { target: { value: "codex" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "First message" }), { target: { value: "Inspect the screenshot" } });
+    fireEvent.change(screen.getByLabelText("Image files"), { target: { files: [new File(["png"], "draft.png", { type: "image/png" })] } });
+    fireEvent.click(screen.getByRole("button", { name: "Add project" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Folder path" }), { target: { value: added.folder_path } });
+    fireEvent.click(screen.getByRole("button", { name: "Add project" }));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Project folder" })).toHaveValue("worktree"));
+    await optionsReady();
+    expect(register).toHaveBeenCalledExactlyOnceWith({ folder_path: "/trees/task/repo", name: null });
+    expect(load).toHaveBeenLastCalledWith("worktree");
+    expect(screen.getByRole("combobox", { name: "Agent" })).toHaveValue("codex");
+    expect(screen.getByRole("textbox", { name: "First message" })).toHaveValue("Inspect the screenshot");
+    expect(screen.getByRole("button", { name: "Remove draft.png" })).toBeInTheDocument();
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Start Codex session" }));
+    expect(props.on_create).toHaveBeenCalledWith("worktree", "Inspect the screenshot", [expect.objectContaining({ file: expect.objectContaining({ name: "draft.png" }) })], { provider: "codex" });
+  });
+
+  it("explains unavailable folders and does not query their agent options", () => {
+    const load = vi.fn(loadOptions);
+    const reason = "No saved sessions reference this folder. Add it manually to keep using it.";
+    render(<NewSessionDialog {...creationProps()} projects={[{ ...project(), available: false, origin: "discovered", discovery_state: "absent", unavailable_reason: reason }]} on_load_options={load} on_register={vi.fn()} />);
+    expect(screen.getByRole("option", { name: "Repo · /repo (unavailable)" })).toBeDisabled();
+    fireEvent.click(screen.getByText("1 unavailable folder"));
+    expect(screen.getByText(reason)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Add project" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Start Pi session" })).toBeDisabled();
+    expect(load).not.toHaveBeenCalled();
+  });
+
+  it("ignores a late registration result after returning to an existing folder and starting a session", async () => {
+    const pending_registration = deferred<RegisteredProject>();
+    const props = { ...creationProps(), projects: [project(), project("other", "/other")], on_register: vi.fn(() => pending_registration.promise) };
+    const { rerender } = render(<NewSessionDialog {...props} />);
+    await optionsReady();
+    fireEvent.change(screen.getByRole("textbox", { name: "First message" }), { target: { value: "Use the original folder" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add project" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Folder path" }), { target: { value: "/other" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add project" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start Pi session" }));
+    rerender(<NewSessionDialog {...props} creating />);
+    await act(async () => pending_registration.resolve(project("other", "/other")));
+    expect(screen.getByRole("combobox", { name: "Project folder" })).toHaveValue("repo");
+    expect(props.on_create).toHaveBeenCalledExactlyOnceWith("repo", "Use the original folder", [], { provider: "pi" });
+  });
+
+  it.each(["creating", "uncertain", "admitted", "controlling"])("prevents changing or adding folders while %s", async (state) => {
+    const props = creationProps();
+    const register = vi.fn();
+    const { rerender } = render(<NewSessionDialog {...props} on_register={register} />);
+    await optionsReady();
+    fireEvent.change(screen.getByRole("textbox", { name: "First message" }), { target: { value: "Original task" } });
+    const locked = { creating: state === "creating", uncertain: state === "uncertain", controlling: state === "controlling",
+      snapshot: state === "admitted" ? snapshot({ provider: "codex", status: "failed", creation_phase: "native_create_uncertain" }) : null };
+    rerender(<NewSessionDialog {...props} {...locked} on_register={register} />);
+    expect(screen.getByRole("combobox", { name: "Project folder" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Add project" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Add project" }));
+    expect(screen.queryByRole("dialog", { name: "Add project" })).not.toBeInTheDocument();
+    expect(register).not.toHaveBeenCalled();
+    expect(screen.getByRole("combobox", { name: "Project folder" })).toHaveValue("repo");
+    expect(screen.getByRole("textbox", { name: "First message" })).toHaveValue("Original task");
+  });
+
   it("waits for host options and retains the draft when loading fails before retry", async () => {
     const pending = deferred<SessionCreationOptions>();
     const load = vi.fn().mockReturnValueOnce(pending.promise).mockResolvedValue(creationOptions());

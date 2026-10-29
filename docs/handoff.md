@@ -4,6 +4,17 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
+Local folders discovered in saved session `cwd` metadata now register
+automatically across all six historical providers. Migration 13 preserves
+existing registrations as manual and tracks per-provider presence separately
+from directory availability. Only complete, stable scans of the same readable
+scope can remove a provider's claim; partial reads and unavailable roots retain
+the last known state. Verified warm indexes seed folders without reparsing histories. Legacy indexes
+first reread lightweight headers because older cwd normalization could change
+spaces in paths; no message-body parsing is required.
+New session stays accessible with an empty registry and can add a folder while
+preserving its draft. See [projects and creation](viewer-projects.md).
+
 The desktop’s **New session** dialog now creates Pi, Codex, OpenCode and DSH
 sessions in registered local projects. Provider/runtime choices are checked
 without starting agents. Codex retains executable discovery; OpenCode requires a

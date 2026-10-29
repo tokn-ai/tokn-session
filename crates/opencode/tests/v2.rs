@@ -15,6 +15,58 @@ fn fixture() -> (tempfile::TempDir, Connection, OpenCodeSessionSource) {
 }
 
 #[test]
+fn observed_catalog_preserves_valid_rows_and_distinguishes_empty_from_unreadable() {
+  let (_directory, connection, source) = fixture();
+  let complete = source.list_session_header_catalog().unwrap();
+  assert!(complete.complete);
+  assert_eq!(complete.headers, source.list_session_headers().unwrap());
+  connection
+    .execute("update session set time_created = 'invalid' where id = 'ses_v1'", [])
+    .unwrap();
+  let partial = source.list_session_header_catalog().unwrap();
+  assert!(!partial.complete);
+  assert_eq!(partial.headers.len(), complete.headers.len() - 1);
+  assert!(!partial.headers.iter().any(|header| header.id == "ses_v1"));
+  assert!(source.list_session_headers().is_err());
+  connection.execute("delete from session", []).unwrap();
+  let empty = source.list_session_header_catalog().unwrap();
+  assert!(empty.complete);
+  assert!(empty.headers.is_empty());
+  connection.execute("drop table session", []).unwrap();
+  assert_eq!(
+    source.list_session_header_catalog().unwrap_err(),
+    source.list_session_headers().unwrap_err()
+  );
+}
+
+#[test]
+fn observed_catalog_preserves_diagnostics_for_corrupt_existing_database() {
+  let directory = tempfile::tempdir().unwrap();
+  let database = directory.path().join("opencode.db");
+  std::fs::write(&database, "not a SQLite database").unwrap();
+  let source = OpenCodeSessionSource::new(Some(database));
+  assert_eq!(
+    source.list_session_header_catalog().unwrap_err(),
+    source.list_session_headers().unwrap_err()
+  );
+}
+
+#[test]
+fn observed_catalog_retains_errors_while_executing_a_readable_schema() {
+  let (_directory, connection, source) = fixture();
+  connection
+    .execute_batch(
+      "drop table session;
+     create view session as select 'broken' as id, null as parent_id, '/work' as directory,
+       abs(-9223372036854775808) as time_created, 0 as time_updated;",
+    )
+    .unwrap();
+  let error = source.list_session_header_catalog().unwrap_err();
+  assert!(error.contains("integer overflow"));
+  assert_eq!(error, source.list_session_headers().unwrap_err());
+}
+
+#[test]
 fn per_session_format_distinguishes_empty_v1_v2_and_mixed_without_table_heuristics() {
   let (_directory, connection, source) = fixture();
   assert_eq!(

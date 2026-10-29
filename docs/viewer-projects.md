@@ -1,6 +1,6 @@
 # Viewer projects and session creation
 
-The desktop viewer registers existing folders and creates Pi, Codex, OpenCode,
+The desktop viewer discovers or manually registers folders and creates Pi, Codex, OpenCode,
 and DSH sessions on the viewing computer’s local connection. The project registry
 and creation commands remain unavailable to browser, HTTP/Hub remote, session-share
 and External reader connections. There is no new CLI `create` or `attach` command.
@@ -12,6 +12,9 @@ folder and runtime, then enter the first message. **Automatic** uses a suitable
 provider default or a single suitable saved profile. Ambiguous profiles require
 an explicit choice. Missing configuration shows an actionable reason before
 creation. Opening the dialog checks configuration without starting a runtime.
+New session remains accessible when no folder is available. Choose **Add project**
+inside the dialog to register an existing directory and return to the same
+provider, prompt and image draft.
 
 Pi keeps its existing model/authentication settings and exclusive worker.
 Codex uses app-server RPC and its existing local executable discovery if no saved
@@ -60,11 +63,32 @@ sessions or an attached external server. Native ownership remains reserved until
 its exact runtime is cleaned up. After a host restart, receipts can verify and
 open existing saved history; only a new explicit Send resumes its runtime.
 
-## Add a project
+## Folder discovery and registration
+
+Every valid absolute `cwd` discovered in saved Codex, Pi, OpenCode, ZCode,
+WorkBuddy or DSH session metadata becomes a registered launch folder. Discovery
+uses the metadata catalog, never sidebar filters or the currently loaded page.
+A verified index can seed these folders without reopening provider histories.
+Legacy indexes first reread lightweight headers to verify exact paths; older
+display normalization could collapse spaces. Message bodies are not read.
+Folder records and per-provider presence are stored in
+`~/.tokn/sessions/index.sqlite`.
+
+A discovered folder remains active while any provider retains saved sessions
+there. Only a complete, stable scan of the same readable source scope can remove
+a provider's claim. Partial reads, disconnected or missing storage, and changed
+source roots leave prior claims unknown rather than declaring them removed.
+When all claims are gone, the folder stays listed but cannot start sessions.
+Reappearing history reuses its saved identity. A missing local directory disables
+launching independently; readable session history is retained.
 
 Choose **Add project** in the sidebar and enter an absolute path to an existing
 directory. The optional name defaults to the folder's name. Registration saves
 metadata; it does not create, copy, or move project files.
+Manual folders remain eligible without history, so they can create their first
+session. Adding an automatically discovered folder manually pins the same record
+without changing its identity or name. Migration 13 treats existing explicit
+registrations as manual.
 
 The saved launch directory is canonical: symlink aliases to the same folder
 return the existing registration, including its original name and identity.

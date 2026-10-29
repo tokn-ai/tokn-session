@@ -27,6 +27,32 @@ pub struct SessionHeader {
   pub updated_at_ms: Option<i64>,
 }
 
+/// A metadata-only observation of a provider's session inventory.
+///
+/// Incomplete observations still contain useful discoveries, but omitted
+/// sessions must not be interpreted as removed from the provider. Completeness
+/// proves membership only in the observed storage scope; it does not certify
+/// that every conversation body or project directory is readable.
+#[derive(Clone, Debug, Default)]
+pub struct SessionHeaderCatalog {
+  pub headers: Vec<SessionHeader>,
+  pub complete: bool,
+}
+
+/// File membership without reading session bodies or unchanged headers.
+#[derive(Clone, Debug, Default)]
+pub struct FileSessionCatalog {
+  pub paths: Vec<PathBuf>,
+  pub complete: bool,
+}
+
+/// Provider-native header relations before file metadata is attached.
+#[derive(Clone, Debug, Default)]
+pub struct SessionRelationCatalog {
+  pub references: Vec<SessionRef>,
+  pub complete: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionRef {
   /// Model immediately before a retained history window; absent for a full
