@@ -12,7 +12,7 @@ use tokn_session_core::{Provider, SessionHeader};
 use tokn_session_pi::session_source::PiSessionSummary;
 
 use crate::{
-  service_protocol::{CatalogEntry, MAX_SNAPSHOT_BYTES},
+  service_protocol::CatalogEntry,
   service_source::{FileVersion, versions},
 };
 
@@ -47,9 +47,6 @@ impl PiCursor {
       .first()
       .and_then(Option::as_ref)
       .ok_or("Pi source is unavailable")?;
-    if current.length > MAX_SNAPSHOT_BYTES as u64 {
-      return Err("Pi metadata source exceeds the size limit".into());
-    }
     let replaced = self.version.as_ref().is_some_and(|previous| {
       #[cfg(unix)]
       if previous.identity != current.identity {

@@ -198,11 +198,25 @@ files close when the last reference to that history leaves. Heartbeats are sent
 every two seconds. Coalesced notifications include every intervening append.
 
 Limits: numeric loopback addresses only (no remote authentication), 64 client
-connections, 16 active sessions, 8 MiB per wire frame, 128 MiB serialized
-records per history journal/window, 128 MiB per JSONL source and 128 MiB of raw
-OpenCode session-row payloads per scan. These are payload limits,
-not exact process-RAM caps; decoded objects and snapshots add overhead. Large
-sessions fail explicitly rather than silently returning partial history.
+connections, and 16 active sessions. Resource budgets are separate:
+
+- Wire frames/encoded journal records: 8 MiB each.
+- Buffered catalogs and retained client windows: 128 MiB each; window accounting
+  includes all retained appends.
+- Readers that materialize a complete source or selected range: 128 MiB per
+  operation, including raw OpenCode session-row payloads per scan. Codex appends
+  charge only the newly materialized batch.
+- Codex records: 128 MiB each, with a 120-second read deadline. Sequential
+  plain/compressed projections have no total-source cap. Backward compressed
+  reads share 512 MiB of temporary disk; retained inherited prefixes alone are
+  decoded and reservations release after the read.
+- History journals: process-wide 2 GiB scratch disk, 64 MiB estimated compact
+  indexes, and one million records. Clones share reservations; failed writes
+  roll back before releasing credit.
+
+These are payload/work/storage budgets, not exact process-RAM caps; decoded
+objects and snapshots add overhead. Exceeding an operation's budget fails
+explicitly and preserves committed history rather than returning partial data.
 Any local process can connect; `--native` may expose sensitive provider data.
 
 ### Viewer connection

@@ -1,4 +1,5 @@
 //! Read-only assembly of bounded, inherited Codex rollout prefixes.
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
@@ -10,11 +11,14 @@ use tokn_session_core::{AgentEvent, LoadedSessionRecords, NormalizedRecord};
 use crate::CodexSessionSource;
 use crate::event::CodexLine;
 use crate::normalize::CodexNormalizer;
-use crate::session_source::inspect_session_header;
+use crate::storage::ReadWorkBudget;
 
 mod reader;
 mod window;
-pub use reader::{CodexHistoryReadStats, CodexHistoryReader, CodexHistoryUpdate};
+pub use reader::{
+  CodexHistoryLimits, CodexHistoryProjectionReader, CodexHistoryProjectionUpdate, CodexHistoryReadStats,
+  CodexHistoryReader, CodexHistoryUpdate,
+};
 
 const MAX_SEGMENTS: usize = 64;
 const MAX_HEADER_BYTES: u64 = 8 * 1024 * 1024;
@@ -25,12 +29,20 @@ pub struct CodexHistorySegment {
   pub path: PathBuf,
   pub end_byte_offset: Option<u64>,
   pub end_ordinal_exclusive: Option<u64>,
-  header_key: serde_json::Value,
+  header_key: HeaderKey,
 }
 
 /// Reads the owning metadata without scanning the rollout body.
 pub fn history_header(path: &Path) -> Result<CodexLine, String> {
-  for line in BufReader::new(crate::storage::reader(path)?.take(MAX_HEADER_BYTES)).lines() {
+  history_header_with_budget(path, &ReadWorkBudget::default())
+}
+
+pub(crate) fn history_header_with_budget(path: &Path, work: &ReadWorkBudget) -> Result<CodexLine, String> {
+  for line in crate::bounded_lines::lines(
+    crate::storage::reader_with_budget(path, work)?.take(MAX_HEADER_BYTES),
+    MAX_HEADER_BYTES as usize,
+  ) {
+    work.check()?;
     let line = line.map_err(|err| err.to_string())?;
     if line.trim().is_empty() {
       continue;
@@ -51,17 +63,27 @@ impl CodexSessionSource {
   /// Resolves a logical history using physical metadata and exact exclusive
   /// cutoffs. The native database is not needed, including after export.
   pub fn history_segments(&self, path: &Path) -> Result<Vec<CodexHistorySegment>, String> {
+    self.history_segments_with_budget(path, reader::DEFAULT_RECORD_BYTES, &ReadWorkBudget::default())
+  }
+
+  pub(crate) fn history_segments_with_budget(
+    &self,
+    path: &Path,
+    max_record_bytes: usize,
+    work: &ReadWorkBudget,
+  ) -> Result<Vec<CodexHistorySegment>, String> {
     let mut current = crate::storage::resolve_path(path);
     let mut end: Option<HistoryPosition> = None;
     let mut segments = Vec::new();
     let mut seen = HashSet::new();
     let mut candidates = None;
     loop {
+      work.check()?;
       let canonical = current.canonicalize().map_err(|err| err.to_string())?;
       if !seen.insert(canonical) || segments.len() == MAX_SEGMENTS {
         return Err("invalid Codex history lineage: cycle or excessive depth".into());
       }
-      let header = history_header(&current)?;
+      let header = history_header_with_budget(&current, work)?;
       let RolloutItem::SessionMeta(meta) = header.item() else {
         unreachable!()
       };
@@ -90,11 +112,11 @@ impl CodexSessionSource {
       if candidates.is_none() {
         let mut paths = Vec::new();
         for root in self.history_roots(path)? {
-          crate::storage::collect_rollouts(&root, &mut paths)?;
+          crate::storage::collect_rollouts_with_budget(&root, &mut paths, work)?;
         }
         candidates = Some(paths);
       }
-      current = resolve_prefix(candidates.as_ref().unwrap(), &current, &base)?;
+      current = resolve_prefix(candidates.as_ref().unwrap(), &current, &base, max_record_bytes, work)?;
       end = Some(base);
     }
     segments.reverse();
@@ -120,14 +142,24 @@ impl CodexSessionSource {
   }
 }
 
-fn header_key(line: &CodexLine) -> serde_json::Value {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HeaderKey {
+  paginated: bool,
+  digest: [u8; 32],
+}
+
+fn header_key(line: &CodexLine) -> HeaderKey {
   let payload = &line.native()["payload"];
-  serde_json::json!({
+  let key = serde_json::json!({
     "ordinal": line.ordinal(),
     "id": payload["id"],
     "history_mode": payload["history_mode"],
     "history_base": payload["history_base"],
-  })
+  });
+  HeaderKey {
+    paginated: payload["history_mode"] == "paginated",
+    digest: Sha256::digest(serde_json::to_vec(&key).expect("JSON metadata serializes")).into(),
+  }
 }
 
 struct HistoryOrdinals {
@@ -170,13 +202,20 @@ impl HistoryOrdinals {
   }
 }
 
-fn resolve_prefix(paths: &[PathBuf], current: &Path, base: &HistoryPosition) -> Result<PathBuf, String> {
+fn resolve_prefix(
+  paths: &[PathBuf],
+  current: &Path,
+  base: &HistoryPosition,
+  max_record_bytes: usize,
+  work: &ReadWorkBudget,
+) -> Result<PathBuf, String> {
   if base.end_ordinal_exclusive == 0 || base.end_byte_offset == 0 {
     return Err("invalid Codex history lineage: empty prefix cutoff".into());
   }
   let current = current.canonicalize().map_err(|err| err.to_string())?;
   let mut matches = Vec::new();
   for path in paths {
+    work.check()?;
     if path.canonicalize().is_ok_and(|path| path == current) {
       continue;
     }
@@ -186,7 +225,9 @@ fn resolve_prefix(paths: &[PathBuf], current: &Path, base: &HistoryPosition) -> 
     if name.starts_with("rollout-") && !name.contains(&base.thread_id) {
       continue;
     }
-    let Ok(header) = history_header(path) else { continue };
+    let Ok(header) = history_header_with_budget(path, work) else {
+      continue;
+    };
     let RolloutItem::SessionMeta(meta) = header.item() else {
       continue;
     };
@@ -202,7 +243,7 @@ fn resolve_prefix(paths: &[PathBuf], current: &Path, base: &HistoryPosition) -> 
     {
       continue;
     }
-    if cutoff_matches(path, base)? {
+    if cutoff_matches(path, base, max_record_bytes, work)? {
       matches.push(path.clone());
     }
   }
@@ -219,7 +260,12 @@ fn resolve_prefix(paths: &[PathBuf], current: &Path, base: &HistoryPosition) -> 
   }
 }
 
-fn cutoff_matches(path: &Path, base: &HistoryPosition) -> Result<bool, String> {
+fn cutoff_matches(
+  path: &Path,
+  base: &HistoryPosition,
+  max_record_bytes: usize,
+  work: &ReadWorkBudget,
+) -> Result<bool, String> {
   if !crate::storage::is_compressed(path)
     && std::fs::metadata(path).map_err(|err| err.to_string())?.len() < base.end_byte_offset
   {
@@ -227,10 +273,14 @@ fn cutoff_matches(path: &Path, base: &HistoryPosition) -> Result<bool, String> {
   }
   // Only inspect the final bounded record; full ordinal ordering is checked
   // by the atomic loader. This keeps dependency discovery independent of size.
-  let mut window = 64 * 1024;
+  let max_window = (max_record_bytes as u64).saturating_add(1);
+  let mut window = (64 * 1024).min(max_window);
   loop {
+    work.check()?;
     let start = base.end_byte_offset.saturating_sub(window);
-    let mut file = crate::storage::reader_at(path, start)?;
+    let Some(mut file) = crate::storage::reader_at_if_present(path, start, work)? else {
+      return Ok(false);
+    };
     let mut bytes = Vec::new();
     Read::by_ref(&mut file)
       .take(base.end_byte_offset - start)
@@ -245,10 +295,10 @@ fn cutoff_matches(path: &Path, base: &HistoryPosition) -> Result<bool, String> {
       .rposition(|byte| *byte == b'\n')
       .map_or(0, |index| index + 1);
     if record_start == 0 && start != 0 {
-      if window == MAX_HEADER_BYTES {
+      if window == max_window {
         return Ok(false);
       }
-      window = (window * 2).min(MAX_HEADER_BYTES);
+      window = (window * 2).min(max_window);
       continue;
     }
     let Ok(line) = serde_json::from_slice::<CodexLine>(&bytes[record_start..end]) else {
@@ -267,10 +317,10 @@ fn cutoff_matches(path: &Path, base: &HistoryPosition) -> Result<bool, String> {
     // that row at the exact boundary so another same-owner segment with a lower
     // ordinal cannot masquerade as this prefix.
     let mut next = Vec::new();
-    BufReader::new(Read::by_ref(&mut file).take(MAX_HEADER_BYTES))
+    BufReader::new(Read::by_ref(&mut file).take(max_window))
       .read_until(b'\n', &mut next)
       .map_err(|err| err.to_string())?;
-    if next.last() != Some(&b'\n') {
+    if next.len() > max_record_bytes || next.last() != Some(&b'\n') {
       return Ok(false);
     }
     return Ok(

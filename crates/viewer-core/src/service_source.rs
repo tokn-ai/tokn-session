@@ -116,7 +116,9 @@ impl SessionReader {
       },
       database: matches!(entry.provider, Provider::OpenCode | Provider::ZCode)
         .then(|| tokn_session_relay::providers::database(entry.provider, Some(entry.header.path.clone()))),
-      database_cache: OpenCodeCompactCache::with_max_source_bytes(crate::service_protocol::MAX_SNAPSHOT_BYTES),
+      database_cache: OpenCodeCompactCache::with_max_source_bytes(
+        crate::service_protocol::MAX_MATERIALIZED_SOURCE_BYTES,
+      ),
       #[cfg(test)]
       database_reads: 0,
       native,
@@ -127,14 +129,14 @@ impl SessionReader {
           tokn_session_codex::CodexHistoryReader::new_window(
             entry.header.path.clone(),
             native,
-            crate::service_protocol::MAX_SNAPSHOT_BYTES,
+            crate::service_protocol::MAX_MATERIALIZED_SOURCE_BYTES,
             crate::service_history::INITIAL_HISTORY_TURNS,
           )
         } else {
           tokn_session_codex::CodexHistoryReader::new(
             entry.header.path.clone(),
             native,
-            crate::service_protocol::MAX_SNAPSHOT_BYTES,
+            crate::service_protocol::MAX_MATERIALIZED_SOURCE_BYTES,
           )
         }
       }),
@@ -201,9 +203,9 @@ impl SessionReader {
     if self.database.is_none()
       && version[0]
         .as_ref()
-        .is_some_and(|v| v.length > crate::service_protocol::MAX_SNAPSHOT_BYTES as u64)
+        .is_some_and(|v| v.length > crate::service_protocol::MAX_MATERIALIZED_SOURCE_BYTES as u64)
     {
-      return Err("Relay session exceeds the snapshot size limit".into());
+      return Err("Relay source exceeds the buffered read budget".into());
     }
     if version == self.version && self.snapshot.error.is_none() {
       return Ok(false);
@@ -383,7 +385,7 @@ impl SessionReader {
 
   fn poll_grouped_file(&mut self, version: Vec<Option<FileVersion>>) -> Result<bool, String> {
     let entry = &self.snapshot.entry;
-    let max_bytes = crate::service_protocol::MAX_SNAPSHOT_BYTES;
+    let max_bytes = crate::service_protocol::MAX_MATERIALIZED_SOURCE_BYTES;
     let loaded = match entry.provider {
       Provider::WorkBuddy => tokn_session_workbuddy::WorkBuddySessionSource::new(Some(self.root.clone()))
         .load_session_records_path(&entry.header.path, self.native, max_bytes)?,

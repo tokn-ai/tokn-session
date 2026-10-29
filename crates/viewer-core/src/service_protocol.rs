@@ -11,7 +11,15 @@ use crate::RelayRecord;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const DEFAULT_SERVICE_ENDPOINT: &str = "tcp://127.0.0.1:5557";
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
-pub const MAX_SNAPSHOT_BYTES: usize = 128 * 1024 * 1024;
+/// Bound record encoding before assembling a separately bounded wire frame.
+pub const MAX_NORMALIZED_RECORD_BYTES: usize = MAX_FRAME_BYTES;
+/// Catalog clients currently retain the entire decoded response.
+pub const MAX_CATALOG_PAYLOAD_BYTES: usize = 128 * 1024 * 1024;
+/// Clients retain and clone the selected window, including live appends.
+pub const MAX_RETAINED_WINDOW_BYTES: usize = 128 * 1024 * 1024;
+/// Legacy readers that still materialize a complete source/selected range.
+/// Streaming readers must bound records and work instead of source length.
+pub const MAX_MATERIALIZED_SOURCE_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CatalogEntry {
