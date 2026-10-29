@@ -14,7 +14,10 @@ use crate::session_source::inspect_session_header;
 
 mod reader;
 mod window;
-pub use reader::{CodexHistoryReadStats, CodexHistoryReader, CodexHistoryUpdate};
+pub use reader::{
+  CodexHistoryProjectionReader, CodexHistoryProjectionUpdate, CodexHistoryReadStats, CodexHistoryReader,
+  CodexHistoryUpdate,
+};
 
 const MAX_SEGMENTS: usize = 64;
 const MAX_HEADER_BYTES: u64 = 8 * 1024 * 1024;

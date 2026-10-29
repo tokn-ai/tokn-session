@@ -7,7 +7,10 @@ mod rollout_path;
 pub mod session_source;
 mod storage;
 
-pub use history::{CodexHistoryReadStats, CodexHistoryReader, CodexHistorySegment, CodexHistoryUpdate, history_header};
+pub use history::{
+  CodexHistoryProjectionReader, CodexHistoryProjectionUpdate, CodexHistoryReadStats, CodexHistoryReader,
+  CodexHistorySegment, CodexHistoryUpdate, history_header,
+};
 pub use session_source::CodexSessionSource;
 
 /// Resolves a retained native JSONL path to its compressed sibling when needed.

@@ -281,7 +281,7 @@ impl Activity {
 }
 
 enum Reader {
-  Codex(Box<tokn_session_codex::CodexHistoryReader>),
+  Codex(Box<tokn_session_codex::CodexHistoryProjectionReader>),
   Pi(Box<tokn_session_relay::JsonlReader>),
 }
 
@@ -334,9 +334,8 @@ impl ActivityReaders {
       Some(entry) => entry,
       None => Entry {
         reader: match locator.provider {
-          ViewerProvider::Codex => Reader::Codex(Box::new(tokn_session_codex::CodexHistoryReader::new(
+          ViewerProvider::Codex => Reader::Codex(Box::new(tokn_session_codex::CodexHistoryProjectionReader::new(
             locator.source_path.clone(),
-            false,
             crate::service_protocol::MAX_SNAPSHOT_BYTES,
           ))),
           ViewerProvider::Pi => Reader::Pi(Box::new(tokn_session_relay::JsonlReader::for_snapshot(
@@ -354,20 +353,21 @@ impl ActivityReaders {
     };
     match &mut entry.reader {
       Reader::Codex(reader) => {
-        if let Some(update) = reader.poll(&tokn_session_codex::CodexSessionSource::new(None))? {
+        // The entry is detached until the whole update validates. A late parse,
+        // lineage, or owner error discards both the staged activity and cursor.
+        if let Some(update) = reader.poll(&tokn_session_codex::CodexSessionSource::new(None), |reset, record| {
+          if reset {
+            entry.activity = Activity::default();
+          }
+          for event in record.events {
+            entry.activity.observe(&event);
+          }
+        })? {
           if update.reference.id != locator.session_id {
             return Err("Session activity owner changed".into());
           }
-          if update.reset {
-            entry.activity = Activity::default();
-          }
           entry.activity.presentation.title = update.reference.title.map(|v| v.chars().take(160).collect());
           entry.activity.presentation.preview = update.reference.preview.map(|v| v.chars().take(240).collect());
-          for record in update.records {
-            for event in record.events {
-              entry.activity.observe(&event);
-            }
-          }
         }
       }
       Reader::Pi(reader) => {
@@ -915,13 +915,132 @@ mod tests {
       _ => unreachable!(),
     };
     assert_eq!(stats.rows_parsed, after.rows_parsed);
-    writeln!(file, "{{broken").unwrap();
+    let last_good = readers.read(&locator).unwrap();
+    // A valid record before a later failure must not publish a partial count or
+    // preview, and retrying the repaired source must not apply it twice.
+    writeln!(file, "{final_row}\n{{broken").unwrap();
     assert!(readers.read(&locator).is_err());
     assert!(!readers.contains(&locator));
+    assert_eq!(last_good.final_count, 1);
     std::fs::write(&path, format!("{header}{final_row}\n{final_row}\n")).unwrap();
     assert_eq!(readers.read(&locator).unwrap().final_count, 2);
     std::fs::write(&path, &header).unwrap();
     assert_eq!(readers.read(&locator).unwrap().final_count, 0);
+  }
+
+  #[test]
+  fn codex_activity_keeps_full_counts_and_questions_beyond_a_record_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("session.jsonl");
+    let mut file = std::fs::File::create(&path).unwrap();
+    writeln!(
+      file,
+      "{}",
+      json!({"type":"session_meta","payload":{"id":"session","cwd":"/tmp"}})
+    )
+    .unwrap();
+    for index in 0..20 {
+      writeln!(
+        file,
+        "{}",
+        json!({"type":"response_item","payload":{
+          "type":"message","id":format!("final-{index}"),"role":"assistant","phase":"final_answer",
+          "content":[{"type":"output_text","text":format!("Reply {index}")}]
+        }})
+      )
+      .unwrap();
+    }
+    writeln!(
+      file,
+      "{}",
+      json!({"type":"event_msg","payload":{
+        "type":"task_started","turn_id":"current"
+      }})
+    )
+    .unwrap();
+    writeln!(
+      file,
+      "{}",
+      json!({"type":"event_msg","payload":{
+        "type":"request_user_input","call_id":"request","turn_id":"current",
+        "questions":[{"id":"question","header":"Choice","question":"Which option?"}]
+      }})
+    )
+    .unwrap();
+    let record_budget = 512;
+    assert!(file.metadata().unwrap().len() > record_budget as u64);
+    let locator = SessionLocator {
+      version: 1,
+      provider: ViewerProvider::Codex,
+      session_id: "session".into(),
+      source_path: path.clone(),
+    };
+    let mut readers = ActivityReaders::default();
+    readers.entries.insert(
+      locator.clone(),
+      Entry {
+        reader: Reader::Codex(Box::new(tokn_session_codex::CodexHistoryProjectionReader::new(
+          path,
+          record_budget,
+        ))),
+        activity: Activity::default(),
+        version: Vec::new(),
+        used: Instant::now(),
+      },
+    );
+    let activity = readers.read(&locator).unwrap();
+    assert_eq!(activity.final_count, 20);
+    assert!(activity.running);
+    assert_eq!(activity.question_attention.required_count, 1);
+    assert_eq!(latest(&activity)["preview"], "Reply 19");
+
+    writeln!(
+      file,
+      "{}",
+      json!({"type":"response_item","payload":{
+        "type":"message","id":"last","role":"assistant","phase":"final_answer",
+        "content":[{"type":"output_text","text":"Completed"}]
+      }})
+    )
+    .unwrap();
+    let activity = readers.read(&locator).unwrap();
+    assert_eq!(activity.final_count, 21);
+    assert!(!activity.running);
+    assert_eq!(activity.question_attention.required_count, 0);
+    assert_eq!(latest(&activity)["preview"], "Completed");
+  }
+
+  #[test]
+  fn codex_activity_discards_streamed_records_when_the_owner_changes() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("session.jsonl");
+    let header = json!({"type":"session_meta","payload":{"id":"original","cwd":"/tmp"}}).to_string();
+    let reply = json!({"type":"response_item","payload":{
+      "type":"message","role":"assistant","phase":"final_answer",
+      "content":[{"type":"output_text","text":"done"}]
+    }})
+    .to_string();
+    std::fs::write(&path, format!("{header}\n{reply}\n")).unwrap();
+    let mut locator = SessionLocator {
+      version: 1,
+      provider: ViewerProvider::Codex,
+      session_id: "original".into(),
+      source_path: path.clone(),
+    };
+    let mut readers = ActivityReaders::default();
+    assert_eq!(readers.read(&locator).unwrap().final_count, 1);
+    std::fs::write(
+      &path,
+      format!("{}\n{reply}\n{reply}\n", header.replace("original", "replacement")),
+    )
+    .unwrap();
+    assert_eq!(
+      readers.read(&locator).err().as_deref(),
+      Some("Session activity owner changed")
+    );
+    assert!(!readers.contains(&locator));
+    locator.session_id = "replacement".into();
+    assert_eq!(readers.read(&locator).unwrap().final_count, 2);
   }
 
   #[test]

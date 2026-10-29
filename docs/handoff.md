@@ -659,6 +659,10 @@ Relay hints coalesce for 200 ms of quiet, capped at one second and scheduled
 deadlines, so streaming records do not each start a catalog pass.
 Active Codex/Pi body indexing uses a bounded LRU of incremental activity readers,
 retaining normalization cursors and reply counts instead of transcript bodies.
+Codex activity folds validated records one at a time across inherited segments,
+so combined histories above the 128 MiB snapshot limit still contribute exact
+reply counts and question state. A failed read discards the staged projection;
+per-source decoded and per-record limits remain, as do normal snapshot limits.
 Recent changes bypass the historical quiet-file delay so running indicators and
 final replies reach the sidebar promptly, including rollouts above 8 MiB.
 Cold backfill still scales its quiet-file delay with size, up to five minutes;

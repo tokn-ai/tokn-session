@@ -29,6 +29,72 @@ pub struct CodexHistoryUpdate {
   pub source_start: Option<u64>,
 }
 
+/// Metadata for a successfully validated streaming projection update.
+pub struct CodexHistoryProjectionUpdate {
+  pub reference: SessionRef,
+  pub history_status: SessionHistoryStatus,
+  pub reset: bool,
+}
+
+/// A full-history cursor that delivers one bounded normalized record at a time.
+///
+/// Unlike a snapshot, a projection does not retain the complete transcript or
+/// impose a combined size limit on its inherited segments. Each source still
+/// obeys the decoded source limit, and `max_record_bytes` bounds incomplete rows.
+pub struct CodexHistoryProjectionReader {
+  reader: CodexHistoryReader,
+}
+
+impl CodexHistoryProjectionReader {
+  pub fn new(path: PathBuf, max_record_bytes: usize) -> Self {
+    Self {
+      reader: CodexHistoryReader::new(path, false, max_record_bytes),
+    }
+  }
+
+  pub fn stats(&self) -> CodexHistoryReadStats {
+    self.reader.stats()
+  }
+
+  /// Fold records into disposable staging state and publish it only after this
+  /// call succeeds. Validation can fail after invoking `consume`; an error
+  /// invalidates the cursor and the next poll starts again with `reset = true`.
+  /// The first (owner) record of a rebuild has `reset = true`; all other records
+  /// have `reset = false`. An unchanged source does not invoke `consume`.
+  pub fn poll(
+    &mut self,
+    source: &CodexSessionSource,
+    mut consume: impl FnMut(bool, NormalizedRecord),
+  ) -> Result<Option<CodexHistoryProjectionUpdate>, String> {
+    self.reader.poll_with(source, &mut Some(&mut consume)).map(|update| {
+      update.map(|update| CodexHistoryProjectionUpdate {
+        reference: update.reference,
+        history_status: update.history_status,
+        reset: update.reset,
+      })
+    })
+  }
+
+  pub fn invalidate(&mut self) {
+    self.reader.invalidate();
+  }
+}
+
+type ProjectionSink<'a> = Option<&'a mut dyn FnMut(bool, NormalizedRecord)>;
+
+fn emit_record(
+  projection: &mut ProjectionSink<'_>,
+  records: &mut Vec<NormalizedRecord>,
+  reset: bool,
+  record: NormalizedRecord,
+) {
+  if let Some(consume) = projection {
+    consume(reset, record);
+  } else {
+    records.push(record);
+  }
+}
+
 /// A verified lineage plus a cursor into its growing active JSONL segment.
 ///
 /// Native rollout growth is treated as append-only. Replacement, truncation,
@@ -138,20 +204,28 @@ impl CodexHistoryReader {
   }
 
   pub fn poll(&mut self, source: &CodexSessionSource) -> Result<Option<CodexHistoryUpdate>, String> {
+    self.poll_with(source, &mut None)
+  }
+
+  fn poll_with(
+    &mut self,
+    source: &CodexSessionSource,
+    projection: &mut ProjectionSink<'_>,
+  ) -> Result<Option<CodexHistoryUpdate>, String> {
     // Take the state before doing fallible work. Only a fully successful read
     // returns it to the cache; callers retain their last-good published records.
     let Some(mut state) = self.state.take() else {
-      return self.rebuild(source).map(Some);
+      return self.rebuild(source, projection).map(Some);
     };
     if source.history_roots(&self.path)? != state.roots {
-      return self.rebuild(source).map(Some);
+      return self.rebuild(source, projection).map(Some);
     }
     if state
       .segments
       .iter()
       .any(|segment| crate::storage::resolve_path(&segment.path) != segment.path)
     {
-      return self.rebuild(source).map(Some);
+      return self.rebuild(source, projection).map(Some);
     }
     let versions = state
       .segments
@@ -161,7 +235,7 @@ impl CodexHistoryReader {
     // Native compression can retire a plain physical file while preserving
     // every decoded byte. Resolve the replacement before reporting it missing.
     let Ok(versions) = versions else {
-      return self.rebuild(source).map(Some);
+      return self.rebuild(source, projection).map(Some);
     };
     if versions == state.versions {
       self.state = Some(state);
@@ -176,7 +250,7 @@ impl CodexHistoryReader {
     {
       // Compressed offsets describe decoded bytes, so physical growth cannot
       // use the append cursor. Rebuild and validate the entire selected range.
-      return self.rebuild(source).map(Some);
+      return self.rebuild(source, projection).map(Some);
     }
     let head = versions.last().unwrap();
     let previous = state.versions.last().unwrap();
@@ -187,7 +261,7 @@ impl CodexHistoryReader {
         continue;
       }
       if !guarded_prefix_growth(&state.segments[index].path, before, after, guard, &mut self.stats)? {
-        return self.rebuild(source).map(Some);
+        return self.rebuild(source, projection).map(Some);
       }
     }
     if head == previous {
@@ -198,15 +272,19 @@ impl CodexHistoryReader {
       return Ok(None);
     }
     if head.identity != previous.identity || head.length <= state.offset {
-      return self.rebuild(source).map(Some);
+      return self.rebuild(source, projection).map(Some);
     }
-    if state
-      .prefix_bytes
-      .saturating_add(head.length)
-      .saturating_sub(state.source_start)
-      > self.max_bytes as u64
+    if projection.is_none()
+      && state
+        .prefix_bytes
+        .saturating_add(head.length)
+        .saturating_sub(state.source_start)
+        > self.max_bytes as u64
     {
       return Err("Codex history exceeds the snapshot size limit".into());
+    }
+    if projection.is_some() && head.length > crate::storage::MAX_DECODED_BYTES {
+      return Err("Codex source exceeds the projection size limit".into());
     }
     let mut file = File::open(&state.segments.last().unwrap().path).map_err(|err| err.to_string())?;
     if !guards_match(
@@ -216,59 +294,56 @@ impl CodexHistoryReader {
       state.offset,
       &mut self.stats,
     )? {
-      return self.rebuild(source).map(Some);
+      return self.rebuild(source, projection).map(Some);
     }
-    let appended = read_range(&mut file, state.offset, head.length - state.offset)?;
-    self.stats.source_bytes_read += appended.len() as u64;
-    update_tail(&mut state.tail_guard, &appended);
-    state.offset = head.length;
-    // Pending bytes contain no newline. A fragmented long row must not scan
-    // its whole accumulated prefix every time another fragment arrives.
-    let appended_complete = complete_length(&appended);
-    let complete = if appended_complete == 0 {
-      0
-    } else {
-      state.pending.len() + appended_complete
-    };
-    state.pending.extend(appended);
-    let start = state.offset - state.pending.len() as u64;
     let mut records = Vec::new();
-    let mut offset = start;
-    for row in state.pending[..complete].split_inclusive(|byte| *byte == b'\n') {
-      let row_offset = offset;
-      offset += row.len() as u64;
-      if row.iter().all(u8::is_ascii_whitespace) {
-        continue;
-      }
-      let line = parse_row(row, &self.path, row_offset, &mut self.stats)?;
-      state.ordinals.accept(&line, &self.path, row_offset)?;
-      if matches!(line.item(), RolloutItem::SessionMeta(_)) {
-        continue;
-      }
-      if super::window::is_turn_start(&line)
-        && let Some(turns) = &mut self.window_turns
-      {
-        *turns = turns.saturating_add(1);
-      }
-      state.dependencies.observe(&line);
-      records.push(normalize_record(
-        line,
-        &self.path,
-        row_offset,
-        self.include_native,
-        false,
-        &mut state.normalizer,
-        &mut state.reference,
-      ));
-    }
+    let mut emitted = false;
+    read_rows(
+      &mut file,
+      state.offset,
+      head.length - state.offset,
+      &mut state.pending,
+      self.max_bytes,
+      &mut self.stats,
+      Some(&mut state.tail_guard),
+      |row, row_offset, stats| {
+        let line = parse_row(row, &self.path, row_offset, stats)?;
+        state.ordinals.accept(&line, &self.path, row_offset)?;
+        if matches!(line.item(), RolloutItem::SessionMeta(_)) {
+          return Ok(());
+        }
+        if let Some(turns) = &mut self.window_turns {
+          if super::window::is_turn_start(&line) {
+            *turns = turns.saturating_add(1);
+          }
+          state.dependencies.observe(&line);
+        }
+        emit_record(
+          projection,
+          &mut records,
+          false,
+          normalize_record(
+            line,
+            &self.path,
+            row_offset,
+            self.include_native,
+            false,
+            &mut state.normalizer,
+            &mut state.reference,
+          ),
+        );
+        emitted = true;
+        Ok(())
+      },
+    )?;
+    state.offset = head.length;
     if state.source_start > 0 && state.dependencies.missing {
       self.widen_dependencies();
-      return self.rebuild(source).map(Some);
+      return self.rebuild(source, projection).map(Some);
     }
-    state.pending.drain(..complete);
     validate_versions(&state.segments, &versions, &state.prefix_guards, &mut self.stats)?;
     state.versions = versions;
-    let update = (!records.is_empty()).then(|| CodexHistoryUpdate {
+    let update = emitted.then(|| CodexHistoryUpdate {
       reference: state.reference.clone(),
       records,
       history_status: state.normalizer.history_status(),
@@ -279,7 +354,11 @@ impl CodexHistoryReader {
     Ok(update)
   }
 
-  fn rebuild(&mut self, source: &CodexSessionSource) -> Result<CodexHistoryUpdate, String> {
+  fn rebuild(
+    &mut self,
+    source: &CodexSessionSource,
+    projection: &mut ProjectionSink<'_>,
+  ) -> Result<CodexHistoryUpdate, String> {
     self.stats.lineage_resolutions += 1;
     let roots = source.history_roots(&self.path)?;
     let segments = source.history_segments(&self.path)?;
@@ -350,15 +429,19 @@ impl CodexHistoryReader {
     let mut normalizer = CodexNormalizer::new_historical();
     let owner_events = normalizer.normalize(owner.clone());
     normalizer.seed_model(reference.model_baseline.as_ref());
-    let mut records = if source_start == 0 {
-      vec![NormalizedRecord {
-        record_id: format!("session:{}", reference.id),
-        native: self.include_native.then(|| owner.native().clone()),
-        events: owner_events,
-      }]
-    } else {
-      Vec::new()
-    };
+    let mut records = Vec::new();
+    if source_start == 0 {
+      emit_record(
+        projection,
+        &mut records,
+        true,
+        NormalizedRecord {
+          record_id: format!("session:{}", reference.id),
+          native: self.include_native.then(|| owner.native().clone()),
+          events: owner_events,
+        },
+      );
+    }
     let mut dependencies = super::window::Dependencies::default();
     let mut consumed = 0u64;
     let mut selected_bytes = 0u64;
@@ -377,40 +460,52 @@ impl CodexHistoryReader {
         length.saturating_sub(TAIL_GUARD_BYTES as u64),
         length.min(TAIL_GUARD_BYTES as u64),
       )?;
-      if selected_bytes.saturating_add(length - start) > self.max_bytes as u64 {
+      if projection.is_none() && selected_bytes.saturating_add(length - start) > self.max_bytes as u64 {
         return Err("Codex history exceeds the snapshot size limit".into());
       }
-      let bytes = read_range(file, start, length - start)?;
-      selected_bytes += bytes.len() as u64;
-      self.stats.source_bytes_read += bytes.len() as u64;
-      let complete = complete_length(&bytes);
-      if segment.end_byte_offset.is_some() && complete != bytes.len() {
-        return Err("invalid Codex history lineage: cutoff is not a complete record".into());
+      if projection.is_some() && length > crate::storage::MAX_DECODED_BYTES {
+        return Err("Codex source exceeds the projection size limit".into());
       }
-      let mut offset = start;
+      selected_bytes += length - start;
+      let mut pending = Vec::new();
       let mut ordinals = HistoryOrdinals::new(segment.header_key["history_mode"].as_str() == Some("paginated"));
       let inherited_parent = thread_spawn && header.native()["payload"]["id"].as_str() != Some(reference.id.as_str());
-      for row in bytes[..complete].split_inclusive(|byte| *byte == b'\n') {
-        let row_offset = offset;
-        offset += row.len() as u64;
-        if row.iter().all(u8::is_ascii_whitespace) {
-          continue;
-        }
-        let line = parse_row(row, &segment.path, row_offset, &mut self.stats)?;
-        ordinals.accept(&line, &segment.path, row_offset)?;
-        if matches!(line.item(), RolloutItem::SessionMeta(_)) {
-          continue;
-        }
-        dependencies.observe(&line);
-        records.push(normalize_record(
-          line,
-          &segment.path,
-          row_offset,
-          self.include_native,
-          inherited_parent,
-          &mut normalizer,
-          &mut reference,
-        ));
+      read_rows(
+        file,
+        start,
+        length - start,
+        &mut pending,
+        self.max_bytes,
+        &mut self.stats,
+        None,
+        |row, row_offset, stats| {
+          let line = parse_row(row, &segment.path, row_offset, stats)?;
+          ordinals.accept(&line, &segment.path, row_offset)?;
+          if matches!(line.item(), RolloutItem::SessionMeta(_)) {
+            return Ok(());
+          }
+          if self.window_turns.is_some() {
+            dependencies.observe(&line);
+          }
+          emit_record(
+            projection,
+            &mut records,
+            false,
+            normalize_record(
+              line,
+              &segment.path,
+              row_offset,
+              self.include_native,
+              inherited_parent,
+              &mut normalizer,
+              &mut reference,
+            ),
+          );
+          Ok(())
+        },
+      )?;
+      if segment.end_byte_offset.is_some() && !pending.is_empty() {
+        return Err("invalid Codex history lineage: cutoff is not a complete record".into());
       }
       if start < length
         && segment
@@ -420,14 +515,7 @@ impl CodexHistoryReader {
         return Err("invalid Codex history lineage: cutoff ordinal disagrees with its bytes".into());
       }
       if segment.end_byte_offset.is_none() {
-        head_state = Some((
-          consumed,
-          length,
-          bytes[complete..].to_vec(),
-          ordinals,
-          header_guard,
-          tail_guard,
-        ));
+        head_state = Some((consumed, length, pending, ordinals, header_guard, tail_guard));
       } else {
         prefix_guards.push(PrefixGuard {
           header: header_guard,
@@ -441,7 +529,7 @@ impl CodexHistoryReader {
     // dependency is actually needed, before publishing a partial operation.
     if source_start > 0 && dependencies.missing {
       self.widen_dependencies();
-      return self.rebuild(source);
+      return self.rebuild(source, projection);
     }
     validate_versions(&segments, &versions, &prefix_guards, &mut self.stats)?;
     let update = CodexHistoryUpdate {
@@ -511,6 +599,62 @@ fn read_range(file: &mut File, offset: u64, length: u64) -> Result<Vec<u8>, Stri
   Ok(bytes)
 }
 
+/// Keep only one source record, including a previous incomplete fragment.
+/// `take` bounds both the file snapshot and each read_until allocation before
+/// parsing. A fragmented long row is scanned only in its newly appended bytes.
+#[allow(clippy::too_many_arguments)]
+fn read_rows(
+  file: &mut File,
+  offset: u64,
+  length: u64,
+  pending: &mut Vec<u8>,
+  max_record_bytes: usize,
+  stats: &mut CodexHistoryReadStats,
+  mut tail: Option<&mut Vec<u8>>,
+  mut consume: impl FnMut(&[u8], u64, &mut CodexHistoryReadStats) -> Result<(), String>,
+) -> Result<(), String> {
+  file.seek(SeekFrom::Start(offset)).map_err(|err| err.to_string())?;
+  let mut reader = BufReader::new(Read::by_ref(file).take(length));
+  let mut row_offset = offset - pending.len() as u64;
+  let initial_row_offset = row_offset;
+  let mut consumed = 0u64;
+  loop {
+    let previous = pending.len();
+    let allowance = max_record_bytes.saturating_sub(previous).saturating_add(1) as u64;
+    let read = Read::by_ref(&mut reader)
+      .take(allowance)
+      .read_until(b'\n', pending)
+      .map_err(|err| err.to_string())?;
+    consumed += read as u64;
+    stats.source_bytes_read += read as u64;
+    if pending.len() > max_record_bytes {
+      return Err("Codex history row exceeds the snapshot size limit".into());
+    }
+    if read == 0 {
+      break;
+    }
+    if let Some(tail) = &mut tail {
+      update_tail(tail, &pending[previous..]);
+    }
+    if pending.last() == Some(&b'\n') {
+      if !pending.iter().all(u8::is_ascii_whitespace) {
+        consume(pending, row_offset, stats)?;
+      }
+      row_offset += pending.len() as u64;
+      pending.clear();
+    }
+  }
+  if consumed != length {
+    return Err("Codex history changed while reading its prefix".into());
+  }
+  // Do not cache the allocation for a completed large record. Keep only the
+  // unfinished suffix, without repeatedly copying an ever-growing fragment.
+  if row_offset != initial_row_offset {
+    pending.shrink_to_fit();
+  }
+  Ok(())
+}
+
 fn guards_match(
   file: &mut File,
   header_guard: &[u8],
@@ -551,13 +695,6 @@ fn update_tail(tail: &mut Vec<u8>, appended: &[u8]) {
     let excess = tail.len().saturating_sub(TAIL_GUARD_BYTES);
     tail.drain(..excess);
   }
-}
-
-fn complete_length(bytes: &[u8]) -> usize {
-  bytes
-    .iter()
-    .rposition(|byte| *byte == b'\n')
-    .map_or(0, |index| index + 1)
 }
 
 fn parse_row(row: &[u8], path: &Path, offset: u64, stats: &mut CodexHistoryReadStats) -> Result<CodexLine, String> {
