@@ -18,7 +18,10 @@ revision table/triggers. Existing rows and application timestamps are retained;
 unknown migration drift still fails closed.
 The desktop’s **New session** opens an app-only blank conversation. Multiple
 drafts retain project/provider/runtime, text and image choices in memory across
-session and machine navigation; closing/reloading the window clears them. No
+session and machine navigation; closing/reloading the window clears them.
+Projects view places each draft under its target project (including shared
+worktree groups); changing its folder moves the row. Time view retains project
+labels, and drafts awaiting a folder remain separately accessible. No
 native session, upload or runtime starts until the first Send. Draft IDs never
 enter native history/subscription APIs. The first Send uses existing guarded
 creation receipts and promotes only verified history with confirmed input;

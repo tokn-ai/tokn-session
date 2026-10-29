@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SessionDraft } from "../lib/useSessionDrafts";
 import type { RegisteredProject } from "../lib/types";
 import { SessionDraftRows } from "./SessionDraftRows";
+import { sidebarDraftEntries } from "../lib/sidebarDrafts";
 
 afterEach(cleanup);
 const project: RegisteredProject = {
@@ -16,8 +17,8 @@ function draft(draft_id: string, overrides: Partial<SessionDraft> = {}): Session
 describe("draft sidebar identities", () => {
   it("keeps identical blank drafts independently selectable", () => {
     const select = vi.fn();
-    render(<SessionDraftRows drafts={[draft("first-draft"), draft("second-draft")]} projects={[project]}
-      selected_draft_id="second-draft" search="" on_select={select} />);
+    render(<SessionDraftRows entries={sidebarDraftEntries([draft("first-draft"), draft("second-draft")], [project], "second-draft", "")}
+      selected_draft_id="second-draft" on_select={select} />);
     const rows = screen.getAllByRole("button", { name: "New session, Pi draft in Viewer" });
     expect(rows).toHaveLength(2);
     fireEvent.click(rows[0]); expect(select).toHaveBeenLastCalledWith("first-draft");
@@ -27,15 +28,16 @@ describe("draft sidebar identities", () => {
 
   it("retains the selected draft while filtering other drafts by text, project, or agent", () => {
     const drafts = [draft("selected", { prompt: "Unrelated selected draft" }), draft("match", { prompt: "Investigate cache\nDo not show line two", selection: { provider: "codex" } }), draft("hidden")];
-    const props = { drafts, projects: [project], selected_draft_id: "selected", on_select: vi.fn() };
-    const { rerender } = render(<SessionDraftRows {...props} search="cache" />);
+    const props = { selected_draft_id: "selected", on_select: vi.fn() };
+    const entries = (search: string) => sidebarDraftEntries(drafts, [project], props.selected_draft_id, search);
+    const { rerender } = render(<SessionDraftRows {...props} entries={entries("cache")} />);
     expect(screen.getAllByRole("button")).toHaveLength(2);
     expect(screen.getByRole("button", { name: "Unrelated selected draft, Pi draft in Viewer" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("button", { name: "Investigate cache, Codex draft in Viewer" })).toBeInTheDocument();
     expect(screen.queryByText("Do not show line two")).not.toBeInTheDocument();
-    rerender(<SessionDraftRows {...props} search="codex" />);
+    rerender(<SessionDraftRows {...props} entries={entries("codex")} />);
     expect(screen.getAllByRole("button")).toHaveLength(2);
-    rerender(<SessionDraftRows {...props} search="/repo" />);
+    rerender(<SessionDraftRows {...props} entries={entries("/repo")} />);
     expect(screen.getAllByRole("button")).toHaveLength(3);
   });
 
@@ -46,7 +48,7 @@ describe("draft sidebar identities", () => {
       session_id: "native-id", session_key: "pi:native-key", session: null, pending_dialog: null, message: null,
       creation_input_state: "uncertain",
     } });
-    render(<><SessionDraftRows drafts={[pending]} projects={[project]} selected_draft_id={null} search="" on_select={select_draft} />
+    render(<><SessionDraftRows entries={sidebarDraftEntries([pending], [project], null, "")} selected_draft_id={null} on_select={select_draft} />
       <button onClick={() => select_native("pi:native-key")}>Saved conversation</button></>);
     fireEvent.click(screen.getByRole("button", { name: "New session, Pi draft in Viewer" }));
     expect(select_draft).toHaveBeenCalledExactlyOnceWith("draft-id");

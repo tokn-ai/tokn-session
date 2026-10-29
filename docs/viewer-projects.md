@@ -8,7 +8,11 @@ and External reader connections. There is no new CLI `create` or `attach` comman
 ## Create a session
 
 Choose **New session** (or a project group’s `+`) to open a blank conversation
-and add an app-only entry under **Drafts**. Select the agent, registered folder
+and add an app-only entry under its target project in **Projects** view.
+Changing the selected folder moves the draft to that project. **Time** view
+shows drafts with their project names; drafts without a known registration
+remain accessible under **Choose a project** in Projects view.
+Select the agent, registered folder
 and runtime now or later. No provider session, image upload or runtime is created
 until the first **Send**. Drafts retain text, images and choices while switching
 sessions or visiting Machines, but are memory-only and disappear when the app
