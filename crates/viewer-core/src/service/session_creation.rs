@@ -291,6 +291,10 @@ impl ViewerService {
       },
       image_ids: request.image_ids.clone(),
       runtime,
+      model: request
+        .model
+        .as_ref()
+        .map(crate::workspace::SessionCreationModelSelection::identity),
     };
     manager
       .receipt(&intent)
@@ -356,6 +360,10 @@ impl ViewerService {
       input,
       image_ids: request.image_ids,
       runtime,
+      model: request
+        .model
+        .as_ref()
+        .map(crate::workspace::SessionCreationModelSelection::identity),
     };
     let snapshot = manager.create(intent).await.map_err(|error| {
       if error.kind == ErrorKind::Uncertain {
@@ -373,9 +381,24 @@ impl ViewerService {
 fn creation_runtime(
   request: &crate::workspace::CreateProjectSessionRequest,
 ) -> Result<Option<RuntimeSelection>, String> {
-  match (&request.runtime_profile_id, request.runtime_revision) {
+  let selected = selected_creation_runtime(request.runtime_profile_id.as_deref(), request.runtime_revision)?;
+  let Some(model) = &request.model else {
+    return Ok(selected);
+  };
+  let pinned = selected_creation_runtime(model.runtime_profile_id.as_deref(), model.runtime_revision)?;
+  if selected.is_some() && selected != pinned {
+    return Err("The model belongs to a different runtime. Choose a model again.".into());
+  }
+  Ok(pinned)
+}
+
+pub(super) fn selected_creation_runtime(
+  profile_id: Option<&str>,
+  revision: Option<u64>,
+) -> Result<Option<RuntimeSelection>, String> {
+  match (profile_id, revision) {
     (Some(id), Some(revision)) => Ok(Some(RuntimeSelection {
-      profile_id: id.clone(),
+      profile_id: id.to_owned(),
       expected_revision: revision,
     })),
     (None, None) => Ok(None),
@@ -448,6 +471,7 @@ impl CreationHost for Host {
           request.working_directory.clone(),
           selection,
           planned_id.map(str::to_owned),
+          request.model.clone(),
         )
         .await
     })
@@ -457,30 +481,47 @@ impl CreationHost for Host {
     created: &'a CreatedNativeSession,
     request_id: &'a str,
     input: &'a MessageInput,
+    model: Option<&'a tokn_interaction_core::ModelIdentity>,
   ) -> AdapterFuture<'a, Result<(), InteractionError>> {
     Box::pin(async move {
-      if !input.images.is_empty() {
+      let state = if model.is_some() || !input.images.is_empty() {
         let state = self
           .runtimes
           .execute_created(created, uuid::Uuid::new_v4().to_string(), Command::State)
           .await?;
         let Reply::State(state) = state else {
           return Err(InteractionError::unavailable(
-            "Could not verify image support for the new session",
+            "Could not verify the new session's model before its first message",
           ));
         };
+        if let Some(expected) = model
+          && !state
+            .model
+            .as_ref()
+            .is_some_and(|current| creation_model_matches(expected, current))
+        {
+          return Err(InteractionError::invalid(
+            "The new session did not confirm the selected model. Its first message was not sent.",
+          ));
+        }
+        Some(state)
+      } else {
+        None
+      };
+      if !input.images.is_empty() {
         let catalog = self
           .runtimes
           .execute_created(created, uuid::Uuid::new_v4().to_string(), Command::Models)
           .await?;
         let supported = match catalog {
-          Reply::Models(models) => state.model.as_ref().is_some_and(|current| {
-            models.iter().any(|model| {
-              model.supports_images
-                && model.model.model_id == current.model_id
-                && model.model.model_provider == current.model_provider
-            })
-          }),
+          Reply::Models(models) => state
+            .as_ref()
+            .and_then(|state| state.model.as_ref())
+            .is_some_and(|current| {
+              models
+                .iter()
+                .any(|model| model.supports_images && creation_model_matches(&model.model, current))
+            }),
           _ => false,
         };
         if !supported {
@@ -562,6 +603,17 @@ impl CreationHost for Host {
       Ok(key)
     })
   }
+}
+
+fn creation_model_matches(
+  expected: &tokn_interaction_core::ModelIdentity,
+  actual: &tokn_interaction_core::ModelIdentity,
+) -> bool {
+  expected.model_id == actual.model_id
+    && expected
+      .model_provider
+      .as_ref()
+      .is_none_or(|provider| actual.model_provider.as_ref() == Some(provider))
 }
 
 impl HistoryPublisher {

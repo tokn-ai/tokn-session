@@ -2,6 +2,160 @@ use super::*;
 use std::sync::atomic::AtomicUsize;
 use tokio::sync::oneshot;
 
+fn test_model() -> ModelIdentity {
+  ModelIdentity {
+    model_provider: Some("provider".into()),
+    model_id: "model".into(),
+    display_name: Some("Model label".into()),
+  }
+}
+
+#[tokio::test]
+async fn draft_catalog_closes_temporary_runtime_without_creating_resuming_or_sending() {
+  let (runtime, shared) = fixture();
+  let models = runtime
+    .creation_models(Provider::Codex, std::env::temp_dir(), None)
+    .await
+    .unwrap();
+  assert_eq!(models[0].model, test_model());
+  let adapter = shared.adapter.lock().unwrap().clone().unwrap();
+  assert_eq!(adapter.model_queries.load(Ordering::SeqCst), 1);
+  assert_eq!(adapter.closes.load(Ordering::SeqCst), 1);
+  assert_eq!(adapter.creates.load(Ordering::SeqCst), 0);
+  assert_eq!(adapter.resumes.load(Ordering::SeqCst), 0);
+  assert_eq!(adapter.sends.load(Ordering::SeqCst), 0);
+  assert!(runtime.inventory().runtimes.is_empty());
+  assert!(runtime.0.state.lock().unwrap().bindings.is_empty());
+}
+
+#[tokio::test]
+async fn draft_catalog_reuses_live_runtime_and_never_closes_it_on_query_failure() {
+  let (runtime, shared) = fixture();
+  runtime
+    .start(StartRuntimeRequest {
+      request_id: uuid::Uuid::new_v4().to_string(),
+      profile_id: runtime.0.host.profile.profile_id.clone(),
+      expected_revision: 1,
+    })
+    .await
+    .unwrap();
+  let adapter = shared.adapter.lock().unwrap().clone().unwrap();
+  runtime
+    .creation_models(Provider::Codex, std::env::temp_dir(), None)
+    .await
+    .unwrap();
+  adapter.fail_models.store(true, Ordering::SeqCst);
+  assert!(
+    runtime
+      .creation_models(Provider::Codex, std::env::temp_dir(), None)
+      .await
+      .is_err()
+  );
+  assert_eq!(shared.opens.load(Ordering::SeqCst), 1);
+  assert_eq!(adapter.closes.load(Ordering::SeqCst), 0);
+  assert_eq!(runtime.inventory().runtimes.len(), 1);
+  runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn draft_catalog_failed_cleanup_reserves_profile_without_starting_a_second_probe() {
+  let (runtime, shared) = fixture();
+  shared.fail_close.store(true, Ordering::SeqCst);
+  let error = runtime
+    .creation_models(Provider::Codex, std::env::temp_dir(), None)
+    .await
+    .unwrap_err();
+  assert!(error.message.contains("cleanup was not confirmed"));
+  assert_eq!(runtime.inventory().runtimes[0].status, "cleanup_failed");
+  assert!(
+    runtime
+      .creation_models(Provider::Codex, std::env::temp_dir(), None)
+      .await
+      .is_err()
+  );
+  assert_eq!(shared.opens.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn canceled_catalog_caller_still_cleans_up_and_shutdown_waits() {
+  let (runtime, shared) = fixture();
+  let (release, wait) = oneshot::channel();
+  *shared.open_wait.lock().unwrap() = Some(wait);
+  let probe = tokio::spawn({
+    let runtime = runtime.clone();
+    async move {
+      runtime
+        .creation_models(Provider::Codex, std::env::temp_dir(), None)
+        .await
+    }
+  });
+  shared.open_started.notified().await;
+  probe.abort();
+  let shutdown = tokio::spawn({
+    let runtime = runtime.clone();
+    async move { runtime.shutdown().await }
+  });
+  tokio::task::yield_now().await;
+  assert!(!shutdown.is_finished());
+  release.send(()).unwrap();
+  shutdown.await.unwrap();
+  let adapter = shared.adapter.lock().unwrap().clone().unwrap();
+  assert_eq!(adapter.closes.load(Ordering::SeqCst), 1);
+  assert_eq!(adapter.creates.load(Ordering::SeqCst), 0);
+  assert!(runtime.inventory().runtimes.is_empty());
+}
+
+#[tokio::test]
+async fn creation_revalidates_catalog_and_passes_only_selected_model_identity() {
+  let (runtime, shared) = fixture();
+  let created = runtime
+    .create_native(Provider::Codex, std::env::temp_dir(), None, None, Some(test_model()))
+    .await
+    .unwrap();
+  let adapter = shared.adapter.lock().unwrap().clone().unwrap();
+  assert_eq!(adapter.model_queries.load(Ordering::SeqCst), 1);
+  assert_eq!(
+    adapter.created_models.lock().unwrap()[0],
+    Some(creation_model_identity(&test_model()))
+  );
+  assert!(!created.capabilities.atomic_model_on_send);
+  let mut removed = test_model();
+  removed.model_id = "no-longer-listed".into();
+  assert_eq!(
+    runtime
+      .create_native(Provider::Codex, std::env::temp_dir(), None, None, Some(removed))
+      .await
+      .unwrap_err()
+      .kind,
+    ErrorKind::InvalidRequest
+  );
+  adapter.fail_models.store(true, Ordering::SeqCst);
+  assert!(
+    runtime
+      .create_native(Provider::Codex, std::env::temp_dir(), None, None, Some(test_model()))
+      .await
+      .is_err()
+  );
+  assert_eq!(adapter.creates.load(Ordering::SeqCst), 1);
+  assert_eq!(adapter.sends.load(Ordering::SeqCst), 0);
+  runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn unsupported_creation_model_is_rejected_before_runtime_start() {
+  let (mut runtime, shared) = fixture();
+  Arc::get_mut(&mut runtime.0).unwrap().host.profile.provider = Provider::Dsh;
+  assert_eq!(
+    runtime
+      .create_native(Provider::Dsh, std::env::temp_dir(), None, None, Some(test_model()))
+      .await
+      .unwrap_err()
+      .kind,
+    ErrorKind::Unsupported
+  );
+  assert_eq!(shared.opens.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn verified_planned_creation_recovers_its_owner_without_repeating_native_writes() {
   let (runtime, shared) = fixture();
@@ -18,7 +172,7 @@ async fn verified_planned_creation_recovers_its_owner_without_repeating_native_w
   let cwd = std::env::temp_dir();
   assert_eq!(
     runtime
-      .create_native(Provider::Codex, cwd.clone(), None, Some("planned-created".into()))
+      .create_native(Provider::Codex, cwd.clone(), None, Some("planned-created".into()), None)
       .await
       .unwrap_err()
       .kind,
@@ -91,11 +245,23 @@ async fn verified_planned_creation_recovers_its_owner_without_repeating_native_w
 async fn created_sessions_share_a_runtime_and_adoption_never_resumes_or_stops_it() {
   let (runtime, shared) = fixture();
   let first = runtime
-    .create_native(Provider::Codex, std::env::temp_dir(), None, Some("created-one".into()))
+    .create_native(
+      Provider::Codex,
+      std::env::temp_dir(),
+      None,
+      Some("created-one".into()),
+      None,
+    )
     .await
     .unwrap();
   let second = runtime
-    .create_native(Provider::Codex, std::env::temp_dir(), None, Some("created-two".into()))
+    .create_native(
+      Provider::Codex,
+      std::env::temp_dir(),
+      None,
+      Some("created-two".into()),
+      None,
+    )
     .await
     .unwrap();
   assert_eq!(first.target.runtime_id, second.target.runtime_id);
@@ -152,6 +318,7 @@ async fn creation_reserves_native_identity_across_hosts_until_exact_runtime_clea
       std::env::temp_dir(),
       None,
       Some("exclusive-created".into()),
+      None,
     )
     .await
     .unwrap();
@@ -161,7 +328,8 @@ async fn creation_reserves_native_identity_across_hosts_until_exact_runtime_clea
         Provider::Codex,
         std::env::temp_dir(),
         None,
-        Some("exclusive-created".into())
+        Some("exclusive-created".into()),
+        None,
       )
       .await
       .is_err()
@@ -185,6 +353,7 @@ async fn creation_reserves_native_identity_across_hosts_until_exact_runtime_clea
       std::env::temp_dir(),
       None,
       Some("exclusive-created".into()),
+      None,
     )
     .await
     .unwrap();
@@ -198,6 +367,7 @@ struct FakeHost {
 
 struct FakeHostState {
   opens: AtomicUsize,
+  fail_close: AtomicBool,
   adapter: Mutex<Option<Arc<FakeAdapter>>>,
   open_wait: Mutex<Option<oneshot::Receiver<()>>>,
   open_started: Notify,
@@ -219,6 +389,14 @@ impl RuntimeHost for FakeHost {
 
   fn validate_launch_ready(&self, _profile: &Self::Profile) -> Result<(), String> {
     Ok(())
+  }
+
+  fn validate_creation_model(&self, profile: &Self::Profile, _model: &ModelIdentity) -> Result<(), InteractionError> {
+    if profile.provider == Provider::Dsh {
+      Err(InteractionError::unsupported("No creation model override"))
+    } else {
+      Ok(())
+    }
   }
 
   fn select_profile<'a>(
@@ -249,12 +427,17 @@ impl RuntimeHost for FakeHost {
           ownership: self.profile.ownership,
           capabilities: Capabilities::default()
             .with(Operation::Metadata)
+            .with(Operation::Models)
             .with(Operation::State)
             .with(Operation::PendingInteractions)
             .with(Operation::Message),
         },
         events: broadcast::channel(8).0,
         creates: AtomicUsize::new(0),
+        created_models: Mutex::new(Vec::new()),
+        model_queries: AtomicUsize::new(0),
+        fail_models: AtomicBool::new(false),
+        fail_close: AtomicBool::new(self.shared.fail_close.load(Ordering::SeqCst)),
         uncertain_create: AtomicBool::new(false),
         unavailable_state: AtomicBool::new(false),
         resumes: AtomicUsize::new(0),
@@ -290,6 +473,7 @@ impl RuntimeHandle for FakeHandle {
   ) -> AdapterFuture<'a, Result<NativeSessionDescriptor, InteractionError>> {
     Box::pin(async move {
       self.0.creates.fetch_add(1, Ordering::SeqCst);
+      self.0.created_models.lock().unwrap().push(request.model.clone());
       if self.0.uncertain_create.load(Ordering::SeqCst) {
         return Err(InteractionError::uncertain("Native create acknowledgement was lost"));
       }
@@ -309,6 +493,10 @@ struct FakeAdapter {
   descriptor: RuntimeDescriptor,
   events: broadcast::Sender<RuntimeEvent>,
   creates: AtomicUsize,
+  created_models: Mutex<Vec<Option<ModelIdentity>>>,
+  model_queries: AtomicUsize,
+  fail_models: AtomicBool,
+  fail_close: AtomicBool,
   uncertain_create: AtomicBool,
   unavailable_state: AtomicBool,
   resumes: AtomicUsize,
@@ -328,6 +516,20 @@ impl InteractionAdapter for FakeAdapter {
       }
       Ok(match request.command {
         Command::Metadata => Reply::Metadata(Metadata::default()),
+        Command::Models => {
+          assert!(
+            request.target.session_id.is_none(),
+            "draft catalogs must never bind a native session"
+          );
+          self.model_queries.fetch_add(1, Ordering::SeqCst);
+          if self.fail_models.load(Ordering::SeqCst) {
+            return Err(InteractionError::unavailable("Catalog unavailable"));
+          }
+          Reply::Models(vec![ModelChoice {
+            model: test_model(),
+            supports_images: true,
+          }])
+        }
         Command::State => Reply::State(SessionState {
           session_id: request.target.session_id,
           status: ExecutionState::Idle,
@@ -357,6 +559,9 @@ impl InteractionAdapter for FakeAdapter {
   fn close(&self) -> AdapterFuture<'_, Result<(), InteractionError>> {
     Box::pin(async {
       self.closes.fetch_add(1, Ordering::SeqCst);
+      if self.fail_close.load(Ordering::SeqCst) {
+        return Err(InteractionError::unavailable("Cleanup not confirmed"));
+      }
       Ok(())
     })
   }
@@ -365,6 +570,7 @@ impl InteractionAdapter for FakeAdapter {
 fn fixture() -> (RuntimeCoordinator<FakeHost>, Arc<FakeHostState>) {
   let shared = Arc::new(FakeHostState {
     opens: AtomicUsize::new(0),
+    fail_close: AtomicBool::new(false),
     adapter: Mutex::new(None),
     open_wait: Mutex::new(None),
     open_started: Notify::new(),

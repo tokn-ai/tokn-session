@@ -1,5 +1,6 @@
 import { invoke, isDesktop, listen, type CommandInvoker, type EventSubscriber, type UnlistenFn } from "./transport";
 import type {
+  ListSessionCreationModelsRequest, SessionCreationModels,
   RelaySettings, RelayStatus, RelayChange,
   AcknowledgeSessionAttentionRequest,
   AcknowledgeSessionAttentionResponse,
@@ -79,6 +80,9 @@ export function registerProject(request: RegisterProjectRequest, send: CommandIn
 }
 export function getSessionCreationOptions(project_id: string, send: CommandInvoker = invoke): Promise<SessionCreationOptions> {
   return send("get_session_creation_options", { request: { project_id } });
+}
+export function listSessionCreationModels(request: ListSessionCreationModelsRequest, send: CommandInvoker = invoke): Promise<SessionCreationModels> {
+  return send("list_session_creation_models", { request });
 }
 export function createProjectSession(request: CreateProjectSessionRequest, send: CommandInvoker = invoke): Promise<ManagedSessionSnapshot> {
   return send("create_project_session", { request });

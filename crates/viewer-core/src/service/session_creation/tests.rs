@@ -122,6 +122,10 @@ struct CodexPeer {
 
 impl CodexPeer {
   async fn start(history: PathBuf, cwd: PathBuf, supports_images: bool) -> Self {
+    Self::start_with_model(history, cwd, supports_images, "test-model").await
+  }
+
+  async fn start_with_model(history: PathBuf, cwd: PathBuf, supports_images: bool, actual_model: &'static str) -> Self {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("ws://{}", listener.local_addr().unwrap());
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -145,7 +149,7 @@ impl CodexPeer {
             let thread = |active: bool| json!({
               "id":"created-codex", "cwd":cwd, "path":history, "ephemeral":false,
               "status":{"type":if active {"active"} else {"idle"}},
-              "model":"test-model", "modelProvider":"test", "turns":[],
+              "model":actual_model, "modelProvider":"test", "turns":[],
             });
             let result = match request["method"].as_str().unwrap() {
               "initialize" => json!({"userAgent":"creation-test"}),
@@ -153,7 +157,7 @@ impl CodexPeer {
                 assert!(!history.exists(), "native history must remain deferred until first input");
                 assert_eq!(request["params"]["cwd"], json!(cwd));
                 assert_eq!(request["params"]["ephemeral"], false);
-                json!({"thread":thread(false),"cwd":cwd,"model":"test-model","modelProvider":"test"})
+                json!({"thread":thread(false),"cwd":cwd,"model":actual_model,"modelProvider":"test"})
               },
               "thread/read" => json!({"thread":thread(active)}),
               "thread/turns/list" => json!({"data":if active {vec![json!({"id":"test-turn","status":"inProgress","items":[]})]}else{Vec::new()},"nextCursor":null}),
@@ -206,6 +210,7 @@ fn request(project: &crate::workspace::RegisteredProject) -> CreateProjectSessio
     provider: LiveProvider::Codex,
     runtime_profile_id: None,
     runtime_revision: None,
+    model: None,
   }
 }
 
@@ -448,6 +453,7 @@ fn receipt(project: &crate::workspace::RegisteredProject, provider: LiveProvider
     project_id: project.project_id.clone(),
     working_directory: project.folder_path.clone().into(),
     runtime: None,
+    model: None,
     fingerprint: "a".repeat(64),
     revision: 1,
     phase: CreationPhase::HistoryPending,
@@ -472,6 +478,157 @@ fn receipt(project: &crate::workspace::RegisteredProject, provider: LiveProvider
     message: None,
     cancel_requested: false,
   }
+}
+
+#[tokio::test]
+async fn draft_catalog_does_not_create_history_and_model_is_applied_once_at_creation() {
+  use crate::workspace::{ListSessionCreationModelsRequest, SessionCreationModelSelection};
+  let directory = tempfile::tempdir().unwrap();
+  let history_root = directory.path().join("codex");
+  std::fs::create_dir(&history_root).unwrap();
+  let service = service(ViewerProvider::Codex, history_root.clone());
+  let project = project(&service, &directory.path().join("project"));
+  let history = history_root.join("created.jsonl");
+  let peer = CodexPeer::start(history.clone(), project.folder_path.clone().into(), true).await;
+  let profile = save_profile(&service, LiveProvider::Codex, peer.endpoint.clone(), None, true).await;
+  let catalog = service
+    .list_session_creation_models(ListSessionCreationModelsRequest {
+      project_id: project.project_id.clone(),
+      provider: LiveProvider::Codex,
+      runtime_profile_id: None,
+      runtime_revision: None,
+    })
+    .await
+    .unwrap();
+  assert!(!history.exists());
+  assert_eq!(peer.count("thread/start"), 0);
+  assert_eq!(peer.count("turn/start"), 0);
+  assert!(service.list_rpc_runtimes().await.unwrap().runtimes.is_empty());
+  assert_eq!(catalog.runtime_profile_id.as_deref(), Some(profile.as_str()));
+  let mut request = request(&project);
+  request.model = Some(SessionCreationModelSelection {
+    model_provider: catalog.models[0].model.model_provider.clone(),
+    model_id: catalog.models[0].model.model_id.clone(),
+    catalog_revision: catalog.catalog_revision.unwrap(),
+    runtime_profile_id: catalog.runtime_profile_id,
+    runtime_revision: catalog.runtime_revision,
+  });
+  let (first, duplicate) = tokio::join!(
+    service.create_project_session(request.clone()),
+    service.create_project_session(request.clone()),
+  );
+  first.unwrap();
+  duplicate.unwrap();
+  let receipt = settled(&service, &request.request_id).await;
+  assert_eq!(receipt.phase, CreationPhase::Ready);
+  assert_eq!(receipt.model.unwrap().model_id, "test-model");
+  assert_eq!(peer.count("thread/start"), 1);
+  assert_eq!(peer.count("turn/start"), 1);
+  let start = peer
+    .requests
+    .lock()
+    .unwrap()
+    .iter()
+    .find(|value| value["method"] == "thread/start")
+    .cloned()
+    .unwrap();
+  assert_eq!(start["params"]["model"], "test-model");
+  // Retry checks only the immutable receipt, even if its catalog proof expired.
+  request.model.as_mut().unwrap().catalog_revision = "0".repeat(64);
+  service.create_project_session(request.clone()).await.unwrap();
+  request.model.as_mut().unwrap().model_id = "different-model".into();
+  assert!(service.create_project_session(request).await.is_err());
+  assert_eq!(peer.count("turn/start"), 1);
+  service.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn stale_draft_model_is_rejected_before_creation_admission() {
+  use crate::workspace::{ListSessionCreationModelsRequest, SessionCreationModelSelection};
+  let directory = tempfile::tempdir().unwrap();
+  let service = service(ViewerProvider::Codex, directory.path().join("codex"));
+  let project = project(&service, &directory.path().join("project"));
+  let peer = CodexPeer::start(
+    directory.path().join("history.jsonl"),
+    project.folder_path.clone().into(),
+    true,
+  )
+  .await;
+  save_profile(&service, LiveProvider::Codex, peer.endpoint.clone(), None, true).await;
+  let catalog = service
+    .list_session_creation_models(ListSessionCreationModelsRequest {
+      project_id: project.project_id.clone(),
+      provider: LiveProvider::Codex,
+      runtime_profile_id: None,
+      runtime_revision: None,
+    })
+    .await
+    .unwrap();
+  let mut request = request(&project);
+  request.model = Some(SessionCreationModelSelection {
+    model_provider: None,
+    model_id: "test-model".into(),
+    catalog_revision: catalog.catalog_revision.unwrap(),
+    runtime_profile_id: catalog.runtime_profile_id,
+    runtime_revision: catalog.runtime_revision,
+  });
+  // Replacing the Automatic default invalidates the model's pinned revision.
+  save_profile(&service, LiveProvider::Codex, peer.endpoint.clone(), None, true).await;
+  let error = service.create_project_session(request.clone()).await.unwrap_err();
+  assert!(!error.may_have_started);
+  assert!(
+    service
+      .creation_manager()
+      .unwrap()
+      .get(&request.request_id)
+      .unwrap()
+      .is_none()
+  );
+  assert_eq!(peer.count("thread/start"), 0);
+  assert_eq!(peer.count("turn/start"), 0);
+  service.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn ignored_native_model_retains_created_identity_without_sending_first_prompt() {
+  use crate::workspace::{ListSessionCreationModelsRequest, SessionCreationModelSelection};
+  let directory = tempfile::tempdir().unwrap();
+  let service = service(ViewerProvider::Codex, directory.path().join("codex"));
+  let project = project(&service, &directory.path().join("project"));
+  let peer = CodexPeer::start_with_model(
+    directory.path().join("history.jsonl"),
+    project.folder_path.clone().into(),
+    true,
+    "fallback-model",
+  )
+  .await;
+  save_profile(&service, LiveProvider::Codex, peer.endpoint.clone(), None, true).await;
+  let catalog = service
+    .list_session_creation_models(ListSessionCreationModelsRequest {
+      project_id: project.project_id.clone(),
+      provider: LiveProvider::Codex,
+      runtime_profile_id: None,
+      runtime_revision: None,
+    })
+    .await
+    .unwrap();
+  let mut request = request(&project);
+  request.model = Some(SessionCreationModelSelection {
+    model_provider: None,
+    model_id: "test-model".into(),
+    catalog_revision: catalog.catalog_revision.unwrap(),
+    runtime_profile_id: catalog.runtime_profile_id,
+    runtime_revision: catalog.runtime_revision,
+  });
+  service.create_project_session(request.clone()).await.unwrap();
+  let receipt = settled(&service, &request.request_id).await;
+  assert_eq!(receipt.created.unwrap().native.native_id, "created-codex");
+  assert_eq!(receipt.first_input, FirstInputState::Rejected);
+  assert!(receipt.message.unwrap().contains("did not confirm"));
+  service.create_project_session(request).await.unwrap();
+  assert_eq!(peer.count("thread/start"), 1);
+  assert_eq!(peer.count("turn/start"), 0);
+  service.sessions.shutdown().await;
 }
 
 fn publisher(service: &ViewerService) -> HistoryPublisher {

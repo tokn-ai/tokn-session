@@ -1,10 +1,12 @@
 //! Provider-independent runtime lifecycle, binding recovery and ownership.
 //! Host configuration and concrete adapter construction stay behind RuntimeHost.
 mod creation;
+mod models;
 #[cfg(test)]
 mod tests;
 mod workflow;
 pub use creation::{CreateNativeSessionRequest, CreatedNativeSession, NativeSessionDescriptor, RuntimeSelection};
+pub(crate) use models::{creation_model_identity, validate_creation_model};
 
 use crate::session_ownership::{SessionLease, SessionOwnership};
 use crate::*;
@@ -57,6 +59,12 @@ pub trait RuntimeHost: Send + Sync + 'static {
   fn resolve_profile(&self, profile_id: &str, revision: u64) -> Result<Self::Profile, String>;
   fn describe(&self, profile: &Self::Profile) -> ProfileDescriptor;
   fn validate_launch_ready(&self, profile: &Self::Profile) -> Result<(), String>;
+  /// Reject unsupported creation-time model overrides before opening a runtime.
+  fn validate_creation_model(&self, _profile: &Self::Profile, _model: &ModelIdentity) -> Result<(), InteractionError> {
+    Err(InteractionError::unsupported(
+      "This runtime uses its default model for new sessions",
+    ))
+  }
   fn select_profile<'a>(
     &'a self,
     provider: Provider,

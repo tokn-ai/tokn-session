@@ -13,8 +13,10 @@ Changing the selected folder moves the draft to that project. **Time** view
 shows drafts with their project names; drafts without a known registration
 remain accessible under **Choose a project** in Projects view.
 Select the agent, registered folder
-and runtime now or later. No provider session, image upload or runtime is created
-until the first **Send**. Drafts retain text, images and choices while switching
+and runtime now or later. No provider session or image upload is created
+until the first **Send**. The model picker may temporarily start a metadata RPC
+process, without creating a saved conversation or sending a prompt. Drafts retain
+text, images and model choices while switching
 sessions or visiting Machines, but are memory-only and disappear when the app
 window closes or reloads. **Discard draft** removes an editable draft immediately.
 
@@ -27,6 +29,11 @@ inside the conversation to register an existing directory and return to the same
 provider, prompt and image draft.
 
 Pi keeps its existing model/authentication settings and exclusive worker.
+The draft model picker offers verified Pi, Codex and OpenCode choices, or
+**Use runtime default**. Choosing stays local; Send revalidates the catalog and
+applies the model before the first prompt. Changing project, agent or runtime
+clears the choice while retaining text/images. An incompatible model keeps image
+attachments visible and blocks Send until corrected. DSH remains default-only.
 Codex uses app-server RPC and its existing local executable discovery if no saved
 profile exists. OpenCode requires a runtime whose configured directory matches
 the selected project. DSH passes the project directory to native session creation
@@ -52,7 +59,7 @@ The shared core durably admits one UUID before native effects. OpenCode/DSH use
 reserved native IDs; Codex returns its native thread ID. First-prompt admission
 has its own state, and a disconnect or timeout never automatically recreates a
 session or replays that prompt. **Check session start** observes the same original
-request, provider, runtime and revision. The draft becomes the saved conversation
+request, provider, runtime, revision and model intent. The draft becomes the saved conversation
 only after both verified history and confirmed first-input acceptance. A background
 completion never changes the currently selected conversation. While acceptance
 is unresolved, **Open saved conversation** can view verified history without
@@ -69,7 +76,8 @@ Codex cannot recover an unacknowledged server-assigned ID through this receipt.
 
 `viewer/session-creations.json` stores bounded RPC creation identities, phases and
 fingerprints, not prompt/image bytes, environment or credentials. The existing
-Pi `managed-sessions.json` and its fingerprints/leases remain unchanged.
+Pi `managed-sessions.json` stores optional creation model identity too; omitted
+choices preserve legacy fingerprints and leases.
 `session-creation-routes.json` binds canonical creation UUIDs to one provider
 across processes and both strategies. Saturated or malformed catalogs reject new
 creation while preserving read-only viewing and their original data.
@@ -203,7 +211,7 @@ Pi uses the environment inherited by the desktop app and its existing model,
 authentication, project configuration, and extensions in the selected working
 directory. Registration does not grant a new trust level or provide a sandbox;
 the selected folder and Pi configuration determine the code and tools Pi runs.
-The viewer does not configure a model or store provider credentials. Set up Pi
+The viewer can select a configured model, but does not store provider credentials. Set up Pi
 on this machine before starting a session.
 
 The executable defaults to `pi` resolved from the desktop process's `PATH`.

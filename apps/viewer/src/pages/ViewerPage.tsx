@@ -150,6 +150,7 @@ function ViewerContent({ remote = false, connection, on_open_machines, machine_l
           on_add_project={() => { registration_draft.current = selected_draft.draft_id; setProjectOpen(true); }}
           on_sidebar_open={openSessions}
           on_load_options={workspace.loadCreationOptions}
+          on_load_models={workspace.loadCreationModels}
           on_open_session={selected_draft.snapshot?.session ? () => {
             selected_draft_ref.current = null;
             setSelectedDraftId(null);

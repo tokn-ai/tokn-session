@@ -136,6 +136,7 @@ fn request(folder: &Path) -> (CreateProjectSessionRequest, RegisteredProject) {
       project_id: "opaque-project".into(),
       prompt: "initial prompt".into(),
       image_ids: Vec::new(),
+      model: None,
     },
     RegisteredProject {
       project_id: "opaque-project".into(),
@@ -143,6 +144,50 @@ fn request(folder: &Path) -> (CreateProjectSessionRequest, RegisteredProject) {
       available: true,
     },
   )
+}
+
+#[test]
+fn creation_model_fingerprints_preserve_legacy_receipts_and_ignore_display_names() {
+  let directory = tempfile::tempdir().unwrap();
+  let (mut request, _) = request(directory.path());
+  assert_eq!(
+    creation_fingerprint(&request, "/project").unwrap(),
+    "c3f1046ff3959a9e0787a28128f58011804a282076cce44fc4ecaf6f577ab561"
+  );
+  request.image_ids = vec!["first-image".into()];
+  let legacy = creation_fingerprint(&request, "/project").unwrap();
+  assert_eq!(
+    legacy,
+    "239648e86a61a95898ea5c2aa0de5968e51c5afa9262e72c42d09d4b9f0ef11b"
+  );
+  request.model = Some(crate::ModelIdentity {
+    model_provider: Some("provider".into()),
+    model_id: "model".into(),
+    display_name: None,
+  });
+  let selected = creation_fingerprint(&request, "/project").unwrap();
+  assert_ne!(selected, legacy);
+  request.model.as_mut().unwrap().display_name = Some("Updated label".into());
+  assert_eq!(creation_fingerprint(&request, "/project").unwrap(), selected);
+  request.model.as_mut().unwrap().model_id = "other".into();
+  assert_ne!(creation_fingerprint(&request, "/project").unwrap(), selected);
+  request.model.as_mut().unwrap().model_id = "model".into();
+  request.model.as_mut().unwrap().model_provider = Some("other".into());
+  assert_ne!(creation_fingerprint(&request, "/project").unwrap(), selected);
+}
+
+#[test]
+fn creation_model_identity_is_bounded_before_admission() {
+  for value in ["", " leading", "line\nbreak", &"x".repeat(513)] {
+    for provider in [false, true] {
+      let model = crate::ModelIdentity {
+        model_provider: Some(if provider { value } else { "provider" }.into()),
+        model_id: if provider { "model" } else { value }.into(),
+        display_name: None,
+      };
+      assert!(validate_creation_model(&model).is_err());
+    }
+  }
 }
 
 async fn wait_status(manager: &ManagedSessions, id: &str, expected: ManagedSessionStatus) -> ManagedSessionSnapshot {

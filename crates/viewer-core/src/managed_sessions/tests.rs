@@ -50,6 +50,7 @@ for line in sys.stdin:
         provider: tokn_interaction_core::Provider::Pi,
         runtime_profile_id: None,
         runtime_revision: None,
+        model: None,
         request_id: request_id.clone(),
         project_id: "project".into(),
         prompt: "handled".into(),

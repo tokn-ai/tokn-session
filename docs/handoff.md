@@ -22,7 +22,13 @@ session and machine navigation; closing/reloading the window clears them.
 Projects view places each draft under its target project (including shared
 worktree groups); changing its folder moves the row. Time view retains project
 labels, and drafts awaiting a folder remain separately accessible. No
-native session, upload or runtime starts until the first Send. Draft IDs never
+native session or upload starts until the first Send. Opening a draft model
+picker can briefly start a metadata RPC process; it never creates or resumes a
+saved conversation. Pi, Codex and OpenCode choices remain local to each draft,
+reset with project/provider/runtime changes, and are revalidated and applied
+before its first prompt. DSH retains its runtime default. Catalog scope pins
+the resolved runtime/revision; creation receipts include model identity without
+changing legacy default-model fingerprints. Draft IDs never
 enter native history/subscription APIs. The first Send uses existing guarded
 creation receipts and promotes only verified history with confirmed input;
 uncertain/rejected input retains the original draft and checks the same receipt
@@ -31,7 +37,8 @@ independently of history readiness; legacy receipts remain unknown. New session
 can add a project with an empty registry. See [projects and creation](viewer-projects.md).
 
 Pi, Codex, OpenCode and DSH creation remains local desktop only.
-Provider/runtime choices are checked without starting agents.
+Provider/runtime options are checked without starting agents; lazy model catalogs
+reuse connected runtimes or close temporary metadata processes after querying.
 Codex retains executable discovery; OpenCode requires a
 runtime matching the project folder. Creation currently requires host-readable
 native history; HTTP/Hub/browser creation remains out of scope.

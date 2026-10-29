@@ -81,6 +81,7 @@ pub struct RpcSessionBinding {
 pub(crate) struct RpcRuntimeManager(Arc<Inner>);
 struct Inner {
   profiles: Arc<RpcProfileStore>,
+  transient_profiles: Arc<Mutex<BTreeMap<String, RpcResolvedProfile>>>,
   runtimes: core_runtime::RuntimeCoordinator<Host>,
   #[cfg(test)]
   interactions: InteractionService,
@@ -110,7 +111,25 @@ impl RpcRuntimeManager {
       })
     };
     if let Some(selection) = &selection {
-      let resolved = profiles.resolve_at_revision(&selection.profile_id, selection.expected_revision)?;
+      let transient = self
+        .0
+        .transient_profiles
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&selection.profile_id)
+        .cloned();
+      let resolved = if let Some(profile) = transient {
+        let canonical_cwd = std::fs::canonicalize(cwd).map_err(|_| "The project folder is unavailable")?;
+        if provider != Provider::Codex
+          || selection.expected_revision != 0
+          || profile.profile.working_directory.as_deref().map(std::path::Path::new) != Some(canonical_cwd.as_path())
+        {
+          return Err("The selected built-in runtime belongs to another project".into());
+        }
+        profile
+      } else {
+        profiles.resolve_at_revision(&selection.profile_id, selection.expected_revision)?
+      };
       if resolved.profile.provider != provider {
         return Err("The chosen runtime belongs to another agent".into());
       }
@@ -122,14 +141,70 @@ impl RpcRuntimeManager {
     Ok(selection)
   }
 
+  /// Resolve the exact runtime behind a draft catalog, including built-in Codex.
+  /// This reads configuration only; ordinary default creation keeps its legacy
+  /// unpinned intent while an explicit model choice pins this returned identity.
+  pub(crate) fn creation_model_selection(
+    &self,
+    provider: Provider,
+    cwd: &std::path::Path,
+    selected: Option<&core_runtime::RuntimeSelection>,
+  ) -> Result<Option<core_runtime::RuntimeSelection>, String> {
+    if let Some(selection) = self.creation_selection(provider, cwd, selected)? {
+      return Ok(Some(selection));
+    }
+    let profile = workflow::builtin_codex(cwd)?;
+    self.pin_builtin_creation_profile(profile).map(Some)
+  }
+
+  fn pin_builtin_creation_profile(
+    &self,
+    profile: RpcResolvedProfile,
+  ) -> Result<core_runtime::RuntimeSelection, String> {
+    let id = profile.profile.profile_id.clone();
+    let mut transient = self
+      .0
+      .transient_profiles
+      .lock()
+      .unwrap_or_else(|error| error.into_inner());
+    if !transient.contains_key(&id) && transient.len() >= 256 {
+      return Err(
+        "Project runtime configuration limit reached; reopen the app to clear inactive configurations".into(),
+      );
+    }
+    transient.entry(id.clone()).or_insert(profile);
+    Ok(core_runtime::RuntimeSelection {
+      profile_id: id,
+      expected_revision: 0,
+    })
+  }
+
   pub(crate) async fn create_native_session(
     &self,
     provider: Provider,
     cwd: PathBuf,
     selection: Option<core_runtime::RuntimeSelection>,
     native_id: Option<String>,
+    model: Option<ModelIdentity>,
   ) -> Result<core_runtime::CreatedNativeSession, InteractionError> {
-    self.0.runtimes.create_native(provider, cwd, selection, native_id).await
+    self
+      .0
+      .runtimes
+      .create_native(provider, cwd, selection, native_id, model)
+      .await
+  }
+  pub(crate) async fn creation_models(
+    &self,
+    provider: Provider,
+    cwd: PathBuf,
+    selection: Option<core_runtime::RuntimeSelection>,
+  ) -> Result<Vec<ModelChoice>, InteractionError> {
+    if provider == Provider::Pi {
+      return Err(InteractionError::unsupported(
+        "Use the managed Pi driver to discover creation models",
+      ));
+    }
+    self.0.runtimes.creation_models(provider, cwd, selection).await
   }
   pub(crate) async fn execute_created(
     &self,
@@ -171,6 +246,7 @@ impl RpcRuntimeManager {
     };
     Self(Arc::new(Inner {
       profiles,
+      transient_profiles: host.transient_profiles.clone(),
       #[cfg(test)]
       interactions: interactions.clone(),
       runtimes: core_runtime::RuntimeCoordinator::new(host, interactions, lease_directory, ownership),

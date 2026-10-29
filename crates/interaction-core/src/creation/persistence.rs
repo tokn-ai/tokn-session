@@ -120,6 +120,7 @@ impl Store {
         || current.project_id != receipt.project_id
         || current.working_directory != receipt.working_directory
         || current.runtime != receipt.runtime
+        || current.model != receipt.model
         || current.planned_native_id != receipt.planned_native_id
       {
         return Err("Immutable creation intent changed".into());
@@ -181,6 +182,12 @@ fn validate_receipt(receipt: &CreationSnapshot) -> Result<(), String> {
   }
   if let Some(selection) = &receipt.runtime {
     validate_profile_id(&selection.profile_id)?;
+  }
+  if let Some(model) = &receipt.model {
+    crate::runtime::validate_creation_model(model).map_err(|error| error.to_string())?;
+    if model.display_name.is_some() {
+      return Err("Creation receipts store model identity without display labels".into());
+    }
   }
   if let Some(created) = &receipt.created {
     if created.provider != receipt.provider

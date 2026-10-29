@@ -274,6 +274,16 @@ export interface RegisterProjectRequest { folder_path: string; name?: string | n
 export interface CreateProjectSessionRequest {
   request_id: string; project_id: string; prompt: string; image_ids?: string[];
   provider?: RpcProvider; runtime_profile_id?: string | null; runtime_revision?: number | null;
+  model?: SessionCreationModelSelection | null;
+}
+export interface ListSessionCreationModelsRequest extends SessionCreationSelection { project_id: string }
+export interface SessionCreationModels {
+  models: ModelChoice[]; catalog_revision: string | null; reason: string | null;
+  runtime_profile_id: string | null; runtime_revision: number | null;
+}
+export interface SessionCreationModelSelection {
+  model_provider: string | null; model_id: string; catalog_revision: string;
+  runtime_profile_id?: string | null; runtime_revision?: number | null;
 }
 export interface SessionCreationRuntime { profile_id: string; revision: number; name: string; available: boolean; reason: string | null }
 export interface SessionCreationProvider {

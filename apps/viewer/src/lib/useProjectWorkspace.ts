@@ -2,11 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { errorMessage } from "./state";
 import { captureTransport, type CommandInvoker, type EventSubscriber } from "./transport";
 import {
-  getSessionCreationOptions, getManagedSession, listRegisteredProjects, listenForManagedSessionChanges, listenForRelayStatus,
+  getSessionCreationOptions, listSessionCreationModels, getManagedSession, listRegisteredProjects, listenForManagedSessionChanges, listenForRelayStatus,
   registerProject, respondManagedSessionDialog, resumeManagedSession, stopManagedSession,
 } from "./tauri";
 import type {
-  ManagedSessionDialogResponse, ManagedSessionSnapshot,
+  ManagedSessionDialogResponse, ManagedSessionSnapshot, ListSessionCreationModelsRequest,
   ProjectWorkspaceSnapshot, RegisterProjectRequest,
 } from "./types";
 
@@ -170,6 +170,7 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
   }, [enabled, transport, workspace?.available]);
 
   const loadCreationOptions = useCallback((project_id: string) => getSessionCreationOptions(project_id, transport.invoke), [transport]);
+  const loadCreationModels = useCallback((request: ListSessionCreationModelsRequest) => listSessionCreationModels(request, transport.invoke), [transport]);
 
   const control = useCallback(async (kind: "stop" | "resume", snapshot: ManagedSessionSnapshot) => {
     if (!enabled || !alive.current || active_transport.current !== transport || control_busy.current) return;
@@ -202,7 +203,7 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
     workspace, loading, error, managed, pending_dialog_session, controlling, input_refresh_key,
     control_error: managed?.request_id === control_failure?.request_id ? control_failure?.message ?? null : null,
     dialog_error: pending_dialog_session?.request_id === control_failure?.request_id ? control_failure?.message ?? null : null,
-    addProject, loadCreationOptions, control, respond, controlErrorFor,
+    addProject, loadCreationOptions, loadCreationModels, control, respond, controlErrorFor,
     retry: () => setRetry((value) => value + 1),
   };
 }

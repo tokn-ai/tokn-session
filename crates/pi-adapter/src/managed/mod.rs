@@ -1,5 +1,6 @@
 //! Native Pi workflows for the shared managed-session supervisor.
 mod actor;
+mod catalog;
 mod protocol;
 
 use std::path::{Path, PathBuf};
@@ -39,6 +40,13 @@ impl ManagedSessionDriver for PiSessionDriver {
   fn spawn(&self, worker: ManagedWorker) -> AdapterFuture<'static, ()> {
     let executable = self.executable.clone();
     Box::pin(actor::run(executable, worker))
+  }
+
+  fn creation_models(
+    &self,
+    working_directory: PathBuf,
+  ) -> AdapterFuture<'static, Result<Vec<tokn_interaction_core::ModelChoice>, String>> {
+    Box::pin(catalog::models(self.executable.clone(), working_directory))
   }
 
   fn validate_history(

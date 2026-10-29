@@ -27,6 +27,7 @@ const DIALOG_DEADLINE: Duration = Duration::from_secs(120);
 const MAX_TURN_ERROR_BYTES: usize = 2048;
 
 enum PendingKind {
+  InitialModels,
   Model(ModelPending),
   State {
     initial: bool,
@@ -133,6 +134,8 @@ struct Actor {
   pending: HashMap<String, Pending>,
   recent: ManagedMessageReceipts,
   initial_prompt: Option<(String, Vec<ResolvedImage>)>,
+  initial_model: Option<tokn_interaction_core::ModelIdentity>,
+  initial_model_verified: bool,
   state: Option<RpcState>,
   model_revision: u64,
   saw_settled: bool,
@@ -170,12 +173,27 @@ impl Actor {
     options.expected_session_id = receipt.session_id.clone();
     options.request_timeout = RPC_DEADLINE;
     options.prompt_timeout = PROMPT_DEADLINE;
+    let initial_model = (!resume).then(|| receipt.model.clone()).flatten();
+    let mut arguments = Vec::new();
+    if let Some(model) = &initial_model {
+      validate_creation_model(model)?;
+      let provider = model
+        .model_provider
+        .as_ref()
+        .ok_or("Pi creation model requires its provider")?;
+      arguments.extend([
+        "--provider".into(),
+        provider.into(),
+        "--model".into(),
+        model.model_id.clone().into(),
+      ]);
+    }
     let session = PiAdapter::spawn_supervised(
       options,
       LaunchOptions {
         executable,
         working_directory: receipt.folder.clone(),
-        arguments: Vec::new(),
+        arguments,
         environment: Default::default(),
         session_file: resume.then(|| receipt.session_file.clone()).flatten(),
       },
@@ -194,6 +212,8 @@ impl Actor {
       pending: HashMap::new(),
       recent: ManagedMessageReceipts::default(),
       initial_prompt: prompt,
+      initial_model,
+      initial_model_verified: false,
       state: None,
       model_revision: 0,
       saw_settled: false,
@@ -314,6 +334,37 @@ impl Actor {
           .to_owned();
         let pending = self.pending.remove(id).expect("validated pending response");
         match pending.kind {
+          PendingKind::InitialModels => {
+            if !success {
+              return Err(error);
+            }
+            let choices = pi_choices(
+              value
+                .get("data")
+                .and_then(|data| data.get("models"))
+                .ok_or("Pi model catalog is missing")?,
+            )?;
+            let selected = self
+              .initial_model
+              .as_ref()
+              .ok_or("Pi creation model selection disappeared")?;
+            let choice = choices
+              .iter()
+              .find(|choice| same_model(&choice.model, selected))
+              .ok_or("The selected Pi model is no longer available; refresh the model list")?;
+            if !choice.supports_images
+              && self
+                .initial_prompt
+                .as_ref()
+                .is_some_and(|(_, images)| !images.is_empty())
+            {
+              return Err("The selected Pi model does not support image input".into());
+            }
+            self.initial_model_verified = true;
+            // Re-read after catalog discovery: extension startup or native
+            // defaults may have changed the launch selection in the meantime.
+            self.request_state(true).await?;
+          }
           PendingKind::Model(pending) => self.model_response(pending, success, value.get("data"), &error).await?,
           PendingKind::Message(pending) => {
             self
@@ -328,6 +379,33 @@ impl Actor {
             self.accept_state(state).await?;
             self.probe_file().await?;
             if initial {
+              if let Some(selected) = &self.initial_model {
+                if !self.initial_model_verified {
+                  self
+                    .send(wire::Command::GetAvailableModels, PendingKind::InitialModels)
+                    .await?;
+                  return Ok(());
+                }
+                if self
+                  .state
+                  .as_ref()
+                  .and_then(|state| state.model.as_ref())
+                  .is_none_or(|current| !same_model(current, selected))
+                {
+                  return Err("Pi did not activate the selected creation model; no prompt was sent".into());
+                }
+                if matches!(
+                  self.receipt.status,
+                  ManagedSessionStatus::Running | ManagedSessionStatus::Stopping
+                ) || self.checking_idle
+                  || self
+                    .state
+                    .as_ref()
+                    .is_some_and(|state| state.is_streaming || state.is_compacting || state.pending_message_count > 0)
+                {
+                  return Err("Pi began work before the initial prompt; no prompt was sent".into());
+                }
+              }
               if let Some((prompt, images)) = self.initial_prompt.take() {
                 self
                   .prompt(self.receipt.request_id.clone(), prompt, images, None, None)
@@ -669,6 +747,16 @@ impl Actor {
   }
 
   async fn request_state(&mut self, initial: bool) -> Result<(), String> {
+    // Catalog verification must retain its initial-state continuation. A
+    // background tick must not reserve a plain state query in its place.
+    if !initial
+      && self
+        .pending
+        .values()
+        .any(|pending| matches!(pending.kind, PendingKind::InitialModels))
+    {
+      return Ok(());
+    }
     if self
       .pending
       .values()
@@ -976,8 +1064,12 @@ fn reject_before_send(kind: PendingKind, message: &str) {
     PendingKind::Abort(reply) => {
       let _ = reply.send(Err(message.into()));
     }
-    PendingKind::State { .. } | PendingKind::Prompt { reply: None, .. } => {}
+    PendingKind::InitialModels | PendingKind::State { .. } | PendingKind::Prompt { reply: None, .. } => {}
   }
+}
+
+fn same_model(left: &tokn_interaction_core::ModelIdentity, right: &tokn_interaction_core::ModelIdentity) -> bool {
+  left.model_provider == right.model_provider && left.model_id == right.model_id
 }
 
 fn turn_error(value: Option<&Value>) -> Option<String> {

@@ -9,6 +9,8 @@ struct Host {
   cancels: AtomicUsize,
   uncertain_create: AtomicBool,
   uncertain_send: AtomicBool,
+  reject_model: AtomicBool,
+  initial_models: Mutex<Vec<Option<ModelIdentity>>>,
   history_ready: AtomicBool,
   started: Notify,
   create_wait: Mutex<Option<oneshot::Receiver<()>>>,
@@ -24,6 +26,8 @@ impl Default for Host {
       cancels: AtomicUsize::new(0),
       uncertain_create: AtomicBool::new(false),
       uncertain_send: AtomicBool::new(false),
+      reject_model: AtomicBool::new(false),
+      initial_models: Mutex::new(Vec::new()),
       history_ready: AtomicBool::new(false),
       started: Notify::new(),
       create_wait: Mutex::new(None),
@@ -74,8 +78,15 @@ impl CreationHost for Host {
     _created: &'a CreatedNativeSession,
     _id: &'a str,
     _input: &'a MessageInput,
+    model: Option<&'a ModelIdentity>,
   ) -> AdapterFuture<'a, Result<(), InteractionError>> {
     Box::pin(async move {
+      self.initial_models.lock().unwrap().push(model.cloned());
+      if self.reject_model.load(Ordering::SeqCst) {
+        return Err(InteractionError::invalid(
+          "The created model differs from the requested model",
+        ));
+      }
       self.sends.fetch_add(1, Ordering::SeqCst);
       self.send_started.notify_one();
       let wait = self.send_wait.lock().unwrap().take();
@@ -124,7 +135,83 @@ fn request() -> CreationRequest {
     },
     image_ids: vec![],
     runtime: None,
+    model: None,
   }
+}
+
+#[test]
+fn model_intent_preserves_legacy_fingerprints_and_ignores_display_labels() {
+  let mut request = request();
+  let legacy = serde_json::to_vec(&(
+    request.provider,
+    &request.project_id,
+    &request.working_directory,
+    &request.input.text,
+    &request.image_ids,
+    &request.runtime,
+  ))
+  .unwrap();
+  let old = format!("{:x}", Sha256::digest(legacy));
+  assert_eq!(fingerprint(&request).unwrap(), old);
+  request.model = Some(ModelIdentity {
+    model_provider: Some("provider".into()),
+    model_id: "model".into(),
+    display_name: Some("One label".into()),
+  });
+  let selected = fingerprint(&request).unwrap();
+  assert_ne!(selected, old);
+  request.model.as_mut().unwrap().display_name = Some("Changed label".into());
+  assert_eq!(fingerprint(&request).unwrap(), selected);
+  request.model.as_mut().unwrap().model_id = "different".into();
+  assert_ne!(fingerprint(&request).unwrap(), selected);
+}
+
+#[tokio::test]
+async fn model_is_part_of_durable_creation_intent_without_changing_message_input() {
+  let host = Arc::new(Host::default());
+  let manager = CreationManager::new(None, host.clone()).unwrap();
+  let mut request = request();
+  request.model = Some(ModelIdentity {
+    model_provider: None,
+    model_id: "chosen".into(),
+    display_name: Some("Visible label".into()),
+  });
+  manager.create(request.clone()).await.unwrap();
+  let snapshot = settled(&manager, &request.request_id).await;
+  assert_eq!(snapshot.model.as_ref().unwrap().model_id, "chosen");
+  assert!(snapshot.model.as_ref().unwrap().display_name.is_none());
+  assert!(request.input.model.is_none());
+  assert_eq!(
+    host.initial_models.lock().unwrap()[0].as_ref().unwrap().model_id,
+    "chosen"
+  );
+  request.model.as_mut().unwrap().display_name = None;
+  assert!(manager.receipt(&request).unwrap().is_some());
+  request.model = None;
+  assert_eq!(manager.receipt(&request).unwrap_err().kind, ErrorKind::Conflict);
+  assert_eq!(host.creates.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn rejected_initial_model_preserves_created_identity_and_never_replays_input() {
+  let host = Arc::new(Host::default());
+  host.reject_model.store(true, Ordering::SeqCst);
+  let manager = CreationManager::new(None, host.clone()).unwrap();
+  let mut request = request();
+  request.model = Some(ModelIdentity {
+    model_provider: None,
+    model_id: "chosen".into(),
+    display_name: None,
+  });
+  manager.create(request.clone()).await.unwrap();
+  let receipt = settled(&manager, &request.request_id).await;
+  assert!(receipt.created.is_some());
+  assert_eq!(receipt.first_input, FirstInputState::Rejected);
+  assert!(receipt.message.unwrap().contains("differs"));
+  host.reject_model.store(false, Ordering::SeqCst);
+  manager.create(request).await.unwrap();
+  assert_eq!(host.sends.load(Ordering::SeqCst), 0);
+  assert_eq!(host.creates.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

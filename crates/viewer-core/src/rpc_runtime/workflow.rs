@@ -1,6 +1,7 @@
 //! Explicit-input workflow over saved host runtime configuration. Inspection
 //! never calls this activation path.
 use super::*;
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 impl RpcRuntimeManager {
@@ -131,7 +132,7 @@ pub(super) fn builtin_codex(cwd: &Path) -> Result<RpcResolvedProfile, String> {
   let profile = RpcResolvedProfile {
     revision: 0,
     profile: RpcRuntimeProfile {
-      profile_id: "ce427f65-1584-4b36-a1f1-194e0f45550a".into(),
+      profile_id: builtin_profile_id(&cwd),
       name: "Local Codex".into(),
       provider: Provider::Codex,
       mode: RpcRuntimeMode::Managed,
@@ -148,4 +149,35 @@ pub(super) fn builtin_codex(cwd: &Path) -> Result<RpcResolvedProfile, String> {
   };
   profile.validate_launch_ready()?;
   Ok(profile)
+}
+
+fn builtin_profile_id(canonical_cwd: &Path) -> String {
+  // A catalog inherits the runtime's project configuration. Never reuse the
+  // first project's transient Codex process when another draft selects a folder.
+  let mut digest = Sha256::new();
+  digest.update(b"tokn:codex-project-runtime:v1\0");
+  digest.update(canonical_cwd.as_os_str().as_encoded_bytes());
+  let mut bytes: [u8; 16] = digest.finalize()[..16].try_into().expect("SHA-256 prefix");
+  bytes[6] = (bytes[6] & 0x0f) | 0x80;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  uuid::Uuid::from_bytes(bytes).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn builtin_profile_identity_is_stable_and_project_scoped() {
+    let root = tempfile::tempdir().unwrap();
+    let first = root.path().join("first");
+    let second = root.path().join("second");
+    std::fs::create_dir(&first).unwrap();
+    std::fs::create_dir(&second).unwrap();
+    let canonical = std::fs::canonicalize(&first).unwrap();
+    let id = builtin_profile_id(&canonical);
+    assert_eq!(id, builtin_profile_id(&std::fs::canonicalize(first.join(".")).unwrap()));
+    assert_ne!(id, builtin_profile_id(&std::fs::canonicalize(second).unwrap()));
+    assert_eq!(uuid::Uuid::parse_str(&id).unwrap().to_string(), id);
+  }
 }

@@ -26,6 +26,8 @@ pub struct Receipt {
   pub project_id: String,
   pub folder: PathBuf,
   pub fingerprint: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub model: Option<crate::ModelIdentity>,
   pub revision: u64,
   pub status: ManagedSessionStatus,
   pub session_id: Option<String>,
@@ -53,6 +55,7 @@ impl Receipt {
       project_id: project.project_id.clone(),
       folder: project.folder_path.clone().into(),
       fingerprint,
+      model: request.model.clone(),
       revision: 1,
       status: ManagedSessionStatus::Starting,
       session_id: None,
@@ -323,6 +326,9 @@ impl ReceiptStore {
         return Err("Managed session receipt belongs to a different provider".into());
       }
       validate_uuid(&receipt.request_id, "saved creation request")?;
+      if let Some(model) = &receipt.model {
+        validate_creation_model(model)?;
+      }
       if !ids.insert(&receipt.request_id) || !receipt.folder.is_absolute() || receipt.fingerprint.len() != 64 {
         return Err("Invalid managed session ownership receipt".into());
       }
@@ -446,6 +452,7 @@ mod tests {
         project_id: "project".into(),
         prompt: "private prompt is never persisted".into(),
         image_ids: Vec::new(),
+        model: None,
       },
       &RegisteredProject {
         project_id: "project".into(),

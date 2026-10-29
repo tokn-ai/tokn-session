@@ -1,6 +1,7 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useSessionDrafts } from "./useSessionDrafts";
+import type { SessionDraftModel } from "./useSessionCreationModels";
 import type { CommandInvoker, EventSubscriber } from "./transport";
 import type { CreateProjectSessionRequest, ManagedSessionSnapshot, SessionSummary } from "./types";
 
@@ -40,6 +41,40 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("app-only session drafts", () => {
+  const selected_model: SessionDraftModel = { choice: { model: { model_provider: "openai", model_id: "chosen", display_name: "Chosen" }, supports_images: true },
+    catalog_revision: "catalog", runtime_profile_id: "rpc", runtime_revision: 7, scope_key: "verified-scope" };
+
+  it("stores independent draft models and clears only model choices when project/provider/runtime scope changes", () => {
+    const host = connection(); const { result } = renderHook(() => useSessionDrafts(options(), host.transport));
+    let first!: string; let second!: string;
+    act(() => { first = result.current.createDraft("project"); second = result.current.createDraft("other"); });
+    act(() => { result.current.updateDraft(first, { model: selected_model, prompt: "Keep text" }); result.current.updateDraft(second, { model: selected_model }); });
+    act(() => result.current.updateDraft(first, { selection: { provider: "codex", runtime_profile_id: "rpc", runtime_revision: 7 } }));
+    expect(result.current.drafts[0]).toMatchObject({ model: null, prompt: "Keep text" });
+    expect(result.current.drafts[1].model).toEqual(selected_model);
+    act(() => result.current.updateDraft(first, { model: selected_model }));
+    act(() => result.current.updateDraft(first, { selection: { provider: "codex", runtime_profile_id: "rpc", runtime_revision: 8 } }));
+    expect(result.current.drafts[0].model).toBeNull();
+    act(() => result.current.updateDraft(first, { model: selected_model }));
+    act(() => result.current.updateDraft(first, { project_id: "elsewhere" }));
+    expect(result.current.drafts[0]).toMatchObject({ model: null, prompt: "Keep text", selection: { provider: "codex" } });
+    expect(host.invoke).not.toHaveBeenCalled();
+  });
+
+  it("freezes model proof at first Send and checks uncertain receipts without replaying or changing it", async () => {
+    const host = connection(); const original = host.invoke.getMockImplementation()!;
+    host.invoke.mockImplementation((command, payload) => command === "create_project_session" ? Promise.reject(new Error("Acknowledgement lost")) : original(command, payload));
+    const { result } = renderHook(() => useSessionDrafts(options(), host.transport)); let id!: string;
+    act(() => { id = result.current.createDraft("project"); result.current.updateDraft(id, { prompt: "First", model: selected_model }); });
+    await act(() => result.current.sendDraft(id));
+    expect(request(host).model).toEqual({ model_provider: "openai", model_id: "chosen", catalog_revision: "catalog", runtime_profile_id: "rpc", runtime_revision: 7 });
+    act(() => result.current.updateDraft(id, { model: null }));
+    await act(() => result.current.sendDraft(id));
+    expect(creates(host)).toHaveLength(1);
+    expect(result.current.drafts[0].model).toEqual(selected_model);
+    expect(result.current.drafts[0].locked).toBe(true);
+  });
+
   it("creates multiple editable drafts without invoking any native command", () => {
     const host = connection();
     const { result } = renderHook(() => useSessionDrafts(options(), host.transport));

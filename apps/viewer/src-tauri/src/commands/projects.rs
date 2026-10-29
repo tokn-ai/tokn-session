@@ -15,6 +15,15 @@ pub async fn get_session_creation_options(
 }
 
 #[tauri::command]
+pub async fn list_session_creation_models(
+  app: AppHandle,
+  state: State<'_, LocalViewer>,
+  request: tokn_viewer_core::workspace::ListSessionCreationModelsRequest,
+) -> Result<tokn_viewer_core::workspace::SessionCreationModels, String> {
+  state.service(&app).await?.list_session_creation_models(request).await
+}
+
+#[tauri::command]
 pub async fn list_registered_projects(
   app: AppHandle,
   state: State<'_, LocalViewer>,

@@ -168,6 +168,8 @@ impl core_runtime::RuntimeHandle for Handle {
           let created = adapter
             .create_thread_with_descriptor(tokn_codex_adapter::ThreadOptions {
               cwd: Some(request.working_directory.clone()),
+              model: request.model.as_ref().map(|model| model.model_id.clone()),
+              model_provider: request.model.as_ref().and_then(|model| model.model_provider.clone()),
               ephemeral: Some(false),
               ..Default::default()
             })
@@ -186,7 +188,7 @@ impl core_runtime::RuntimeHandle for Handle {
             .native_id
             .as_deref()
             .ok_or_else(|| InteractionError::invalid("OpenCode creation requires a reserved ID"))?;
-          let created = adapter.create_session_with_id(id, None, None).await?;
+          let created = adapter.create_session_with_id(id, None, request.model.clone()).await?;
           (
             created
               .target
@@ -197,6 +199,11 @@ impl core_runtime::RuntimeHandle for Handle {
           )
         }
         Self::Dsh(adapter) => {
+          if request.model.is_some() {
+            return Err(InteractionError::unsupported(
+              "DSH uses its default model for new sessions",
+            ));
+          }
           let id = request
             .native_id
             .clone()
@@ -272,6 +279,19 @@ impl core_runtime::RuntimeHost for Host {
     profile.validate_launch_ready()
   }
 
+  fn validate_creation_model(&self, profile: &Self::Profile, model: &ModelIdentity) -> Result<(), InteractionError> {
+    match profile.profile.provider {
+      Provider::Codex => Ok(()),
+      Provider::OpenCode if model.model_provider.is_some() => Ok(()),
+      Provider::OpenCode => Err(InteractionError::invalid(
+        "OpenCode model selection requires its provider identity",
+      )),
+      _ => Err(InteractionError::unsupported(
+        "This runtime uses its default model for new sessions",
+      )),
+    }
+  }
+
   fn select_profile<'a>(
     &'a self,
     provider: Provider,
@@ -301,12 +321,16 @@ impl core_runtime::RuntimeHost for Host {
         .await
         .map_err(|_| "Could not discover the local Codex executable")??;
       let profile_id = profile.profile.profile_id.clone();
-      self
+      let mut transient = self
         .transient_profiles
         .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .entry(profile_id.clone())
-        .or_insert(profile);
+        .unwrap_or_else(|error| error.into_inner());
+      if !transient.contains_key(&profile_id) && transient.len() >= 256 {
+        return Err(
+          "Project runtime configuration limit reached; reopen the app to clear inactive configurations".into(),
+        );
+      }
+      transient.entry(profile_id.clone()).or_insert(profile);
       Ok((profile_id, 0))
     })
   }

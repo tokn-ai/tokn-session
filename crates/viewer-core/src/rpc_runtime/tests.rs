@@ -13,6 +13,7 @@ mod workflow_tests;
 pub(crate) struct CodexPeer {
   pub(crate) endpoint: String,
   requests: Arc<Mutex<Vec<Value>>>,
+  model_catalog: Arc<Mutex<Vec<Value>>>,
   connections: Arc<AtomicUsize>,
   active: Arc<AtomicBool>,
   drop_prompt_ack: Arc<AtomicBool>,
@@ -27,6 +28,8 @@ impl CodexPeer {
     let endpoint = format!("ws://{}", listener.local_addr().unwrap());
     let requests = Arc::new(Mutex::new(Vec::new()));
     let recorded = requests.clone();
+    let model_catalog = Arc::new(Mutex::new(Vec::new()));
+    let catalog = model_catalog.clone();
     let connections = Arc::new(AtomicUsize::new(0));
     let accepted = connections.clone();
     let active = Arc::new(AtomicBool::new(false));
@@ -45,6 +48,7 @@ impl CodexPeer {
             let Ok((stream, _)) = connection else { break };
             accepted.fetch_add(1, Ordering::Relaxed);
             let requests = recorded.clone();
+            let catalog = catalog.clone();
             let gate = gate.clone();
             let active = native_active.clone();
             let drop_ack = drop_ack.clone();
@@ -68,7 +72,12 @@ impl CodexPeer {
                       "model":"test-model", "modelProvider":"test", "turns":[]
                     }
                   }),
-                  "model/list" => json!({"data":[],"nextCursor":null}),
+                  "model/list" => json!({"data":catalog.lock().unwrap().clone(),"nextCursor":null}),
+                  "thread/start" => json!({"model":request["params"]["model"],"modelProvider":"test","thread":{
+                    "id":"created-test-thread", "status":{"type":"idle"}, "cwd":request["params"]["cwd"],
+                    "path":"/tmp/created-test-thread.jsonl", "ephemeral":false, "turns":[],
+                    "model":request["params"]["model"], "modelProvider":"test"
+                  }}),
                   "turn/start" => {active.store(true,Ordering::Relaxed);json!({"turn":{"id":"test-turn","status":"inProgress","items":[]}})},
                   other => panic!("unexpected native method: {other}"),
                 };
@@ -84,6 +93,7 @@ impl CodexPeer {
     Self {
       endpoint,
       requests,
+      model_catalog,
       connections,
       active,
       drop_prompt_ack,
@@ -166,6 +176,116 @@ async fn wait_until(mut condition: impl FnMut() -> bool) {
 
 fn manager() -> RpcRuntimeManager {
   RpcRuntimeManager::new(None, InteractionService::default())
+}
+
+#[test]
+fn pinned_builtin_model_runtime_does_not_follow_a_new_saved_default_or_another_project() {
+  let manager = manager();
+  let folder = tempfile::tempdir().unwrap();
+  let cwd = std::fs::canonicalize(folder.path()).unwrap();
+  let builtin = RpcResolvedProfile {
+    revision: 0,
+    profile: RpcRuntimeProfile {
+      profile_id: uuid::Uuid::new_v4().to_string(),
+      name: "Built-in test Codex".into(),
+      provider: Provider::Codex,
+      mode: RpcRuntimeMode::Managed,
+      executable: Some(std::env::current_exe().unwrap().to_string_lossy().into_owned()),
+      arguments: Vec::new(),
+      working_directory: Some(cwd.to_string_lossy().into_owned()),
+      endpoint: None,
+      environment_keys: Vec::new(),
+      credential_kind: None,
+      is_default: false,
+    },
+    environment: BTreeMap::new(),
+    credentials: RpcCredentials::None,
+  };
+  let pinned = manager.pin_builtin_creation_profile(builtin).unwrap();
+  let added = save_profile(&manager, attached_profile("ws://127.0.0.1:1".into()));
+  assert_eq!(
+    manager
+      .creation_selection(Provider::Codex, &cwd, Some(&pinned))
+      .unwrap(),
+    Some(pinned.clone())
+  );
+  assert_eq!(
+    manager
+      .creation_model_selection(Provider::Codex, &cwd, Some(&pinned))
+      .unwrap(),
+    Some(pinned.clone())
+  );
+  assert_eq!(
+    manager
+      .creation_selection(Provider::Codex, &cwd, None)
+      .unwrap()
+      .unwrap()
+      .profile_id,
+    added.profile_id
+  );
+  let other = tempfile::tempdir().unwrap();
+  assert!(
+    manager
+      .creation_selection(Provider::Codex, other.path(), Some(&pinned))
+      .is_err()
+  );
+  assert!(manager.inventory().runtimes.is_empty());
+}
+
+#[tokio::test]
+async fn codex_draft_catalog_is_sessionless_and_creation_revalidates_then_passes_model() {
+  let peer = CodexPeer::start(false).await;
+  peer.model_catalog.lock().unwrap().push(json!({
+    "id":"test-model", "model":"test-model", "displayName":"Test model", "description":"Model for test", "hidden":false,
+    "isDefault":true, "defaultReasoningEffort":"medium", "supportedReasoningEfforts":[], "inputModalities":["text","image"]
+  }));
+  let manager = manager();
+  let profile = save_profile(&manager, attached_profile(peer.endpoint.clone()));
+  let selection = core_runtime::RuntimeSelection {
+    profile_id: profile.profile_id,
+    expected_revision: profile.expected_revision,
+  };
+  let models = manager
+    .creation_models(Provider::Codex, PathBuf::from("/tmp"), Some(selection.clone()))
+    .await
+    .unwrap();
+  assert_eq!(models.len(), 1);
+  assert_eq!(models[0].model.model_id, "test-model");
+  assert!(models[0].supports_images);
+  assert!(manager.inventory().runtimes.is_empty());
+  assert!(
+    !peer
+      .methods()
+      .iter()
+      .any(|method| matches!(method.as_str(), "thread/start" | "thread/resume" | "turn/start"))
+  );
+  let created = manager
+    .create_native_session(
+      Provider::Codex,
+      PathBuf::from("/tmp"),
+      Some(selection),
+      None,
+      Some(models[0].model.clone()),
+    )
+    .await
+    .unwrap();
+  assert_eq!(created.native.native_id, "created-test-thread");
+  let requests = peer.requests.lock().unwrap().clone();
+  let create = requests
+    .iter()
+    .position(|request| request["method"] == "thread/start")
+    .unwrap();
+  assert_eq!(requests[create]["params"]["model"], "test-model");
+  assert!(requests[create]["params"].get("modelProvider").is_none());
+  assert_eq!(requests[create - 1]["method"], "model/list");
+  assert!(
+    !peer
+      .methods()
+      .iter()
+      .any(|method| matches!(method.as_str(), "thread/resume" | "turn/start"))
+  );
+  assert_eq!(peer.connections.load(Ordering::Relaxed), 2);
+  manager.shutdown().await;
 }
 
 #[tokio::test]

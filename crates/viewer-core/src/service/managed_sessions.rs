@@ -103,6 +103,10 @@ impl ViewerService {
         .await
         .map_err(SessionCreationError::not_started)?;
     }
+    self
+      .preflight_creation_model(&request)
+      .await
+      .map_err(SessionCreationError::not_started)?;
     let images = if request.image_ids.is_empty() {
       Vec::new()
     } else {
@@ -533,6 +537,7 @@ for line in sys.stdin:
       provider: tokn_interaction_core::Provider::Pi,
       runtime_profile_id: None,
       runtime_revision: None,
+      model: None,
       request_id: uuid::Uuid::new_v4().to_string(),
       project_id: project.project_id,
       prompt: "first prompt".into(),
@@ -781,6 +786,7 @@ for line in sys.stdin:
           provider: tokn_interaction_core::Provider::Pi,
           runtime_profile_id: None,
           runtime_revision: None,
+          model: None,
           request_id: uuid::Uuid::new_v4().to_string(),
           project_id: project.project_id,
           prompt: "hello".into(),
@@ -826,6 +832,7 @@ for line in sys.stdin:
         provider: tokn_interaction_core::Provider::Pi,
         runtime_profile_id: None,
         runtime_revision: None,
+        model: None,
         request_id: uuid::Uuid::new_v4().to_string(),
         project_id: project.project_id.clone(),
         prompt,

@@ -21,6 +21,25 @@ most 1 MiB before falling back to unknown preceding context.
 
 ## Live commands
 
+New-session drafts use `list_session_creation_models`, scoped to the local
+project, provider and runtime revision. Opening the picker lazily queries a
+verified catalog, reusing a connected runtime or closing a temporary metadata
+process afterwards. Pi uses `--no-session`; its normal CLI startup still loads
+configuration/extensions and can run native migrations. No saved conversation,
+prompt or model-setting call is made during discovery.
+
+**Use runtime default** preserves existing creation behavior. Explicit Pi,
+Codex and OpenCode choices stay in the draft until Send, reset when the
+project/provider/runtime changes, and determine image compatibility. DSH remains
+default-only because its creation API does not accept a model. The host verifies
+the catalog scope again before admission and checks the actual creation runtime
+before applying the model. Pi uses creation-only launch arguments and verifies
+native state; Codex/OpenCode pass native creation parameters. The selected model
+identity belongs to the same durable creation fingerprint as the first prompt;
+uncertain results never trigger a separate setter or prompt replay. Native
+catalog details and credentials do not enter receipts. This flow remains local
+desktop only and does not change existing-session RPC model capabilities.
+
 `get_session_model_status`, `list_session_models`, and `submit_session_input`
 share snake_case request/response contracts in `viewer-core::models`. Tauri
 commands are async. HTTP invokes the same service; encrypted Hub routing enforces
@@ -59,13 +78,14 @@ Image uploads are bounded staging, independent of the active model. Delivery
 checks the effective model after the idle/busy decision, allowing an idle draft
 to choose a vision model without an early model change. Pi's native setter may
 also persist its default provider/model for new sessions, but this happens only
-when sending an idle prompt with that choice. New Pi Session inherits defaults.
+when sending an idle prompt with that choice. New Pi sessions inherit defaults
+unless their draft explicitly chooses a creation model.
 
 Codex defaults to RPC. Model reads use an already bound app-server and native
 catalog; an unbound thread retains recorded context without starting or resuming
 it. The common RPC adapters do not guarantee atomic model-on-send, so these
 catalogs remain inspectable metadata with read-only selection and an explicit
-reason. Opening the picker does not activate a runtime. See
+reason. Opening an existing session's picker does not activate a runtime. See
 [shared session supervision](shared-session-supervisor.md).
 
 When Codex Desktop is explicitly selected, status uses local `thread-owner-discovery`, then binds
