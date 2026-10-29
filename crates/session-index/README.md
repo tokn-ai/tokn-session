@@ -32,3 +32,8 @@ Startup may use `add_project_folder_observations` for newly discovered cached
 cwd values without changing omitted memberships. Unchanged reconciliation does
 not write, and `project_folder_revision` advances only with registry metadata so
 followers can skip expensive snapshots for ordinary session updates.
+
+Migration SQL is immutable once any build can apply it, including a running
+development app. Further schema changes belong in a new migration version.
+Compatibility for an observed development schema requires its exact checksum
+and verified schema, with the upgrade and ledger change in one transaction.

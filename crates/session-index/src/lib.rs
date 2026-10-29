@@ -15,6 +15,7 @@
 //! precondition, so a stale scan cannot overwrite a newer replacement.
 
 mod managed_admissions;
+mod migration_013_compatibility;
 mod migration_compatibility;
 mod project_aliases;
 mod project_discovery;
@@ -1685,6 +1686,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
   }
 
   let mut combined_project_migration = false;
+  let mut early_project_discovery_migration = false;
   for (index, (version, found_checksum)) in applied.iter().enumerate() {
     let migration = MIGRATIONS
       .get(index)
@@ -1701,6 +1703,10 @@ fn migrate(connection: &mut Connection) -> Result<()> {
     if *found_checksum != expected_checksum {
       if migration_compatibility::is_combined_project_migration(*version, found_checksum) {
         combined_project_migration = true;
+        continue;
+      }
+      if migration_013_compatibility::is_early_project_discovery(*version, found_checksum) {
+        early_project_discovery_migration = true;
         continue;
       }
       return Err(SessionIndexError::MigrationChecksumMismatch {
@@ -1724,6 +1730,14 @@ fn migrate(connection: &mut Connection) -> Result<()> {
   } else {
     applied.len()
   };
+  if early_project_discovery_migration {
+    if applied.len() != 13 {
+      return Err(SessionIndexError::MigrationHistoryInvalid(
+        "early migration 13 must be the final recorded migration".into(),
+      ));
+    }
+    migration_013_compatibility::adopt_early_project_discovery(&transaction)?;
+  }
   for migration in MIGRATIONS.iter().skip(applied_count) {
     transaction.execute_batch(migration.sql)?;
     if migration.version == 12 {

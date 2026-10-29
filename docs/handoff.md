@@ -12,6 +12,10 @@ scope can remove a provider's claim; partial reads and unavailable roots retain
 the last known state. Verified warm indexes seed folders without reparsing histories. Legacy indexes
 first reread lightweight headers because older cwd normalization could change
 spaces in paths; no message-body parsing is required.
+Indexes created by the early migration 13 development build are recognized by
+their exact checksum and schema, then upgraded atomically with the missing
+revision table/triggers. Existing rows and application timestamps are retained;
+unknown migration drift still fails closed.
 New session stays accessible with an empty registry and can add a folder while
 preserving its draft. See [projects and creation](viewer-projects.md).
 
