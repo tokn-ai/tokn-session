@@ -160,7 +160,7 @@ impl From<tokn_interaction_core::managed_sessions::ManagedSessionSnapshot> for M
       last_turn_error: snapshot.last_turn_error,
       pending_dialog: snapshot.pending_dialog,
       creation_phase: None,
-      creation_input_state: None,
+      creation_input_state: snapshot.creation_input_state,
     }
   }
 }

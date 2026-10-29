@@ -9,6 +9,7 @@ use tokio::{
   time::{Instant, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
+use tokn_interaction_core::creation::FirstInputState;
 use tokn_interaction_core::managed_sessions::*;
 use tokn_pi_rpc_protocol as wire;
 
@@ -346,6 +347,17 @@ impl Actor {
             model_result,
           } => {
             let initial = reply.is_none();
+            if initial {
+              self
+                .update(|receipt| {
+                  receipt.creation_input_state = Some(if success {
+                    FirstInputState::Accepted
+                  } else {
+                    FirstInputState::Rejected
+                  });
+                })
+                .await?;
+            }
             let result = if success {
               Ok(if let Some(result) = model_result {
                 Admission::WithModel {
@@ -595,6 +607,13 @@ impl Actor {
           mime_type: image.mime_type.clone(),
         })
         .collect();
+    }
+    if reply.is_none() {
+      // Persist before native I/O: a lost acknowledgement must never become
+      // inferred acceptance merely because Pi created a history file.
+      self
+        .update(|receipt| receipt.creation_input_state = Some(FirstInputState::Uncertain))
+        .await?;
     }
     self
       .send(

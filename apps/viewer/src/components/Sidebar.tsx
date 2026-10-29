@@ -17,8 +17,13 @@ import {
 import { BranchIcon, ChevronIcon, CloseIcon, PanelIcon, SearchIcon, WarningIcon } from "./Icons";
 import { useSidebarGroups } from "../lib/useSidebarGroups";
 import { LoadingRows } from "./StateView";
+import { SessionDraftRows } from "./SessionDraftRows";
+import type { SessionDraft } from "../lib/useSessionDrafts";
 
 interface SidebarProps {
+  drafts?: readonly SessionDraft[];
+  selected_draft_id?: string | null;
+  on_draft_select?: (draft_id: string) => void;
   registered_projects?: RegisteredProject[];
   workspace_available?: boolean;
   workspace_notice?: string | null;
@@ -244,6 +249,9 @@ function SessionBranch({
 }
 
 export function Sidebar({
+  drafts = [],
+  selected_draft_id = null,
+  on_draft_select,
   registered_projects = NO_PROJECTS,
   workspace_available = false,
   workspace_notice,
@@ -405,6 +413,8 @@ export function Sidebar({
       ) : null}
 
       <div className="sidebar__list">
+        {on_draft_select ? <SessionDraftRows drafts={drafts} projects={registered_projects}
+          selected_draft_id={selected_draft_id} search={search} on_select={on_draft_select} /> : null}
         {is_loading && sessions.length === 0 ? <LoadingRows count={6} /> : null}
 
         {!is_loading && error && sessions.length === 0 ? (
@@ -427,7 +437,7 @@ export function Sidebar({
           </div>
         ) : null}
 
-        {!is_loading && !error && sessions.length === 0 && groups.length === 0 ? (
+        {!is_loading && !error && sessions.length === 0 && groups.length === 0 && drafts.length === 0 ? (
           <div className="sidebar-state">
             <strong>
               {noProviders

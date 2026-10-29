@@ -68,6 +68,30 @@ function snapshot(request: SessionUpdatesRequest, revision = "1"): SessionUpdate
   };
 }
 
+it("releases native history when selecting an app-only draft and ignores late history", async () => {
+  const page = deferred<SessionUpdate>();
+  let request!: SessionUpdatesRequest;
+  nativeInvoke.mockImplementation(async (command: string, payload?: { request: SessionUpdatesRequest }) => {
+    if (command === "list_sessions") return catalog("local-session");
+    if (command === "subscribe_session") return { revision: "0" };
+    if (command === "load_session_backward") { request = payload!.request; return page.promise; }
+    if (command === "update_session_view") return;
+    return new Promise(() => {});
+  });
+  const { result } = renderHook(() => useViewerState());
+  await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+  act(() => result.current.selectSession("local-session"));
+  await waitFor(() => expect(request).toBeDefined());
+  act(() => result.current.clearSessionSelection());
+  await act(async () => page.resolve(snapshot(request)));
+  expect(result.current.selectedSessionKey).toBeNull();
+  expect(result.current.events).toEqual([]);
+  expect(result.current.eventsLoading).toBe(false);
+  expect(nativeInvoke.mock.calls.filter(([command, payload]) => command === "subscribe_session" && !payload.request.unsubscribe)).toHaveLength(1);
+  expect(nativeInvoke.mock.calls.filter(([command]) => command === "load_session_backward")).toHaveLength(1);
+  expect(nativeInvoke).toHaveBeenCalledWith("subscribe_session", { request: expect.objectContaining({ session_key: "local-session", unsubscribe: true }) }, undefined);
+});
+
 it("stops delayed local pagination when a remote viewer replaces the local reader", async () => {
   const subscription = deferred<{ revision: string }>();
   const pending = deferred<SessionUpdate>();

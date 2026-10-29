@@ -16,12 +16,20 @@ Indexes created by the early migration 13 development build are recognized by
 their exact checksum and schema, then upgraded atomically with the missing
 revision table/triggers. Existing rows and application timestamps are retained;
 unknown migration drift still fails closed.
-New session stays accessible with an empty registry and can add a folder while
-preserving its draft. See [projects and creation](viewer-projects.md).
+The desktop’s **New session** opens an app-only blank conversation. Multiple
+drafts retain project/provider/runtime, text and image choices in memory across
+session and machine navigation; closing/reloading the window clears them. No
+native session, upload or runtime starts until the first Send. Draft IDs never
+enter native history/subscription APIs. The first Send uses existing guarded
+creation receipts and promotes only verified history with confirmed input;
+uncertain/rejected input retains the original draft and checks the same receipt
+without replay. Managed Pi now persists its explicit first-input acknowledgement
+independently of history readiness; legacy receipts remain unknown. New session
+can add a project with an empty registry. See [projects and creation](viewer-projects.md).
 
-The desktop’s **New session** dialog now creates Pi, Codex, OpenCode and DSH
-sessions in registered local projects. Provider/runtime choices are checked
-without starting agents. Codex retains executable discovery; OpenCode requires a
+Pi, Codex, OpenCode and DSH creation remains local desktop only.
+Provider/runtime choices are checked without starting agents.
+Codex retains executable discovery; OpenCode requires a
 runtime matching the project folder. Creation currently requires host-readable
 native history; HTTP/Hub/browser creation remains out of scope.
 `interaction-core::creation` owns durable phases, cancellation and no-replay

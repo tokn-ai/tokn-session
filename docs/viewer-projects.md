@@ -7,13 +7,19 @@ and External reader connections. There is no new CLI `create` or `attach` comman
 
 ## Create a session
 
-Choose **New session** (or a project group’s `+`), select the agent, registered
-folder and runtime, then enter the first message. **Automatic** uses a suitable
+Choose **New session** (or a project group’s `+`) to open a blank conversation
+and add an app-only entry under **Drafts**. Select the agent, registered folder
+and runtime now or later. No provider session, image upload or runtime is created
+until the first **Send**. Drafts retain text, images and choices while switching
+sessions or visiting Machines, but are memory-only and disappear when the app
+window closes or reloads. **Discard draft** removes an editable draft immediately.
+
+**Automatic** uses a suitable
 provider default or a single suitable saved profile. Ambiguous profiles require
 an explicit choice. Missing configuration shows an actionable reason before
-creation. Opening the dialog checks configuration without starting a runtime.
+creation. Opening a draft checks configuration without starting a runtime.
 New session remains accessible when no folder is available. Choose **Add project**
-inside the dialog to register an existing directory and return to the same
+inside the conversation to register an existing directory and return to the same
 provider, prompt and image draft.
 
 Pi keeps its existing model/authentication settings and exclusive worker.
@@ -42,9 +48,16 @@ The shared core durably admits one UUID before native effects. OpenCode/DSH use
 reserved native IDs; Codex returns its native thread ID. First-prompt admission
 has its own state, and a disconnect or timeout never automatically recreates a
 session or replays that prompt. **Check session start** observes the same original
-request, provider, runtime and revision. Verified history may open while a first
-admission awaits a native question; subsequent answers and controls use the
-normal session supervisor. An unconfirmed/rejected first message remains visible.
+request, provider, runtime and revision. The draft becomes the saved conversation
+only after both verified history and confirmed first-input acceptance. A background
+completion never changes the currently selected conversation. While acceptance
+is unresolved, **Open saved conversation** can view verified history without
+discarding the original draft. Native questions and Stop/Resume controls use the
+normal session supervisor. An unconfirmed/rejected first message remains visible,
+including its attachments; retry checks the original receipt instead of sending
+again. Managed Pi persists acknowledgement separately from its file identity, so
+a header-only history cannot incorrectly clear an unaccepted first message.
+Older Pi receipts with no acknowledgement field remain unknown.
 If an OpenCode/DSH create acknowledgement is lost, the host can find history by
 its reserved native ID and adopt the exact existing runtime owner. The first
 prompt is still marked unsent and is never replayed during this reconciliation.
