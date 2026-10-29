@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use crate::event::{PiContentBlock, PiMessage, PiSessionItem, PiSessionLine, PiUserContent};
 use crate::normalize::PiNormalizer;
-use tokn_session_core::{LoadedSession, SessionHeader, SessionHistoryStatus, SessionRef};
+use tokn_session_core::{
+  FileSessionCatalog, LoadedSession, SessionHeader, SessionHistoryStatus, SessionRef, SessionRelationCatalog,
+};
 
 pub struct PiSessionSource {
   session_dir: Option<PathBuf>,
@@ -22,6 +24,24 @@ impl PiSessionSource {
 
   pub fn list_session_relations(&self) -> Result<Vec<SessionRef>, String> {
     self.list_session_refs(inspect_session_header)
+  }
+
+  pub fn list_session_relation_catalog(&self) -> Result<SessionRelationCatalog, String> {
+    let paths = self.session_path_catalog()?;
+    let mut catalog = SessionRelationCatalog {
+      references: Vec::new(),
+      complete: paths.complete,
+    };
+    for path in paths.paths {
+      match inspect_session_header(&path) {
+        Ok(reference) => catalog.references.push(reference),
+        Err(_) => catalog.complete = false,
+      }
+    }
+    catalog
+      .references
+      .sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| b.path.cmp(&a.path)));
+    Ok(catalog)
   }
 
   /// Returns the effective session root used for discovery.
@@ -41,6 +61,18 @@ impl PiSessionSource {
     }
     paths.sort();
     Ok(paths)
+  }
+
+  pub fn session_path_catalog(&self) -> Result<FileSessionCatalog, String> {
+    let mut catalog = FileSessionCatalog {
+      paths: Vec::new(),
+      complete: true,
+    };
+    for root in self.session_roots()? {
+      collect_jsonl_catalog(&root, &mut catalog);
+    }
+    catalog.paths.sort();
+    Ok(catalog)
   }
 
   /// Reads the header relation for one known session path without scanning its
@@ -222,6 +254,30 @@ fn collect_jsonl_files(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<(), Strin
     }
   }
   Ok(())
+}
+
+fn collect_jsonl_catalog(dir: &Path, catalog: &mut FileSessionCatalog) {
+  let Ok(entries) = std::fs::read_dir(dir) else {
+    catalog.complete = false;
+    return;
+  };
+  for entry in entries {
+    let Ok(entry) = entry else {
+      catalog.complete = false;
+      continue;
+    };
+    let path = entry.path();
+    // Match Pi's existing traversal, including symlinked session directories.
+    let Ok(metadata) = std::fs::metadata(&path) else {
+      catalog.complete = false;
+      continue;
+    };
+    if metadata.is_dir() {
+      collect_jsonl_catalog(&path, catalog);
+    } else if path.extension() == Some(OsStr::new("jsonl")) {
+      catalog.paths.push(path);
+    }
+  }
 }
 
 fn inspect_session(path: &Path) -> Result<SessionRef, String> {

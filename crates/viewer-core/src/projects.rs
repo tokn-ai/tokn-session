@@ -1,15 +1,20 @@
-//! Explicit local launch folders, separate from inferred session grouping.
+//! Stable local launch folders shared by registration and provider discovery.
 use std::{
   path::{Path, PathBuf},
   time::{SystemTime, UNIX_EPOCH},
 };
 
-use tokn_session_index::RegisteredProjectRecord;
+use tokn_session_index::{ProjectFolderRecord, RegisteredProjectRecord};
+
+mod discovery;
+pub(crate) use discovery::{ProjectRegistryState, valid_discovered_cwd};
 
 use crate::{
   ViewerService,
   relay::RelayMode,
-  workspace::{ProjectWorkspaceSnapshot, RegisterProjectRequest, RegisteredProject},
+  workspace::{
+    ProjectDiscoveryState, ProjectOrigin, ProjectWorkspaceSnapshot, RegisterProjectRequest, RegisteredProject,
+  },
 };
 
 const MAX_FOLDER_PATH_BYTES: usize = 4096;
@@ -18,29 +23,14 @@ const EXTERNAL_REGISTRY_REASON: &str =
   "Projects belong to this computer's local reader. Switch from External reader mode to manage them.";
 
 impl ViewerService {
-  /// Lists saved launch folders independently of provider discovery and
-  /// pagination, including projects that have no sessions yet.
+  /// Lists durable launch folders, seeding verified indexed cwd metadata once
+  /// without parsing provider histories or proving disappearance.
   pub fn list_registered_projects(&self) -> Result<ProjectWorkspaceSnapshot, String> {
     self.check_project_share_scope()?;
-    if self.relay.status().settings.mode == RelayMode::External {
-      return Ok(ProjectWorkspaceSnapshot {
-        available: false,
-        unavailable_reason: Some(EXTERNAL_REGISTRY_REASON.into()),
-        projects: Vec::new(),
-      });
+    if self.relay.status().settings.mode != RelayMode::External {
+      self.bootstrap_project_registry()?;
     }
-    let projects = self
-      .session_index
-      .list_registered_projects()
-      .map_err(|error| format!("Could not list registered projects: {error}"))?
-      .into_iter()
-      .map(project_snapshot)
-      .collect();
-    Ok(ProjectWorkspaceSnapshot {
-      available: true,
-      unavailable_reason: None,
-      projects,
-    })
+    self.refresh_project_registry_snapshot()
   }
 
   /// Registers an existing directory. Symlink aliases resolve to one stable
@@ -83,7 +73,12 @@ impl ViewerService {
         created_at_ms,
       })
       .map_err(|error| format!("Could not register the project: {error}"))?;
-    Ok(project_snapshot(project))
+    let snapshot = self.refresh_project_registry_snapshot()?;
+    snapshot
+      .projects
+      .into_iter()
+      .find(|saved| saved.project_id == project.project_id)
+      .ok_or_else(|| "The registered project was not found after saving".into())
   }
 
   /// Resolves a registered identity for a new local session and revalidates
@@ -96,12 +91,16 @@ impl ViewerService {
     }
     let record = self
       .session_index
-      .get_registered_project(project_id)
+      .get_project_folder(project_id)
       .map_err(|error| format!("Could not read the registered project: {error}"))?
       .ok_or("The registered project was not found")?;
     let project = project_snapshot(record);
     if !project.available {
-      return Err("The registered project folder is unavailable or now resolves to a different location".into());
+      return Err(
+        project
+          .unavailable_reason
+          .unwrap_or_else(|| "The project folder is unavailable".into()),
+      );
     }
     Ok(project)
   }
@@ -159,8 +158,29 @@ fn folder_is_available(folder_path: &str) -> bool {
   canonical_folder(folder_path).is_ok_and(|canonical| PathBuf::from(canonical) == Path::new(folder_path))
 }
 
-fn project_snapshot(record: RegisteredProjectRecord) -> RegisteredProject {
-  let available = folder_is_available(&record.folder_path);
+fn project_snapshot(folder: ProjectFolderRecord) -> RegisteredProject {
+  let record = folder.project;
+  let origin = match folder.origin {
+    tokn_session_index::ProjectOrigin::Manual => ProjectOrigin::Manual,
+    tokn_session_index::ProjectOrigin::Discovered => ProjectOrigin::Discovered,
+  };
+  let discovery_state = match folder.discovery_state {
+    tokn_session_index::ProjectDiscoveryState::Present => ProjectDiscoveryState::Present,
+    tokn_session_index::ProjectDiscoveryState::Absent => ProjectDiscoveryState::Absent,
+    tokn_session_index::ProjectDiscoveryState::Unknown => ProjectDiscoveryState::Unknown,
+  };
+  let unavailable_reason = if !folder_is_available(&record.folder_path) {
+    Some("The project folder is unavailable or now resolves to a different location".into())
+  } else if origin == ProjectOrigin::Discovered && !folder.has_agent_sessions {
+    Some(if discovery_state == ProjectDiscoveryState::Unknown {
+      "No agent session reference has been confirmed; waiting for discovery to succeed".into()
+    } else {
+      "No agent sessions reference this folder anymore".into()
+    })
+  } else {
+    None
+  };
+  let available = unavailable_reason.is_none();
   RegisteredProject {
     project_id: record.project_id,
     group_key: record.group_key,
@@ -168,6 +188,9 @@ fn project_snapshot(record: RegisteredProjectRecord) -> RegisteredProject {
     name: record.name,
     created_at_ms: record.created_at_ms,
     available,
+    origin,
+    discovery_state,
+    unavailable_reason,
   }
 }
 

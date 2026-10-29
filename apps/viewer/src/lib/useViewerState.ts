@@ -2209,6 +2209,12 @@ export function useViewerState() {
     setMobileSidebarOpen(false);
   }, [applySessionSelection]);
 
+  const clearSessionSelection = useCallback(() => {
+    pendingQuestionSession.current = null;
+    applySessionSelection(null);
+    setMobileSidebarOpen(false);
+  }, [applySessionSelection]);
+
   const openCreatedSession = useCallback((session: SessionSummary) => {
     // Creation supplies a verified native row, even when the current sidebar
     // filter/page does not contain it. Retire a pre-creation catalog request
@@ -2460,6 +2466,7 @@ export function useViewerState() {
     currentModel: selectedSessionKey ? displayCache.current.currentModel(selectedSessionKey) : undefined,
     selectedSessionKey,
     selectSession,
+    clearSessionSelection,
     openCreatedSession,
     sessionsLoading,
     sessionsLoadingMore,

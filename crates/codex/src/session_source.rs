@@ -9,7 +9,9 @@ use crate::normalize::{CodexHistoryBoundary, CodexNormalizer};
 use rusqlite::{Connection, OpenFlags, params_from_iter};
 use serde::Deserialize;
 use tokn_codex_protocol::{ContentItem, ResponseItem, RolloutItem};
-use tokn_session_core::{LoadedSession, SessionHeader, SessionHistoryStatus, SessionRef};
+use tokn_session_core::{
+  FileSessionCatalog, LoadedSession, SessionHeader, SessionHistoryStatus, SessionRef, SessionRelationCatalog,
+};
 
 mod catalog;
 
@@ -40,6 +42,27 @@ impl CodexSessionSource {
     Ok(references)
   }
 
+  /// Observe every readable header without treating a skipped file as removal.
+  pub fn list_session_relation_catalog(&self) -> Result<SessionRelationCatalog, String> {
+    let paths = self.session_path_catalog()?;
+    let mut catalog = SessionRelationCatalog {
+      references: Vec::new(),
+      complete: paths.complete,
+    };
+    for path in paths.paths {
+      match inspect_session_header(&path) {
+        Ok(reference) => catalog.references.push(reference),
+        Err(_) => catalog.complete = false,
+      }
+    }
+    catalog::retain_lineage_heads(self, &mut catalog.references);
+    self.apply_indexed_metadata(&mut catalog.references);
+    catalog
+      .references
+      .sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| b.path.cmp(&a.path)));
+    Ok(catalog)
+  }
+
   /// Returns the session directory roots that this source would discover.
   ///
   /// Consumers that maintain a file watcher should use these effective roots
@@ -66,6 +89,25 @@ impl CodexSessionSource {
       catalog::retain_current_rollouts(&home, &mut paths);
     }
     Ok(paths)
+  }
+
+  /// A partial inventory survives unreadable directories. The default archive
+  /// directory is optional; an unavailable primary or explicit root is not.
+  pub fn session_path_catalog(&self) -> Result<FileSessionCatalog, String> {
+    let mut catalog = FileSessionCatalog {
+      paths: Vec::new(),
+      complete: true,
+    };
+    for (index, root) in self.session_roots()?.into_iter().enumerate() {
+      crate::storage::collect_rollout_catalog(&root, &mut catalog, self.session_dir.is_none() && index > 0);
+    }
+    catalog.paths.sort();
+    if let Ok(home) = default_codex_home()
+      && owns_metadata_root(self.session_dir.as_deref(), &home)
+    {
+      catalog::retain_current_rollouts(&home, &mut catalog.paths);
+    }
+    Ok(catalog)
   }
 
   /// Applies Codex Desktop's optional title and preview metadata to an
@@ -814,6 +856,31 @@ mod tests {
   use rusqlite::params;
   use tempfile::tempdir;
   use tokn_session_core::AgentEvent;
+
+  #[test]
+  fn missing_default_archive_is_optional_but_explicit_or_primary_roots_are_not() {
+    let directory = tempdir().unwrap();
+    let sessions = directory.path().join("sessions");
+    let archive = directory.path().join("archived_sessions");
+    std::fs::create_dir(&sessions).unwrap();
+    let mut catalog = FileSessionCatalog {
+      paths: Vec::new(),
+      complete: true,
+    };
+    crate::storage::collect_rollout_catalog(&sessions, &mut catalog, false);
+    crate::storage::collect_rollout_catalog(&archive, &mut catalog, true);
+    assert!(catalog.complete);
+    assert!(catalog.paths.is_empty());
+    assert!(
+      !CodexSessionSource::new(Some(archive))
+        .session_path_catalog()
+        .unwrap()
+        .complete
+    );
+    std::fs::remove_dir(&sessions).unwrap();
+    crate::storage::collect_rollout_catalog(&sessions, &mut catalog, false);
+    assert!(!catalog.complete);
+  }
 
   #[cfg(unix)]
   #[test]

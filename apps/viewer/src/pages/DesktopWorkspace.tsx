@@ -8,15 +8,21 @@ import { initializeLocalViewer } from "../lib/tauri";
 import { selectMachine } from "../lib/transport";
 import type { HubMachineSelection } from "../lib/types";
 import { ViewerPage } from "./ViewerPage";
+import { SessionDraftsProvider } from "../components/SessionDraftsProvider";
 
 type WorkspaceView = { kind: "machines"; hub_url: string; startup_host_id: string | null }
   | { kind: "opening_local" } | { kind: "local" };
 
 export function DesktopWorkspace() {
-  return <NativeDevicePreferencesProvider><LocalHostProvider><DesktopWorkspaceContent /></LocalHostProvider></NativeDevicePreferencesProvider>;
+  const [drafts_enabled, setDraftsEnabled] = useState(false);
+  return <NativeDevicePreferencesProvider><LocalHostProvider>
+    <SessionDraftsProvider enabled={drafts_enabled}>
+      <DesktopWorkspaceContent on_local_ready={() => setDraftsEnabled(true)} />
+    </SessionDraftsProvider>
+  </LocalHostProvider></NativeDevicePreferencesProvider>;
 }
 
-function DesktopWorkspaceContent() {
+function DesktopWorkspaceContent({ on_local_ready }: { on_local_ready: () => void }) {
   const preferences = useMachinePreferences();
   const preferences_ref = useRef(preferences);
   preferences_ref.current = preferences;
@@ -44,6 +50,7 @@ function DesktopWorkspaceContent() {
     let canceled = false;
     void initializeLocalViewer().then(() => {
       if (canceled) return;
+      on_local_ready();
       rememberMachine(preferences_ref.current, { kind: "local" });
       setView({ kind: "local" });
     }).catch((error: unknown) => {

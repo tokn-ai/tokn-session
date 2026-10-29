@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use tokn_dsh_protocol::{DshSessionItem, DshSessionLine, SessionHeader as DshSessionHeader};
 use tokn_session_core::{
-  LoadedSession, LoadedSessionRecords, NormalizedRecord, SessionHeader, SessionHistoryStatus, SessionRef,
+  FileSessionCatalog, LoadedSession, LoadedSessionRecords, NormalizedRecord, SessionHeader, SessionHistoryStatus,
+  SessionRef, SessionRelationCatalog,
 };
 
 use crate::{normalize, storage};
@@ -47,15 +48,30 @@ impl DshSessionSource {
   pub fn list_session_relations(&self) -> Result<Vec<SessionRef>, String> {
     let mut references = Vec::new();
     for path in self.paths()? {
-      let mut reader = storage::reader(&path)?;
-      let mut first = String::new();
-      reader
-        .read_line(&mut first)
-        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-      references.push(reference(&path, &header(storage::parse(&first, &path, 1)?, &path)?));
+      references.push(read_relation(&path)?);
     }
     sort_refs(&mut references);
     Ok(references)
+  }
+
+  pub fn list_session_relation_catalog(&self) -> Result<SessionRelationCatalog, String> {
+    let mut paths = FileSessionCatalog {
+      paths: Vec::new(),
+      complete: true,
+    };
+    collect_catalog(&self.session_root()?, &mut paths);
+    let mut catalog = SessionRelationCatalog {
+      references: Vec::new(),
+      complete: paths.complete,
+    };
+    for path in paths.paths {
+      match read_relation(&path) {
+        Ok(reference) => catalog.references.push(reference),
+        Err(_) => catalog.complete = false,
+      }
+    }
+    sort_refs(&mut catalog.references);
+    Ok(catalog)
   }
 
   /// Populate presentation metadata stored after DSH's first session row.
@@ -255,6 +271,37 @@ fn collect(root: &Path, paths: &mut Vec<PathBuf>) -> Result<(), String> {
     }
   }
   Ok(())
+}
+
+fn collect_catalog(root: &Path, catalog: &mut FileSessionCatalog) {
+  let Ok(entries) = std::fs::read_dir(root) else {
+    catalog.complete = false;
+    return;
+  };
+  for entry in entries {
+    let Ok(entry) = entry else {
+      catalog.complete = false;
+      continue;
+    };
+    let Ok(kind) = entry.file_type() else {
+      catalog.complete = false;
+      continue;
+    };
+    if kind.is_dir() {
+      collect_catalog(&entry.path(), catalog);
+    } else if kind.is_file() && matches!(entry.file_name().to_str(), Some("session.jsonl" | "session.jsonl.zstd")) {
+      catalog.paths.push(entry.path());
+    }
+  }
+}
+
+fn read_relation(path: &Path) -> Result<SessionRef, String> {
+  let mut reader = storage::reader(path)?;
+  let mut first = String::new();
+  reader
+    .read_line(&mut first)
+    .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+  Ok(reference(path, &header(storage::parse(&first, path, 1)?, path)?))
 }
 
 pub(crate) fn header(line: DshSessionLine, path: &Path) -> Result<DshSessionHeader, String> {

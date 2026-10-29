@@ -1777,6 +1777,60 @@ if mode == 'ignore_eof':
   }
 
   #[tokio::test]
+  async fn initial_input_acceptance_is_confirmed_separately_from_native_history() {
+    use tokn_interaction_core::creation::FirstInputState;
+    let fixture = Fixture::new("normal", "hold-ack");
+    fixture.create().await;
+    fixture
+      .wait_for(|snapshot| snapshot.creation_input_state == Some(FirstInputState::Uncertain))
+      .await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+      while !fixture.log().iter().any(|value| value["kind"] == "prompt_waiting") {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+      }
+    })
+    .await
+    .unwrap();
+    assert!(fixture.folder().join("synthetic-history.jsonl").exists());
+    assert_eq!(
+      fixture.snapshot().creation_input_state,
+      Some(FirstInputState::Uncertain)
+    );
+    std::fs::write(fixture.folder().join("allow-prompt"), "").unwrap();
+    fixture
+      .wait_for(|snapshot| snapshot.creation_input_state == Some(FirstInputState::Accepted))
+      .await;
+    fixture.manager.shutdown().await;
+    let restored =
+      ManagedPiSessions::with_executable(Some(fixture.state_path.clone()), fixture.executable.clone()).unwrap();
+    assert_eq!(
+      restored
+        .creation_receipt(&fixture.request)
+        .unwrap()
+        .unwrap()
+        .creation_input_state,
+      Some(FirstInputState::Accepted)
+    );
+  }
+
+  #[tokio::test]
+  async fn initial_input_rejection_and_lost_acknowledgement_remain_distinct() {
+    use tokn_interaction_core::creation::FirstInputState;
+    for (prompt, expected) in [
+      ("reject-follow-up", FirstInputState::Rejected),
+      ("exit-before-ack", FirstInputState::Uncertain),
+    ] {
+      let fixture = Fixture::new("normal", prompt);
+      fixture.create().await;
+      let failed = fixture
+        .wait_for(|snapshot| snapshot.status == ManagedSessionStatus::Failed)
+        .await;
+      assert_eq!(failed.creation_input_state, Some(expected));
+      fixture.manager.shutdown().await;
+    }
+  }
+
+  #[tokio::test]
   async fn duplicate_creation_launches_once_and_rejects_changed_content() {
     let fixture = Fixture::new("normal", "synthetic initial prompt");
     let (first, duplicate) = tokio::join!(

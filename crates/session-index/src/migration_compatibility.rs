@@ -233,7 +233,7 @@ mod tests {
     drop(index);
     let reopened = SessionIndex::open(&path).unwrap();
     assert!(reopened.has_managed_session_admission(&key).unwrap());
-    assert_eq!(ledger(&reopened.connection().unwrap()).len(), 12);
+    assert_eq!(ledger(&reopened.connection().unwrap()).len(), MIGRATIONS.len());
   }
 
   #[test]
@@ -252,7 +252,7 @@ mod tests {
     assert_folder_upgrade(&connection);
     assert_eq!(data(&connection, &["managed_session_admissions"]), admission);
     let after = ledger(&connection);
-    assert_eq!(after.len(), 12);
+    assert_eq!(after.len(), MIGRATIONS.len());
     assert_eq!(after[..9], before_ledger[..9]);
     assert_eq!(after[9], (10, migration_checksum(MIGRATION_010), 1010));
     assert_eq!(after[10], (11, migration_checksum(MIGRATION_011), 1010));
@@ -290,7 +290,7 @@ mod tests {
         .unwrap()
     );
     let applied = ledger(&index.connection().unwrap());
-    assert_eq!(applied.len(), 12);
+    assert_eq!(applied.len(), MIGRATIONS.len());
     assert_eq!(applied[10], (11, migration_checksum(MIGRATION_011), 1010));
   }
 

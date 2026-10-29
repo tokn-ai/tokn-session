@@ -8,7 +8,7 @@ use tokn_session_core::{LoadedSession, LoadedSessionTree, SessionRef};
 
 pub use print::{AppendAction, AppendSessionRequest, CreateSessionRequest};
 pub use source::Source;
-pub use tokn_session_core::SessionHeader;
+pub use tokn_session_core::{FileSessionCatalog, SessionHeader, SessionHeaderCatalog};
 
 pub struct AgentClient;
 
@@ -20,6 +20,25 @@ impl AgentClient {
   /// API for latency-sensitive viewers and other metadata-only consumers.
   pub fn list_session_headers(source: Source, session_dir: Option<PathBuf>) -> Result<Vec<SessionHeader>, String> {
     session_source::session_source(source, session_dir)?.list_session_headers()
+  }
+
+  /// Observes readable headers and whether absence is authoritative. Missing
+  /// storage and skipped reads produce incomplete catalogs, not removals.
+  /// Existing database failures retain their diagnostic when no independent
+  /// usable catalog is available. Errors also cannot establish absence.
+  pub fn list_session_header_catalog(
+    source: Source,
+    session_dir: Option<PathBuf>,
+  ) -> Result<SessionHeaderCatalog, String> {
+    session_source::session_source(source, session_dir)?.list_session_header_catalog()
+  }
+
+  /// Returns the storage scope of the current catalog configuration, including
+  /// optional or currently missing roots. Directory-backed providers return
+  /// discovery directories; OpenCode and ZCode return the exact SQLite path.
+  /// A complete catalog does not establish absence outside these roots.
+  pub fn session_catalog_roots(source: Source, session_dir: Option<PathBuf>) -> Result<Vec<PathBuf>, String> {
+    session_source::session_source(source, session_dir)?.session_catalog_roots()
   }
 
   /// Returns the effective session-file roots for a provider that supports
@@ -35,6 +54,12 @@ impl AgentClient {
   /// Enumerates file-backed sessions without opening their contents.
   pub fn file_session_paths(source: Source, session_dir: Option<PathBuf>) -> Result<Vec<PathBuf>, String> {
     session_source::session_source(source, session_dir)?.file_session_paths()
+  }
+
+  /// Observes file membership without reopening unchanged headers. Callers
+  /// must also mark their header observation incomplete on failed file reads.
+  pub fn file_session_catalog(source: Source, session_dir: Option<PathBuf>) -> Result<FileSessionCatalog, String> {
+    session_source::session_source(source, session_dir)?.file_session_catalog()
   }
 
   /// Applies provider catalog metadata that is stored outside session files.
@@ -162,6 +187,89 @@ mod tests {
   }
 
   #[test]
+  fn observed_file_catalogs_keep_readable_headers_and_report_missing_or_damaged_storage() {
+    for (source, fixture, file_name) in [
+      (Source::Codex, "codex/tree_root.jsonl", "session.jsonl"),
+      (Source::Pi, "pi/tree_parent.jsonl", "session.jsonl"),
+      (Source::Dsh, "dsh/basic/session.jsonl", "session.jsonl"),
+    ] {
+      let directory = tempfile::tempdir().unwrap();
+      let root = directory.path().join("sessions");
+      let observe = || AgentClient::list_session_header_catalog(source, Some(root.clone())).unwrap();
+      assert!(!observe().complete, "missing {source:?} storage is unknown");
+      std::fs::create_dir(&root).unwrap();
+      let empty = observe();
+      assert!(empty.complete, "existing empty {source:?} storage is complete");
+      assert!(empty.headers.is_empty());
+
+      let valid = root.join("valid");
+      std::fs::create_dir(&valid).unwrap();
+      let body = std::fs::read_to_string(fixture_path(fixture)).unwrap();
+      std::fs::write(
+        valid.join(file_name),
+        format!("{}\ninvalid body\n", body.lines().next().unwrap()),
+      )
+      .unwrap();
+      let valid_catalog = observe();
+      assert!(valid_catalog.complete, "{source:?} discovery must not read bodies");
+      assert_eq!(valid_catalog.headers.len(), 1);
+      let broken = root.join("broken");
+      std::fs::create_dir(&broken).unwrap();
+      std::fs::write(broken.join(file_name), "invalid header\n").unwrap();
+      let partial = observe();
+      assert!(!partial.complete);
+      assert_eq!(partial.headers, valid_catalog.headers);
+    }
+  }
+
+  #[test]
+  fn observed_file_membership_does_not_parse_headers() {
+    for source in [Source::Codex, Source::Pi] {
+      let directory = tempfile::tempdir().unwrap();
+      let root = directory.path().join("sessions");
+      assert!(
+        !AgentClient::file_session_catalog(source, Some(root.clone()))
+          .unwrap()
+          .complete
+      );
+      std::fs::create_dir(&root).unwrap();
+      let path = root.join("invalid.jsonl");
+      std::fs::write(&path, "not a header\n").unwrap();
+      let observed = AgentClient::file_session_catalog(source, Some(root)).unwrap();
+      assert!(observed.complete);
+      assert_eq!(observed.paths, [path]);
+    }
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn observed_pi_membership_preserves_valid_files_when_metadata_is_unavailable() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let path = root.join("valid.jsonl");
+    std::fs::copy(fixture_path("pi/tree_parent.jsonl"), &path).unwrap();
+    std::os::unix::fs::symlink(root.join("unavailable"), root.join("broken.jsonl")).unwrap();
+    let paths = AgentClient::file_session_catalog(Source::Pi, Some(root.to_path_buf())).unwrap();
+    assert!(!paths.complete);
+    assert_eq!(paths.paths, [path]);
+    let headers = AgentClient::list_session_header_catalog(Source::Pi, Some(root.to_path_buf())).unwrap();
+    assert!(!headers.complete);
+    assert_eq!(headers.headers.len(), 1);
+  }
+
+  #[test]
+  fn observed_database_catalogs_report_unavailable_storage_without_creating_it() {
+    for source in [Source::OpenCode, Source::ZCode, Source::WorkBuddy] {
+      let directory = tempfile::tempdir().unwrap();
+      let missing = directory.path().join("missing");
+      let catalog = AgentClient::list_session_header_catalog(source, Some(missing.clone())).unwrap();
+      assert!(!catalog.complete);
+      assert!(catalog.headers.is_empty());
+      assert!(!missing.exists());
+    }
+  }
+
+  #[test]
   fn header_listing_stops_before_an_invalid_conversation_body() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("header-only.jsonl");
@@ -221,6 +329,31 @@ mod tests {
       AgentClient::file_session_roots(Source::Pi, Some(root.clone())).expect("Pi should expose its explicit root"),
       vec![root]
     );
+  }
+
+  #[test]
+  fn catalog_roots_expose_current_scope_for_every_provider_without_requiring_storage() {
+    let directory = tempfile::tempdir().unwrap();
+    let old_root = directory.path().join("old");
+    let current_root = directory.path().join("current");
+    for source in [Source::Codex, Source::Pi, Source::Dsh, Source::WorkBuddy] {
+      let roots = AgentClient::session_catalog_roots(source, Some(current_root.clone())).unwrap();
+      assert_eq!(roots, [current_root.clone()]);
+      assert!(
+        !roots
+          .iter()
+          .any(|root| old_root.join("session.jsonl").starts_with(root))
+      );
+      assert!(!current_root.exists());
+    }
+    for source in [Source::OpenCode, Source::ZCode] {
+      let database = current_root.join("sessions.sqlite");
+      assert_eq!(
+        AgentClient::session_catalog_roots(source, Some(database.clone())).unwrap(),
+        [database.clone()]
+      );
+      assert!(!database.exists());
+    }
   }
 
   #[test]
