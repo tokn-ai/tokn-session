@@ -73,6 +73,33 @@ fn pi_decodes_history_once_then_only_complete_appended_lines() {
 }
 
 #[test]
+fn pi_metadata_uses_a_bounded_batch_even_when_the_source_exceeds_the_old_snapshot_limit() {
+  let root = TempDir::new().unwrap();
+  let path = root.path().join("session.jsonl");
+  fs::write(&path, format!("{HEADER}{MESSAGE}{}", named("Large session"))).unwrap();
+  let entry = fixture(root.path());
+  let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+  // Only the initial batch is relevant. A sparse, unread suffix makes it
+  // possible to check admission independently of materializing 128 MiB.
+  let mut padding = vec![b' '; 8192];
+  *padding.last_mut().unwrap() = b'\n';
+  for _ in 0..=SCAN_BUDGET / padding.len() as u64 {
+    file.write_all(&padding).unwrap();
+  }
+  file.set_len(129 * 1024 * 1024).unwrap();
+  let mut cursor = PiCursor::default();
+  assert!(
+    !cursor
+      .read(&entry.header, &revision(&entry.header, Provider::Pi))
+      .unwrap()
+  );
+  assert_eq!(cursor.summary.title.as_deref(), Some("Large session"));
+  assert_eq!(cursor.summary.preview.as_deref(), Some("first prompt"));
+  assert!(cursor.offset <= SCAN_BUDGET + padding.len() as u64);
+  assert_eq!(cursor.decoded, 3);
+}
+
+#[test]
 fn pi_replacement_truncation_and_same_length_rewrites_reset_metadata() {
   let root = TempDir::new().unwrap();
   let path = root.path().join("session.jsonl");

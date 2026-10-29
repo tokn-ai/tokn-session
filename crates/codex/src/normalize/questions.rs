@@ -1,22 +1,36 @@
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokn_codex_protocol::{AsyncUserInputQuestion, FunctionCallItem, RequestUserInputEvent};
 use tokn_session_core::{AgentEvent, Phase, Provider, QuestionRequestEvent, UserQuestion, UserQuestionOption};
 
-use super::string_field;
+use super::{retention::MAX_CORRELATION_BYTES, string_field};
 
 /// Bounded correlation retained across incremental reads. Never identify a
 /// reply from answer-shaped JSON alone: it must belong to a recorded request
 /// or a canonical output explicitly named request_user_input.
-#[derive(Default)]
 pub(super) struct RepliesNormalizer {
   requests: std::collections::BTreeMap<String, ReplyContext>,
   order: std::collections::VecDeque<String>,
-  outputs: std::collections::BTreeMap<String, Value>,
+  retained_bytes: usize,
+  byte_limit: usize,
 }
 
 struct ReplyContext {
   turn_id: Option<String>,
   questions: Vec<UserQuestion>,
+  output: Option<[u8; 32]>,
+  retained_bytes: usize,
+}
+
+impl Default for RepliesNormalizer {
+  fn default() -> Self {
+    Self {
+      requests: Default::default(),
+      order: Default::default(),
+      retained_bytes: 0,
+      byte_limit: MAX_CORRELATION_BYTES,
+    }
+  }
 }
 
 impl RepliesNormalizer {
@@ -38,26 +52,72 @@ impl RepliesNormalizer {
       let Some(id) = request.request_id.as_ref() else {
         continue;
       };
-      if !self.requests.contains_key(id) {
-        self.order.push_back(id.clone());
-      }
-      self.requests.insert(
-        id.clone(),
-        ReplyContext {
-          turn_id: request.turn_id.clone(),
-          questions: request.questions.clone(),
-        },
-      );
-      self.evict();
+      self.retain(id, request.turn_id.as_deref(), &request.questions);
     }
   }
 
-  fn evict(&mut self) {
-    while self.order.len() > 256 {
-      if let Some(oldest) = self.order.pop_front() {
-        self.requests.remove(&oldest);
-        self.outputs.remove(&oldest);
+  fn used_bytes(&self) -> usize {
+    self
+      .retained_bytes
+      .saturating_add(self.order.capacity().saturating_mul(std::mem::size_of::<String>()))
+  }
+
+  fn retain(&mut self, id: &str, turn_id: Option<&str>, questions: &[UserQuestion]) {
+    let retained_bytes = context_bytes(id, turn_id, questions);
+    let previous = self.requests.remove(id);
+    let existed = previous.is_some();
+    let output = previous.and_then(|context| {
+      self.retained_bytes -= context.retained_bytes;
+      context.output
+    });
+    if retained_bytes > self.byte_limit {
+      // A reused identity must not keep stale questions after an oversized
+      // update. Check before cloning any question bodies into the cache.
+      self.order.retain(|candidate| candidate != id);
+      if self.order.is_empty() {
+        self.order.shrink_to_fit();
       }
+      return;
+    }
+    if !existed {
+      self.order.push_back(id.to_owned());
+    }
+    // Reserve room before cloning, including allocated order slots. Updating
+    // the oldest entry can evict that entry itself under the same FIFO policy.
+    while self.order.len() > 256 || self.used_bytes().saturating_add(retained_bytes) > self.byte_limit {
+      let Some(oldest) = self.order.pop_front() else { break };
+      if oldest == id {
+        self.evict();
+        return;
+      }
+      if let Some(context) = self.requests.remove(&oldest) {
+        self.retained_bytes -= context.retained_bytes;
+      }
+    }
+    self.requests.insert(
+      id.to_owned(),
+      ReplyContext {
+        turn_id: turn_id.map(str::to_owned),
+        questions: questions.to_vec(),
+        output,
+        retained_bytes,
+      },
+    );
+    self.retained_bytes += retained_bytes;
+    self.evict();
+  }
+
+  fn evict(&mut self) {
+    while self.order.len() > 256 || self.used_bytes() > self.byte_limit {
+      let Some(oldest) = self.order.pop_front() else {
+        break;
+      };
+      if let Some(context) = self.requests.remove(&oldest) {
+        self.retained_bytes -= context.retained_bytes;
+      }
+    }
+    if self.order.is_empty() {
+      self.order.shrink_to_fit();
     }
   }
 
@@ -105,23 +165,18 @@ impl RepliesNormalizer {
       )]);
     };
     let decoded = decoded.unwrap();
-    if self.outputs.get(&id) == Some(&decoded) {
+    let fingerprint = output_fingerprint(&decoded).ok()?;
+    if self.requests.get(&id).and_then(|context| context.output) == Some(fingerprint) {
       return Some(Vec::new());
     }
     // Orphan canonical outputs remain readable without invented question text.
     // Cache their identity too so a repeated output cannot duplicate the reply.
     if !self.requests.contains_key(&id) {
-      self.order.push_back(id.clone());
-      self.requests.insert(
-        id.clone(),
-        ReplyContext {
-          turn_id: string_field(payload, "turn_id"),
-          questions: Vec::new(),
-        },
-      );
-      self.evict();
+      self.retain(&id, payload["turn_id"].as_str(), &[]);
     }
-    self.outputs.insert(id.clone(), decoded);
+    if let Some(context) = self.requests.get_mut(&id) {
+      context.output = Some(fingerprint);
+    }
     let request = self.requests.get(&id);
     let mut answers = response.answers;
     let mut replies = Vec::new();
@@ -161,6 +216,82 @@ impl RepliesNormalizer {
       timestamp: line.timestamp().map(str::to_owned),
     })])
   }
+}
+
+fn context_bytes(id: &str, turn_id: Option<&str>, questions: &[UserQuestion]) -> usize {
+  // Account for both copies of the request ID, cloned vectors/strings, and a
+  // conservatively charged BTree node (including unused slots and pointers).
+  let node = std::mem::size_of::<(String, ReplyContext)>()
+    .saturating_mul(12)
+    .saturating_add(std::mem::size_of::<usize>().saturating_mul(16));
+  let mut bytes = node
+    .saturating_add(id.len().saturating_mul(2))
+    .saturating_add(turn_id.map_or(0, str::len))
+    .saturating_add(questions.len().saturating_mul(std::mem::size_of::<UserQuestion>()));
+  for question in questions {
+    bytes = bytes
+      .saturating_add(question.id.as_ref().map_or(0, String::len))
+      .saturating_add(question.header.as_ref().map_or(0, String::len))
+      .saturating_add(question.question.len());
+    if let Some(options) = &question.options {
+      bytes = bytes.saturating_add(options.len().saturating_mul(std::mem::size_of::<UserQuestionOption>()));
+      for option in options {
+        bytes = bytes
+          .saturating_add(option.label.len())
+          .saturating_add(option.description.as_ref().map_or(0, String::len));
+      }
+    }
+  }
+  bytes
+}
+
+struct DigestWriter(Sha256);
+
+impl std::io::Write for DigestWriter {
+  fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+    self.0.update(bytes);
+    Ok(bytes.len())
+  }
+
+  fn flush(&mut self) -> std::io::Result<()> {
+    Ok(())
+  }
+}
+
+/// Match Value equality, including order-independent objects and equal signed
+/// floating-point zeroes, while hashing without retaining serialized answers.
+struct CanonicalValue<'a>(&'a Value);
+
+impl serde::Serialize for CanonicalValue<'_> {
+  fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::{SerializeMap, SerializeSeq};
+    match self.0 {
+      Value::Number(number) if number.is_f64() && number.as_f64() == Some(0.0) => serializer.serialize_f64(0.0),
+      Value::Array(values) => {
+        let mut sequence = serializer.serialize_seq(Some(values.len()))?;
+        for value in values {
+          sequence.serialize_element(&CanonicalValue(value))?;
+        }
+        sequence.end()
+      }
+      Value::Object(values) => {
+        let mut entries = values.iter().collect::<Vec<_>>();
+        entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        let mut map = serializer.serialize_map(Some(entries.len()))?;
+        for (key, value) in entries {
+          map.serialize_entry(key, &CanonicalValue(value))?;
+        }
+        map.end()
+      }
+      value => serde::Serialize::serialize(value, serializer),
+    }
+  }
+}
+
+fn output_fingerprint(value: &Value) -> Result<[u8; 32], serde_json::Error> {
+  let mut writer = DigestWriter(Sha256::new());
+  serde_json::to_writer(&mut writer, &CanonicalValue(value))?;
+  Ok(writer.0.finalize().into())
 }
 
 fn reply_value(output: &Value) -> Option<Value> {
@@ -468,6 +599,127 @@ mod tests {
     assert_eq!(normalizer.requests.len(), 256);
     assert_eq!(normalizer.order.len(), 256);
     assert!(!normalizer.requests.contains_key("call-0"));
+  }
+
+  fn request_event(id: &str, text: &str) -> AgentEvent {
+    request(
+      None,
+      &json!({
+        "type":"request_user_input", "call_id":id, "turn_id":"turn",
+        "questions":[{"id":"q","header":"Choice","question":text,
+          "options":[{"label":"Yes","description":"Proceed"}]}]
+      }),
+      None,
+    )
+    .unwrap()
+  }
+
+  fn canonical_output(id: &str, answer: Value) -> tokn_codex_protocol::RolloutLine {
+    serde_json::from_value(json!({"type":"event_msg","payload":{
+      "type":"item_completed","item":{"type":"FunctionCallOutput","name":"request_user_input","id":id,"output":answer}
+    }}))
+    .unwrap()
+  }
+
+  #[test]
+  fn question_bytes_evict_old_context_without_inventing_reply_matches() {
+    let first = request_event("one", "Choose a value?");
+    let AgentEvent::QuestionRequest(request) = &first else {
+      panic!()
+    };
+    let cost = context_bytes("one", request.turn_id.as_deref(), &request.questions);
+    let mut normalizer = RepliesNormalizer {
+      byte_limit: cost * 2 + 256,
+      ..Default::default()
+    };
+    for id in ["one", "two", "new"] {
+      normalizer.observe(&[request_event(id, "Choose a value?")]);
+    }
+    assert_eq!(normalizer.requests.len(), 2);
+    assert!(!normalizer.requests.contains_key("one"));
+    assert!(normalizer.used_bytes() <= normalizer.byte_limit);
+    let answers = json!({"answers":{"q":{"answers":["Yes"]}}});
+    let legacy = serde_json::from_value(structured_output("one", answers.clone())).unwrap();
+    assert!(normalizer.output(&legacy, None).is_none());
+    let events = normalizer.output(&canonical_output("one", answers), None).unwrap();
+    assert!(matches!(&events[..], [AgentEvent::QuestionReply(reply)]
+      if reply.replies[0].question_id == "q" && reply.replies[0].question.is_none() && reply.replies[0].answers == ["Yes"]));
+  }
+
+  #[test]
+  fn replacing_question_context_updates_bytes_and_drops_oversized_stale_context() {
+    let event = request_event("call", "Choose a value?");
+    let AgentEvent::QuestionRequest(request) = &event else {
+      panic!()
+    };
+    let cost = context_bytes("call", request.turn_id.as_deref(), &request.questions);
+    let mut normalizer = RepliesNormalizer {
+      byte_limit: cost + 256,
+      ..Default::default()
+    };
+    normalizer.observe(std::slice::from_ref(&event));
+    let retained = normalizer.used_bytes();
+    let output = canonical_output("call", json!({"answers":{"q":{"answers":["Yes"]}}}));
+    assert_eq!(normalizer.output(&output, None).unwrap().len(), 1);
+    for _ in 0..100 {
+      normalizer.observe(std::slice::from_ref(&event));
+      assert_eq!(normalizer.used_bytes(), retained);
+      assert_eq!(normalizer.requests.len(), 1);
+    }
+    assert!(normalizer.output(&output, None).unwrap().is_empty());
+    let oversized = request_event("call", &"x".repeat(normalizer.byte_limit * 2));
+    normalizer.observe(std::slice::from_ref(&oversized));
+    assert!(normalizer.requests.is_empty());
+    assert_eq!(normalizer.used_bytes(), 0);
+    assert!(
+      matches!(oversized, AgentEvent::QuestionRequest(request) if request.questions[0].question.len() > normalizer.byte_limit)
+    );
+    let events = normalizer.output(&output, None).unwrap();
+    assert!(matches!(&events[..], [AgentEvent::QuestionReply(reply)] if reply.replies[0].question.is_none()));
+  }
+
+  #[test]
+  fn output_dedup_retains_a_fingerprint_without_answer_bodies_or_unbounded_ids() {
+    let event = request_event("call", "Choose a value?");
+    let mut normalizer = RepliesNormalizer::default();
+    normalizer.observe(&[event]);
+    let retained = normalizer.used_bytes();
+    let answer = "z".repeat(256 * 1024);
+    let output = canonical_output("call", json!({"answers":{"q":{"answers":[answer]}}}));
+    let events = normalizer.output(&output, None).unwrap();
+    assert!(matches!(&events[..], [AgentEvent::QuestionReply(reply)] if reply.replies[0].answers[0] == answer));
+    assert_eq!(normalizer.used_bytes(), retained);
+    assert!(normalizer.requests["call"].output.is_some());
+    assert!(normalizer.output(&output, None).unwrap().is_empty());
+
+    let mut normalizer = RepliesNormalizer {
+      byte_limit: 2048,
+      ..Default::default()
+    };
+    let output = canonical_output(&"id".repeat(2048), json!({"answers":{"q":{"answers":["Yes"]}}}));
+    assert!(
+      matches!(&normalizer.output(&output, None).unwrap()[..], [AgentEvent::QuestionReply(reply)] if reply.replies[0].question.is_none())
+    );
+    assert!(normalizer.requests.is_empty());
+    assert_eq!(normalizer.used_bytes(), 0);
+  }
+
+  #[test]
+  fn output_fingerprints_preserve_json_value_equality() {
+    let left: Value =
+      serde_json::from_str(r#"{"answers":{"q":{"answers":["Yes"]}},"future":{"z":-0.0,"a":[1,2]}}"#).unwrap();
+    let right: Value =
+      serde_json::from_str(r#"{"future":{"a":[1,2],"z":0.0},"answers":{"q":{"answers":["Yes"]}}}"#).unwrap();
+    assert_eq!(left, right);
+    assert_eq!(output_fingerprint(&left).unwrap(), output_fingerprint(&right).unwrap());
+    assert_ne!(
+      output_fingerprint(&json!(0)).unwrap(),
+      output_fingerprint(&json!(0.0)).unwrap()
+    );
+    assert_ne!(
+      output_fingerprint(&json!([1, 2])).unwrap(),
+      output_fingerprint(&json!([2, 1])).unwrap()
+    );
   }
 
   #[test]

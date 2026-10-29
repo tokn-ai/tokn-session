@@ -620,9 +620,12 @@ Codex paginated rollouts can reference earlier physical files through
 history assemble these bounded prefixes before the active segment, validating
 both byte and ordinal cutoffs so reverted turns stay excluded.
 Native `.jsonl.zst` archives are discovered alongside plain JSONL. Byte cutoffs
-remain decoded offsets; backward reads share one anonymous decoded file per
-segment/rebuild (128 MiB decoded limit), with inherited segments decoding only
-the retained prefix. Plain siblings take precedence, and stale Desktop JSONL
+remain decoded offsets; backward reads share anonymous decoded files from a
+process-wide 512 MiB scratch pool, with inherited segments decoding only their
+retained prefixes. Sequential activity/full-history scans stream compressed
+bytes directly. Source length is not an admission limit; record size, materialized
+batches, scratch space, and a 120-second read deadline are separate budgets.
+Plain siblings take precedence, and stale Desktop JSONL
 paths resolve compressed siblings. Compression preserves record IDs; changed
 compressed sources rebuild atomically. Compression notifications reconcile the
 Codex catalog, and missing plain dependencies re-resolve before reader retry.
@@ -659,11 +662,18 @@ Relay hints coalesce for 200 ms of quiet, capped at one second and scheduled
 deadlines, so streaming records do not each start a catalog pass.
 Active Codex/Pi body indexing uses a bounded LRU of incremental activity readers,
 retaining normalization cursors and reply counts instead of transcript bodies.
+Codex activity folds validated records one at a time across inherited segments,
+so large plain/compressed histories still contribute exact reply counts and
+question state. Failed reads discard staged projections. Tool/question
+correlation caches have independent byte budgets; an oversized attention state
+fails without replacing the last committed state.
 Recent changes bypass the historical quiet-file delay so running indicators and
 final replies reach the sidebar promptly, including rollouts above 8 MiB.
 Cold backfill still scales its quiet-file delay with size, up to five minutes;
 cold JSONL bodies above 8 MiB stay catalog-only and preserve prior activity.
-The existing 128 MiB source limit still applies. Pending-body polling
+Pi and grouped readers that still buffer a full source retain their 128 MiB
+materialization budget. Pi metadata scans instead use bounded batches at any
+source size. Pending-body polling
 runs every five seconds and queries only unbaselined sessions and their source
 rows, so deferred work does not repeatedly decode the complete session index.
 Automatic snapshots no longer run a separate discovery or metadata-backfill
@@ -673,6 +683,12 @@ configuration installs the reader before publishing the mode and gives each
 configuration a fresh cancellation scope; the supervisor reuses that reader. The legacy
 External snapshot server retains its independent catalog and presentation cache
 for explicitly configured provider roots.
+
+History journals share 2 GiB of scratch disk, 64 MiB of estimated compact-index
+storage, and one million index records across the process. Clones share storage
+credits; failed/cancelled writes roll back. These replace the old per-history
+128 MiB journal gate. Catalog and retained client-window payloads remain bounded
+at 128 MiB, independently of the journal and source; wire records remain 8 MiB.
 
 Viewer mode (`automatic`/`external`/`local`), external endpoint, and optional
 native inclusion persist in `~/.tokn/sessions/viewer/relay.json`. Missing settings default

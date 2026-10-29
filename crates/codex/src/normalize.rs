@@ -7,9 +7,11 @@ mod image_tests;
 mod images;
 mod item_lifecycle;
 mod questions;
+mod retention;
 mod turn_lifecycle;
 
-use std::collections::{HashMap, VecDeque};
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde_json::{Value, json};
 use tokn_codex_protocol::{
@@ -40,6 +42,9 @@ pub struct CodexNormalizer {
   pending_code_mode_calls: HashMap<String, VecDeque<PendingCodeModeCall>>,
   pending_code_mode_order: VecDeque<(String, u64)>,
   pending_code_mode_call_count: usize,
+  pending_code_mode_bytes: usize,
+  retired_code_mode_ids: HashSet<[u8; 32]>,
+  code_mode_correlation_exhausted: bool,
   next_pending_code_mode_token: u64,
   question_replies: questions::RepliesNormalizer,
   generation_dedup: images::GenerationDedup,
@@ -48,6 +53,7 @@ pub struct CodexNormalizer {
 #[derive(Clone, Debug)]
 struct PendingCodeModeCall {
   token: u64,
+  retained_bytes: usize,
   call: Option<DecodedCodeModeCall>,
   provider_tool_name: String,
   turn_id: Option<String>,
@@ -128,6 +134,9 @@ impl CodexNormalizer {
       pending_code_mode_calls: Default::default(),
       pending_code_mode_order: Default::default(),
       pending_code_mode_call_count: 0,
+      pending_code_mode_bytes: 0,
+      retired_code_mode_ids: Default::default(),
+      code_mode_correlation_exhausted: false,
       next_pending_code_mode_token: 0,
       question_replies: Default::default(),
       generation_dedup: Default::default(),
@@ -146,6 +155,9 @@ impl CodexNormalizer {
       pending_code_mode_calls: Default::default(),
       pending_code_mode_order: Default::default(),
       pending_code_mode_call_count: 0,
+      pending_code_mode_bytes: 0,
+      retired_code_mode_ids: Default::default(),
+      code_mode_correlation_exhausted: false,
       next_pending_code_mode_token: 0,
       question_replies: Default::default(),
       generation_dedup: Default::default(),
@@ -400,6 +412,7 @@ impl CodexNormalizer {
         item.call_id.clone(),
         PendingCodeModeCall {
           token: 0,
+          retained_bytes: 0,
           call: decoded.clone(),
           provider_tool_name: name.clone(),
           turn_id: turn_id.clone(),
@@ -537,10 +550,33 @@ impl CodexNormalizer {
     let Some(call_id) = call_id else {
       return;
     };
+    let identity: [u8; 32] = Sha256::digest(call_id.as_bytes()).into();
+    if self.code_mode_correlation_exhausted || self.retired_code_mode_ids.contains(&identity) {
+      return;
+    }
     let mut call = call;
+    // The invocation remains visible even when its input is too large to keep
+    // for result enrichment. Retain the small correlation marker in that case.
+    let overhead = size_of::<PendingCodeModeCall>()
+      .saturating_add(call_id.capacity().saturating_mul(2))
+      .saturating_add(call.provider_tool_name.capacity())
+      .saturating_add(call.turn_id.as_ref().map_or(0, String::capacity));
+    call.retained_bytes =
+      overhead.saturating_add(call.call.as_ref().map_or(0, |call| retention::value_bytes(&call.input)));
+    if call.retained_bytes > retention::MAX_CORRELATION_BYTES {
+      call.call = None;
+      call.retained_bytes = overhead;
+    }
+    if call.retained_bytes > retention::MAX_CORRELATION_BYTES {
+      // An uncacheable replacement must not make a later output correlate to
+      // an older invocation that reused the same provider call identity.
+      self.retire_code_mode_id(&call_id);
+      return;
+    }
     call.token = self.next_pending_code_mode_token;
     self.next_pending_code_mode_token = self.next_pending_code_mode_token.wrapping_add(1);
     self.pending_code_mode_order.push_back((call_id.clone(), call.token));
+    self.pending_code_mode_bytes = self.pending_code_mode_bytes.saturating_add(call.retained_bytes);
     self.pending_code_mode_calls.entry(call_id).or_default().push_back(call);
     self.pending_code_mode_call_count += 1;
     self.trim_pending_code_mode_calls();
@@ -565,6 +601,7 @@ impl CodexNormalizer {
     }
     if let Some(call) = &call {
       self.pending_code_mode_call_count = self.pending_code_mode_call_count.saturating_sub(1);
+      self.pending_code_mode_bytes = self.pending_code_mode_bytes.saturating_sub(call.retained_bytes);
       self
         .pending_code_mode_order
         .retain(|(queued_call_id, token)| queued_call_id != call_id || *token != call.token);
@@ -573,9 +610,37 @@ impl CodexNormalizer {
   }
 
   fn trim_pending_code_mode_calls(&mut self) {
-    while self.pending_code_mode_call_count > MAX_PENDING_CODE_MODE_CALLS {
+    self.trim_pending_code_mode_bytes(retention::MAX_CORRELATION_BYTES);
+  }
+
+  fn retire_code_mode_id(&mut self, call_id: &str) {
+    if let Some(previous) = self.pending_code_mode_calls.remove(call_id) {
+      for previous in previous {
+        self.pending_code_mode_call_count = self.pending_code_mode_call_count.saturating_sub(1);
+        self.pending_code_mode_bytes = self.pending_code_mode_bytes.saturating_sub(previous.retained_bytes);
+      }
+    }
+    self.pending_code_mode_order.retain(|(id, _)| id != call_id);
+    let identity = Sha256::digest(call_id.as_bytes()).into();
+    self.retired_code_mode_ids.insert(identity);
+    if self.retired_code_mode_ids.len() > MAX_PENDING_CODE_MODE_CALLS {
+      // Do not forget an ambiguous identity and later enrich a delayed result
+      // with a new invocation's input. At this boundary stop enrichment for
+      // this reader; original invocation/output events remain fully visible.
+      self.code_mode_correlation_exhausted = true;
+      self.retired_code_mode_ids.clear();
+      self.pending_code_mode_calls.clear();
+      self.pending_code_mode_order.clear();
+      self.pending_code_mode_call_count = 0;
+      self.pending_code_mode_bytes = 0;
+    }
+  }
+
+  fn trim_pending_code_mode_bytes(&mut self, max_bytes: usize) {
+    while self.pending_code_mode_call_count > MAX_PENDING_CODE_MODE_CALLS || self.pending_code_mode_bytes > max_bytes {
       let Some((call_id, token)) = self.pending_code_mode_order.pop_front() else {
         self.pending_code_mode_call_count = 0;
+        self.pending_code_mode_bytes = 0;
         self.pending_code_mode_calls.clear();
         break;
       };
@@ -592,8 +657,10 @@ impl CodexNormalizer {
       {
         self.pending_code_mode_calls.remove(&call_id);
       }
-      if removed.is_some() {
+      if let Some(removed) = removed {
         self.pending_code_mode_call_count = self.pending_code_mode_call_count.saturating_sub(1);
+        self.pending_code_mode_bytes = self.pending_code_mode_bytes.saturating_sub(removed.retained_bytes);
+        self.retire_code_mode_id(&call_id);
       }
     }
   }
@@ -2121,6 +2188,87 @@ mod tests {
       first_result.output.as_ref().and_then(|output| output.get("text")),
       Some(&json!("first"))
     );
+  }
+
+  #[test]
+  fn evicted_code_mode_ids_never_match_a_later_reused_invocation() {
+    let mut normalizer = CodexNormalizer::new();
+    let call = |text: &str| PendingCodeModeCall {
+      token: 0,
+      retained_bytes: 0,
+      call: Some(DecodedCodeModeCall {
+        tool: code_mode::CodeModeTool::ExecCommand,
+        input: json!({"cmd":text}),
+      }),
+      provider_tool_name: "exec".into(),
+      turn_id: None,
+    };
+    normalizer.remember_code_mode_call(Some("reused".into()), call("first"));
+    normalizer.remember_code_mode_call(Some("reused".into()), call("second"));
+    normalizer.trim_pending_code_mode_bytes(normalizer.pending_code_mode_bytes - 1);
+    assert!(normalizer.take_code_mode_call(Some("reused"), None).is_none());
+    normalizer.remember_code_mode_call(Some("reused".into()), call("third"));
+    assert!(normalizer.take_code_mode_call(Some("reused"), None).is_none());
+    assert_eq!(normalizer.pending_code_mode_bytes, 0);
+
+    for index in 0..=MAX_PENDING_CODE_MODE_CALLS {
+      normalizer.retire_code_mode_id(&format!("retired-{index}"));
+    }
+    assert!(normalizer.code_mode_correlation_exhausted);
+    normalizer.remember_code_mode_call(Some("new".into()), call("cannot safely enrich"));
+    assert!(normalizer.take_code_mode_call(Some("new"), None).is_none());
+    assert!(normalizer.retired_code_mode_ids.len() <= MAX_PENDING_CODE_MODE_CALLS);
+  }
+
+  #[test]
+  fn pending_code_mode_bytes_are_bounded_and_released_after_matching_outputs() {
+    let mut normalizer = CodexNormalizer::new();
+    for index in 0..3 {
+      normalizer.remember_code_mode_call(
+        Some(format!("call-{index}")),
+        PendingCodeModeCall {
+          token: 0,
+          retained_bytes: 0,
+          call: Some(DecodedCodeModeCall {
+            tool: code_mode::CodeModeTool::ExecCommand,
+            input: json!({"cmd":"x".repeat(256)}),
+          }),
+          provider_tool_name: "exec".into(),
+          turn_id: None,
+        },
+      );
+    }
+    let total = normalizer.pending_code_mode_bytes;
+    normalizer.trim_pending_code_mode_bytes(total - 1);
+    assert_eq!(normalizer.pending_code_mode_call_count, 2);
+    assert!(normalizer.take_code_mode_call(Some("call-0"), None).is_none());
+    assert!(normalizer.take_code_mode_call(Some("call-1"), None).is_some());
+    assert!(normalizer.take_code_mode_call(Some("call-2"), None).is_some());
+    assert_eq!(normalizer.pending_code_mode_bytes, 0);
+    assert!(normalizer.pending_code_mode_order.is_empty());
+  }
+
+  #[test]
+  fn oversized_code_mode_input_keeps_a_small_exact_correlation_marker() {
+    let mut normalizer = CodexNormalizer::new();
+    normalizer.remember_code_mode_call(
+      Some("large".into()),
+      PendingCodeModeCall {
+        token: 0,
+        retained_bytes: 0,
+        call: Some(DecodedCodeModeCall {
+          tool: code_mode::CodeModeTool::ExecCommand,
+          input: json!({"cmd":"x".repeat(retention::MAX_CORRELATION_BYTES)}),
+        }),
+        provider_tool_name: "exec".into(),
+        turn_id: Some("turn".into()),
+      },
+    );
+    assert!(normalizer.pending_code_mode_bytes < 1024);
+    let marker = normalizer.take_code_mode_call(Some("large"), Some("turn")).unwrap();
+    assert!(marker.call.is_none());
+    assert_eq!(marker.provider_tool_name, "exec");
+    assert_eq!(normalizer.pending_code_mode_bytes, 0);
   }
 
   #[test]

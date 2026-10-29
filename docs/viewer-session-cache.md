@@ -69,9 +69,27 @@ Legacy `follow` and row-based event-page requests still expose full history.
 
 The memory target estimates retained serialized payloads and their live copies;
 it excludes runtime overhead, normalizer state, compact indexes and temporary
-parsing allocations. Three turns can themselves be large. Existing 128 MiB
-source/journal/window payload limits still apply. Initial reads and some source
-rewrites may transiently normalize the entire source. Codex/Pi normalizers keep
+parsing allocations. Three turns can themselves be large. Materialized catalog
+and retained client-window payloads have independent 128 MiB budgets; the window
+budget includes live appends, not just the latest update. Legacy readers that
+buffer a whole source retain a separate 128 MiB materialization budget.
+
+Codex source length is unrestricted by these payload budgets. Sequential
+activity projections stream plain/compressed records; lazy reads select recent
+turns and bound the materialized range or append batch. Individual Codex records
+are bounded at 128 MiB, with a 120-second operation deadline. Compressed backward
+reads borrow from a shared 512 MiB temporary-disk pool and release it after the
+read. Tool/question correlation caches have their own retained-byte budgets.
+
+Disk journals share a process-wide 2 GiB disk budget, 64 MiB conservative index
+estimate, and one million records. Records are independently bounded for the
+8 MiB transport frame. Snapshot clones share storage reservations; failed writes
+truncate staged data before releasing credit, and the last owner releases the
+journal. A quota error preserves the last committed history. These budgets are
+resource controls, not a maximum lifetime session size.
+
+Initial reads and some source rewrites may transiently normalize the entire
+selected source. Codex/Pi normalizers keep
 their append cursors, while mutable SQLite providers still scan a consistent
 row snapshot to detect edits. WorkBuddy/DSH still normalize changed grouped
 sources before reconciling them. A hard process-memory cap would need further

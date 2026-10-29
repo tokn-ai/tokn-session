@@ -31,6 +31,22 @@ impl Request {
 }
 
 impl Questions {
+  /// Conservative compact-state accounting; question text is never retained.
+  pub(crate) fn retained_bytes(&self) -> usize {
+    self.requests.iter().fold(
+      self.active_turn.as_ref().map_or(0, String::capacity),
+      |bytes, (id, request)| {
+        bytes
+          .saturating_add(128)
+          .saturating_add(id.capacity().saturating_mul(2))
+          .saturating_add(request.turn_id.as_ref().map_or(0, String::capacity))
+          .saturating_add(request.unanswered.iter().fold(0usize, |bytes, id| {
+            bytes.saturating_add(64).saturating_add(id.capacity())
+          }))
+      },
+    )
+  }
+
   pub fn observe(&mut self, event: &AgentEvent, source_index: usize) {
     if event.is_hidden() {
       return;
