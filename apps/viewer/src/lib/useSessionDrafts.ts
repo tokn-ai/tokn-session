@@ -167,7 +167,8 @@ export function useSessionDrafts(options: DraftOptions, transport_override?: Dra
     const scope_changed = patch.project_id !== undefined && patch.project_id !== draft.project_id
       || selection.provider !== draft.selection.provider
       || (selection.runtime_profile_id ?? null) !== (draft.selection.runtime_profile_id ?? null)
-      || (selection.runtime_revision ?? null) !== (draft.selection.runtime_revision ?? null);
+      || (selection.runtime_revision ?? null) !== (draft.selection.runtime_revision ?? null)
+      || (selection.runtime_plan_id ?? null) !== (draft.selection.runtime_plan_id ?? null);
     records.current.set(draft_id, { ...draft, ...patch, selection, model: scope_changed ? null : patch.model === undefined ? draft.model : patch.model, error: null });
     publish();
   }, [isCurrent, publish]);
@@ -230,7 +231,8 @@ export function useSessionDrafts(options: DraftOptions, transport_override?: Dra
     try { request = { request_id: createUuid(), project_id: draft.project_id, prompt: draft.prompt, ...draft.selection,
       ...(draft.model ? { model: { model_provider: draft.model.choice.model.model_provider,
         model_id: draft.model.choice.model.model_id, catalog_revision: draft.model.catalog_revision,
-        runtime_profile_id: draft.model.runtime_profile_id, runtime_revision: draft.model.runtime_revision } } : {}) }; }
+        runtime_profile_id: draft.model.runtime_profile_id, runtime_revision: draft.model.runtime_revision,
+        ...(draft.model.runtime_plan_id !== undefined ? { runtime_plan_id: draft.model.runtime_plan_id } : {}) } } : {}) }; }
     catch (failure) { records.current.set(draft_id, { ...draft, error: errorMessage(failure) }); publish(); return; }
     const uploads: ImageUploadReceipt[] = [];
     const attempt: DraftAttempt = { request, uploads, release_uploads: () => releaseImageUploads(uploads, transport.release ?? transport.invoke) };

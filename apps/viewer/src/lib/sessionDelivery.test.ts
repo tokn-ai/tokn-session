@@ -9,9 +9,9 @@ beforeEach(() => vi.mocked(invoke).mockReset());
 it("keeps draft model discovery and creation proof on the captured machine without local fallback", async () => {
   const { send, calls } = machineInvoker();
   calls.mockResolvedValue({});
-  const target = { project_id: "repo", provider: "codex" as const, runtime_profile_id: "local", runtime_revision: 3 };
+  const target = { project_id: "repo", provider: "codex" as const, runtime_profile_id: "local", runtime_revision: 3, runtime_plan_id: "verified-plan" };
   const request = { ...target, request_id: "first", prompt: "Hello", model: { model_provider: "openai", model_id: "chosen",
-    catalog_revision: "catalog", runtime_profile_id: "local", runtime_revision: 3 } };
+    catalog_revision: "catalog", runtime_profile_id: "local", runtime_revision: 3, runtime_plan_id: "verified-plan" } };
   await listSessionCreationModels(target, send);
   await createProjectSession(request, send);
   expect(calls.mock.calls).toEqual([["list_session_creation_models", { request: target }], ["create_project_session", { request }]]);

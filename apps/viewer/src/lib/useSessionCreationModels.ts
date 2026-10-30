@@ -8,12 +8,13 @@ export interface SessionDraftModel {
   catalog_revision: string;
   runtime_profile_id: string | null;
   runtime_revision: number | null;
+  runtime_plan_id?: string | null;
   scope_key: string;
 }
 
 export function creationModelScope(request: ListSessionCreationModelsRequest, default_profile_id: string | null, default_revision: number | null): string {
   return JSON.stringify([request.project_id, request.provider, request.runtime_profile_id ?? null, request.runtime_revision ?? null,
-    request.runtime_profile_id ? null : default_profile_id, request.runtime_profile_id ? null : default_revision]);
+    request.runtime_profile_id ? null : default_profile_id, request.runtime_profile_id ? null : default_revision, request.runtime_plan_id ?? null]);
 }
 
 interface CatalogView {
@@ -52,8 +53,12 @@ export function useSessionCreationModels(request: ListSessionCreationModelsReque
     const lifetime = epoch.current;
     update({ ...latest.current, loading: true, error: null });
     try {
-      const result = await load(request_ref.current);
+      const target = request_ref.current;
+      const result = await load(target);
       if (lifetime !== epoch.current) return;
+      if (target.runtime_plan_id && result.runtime_plan_id !== target.runtime_plan_id) {
+        throw new Error("The runtime configuration changed while loading models. Refresh the agent configuration before choosing a model.");
+      }
       update({ loading: false, result, error: null });
     } catch (failure) {
       if (lifetime !== epoch.current) return;
@@ -66,10 +71,12 @@ export function useSessionCreationModels(request: ListSessionCreationModelsReque
     if (!enabled || !active.current || latest_owner.current !== owner || current.loading || current.error
       || !current.result?.catalog_revision || !verified) return null;
     return { choice: verified, catalog_revision: current.result.catalog_revision, scope_key,
-      runtime_profile_id: current.result.runtime_profile_id, runtime_revision: current.result.runtime_revision };
+      runtime_profile_id: current.result.runtime_profile_id, runtime_revision: current.result.runtime_revision,
+      ...(current.result.runtime_plan_id !== undefined ? { runtime_plan_id: current.result.runtime_plan_id } : {}) };
   }, [enabled, owner, scope_key]);
-  const selectionValid = (selected: SessionDraftModel | null) => !selected || selected.scope_key === scope_key && !value.loading
+  const selectionValid = (selected: SessionDraftModel | null) => !selected || selected.scope_key === scope_key && !value.loading && !value.error
     && (!value.result || value.result.catalog_revision === selected.catalog_revision
+      && (value.result.runtime_plan_id ?? null) === (selected.runtime_plan_id ?? null)
       && value.result.models.some((choice) => sameModel(choice.model, selected.choice.model)));
 
   return {

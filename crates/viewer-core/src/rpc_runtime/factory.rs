@@ -247,19 +247,7 @@ impl core_runtime::RuntimeHost for Host {
   type Profile = RpcResolvedProfile;
 
   fn resolve_profile(&self, profile_id: &str, revision: u64) -> Result<Self::Profile, String> {
-    if let Some(profile) = self
-      .transient_profiles
-      .lock()
-      .unwrap_or_else(|error| error.into_inner())
-      .get(profile_id)
-      .cloned()
-    {
-      if profile.revision != revision {
-        return Err("Runtime profile changed before connection".into());
-      }
-      return Ok(profile);
-    }
-    self.profiles.resolve_at_revision(profile_id, revision)
+    self.resolver.resolve_profile(profile_id, revision)
   }
 
   fn describe(&self, profile: &Self::Profile) -> core_runtime::ProfileDescriptor {
@@ -298,40 +286,13 @@ impl core_runtime::RuntimeHost for Host {
     cwd: &'a std::path::Path,
   ) -> AdapterFuture<'a, Result<(String, u64), String>> {
     Box::pin(async move {
-      // Pi history requires a verified file and the owned-session driver.
-      if provider == Provider::Pi {
-        return Err("Continue this Pi session through its verified owned-session runtime".into());
-      }
-      let profiles = self.profiles.clone();
+      let resolver = self.resolver.clone();
       let cwd = cwd.to_path_buf();
-      let selected = tokio::task::spawn_blocking(move || {
-        let snapshot = profiles.snapshot()?;
-        let profile = super::workflow::select_profile(&snapshot, provider, &cwd)?;
-        let Some(profile) = profile else {
-          return Ok((None, snapshot.revision, cwd));
-        };
-        Ok::<_, String>((Some(profile.profile_id.clone()), snapshot.revision, cwd))
-      })
-      .await
-      .map_err(|_| "Could not select a runtime profile")??;
-      if let Some(profile_id) = selected.0 {
-        return Ok((profile_id, selected.1));
-      }
-      let profile = tokio::task::spawn_blocking(move || super::workflow::builtin_codex(&selected.2))
+      let plan = tokio::task::spawn_blocking(move || resolver.resolve_plan(provider, &cwd, None))
         .await
-        .map_err(|_| "Could not discover the local Codex executable")??;
-      let profile_id = profile.profile.profile_id.clone();
-      let mut transient = self
-        .transient_profiles
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-      if !transient.contains_key(&profile_id) && transient.len() >= 256 {
-        return Err(
-          "Project runtime configuration limit reached; reopen the app to clear inactive configurations".into(),
-        );
-      }
-      transient.entry(profile_id.clone()).or_insert(profile);
-      Ok((profile_id, 0))
+        .map_err(|_| "Could not resolve the local runtime")??;
+      let selection = plan.shared_runtime_selection()?;
+      Ok((selection.profile_id, selection.expected_revision))
     })
   }
 

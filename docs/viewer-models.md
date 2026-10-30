@@ -22,20 +22,29 @@ most 1 MiB before falling back to unknown preceding context.
 ## Live commands
 
 New-session drafts use `list_session_creation_models`, scoped to the local
-project, provider and runtime revision. Opening the picker lazily queries a
-verified catalog, reusing a connected runtime or closing a temporary metadata
+project, provider and resolved runtime plan. Availability, catalog reads and
+first Send use the same host resolver. The additive `runtime_plan_id` pins
+configuration identity/revision, strategy and working folder without exposing
+launch configuration; it is distinct from a live instance or an authorization
+token. Opening the picker lazily queries a verified catalog, reusing a connected
+runtime or closing a temporary metadata
 process afterwards. Pi uses `--no-session`; its normal CLI startup still loads
 configuration/extensions and can run native migrations. No saved conversation,
 prompt or model-setting call is made during discovery.
 
 **Use runtime default** preserves existing creation behavior. Explicit Pi,
 Codex and OpenCode choices stay in the draft until Send, reset when the
-project/provider/runtime changes, and determine image compatibility. DSH remains
-default-only because its creation API does not accept a model. The host verifies
-the catalog scope again before admission and checks the actual creation runtime
-before applying the model. Pi uses creation-only launch arguments and verifies
-native state; Codex/OpenCode pass native creation parameters. The selected model
-identity belongs to the same durable creation fingerprint as the first prompt;
+project/provider/runtime changes, and determine image compatibility. A refreshed
+runtime plan also clears the model choice while preserving text/images. DSH
+remains default-only because its creation API does not accept a model. The host verifies
+the complete plan before and after catalog discovery, again before admission,
+and checks the actual creation runtime before applying the model. Stale
+project/profile/default or executable metadata rejects the old selection. Pi
+uses the common plan contract with its existing worker and catalog. Its driver
+passes creation-only launch arguments and verifies native state;
+Codex/OpenCode pass native creation parameters. The selected model
+identity and runtime-plan proof belong to the same durable creation fingerprint
+as the first prompt. RPC receipts also retain the exact resolved plan;
 uncertain results never trigger a separate setter or prompt replay. Native
 catalog details and credentials do not enter receipts. This flow remains local
 desktop only and does not change existing-session RPC model capabilities.

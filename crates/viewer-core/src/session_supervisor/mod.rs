@@ -1,6 +1,7 @@
 //! Host-owned session coordination. Provider drivers retain native semantics;
 //! runtime processes and connections remain owned by the runtime manager.
 mod controls;
+mod resolution;
 mod rpc;
 
 use crate::{
@@ -78,6 +79,17 @@ impl VerifiedSession {
       provider: self.provider()?,
       native_id: self.input.session_id.clone(),
     })
+  }
+
+  fn runtime_descriptor(&self) -> Result<tokn_interaction_core::runtime_plan::VerifiedSessionDescriptor, String> {
+    tokn_interaction_core::runtime_plan::VerifiedSessionDescriptor::from_verified_history(
+      self.provider()?,
+      tokn_interaction_core::runtime::NativeSessionDescriptor {
+        native_id: self.input.session_id.clone(),
+        working_directory: self.cwd.clone(),
+        history_path: Some(self.input.session_file.clone()),
+      },
+    )
   }
 
   fn identity(&self) -> String {

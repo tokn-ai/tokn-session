@@ -24,6 +24,38 @@ does not start it or replace an already connected binding. Corrupt or newer-form
 storage is preserved;
 repairing the file and choosing Refresh retries the read without restarting.
 
+Automatic resolution prefers a suitable saved default or sole suitable profile.
+An explicit profile must match its revision/provider and launch requirements;
+invalid or ambiguous saved configuration does not silently fall back. OpenCode
+profiles must match the native session or draft project folder. If no suitable
+profile exists, the host can discover managed local runtimes without saving a
+profile:
+
+| Provider | Executable override | PATH command |
+| --- | --- | --- |
+| Codex | `TOKN_SESSION_CODEX_EXECUTABLE` | `codex` |
+| OpenCode | `TOKN_SESSION_OPENCODE_EXECUTABLE` | `opencode` |
+| DSH | `TOKN_SESSION_DSH_EXECUTABLE` | `dsh` |
+
+Overrides are executable paths or names, without shell syntax or arguments. An
+unavailable override fails instead of choosing another binary. Discovery checks
+canonical paths and executable metadata without launching agents; native
+compatibility is checked on connection. Discovered configurations are scoped to
+their project and pin executable metadata, so a replaced binary requires fresh
+resolution. The bounded transient inventory is not a saved-profile registry.
+Pi creation uses `TOKN_SESSION_PI_EXECUTABLE`/`PATH` through its existing worker,
+represented by the same plan contract; selecting a saved Pi profile for a draft
+is not supported yet.
+
+Availability, draft model catalogs and first Send use one `RuntimePlan` resolver.
+Its configuration/revision, ownership, reuse scope, strategy and working folder
+are distinct from a live instance. Public draft contracts carry an additive
+SHA-256 `runtime_plan_id`, which the host compares before admission. It is a
+configuration fence, not an authorization token. RPC creation receipts retain
+the exact plan; retrying an existing request does not resolve a different default.
+Existing-session activation combines a pinned plan with host-verified native
+history. Executable paths, environment values and credentials remain host-side.
+
 Reads expose environment variable names and credential kinds, never their
 values. Writes can retain, replace, or clear saved environment/authentication.
 Attached OpenCode supports Basic authentication; attached Codex/DSH support
@@ -81,12 +113,11 @@ claiming that same session. Codex subagents remain controlled through their
 parent. OpenCode V1 history cannot bind to a V2 runtime.
 
 First Send can start/connect the selected runtime and resume/bind an existing
-session. Codex defaults to RPC and can discover a local executable when no
-suitable saved profile exists; Desktop control must be explicitly selected.
+session. Codex defaults to RPC; Desktop control must be explicitly selected.
 Bound metadata and live callback answers use the common service. Runtime
 failures do not automatically select another transport or replay a prompt.
 Opening historical work remains view-only. Local desktop projects can create
-Codex/OpenCode/DSH sessions through these configured runtimes; OpenCode V2 local
+Codex/OpenCode/DSH sessions through saved or discovered runtimes; OpenCode V2 local
 history is supported. Arbitrary Pi history adoption and remote-only RPC history
 remain future work. See [shared session supervision](shared-session-supervisor.md).
 

@@ -367,6 +367,8 @@ struct FakeHost {
 
 struct FakeHostState {
   opens: AtomicUsize,
+  selections: AtomicUsize,
+  profile_override: Mutex<Option<ProfileDescriptor>>,
   fail_close: AtomicBool,
   adapter: Mutex<Option<Arc<FakeAdapter>>>,
   open_wait: Mutex<Option<oneshot::Receiver<()>>>,
@@ -377,10 +379,17 @@ impl RuntimeHost for FakeHost {
   type Profile = ProfileDescriptor;
 
   fn resolve_profile(&self, id: &str, revision: u64) -> Result<Self::Profile, String> {
-    if id != self.profile.profile_id || revision != self.profile.revision {
+    let profile = self
+      .shared
+      .profile_override
+      .lock()
+      .unwrap()
+      .clone()
+      .unwrap_or_else(|| self.profile.clone());
+    if id != profile.profile_id || revision != profile.revision {
       return Err("Profile changed".into());
     }
-    Ok(self.profile.clone())
+    Ok(profile)
   }
 
   fn describe(&self, profile: &Self::Profile) -> ProfileDescriptor {
@@ -404,7 +413,17 @@ impl RuntimeHost for FakeHost {
     _provider: Provider,
     _cwd: &'a Path,
   ) -> AdapterFuture<'a, Result<(String, u64), String>> {
-    Box::pin(async { Ok((self.profile.profile_id.clone(), self.profile.revision)) })
+    Box::pin(async {
+      self.shared.selections.fetch_add(1, Ordering::SeqCst);
+      let profile = self
+        .shared
+        .profile_override
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| self.profile.clone());
+      Ok((profile.profile_id, profile.revision))
+    })
   }
 
   fn open<'a>(
@@ -570,6 +589,8 @@ impl InteractionAdapter for FakeAdapter {
 fn fixture() -> (RuntimeCoordinator<FakeHost>, Arc<FakeHostState>) {
   let shared = Arc::new(FakeHostState {
     opens: AtomicUsize::new(0),
+    selections: AtomicUsize::new(0),
+    profile_override: Mutex::new(None),
     fail_close: AtomicBool::new(false),
     adapter: Mutex::new(None),
     open_wait: Mutex::new(None),
@@ -829,4 +850,161 @@ async fn unregistered_uncertain_cleanup_remains_visible_and_holds_profile_lease_
   second.start(request).await.unwrap();
   assert_eq!(shared.opens.load(Ordering::SeqCst), 2);
   second.shutdown().await;
+}
+
+fn resolved_test_plan(runtime: &RuntimeCoordinator<FakeHost>) -> crate::runtime_plan::RuntimePlan {
+  use crate::runtime_plan::{RuntimeConfigurationIdentity, RuntimePlan, RuntimeReuseScope, RuntimeStrategy};
+  let profile = &runtime.0.host.profile;
+  RuntimePlan {
+    provider: profile.provider,
+    configuration: RuntimeConfigurationIdentity {
+      id: profile.profile_id.clone(),
+      revision: profile.revision,
+    },
+    ownership: profile.ownership,
+    reuse_scope: RuntimeReuseScope::Runtime,
+    strategy: RuntimeStrategy::SharedRuntime,
+    working_directory: std::env::temp_dir(),
+  }
+}
+
+fn verified_test_session(plan: &crate::runtime_plan::RuntimePlan) -> crate::runtime_plan::VerifiedSessionDescriptor {
+  crate::runtime_plan::VerifiedSessionDescriptor::from_verified_history(
+    plan.provider,
+    NativeSessionDescriptor {
+      native_id: "planned-native-id".into(),
+      working_directory: plan.working_directory.clone(),
+      history_path: Some(std::env::temp_dir().join("host-verified-history.jsonl")),
+    },
+  )
+  .unwrap()
+}
+
+#[tokio::test]
+async fn planned_resume_pins_configuration_and_deduplicates_without_sending_input() {
+  let (runtime, shared) = fixture();
+  let plan = resolved_test_plan(&runtime);
+  let descriptor = verified_test_session(&plan);
+  let request_id = uuid::Uuid::new_v4().to_string();
+  let second_id = uuid::Uuid::new_v4().to_string();
+  let (first, concurrent) = tokio::join!(
+    runtime.ensure_session_with_plan(&request_id, "planned-key", plan.clone(), descriptor.clone()),
+    runtime.ensure_session_with_plan(&second_id, "planned-key", plan.clone(), descriptor.clone()),
+  );
+  let binding = first.unwrap();
+  assert_eq!(binding.target, concurrent.unwrap().target);
+  assert_eq!(
+    runtime
+      .ensure_session_with_plan(&request_id, "planned-key", plan.clone(), descriptor.clone())
+      .await
+      .unwrap()
+      .target,
+    binding.target
+  );
+  assert_eq!(
+    shared.selections.load(Ordering::SeqCst),
+    0,
+    "a pinned plan must never resolve another default"
+  );
+  assert_eq!(shared.opens.load(Ordering::SeqCst), 1);
+  let adapter = shared.adapter.lock().unwrap().clone().unwrap();
+  assert_eq!(adapter.resumes.load(Ordering::SeqCst), 1);
+  assert_eq!(adapter.creates.load(Ordering::SeqCst), 0);
+  assert_eq!(adapter.sends.load(Ordering::SeqCst), 0);
+  let mut changed = plan.clone();
+  changed.reuse_scope = crate::runtime_plan::RuntimeReuseScope::Project;
+  assert!(
+    runtime
+      .ensure_session_with_plan(&request_id, "planned-key", changed, descriptor.clone())
+      .await
+      .is_err()
+  );
+  let mut changed = descriptor.native().clone();
+  changed.history_path = Some(std::env::temp_dir().join("another-verified-history.jsonl"));
+  let changed = crate::runtime_plan::VerifiedSessionDescriptor::from_verified_history(plan.provider, changed).unwrap();
+  assert!(
+    runtime
+      .ensure_session_with_plan(&request_id, "planned-key", plan, changed)
+      .await
+      .is_err()
+  );
+  assert_eq!(adapter.resumes.load(Ordering::SeqCst), 1);
+  runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn planned_resume_rejects_stale_or_mismatched_configuration_before_opening() {
+  let (runtime, shared) = fixture();
+  let plan = resolved_test_plan(&runtime);
+  let mut stale = plan.clone();
+  stale.configuration.revision += 1;
+  let mut provider = plan.clone();
+  provider.provider = Provider::OpenCode;
+  let mut ownership = plan.clone();
+  ownership.ownership = Ownership::Managed;
+  let mut worker = ownership.clone();
+  worker.strategy = crate::runtime_plan::RuntimeStrategy::SessionWorker;
+  worker.reuse_scope = crate::runtime_plan::RuntimeReuseScope::Session;
+  for invalid in [stale, provider, ownership, worker] {
+    let descriptor = verified_test_session(&invalid);
+    assert!(
+      runtime
+        .ensure_session_with_plan(&uuid::Uuid::new_v4().to_string(), "key", invalid, descriptor)
+        .await
+        .is_err()
+    );
+  }
+  let mut other_directory = plan.clone();
+  other_directory.working_directory.push("another-project");
+  assert!(
+    runtime
+      .ensure_session_with_plan(
+        &uuid::Uuid::new_v4().to_string(),
+        "key",
+        plan,
+        verified_test_session(&other_directory)
+      )
+      .await
+      .is_err()
+  );
+  assert_eq!(shared.opens.load(Ordering::SeqCst), 0);
+  assert_eq!(shared.selections.load(Ordering::SeqCst), 0);
+  runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn planned_resume_does_not_reuse_a_binding_from_another_configuration_or_revision() {
+  let (runtime, shared) = fixture();
+  let plan = resolved_test_plan(&runtime);
+  let descriptor = verified_test_session(&plan);
+  runtime
+    .ensure_session_with_plan(
+      &uuid::Uuid::new_v4().to_string(),
+      "key",
+      plan.clone(),
+      descriptor.clone(),
+    )
+    .await
+    .unwrap();
+  let mut updated = runtime.0.host.profile.clone();
+  updated.revision += 1;
+  for different_profile in [false, true] {
+    if different_profile {
+      updated.profile_id = uuid::Uuid::new_v4().to_string();
+    }
+    *shared.profile_override.lock().unwrap() = Some(updated.clone());
+    let mut changed = plan.clone();
+    changed.configuration.id = updated.profile_id.clone();
+    changed.configuration.revision = updated.revision;
+    let error = runtime
+      .ensure_session_with_plan(&uuid::Uuid::new_v4().to_string(), "key", changed, descriptor.clone())
+      .await
+      .unwrap_err();
+    assert!(error.contains("different runtime configuration"), "{error}");
+  }
+  assert_eq!(shared.opens.load(Ordering::SeqCst), 1);
+  assert_eq!(shared.selections.load(Ordering::SeqCst), 0);
+  let adapter = shared.adapter.lock().unwrap().clone().unwrap();
+  assert_eq!(adapter.resumes.load(Ordering::SeqCst), 1);
+  runtime.shutdown().await;
 }

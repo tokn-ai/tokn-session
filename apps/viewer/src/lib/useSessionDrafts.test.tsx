@@ -75,6 +75,22 @@ describe("app-only session drafts", () => {
     expect(result.current.drafts[0].locked).toBe(true);
   });
 
+  it("invalidates a model when an automatic plan changes and freezes the new plan even with runtime default", async () => {
+    const host = connection(); const { result } = renderHook(() => useSessionDrafts(options(), host.transport)); let id!: string;
+    const file = new File(["image"], "screen.png", { type: "image/png" });
+    act(() => { id = result.current.createDraft("project"); result.current.updateDraft(id, { selection: { provider: "codex", runtime_plan_id: "plan-one" }, prompt: "Keep text" }); });
+    act(() => { result.current.updateDraft(id, { model: { ...selected_model, runtime_profile_id: null, runtime_revision: null, runtime_plan_id: "plan-one" } }); result.current.addImages(id, [file]); });
+    act(() => result.current.updateDraft(id, { selection: { provider: "codex", runtime_plan_id: "plan-two" } }));
+    expect(result.current.drafts[0]).toMatchObject({ model: null, prompt: "Keep text", selection: { runtime_plan_id: "plan-two" } });
+    expect(result.current.drafts[0].images[0].file).toBe(file);
+    act(() => result.current.removeImage(id, result.current.drafts[0].images[0].draft_id));
+    await act(() => result.current.sendDraft(id));
+    expect(request(host)).toMatchObject({ provider: "codex", prompt: "Keep text", runtime_plan_id: "plan-two" });
+    expect(request(host).model).toBeUndefined();
+    act(() => result.current.updateDraft(id, { selection: { provider: "codex", runtime_plan_id: "plan-three" } }));
+    expect(request(host).runtime_plan_id).toBe("plan-two");
+  });
+
   it("creates multiple editable drafts without invoking any native command", () => {
     const host = connection();
     const { result } = renderHook(() => useSessionDrafts(options(), host.transport));

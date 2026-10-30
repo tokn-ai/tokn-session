@@ -25,6 +25,8 @@ pub struct CreateProjectSessionRequest {
   pub image_ids: Vec<String>,
   #[serde(default)]
   pub model: Option<crate::ModelIdentity>,
+  #[serde(default)]
+  pub runtime_plan_id: Option<String>,
 }
 
 /// Host-validated immutable image bytes. Filesystem upload paths stay in the host.

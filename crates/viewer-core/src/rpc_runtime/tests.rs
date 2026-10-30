@@ -8,6 +8,7 @@ use std::{
 };
 use tokio::{sync::watch, task::JoinSet};
 mod http_peer;
+mod resolution;
 mod workflow_tests;
 
 pub(crate) struct CodexPeer {
@@ -175,7 +176,9 @@ async fn wait_until(mut condition: impl FnMut() -> bool) {
 }
 
 fn manager() -> RpcRuntimeManager {
-  RpcRuntimeManager::new(None, InteractionService::default())
+  let manager = RpcRuntimeManager::new(None, InteractionService::default());
+  manager.set_discovery_environment(discovery::DiscoveryEnvironment::default());
+  manager
 }
 
 #[test]
@@ -183,25 +186,19 @@ fn pinned_builtin_model_runtime_does_not_follow_a_new_saved_default_or_another_p
   let manager = manager();
   let folder = tempfile::tempdir().unwrap();
   let cwd = std::fs::canonicalize(folder.path()).unwrap();
-  let builtin = RpcResolvedProfile {
-    revision: 0,
-    profile: RpcRuntimeProfile {
-      profile_id: uuid::Uuid::new_v4().to_string(),
-      name: "Built-in test Codex".into(),
-      provider: Provider::Codex,
-      mode: RpcRuntimeMode::Managed,
-      executable: Some(std::env::current_exe().unwrap().to_string_lossy().into_owned()),
-      arguments: Vec::new(),
-      working_directory: Some(cwd.to_string_lossy().into_owned()),
-      endpoint: None,
-      environment_keys: Vec::new(),
-      credential_kind: None,
-      is_default: false,
-    },
-    environment: BTreeMap::new(),
-    credentials: RpcCredentials::None,
+  let environment = discovery::DiscoveryEnvironment {
+    path: None,
+    executables: BTreeMap::from([(
+      "TOKN_SESSION_CODEX_EXECUTABLE".into(),
+      std::env::current_exe().unwrap().into_os_string(),
+    )]),
   };
-  let pinned = manager.pin_builtin_creation_profile(builtin).unwrap();
+  manager.set_discovery_environment(environment);
+  let pinned = manager
+    .resolve_plan(Provider::Codex, &cwd, None)
+    .unwrap()
+    .shared_runtime_selection()
+    .unwrap();
   let added = save_profile(&manager, attached_profile("ws://127.0.0.1:1".into()));
   assert_eq!(
     manager
@@ -211,9 +208,11 @@ fn pinned_builtin_model_runtime_does_not_follow_a_new_saved_default_or_another_p
   );
   assert_eq!(
     manager
-      .creation_model_selection(Provider::Codex, &cwd, Some(&pinned))
+      .resolve_plan(Provider::Codex, &cwd, Some(&pinned))
+      .unwrap()
+      .shared_runtime_selection()
       .unwrap(),
-    Some(pinned.clone())
+    pinned.clone()
   );
   assert_eq!(
     manager

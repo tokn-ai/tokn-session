@@ -4,7 +4,8 @@ use crate::workspace::{
   CreateProjectSessionRequest, ListSessionCreationModelsRequest, RegisteredProject, SessionCreationModels,
 };
 use sha2::{Digest, Sha256};
-use tokn_interaction_core::{ModelChoice, Provider as LiveProvider, runtime::RuntimeSelection};
+use tokn_interaction_core::runtime_plan::{RuntimePlan, RuntimeStrategy};
+use tokn_interaction_core::{ModelChoice, Provider as LiveProvider};
 
 const MAX_MODELS: usize = 512;
 
@@ -16,20 +17,27 @@ impl ViewerService {
     self.check_managed_workspace()?;
     let service = self.clone();
     let scope = request.clone();
-    let (project, runtime) = tokio::task::spawn_blocking(move || service.creation_model_scope(&scope))
+    let (project, plan) = tokio::task::spawn_blocking(move || service.creation_model_scope(&scope))
       .await
       .map_err(|_| "Could not validate the model catalog scope")??;
+    let runtime = if plan.strategy == RuntimeStrategy::SharedRuntime {
+      Some(plan.shared_runtime_selection()?)
+    } else {
+      None
+    };
+    let runtime_plan_id = Some(plan.fingerprint()?);
     if request.provider == LiveProvider::Dsh {
       return Ok(SessionCreationModels {
         models: Vec::new(),
         catalog_revision: None,
         runtime_profile_id: runtime.as_ref().map(|runtime| runtime.profile_id.clone()),
         runtime_revision: runtime.as_ref().map(|runtime| runtime.expected_revision),
+        runtime_plan_id,
         reason: Some("DSH uses its runtime default when creating a session.".into()),
       });
     }
     let cwd = PathBuf::from(&project.folder_path);
-    let models = if request.provider == LiveProvider::Pi {
+    let models = if plan.strategy == RuntimeStrategy::SessionWorker {
       self.sessions.managed.creation_models(cwd).await?
     } else {
       self
@@ -44,14 +52,13 @@ impl ViewerService {
     // selection made against the new configuration.
     let service = self.clone();
     let provider = request.provider;
-    let (current_project, current_runtime) =
-      tokio::task::spawn_blocking(move || service.creation_model_scope(&request))
-        .await
-        .map_err(|_| "Could not recheck the model catalog scope")??;
-    if current_project.folder_path != project.folder_path || current_runtime != runtime {
+    let (current_project, current_plan) = tokio::task::spawn_blocking(move || service.creation_model_scope(&request))
+      .await
+      .map_err(|_| "Could not recheck the model catalog scope")??;
+    if current_project.folder_path != project.folder_path || current_plan != plan {
       return Err("The project or runtime changed while loading models. Open the model picker again.".into());
     }
-    let revision = catalog_revision(&project, provider, &runtime, &models)?;
+    let revision = catalog_revision(&project, provider, &plan, &models)?;
     Ok(SessionCreationModels {
       reason: models
         .is_empty()
@@ -60,35 +67,32 @@ impl ViewerService {
       catalog_revision: Some(revision),
       runtime_profile_id: runtime.as_ref().map(|runtime| runtime.profile_id.clone()),
       runtime_revision: runtime.as_ref().map(|runtime| runtime.expected_revision),
+      runtime_plan_id,
     })
   }
 
   fn creation_model_scope(
     &self,
     request: &ListSessionCreationModelsRequest,
-  ) -> Result<(RegisteredProject, Option<RuntimeSelection>), String> {
+  ) -> Result<(RegisteredProject, RuntimePlan), String> {
     let project = self.validated_project(&request.project_id)?;
     let selected = super::session_creation::selected_creation_runtime(
       request.runtime_profile_id.as_deref(),
       request.runtime_revision,
     )?;
-    let runtime = if request.provider == LiveProvider::Pi {
-      if selected.is_some() {
-        return Err("Pi uses its managed-session configuration; choose Automatic".into());
-      }
-      self.sessions.managed.available()?;
-      None
-    } else {
-      self.sessions.runtimes.creation_model_selection(
-        request.provider,
-        Path::new(&project.folder_path),
-        selected.as_ref(),
-      )?
-    };
-    Ok((project, runtime))
+    let plan =
+      self
+        .sessions
+        .resolve_creation_plan(request.provider, Path::new(&project.folder_path), selected.as_ref())?;
+    validate_plan_fence(request.runtime_plan_id.as_deref(), &plan)?;
+    Ok((project, plan))
   }
 
-  pub(super) async fn preflight_creation_model(&self, request: &CreateProjectSessionRequest) -> Result<(), String> {
+  pub(super) async fn preflight_creation_model(
+    &self,
+    request: &CreateProjectSessionRequest,
+    plan: &RuntimePlan,
+  ) -> Result<(), String> {
     let Some(selection) = &request.model else {
       return Ok(());
     };
@@ -105,6 +109,9 @@ impl ViewerService {
         provider: request.provider,
         runtime_profile_id: request.runtime_profile_id.clone(),
         runtime_revision: request.runtime_revision,
+        // Fence the server-resolved plan too, including older clients that did
+        // not send a proof. Metadata must not switch Automatic mid-admission.
+        runtime_plan_id: Some(plan.fingerprint()?),
       })
       .await?;
     validate_selection(request, &catalog)
@@ -148,7 +155,7 @@ fn normalize_models(mut models: Vec<ModelChoice>) -> Result<Vec<ModelChoice>, St
 fn catalog_revision(
   project: &RegisteredProject,
   provider: LiveProvider,
-  runtime: &Option<RuntimeSelection>,
+  plan: &RuntimePlan,
   models: &[ModelChoice],
 ) -> Result<String, String> {
   let identities: Vec<_> = models
@@ -161,7 +168,7 @@ fn catalog_revision(
       )
     })
     .collect();
-  let bytes = serde_json::to_vec(&(&project.project_id, &project.folder_path, provider, runtime, identities))
+  let bytes = serde_json::to_vec(&(&project.project_id, &project.folder_path, provider, plan, identities))
     .map_err(|error| error.to_string())?;
   Ok(format!("{:x}", Sha256::digest(bytes)))
 }
@@ -171,6 +178,10 @@ fn validate_selection(request: &CreateProjectSessionRequest, catalog: &SessionCr
   if catalog.catalog_revision.as_deref() != Some(&selection.catalog_revision)
     || catalog.runtime_profile_id != selection.runtime_profile_id
     || catalog.runtime_revision != selection.runtime_revision
+    || selection
+      .runtime_plan_id
+      .as_ref()
+      .is_some_and(|id| catalog.runtime_plan_id.as_ref() != Some(id))
   {
     return Err("The available models or runtime changed. Choose a model again, or use the runtime default.".into());
   }
@@ -183,6 +194,16 @@ fn validate_selection(request: &CreateProjectSessionRequest, catalog: &SessionCr
     .ok_or("The selected model is no longer available. Choose a model again, or use the runtime default.")?;
   if !request.image_ids.is_empty() && !choice.supports_images {
     return Err("The selected model does not support images. Keep the draft and choose an image-capable model.".into());
+  }
+  Ok(())
+}
+
+pub(super) fn validate_plan_fence(expected: Option<&str>, plan: &RuntimePlan) -> Result<(), String> {
+  if let Some(expected) = expected {
+    tokn_interaction_core::runtime_plan::validate_plan_id(expected)?;
+    if plan.fingerprint()? != expected {
+      return Err("The runtime configuration changed. Refresh the draft and choose its runtime again.".into());
+    }
   }
   Ok(())
 }
@@ -227,12 +248,14 @@ mod tests {
       provider: LiveProvider::Codex,
       runtime_profile_id: None,
       runtime_revision: None,
+      runtime_plan_id: None,
       model: Some(SessionCreationModelSelection {
         model_provider: None,
         model_id: "text-only".into(),
         catalog_revision: "a".repeat(64),
         runtime_profile_id: Some("runtime".into()),
         runtime_revision: Some(1),
+        runtime_plan_id: None,
       }),
     };
     let catalog = SessionCreationModels {
@@ -240,6 +263,7 @@ mod tests {
       catalog_revision: Some("a".repeat(64)),
       runtime_profile_id: Some("runtime".into()),
       runtime_revision: Some(1),
+      runtime_plan_id: None,
       reason: None,
     };
     assert!(validate_selection(&request, &catalog).unwrap_err().contains("images"));

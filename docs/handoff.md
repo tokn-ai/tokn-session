@@ -26,9 +26,11 @@ native session or upload starts until the first Send. Opening a draft model
 picker can briefly start a metadata RPC process; it never creates or resumes a
 saved conversation. Pi, Codex and OpenCode choices remain local to each draft,
 reset with project/provider/runtime changes, and are revalidated and applied
-before its first prompt. DSH retains its runtime default. Catalog scope pins
-the resolved runtime/revision; creation receipts include model identity without
-changing legacy default-model fingerprints. Draft IDs never
+before its first prompt. DSH retains its runtime default. Availability, catalogs
+and first Send share a host-resolved `RuntimePlan`; an opaque `runtime_plan_id`
+pins configuration and project scope without exposing launch configuration.
+Stale plans reject before admission. Creation receipts include model identity
+without changing legacy default-model fingerprints. Draft IDs never
 enter native history/subscription APIs. The first Send uses existing guarded
 creation receipts and promotes only verified history with confirmed input;
 uncertain/rejected input retains the original draft and checks the same receipt
@@ -39,14 +41,18 @@ can add a project with an empty registry. See [projects and creation](viewer-pro
 Pi, Codex, OpenCode and DSH creation remains local desktop only.
 Provider/runtime options are checked without starting agents; lazy model catalogs
 reuse connected runtimes or close temporary metadata processes after querying.
-Codex retains executable discovery; OpenCode requires a
-runtime matching the project folder. Creation currently requires host-readable
+Automatic prefers a suitable saved default or sole suitable profile, then
+discovers local Codex/OpenCode/DSH executables through provider overrides or
+`PATH`. Explicit profiles never fall back; OpenCode profiles must match the
+project folder. Creation currently requires host-readable
 native history; HTTP/Hub/browser creation remains out of scope.
 Drafts link unavailable RPC runtimes to Settings → Agent runtimes and refresh
 their options after profile changes or closing Settings, preserving draft input.
 `interaction-core::creation` owns durable phases, cancellation and no-replay
-receipts; `runtime` reserves/adopts created targets without an extra resume.
-Pi keeps its existing managed worker/catalog. UUID provider bindings are shared
+receipts; RPC receipts persist the exact resolved plan so retries do not select
+a changed default. `runtime` reserves/adopts created targets without an extra
+resume. Pi uses the same typed resolution boundary while keeping its existing
+managed worker/catalog and receipt strategy. UUID provider bindings are shared
 across both strategies. OpenCode V2 local SQLite history now displays alongside
 V1, while only V2 (or receipt-proven new empty sessions) can use RPC control.
 See [projects and creation](viewer-projects.md) for configuration and recovery.

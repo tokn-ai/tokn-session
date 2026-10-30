@@ -50,18 +50,20 @@ export function DraftConversation({ draft, projects, workspace_available, worksp
   const runtime = agent?.runtimes.find((entry) => entry.profile_id === runtime_id);
   const runtime_current = !runtime_id || !!runtime && runtime.revision === draft.selection.runtime_revision;
   const agent_available = !!agent && (runtime_id ? runtime?.available === true && runtime_current : agent.available);
+  const runtime_plan_id = runtime_id ? runtime?.runtime_plan_id : agent?.runtime_plan_id;
+  const plan_current = (draft.selection.runtime_plan_id ?? null) === (runtime_plan_id ?? null);
   const model_request = { project_id: draft.project_id, ...draft.selection };
   const model_scope = creationModelScope(model_request, agent?.default_profile_id ?? null,
     agent?.runtimes.find((entry) => entry.profile_id === agent.default_profile_id)?.revision ?? null);
   const model = useSessionCreationModels(model_request, model_scope,
-    workspace_available && !!project?.available && agent_available && !options_loading && !options_error, on_load_models);
+    workspace_available && !!project?.available && agent_available && plan_current && !options_loading && !options_error, on_load_models);
   const model_current = model.selectionValid(draft.model);
   const images_allowed = agent?.supports_images === true && (!draft.model || model_current && draft.model.choice.supports_images);
   const length = Array.from(draft.prompt).length;
   const over_limit = length > MAX_MESSAGE_LENGTH;
   const can_send = workspace_available && !!project?.available && agent_available && !options_loading && !options_error
     && !draft.locked && !draft.sending && !over_limit && (!!draft.prompt.trim() || !!draft.images.length)
-    && model_current && (!draft.images.length || images_allowed);
+    && plan_current && model_current && (!draft.images.length || images_allowed);
   const checking_existing = draft.locked || draft.uncertain;
   const unavailable_projects = projects.filter((entry) => !entry.available);
 
@@ -77,6 +79,12 @@ export function DraftConversation({ draft, projects, workspace_available, worksp
       .finally(() => { if (!cancelled) setOptionsLoading(false); });
     return () => { cancelled = true; };
   }, [draft.project_id, project?.available, workspace_available, on_load_options, options_retry]);
+
+  useEffect(() => {
+    if (agent && !options_loading && !draft.locked && runtime_current && !plan_current) {
+      on_change({ selection: { ...draft.selection, runtime_plan_id: runtime_plan_id ?? null } });
+    }
+  }, [agent, draft.locked, draft.selection, on_change, options_loading, plan_current, runtime_current, runtime_plan_id]);
 
   useEffect(() => {
     if (agent && !options_loading && !draft.locked && draft.model && draft.model.scope_key !== model_scope) on_change({ model: null });

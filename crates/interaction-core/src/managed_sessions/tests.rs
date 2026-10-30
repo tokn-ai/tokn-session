@@ -137,6 +137,7 @@ fn request(folder: &Path) -> (CreateProjectSessionRequest, RegisteredProject) {
       prompt: "initial prompt".into(),
       image_ids: Vec::new(),
       model: None,
+      runtime_plan_id: None,
     },
     RegisteredProject {
       project_id: "opaque-project".into(),
@@ -166,6 +167,10 @@ fn creation_model_fingerprints_preserve_legacy_receipts_and_ignore_display_names
     display_name: None,
   });
   let selected = creation_fingerprint(&request, "/project").unwrap();
+  assert_eq!(
+    selected,
+    "a6ca9e3f36325fd1e0d606ce310ada3add5ff0b804b7e3f2e73a5c050fdb2134"
+  );
   assert_ne!(selected, legacy);
   request.model.as_mut().unwrap().display_name = Some("Updated label".into());
   assert_eq!(creation_fingerprint(&request, "/project").unwrap(), selected);
@@ -188,6 +193,132 @@ fn creation_model_identity_is_bounded_before_admission() {
       assert!(validate_creation_model(&model).is_err());
     }
   }
+}
+
+#[test]
+fn creation_plan_fences_are_optional_bounded_and_part_of_the_fingerprint() {
+  let directory = tempfile::tempdir().unwrap();
+  let (mut request, _) = request(directory.path());
+  for model in [
+    None,
+    Some(crate::ModelIdentity {
+      model_provider: Some("provider".into()),
+      model_id: "model".into(),
+      display_name: None,
+    }),
+  ] {
+    request.model = model;
+    let legacy = creation_fingerprint(&request, "/project").unwrap();
+    request.runtime_plan_id = Some("a".repeat(64));
+    validate_creation_request(&request).unwrap();
+    let pinned = creation_fingerprint(&request, "/project").unwrap();
+    assert_ne!(pinned, legacy);
+    request.runtime_plan_id = Some("b".repeat(64));
+    assert_ne!(creation_fingerprint(&request, "/project").unwrap(), pinned);
+    request.runtime_plan_id = None;
+    assert_eq!(creation_fingerprint(&request, "/project").unwrap(), legacy);
+  }
+  for invalid in [
+    "".to_owned(),
+    "a".repeat(63),
+    "a".repeat(65),
+    "g".repeat(64),
+    " ".repeat(64),
+  ] {
+    request.runtime_plan_id = Some(invalid);
+    assert!(
+      validate_creation_request(&request)
+        .unwrap_err()
+        .contains("runtime plan")
+    );
+  }
+}
+
+#[tokio::test]
+async fn creation_plan_fence_survives_resume_and_cannot_be_changed_by_a_worker_or_duplicate() {
+  let directory = tempfile::tempdir().unwrap();
+  let path = directory.path().join("managed.json");
+  let driver = Arc::new(TestDriver::default());
+  let manager = test_manager(Some(path.clone()), &driver);
+  let (mut request, project) = request(directory.path());
+  request.runtime_plan_id = Some("a".repeat(64));
+  manager.create(request.clone(), project).await.unwrap();
+  wait_status(&manager, &request.request_id, ManagedSessionStatus::Idle).await;
+  let (original, generation) = {
+    let records = manager.inner.records.lock().unwrap();
+    let record = records.get(&request.request_id).unwrap();
+    (record.receipt.clone(), record.generation)
+  };
+  let host = ManagedHostContext {
+    inner: Arc::downgrade(&manager.inner),
+    id: request.request_id.clone(),
+    generation,
+  };
+  for plan_id in [None, Some("b".repeat(64))] {
+    let mut changed = original.clone();
+    changed.runtime_plan_id = plan_id.clone();
+    assert!(
+      host
+        .update(changed)
+        .await
+        .unwrap_err()
+        .contains("immutable creation intent")
+    );
+    let mut changed = request.clone();
+    changed.runtime_plan_id = plan_id;
+    assert!(
+      manager
+        .creation_receipt(&changed)
+        .unwrap_err()
+        .contains("different content")
+    );
+  }
+  let mut changed = original.clone();
+  changed.model = Some(crate::ModelIdentity {
+    model_provider: Some("provider".into()),
+    model_id: "changed".into(),
+    display_name: None,
+  });
+  assert!(
+    host
+      .update(changed)
+      .await
+      .unwrap_err()
+      .contains("immutable creation intent")
+  );
+  manager.shutdown().await;
+  let restored = test_manager(Some(path), &driver);
+  assert_eq!(
+    restored
+      .inner
+      .store
+      .latest(&request.request_id)
+      .unwrap()
+      .unwrap()
+      .runtime_plan_id,
+    request.runtime_plan_id
+  );
+  restored
+    .resume(ManagedSessionRequest {
+      request_id: Some(request.request_id.clone()),
+      session_key: None,
+    })
+    .await
+    .unwrap();
+  wait_status(&restored, &request.request_id, ManagedSessionStatus::Idle).await;
+  assert_eq!(driver.starts.load(Ordering::SeqCst), 2);
+  assert_eq!(driver.prompts.lock().unwrap().as_slice(), ["initial prompt"]);
+  assert_eq!(
+    restored
+      .inner
+      .store
+      .latest(&request.request_id)
+      .unwrap()
+      .unwrap()
+      .runtime_plan_id,
+    request.runtime_plan_id
+  );
+  restored.shutdown().await;
 }
 
 async fn wait_status(manager: &ManagedSessions, id: &str, expected: ManagedSessionStatus) -> ManagedSessionSnapshot {

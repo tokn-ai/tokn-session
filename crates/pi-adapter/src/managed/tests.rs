@@ -788,6 +788,7 @@ if mode == 'ignore_eof':
         available: true,
       };
       let request = CreateProjectSessionRequest {
+        runtime_plan_id: None,
         request_id: uuid::Uuid::new_v4().to_string(),
         project_id,
         prompt: prompt.into(),

@@ -97,14 +97,12 @@ impl ViewerService {
       .await
       .map_err(|_| SessionCreationError::not_started("Could not validate the project folder"))?
       .map_err(SessionCreationError::not_started)?;
-    if request.provider != tokn_interaction_core::Provider::Pi {
-      self
-        .preflight_rpc_creation(&request, &project)
-        .await
-        .map_err(SessionCreationError::not_started)?;
-    }
+    let runtime_plan = self
+      .preflight_creation_runtime(&request, &project)
+      .await
+      .map_err(SessionCreationError::not_started)?;
     self
-      .preflight_creation_model(&request)
+      .preflight_creation_model(&request, &runtime_plan)
       .await
       .map_err(SessionCreationError::not_started)?;
     let images = if request.image_ids.is_empty() {
@@ -124,12 +122,23 @@ impl ViewerService {
       .map_err(|_| SessionCreationError::not_started("Could not load image attachments"))?
       .map_err(SessionCreationError::not_started)?
     };
+    if request.provider == tokn_interaction_core::Provider::Pi
+      && self
+        .preflight_creation_runtime(&request, &project)
+        .await
+        .map_err(SessionCreationError::not_started)?
+        != runtime_plan
+    {
+      return Err(SessionCreationError::not_started(
+        "The Pi runtime configuration changed. Refresh the draft before sending.",
+      ));
+    }
     self
       .claim_creation_route(&request)
       .await
       .map_err(SessionCreationError::not_started)?;
     if request.provider != tokn_interaction_core::Provider::Pi {
-      return self.start_rpc_creation(request, project, images).await;
+      return self.start_rpc_creation(request, project, images, runtime_plan).await;
     }
     let snapshot = self
       .sessions
@@ -537,6 +546,7 @@ for line in sys.stdin:
       provider: tokn_interaction_core::Provider::Pi,
       runtime_profile_id: None,
       runtime_revision: None,
+      runtime_plan_id: None,
       model: None,
       request_id: uuid::Uuid::new_v4().to_string(),
       project_id: project.project_id,
@@ -786,6 +796,7 @@ for line in sys.stdin:
           provider: tokn_interaction_core::Provider::Pi,
           runtime_profile_id: None,
           runtime_revision: None,
+          runtime_plan_id: None,
           model: None,
           request_id: uuid::Uuid::new_v4().to_string(),
           project_id: project.project_id,
@@ -832,6 +843,7 @@ for line in sys.stdin:
         provider: tokn_interaction_core::Provider::Pi,
         runtime_profile_id: None,
         runtime_revision: None,
+        runtime_plan_id: None,
         model: None,
         request_id: uuid::Uuid::new_v4().to_string(),
         project_id: project.project_id.clone(),

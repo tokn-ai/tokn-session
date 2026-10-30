@@ -135,8 +135,50 @@ fn request() -> CreationRequest {
     },
     image_ids: vec![],
     runtime: None,
+    runtime_plan: None,
+    runtime_plan_id: None,
     model: None,
   }
+}
+
+#[tokio::test]
+async fn creation_plan_survives_restart_without_replaying_input_or_re_resolving_configuration() {
+  use crate::runtime_plan::{RuntimeConfigurationIdentity, RuntimePlan, RuntimeReuseScope, RuntimeStrategy};
+  let directory = tempfile::tempdir().unwrap();
+  let path = directory.path().join("receipts.json");
+  let host = Arc::new(Host::default());
+  host.uncertain_send.store(true, Ordering::SeqCst);
+  let manager = CreationManager::new(Some(path.clone()), host.clone()).unwrap();
+  let mut request = request();
+  let plan = RuntimePlan {
+    provider: request.provider,
+    configuration: RuntimeConfigurationIdentity {
+      id: "64f80e49-1898-462c-8a21-598ad0cd405f".into(),
+      revision: 7,
+    },
+    ownership: crate::Ownership::Managed,
+    reuse_scope: RuntimeReuseScope::Project,
+    strategy: RuntimeStrategy::SharedRuntime,
+    working_directory: request.working_directory.clone(),
+  };
+  request.runtime_plan_id = Some(plan.fingerprint().unwrap());
+  request.runtime_plan = Some(plan.clone());
+  manager.create(request.clone()).await.unwrap();
+  let snapshot = settled(&manager, &request.request_id).await;
+  assert_eq!(snapshot.runtime_plan, Some(plan));
+  assert_eq!(snapshot.first_input, FirstInputState::Uncertain);
+  manager.shutdown().await;
+  drop(manager);
+  let restored = CreationManager::new(Some(path), host.clone()).unwrap();
+  let receipt = restored.create(request.clone()).await.unwrap();
+  assert_eq!(receipt.runtime_plan_id, request.runtime_plan_id);
+  assert_eq!(host.creates.load(Ordering::SeqCst), 1);
+  assert_eq!(host.sends.load(Ordering::SeqCst), 1);
+  request.runtime_plan_id = None;
+  assert_eq!(restored.receipt(&request).unwrap_err().kind, ErrorKind::Conflict);
+  let mut changed = request.clone();
+  changed.runtime_plan.as_mut().unwrap().working_directory = directory.path().to_path_buf();
+  assert_eq!(restored.receipt(&changed).unwrap_err().kind, ErrorKind::InvalidRequest);
 }
 
 #[test]

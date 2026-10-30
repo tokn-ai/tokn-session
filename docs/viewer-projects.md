@@ -22,14 +22,17 @@ window closes or reloads. **Discard draft** removes an editable draft immediatel
 
 **Automatic** uses a suitable
 provider default or a single suitable saved profile. Ambiguous profiles require
-an explicit choice. Missing configuration shows an actionable reason before
-creation. Opening a draft checks configuration without starting a runtime.
+an explicit choice. If no suitable saved profile exists, Codex/OpenCode/DSH can
+use a local executable discovered through their `TOKN_SESSION_*_EXECUTABLE`
+override or `PATH`; see [runtime configuration](viewer-rpc-runtimes.md).
+An explicit profile or executable override never silently falls back. Missing
+configuration shows an actionable reason before creation. Opening a draft checks
+configuration without starting a runtime.
 Unavailable RPC agents offer **Configure agent runtime**, opening Settings at
 **Agent runtimes**. Returning to the draft or saving a runtime profile refreshes
 its configuration without discarding text, images or the selected project.
-OpenCode and DSH require saved profiles; selecting them does not install or
-automatically discover their executables. OpenCode's runtime folder must match
-the draft's project folder.
+OpenCode's saved runtime folder must match the draft's project folder;
+discovered runtimes are scoped to that folder.
 New session remains accessible when no folder is available. Choose **Add project**
 inside the conversation to register an existing directory and return to the same
 provider, prompt and image draft.
@@ -40,10 +43,15 @@ The draft model picker offers verified Pi, Codex and OpenCode choices, or
 applies the model before the first prompt. Changing project, agent or runtime
 clears the choice while retaining text/images. An incompatible model keeps image
 attachments visible and blocks Send until corrected. DSH remains default-only.
-Codex uses app-server RPC and its existing local executable discovery if no saved
-profile exists. OpenCode requires a runtime whose configured directory matches
-the selected project. DSH passes the project directory to native session creation
-and retains the deployment’s default agent preset.
+Codex uses app-server RPC. DSH passes the project directory to native session
+creation and retains the deployment’s default agent preset.
+
+Availability, catalog reads and first Send share a resolved runtime plan. Drafts
+retain its opaque `runtime_plan_id` and the host checks it again before admitting
+creation. A changed project, saved profile/default or discovered executable
+invalidates the old scope; refreshing options clears only the model choice and
+keeps text/images. Pi uses this same plan boundary while retaining its existing
+worker execution and receipts. Checking availability never launches an agent.
 
 Initial images are supported for Pi, Codex and OpenCode, with host-side validation
 against the effective model before delivery. DSH currently advertises no verified
@@ -65,8 +73,9 @@ The shared core durably admits one UUID before native effects. OpenCode/DSH use
 reserved native IDs; Codex returns its native thread ID. First-prompt admission
 has its own state, and a disconnect or timeout never automatically recreates a
 session or replays that prompt. **Check session start** observes the same original
-request, provider, runtime, revision and model intent. The draft becomes the saved conversation
-only after both verified history and confirmed first-input acceptance. A background
+request, provider, resolved runtime plan, revision and model intent. The draft
+becomes the saved conversation only after both verified history and confirmed
+first-input acceptance. A background
 completion never changes the currently selected conversation. While acceptance
 is unresolved, **Open saved conversation** can view verified history without
 discarding the original draft. Native questions and Stop/Resume controls use the
@@ -80,10 +89,12 @@ its reserved native ID and adopt the exact existing runtime owner. The first
 prompt is still marked unsent and is never replayed during this reconciliation.
 Codex cannot recover an unacknowledged server-assigned ID through this receipt.
 
-`viewer/session-creations.json` stores bounded RPC creation identities, phases and
-fingerprints, not prompt/image bytes, environment or credentials. The existing
-Pi `managed-sessions.json` stores optional creation model identity too; omitted
-choices preserve legacy fingerprints and leases.
+`viewer/session-creations.json` stores bounded RPC creation identities, phases,
+fingerprints and the exact resolved runtime plan. Retrying a receipt never
+selects a changed default. It does not store prompt/image bytes, executable
+paths, environment or credentials. The existing Pi `managed-sessions.json`
+stores optional creation model identity and runtime-plan proof too; omitted
+fields preserve legacy fingerprints and leases.
 `session-creation-routes.json` binds canonical creation UUIDs to one provider
 across processes and both strategies. Saturated or malformed catalogs reject new
 creation while preserving read-only viewing and their original data.

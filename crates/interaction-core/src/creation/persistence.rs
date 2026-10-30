@@ -120,6 +120,8 @@ impl Store {
         || current.project_id != receipt.project_id
         || current.working_directory != receipt.working_directory
         || current.runtime != receipt.runtime
+        || current.runtime_plan != receipt.runtime_plan
+        || current.runtime_plan_id != receipt.runtime_plan_id
         || current.model != receipt.model
         || current.planned_native_id != receipt.planned_native_id
       {
@@ -182,6 +184,25 @@ fn validate_receipt(receipt: &CreationSnapshot) -> Result<(), String> {
   }
   if let Some(selection) = &receipt.runtime {
     validate_profile_id(&selection.profile_id)?;
+  }
+  if let Some(plan) = &receipt.runtime_plan {
+    let selection = plan.shared_runtime_selection()?;
+    if plan.provider != receipt.provider
+      || plan.working_directory != receipt.working_directory
+      || receipt.runtime.as_ref().is_some_and(|runtime| runtime != &selection)
+      || receipt
+        .runtime_plan_id
+        .as_ref()
+        .is_some_and(|id| plan.fingerprint().as_ref() != Ok(id))
+      || receipt
+        .created
+        .as_ref()
+        .is_some_and(|created| created.profile_id != selection.profile_id)
+    {
+      return Err("Creation receipt runtime plan is inconsistent".into());
+    }
+  } else if receipt.runtime_plan_id.is_some() {
+    return Err("Creation receipt runtime plan is missing".into());
   }
   if let Some(model) = &receipt.model {
     crate::runtime::validate_creation_model(model).map_err(|error| error.to_string())?;

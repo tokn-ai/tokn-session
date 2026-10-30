@@ -754,7 +754,19 @@ fn creation_fingerprint(request: &CreateProjectSessionRequest, folder: &str) -> 
   Ok(format!(
     "{:x}",
     Sha256::digest(
-      if let Some(model) = &request.model {
+      if let Some(plan_id) = &request.runtime_plan_id {
+        serde_json::to_vec(&(
+          &request.project_id,
+          folder,
+          &request.prompt,
+          &request.image_ids,
+          request
+            .model
+            .as_ref()
+            .map(|model| (&model.model_provider, &model.model_id)),
+          plan_id,
+        ))
+      } else if let Some(model) = &request.model {
         serde_json::to_vec(&(
           &request.project_id,
           folder,
@@ -799,6 +811,9 @@ pub fn validate_creation_request(request: &CreateProjectSessionRequest) -> Resul
   validate_image_ids(&request.image_ids)?;
   if let Some(model) = &request.model {
     validate_creation_model(model)?;
+  }
+  if let Some(plan_id) = &request.runtime_plan_id {
+    crate::runtime_plan::validate_plan_id(plan_id)?;
   }
   validate_message(&request.prompt, !request.image_ids.is_empty())
 }

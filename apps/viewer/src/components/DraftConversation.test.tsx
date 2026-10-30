@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ManagedSessionSnapshot, RegisteredProject, SessionCreationOptions, SessionSummary } from "../lib/types";
+import type { ManagedSessionSnapshot, RegisteredProject, RpcProvider, SessionCreationOptions, SessionSummary } from "../lib/types";
 import type { SessionDraft } from "../lib/useSessionDrafts";
 import { DraftConversation, type DraftConversationProps } from "./DraftConversation";
 
@@ -36,6 +36,48 @@ async function ready() { await waitFor(() => expect(screen.queryByText("Checking
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; }
 
 describe("draft conversation", () => {
+  it.each(["pi", "codex", "open_code", "dsh"] as RpcProvider[])("pins %s automatic availability before first Send without loading models", async (provider) => {
+    const available: SessionCreationOptions = { project_id: "repo", providers: [{ provider, available: true, reason: null,
+      supports_images: false, default_profile_id: null, runtimes: [], runtime_plan_id: `${provider}-plan` }] };
+    const input = props({ on_load_options: vi.fn(async () => available) });
+    const send = vi.fn();
+    function Stateful() {
+      const [value, setValue] = useState(draft({ selection: { provider }, prompt: "First task" }));
+      return <DraftConversation {...input} draft={value} on_change={(patch) => setValue((previous) => ({ ...previous, ...patch }))}
+        on_send={() => send(value.selection)} />;
+    }
+    render(<Stateful />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(send).toHaveBeenCalledExactlyOnceWith({ provider, runtime_plan_id: `${provider}-plan` });
+    expect(input.on_load_models).not.toHaveBeenCalled();
+    expect(screen.queryByRole("combobox", { name: "Runtime" })).not.toBeInTheDocument();
+  });
+
+  it("clears a chosen model when automatic configuration changes without saved profiles and preserves the draft", async () => {
+    const file = new File(["png"], "draft.png", { type: "image/png" });
+    const selected = { model: { model_provider: "provider", model_id: "chosen", display_name: "Chosen" }, supports_images: true };
+    const available = (runtime_plan_id: string): SessionCreationOptions => ({ project_id: "repo", providers: [{ provider: "codex", available: true,
+      reason: null, supports_images: true, default_profile_id: null, runtimes: [], runtime_plan_id }] });
+    const input = props({ on_load_models: vi.fn(async () => ({ models: [selected], catalog_revision: "catalog", runtime_profile_id: null,
+      runtime_revision: null, runtime_plan_id: "automatic-one", reason: null })) });
+    function Stateful({ load_options }: { load_options: DraftConversationProps["on_load_options"] }) {
+      const [value, setValue] = useState(draft({ selection: { provider: "codex" }, prompt: "Keep this task", images: [{ draft_id: "image", file, url: "blob:screen" }] }));
+      return <DraftConversation {...input} draft={value} on_load_options={load_options} on_change={(patch) => setValue((previous) => ({ ...previous, ...patch }))} />;
+    }
+    const view = render(<Stateful load_options={async () => available("automatic-one")} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Model: Runtime default/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Chosen provider/ }));
+    expect(screen.getByRole("button", { name: /Model: Chosen/ })).toBeInTheDocument();
+    view.rerender(<Stateful load_options={async () => available("automatic-two")} />);
+    await screen.findByRole("button", { name: /Model: Runtime default/ });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeEnabled());
+    expect(screen.getByRole("textbox", { name: "First message" })).toHaveValue("Keep this task");
+    expect(screen.getByAltText("draft.png")).toBeInTheDocument();
+    expect(input.on_load_models).toHaveBeenCalledExactlyOnceWith({ project_id: "repo", provider: "codex", runtime_plan_id: "automatic-one" });
+    expect(input.on_send).not.toHaveBeenCalled();
+  });
+
   it("does not suggest saved RPC profiles to repair managed Pi configuration", async () => {
     const configured = options();
     configured.providers[0] = { ...configured.providers[0], available: false, reason: "Managed Pi is unavailable." };

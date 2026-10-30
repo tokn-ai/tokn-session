@@ -9,6 +9,7 @@ use tokn_interaction_core::creation::{
   CreationHost, CreationManager, CreationPhase, CreationRequest, CreationSnapshot,
 };
 use tokn_interaction_core::runtime::{CreatedNativeSession, RuntimeSelection};
+use tokn_interaction_core::runtime_plan::RuntimePlan;
 use tokn_interaction_core::{
   AdapterFuture, Command, DeliveryMode, ErrorKind, InteractionError, MessageInput, Provider as LiveProvider, Reply,
 };
@@ -74,42 +75,35 @@ impl ViewerService {
       LiveProvider::OpenCode,
       LiveProvider::Dsh,
     ] {
-      if provider == LiveProvider::Pi {
-        let ready = self.sessions.managed.available();
-        providers.push(SessionCreationProvider {
-          provider,
-          available: ready.is_ok(),
-          reason: ready.err(),
-          supports_images: true,
-          default_profile_id: None,
-          runtimes: Vec::new(),
-        });
-        continue;
-      }
       let mut runtimes = Vec::new();
-      for profile in saved.profiles.iter().filter(|profile| profile.provider == provider) {
-        let ready = profiles
-          .resolve_at_revision(&profile.profile_id, saved.revision)
-          .and_then(|resolved| {
-            resolved.validate_launch_ready()?;
-            validate_creation_profile(&resolved, cwd)
+      if provider != LiveProvider::Pi {
+        for profile in saved.profiles.iter().filter(|profile| profile.provider == provider) {
+          let selected = RuntimeSelection {
+            profile_id: profile.profile_id.clone(),
+            expected_revision: saved.revision,
+          };
+          let plan = self.sessions.resolve_creation_plan(provider, cwd, Some(&selected));
+          runtimes.push(SessionCreationRuntime {
+            profile_id: profile.profile_id.clone(),
+            revision: saved.revision,
+            name: profile.name.clone(),
+            available: plan.is_ok(),
+            reason: plan.as_ref().err().cloned(),
+            runtime_plan_id: plan.ok().map(|plan| plan.fingerprint()).transpose()?,
           });
-        runtimes.push(SessionCreationRuntime {
-          profile_id: profile.profile_id.clone(),
-          revision: saved.revision,
-          name: profile.name.clone(),
-          available: ready.is_ok(),
-          reason: ready.err(),
-        });
+        }
       }
-      let selection = self.sessions.runtimes.creation_selection(provider, cwd, None);
-      let default_profile_id = selection
-        .as_ref()
-        .ok()
-        .and_then(|value| value.as_ref())
-        .map(|selection| selection.profile_id.clone());
-      let available = selection.is_ok();
-      let reason = selection.err();
+      let plan = self.sessions.resolve_creation_plan(provider, cwd, None);
+      let default_profile_id = plan.as_ref().ok().and_then(|plan| {
+        saved
+          .profiles
+          .iter()
+          .find(|profile| profile.profile_id == plan.configuration.id)
+          .map(|profile| profile.profile_id.clone())
+      });
+      let available = plan.is_ok();
+      let reason = plan.as_ref().err().cloned();
+      let runtime_plan_id = plan.ok().map(|plan| plan.fingerprint()).transpose()?;
       providers.push(SessionCreationProvider {
         provider,
         available,
@@ -117,6 +111,7 @@ impl ViewerService {
         supports_images: provider != LiveProvider::Dsh,
         default_profile_id,
         runtimes,
+        runtime_plan_id,
       });
     }
     Ok(SessionCreationOptions {
@@ -291,6 +286,8 @@ impl ViewerService {
       },
       image_ids: request.image_ids.clone(),
       runtime,
+      runtime_plan: existing.runtime_plan.clone(),
+      runtime_plan_id: request.runtime_plan_id.clone(),
       model: request
         .model
         .as_ref()
@@ -310,25 +307,25 @@ impl ViewerService {
       .map_err(SessionCreationError::uncertain)
   }
 
-  pub(super) async fn preflight_rpc_creation(
+  pub(super) async fn preflight_creation_runtime(
     &self,
     request: &crate::workspace::CreateProjectSessionRequest,
     project: &crate::workspace::RegisteredProject,
-  ) -> Result<(), String> {
+  ) -> Result<RuntimePlan, String> {
     if request.provider == LiveProvider::Dsh && !request.image_ids.is_empty() {
       return Err("DSH does not advertise image support for new sessions. Remove the images before starting.".into());
     }
-    let manager = self.sessions.runtimes.clone();
+    let supervisor = self.sessions.clone();
     let provider = request.provider;
     let cwd = PathBuf::from(&project.folder_path);
     let selection = creation_runtime(request)?;
-    tokio::task::spawn_blocking(move || {
-      manager
-        .creation_selection(provider, &cwd, selection.as_ref())
-        .map(|_| ())
-    })
-    .await
-    .map_err(|_| "Could not validate the creation runtime".to_owned())?
+    tokio::task::spawn_blocking(move || supervisor.resolve_creation_plan(provider, &cwd, selection.as_ref()))
+      .await
+      .map_err(|_| "Could not validate the creation runtime".to_owned())?
+      .and_then(|plan| {
+        super::session_creation_models::validate_plan_fence(request.runtime_plan_id.as_deref(), &plan)?;
+        Ok(plan)
+      })
   }
 
   pub(super) async fn start_rpc_creation(
@@ -336,6 +333,7 @@ impl ViewerService {
     request: crate::workspace::CreateProjectSessionRequest,
     project: crate::workspace::RegisteredProject,
     images: Vec<crate::images::ResolvedImage>,
+    runtime_plan: RuntimePlan,
   ) -> Result<crate::workspace::ManagedSessionSnapshot, crate::workspace::SessionCreationError> {
     use crate::workspace::SessionCreationError;
     let manager = self.creation_manager().map_err(SessionCreationError::not_started)?;
@@ -360,6 +358,8 @@ impl ViewerService {
       input,
       image_ids: request.image_ids,
       runtime,
+      runtime_plan: Some(runtime_plan),
+      runtime_plan_id: request.runtime_plan_id,
       model: request
         .model
         .as_ref()
@@ -419,10 +419,16 @@ pub(crate) fn validate_creation_profile(
   profile: &crate::rpc_profiles::RpcResolvedProfile,
   cwd: &Path,
 ) -> Result<(), String> {
-  if profile.profile.provider == LiveProvider::OpenCode
-    && profile.profile.working_directory.as_deref().map(Path::new) != Some(cwd)
-  {
-    return Err("This OpenCode runtime uses another project folder. Configure a runtime for this folder.".into());
+  if profile.profile.provider == LiveProvider::OpenCode {
+    let configured = profile
+      .profile
+      .working_directory
+      .as_deref()
+      .and_then(|path| std::fs::canonicalize(path).ok());
+    let project = std::fs::canonicalize(cwd).map_err(|_| "The project folder is unavailable")?;
+    if configured.as_deref() != Some(project.as_path()) {
+      return Err("This OpenCode runtime uses another project folder. Configure a runtime for this folder.".into());
+    }
   }
   if profile.profile.mode == RpcRuntimeMode::Attached {
     let endpoint = profile
@@ -456,7 +462,13 @@ impl CreationHost for Host {
   ) -> AdapterFuture<'a, Result<CreatedNativeSession, InteractionError>> {
     Box::pin(async move {
       let runtimes = self.runtimes.clone();
-      let selection = request.runtime.clone();
+      let selection = request
+        .runtime_plan
+        .as_ref()
+        .map(RuntimePlan::shared_runtime_selection)
+        .transpose()
+        .map_err(InteractionError::invalid)?
+        .or_else(|| request.runtime.clone());
       let cwd = request.working_directory.clone();
       let provider = request.provider;
       let selection =

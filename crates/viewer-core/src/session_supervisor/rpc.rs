@@ -66,17 +66,32 @@ impl SessionSupervisor {
         "This RPC runtime cannot atomically apply a draft model on Send",
       ));
     }
-    let binding = self
-      .runtimes
-      .ensure_session(
-        &request.request_id,
-        &target.session_key,
-        target.provider().map_err(DeliveryError::not_sent)?,
-        &target.input.session_id,
-        &target.cwd,
-      )
-      .await
-      .map_err(DeliveryError::not_sent)?;
+    let binding = if self.runtimes.binding(&target.session_key).is_some() {
+      self
+        .runtimes
+        .ensure_session(
+          &request.request_id,
+          &target.session_key,
+          target.provider().map_err(DeliveryError::not_sent)?,
+          &target.input.session_id,
+          &target.cwd,
+        )
+        .await
+    } else {
+      let descriptor = target.runtime_descriptor().map_err(DeliveryError::not_sent)?;
+      let supervisor = self.clone();
+      let cwd = target.cwd.clone();
+      let provider = descriptor.provider();
+      let plan = tokio::task::spawn_blocking(move || supervisor.resolve_runtime_plan(provider, &cwd, None))
+        .await
+        .map_err(|_| DeliveryError::not_sent("Could not resolve the session runtime"))?
+        .map_err(DeliveryError::not_sent)?;
+      self
+        .runtimes
+        .ensure_verified_session(&request.request_id, &target.session_key, plan, descriptor)
+        .await
+    }
+    .map_err(DeliveryError::not_sent)?;
     use base64::Engine;
     let images = images
       .into_iter()

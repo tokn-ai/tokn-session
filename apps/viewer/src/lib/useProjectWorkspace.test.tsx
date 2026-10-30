@@ -44,7 +44,7 @@ describe("local project workspace", () => {
     const { result } = renderHook(() => useProjectWorkspace(options(), host.transport));
     await waitFor(() => expect(result.current.workspace?.available).toBe(true));
     const initial = result.current.loadCreationOptions;
-    act(() => host.runtimesChanged());
+    await act(async () => { host.runtimesChanged(); });
     expect(result.current.loadCreationOptions).not.toBe(initial);
     const after_event = result.current.loadCreationOptions;
     act(() => result.current.refreshCreationOptions());
@@ -52,6 +52,17 @@ describe("local project workspace", () => {
     await act(() => result.current.loadCreationOptions("project"));
     expect(host.invoke).toHaveBeenCalledWith("get_session_creation_options", { request: { project_id: "project" } });
     expect(host.invoke.mock.calls.some(([command]) => command === "create_project_session")).toBe(false);
+  });
+
+  it("refreshes automatic runtime availability on focus without requiring a saved-profile event", async () => {
+    const host = connection();
+    const { result } = renderHook(() => useProjectWorkspace(options(), host.transport));
+    await waitFor(() => expect(result.current.workspace?.available).toBe(true));
+    const before = result.current.loadCreationOptions;
+    await act(async () => { window.dispatchEvent(new Event("focus")); window.dispatchEvent(new Event("focus")); });
+    expect(result.current.loadCreationOptions).not.toBe(before);
+    await act(() => result.current.loadCreationOptions("project"));
+    expect(host.invoke).toHaveBeenCalledWith("get_session_creation_options", { request: { project_id: "project" } });
   });
 
   it("loads creation choices through the selected desktop transport", async () => {

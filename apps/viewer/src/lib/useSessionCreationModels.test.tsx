@@ -29,6 +29,7 @@ it.each([
   { ...request, provider: "pi" as const },
   { ...request, runtime_profile_id: "explicit", runtime_revision: 3 },
   { ...request, runtime_profile_id: "explicit", runtime_revision: 4 },
+  { ...request, runtime_plan_id: "automatic-changed" },
 ])("retires late catalogs after changing draft scope to %j", async (next) => {
   const pending = deferred<SessionCreationModels>();
   const load = vi.fn(() => pending.promise);
@@ -81,6 +82,23 @@ it("invalidates a selected choice when a refreshed catalog or automatic runtime 
   const refreshed = result.current.selectionFor(choice)!;
   rerender({ revision: 4 });
   expect(result.current.selectionValid(refreshed)).toBe(false);
+});
+
+it("pins automatic catalogs without saved profiles and rejects mismatched runtime-plan responses", async () => {
+  const target = { ...request, runtime_plan_id: "automatic-one" };
+  const plan_scope = scope(target);
+  const load = vi.fn().mockResolvedValueOnce(catalog({ runtime_profile_id: null, runtime_revision: null, runtime_plan_id: "automatic-one" }))
+    .mockResolvedValueOnce(catalog({ runtime_profile_id: null, runtime_revision: null, runtime_plan_id: "automatic-two" }));
+  const { result } = renderHook(() => useSessionCreationModels(target, plan_scope, true, load));
+  await act(() => result.current.loadChoices());
+  const selected = result.current.selectionFor(choice)!;
+  expect(selected).toMatchObject({ runtime_profile_id: null, runtime_revision: null, runtime_plan_id: "automatic-one" });
+  expect(load).toHaveBeenCalledWith(target);
+  await act(() => result.current.loadChoices());
+  expect(result.current.error).toMatch(/runtime configuration changed/);
+  expect(result.current.selectionValid(selected)).toBe(false);
+  expect(result.current.selectionFor(choice)).toBeNull();
+  expect(result.current.selectionValid(null)).toBe(true);
 });
 
 it("does not read models after unmount or while the workspace is unavailable", async () => {

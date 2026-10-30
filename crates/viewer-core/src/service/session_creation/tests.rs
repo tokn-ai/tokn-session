@@ -71,7 +71,12 @@ impl ViewerRepository for Repository {
 }
 
 fn service(provider: ViewerProvider, location: PathBuf) -> ViewerService {
-  ViewerService::new(Arc::new(Repository { provider, location }))
+  let service = ViewerService::new(Arc::new(Repository { provider, location }));
+  service
+    .sessions
+    .runtimes
+    .set_discovery_environment(crate::rpc_runtime::discovery::DiscoveryEnvironment::default());
+  service
 }
 
 fn project(service: &ViewerService, folder: &Path) -> crate::workspace::RegisteredProject {
@@ -210,6 +215,7 @@ fn request(project: &crate::workspace::RegisteredProject) -> CreateProjectSessio
     provider: LiveProvider::Codex,
     runtime_profile_id: None,
     runtime_revision: None,
+    runtime_plan_id: None,
     model: None,
   }
 }
@@ -399,7 +405,14 @@ async fn unsupported_initial_images_never_send_a_first_prompt() {
   service.create_project_session(request.clone()).await.unwrap();
   let receipt = settled(&service, &request.request_id).await;
   assert_eq!(receipt.first_input, FirstInputState::Rejected);
-  assert!(receipt.message.unwrap().contains("image support"));
+  assert!(
+    receipt
+      .message
+      .as_ref()
+      .is_some_and(|message| message.contains("image support")),
+    "{:?}",
+    receipt.message
+  );
   assert_eq!(peer.count("thread/start"), 1);
   assert_eq!(peer.count("turn/start"), 0);
   assert!(!history.exists());
@@ -453,6 +466,8 @@ fn receipt(project: &crate::workspace::RegisteredProject, provider: LiveProvider
     project_id: project.project_id.clone(),
     working_directory: project.folder_path.clone().into(),
     runtime: None,
+    runtime_plan: None,
+    runtime_plan_id: None,
     model: None,
     fingerprint: "a".repeat(64),
     revision: 1,
@@ -480,6 +495,40 @@ fn receipt(project: &crate::workspace::RegisteredProject, provider: LiveProvider
   }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn opencode_creation_accepts_the_same_project_through_a_symlink_without_activation() {
+  let directory = tempfile::tempdir().unwrap();
+  let service = service(ViewerProvider::Codex, directory.path().join("history"));
+  let project = project(&service, &directory.path().join("project"));
+  let alias = directory.path().join("project-alias");
+  std::os::unix::fs::symlink(&project.folder_path, &alias).unwrap();
+  save_profile(
+    &service,
+    LiveProvider::OpenCode,
+    "http://127.0.0.1:1".into(),
+    Some(alias.to_string_lossy().into_owned()),
+    true,
+  )
+  .await;
+  let options = service
+    .get_session_creation_options(SessionCreationOptionsRequest {
+      project_id: project.project_id,
+    })
+    .await
+    .unwrap();
+  let choice = options
+    .providers
+    .iter()
+    .find(|choice| choice.provider == LiveProvider::OpenCode)
+    .unwrap();
+  assert!(choice.available, "{:?}", choice.reason);
+  assert!(choice.runtimes[0].available);
+  assert_eq!(choice.runtime_plan_id, choice.runtimes[0].runtime_plan_id);
+  assert!(service.list_rpc_runtimes().await.unwrap().runtimes.is_empty());
+  service.sessions.shutdown().await;
+}
+
 #[tokio::test]
 async fn draft_catalog_does_not_create_history_and_model_is_applied_once_at_creation() {
   use crate::workspace::{ListSessionCreationModelsRequest, SessionCreationModelSelection};
@@ -497,6 +546,7 @@ async fn draft_catalog_does_not_create_history_and_model_is_applied_once_at_crea
       provider: LiveProvider::Codex,
       runtime_profile_id: None,
       runtime_revision: None,
+      runtime_plan_id: None,
     })
     .await
     .unwrap();
@@ -506,12 +556,14 @@ async fn draft_catalog_does_not_create_history_and_model_is_applied_once_at_crea
   assert!(service.list_rpc_runtimes().await.unwrap().runtimes.is_empty());
   assert_eq!(catalog.runtime_profile_id.as_deref(), Some(profile.as_str()));
   let mut request = request(&project);
+  request.runtime_plan_id = catalog.runtime_plan_id.clone();
   request.model = Some(SessionCreationModelSelection {
     model_provider: catalog.models[0].model.model_provider.clone(),
     model_id: catalog.models[0].model.model_id.clone(),
     catalog_revision: catalog.catalog_revision.unwrap(),
     runtime_profile_id: catalog.runtime_profile_id,
     runtime_revision: catalog.runtime_revision,
+    runtime_plan_id: catalog.runtime_plan_id,
   });
   let (first, duplicate) = tokio::join!(
     service.create_project_session(request.clone()),
@@ -561,6 +613,7 @@ async fn stale_draft_model_is_rejected_before_creation_admission() {
       provider: LiveProvider::Codex,
       runtime_profile_id: None,
       runtime_revision: None,
+      runtime_plan_id: None,
     })
     .await
     .unwrap();
@@ -571,6 +624,7 @@ async fn stale_draft_model_is_rejected_before_creation_admission() {
     catalog_revision: catalog.catalog_revision.unwrap(),
     runtime_profile_id: catalog.runtime_profile_id,
     runtime_revision: catalog.runtime_revision,
+    runtime_plan_id: None,
   });
   // Replacing the Automatic default invalidates the model's pinned revision.
   save_profile(&service, LiveProvider::Codex, peer.endpoint.clone(), None, true).await;
@@ -586,6 +640,148 @@ async fn stale_draft_model_is_rejected_before_creation_admission() {
   );
   assert_eq!(peer.count("thread/start"), 0);
   assert_eq!(peer.count("turn/start"), 0);
+  service.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn runtime_default_is_pinned_from_availability_and_stale_plan_never_activates() {
+  let directory = tempfile::tempdir().unwrap();
+  let service = service(ViewerProvider::Codex, directory.path().join("codex"));
+  let project = project(&service, &directory.path().join("project"));
+  let peer = CodexPeer::start(
+    directory.path().join("history.jsonl"),
+    project.folder_path.clone().into(),
+    true,
+  )
+  .await;
+  save_profile(&service, LiveProvider::Codex, peer.endpoint.clone(), None, true).await;
+  let options = service
+    .get_session_creation_options(SessionCreationOptionsRequest {
+      project_id: project.project_id.clone(),
+    })
+    .await
+    .unwrap();
+  let mut request = request(&project);
+  request.runtime_plan_id = options
+    .providers
+    .iter()
+    .find(|entry| entry.provider == LiveProvider::Codex)
+    .unwrap()
+    .runtime_plan_id
+    .clone();
+  assert!(request.runtime_plan_id.is_some());
+  assert_eq!(peer.count("initialize"), 0);
+  save_profile(&service, LiveProvider::Codex, peer.endpoint.clone(), None, true).await;
+  let error = service.create_project_session(request.clone()).await.unwrap_err();
+  assert!(!error.may_have_started);
+  assert!(error.message.contains("configuration changed"));
+  assert!(
+    service
+      .creation_manager()
+      .unwrap()
+      .get(&request.request_id)
+      .unwrap()
+      .is_none()
+  );
+  assert_eq!(peer.count("initialize"), 0);
+  service.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn model_preflight_keeps_the_server_plan_even_when_the_client_omits_its_proof() {
+  use crate::workspace::{ListSessionCreationModelsRequest, SessionCreationModelSelection};
+  let directory = tempfile::tempdir().unwrap();
+  let service = service(ViewerProvider::Codex, directory.path().join("codex"));
+  let project = project(&service, &directory.path().join("project"));
+  let peer = CodexPeer::start(
+    directory.path().join("history.jsonl"),
+    project.folder_path.clone().into(),
+    true,
+  )
+  .await;
+  save_profile(&service, LiveProvider::Codex, peer.endpoint.clone(), None, true).await;
+  let plan = service
+    .sessions
+    .resolve_creation_plan(LiveProvider::Codex, Path::new(&project.folder_path), None)
+    .unwrap();
+  save_profile(&service, LiveProvider::Codex, peer.endpoint.clone(), None, true).await;
+  let catalog = service
+    .list_session_creation_models(ListSessionCreationModelsRequest {
+      project_id: project.project_id.clone(),
+      provider: LiveProvider::Codex,
+      runtime_profile_id: None,
+      runtime_revision: None,
+      runtime_plan_id: None,
+    })
+    .await
+    .unwrap();
+  let mut request = request(&project);
+  request.model = Some(SessionCreationModelSelection {
+    model_provider: None,
+    model_id: "test-model".into(),
+    catalog_revision: catalog.catalog_revision.unwrap(),
+    runtime_profile_id: catalog.runtime_profile_id,
+    runtime_revision: catalog.runtime_revision,
+    runtime_plan_id: None,
+  });
+  let queries = peer.count("model/list");
+  assert!(
+    service
+      .preflight_creation_model(&request, &plan)
+      .await
+      .unwrap_err()
+      .contains("configuration changed")
+  );
+  assert_eq!(peer.count("model/list"), queries);
+  assert_eq!(peer.count("thread/start"), 0);
+  service.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn all_provider_options_share_typed_plans_without_launching_agents() {
+  use crate::rpc_runtime::discovery::DiscoveryEnvironment;
+  let directory = tempfile::tempdir().unwrap();
+  let mut service = service(ViewerProvider::Codex, directory.path().join("history"));
+  let project = project(&service, &directory.path().join("project"));
+  // Resolution reads metadata only. These test executables must never be run.
+  let executable = std::env::current_exe().unwrap();
+  service.sessions.managed =
+    crate::managed_sessions::ManagedSessions::with_test_executable(None, executable.clone()).unwrap();
+  service
+    .sessions
+    .runtimes
+    .set_discovery_environment(DiscoveryEnvironment {
+      path: None,
+      executables: [
+        "TOKN_SESSION_CODEX_EXECUTABLE",
+        "TOKN_SESSION_OPENCODE_EXECUTABLE",
+        "TOKN_SESSION_DSH_EXECUTABLE",
+      ]
+      .into_iter()
+      .map(|key| (key.to_owned(), executable.clone().into_os_string()))
+      .collect(),
+    });
+  let options = service
+    .get_session_creation_options(SessionCreationOptionsRequest {
+      project_id: project.project_id.clone(),
+    })
+    .await
+    .unwrap();
+  for entry in options.providers {
+    assert!(entry.available, "{:?}: {:?}", entry.provider, entry.reason);
+    let plan = service
+      .sessions
+      .resolve_creation_plan(entry.provider, Path::new(&project.folder_path), None)
+      .unwrap();
+    assert_eq!(
+      entry.runtime_plan_id.as_deref(),
+      Some(plan.fingerprint().unwrap().as_str())
+    );
+    assert!(entry.default_profile_id.is_none());
+    assert!(entry.runtimes.is_empty());
+  }
+  assert!(service.list_rpc_runtimes().await.unwrap().runtimes.is_empty());
+  assert!(service.sessions.managed.list_runtimes().await.is_empty());
   service.sessions.shutdown().await;
 }
 
@@ -609,6 +805,7 @@ async fn ignored_native_model_retains_created_identity_without_sending_first_pro
       provider: LiveProvider::Codex,
       runtime_profile_id: None,
       runtime_revision: None,
+      runtime_plan_id: None,
     })
     .await
     .unwrap();
@@ -619,6 +816,7 @@ async fn ignored_native_model_retains_created_identity_without_sending_first_pro
     catalog_revision: catalog.catalog_revision.unwrap(),
     runtime_profile_id: catalog.runtime_profile_id,
     runtime_revision: catalog.runtime_revision,
+    runtime_plan_id: None,
   });
   service.create_project_session(request.clone()).await.unwrap();
   let receipt = settled(&service, &request.request_id).await;

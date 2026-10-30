@@ -28,6 +28,8 @@ pub struct CreationRequest {
   pub input: MessageInput,
   pub image_ids: Vec<String>,
   pub runtime: Option<RuntimeSelection>,
+  pub runtime_plan: Option<crate::runtime_plan::RuntimePlan>,
+  pub runtime_plan_id: Option<String>,
   /// Creation-time intent, separate from generic model-on-message support.
   pub model: Option<ModelIdentity>,
 }
@@ -63,6 +65,10 @@ pub struct CreationSnapshot {
   pub project_id: String,
   pub working_directory: PathBuf,
   pub runtime: Option<RuntimeSelection>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub runtime_plan: Option<crate::runtime_plan::RuntimePlan>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub runtime_plan_id: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub model: Option<ModelIdentity>,
   pub fingerprint: String,
@@ -300,6 +306,8 @@ impl CreationManager {
       project_id: request.project_id.clone(),
       working_directory: request.working_directory.clone(),
       runtime: request.runtime.clone(),
+      runtime_plan: request.runtime_plan.clone(),
+      runtime_plan_id: request.runtime_plan_id.clone(),
       model: request.model.as_ref().map(crate::runtime::creation_model_identity),
       fingerprint: fingerprint_value,
       revision: 1,
@@ -738,6 +746,23 @@ fn validate_intent(request: &CreationRequest) -> Result<(), InteractionError> {
   if let Some(model) = &request.model {
     crate::runtime::validate_creation_model(model)?;
   }
+  if let Some(plan) = &request.runtime_plan {
+    let selection = plan.shared_runtime_selection().map_err(InteractionError::invalid)?;
+    if plan.provider != request.provider
+      || plan.working_directory != request.working_directory
+      || request.runtime.as_ref().is_some_and(|selected| selected != &selection)
+      || request
+        .runtime_plan_id
+        .as_ref()
+        .is_some_and(|id| plan.fingerprint().as_ref() != Ok(id))
+    {
+      return Err(InteractionError::invalid(
+        "Creation runtime plan does not match its intent",
+      ));
+    }
+  } else if request.runtime_plan_id.is_some() {
+    return Err(InteractionError::invalid("Creation runtime plan is missing"));
+  }
   crate::managed_sessions::validate_message(&request.input.text, !request.image_ids.is_empty())
     .map_err(InteractionError::invalid)
 }
@@ -751,9 +776,15 @@ fn fingerprint(request: &CreationRequest) -> Result<String, InteractionError> {
     &request.runtime,
   );
   // Preserve pre-model receipts byte-for-byte when native defaults are chosen.
-  let payload = match &request.model {
-    None => serde_json::to_vec(&legacy),
-    Some(model) => serde_json::to_vec(&(legacy, crate::runtime::creation_model_identity(model))),
+  let payload = match (&request.runtime_plan, &request.runtime_plan_id, &request.model) {
+    (None, None, None) => serde_json::to_vec(&legacy),
+    (None, None, Some(model)) => serde_json::to_vec(&(legacy, crate::runtime::creation_model_identity(model))),
+    _ => serde_json::to_vec(&(
+      legacy,
+      request.model.as_ref().map(crate::runtime::creation_model_identity),
+      &request.runtime_plan,
+      &request.runtime_plan_id,
+    )),
   }
   .map_err(|_| InteractionError::invalid("Invalid creation intent"))?;
   Ok(format!("{:x}", Sha256::digest(payload)))

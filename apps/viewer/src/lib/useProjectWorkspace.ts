@@ -101,6 +101,15 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
     if (!enabled) return;
     const unlisteners: (() => void)[] = [];
     let cancelled = false;
+    let options_refresh_scheduled = false;
+    const scheduleOptionsRefresh = () => {
+      if (cancelled || options_refresh_scheduled) return;
+      options_refresh_scheduled = true;
+      queueMicrotask(() => {
+        options_refresh_scheduled = false;
+        if (!cancelled) refreshCreationOptions();
+      });
+    };
     void (async () => {
       try {
         const stop = await listenForManagedSessionChanges((snapshot) => {
@@ -121,7 +130,7 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
       } catch { /* Focusing the window recovers cross-window registrations. */ }
       try {
         const stop = await transport.listen("rpc-runtimes-changed", () => {
-          if (!cancelled) refreshCreationOptions();
+          scheduleOptionsRefresh();
         });
         if (cancelled) { stop(); return; }
         unlisteners.push(stop);
@@ -138,7 +147,12 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
       } catch (failure) { if (!cancelled) setError(errorMessage(failure)); }
       finally { if (!cancelled) setLoading(false); }
     })();
-    const focus = () => { if (!cancelled) void refreshProjects(epoch).catch(() => {}); };
+    const focus = () => {
+      if (!cancelled) {
+        void refreshProjects(epoch).catch(() => {});
+        scheduleOptionsRefresh();
+      }
+    };
     window.addEventListener("focus", focus);
     return () => {
       cancelled = true; alive.current = false; lifetime.current += 1;

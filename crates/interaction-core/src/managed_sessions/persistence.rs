@@ -28,6 +28,8 @@ pub struct Receipt {
   pub fingerprint: String,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub model: Option<crate::ModelIdentity>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub runtime_plan_id: Option<String>,
   pub revision: u64,
   pub status: ManagedSessionStatus,
   pub session_id: Option<String>,
@@ -56,6 +58,7 @@ impl Receipt {
       folder: project.folder_path.clone().into(),
       fingerprint,
       model: request.model.clone(),
+      runtime_plan_id: request.runtime_plan_id.clone(),
       revision: 1,
       status: ManagedSessionStatus::Starting,
       session_id: None,
@@ -329,6 +332,9 @@ impl ReceiptStore {
       if let Some(model) = &receipt.model {
         validate_creation_model(model)?;
       }
+      if let Some(plan_id) = &receipt.runtime_plan_id {
+        crate::runtime_plan::validate_plan_id(plan_id)?;
+      }
       if !ids.insert(&receipt.request_id) || !receipt.folder.is_absolute() || receipt.fingerprint.len() != 64 {
         return Err("Invalid managed session ownership receipt".into());
       }
@@ -453,6 +459,7 @@ mod tests {
         prompt: "private prompt is never persisted".into(),
         image_ids: Vec::new(),
         model: None,
+        runtime_plan_id: None,
       },
       &RegisteredProject {
         project_id: "project".into(),
@@ -471,6 +478,16 @@ mod tests {
     value.as_object_mut().unwrap().remove("creation_input_state");
     let old: Receipt = serde_json::from_value(value).unwrap();
     assert_eq!(old.snapshot().creation_input_state, None);
+    assert_eq!(old.runtime_plan_id, None);
+  }
+
+  #[test]
+  fn invalid_saved_runtime_plan_fences_are_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    let (store, _) = new_store(None).unwrap();
+    let mut receipt = receipt(directory.path());
+    receipt.runtime_plan_id = Some("not-a-plan-id".into());
+    assert!(store.admit(receipt).unwrap_err().contains("runtime plan"));
   }
 
   #[test]
