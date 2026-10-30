@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { isDesktop } from "../lib/transport";
 import { useMachineSettings } from "../lib/useMachineSettings";
 import { useViewerPreferences } from "../lib/viewerPreferences";
-import { SettingsPage } from "../pages/SettingsPage";
+import { SettingsPage, type SettingsSection } from "../pages/SettingsPage";
 import { MachineHostingSettings } from "./MachineHostingSettings";
 import { NativePreferenceSaveNotice } from "./NativePreferenceSaveNotice";
 import { ActionNotificationHost } from "./ActionNotifications";
@@ -14,23 +14,24 @@ interface SettingsDialogProps {
   machine_label: string;
   machine_key: string;
   connected?: boolean;
+  initial_section?: SettingsSection;
   on_close: () => void;
   return_focus: RefObject<HTMLButtonElement | null>;
 }
 
-export function SettingsDialog({ remote, machine_label, machine_key, connected = true, on_close, return_focus }: SettingsDialogProps) {
+export function SettingsDialog({ remote, machine_label, machine_key, connected = true, initial_section, on_close, return_focus }: SettingsDialogProps) {
   const dialog = useRef<HTMLDialogElement>(null);
   const local = !remote && isDesktop();
   const machine = useMachineSettings(local, undefined, connected);
   const viewer = useViewerPreferences();
   useEffect(() => {
-    const opener = return_focus.current;
     dialog.current?.showModal();
-    return () => { if (opener?.isConnected) opener.focus({ preventScroll: true }); };
+    return () => { if (return_focus.current?.isConnected) return_focus.current.focus({ preventScroll: true }); };
   }, [return_focus]);
   return createPortal(<dialog ref={dialog} className="settings-dialog" aria-label="Settings"
     onCancel={(event) => { event.preventDefault(); on_close(); }}>
     <SettingsPage
+      initial_section={initial_section}
       on_close={on_close}
       machine_label={machine_label}
       machine_key={machine_key}

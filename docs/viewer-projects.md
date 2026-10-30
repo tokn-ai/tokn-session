@@ -24,6 +24,12 @@ window closes or reloads. **Discard draft** removes an editable draft immediatel
 provider default or a single suitable saved profile. Ambiguous profiles require
 an explicit choice. Missing configuration shows an actionable reason before
 creation. Opening a draft checks configuration without starting a runtime.
+Unavailable RPC agents offer **Configure agent runtime**, opening Settings at
+**Agent runtimes**. Returning to the draft or saving a runtime profile refreshes
+its configuration without discarding text, images or the selected project.
+OpenCode and DSH require saved profiles; selecting them does not install or
+automatically discover their executables. OpenCode's runtime folder must match
+the draft's project folder.
 New session remains accessible when no folder is available. Choose **Add project**
 inside the conversation to register an existing directory and return to the same
 provider, prompt and image draft.

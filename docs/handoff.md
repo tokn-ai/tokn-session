@@ -42,6 +42,8 @@ reuse connected runtimes or close temporary metadata processes after querying.
 Codex retains executable discovery; OpenCode requires a
 runtime matching the project folder. Creation currently requires host-readable
 native history; HTTP/Hub/browser creation remains out of scope.
+Drafts link unavailable RPC runtimes to Settings → Agent runtimes and refresh
+their options after profile changes or closing Settings, preserving draft input.
 `interaction-core::creation` owns durable phases, cancellation and no-replay
 receipts; `runtime` reserves/adopts created targets without an extra resume.
 Pi keeps its existing managed worker/catalog. UUID provider bindings are shared

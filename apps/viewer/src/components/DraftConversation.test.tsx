@@ -36,6 +36,15 @@ async function ready() { await waitFor(() => expect(screen.queryByText("Checking
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; }
 
 describe("draft conversation", () => {
+  it("does not suggest saved RPC profiles to repair managed Pi configuration", async () => {
+    const configured = options();
+    configured.providers[0] = { ...configured.providers[0], available: false, reason: "Managed Pi is unavailable." };
+    render(<DraftConversation {...props({ on_load_options: vi.fn(async () => configured), on_configure_runtime: vi.fn() })} />);
+    await ready();
+    expect(screen.getByText("Managed Pi is unavailable.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Configure agent runtime" })).not.toBeInTheDocument();
+  });
+
   it("loads models on opening the picker, keeps selection local, and gates images by the selected model", async () => {
     const file = new File(["png"], "draft.png", { type: "image/png" });
     const chosen = { model: { model_provider: "provider", model_id: "text-only", display_name: "Text model" }, supports_images: false };

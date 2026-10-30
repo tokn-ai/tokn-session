@@ -41,6 +41,8 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
   const [controlling, setControlling] = useState(false);
   const [input_refresh_key, setInputRefreshKey] = useState(0);
   const [retry, setRetry] = useState(0);
+  const [creation_options_revision, setCreationOptionsRevision] = useState(0);
+  const refreshCreationOptions = useCallback(() => setCreationOptionsRevision((revision) => revision + 1), []);
   const lifetime = useRef(0);
   const alive = useRef(false);
   const control_busy = useRef(false);
@@ -118,6 +120,13 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
         unlisteners.push(stop);
       } catch { /* Focusing the window recovers cross-window registrations. */ }
       try {
+        const stop = await transport.listen("rpc-runtimes-changed", () => {
+          if (!cancelled) refreshCreationOptions();
+        });
+        if (cancelled) { stop(); return; }
+        unlisteners.push(stop);
+      } catch { /* Closing settings also refreshes draft creation options. */ }
+      try {
         const stop = await listenForRelayStatus(() => {
           if (!cancelled) void refreshProjects(epoch).catch(() => {});
         }, transport.listen);
@@ -136,7 +145,7 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
       for (const unlisten of unlisteners) unlisten();
       window.removeEventListener("focus", focus);
     };
-  }, [accept, enabled, machine_key, refreshProjects, refreshRequest, transport]);
+  }, [accept, enabled, machine_key, refreshCreationOptions, refreshProjects, refreshRequest, transport]);
 
   useEffect(() => {
     if (!enabled || retry === 0) return;
@@ -169,7 +178,7 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
     return project;
   }, [enabled, transport, workspace?.available]);
 
-  const loadCreationOptions = useCallback((project_id: string) => getSessionCreationOptions(project_id, transport.invoke), [transport]);
+  const loadCreationOptions = useCallback((project_id: string) => getSessionCreationOptions(project_id, transport.invoke), [transport, creation_options_revision]);
   const loadCreationModels = useCallback((request: ListSessionCreationModelsRequest) => listSessionCreationModels(request, transport.invoke), [transport]);
 
   const control = useCallback(async (kind: "stop" | "resume", snapshot: ManagedSessionSnapshot) => {
@@ -203,7 +212,7 @@ export function useProjectWorkspace(options: WorkspaceOptions, transport_overrid
     workspace, loading, error, managed, pending_dialog_session, controlling, input_refresh_key,
     control_error: managed?.request_id === control_failure?.request_id ? control_failure?.message ?? null : null,
     dialog_error: pending_dialog_session?.request_id === control_failure?.request_id ? control_failure?.message ?? null : null,
-    addProject, loadCreationOptions, loadCreationModels, control, respond, controlErrorFor,
+    addProject, loadCreationOptions, loadCreationModels, refreshCreationOptions, control, respond, controlErrorFor,
     retry: () => setRetry((value) => value + 1),
   };
 }

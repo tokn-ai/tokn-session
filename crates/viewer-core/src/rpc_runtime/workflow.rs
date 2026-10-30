@@ -97,10 +97,17 @@ pub(super) fn select_profile<'a>(
   if !suitable.is_empty() {
     return Err("Choose a default RPC runtime profile for this provider before sending".into());
   }
-  if provider == Provider::Codex {
-    return Ok(None);
-  }
-  Err("No saved RPC runtime profile can continue this session; configure one on the selected machine".into())
+  let reason = match provider {
+    Provider::Codex => return Ok(None),
+    Provider::OpenCode => {
+      "No OpenCode runtime is configured for this project folder. Add a profile in Settings → Agent runtimes with this folder as its working directory."
+    }
+    Provider::Dsh => {
+      "No DSH runtime is configured. Add a managed process or an existing RPC connection in Settings → Agent runtimes."
+    }
+    Provider::Pi => "No Pi runtime is configured. Add a profile in Settings → Agent runtimes.",
+  };
+  Err(reason.into())
 }
 
 pub(super) fn builtin_codex(cwd: &Path) -> Result<RpcResolvedProfile, String> {

@@ -25,6 +25,7 @@ export interface DraftConversationProps {
   on_check: () => void;
   on_discard: () => void;
   on_add_project: () => void;
+  on_configure_runtime?: (trigger: HTMLButtonElement) => void;
   on_sidebar_open: () => void;
   on_load_options: (project_id: string) => Promise<SessionCreationOptions>;
   on_load_models: (request: ListSessionCreationModelsRequest) => Promise<SessionCreationModels>;
@@ -33,7 +34,7 @@ export interface DraftConversationProps {
 
 /** An editable conversation without a native identity or session subscriptions. */
 export function DraftConversation({ draft, projects, workspace_available, workspace_notice, managed_controls,
-  on_change, on_add_images, on_remove_image, on_send, on_check, on_discard, on_add_project,
+  on_change, on_add_images, on_remove_image, on_send, on_check, on_discard, on_add_project, on_configure_runtime,
   on_sidebar_open, on_load_options, on_load_models, on_open_session }: DraftConversationProps) {
   const input_id = useId();
   const textarea = useRef<HTMLTextAreaElement>(null);
@@ -161,6 +162,8 @@ export function DraftConversation({ draft, projects, workspace_available, worksp
         {!options_loading && !options_error && options && !agent ? <p className="draft-conversation__error" role="alert">{agent_name} is unavailable on this machine.</p> : null}
         {runtime_id && agent && !runtime_current ? <p className="draft-conversation__error" role="alert">The selected runtime changed. Choose a runtime again before sending.</p> : null}
         {runtime?.reason || !runtime_id && agent?.reason ? <p className={agent_available ? "draft-conversation__notice" : "draft-conversation__error"} role={agent_available ? "status" : "alert"}>{runtime?.reason ?? agent?.reason}</p> : null}
+        {provider !== "pi" && workspace_available && project?.available && options && !options_loading && !options_error && !agent_available && !draft.locked && on_configure_runtime
+          ? <button className="text-button" type="button" disabled={draft.sending} onClick={(event) => on_configure_runtime(event.currentTarget)}>Configure agent runtime</button> : null}
       </div>
     </div>
 
