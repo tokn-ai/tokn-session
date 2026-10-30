@@ -27,9 +27,5 @@ zeroize = "1"
 libc = "0.2"
 
 [dev-dependencies]
-tokn-session-hub.workspace = true
 axum = { version = "0.8", features = ["ws"] }
-tower-http = { version = "0.6", features = ["cors"] }
 tempfile = "3"
-webauthn-rs = "0.5.5"
-webauthn-authenticator-rs = { version = "0.5.5", default-features = false, features = ["softpasskey"] }

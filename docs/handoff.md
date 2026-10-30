@@ -12,6 +12,8 @@ scaffolding and platform build scripts/configuration are in `apps/viewer`.
 Phone layouts account for safe areas and the visual viewport when keyboards open.
 `hub-remote` now owns native client trust persistence, with the existing Hub
 onboarding exports preserved, so mobile avoids server/SQLite/WebAuthn dependencies.
+Host/client integration tests and the WebRTC smoke example live in the Hub crate
+to keep both runtime and published dependency graphs acyclic.
 Android ARM64 checking, linking, and debug APK packaging pass, along with the
 workspace/viewer tests and Chromium phone/tablet layout checks. iOS is configured
 for 16.4+ but remains unbuilt; native device pairing and keyboard checks remain.

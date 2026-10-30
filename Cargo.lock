@@ -6052,12 +6052,8 @@ dependencies = [
  "tokio-util",
  "tokn-hub-client-core",
  "tokn-hub-transport",
- "tokn-session-hub",
- "tower-http",
  "url",
  "uuid",
- "webauthn-authenticator-rs",
- "webauthn-rs",
  "zeroize",
 ]
 

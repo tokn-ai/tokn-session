@@ -41,6 +41,7 @@ webauthn-rs = "0.5.5"
 zeroize = "1"
 
 [dev-dependencies]
+tower-http = { version = "0.6", features = ["cors"] }
 http-body-util = "0.1"
 tempfile = "3"
 webauthn-authenticator-rs = { version = "0.5.5", default-features = false, features = ["softpasskey"] }
