@@ -92,15 +92,37 @@ development team and provisioning; configure those locally using
 nor signing material is committed. iOS generation/build commands are only
 available from the Tauri CLI on macOS.
 
+## Continuous integration
+
+The **Mobile builds** workflow runs on pull requests, pushes to `main`, and
+manual dispatch. Both jobs build the shared frontend and compile the native
+application with locked Cargo and pnpm dependencies:
+
+- **Android build** uses Ubuntu 24.04, JDK 17, SDK 37, and NDK 29.0.14206865.
+  It builds the checked-in Android project for ARM64, verifies the APK signature
+  and native library, and uploads `tokn-sessions-android-arm64-debug`.
+- **iOS simulator build** uses an Apple Silicon macOS 15 runner. It generates
+  the Xcode project, builds an unsigned ARM64 simulator app, verifies its
+  executable and simulator platform, and uploads
+  `tokn-sessions-ios-simulator-arm64`. The `.app` is archived as `.tar.gz` to
+  retain executable permissions and symlinks. The local equivalent is
+  `bash apps/viewer/scripts/build-ios-ci.sh` from the repository root.
+
+Artifacts are retained for seven days on the workflow run's **Artifacts** page.
+These build checks require no Apple signing credentials or Android release keys.
+They do not boot devices or exercise pairing; the iOS artifact runs in a
+simulator and needs a separate signed device build for an iPhone or iPad.
+Cargo and Gradle caches speed subsequent builds, and newer pushes cancel stale
+mobile runs on the same PR or branch.
+
 ## Device verification
 
 Native verification on Linux passed the Android ARM64 Rust cross-check and full
 debug APK build (frontend assets, Rust linking, Kotlin, resources, and packaging)
 with NDK 29 and JDK 17. The development APK is
 `apps/viewer/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`;
-this build contains the ARM64 ABI. No emulator or physical-device pairing was
-performed. iOS project generation, compilation, and device checks still require
-a Mac with Xcode and have not been verified here.
+this build contains the ARM64 ABI. CI provides the macOS/Xcode build check for
+the iOS simulator. No emulator or physical-device pairing was performed locally.
 
 Chromium layout checks passed at 320×568, 390×844, 412×915, 768×1024,
 and 844×390. The checks exercised the shared conversation, session drawer

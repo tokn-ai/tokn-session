@@ -15,8 +15,10 @@ onboarding exports preserved, so mobile avoids server/SQLite/WebAuthn dependenci
 Host/client integration tests and the WebRTC smoke example live in the Hub crate
 to keep both runtime and published dependency graphs acyclic.
 Android ARM64 checking, linking, and debug APK packaging pass, along with the
-workspace/viewer tests and Chromium phone/tablet layout checks. iOS is configured
-for 16.4+ but remains unbuilt; native device pairing and keyboard checks remain.
+workspace/viewer tests and Chromium phone/tablet layout checks. The Mobile builds
+workflow builds an ARM64 Android debug APK and unsigned iOS 16.4+ ARM64 simulator
+app on PRs/main, with cached tools and downloadable artifacts. The iOS job
+generates its Xcode project on macOS; native pairing and keyboard checks remain.
 See [mobile viewer](viewer-mobile.md) for build setup and device verification.
 
 Local folders discovered in saved session `cwd` metadata now register

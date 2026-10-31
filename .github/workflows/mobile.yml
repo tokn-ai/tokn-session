@@ -1,0 +1,157 @@
+name: Mobile builds
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-builds-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_BUILD_JOBS: "2"
+
+jobs:
+  android:
+    name: Android build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/viewer/pnpm-lock.yaml
+
+      - name: Install Rust targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,aarch64-linux-android
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: mobile-android-arm64
+          cache-on-failure: true
+
+      - name: Install WASM bindings CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install Android SDK and NDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools platforms;android-37.0 build-tools;37.0.0 ndk;29.0.14206865
+
+      - name: Select Android toolchain
+        run: |
+          {
+            echo "ANDROID_SDK_ROOT=$ANDROID_HOME"
+            echo "NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865"
+            echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865"
+            echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/29.0.14206865"
+          } >> "$GITHUB_ENV"
+
+      - name: Cache Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install viewer dependencies
+        working-directory: apps/viewer
+        run: pnpm install --frozen-lockfile
+
+      - name: Build ARM64 debug APK
+        working-directory: apps/viewer
+        run: pnpm tauri android build --ci --debug --apk --target aarch64 -- --locked
+
+      - name: Verify APK native library
+        run: |
+          apk=apps/viewer/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+          unzip -l "$apk" | grep -F 'lib/arm64-v8a/libtokn_session_viewer.so'
+          "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify "$apk"
+
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokn-sessions-android-arm64-debug
+          path: apps/viewer/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  ios:
+    name: iOS simulator build
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/viewer/pnpm-lock.yaml
+
+      - name: Install Rust targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,aarch64-apple-ios-sim
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: mobile-ios-simulator-arm64
+          cache-on-failure: true
+
+      - name: Install WASM bindings CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
+
+      - name: Install Xcode project tools
+        run: brew install xcodegen libimobiledevice cocoapods
+
+      - name: Install viewer dependencies
+        working-directory: apps/viewer
+        run: pnpm install --frozen-lockfile
+
+      - name: Build unsigned simulator app
+        run: bash apps/viewer/scripts/build-ios-ci.sh
+
+      - name: Upload iOS simulator app
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokn-sessions-ios-simulator-arm64
+          path: apps/viewer/src-tauri/gen/apple/build/tokn-sessions-ios-simulator-arm64.tar.gz
+          if-no-files-found: error
+          retention-days: 7
