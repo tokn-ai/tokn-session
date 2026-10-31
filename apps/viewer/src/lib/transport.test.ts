@@ -16,6 +16,20 @@ function stream() {
   return { response: new Response(body), send: (value: string) => controller.enqueue(new TextEncoder().encode(value)), end: () => controller.close() };
 }
 
+it("mobile requires a selected remote machine and never falls through to local commands", async () => {
+  vi.stubGlobal("__TAURI_INTERNALS__", {});
+  vi.stubGlobal("__TOKN_MOBILE__", true);
+  const captured = captureTransport();
+  await expect(invoke("list_sessions")).rejects.toThrow("Connect to a machine first");
+  await expect(captured.invoke("list_sessions")).rejects.toThrow("Connect to a machine first");
+  await expect(listen("session-updated", () => {})).rejects.toThrow("Connect to a machine first");
+  const remote = client();
+  const send = vi.spyOn(remote, "invoke").mockResolvedValue({ sessions: [] });
+  selectMachine(remote);
+  await expect(invoke("list_sessions")).resolves.toEqual({ sessions: [] });
+  expect(send).toHaveBeenCalledWith("list_sessions", undefined);
+});
+
 class LiveSocket {
   static instances: LiveSocket[] = [];
   onopen?: () => void;

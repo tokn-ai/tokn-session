@@ -15,8 +15,7 @@ use std::{
   },
 };
 use tokn_hub_client_core::secure::NoiseIdentity;
-use tokn_hub_remote::{RemoteManager, ResolvedMachine, SavedHost};
-use tokn_session_hub::onboarding::ClientStore;
+use tokn_hub_remote::{ClientStore, RemoteManager, ResolvedMachine, SavedHost};
 use url::Url;
 
 #[derive(Clone)]

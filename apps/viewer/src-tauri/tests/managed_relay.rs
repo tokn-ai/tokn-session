@@ -1,3 +1,5 @@
+#![cfg(desktop)]
+
 //! Exercise the bundled stdio child without a GUI or the user's provider roots.
 use std::{path::Path, process::Stdio, time::Duration};
 use tokio::{

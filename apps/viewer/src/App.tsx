@@ -9,6 +9,8 @@ import { detectHub, hubErrorMessage, type HubStatus } from "./lib/hub";
 import { HubAccess } from "./components/HubAccess";
 import { NativePasskey } from "./components/NativePasskey";
 import { DesktopWorkspace } from "./pages/DesktopWorkspace";
+import { MobileWorkspace } from "./pages/MobileWorkspace";
+import { isMobileApp } from "./lib/platform";
 import { SettingsEntry } from "./components/SettingsEntry";
 import { ActionNotificationsProvider } from "./components/ActionNotifications";
 
@@ -93,6 +95,7 @@ function BrowserGateway({ bootstrap_token }: { bootstrap_token?: string }) {
 interface AppProps { initial_token?: string; bootstrap_token?: string; }
 
 function AppContent({ initial_token, bootstrap_token }: AppProps) {
+  if (isMobileApp()) return <MobileWorkspace />;
   if (isDesktop()) return <DesktopWorkspace />;
   if (window.location.pathname === "/passkey") return <NativePasskey />;
   if (window.location.pathname === "/connect") return <PairedConnection initial_token={initial_token} />;

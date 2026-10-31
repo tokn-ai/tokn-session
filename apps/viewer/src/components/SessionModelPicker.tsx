@@ -27,12 +27,19 @@ export function SessionModelPicker({ model, provider, input_busy = false, select
     if (!open) return;
     const place = () => {
       const rect = trigger.current?.getBoundingClientRect();
+      const visible_top = window.visualViewport?.offsetTop ?? 0;
       if (rect) setPosition({ left: Math.max(12, Math.min(rect.left, window.innerWidth - 332)),
-        bottom: Math.max(12, window.innerHeight - rect.top + 8), maxHeight: Math.min(460, Math.max(80, rect.top - 24)) });
+        bottom: Math.max(12, window.innerHeight - rect.top + 8), maxHeight: Math.min(460, Math.max(80, rect.top - visible_top - 24)) });
     };
     place();
     window.addEventListener("resize", place);
-    return () => window.removeEventListener("resize", place);
+    window.visualViewport?.addEventListener("resize", place);
+    window.visualViewport?.addEventListener("scroll", place);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.visualViewport?.removeEventListener("resize", place);
+      window.visualViewport?.removeEventListener("scroll", place);
+    };
   }, [open]);
 
   useEffect(() => {

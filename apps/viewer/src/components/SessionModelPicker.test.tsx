@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { SessionModelPicker } from "./SessionModelPicker";
 import type { SessionModelController } from "../lib/useSessionModel";
@@ -14,7 +14,24 @@ function controller(overrides: Partial<SessionModelController> = {}): SessionMod
     choiceAllowed: vi.fn(() => true), acceptState: vi.fn(() => true), ...overrides };
 }
 const callbacks = () => ({ on_select: vi.fn(), on_clear: vi.fn() });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+it("repositions an open model panel when a mobile keyboard resizes only the visual viewport", () => {
+  const viewport = Object.assign(new EventTarget(), { offsetTop: 0 });
+  vi.stubGlobal("visualViewport", viewport);
+  render(<SessionModelPicker model={controller()} provider="Pi" {...callbacks()} />);
+  const trigger = screen.getByRole("button", { name: /Change model/ });
+  let top = 600;
+  vi.spyOn(trigger, "getBoundingClientRect").mockImplementation(() => ({ left: 20, top }) as DOMRect);
+  fireEvent.click(trigger);
+  expect(screen.getByRole("dialog")).toHaveStyle({ maxHeight: "460px" });
+  top = 260;
+  act(() => viewport.dispatchEvent(new Event("resize")));
+  expect(screen.getByRole("dialog")).toHaveStyle({ maxHeight: "236px" });
+  viewport.offsetTop = 30;
+  act(() => viewport.dispatchEvent(new Event("scroll")));
+  expect(screen.getByRole("dialog")).toHaveStyle({ maxHeight: "206px" });
+});
 
 it("opens the lazy draft picker with Send/Pi-default guidance and dismisses on Escape/outside", () => {
   const model = controller();

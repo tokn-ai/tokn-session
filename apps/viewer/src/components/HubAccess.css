@@ -29,10 +29,10 @@
 .hub-saved-machines > p { margin: 10px 0 20px; font-size: 13px; line-height: 1.6; }
 .hub-saved-host { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 16px; padding: 18px; }
 .hub-saved-host > button { max-width: 100%; white-space: nowrap; }
-.hub-machine-settings { grid-column: 1 / -1; padding-top: 12px; border-top: 1px solid var(--border); font-size: 12px; }
+.hub-machine-settings { grid-column: 1 / -1; min-width: 0; padding-top: 12px; border-top: 1px solid var(--border); font-size: 12px; overflow-wrap: anywhere; }
 .hub-machine-settings summary, .hub-input-help summary { cursor: pointer; color: var(--text-soft); }
-.hub-machine-settings > div { display: grid; gap: 12px; padding-top: 14px; }
-.hub-machine-settings button { justify-self: start; }
+.hub-machine-settings > div { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; padding-top: 14px; }
+.hub-machine-settings button { justify-self: start; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .hub-machine-settings p { margin: 0; }
 .hub-empty-state { border: 1px dashed var(--border-strong); border-radius: 10px; padding: 28px 20px; }
 .hub-empty-state h3 { margin: 0 0 8px; font-size: 15px; }
@@ -64,6 +64,7 @@
 .hub-namespace-list li { padding: 6px 10px; background: var(--surface-raised); border: 1px solid var(--border); border-radius: 6px; font-size: 12px; }
 .hub-admin-host { flex-wrap: wrap; }
 @media (max-width: 860px) {
+  .hub-access button { min-height: 44px; }
   .hub-access-layout { grid-template-columns: minmax(0, 1fr); gap: 28px; }
   .hub-access input:not([type="radio"]), .hub-admin-address input, .hub-admin-address select, .hub-namespace-form input { font-size: 16px; }
 }
@@ -71,6 +72,7 @@
   .hub-origin { align-items: flex-start; }
   .hub-saved-host { display: grid; }
   .hub-add-machine { padding: 20px; }
+  .hub-progress { flex-wrap: wrap; }
 }
 
 @media (max-width: 600px) { .hub-this-machine { flex-wrap: wrap; } }

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSCameraUsageDescription</key>
+  <string>Take a photo to attach to a message for your remote session.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Connect directly to your paired computer to view and control your sessions.</string>
+  <key>NSPhotoLibraryUsageDescription</key>
+  <string>Choose images to attach to messages for your remote sessions.</string>
+</dict>
+</plist>

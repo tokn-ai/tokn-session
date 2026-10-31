@@ -2,7 +2,9 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { consumeBootstrapToken, consumeLoginToken } from "./lib/login";
+import { installViewportSizing } from "./lib/viewport";
 
+installViewportSizing();
 const initial_token = consumeLoginToken();
 const bootstrap_token = consumeBootstrapToken();
 

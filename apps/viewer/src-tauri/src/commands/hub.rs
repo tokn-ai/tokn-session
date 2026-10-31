@@ -2,7 +2,9 @@
 use crate::native_remote::NativeRemote;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
-use tokn_hub_remote::{AuthOptions, ClientStatus, ConnectionInfo, ResolvedMachine};
+#[cfg(desktop)]
+use tokn_hub_remote::AuthOptions;
+use tokn_hub_remote::{ClientStatus, ConnectionInfo, ResolvedMachine};
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn hub_client_status(state: State<'_, NativeRemote>, hub_url: String) -> Result<ClientStatus, String> {
@@ -64,6 +66,7 @@ pub async fn hub_client_open(
   host_public_key: Option<String>,
 ) -> Result<ConnectionInfo, String> {
   let sink = std::sync::Arc::new(move |event: &str, payload: Value| {
+    #[cfg(desktop)]
     if matches!(event, "hub-client-runtime-changed" | "hub-client-transport") {
       crate::runtime_management::changed(&app);
     }
@@ -110,6 +113,7 @@ pub async fn hub_client_forget(state: State<'_, NativeRemote>, hub_url: String, 
   state.manager().await?.forget(&hub_url, &host_id).await
 }
 
+#[cfg(desktop)]
 #[tauri::command(rename_all = "snake_case")]
 pub async fn hub_client_auth_start(
   state: State<'_, NativeRemote>,
@@ -125,6 +129,7 @@ pub async fn hub_client_auth_start(
     .await
 }
 
+#[cfg(desktop)]
 #[tauri::command(rename_all = "snake_case")]
 pub async fn hub_client_auth_finish(
   state: State<'_, NativeRemote>,
@@ -134,6 +139,7 @@ pub async fn hub_client_auth_finish(
   state.manager().await?.auth_finish(&auth_id, credential).await
 }
 
+#[cfg(desktop)]
 #[tauri::command(rename_all = "snake_case")]
 pub async fn hub_client_auth_cancel(
   state: State<'_, NativeRemote>,
@@ -141,10 +147,12 @@ pub async fn hub_client_auth_cancel(
   auth_id: String,
 ) -> Result<(), String> {
   state.manager().await?.auth_cancel(&auth_id).await;
+  #[cfg(desktop)]
   callbacks.cancel(&auth_id).await;
   Ok(())
 }
 
+#[cfg(desktop)]
 #[tauri::command(rename_all = "snake_case")]
 pub async fn hub_client_passkey_credential(
   app: AppHandle,

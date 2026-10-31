@@ -52,11 +52,11 @@ it("browser clients cannot send native preference commands through their selecte
   const send = vi.spyOn(remote, "invoke");
   const subscribe = vi.spyOn(remote, "listen");
   selectMachine(remote);
-  await expect(initializeDevicePreferences({ viewer_preferences: null, machine_preferences: null })).rejects.toThrow("desktop app");
-  await expect(writeViewerPreferences(viewer, "viewer-write")).rejects.toThrow("desktop app");
-  await expect(writeMachinePreferences(machines, "machines-write")).rejects.toThrow("desktop app");
-  await expect(listenForViewerPreferences(vi.fn())).rejects.toThrow("desktop app");
-  await expect(listenForMachinePreferences(vi.fn())).rejects.toThrow("desktop app");
+  await expect(initializeDevicePreferences({ viewer_preferences: null, machine_preferences: null })).rejects.toThrow("available in the app");
+  await expect(writeViewerPreferences(viewer, "viewer-write")).rejects.toThrow("available in the app");
+  await expect(writeMachinePreferences(machines, "machines-write")).rejects.toThrow("available in the app");
+  await expect(listenForViewerPreferences(vi.fn())).rejects.toThrow("available in the app");
+  await expect(listenForMachinePreferences(vi.fn())).rejects.toThrow("available in the app");
   expect(send).not.toHaveBeenCalled(); expect(subscribe).not.toHaveBeenCalled();
   expect(nativeInvoke).not.toHaveBeenCalled(); expect(nativeListen).not.toHaveBeenCalled();
 });

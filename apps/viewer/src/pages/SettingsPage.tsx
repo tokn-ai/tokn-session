@@ -5,6 +5,7 @@ import type { MachineSettingsSnapshot, RelaySettings, RelayStatus, ViewerPrefere
 import { RuntimeSettings } from "../components/RuntimeSettings";
 import { RpcRuntimeSettings } from "../components/RpcRuntimeSettings";
 import "./SettingsPage.css";
+import { isMobileApp } from "../lib/platform";
 
 export interface SettingsPageProps {
   on_close: () => void;
@@ -169,7 +170,7 @@ export function SettingsPage({ on_close, machine_label, machine_key, machine_con
     <header className="settings-page__header"><h1>Settings</h1><button aria-label="Close settings" className="icon-button" onClick={on_close} type="button"><CloseIcon /></button></header>
     <div className="settings-page__layout">
       <nav aria-label="Settings sections" className="settings-page__nav">
-        {sections.map((item) => <button aria-controls={`${id}-${item.key}`} aria-current={section === item.key ? "page" : undefined} className="settings-page__nav-item" key={item.key} onClick={() => setSection(item.key)} type="button">{item.icon}<span><strong>{item.label}</strong><small>{item.detail}</small></span></button>)}
+        {sections.filter((item) => item.key !== "runtimes" || !isMobileApp()).map((item) => <button aria-controls={`${id}-${item.key}`} aria-current={section === item.key ? "page" : undefined} className="settings-page__nav-item" key={item.key} onClick={() => setSection(item.key)} type="button">{item.icon}<span><strong>{item.label}</strong><small>{item.detail}</small></span></button>)}
       </nav>
       <div className="settings-page__content">
         <section aria-labelledby={`${id}-viewer-title`} className="settings-page__section" hidden={section !== "viewer"} id={`${id}-viewer`}>

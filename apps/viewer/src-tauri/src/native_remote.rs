@@ -2,7 +2,9 @@
 use std::path::PathBuf;
 use tokio::sync::{OnceCell, RwLock};
 use tokn_hub_remote::RemoteManager;
-use tokn_session_storage::{SessionPaths, directory_for_inspection};
+use tokn_session_storage::SessionPaths;
+#[cfg(desktop)]
+use tokn_session_storage::directory_for_inspection;
 
 pub struct NativeRemote {
   paths: SessionPaths,
@@ -13,6 +15,7 @@ pub struct NativeRemote {
 
 impl NativeRemote {
   /// Listing runtimes must not generate or load desktop identity storage.
+  #[cfg(desktop)]
   pub async fn list_connections(&self) -> Vec<tokn_hub_remote::ConnectionInfo> {
     match self.initialized.get() {
       Some(manager) => manager.list_connections().await,
@@ -55,6 +58,7 @@ impl NativeRemote {
   }
 }
 
+#[cfg(desktop)]
 fn prepare(paths: &SessionPaths, legacy: PathBuf) -> Result<RemoteManager, String> {
   // A real legacy Hub must migrate first. Creating desktop-client underneath
   // the destination Hub would turn that complete-bundle move into a conflict.
@@ -80,7 +84,7 @@ fn prepare(paths: &SessionPaths, legacy: PathBuf) -> Result<RemoteManager, Strin
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, desktop))]
 mod tests {
   use super::*;
   use tokn_session_hub::{onboarding::ClientStore, secure::NoiseIdentity};
@@ -166,4 +170,9 @@ mod tests {
     manager.status(hub.as_str()).await.unwrap();
     assert!(new_paths.desktop_client_dir().join("client-hosts.json").exists());
   }
+}
+
+#[cfg(mobile)]
+fn prepare(paths: &SessionPaths, _legacy: PathBuf) -> Result<RemoteManager, String> {
+  Ok(RemoteManager::new(paths.desktop_client_dir()))
 }
