@@ -28,15 +28,15 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -57,7 +57,7 @@ jobs:
         run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
 
       - name: Install Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 17
@@ -77,7 +77,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Cache Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
 
       - name: Install viewer dependencies
         working-directory: apps/viewer
@@ -94,7 +94,7 @@ jobs:
           "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify "$apk"
 
       - name: Upload Android APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tokn-sessions-android-arm64-debug
           path: apps/viewer/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
@@ -110,15 +110,15 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -149,7 +149,7 @@ jobs:
         run: bash apps/viewer/scripts/build-ios-ci.sh
 
       - name: Upload iOS simulator app
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tokn-sessions-ios-simulator-arm64
           path: apps/viewer/src-tauri/gen/apple/build/tokn-sessions-ios-simulator-arm64.tar.gz

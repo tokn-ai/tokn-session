@@ -23,7 +23,7 @@ fi
 app_path="${apps[0]}"
 executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Info.plist")"
 test -x "$app_path/$executable"
-xcrun lipo -verify_arch arm64 "$app_path/$executable"
+xcrun lipo "$app_path/$executable" -verify_arch arm64
 test "$(/usr/libexec/PlistBuddy -c 'Print :DTPlatformName' "$app_path/Info.plist")" = iphonesimulator
 
 # Preserve the executable mode and any bundle symlinks in the uploaded artifact.
