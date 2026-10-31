@@ -1,3 +1,4 @@
+# Example only. Replace __HUB_DOMAIN__ in a copy outside this repository.
 [Unit]
 Description=Tokn Session Hub
 After=network-online.target
@@ -8,7 +9,7 @@ Type=simple
 User=tokn-hub
 Group=tokn-hub
 WorkingDirectory=/opt/tokn-hub/current
-ExecStart=/opt/tokn-hub/current/tokn-session-hub serve --bind 127.0.0.1:5559 --public-url https://ahub.clouds56.top --state-path /var/lib/tokn-hub/state.sqlite --web-root /opt/tokn-hub/current/web
+ExecStart=/opt/tokn-hub/current/tokn-session-hub serve --bind 127.0.0.1:5559 --public-url https://__HUB_DOMAIN__ --state-path /var/lib/tokn-hub/state.sqlite --web-root /opt/tokn-hub/current/web
 StateDirectory=tokn-hub
 StateDirectoryMode=0700
 UMask=0077

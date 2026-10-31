@@ -469,10 +469,10 @@ captured compaction. Upgrade strict `AgentEvent` consumers with the producer.
 
 ## Session Hub
 
-The Hub and browser UI are deployed at `https://ahub.clouds56.top` on ctl host
-`vultr-2`, using nginx HTTPS/WebSocket termination and a dedicated loopback
-systemd service. Persistent state stays outside versioned releases. See
-[deployment](../deploy/vultr-2/README.md) for configuration, checks, and updates.
+Generic [Linux deployment examples](../deploy/hub/README.md) cover nginx
+HTTPS/WebSocket termination and a loopback systemd service for the Hub and
+browser UI. Keep host identities, rendered configurations and operational
+records outside the repository. Persistent state stays outside versioned releases.
 
 Desktop **Machines → This machine → Host this computer** now owns optional
 hosting for the app lifetime. Machines opens a floating hosting dialog; local
@@ -523,14 +523,11 @@ Pagehide clears active content and keys; BFCache restoration reloads. Host state
 v2 distinguishes native, browser enrollment, and browser session grants. Legacy
 state fails closed; explicit `authenticator --upgrade-sha256` rotates OTP, clears
 unclassified grants, preserves host keys/passkeys/limits, and requires rescanning
-and app re-pairing. Protocol v2 and clients must upgrade together. Release `eb86123` is deployed to `ahub.clouds56.top` and this machine’s
-connector/API. The authenticator CLI also shows its saved machine reference and current TOTP
+and app re-pairing. Protocol v2 and clients must upgrade together.
+The authenticator CLI also shows its saved machine reference and current TOTP
 with seconds remaining in trusted-terminal output, plus the full setup URI and
 explicit manual settings/mismatch guidance; exports stay Base32-only.
 Reference lookup reads existing keys without generating replacements.
-Local SHA-256 migration preserved identities/passkeys and retired
-two legacy grants; the authenticator must be rescanned. Private pre-upgrade
-backups exist on each endpoint.
 Enrolled host-owned passkeys authorize tab keys on their original Noise
 channel; a new device needs the full machine reference to pin the host first.
 Native passkey prompts use the Hub browser origin and a one-shot loopback form
