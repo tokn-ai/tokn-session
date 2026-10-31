@@ -1,0 +1,15 @@
+# Initial HTTP-only config for the first certificate issuance.
+# Replace __HUB_DOMAIN__ in a copy outside this repository.
+server {
+  listen 80;
+  listen [::]:80;
+  server_name __HUB_DOMAIN__;
+
+  location ^~ /.well-known/acme-challenge/ {
+    root /var/lib/letsencrypt;
+    default_type text/plain;
+    try_files $uri =404;
+  }
+
+  location / { return 404; }
+}

@@ -469,6 +469,11 @@ captured compaction. Upgrade strict `AgentEvent` consumers with the producer.
 
 ## Session Hub
 
+Generic [Linux deployment examples](../deploy/hub/README.md) cover nginx
+HTTPS/WebSocket termination and a loopback systemd service for the Hub and
+browser UI. Keep host identities, rendered configurations and operational
+records outside the repository. Persistent state stays outside versioned releases.
+
 Desktop **Machines → This machine → Host this computer** now owns optional
 hosting for the app lifetime. Machines opens a floating hosting dialog; local
 and remote session connection panels show its status and quick on/off switch
@@ -518,7 +523,8 @@ Pagehide clears active content and keys; BFCache restoration reloads. Host state
 v2 distinguishes native, browser enrollment, and browser session grants. Legacy
 state fails closed; explicit `authenticator --upgrade-sha256` rotates OTP, clears
 unclassified grants, preserves host keys/passkeys/limits, and requires rescanning
-and app re-pairing. Protocol v2 and clients must upgrade together. The authenticator CLI also shows its saved machine reference and current TOTP
+and app re-pairing. Protocol v2 and clients must upgrade together.
+The authenticator CLI also shows its saved machine reference and current TOTP
 with seconds remaining in trusted-terminal output, plus the full setup URI and
 explicit manual settings/mismatch guidance; exports stay Base32-only.
 Reference lookup reads existing keys without generating replacements.
