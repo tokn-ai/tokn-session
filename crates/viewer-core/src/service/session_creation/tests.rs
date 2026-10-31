@@ -246,6 +246,7 @@ async fn codex_creation_indexes_real_history_and_reuses_one_runtime_for_followup
   let directory = tempfile::tempdir().unwrap();
   let history_root = directory.path().join("codex");
   std::fs::create_dir(&history_root).unwrap();
+  let history_root = history_root.canonicalize().unwrap();
   let service = service(ViewerProvider::Codex, history_root.clone());
   let project = project(&service, &directory.path().join("project"));
   let history = history_root.join("created.jsonl");
@@ -329,6 +330,7 @@ async fn rpc_creation_uuid_cannot_admit_pi_while_a_duplicate_rpc_call_observes_i
   let directory = tempfile::tempdir().unwrap();
   let history_root = directory.path().join("codex");
   std::fs::create_dir(&history_root).unwrap();
+  let history_root = history_root.canonicalize().unwrap();
   let mut service = service(ViewerProvider::Codex, history_root.clone());
   // A regression must never launch an installed Pi or reach a provider account.
   service.sessions.managed =
@@ -375,6 +377,7 @@ async fn unsupported_initial_images_never_send_a_first_prompt() {
   let directory = tempfile::tempdir().unwrap();
   let history_root = directory.path().join("codex");
   std::fs::create_dir(&history_root).unwrap();
+  let history_root = history_root.canonicalize().unwrap();
   let service = service(ViewerProvider::Codex, history_root.clone());
   let project = project(&service, &directory.path().join("project"));
   let history = history_root.join("created.jsonl");
@@ -403,7 +406,15 @@ async fn unsupported_initial_images_never_send_a_first_prompt() {
   request.prompt.clear();
   request.image_ids.push(uploaded.image_id.unwrap());
   service.create_project_session(request.clone()).await.unwrap();
-  let receipt = settled(&service, &request.request_id).await;
+  settled(&service, &request.request_id).await;
+  // Inspect the final reason after deferred history publication has drained.
+  service.sessions.shutdown().await;
+  let receipt = service
+    .creation_manager()
+    .unwrap()
+    .get(&request.request_id)
+    .unwrap()
+    .unwrap();
   assert_eq!(receipt.first_input, FirstInputState::Rejected);
   assert!(
     receipt
@@ -416,7 +427,6 @@ async fn unsupported_initial_images_never_send_a_first_prompt() {
   assert_eq!(peer.count("thread/start"), 1);
   assert_eq!(peer.count("turn/start"), 0);
   assert!(!history.exists());
-  service.sessions.shutdown().await;
 }
 
 #[tokio::test]
@@ -535,6 +545,7 @@ async fn draft_catalog_does_not_create_history_and_model_is_applied_once_at_crea
   let directory = tempfile::tempdir().unwrap();
   let history_root = directory.path().join("codex");
   std::fs::create_dir(&history_root).unwrap();
+  let history_root = history_root.canonicalize().unwrap();
   let service = service(ViewerProvider::Codex, history_root.clone());
   let project = project(&service, &directory.path().join("project"));
   let history = history_root.join("created.jsonl");
@@ -789,10 +800,13 @@ async fn all_provider_options_share_typed_plans_without_launching_agents() {
 async fn ignored_native_model_retains_created_identity_without_sending_first_prompt() {
   use crate::workspace::{ListSessionCreationModelsRequest, SessionCreationModelSelection};
   let directory = tempfile::tempdir().unwrap();
-  let service = service(ViewerProvider::Codex, directory.path().join("codex"));
+  let history_root = directory.path().join("codex");
+  std::fs::create_dir(&history_root).unwrap();
+  let history_root = history_root.canonicalize().unwrap();
+  let service = service(ViewerProvider::Codex, history_root.clone());
   let project = project(&service, &directory.path().join("project"));
   let peer = CodexPeer::start_with_model(
-    directory.path().join("history.jsonl"),
+    history_root.join("history.jsonl"),
     project.folder_path.clone().into(),
     true,
     "fallback-model",
@@ -819,14 +833,28 @@ async fn ignored_native_model_retains_created_identity_without_sending_first_pro
     runtime_plan_id: None,
   });
   service.create_project_session(request.clone()).await.unwrap();
-  let receipt = settled(&service, &request.request_id).await;
+  settled(&service, &request.request_id).await;
+  service.create_project_session(request.clone()).await.unwrap();
+  // Inspect the final reason after deferred history publication has drained.
+  service.sessions.shutdown().await;
+  let receipt = service
+    .creation_manager()
+    .unwrap()
+    .get(&request.request_id)
+    .unwrap()
+    .unwrap();
   assert_eq!(receipt.created.unwrap().native.native_id, "created-codex");
   assert_eq!(receipt.first_input, FirstInputState::Rejected);
-  assert!(receipt.message.unwrap().contains("did not confirm"));
-  service.create_project_session(request).await.unwrap();
+  assert!(
+    receipt
+      .message
+      .as_ref()
+      .is_some_and(|message| message.contains("did not confirm")),
+    "{:?}",
+    receipt.message
+  );
   assert_eq!(peer.count("thread/start"), 1);
   assert_eq!(peer.count("turn/start"), 0);
-  service.sessions.shutdown().await;
 }
 
 fn publisher(service: &ViewerService) -> HistoryPublisher {
