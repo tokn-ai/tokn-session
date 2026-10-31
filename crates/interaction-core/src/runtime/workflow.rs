@@ -1,5 +1,6 @@
 //! Explicit-input activation, recovered bindings and safe ownership release.
 use super::*;
+use crate::runtime_plan::{RuntimePlan, VerifiedSessionDescriptor};
 
 impl<H: RuntimeHost> RuntimeCoordinator<H> {
   /// Called only after the host has verified a historical session and an
@@ -34,7 +35,7 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     match self
       .action(request_id, "ensure_session", fingerprint, async move {
         manager
-          .ensure_session_inner(key, provider, native_id, cwd)
+          .ensure_session_inner(key, provider, native_id, cwd, None)
           .await
           .map(ActionReply::Bound)
       })
@@ -50,12 +51,99 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     }
   }
 
+  /// Activate only the host-resolved configuration and host-verified history.
+  /// A changed default cannot redirect this explicit input to another runtime.
+  pub async fn ensure_session_with_plan(
+    &self,
+    request_id: &str,
+    session_key: &str,
+    plan: RuntimePlan,
+    descriptor: VerifiedSessionDescriptor,
+  ) -> Result<SessionBinding, String> {
+    validate_uuid(request_id)?;
+    if session_key.is_empty() || session_key.len() > 8192 {
+      return Err("Invalid verified session target".into());
+    }
+    plan.validate_resume(&descriptor)?;
+    let selection = plan.shared_runtime_selection()?;
+    let fingerprint = Sha256::digest(
+      serde_json::to_vec(&("runtime-plan-v1", session_key, &plan, &descriptor))
+        .map_err(|_| "Invalid verified session target")?,
+    )
+    .into();
+    let manager = self.clone();
+    let key = session_key.to_owned();
+    let selected_plan = plan.clone();
+    match self
+      .action(request_id, "ensure_session", fingerprint, async move {
+        manager.validate_resolved_plan(&selected_plan).await?;
+        manager
+          .ensure_session_inner(
+            key,
+            selected_plan.provider,
+            descriptor.native().native_id.clone(),
+            descriptor.native().working_directory.clone(),
+            Some(selection),
+          )
+          .await
+          .map(ActionReply::Bound)
+      })
+      .await?
+    {
+      ActionReply::Bound(binding) => {
+        self
+          .check_binding(&binding, Some(plan.provider))
+          .map_err(|error| error.to_string())?;
+        self.check_binding_plan(&binding, &plan)?;
+        Ok(binding)
+      }
+      _ => Err("Request ID belongs to another runtime action".into()),
+    }
+  }
+
+  async fn validate_resolved_plan(&self, plan: &RuntimePlan) -> Result<(), String> {
+    let manager = self.clone();
+    let plan = plan.clone();
+    tokio::task::spawn_blocking(move || {
+      let resolved = manager
+        .0
+        .host
+        .resolve_profile(&plan.configuration.id, plan.configuration.revision)?;
+      let descriptor = manager.0.host.describe(&resolved);
+      if descriptor.profile_id != plan.configuration.id
+        || descriptor.revision != plan.configuration.revision
+        || descriptor.provider != plan.provider
+        || descriptor.ownership != plan.ownership
+      {
+        return Err("Resolved runtime configuration no longer matches the selected plan".into());
+      }
+      Ok(())
+    })
+    .await
+    .map_err(|_| "Could not verify the selected runtime plan")?
+  }
+
+  fn check_binding_plan(&self, binding: &SessionBinding, plan: &RuntimePlan) -> Result<(), String> {
+    let state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
+    if binding.profile_id != plan.configuration.id
+      || !state.runtimes.get(&binding.target.runtime_id).is_some_and(|runtime| {
+        runtime.info.instance_id == binding.target.instance_id
+          && runtime.info.profile_revision == plan.configuration.revision
+          && runtime.info.ownership == plan.ownership
+      })
+    {
+      return Err("The session is bound to a different runtime configuration; refresh before sending".into());
+    }
+    Ok(())
+  }
+
   async fn ensure_session_inner(
     &self,
     key: String,
     provider: Provider,
     native_id: String,
     cwd: PathBuf,
+    selection: Option<RuntimeSelection>,
   ) -> Result<SessionBinding, String> {
     self.ensure_open()?;
     if let Some(binding) = self.binding(&key) {
@@ -65,9 +153,23 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
       self
         .check_binding(&binding, Some(provider))
         .map_err(|error| error.to_string())?;
+      if let Some(selection) = &selection {
+        let state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
+        if binding.profile_id != selection.profile_id
+          || !state
+            .runtimes
+            .get(&binding.target.runtime_id)
+            .is_some_and(|runtime| runtime.info.profile_revision == selection.expected_revision)
+        {
+          return Err("The session is bound to a different runtime configuration; refresh before sending".into());
+        }
+      }
       return Ok(binding);
     }
-    let (profile_id, revision) = self.0.host.select_profile(provider, &cwd).await?;
+    let (profile_id, revision) = match selection {
+      Some(selection) => (selection.profile_id, selection.expected_revision),
+      None => self.0.host.select_profile(provider, &cwd).await?,
+    };
     let info = self
       .start_inner(StartRuntimeRequest {
         request_id: uuid::Uuid::new_v4().to_string(),

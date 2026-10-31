@@ -14,13 +14,27 @@ automatic fallback between these transports. Desktop uses the existing owner
 discovery/input path; it does not provide a verified model catalog.
 
 The first Send verifies the host's historical identity and working directory,
-selects a saved runtime profile, starts/connects it if necessary, and binds the
-native session before delivering input. A provider default wins; a single
-suitable profile can be selected without a default. Ambiguous configuration
-requires an explicit default. OpenCode profiles must match the session's native
-directory. When Codex has no suitable saved profile, the host can discover
-`codex` through `TOKN_SESSION_CODEX_EXECUTABLE` or `PATH` and launch a managed
-app-server. This transient local profile does not write new saved configuration.
+resolves a runtime plan, starts/connects it if necessary, and binds the native
+session before delivering input. An explicit profile is checked at its exact
+revision and never falls back. Automatic prefers a suitable provider default or
+sole suitable saved profile; ambiguous profiles require a default. OpenCode
+profiles must match the session's native directory. With no suitable saved
+profile, the host can discover local Codex/OpenCode/DSH executables through
+`TOKN_SESSION_CODEX_EXECUTABLE`, `TOKN_SESSION_OPENCODE_EXECUTABLE`, or
+`TOKN_SESSION_DSH_EXECUTABLE`, then `PATH`. These project-scoped managed
+configurations do not write saved profiles. An invalid explicit executable
+override does not fall back to another binary.
+
+`interaction-core::runtime_plan` separates configuration identity from a running
+instance. `RuntimePlan` records provider, configuration/revision, ownership,
+reuse scope, lifecycle strategy and working directory. The host uses
+the same resolution for creation availability, draft catalogs and first Send.
+The additive opaque `runtime_plan_id` fences the configuration shown to a draft;
+the host rechecks it before admission. Existing-session activation also requires
+a host-verified native descriptor and rechecks the pinned configuration before
+launch. Connected bindings retain their exact runtime when defaults change.
+Resolution itself reads only configuration/filesystem metadata. Native adapter
+handshakes establish protocol compatibility when a runtime actually starts.
 
 Missing executables, directories, or profiles produce an unavailable capability
 or a definite pre-send failure. A dropped acknowledgement after input is written
@@ -51,6 +65,8 @@ types:
 - `runtime::RuntimeCoordinator` owns configured process/connection lifecycle,
   instance fences, native binding recovery, quarantine and awaited shutdown.
   Host hooks select and validate profiles and construct concrete adapter handles.
+- `runtime_plan` defines pure configuration intent and verified-history evidence;
+  it does not start processes or acquire native ownership.
 - `viewer-core` owns executable/profile configuration, authorization, project and
   index integration, historical identity verification, and display projection.
 
@@ -58,7 +74,10 @@ Provider adapters retain native transport, state interpretation and command
 sequencing. Pi's managed workflow lives in `pi-adapter::managed`, and its bridge
 protocol lives in `pi-adapter::bridge`. Typed native models and dialog validation
 live in `pi-rpc-protocol`; persisted header validation lives in `tokn-session-pi`.
-The former viewer `managed_pi` module no longer exists.
+The former viewer `managed_pi` module no longer exists. Pi now resolves through
+the common plan boundary as a session-scoped worker, while retaining its driver,
+catalog, lifecycle and receipt strategy. Saved Pi RPC profiles do not replace
+that creation workflow in this migration.
 
 `viewer/session-leases` contains private cross-process leases keyed by a SHA-256
 digest of provider and native session ID. RPC profiles, the owned Pi driver,
@@ -89,7 +108,7 @@ message awaiting native acknowledgement, allowing extension preflight to finish.
 | Codex | Explicit app-server create/resume binding; start-or-steer, turn interruption, model catalogs, and live callback questions. Desktop is an explicit alternative. |
 | Pi | Viewer-owned sessions keep the exclusive Pi workflow driver; independently running bridges keep their existing owner. A Pi profile cannot adopt arbitrary saved history from an ID alone. |
 | OpenCode | Native V2 creation, local history, runtime/profile binding and start-or-steer. V1 and mixed histories remain read-only. |
-| DSH | Existing native sessions through a configured ApiProxy runtime. State/model inspection does not activate cold agents. Local project creation uses the native default preset. |
+| DSH | Existing native sessions through a saved or locally discovered ApiProxy runtime. State/model inspection does not activate cold agents. Local project creation uses the native default preset. |
 
 The Pi driver owns model-on-send sequencing, native extension dialogs,
 dialog-aware deadlines, stream/error interpretation and idle eligibility. The
@@ -131,8 +150,12 @@ and [live interaction](interaction-core.md) for transport and capability details
 before native effects. Its persisted phases distinguish native-creation
 uncertainty, known native identity, first-input uncertainty and history readiness.
 Request leases and a shared UUID/provider ledger cover independent processes and
-Pi/RPC strategy boundaries. Receipts never persist prompt/image bodies or native
-configuration. Repeating or reloading a request does not resend creation/input.
+Pi/RPC strategy boundaries. RPC receipts persist the resolved plan and original
+optional client proof, so retries keep their exact runtime even after defaults
+change. Pi receipts retain the optional plan proof in their existing workflow.
+Legacy receipts preserve their prior fingerprints. Receipts never persist
+prompt/image bodies, executable paths, endpoints or credentials. Repeating or
+reloading a request does not resend creation/input.
 
 The runtime coordinator creates and reserves the exact native target, then adopts
 an indexed host-verified key without calling native resume. While initial input

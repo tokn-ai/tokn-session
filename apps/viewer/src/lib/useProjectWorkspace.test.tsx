@@ -33,11 +33,38 @@ function connection() {
   });
   const listen = vi.fn(async (name: string, callback: (event: { payload: ManagedSessionSnapshot }) => void) => { handlers.set(name, callback); return stop; });
   return { invoke, stop, transport: { invoke: invoke as CommandInvoker, listen: listen as EventSubscriber }, emit: (snapshot: ManagedSessionSnapshot) => handlers.get("managed-session-changed")!({ payload: snapshot }),
-    registryChanged: () => handlers.get("registered-projects-changed")!({ payload: null as never }) };
+    registryChanged: () => handlers.get("registered-projects-changed")!({ payload: null as never }),
+    runtimesChanged: () => handlers.get("rpc-runtimes-changed")!({ payload: null as never }) };
 }
 const options = () => ({ enabled: true, machine_key: "local", selected_session_key: null as string | null });
 
 describe("local project workspace", () => {
+  it("invalidates draft creation options when runtime profiles change or settings closes", async () => {
+    const host = connection();
+    const { result } = renderHook(() => useProjectWorkspace(options(), host.transport));
+    await waitFor(() => expect(result.current.workspace?.available).toBe(true));
+    const initial = result.current.loadCreationOptions;
+    await act(async () => { host.runtimesChanged(); });
+    expect(result.current.loadCreationOptions).not.toBe(initial);
+    const after_event = result.current.loadCreationOptions;
+    act(() => result.current.refreshCreationOptions());
+    expect(result.current.loadCreationOptions).not.toBe(after_event);
+    await act(() => result.current.loadCreationOptions("project"));
+    expect(host.invoke).toHaveBeenCalledWith("get_session_creation_options", { request: { project_id: "project" } });
+    expect(host.invoke.mock.calls.some(([command]) => command === "create_project_session")).toBe(false);
+  });
+
+  it("refreshes automatic runtime availability on focus without requiring a saved-profile event", async () => {
+    const host = connection();
+    const { result } = renderHook(() => useProjectWorkspace(options(), host.transport));
+    await waitFor(() => expect(result.current.workspace?.available).toBe(true));
+    const before = result.current.loadCreationOptions;
+    await act(async () => { window.dispatchEvent(new Event("focus")); window.dispatchEvent(new Event("focus")); });
+    expect(result.current.loadCreationOptions).not.toBe(before);
+    await act(() => result.current.loadCreationOptions("project"));
+    expect(host.invoke).toHaveBeenCalledWith("get_session_creation_options", { request: { project_id: "project" } });
+  });
+
   it("loads creation choices through the selected desktop transport", async () => {
     const host = connection();
     const { result } = renderHook(() => useProjectWorkspace(options(), host.transport));

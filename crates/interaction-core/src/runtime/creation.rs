@@ -13,6 +13,7 @@ pub struct CreateNativeSessionRequest {
   /// Provider-supported, host-planned identity. Never substitute it for a
   /// different identity returned by the native server.
   pub native_id: Option<String>,
+  pub model: Option<ModelIdentity>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -40,10 +41,15 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     working_directory: PathBuf,
     selection: Option<RuntimeSelection>,
     native_id: Option<String>,
+    model: Option<ModelIdentity>,
   ) -> Result<CreatedNativeSession, InteractionError> {
     if !working_directory.is_absolute() || native_id.as_deref().is_some_and(|id| !valid_native_id(id)) {
       return Err(InteractionError::invalid("Invalid native creation target"));
     }
+    if let Some(model) = &model {
+      validate_creation_model(model)?;
+    }
+    let model = model.as_ref().map(creation_model_identity);
     {
       let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
       self.ensure_open().map_err(InteractionError::unavailable)?;
@@ -57,7 +63,7 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
         complete: true,
       };
       manager
-        .create_native_inner(provider, working_directory, selection, native_id)
+        .create_native_inner(provider, working_directory, selection, native_id, model)
         .await
     })
     .await
@@ -70,6 +76,7 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     working_directory: PathBuf,
     selection: Option<RuntimeSelection>,
     native_id: Option<String>,
+    model: Option<ModelIdentity>,
   ) -> Result<CreatedNativeSession, InteractionError> {
     let (profile_id, revision) = match selection {
       Some(selection) => {
@@ -87,14 +94,25 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     // profile. Runtime startup itself never creates a provider session.
     let manager = self.clone();
     let selected_id = profile_id.clone();
+    let selected_model = model.clone();
     let descriptor = tokio::task::spawn_blocking(move || {
-      let resolved = manager.0.host.resolve_profile(&selected_id, revision)?;
-      manager.0.host.validate_launch_ready(&resolved)?;
-      Ok::<_, String>(manager.0.host.describe(&resolved))
+      let resolved = manager
+        .0
+        .host
+        .resolve_profile(&selected_id, revision)
+        .map_err(InteractionError::unavailable)?;
+      manager
+        .0
+        .host
+        .validate_launch_ready(&resolved)
+        .map_err(InteractionError::unavailable)?;
+      if let Some(model) = &selected_model {
+        manager.0.host.validate_creation_model(&resolved, model)?;
+      }
+      Ok::<_, InteractionError>(manager.0.host.describe(&resolved))
     })
     .await
-    .map_err(|_| InteractionError::unavailable("Could not read the creation runtime profile"))?
-    .map_err(InteractionError::unavailable)?;
+    .map_err(|_| InteractionError::unavailable("Could not read the creation runtime profile"))??;
     if descriptor.provider != provider {
       return Err(InteractionError::invalid(
         "The selected runtime belongs to another provider",
@@ -123,10 +141,23 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
         .map(|record| record.handle.clone())
         .ok_or_else(|| InteractionError::unavailable("The creation runtime disconnected"))?
     };
+    let native = handle.adapter();
+    if let Some(model) = &model {
+      let choices = models::query_models(native.as_ref()).await?;
+      if !choices
+        .iter()
+        .any(|choice| creation_model_identity(&choice.model) == *model)
+      {
+        return Err(InteractionError::invalid(
+          "The selected model is no longer available; refresh the model list",
+        ));
+      }
+    }
     let native = handle
       .create_native(&CreateNativeSessionRequest {
         working_directory: working_directory.clone(),
         native_id: native_id.clone(),
+        model,
       })
       .await?;
     drop(guard);

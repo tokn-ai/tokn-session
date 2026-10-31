@@ -2,14 +2,29 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useFloatingPanel } from "../lib/useFloatingPanel";
 import { modelLabel, sameModel } from "../lib/sessionModels";
-import type { SessionModelController } from "../lib/useSessionModel";
-import type { ModelChoice } from "../lib/types";
+import type { ModelChoice, SessionModelState } from "../lib/types";
 import { ChevronIcon, CloseIcon } from "./Icons";
 import "./SessionModelPicker.css";
 
-export function SessionModelPicker({ model, provider, input_busy = false, selected_model = null, on_select, on_clear }: {
-  model: SessionModelController; provider: string; input_busy?: boolean;
+interface ModelPickerController {
+  state: SessionModelState | null;
+  status?: { updates_pi_default: boolean } | null;
+  reason?: string | null;
+  error: string | null;
+  checking: boolean;
+  loading: boolean;
+  choices: ModelChoice[] | null;
+  can_open: boolean;
+  can_select: boolean;
+  running?: boolean;
+  refresh: () => Promise<void>;
+  loadChoices: () => Promise<void>;
+}
+
+export function SessionModelPicker({ model, provider, input_busy = false, selected_model = null, selection_current = true, mode = "session", on_select, on_clear }: {
+  model: ModelPickerController; provider: string; input_busy?: boolean; mode?: "session" | "creation";
   selected_model?: ModelChoice | null;
+  selection_current?: boolean;
   on_select: (choice: ModelChoice) => void;
   on_clear: () => void;
 }) {
@@ -20,7 +35,7 @@ export function SessionModelPicker({ model, provider, input_busy = false, select
   const close = useCallback(() => setOpen(false), []);
   const panel = useFloatingPanel(open, close, trigger);
   const identity = selected_model?.model ?? model.state?.model;
-  const label = identity ? modelLabel(identity) : provider;
+  const label = identity ? modelLabel(identity) : mode === "creation" ? "Runtime default" : provider;
   const reason = model.reason ?? model.error ?? (model.checking ? "Checking model availability…" : "Model selection is unavailable for this session.");
 
   useEffect(() => {
@@ -43,8 +58,13 @@ export function SessionModelPicker({ model, provider, input_busy = false, select
   }, [open]);
 
   useEffect(() => {
-    if (open && model.choices === null && !model.loading && !model.error) void model.loadChoices();
-  }, [open, model.choices, model.loading, model.error, model.loadChoices]);
+    if (open && mode === "session" && model.choices === null && !model.loading && !model.error) void model.loadChoices();
+  }, [open, mode, model.choices, model.loading, model.error, model.loadChoices]);
+
+  useEffect(() => {
+    // Opening a draft picker also recovers a catalog rejected at first Send.
+    if (open && mode === "creation") void model.loadChoices();
+  }, [open, mode, model.loadChoices]);
 
   return <div className="session-model">
     {model.can_open ? <button ref={trigger} className="session-model__trigger" type="button"
@@ -52,10 +72,10 @@ export function SessionModelPicker({ model, provider, input_busy = false, select
       disabled={input_busy} onClick={() => setOpen((value) => !value)}>
       <span>{label}</span><ChevronIcon aria-hidden="true" />
     </button> : <span className="session-model__static" title={reason}>
-      <span className="session-model__name">{label}</span>{!selected_model && identity && (model.state?.source === "recorded" || model.state?.source === "catalog")
+      <span className="session-model__name">{label}</span>{mode === "session" && !selected_model && identity && (model.state?.source === "recorded" || model.state?.source === "catalog")
         ? <span className="session-model__recorded">{model.state.source === "recorded" ? "Recorded" : "Catalog"}</span> : null}
     </span>}
-    {selected_model ? <button className="text-button session-model__retry" type="button" disabled={input_busy} onClick={on_clear}>Use current model</button> : null}
+    {selected_model ? <button className="text-button session-model__retry" type="button" disabled={input_busy} onClick={on_clear}>{mode === "creation" ? "Use runtime default" : "Use current model"}</button> : null}
     {!model.can_open && !model.checking ? <small className="session-model__reason" title={reason}>{reason}</small> : null}
     {!model.can_open && !model.checking && model.error ? <button className="text-button session-model__retry" type="button" onClick={() => { void model.refresh(); }}>Refresh model status</button> : null}
     {open ? createPortal(<div className="session-model__panel" ref={panel} id={panel_id} role="dialog" aria-modal="false"
@@ -65,11 +85,15 @@ export function SessionModelPicker({ model, provider, input_busy = false, select
       {model.loading || model.checking ? <p className="session-model__notice" role="status"><span className="inline-spinner" />Loading available models…</p> : null}
       {model.error ? <div className="session-model__error" role="alert"><p>{model.error}</p>
         <button type="button" className="text-button" disabled={model.loading || model.checking}
-          onClick={() => { if (!model.status) void model.refresh(); else void model.loadChoices(); }}>
-          {!model.status ? "Refresh model status" : "Retry models"}</button></div> : null}
+          onClick={() => { if (mode === "session" && !model.status) void model.refresh(); else void model.loadChoices(); }}>
+          {mode === "session" && !model.status ? "Refresh model status" : "Retry models"}</button></div> : null}
+      {mode === "creation" ? <div className="session-model__choices"><button type="button" className="session-model__choice"
+        aria-pressed={!selected_model} disabled={input_busy} onClick={on_clear}>
+        <span><strong>Runtime default</strong> <small>Use the agent’s configured model</small></span><span aria-hidden="true">{!selected_model ? "✓" : ""}</span>
+      </button></div> : null}
       {model.choices?.length ? <div className="session-model__choices" role="group" aria-label="Available models">
         {model.choices.map((choice) => {
-          const selected = sameModel(identity, choice.model);
+          const selected = selection_current && sameModel(identity, choice.model);
           return <button key={JSON.stringify([choice.model.model_provider, choice.model.model_id])} type="button"
             aria-pressed={selected} className="session-model__choice" disabled={!model.can_select || input_busy || selected}
             onClick={() => { on_select(choice); }}>
@@ -78,8 +102,8 @@ export function SessionModelPicker({ model, provider, input_busy = false, select
           </button>;
         })}
       </div> : model.choices && !model.loading ? <p className="session-model__notice">No verified models are available.</p> : null}
-      {!model.can_select && !model.checking && !model.loading ? <p className="session-model__notice">{reason}</p> : null}
-      <p className="session-model__footnote">{model.running
+      {!model.can_select && !model.checking && !model.loading && !model.error ? <p className="session-model__notice">{reason}</p> : null}
+      <p className="session-model__footnote">{mode === "creation" ? "Your model choice is applied when you send the first message." : model.running
         ? "While this session is responding, Send steers the current model and ignores this choice."
         : "Your model choice is applied when you send the next message."}</p>
       {model.status?.updates_pi_default ? <p className="session-model__footnote">When applied on Send, this choice also updates Pi’s default for new sessions on this machine.</p> : null}

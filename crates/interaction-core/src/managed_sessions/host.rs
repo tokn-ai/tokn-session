@@ -147,6 +147,8 @@ impl ManagedHostContext {
         || receipt.project_id != record.receipt.project_id
         || receipt.folder != record.receipt.folder
         || receipt.fingerprint != record.receipt.fingerprint
+        || receipt.model != record.receipt.model
+        || receipt.runtime_plan_id != record.receipt.runtime_plan_id
       {
         return Err("Managed session worker changed immutable creation intent".into());
       }

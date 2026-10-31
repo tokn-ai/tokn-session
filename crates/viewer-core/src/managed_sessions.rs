@@ -13,12 +13,20 @@ use crate::{
     RegisteredProject,
   },
 };
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+  path::{Path, PathBuf},
+  sync::Arc,
+  time::Duration,
+};
+use tokn_interaction_core::runtime_plan::{
+  RuntimeConfigurationIdentity, RuntimePlan, RuntimeReuseScope, RuntimeStrategy,
+};
 use tokn_interaction_core::{Provider, managed_sessions as shared};
 
 #[derive(Clone)]
 pub(crate) struct ManagedSessions {
   manager: shared::ManagedSessions,
+  executable: Option<PathBuf>,
 }
 
 struct ViewerHost;
@@ -70,6 +78,14 @@ impl ManagedSessions {
     executable: PathBuf,
     ownership: SessionOwnership,
   ) -> Result<Self, String> {
+    // Resolve once for the lifetime of this driver, so its advertised plan and
+    // the executable used by the preserved worker are the same configuration.
+    let resolved = crate::rpc_runtime::discovery::resolve_executable(
+      Some(executable.as_os_str()),
+      std::env::var_os("PATH").as_deref(),
+      "pi",
+    )
+    .ok();
     let manager = shared::ManagedSessions::new(
       shared::ManagedSessionConfiguration {
         state_path,
@@ -77,11 +93,42 @@ impl ManagedSessions {
         legacy_provider: Some(Provider::Pi),
         lease_prefix: "managed-pi".into(),
       },
-      Arc::new(tokn_pi_adapter::managed::PiSessionDriver::new(executable)),
+      Arc::new(tokn_pi_adapter::managed::PiSessionDriver::new(
+        resolved.clone().unwrap_or(executable),
+      )),
       Arc::new(ViewerHost),
       ownership,
     )?;
-    Ok(Self { manager })
+    Ok(Self {
+      manager,
+      executable: resolved,
+    })
+  }
+
+  pub(crate) fn runtime_plan(&self, cwd: &Path) -> Result<RuntimePlan, String> {
+    self.manager.available()?;
+    let executable = self
+      .executable
+      .as_ref()
+      .ok_or("Pi is unavailable. Install it or set TOKN_SESSION_PI_EXECUTABLE, then restart local sessions.")?;
+    crate::rpc_runtime::discovery::resolve_executable(Some(executable.as_os_str()), None, "pi")?;
+    let canonical = std::fs::canonicalize(cwd).map_err(|_| "The project folder is unavailable")?;
+    if !canonical.is_dir() {
+      return Err("The project folder is unavailable".into());
+    }
+    let plan = RuntimePlan {
+      provider: Provider::Pi,
+      configuration: RuntimeConfigurationIdentity {
+        id: crate::rpc_runtime::discovery::executable_configuration_id(Provider::Pi, &canonical, executable)?,
+        revision: 0,
+      },
+      ownership: tokn_interaction_core::Ownership::Managed,
+      reuse_scope: RuntimeReuseScope::Session,
+      strategy: RuntimeStrategy::SessionWorker,
+      working_directory: cwd.to_owned(),
+    };
+    plan.validate()?;
+    Ok(plan)
   }
 
   #[cfg(test)]
@@ -98,6 +145,7 @@ impl ManagedSessions {
   pub(crate) fn disabled(message: String) -> Self {
     Self {
       manager: shared::ManagedSessions::disabled(message, Provider::Pi),
+      executable: None,
     }
   }
 

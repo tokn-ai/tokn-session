@@ -8,6 +8,7 @@ import "./SettingsPage.css";
 import { isMobileApp } from "../lib/platform";
 
 export interface SettingsPageProps {
+  initial_section?: SettingsSection;
   on_close: () => void;
   machine_label: string;
   machine_key: string;
@@ -23,7 +24,7 @@ export interface SettingsPageProps {
   hosting: ReactNode;
 }
 
-type SettingsSection = "viewer" | "sources" | "hosting" | "runtimes" | "agent_runtimes";
+export type SettingsSection = "viewer" | "sources" | "hosting" | "runtimes" | "agent_runtimes";
 
 const READER_PHASES: Record<RelayStatus["phase"], string> = {
   local: "Local history", starting: "Starting", connecting: "Connecting", live: "Live",
@@ -156,9 +157,9 @@ function SourceLocations({ settings }: { settings: MachineSettingsSnapshot }) {
   </div>;
 }
 
-export function SettingsPage({ on_close, machine_label, machine_key, machine_connected = true, preferences, on_preferences_change, on_preferences_reset, settings, settings_loading, settings_error, on_settings_retry, on_reader_apply, hosting }: SettingsPageProps) {
+export function SettingsPage({ on_close, initial_section = "viewer", machine_label, machine_key, machine_connected = true, preferences, on_preferences_change, on_preferences_reset, settings, settings_loading, settings_error, on_settings_retry, on_reader_apply, hosting }: SettingsPageProps) {
   const id = useId();
-  const [section, setSection] = useState<SettingsSection>("viewer");
+  const [section, setSection] = useState<SettingsSection>(initial_section);
   const sections: { key: SettingsSection; label: string; detail: string; icon: ReactNode }[] = [
     { key: "viewer", label: "Viewer preferences", detail: "This device", icon: <PanelIcon /> },
     { key: "sources", label: "Sources & reader", detail: machine_label, icon: <TechnicalIcon /> },

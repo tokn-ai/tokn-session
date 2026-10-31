@@ -754,7 +754,27 @@ fn creation_fingerprint(request: &CreateProjectSessionRequest, folder: &str) -> 
   Ok(format!(
     "{:x}",
     Sha256::digest(
-      if request.image_ids.is_empty() {
+      if let Some(plan_id) = &request.runtime_plan_id {
+        serde_json::to_vec(&(
+          &request.project_id,
+          folder,
+          &request.prompt,
+          &request.image_ids,
+          request
+            .model
+            .as_ref()
+            .map(|model| (&model.model_provider, &model.model_id)),
+          plan_id,
+        ))
+      } else if let Some(model) = &request.model {
+        serde_json::to_vec(&(
+          &request.project_id,
+          folder,
+          &request.prompt,
+          &request.image_ids,
+          (&model.model_provider, &model.model_id),
+        ))
+      } else if request.image_ids.is_empty() {
         serde_json::to_vec(&(&request.project_id, folder, &request.prompt))
       } else {
         serde_json::to_vec(&(&request.project_id, folder, &request.prompt, &request.image_ids))
@@ -789,7 +809,26 @@ fn validate_uuid(value: &str, kind: &str) -> Result<(), String> {
 pub fn validate_creation_request(request: &CreateProjectSessionRequest) -> Result<(), String> {
   validate_uuid(&request.request_id, "creation request")?;
   validate_image_ids(&request.image_ids)?;
+  if let Some(model) = &request.model {
+    validate_creation_model(model)?;
+  }
+  if let Some(plan_id) = &request.runtime_plan_id {
+    crate::runtime_plan::validate_plan_id(plan_id)?;
+  }
   validate_message(&request.prompt, !request.image_ids.is_empty())
+}
+
+pub fn validate_creation_model(model: &crate::ModelIdentity) -> Result<(), String> {
+  if !valid_identity(&model.model_id)
+    || model
+      .model_provider
+      .as_ref()
+      .is_some_and(|value| !valid_identity(value))
+    || model.display_name.as_ref().is_some_and(|value| !valid_identity(value))
+  {
+    return Err("Invalid creation model selection".into());
+  }
+  Ok(())
 }
 
 pub(crate) fn validate_message(value: &str, has_images: bool) -> Result<(), String> {

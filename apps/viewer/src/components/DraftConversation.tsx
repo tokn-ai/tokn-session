@@ -1,10 +1,12 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { DEFAULT_IMAGE_LIMITS } from "../lib/imageDrafts";
 import { errorMessage } from "../lib/state";
-import type { RegisteredProject, RpcProvider, SessionCreationOptions, SessionCreationSelection } from "../lib/types";
-import type { SessionDraft } from "../lib/useSessionDrafts";
+import type { ListSessionCreationModelsRequest, RegisteredProject, RpcProvider, SessionCreationModels, SessionCreationOptions } from "../lib/types";
+import type { SessionDraft, SessionDraftPatch } from "../lib/useSessionDrafts";
+import { creationModelScope, useSessionCreationModels } from "../lib/useSessionCreationModels";
 import { ImageAttachmentPicker, ImageAttachmentPreviews, imageDrop, imagePaste } from "./ImageAttachments";
 import { PanelIcon, SendIcon } from "./Icons";
+import { SessionModelPicker } from "./SessionModelPicker";
 import "./DraftConversation.css";
 
 const AGENT_NAMES: Record<RpcProvider, string> = { pi: "Pi", codex: "Codex", open_code: "OpenCode", dsh: "DSH" };
@@ -16,22 +18,24 @@ export interface DraftConversationProps {
   workspace_available: boolean;
   workspace_notice?: string | null;
   managed_controls?: ReactNode;
-  on_change: (patch: { project_id?: string; selection?: SessionCreationSelection; prompt?: string }) => void;
+  on_change: (patch: SessionDraftPatch) => void;
   on_add_images: (files: File[]) => void;
   on_remove_image: (image_id: string) => void;
   on_send: () => void;
   on_check: () => void;
   on_discard: () => void;
   on_add_project: () => void;
+  on_configure_runtime?: (trigger: HTMLButtonElement) => void;
   on_sidebar_open: () => void;
   on_load_options: (project_id: string) => Promise<SessionCreationOptions>;
+  on_load_models: (request: ListSessionCreationModelsRequest) => Promise<SessionCreationModels>;
   on_open_session?: () => void;
 }
 
 /** An editable conversation without a native identity or session subscriptions. */
 export function DraftConversation({ draft, projects, workspace_available, workspace_notice, managed_controls,
-  on_change, on_add_images, on_remove_image, on_send, on_check, on_discard, on_add_project,
-  on_sidebar_open, on_load_options, on_open_session }: DraftConversationProps) {
+  on_change, on_add_images, on_remove_image, on_send, on_check, on_discard, on_add_project, on_configure_runtime,
+  on_sidebar_open, on_load_options, on_load_models, on_open_session }: DraftConversationProps) {
   const input_id = useId();
   const textarea = useRef<HTMLTextAreaElement>(null);
   const [options, setOptions] = useState<SessionCreationOptions | null>(null);
@@ -46,12 +50,20 @@ export function DraftConversation({ draft, projects, workspace_available, worksp
   const runtime = agent?.runtimes.find((entry) => entry.profile_id === runtime_id);
   const runtime_current = !runtime_id || !!runtime && runtime.revision === draft.selection.runtime_revision;
   const agent_available = !!agent && (runtime_id ? runtime?.available === true && runtime_current : agent.available);
-  const images_allowed = agent?.supports_images === true;
+  const runtime_plan_id = runtime_id ? runtime?.runtime_plan_id : agent?.runtime_plan_id;
+  const plan_current = (draft.selection.runtime_plan_id ?? null) === (runtime_plan_id ?? null);
+  const model_request = { project_id: draft.project_id, ...draft.selection };
+  const model_scope = creationModelScope(model_request, agent?.default_profile_id ?? null,
+    agent?.runtimes.find((entry) => entry.profile_id === agent.default_profile_id)?.revision ?? null);
+  const model = useSessionCreationModels(model_request, model_scope,
+    workspace_available && !!project?.available && agent_available && plan_current && !options_loading && !options_error, on_load_models);
+  const model_current = model.selectionValid(draft.model);
+  const images_allowed = agent?.supports_images === true && (!draft.model || model_current && draft.model.choice.supports_images);
   const length = Array.from(draft.prompt).length;
   const over_limit = length > MAX_MESSAGE_LENGTH;
   const can_send = workspace_available && !!project?.available && agent_available && !options_loading && !options_error
     && !draft.locked && !draft.sending && !over_limit && (!!draft.prompt.trim() || !!draft.images.length)
-    && (!draft.images.length || images_allowed);
+    && plan_current && model_current && (!draft.images.length || images_allowed);
   const checking_existing = draft.locked || draft.uncertain;
   const unavailable_projects = projects.filter((entry) => !entry.available);
 
@@ -67,6 +79,16 @@ export function DraftConversation({ draft, projects, workspace_available, worksp
       .finally(() => { if (!cancelled) setOptionsLoading(false); });
     return () => { cancelled = true; };
   }, [draft.project_id, project?.available, workspace_available, on_load_options, options_retry]);
+
+  useEffect(() => {
+    if (agent && !options_loading && !draft.locked && runtime_current && !plan_current) {
+      on_change({ selection: { ...draft.selection, runtime_plan_id: runtime_plan_id ?? null } });
+    }
+  }, [agent, draft.locked, draft.selection, on_change, options_loading, plan_current, runtime_current, runtime_plan_id]);
+
+  useEffect(() => {
+    if (agent && !options_loading && !draft.locked && draft.model && draft.model.scope_key !== model_scope) on_change({ model: null });
+  }, [agent, draft.locked, draft.model, model_scope, on_change, options_loading]);
 
   useLayoutEffect(() => {
     const field = textarea.current;
@@ -105,7 +127,7 @@ export function DraftConversation({ draft, projects, workspace_available, worksp
       <div className="draft-conversation__setup">
         <div className="draft-conversation__welcome">
           <h1>Start a conversation</h1>
-          <p>The agent starts when you send your first message.</p>
+          <p>Your conversation starts when you send your first message.</p>
         </div>
         <div className="draft-conversation__fields">
           <label className="draft-conversation__project">Project folder
@@ -148,6 +170,8 @@ export function DraftConversation({ draft, projects, workspace_available, worksp
         {!options_loading && !options_error && options && !agent ? <p className="draft-conversation__error" role="alert">{agent_name} is unavailable on this machine.</p> : null}
         {runtime_id && agent && !runtime_current ? <p className="draft-conversation__error" role="alert">The selected runtime changed. Choose a runtime again before sending.</p> : null}
         {runtime?.reason || !runtime_id && agent?.reason ? <p className={agent_available ? "draft-conversation__notice" : "draft-conversation__error"} role={agent_available ? "status" : "alert"}>{runtime?.reason ?? agent?.reason}</p> : null}
+        {provider !== "pi" && workspace_available && project?.available && options && !options_loading && !options_error && !agent_available && !draft.locked && on_configure_runtime
+          ? <button className="text-button" type="button" disabled={draft.sending} onClick={(event) => on_configure_runtime(event.currentTarget)}>Configure agent runtime</button> : null}
       </div>
     </div>
 
@@ -170,7 +194,9 @@ export function DraftConversation({ draft, projects, workspace_available, worksp
             }} />
           <ImageAttachmentPicker image_count={draft.images.length} limits={images_allowed ? DEFAULT_IMAGE_LIMITS : null} disabled={draft.locked || draft.sending} on_add={addImages} />
           <div className="session-composer__footer">
-            <span className="session-composer__provider">{agent_name}</span>
+            <SessionModelPicker key={model_scope} model={model} provider={agent_name} mode="creation" input_busy={draft.locked || draft.sending}
+              selected_model={draft.model?.choice} selection_current={model_current} on_clear={() => on_change({ model: null })}
+              on_select={(choice) => { const selected = model.selectionFor(choice); if (selected) on_change({ model: selected }); }} />
             {checking_existing ? <button className="draft-conversation__check" type="submit" disabled={draft.sending}>{draft.sending ? "Checking…" : "Check session start"}</button>
               : <button className="session-composer__send" type="submit" disabled={!can_send} aria-label={draft.sending ? "Starting session…" : "Send"} title="Send message (⌘ / Ctrl + Enter)">
                 {draft.sending ? <span className="inline-spinner" aria-hidden="true" /> : <SendIcon />}
@@ -190,7 +216,8 @@ export function DraftConversation({ draft, projects, workspace_available, worksp
           {draft.snapshot?.last_turn_error ? <p className="draft-conversation__error">{draft.snapshot.last_turn_error}</p> : null}
           {draft.error && draft.error !== draft.snapshot?.message ? <p className="draft-conversation__error" role="alert">{draft.error}</p> : null}
           {draft.image_error ? <p className="draft-conversation__error" role="alert">{draft.image_error}</p> : null}
-          {!!draft.images.length && agent && !images_allowed ? <p className="draft-conversation__error" role="alert">{agent_name} cannot accept these images. Remove them or choose an agent with image support.</p> : null}
+          {draft.model && !model_current && !model.loading && !draft.locked ? <p className="draft-conversation__error" role="alert">The model catalog changed. Choose a model again or use runtime default before sending.</p> : null}
+          {!!draft.images.length && agent && !images_allowed ? <p className="draft-conversation__error" role="alert">{draft.model ? "This model cannot accept these images. Remove them or choose a model with image support." : `${agent_name} cannot accept these images. Remove them or choose an agent with image support.`}</p> : null}
           {draft.snapshot?.session && on_open_session ? <button className="text-button" type="button" onClick={on_open_session}>Open saved conversation</button> : null}
         </div>
       </div>

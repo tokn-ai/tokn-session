@@ -1,5 +1,7 @@
 //! Host configuration, adapter factories and viewer DTO mapping for shared runtimes.
+pub(crate) mod discovery;
 mod factory;
+mod resolver;
 #[cfg(test)]
 pub(crate) mod tests;
 mod workflow;
@@ -80,7 +82,7 @@ pub struct RpcSessionBinding {
 #[derive(Clone)]
 pub(crate) struct RpcRuntimeManager(Arc<Inner>);
 struct Inner {
-  profiles: Arc<RpcProfileStore>,
+  resolver: resolver::RuntimeResolver,
   runtimes: core_runtime::RuntimeCoordinator<Host>,
   #[cfg(test)]
   interactions: InteractionService,
@@ -88,38 +90,50 @@ struct Inner {
 
 #[derive(Clone)]
 struct Host {
-  profiles: Arc<RpcProfileStore>,
-  transient_profiles: Arc<Mutex<BTreeMap<String, RpcResolvedProfile>>>,
+  resolver: resolver::RuntimeResolver,
 }
 
 impl RpcRuntimeManager {
+  pub(crate) fn resolve_plan(
+    &self,
+    provider: Provider,
+    cwd: &std::path::Path,
+    selected: Option<&core_runtime::RuntimeSelection>,
+  ) -> Result<tokn_interaction_core::runtime_plan::RuntimePlan, String> {
+    self.0.resolver.resolve_plan(provider, cwd, selected)
+  }
+
   pub(crate) fn creation_selection(
     &self,
     provider: Provider,
     cwd: &std::path::Path,
     selected: Option<&core_runtime::RuntimeSelection>,
   ) -> Result<Option<core_runtime::RuntimeSelection>, String> {
-    let profiles = self.profiles()?;
-    let snapshot = profiles.snapshot()?;
-    let selection = if let Some(selected) = selected {
-      Some(selected.clone())
-    } else {
-      workflow::select_profile(&snapshot, provider, cwd)?.map(|profile| core_runtime::RuntimeSelection {
-        profile_id: profile.profile_id.clone(),
-        expected_revision: snapshot.revision,
-      })
-    };
-    if let Some(selection) = &selection {
-      let resolved = profiles.resolve_at_revision(&selection.profile_id, selection.expected_revision)?;
-      if resolved.profile.provider != provider {
-        return Err("The chosen runtime belongs to another agent".into());
-      }
-      resolved.validate_launch_ready()?;
-      crate::service::validate_creation_profile(&resolved, cwd)?;
-    } else {
-      workflow::builtin_codex(cwd)?;
-    }
-    Ok(selection)
+    let plan = self.resolve_plan(provider, cwd, selected)?;
+    let selection = plan.shared_runtime_selection()?;
+    let resolved = self
+      .0
+      .resolver
+      .resolve_profile(&selection.profile_id, selection.expected_revision)?;
+    crate::service::validate_creation_profile(&resolved, cwd)?;
+    // Existing unpinned/default receipts retain their original fingerprint.
+    Ok(
+      if selected.is_none() && self.0.resolver.is_discovered(&selection.profile_id) {
+        None
+      } else {
+        Some(selection)
+      },
+    )
+  }
+
+  #[cfg(test)]
+  pub(crate) fn set_discovery_environment(&self, environment: discovery::DiscoveryEnvironment) {
+    *self
+      .0
+      .resolver
+      .discovery_environment
+      .lock()
+      .unwrap_or_else(|error| error.into_inner()) = Some(environment);
   }
 
   pub(crate) async fn create_native_session(
@@ -128,8 +142,26 @@ impl RpcRuntimeManager {
     cwd: PathBuf,
     selection: Option<core_runtime::RuntimeSelection>,
     native_id: Option<String>,
+    model: Option<ModelIdentity>,
   ) -> Result<core_runtime::CreatedNativeSession, InteractionError> {
-    self.0.runtimes.create_native(provider, cwd, selection, native_id).await
+    self
+      .0
+      .runtimes
+      .create_native(provider, cwd, selection, native_id, model)
+      .await
+  }
+  pub(crate) async fn creation_models(
+    &self,
+    provider: Provider,
+    cwd: PathBuf,
+    selection: Option<core_runtime::RuntimeSelection>,
+  ) -> Result<Vec<ModelChoice>, InteractionError> {
+    if provider == Provider::Pi {
+      return Err(InteractionError::unsupported(
+        "Use the managed Pi driver to discover creation models",
+      ));
+    }
+    self.0.runtimes.creation_models(provider, cwd, selection).await
   }
   pub(crate) async fn execute_created(
     &self,
@@ -165,12 +197,16 @@ impl RpcRuntimeManager {
     let lease_directory = parent.map(|path| path.join("rpc-leases"));
     let ownership = crate::session_ownership::SessionOwnership::new(parent.map(|path| path.join("session-leases")));
     let profiles = Arc::new(RpcProfileStore::configured(path));
-    let host = Host {
-      profiles: profiles.clone(),
+    let resolver = resolver::RuntimeResolver {
+      profiles,
       transient_profiles: Arc::new(Mutex::new(BTreeMap::new())),
+      discovery_environment: Arc::new(Mutex::new(None)),
+    };
+    let host = Host {
+      resolver: resolver.clone(),
     };
     Self(Arc::new(Inner {
-      profiles,
+      resolver,
       #[cfg(test)]
       interactions: interactions.clone(),
       runtimes: core_runtime::RuntimeCoordinator::new(host, interactions, lease_directory, ownership),
@@ -189,7 +225,7 @@ impl RpcRuntimeManager {
   }
 
   pub(crate) fn profiles(&self) -> Result<Arc<RpcProfileStore>, String> {
-    Ok(self.0.profiles.clone())
+    Ok(self.0.resolver.profiles.clone())
   }
 
   pub(crate) fn subscribe(&self) -> broadcast::Receiver<()> {

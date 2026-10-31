@@ -23,6 +23,10 @@ pub struct CreateProjectSessionRequest {
   pub prompt: String,
   #[serde(default)]
   pub image_ids: Vec<String>,
+  #[serde(default)]
+  pub model: Option<crate::ModelIdentity>,
+  #[serde(default)]
+  pub runtime_plan_id: Option<String>,
 }
 
 /// Host-validated immutable image bytes. Filesystem upload paths stay in the host.
@@ -212,6 +216,14 @@ pub trait ManagedSessionDriver: Send + Sync {
   fn label(&self) -> &str;
   fn model_capabilities(&self) -> ManagedModelCapabilities {
     ManagedModelCapabilities::default()
+  }
+  /// Discover creation choices without creating a durable native session or
+  /// sending a prompt. Implementations own temporary-runtime cleanup.
+  fn creation_models(
+    &self,
+    _working_directory: PathBuf,
+  ) -> crate::AdapterFuture<'static, Result<Vec<crate::ModelChoice>, String>> {
+    Box::pin(async { Err("This agent does not support model discovery before session creation".into()) })
   }
   fn spawn(&self, worker: ManagedWorker) -> crate::AdapterFuture<'static, ()>;
   /// Bounded provider-native history identity verification; called on a blocking task.

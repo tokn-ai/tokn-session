@@ -2,6 +2,160 @@ use super::*;
 use std::sync::atomic::AtomicUsize;
 use tokio::sync::oneshot;
 
+fn test_model() -> ModelIdentity {
+  ModelIdentity {
+    model_provider: Some("provider".into()),
+    model_id: "model".into(),
+    display_name: Some("Model label".into()),
+  }
+}
+
+#[tokio::test]
+async fn draft_catalog_closes_temporary_runtime_without_creating_resuming_or_sending() {
+  let (runtime, shared) = fixture();
+  let models = runtime
+    .creation_models(Provider::Codex, std::env::temp_dir(), None)
+    .await
+    .unwrap();
+  assert_eq!(models[0].model, test_model());
+  let adapter = shared.adapter.lock().unwrap().clone().unwrap();
+  assert_eq!(adapter.model_queries.load(Ordering::SeqCst), 1);
+  assert_eq!(adapter.closes.load(Ordering::SeqCst), 1);
+  assert_eq!(adapter.creates.load(Ordering::SeqCst), 0);
+  assert_eq!(adapter.resumes.load(Ordering::SeqCst), 0);
+  assert_eq!(adapter.sends.load(Ordering::SeqCst), 0);
+  assert!(runtime.inventory().runtimes.is_empty());
+  assert!(runtime.0.state.lock().unwrap().bindings.is_empty());
+}
+
+#[tokio::test]
+async fn draft_catalog_reuses_live_runtime_and_never_closes_it_on_query_failure() {
+  let (runtime, shared) = fixture();
+  runtime
+    .start(StartRuntimeRequest {
+      request_id: uuid::Uuid::new_v4().to_string(),
+      profile_id: runtime.0.host.profile.profile_id.clone(),
+      expected_revision: 1,
+    })
+    .await
+    .unwrap();
+  let adapter = shared.adapter.lock().unwrap().clone().unwrap();
+  runtime
+    .creation_models(Provider::Codex, std::env::temp_dir(), None)
+    .await
+    .unwrap();
+  adapter.fail_models.store(true, Ordering::SeqCst);
+  assert!(
+    runtime
+      .creation_models(Provider::Codex, std::env::temp_dir(), None)
+      .await
+      .is_err()
+  );
+  assert_eq!(shared.opens.load(Ordering::SeqCst), 1);
+  assert_eq!(adapter.closes.load(Ordering::SeqCst), 0);
+  assert_eq!(runtime.inventory().runtimes.len(), 1);
+  runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn draft_catalog_failed_cleanup_reserves_profile_without_starting_a_second_probe() {
+  let (runtime, shared) = fixture();
+  shared.fail_close.store(true, Ordering::SeqCst);
+  let error = runtime
+    .creation_models(Provider::Codex, std::env::temp_dir(), None)
+    .await
+    .unwrap_err();
+  assert!(error.message.contains("cleanup was not confirmed"));
+  assert_eq!(runtime.inventory().runtimes[0].status, "cleanup_failed");
+  assert!(
+    runtime
+      .creation_models(Provider::Codex, std::env::temp_dir(), None)
+      .await
+      .is_err()
+  );
+  assert_eq!(shared.opens.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn canceled_catalog_caller_still_cleans_up_and_shutdown_waits() {
+  let (runtime, shared) = fixture();
+  let (release, wait) = oneshot::channel();
+  *shared.open_wait.lock().unwrap() = Some(wait);
+  let probe = tokio::spawn({
+    let runtime = runtime.clone();
+    async move {
+      runtime
+        .creation_models(Provider::Codex, std::env::temp_dir(), None)
+        .await
+    }
+  });
+  shared.open_started.notified().await;
+  probe.abort();
+  let shutdown = tokio::spawn({
+    let runtime = runtime.clone();
+    async move { runtime.shutdown().await }
+  });
+  tokio::task::yield_now().await;
+  assert!(!shutdown.is_finished());
+  release.send(()).unwrap();
+  shutdown.await.unwrap();
+  let adapter = shared.adapter.lock().unwrap().clone().unwrap();
+  assert_eq!(adapter.closes.load(Ordering::SeqCst), 1);
+  assert_eq!(adapter.creates.load(Ordering::SeqCst), 0);
+  assert!(runtime.inventory().runtimes.is_empty());
+}
+
+#[tokio::test]
+async fn creation_revalidates_catalog_and_passes_only_selected_model_identity() {
+  let (runtime, shared) = fixture();
+  let created = runtime
+    .create_native(Provider::Codex, std::env::temp_dir(), None, None, Some(test_model()))
+    .await
+    .unwrap();
+  let adapter = shared.adapter.lock().unwrap().clone().unwrap();
+  assert_eq!(adapter.model_queries.load(Ordering::SeqCst), 1);
+  assert_eq!(
+    adapter.created_models.lock().unwrap()[0],
+    Some(creation_model_identity(&test_model()))
+  );
+  assert!(!created.capabilities.atomic_model_on_send);
+  let mut removed = test_model();
+  removed.model_id = "no-longer-listed".into();
+  assert_eq!(
+    runtime
+      .create_native(Provider::Codex, std::env::temp_dir(), None, None, Some(removed))
+      .await
+      .unwrap_err()
+      .kind,
+    ErrorKind::InvalidRequest
+  );
+  adapter.fail_models.store(true, Ordering::SeqCst);
+  assert!(
+    runtime
+      .create_native(Provider::Codex, std::env::temp_dir(), None, None, Some(test_model()))
+      .await
+      .is_err()
+  );
+  assert_eq!(adapter.creates.load(Ordering::SeqCst), 1);
+  assert_eq!(adapter.sends.load(Ordering::SeqCst), 0);
+  runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn unsupported_creation_model_is_rejected_before_runtime_start() {
+  let (mut runtime, shared) = fixture();
+  Arc::get_mut(&mut runtime.0).unwrap().host.profile.provider = Provider::Dsh;
+  assert_eq!(
+    runtime
+      .create_native(Provider::Dsh, std::env::temp_dir(), None, None, Some(test_model()))
+      .await
+      .unwrap_err()
+      .kind,
+    ErrorKind::Unsupported
+  );
+  assert_eq!(shared.opens.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn verified_planned_creation_recovers_its_owner_without_repeating_native_writes() {
   let (runtime, shared) = fixture();
@@ -18,7 +172,7 @@ async fn verified_planned_creation_recovers_its_owner_without_repeating_native_w
   let cwd = std::env::temp_dir();
   assert_eq!(
     runtime
-      .create_native(Provider::Codex, cwd.clone(), None, Some("planned-created".into()))
+      .create_native(Provider::Codex, cwd.clone(), None, Some("planned-created".into()), None)
       .await
       .unwrap_err()
       .kind,
@@ -91,11 +245,23 @@ async fn verified_planned_creation_recovers_its_owner_without_repeating_native_w
 async fn created_sessions_share_a_runtime_and_adoption_never_resumes_or_stops_it() {
   let (runtime, shared) = fixture();
   let first = runtime
-    .create_native(Provider::Codex, std::env::temp_dir(), None, Some("created-one".into()))
+    .create_native(
+      Provider::Codex,
+      std::env::temp_dir(),
+      None,
+      Some("created-one".into()),
+      None,
+    )
     .await
     .unwrap();
   let second = runtime
-    .create_native(Provider::Codex, std::env::temp_dir(), None, Some("created-two".into()))
+    .create_native(
+      Provider::Codex,
+      std::env::temp_dir(),
+      None,
+      Some("created-two".into()),
+      None,
+    )
     .await
     .unwrap();
   assert_eq!(first.target.runtime_id, second.target.runtime_id);
@@ -152,6 +318,7 @@ async fn creation_reserves_native_identity_across_hosts_until_exact_runtime_clea
       std::env::temp_dir(),
       None,
       Some("exclusive-created".into()),
+      None,
     )
     .await
     .unwrap();
@@ -161,7 +328,8 @@ async fn creation_reserves_native_identity_across_hosts_until_exact_runtime_clea
         Provider::Codex,
         std::env::temp_dir(),
         None,
-        Some("exclusive-created".into())
+        Some("exclusive-created".into()),
+        None,
       )
       .await
       .is_err()
@@ -185,6 +353,7 @@ async fn creation_reserves_native_identity_across_hosts_until_exact_runtime_clea
       std::env::temp_dir(),
       None,
       Some("exclusive-created".into()),
+      None,
     )
     .await
     .unwrap();
@@ -198,6 +367,9 @@ struct FakeHost {
 
 struct FakeHostState {
   opens: AtomicUsize,
+  selections: AtomicUsize,
+  profile_override: Mutex<Option<ProfileDescriptor>>,
+  fail_close: AtomicBool,
   adapter: Mutex<Option<Arc<FakeAdapter>>>,
   open_wait: Mutex<Option<oneshot::Receiver<()>>>,
   open_started: Notify,
@@ -207,10 +379,17 @@ impl RuntimeHost for FakeHost {
   type Profile = ProfileDescriptor;
 
   fn resolve_profile(&self, id: &str, revision: u64) -> Result<Self::Profile, String> {
-    if id != self.profile.profile_id || revision != self.profile.revision {
+    let profile = self
+      .shared
+      .profile_override
+      .lock()
+      .unwrap()
+      .clone()
+      .unwrap_or_else(|| self.profile.clone());
+    if id != profile.profile_id || revision != profile.revision {
       return Err("Profile changed".into());
     }
-    Ok(self.profile.clone())
+    Ok(profile)
   }
 
   fn describe(&self, profile: &Self::Profile) -> ProfileDescriptor {
@@ -221,12 +400,30 @@ impl RuntimeHost for FakeHost {
     Ok(())
   }
 
+  fn validate_creation_model(&self, profile: &Self::Profile, _model: &ModelIdentity) -> Result<(), InteractionError> {
+    if profile.provider == Provider::Dsh {
+      Err(InteractionError::unsupported("No creation model override"))
+    } else {
+      Ok(())
+    }
+  }
+
   fn select_profile<'a>(
     &'a self,
     _provider: Provider,
     _cwd: &'a Path,
   ) -> AdapterFuture<'a, Result<(String, u64), String>> {
-    Box::pin(async { Ok((self.profile.profile_id.clone(), self.profile.revision)) })
+    Box::pin(async {
+      self.shared.selections.fetch_add(1, Ordering::SeqCst);
+      let profile = self
+        .shared
+        .profile_override
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| self.profile.clone());
+      Ok((profile.profile_id, profile.revision))
+    })
   }
 
   fn open<'a>(
@@ -249,12 +446,17 @@ impl RuntimeHost for FakeHost {
           ownership: self.profile.ownership,
           capabilities: Capabilities::default()
             .with(Operation::Metadata)
+            .with(Operation::Models)
             .with(Operation::State)
             .with(Operation::PendingInteractions)
             .with(Operation::Message),
         },
         events: broadcast::channel(8).0,
         creates: AtomicUsize::new(0),
+        created_models: Mutex::new(Vec::new()),
+        model_queries: AtomicUsize::new(0),
+        fail_models: AtomicBool::new(false),
+        fail_close: AtomicBool::new(self.shared.fail_close.load(Ordering::SeqCst)),
         uncertain_create: AtomicBool::new(false),
         unavailable_state: AtomicBool::new(false),
         resumes: AtomicUsize::new(0),
@@ -290,6 +492,7 @@ impl RuntimeHandle for FakeHandle {
   ) -> AdapterFuture<'a, Result<NativeSessionDescriptor, InteractionError>> {
     Box::pin(async move {
       self.0.creates.fetch_add(1, Ordering::SeqCst);
+      self.0.created_models.lock().unwrap().push(request.model.clone());
       if self.0.uncertain_create.load(Ordering::SeqCst) {
         return Err(InteractionError::uncertain("Native create acknowledgement was lost"));
       }
@@ -309,6 +512,10 @@ struct FakeAdapter {
   descriptor: RuntimeDescriptor,
   events: broadcast::Sender<RuntimeEvent>,
   creates: AtomicUsize,
+  created_models: Mutex<Vec<Option<ModelIdentity>>>,
+  model_queries: AtomicUsize,
+  fail_models: AtomicBool,
+  fail_close: AtomicBool,
   uncertain_create: AtomicBool,
   unavailable_state: AtomicBool,
   resumes: AtomicUsize,
@@ -328,6 +535,20 @@ impl InteractionAdapter for FakeAdapter {
       }
       Ok(match request.command {
         Command::Metadata => Reply::Metadata(Metadata::default()),
+        Command::Models => {
+          assert!(
+            request.target.session_id.is_none(),
+            "draft catalogs must never bind a native session"
+          );
+          self.model_queries.fetch_add(1, Ordering::SeqCst);
+          if self.fail_models.load(Ordering::SeqCst) {
+            return Err(InteractionError::unavailable("Catalog unavailable"));
+          }
+          Reply::Models(vec![ModelChoice {
+            model: test_model(),
+            supports_images: true,
+          }])
+        }
         Command::State => Reply::State(SessionState {
           session_id: request.target.session_id,
           status: ExecutionState::Idle,
@@ -357,6 +578,9 @@ impl InteractionAdapter for FakeAdapter {
   fn close(&self) -> AdapterFuture<'_, Result<(), InteractionError>> {
     Box::pin(async {
       self.closes.fetch_add(1, Ordering::SeqCst);
+      if self.fail_close.load(Ordering::SeqCst) {
+        return Err(InteractionError::unavailable("Cleanup not confirmed"));
+      }
       Ok(())
     })
   }
@@ -365,6 +589,9 @@ impl InteractionAdapter for FakeAdapter {
 fn fixture() -> (RuntimeCoordinator<FakeHost>, Arc<FakeHostState>) {
   let shared = Arc::new(FakeHostState {
     opens: AtomicUsize::new(0),
+    selections: AtomicUsize::new(0),
+    profile_override: Mutex::new(None),
+    fail_close: AtomicBool::new(false),
     adapter: Mutex::new(None),
     open_wait: Mutex::new(None),
     open_started: Notify::new(),
@@ -623,4 +850,161 @@ async fn unregistered_uncertain_cleanup_remains_visible_and_holds_profile_lease_
   second.start(request).await.unwrap();
   assert_eq!(shared.opens.load(Ordering::SeqCst), 2);
   second.shutdown().await;
+}
+
+fn resolved_test_plan(runtime: &RuntimeCoordinator<FakeHost>) -> crate::runtime_plan::RuntimePlan {
+  use crate::runtime_plan::{RuntimeConfigurationIdentity, RuntimePlan, RuntimeReuseScope, RuntimeStrategy};
+  let profile = &runtime.0.host.profile;
+  RuntimePlan {
+    provider: profile.provider,
+    configuration: RuntimeConfigurationIdentity {
+      id: profile.profile_id.clone(),
+      revision: profile.revision,
+    },
+    ownership: profile.ownership,
+    reuse_scope: RuntimeReuseScope::Runtime,
+    strategy: RuntimeStrategy::SharedRuntime,
+    working_directory: std::env::temp_dir(),
+  }
+}
+
+fn verified_test_session(plan: &crate::runtime_plan::RuntimePlan) -> crate::runtime_plan::VerifiedSessionDescriptor {
+  crate::runtime_plan::VerifiedSessionDescriptor::from_verified_history(
+    plan.provider,
+    NativeSessionDescriptor {
+      native_id: "planned-native-id".into(),
+      working_directory: plan.working_directory.clone(),
+      history_path: Some(std::env::temp_dir().join("host-verified-history.jsonl")),
+    },
+  )
+  .unwrap()
+}
+
+#[tokio::test]
+async fn planned_resume_pins_configuration_and_deduplicates_without_sending_input() {
+  let (runtime, shared) = fixture();
+  let plan = resolved_test_plan(&runtime);
+  let descriptor = verified_test_session(&plan);
+  let request_id = uuid::Uuid::new_v4().to_string();
+  let second_id = uuid::Uuid::new_v4().to_string();
+  let (first, concurrent) = tokio::join!(
+    runtime.ensure_session_with_plan(&request_id, "planned-key", plan.clone(), descriptor.clone()),
+    runtime.ensure_session_with_plan(&second_id, "planned-key", plan.clone(), descriptor.clone()),
+  );
+  let binding = first.unwrap();
+  assert_eq!(binding.target, concurrent.unwrap().target);
+  assert_eq!(
+    runtime
+      .ensure_session_with_plan(&request_id, "planned-key", plan.clone(), descriptor.clone())
+      .await
+      .unwrap()
+      .target,
+    binding.target
+  );
+  assert_eq!(
+    shared.selections.load(Ordering::SeqCst),
+    0,
+    "a pinned plan must never resolve another default"
+  );
+  assert_eq!(shared.opens.load(Ordering::SeqCst), 1);
+  let adapter = shared.adapter.lock().unwrap().clone().unwrap();
+  assert_eq!(adapter.resumes.load(Ordering::SeqCst), 1);
+  assert_eq!(adapter.creates.load(Ordering::SeqCst), 0);
+  assert_eq!(adapter.sends.load(Ordering::SeqCst), 0);
+  let mut changed = plan.clone();
+  changed.reuse_scope = crate::runtime_plan::RuntimeReuseScope::Project;
+  assert!(
+    runtime
+      .ensure_session_with_plan(&request_id, "planned-key", changed, descriptor.clone())
+      .await
+      .is_err()
+  );
+  let mut changed = descriptor.native().clone();
+  changed.history_path = Some(std::env::temp_dir().join("another-verified-history.jsonl"));
+  let changed = crate::runtime_plan::VerifiedSessionDescriptor::from_verified_history(plan.provider, changed).unwrap();
+  assert!(
+    runtime
+      .ensure_session_with_plan(&request_id, "planned-key", plan, changed)
+      .await
+      .is_err()
+  );
+  assert_eq!(adapter.resumes.load(Ordering::SeqCst), 1);
+  runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn planned_resume_rejects_stale_or_mismatched_configuration_before_opening() {
+  let (runtime, shared) = fixture();
+  let plan = resolved_test_plan(&runtime);
+  let mut stale = plan.clone();
+  stale.configuration.revision += 1;
+  let mut provider = plan.clone();
+  provider.provider = Provider::OpenCode;
+  let mut ownership = plan.clone();
+  ownership.ownership = Ownership::Managed;
+  let mut worker = ownership.clone();
+  worker.strategy = crate::runtime_plan::RuntimeStrategy::SessionWorker;
+  worker.reuse_scope = crate::runtime_plan::RuntimeReuseScope::Session;
+  for invalid in [stale, provider, ownership, worker] {
+    let descriptor = verified_test_session(&invalid);
+    assert!(
+      runtime
+        .ensure_session_with_plan(&uuid::Uuid::new_v4().to_string(), "key", invalid, descriptor)
+        .await
+        .is_err()
+    );
+  }
+  let mut other_directory = plan.clone();
+  other_directory.working_directory.push("another-project");
+  assert!(
+    runtime
+      .ensure_session_with_plan(
+        &uuid::Uuid::new_v4().to_string(),
+        "key",
+        plan,
+        verified_test_session(&other_directory)
+      )
+      .await
+      .is_err()
+  );
+  assert_eq!(shared.opens.load(Ordering::SeqCst), 0);
+  assert_eq!(shared.selections.load(Ordering::SeqCst), 0);
+  runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn planned_resume_does_not_reuse_a_binding_from_another_configuration_or_revision() {
+  let (runtime, shared) = fixture();
+  let plan = resolved_test_plan(&runtime);
+  let descriptor = verified_test_session(&plan);
+  runtime
+    .ensure_session_with_plan(
+      &uuid::Uuid::new_v4().to_string(),
+      "key",
+      plan.clone(),
+      descriptor.clone(),
+    )
+    .await
+    .unwrap();
+  let mut updated = runtime.0.host.profile.clone();
+  updated.revision += 1;
+  for different_profile in [false, true] {
+    if different_profile {
+      updated.profile_id = uuid::Uuid::new_v4().to_string();
+    }
+    *shared.profile_override.lock().unwrap() = Some(updated.clone());
+    let mut changed = plan.clone();
+    changed.configuration.id = updated.profile_id.clone();
+    changed.configuration.revision = updated.revision;
+    let error = runtime
+      .ensure_session_with_plan(&uuid::Uuid::new_v4().to_string(), "key", changed, descriptor.clone())
+      .await
+      .unwrap_err();
+    assert!(error.contains("different runtime configuration"), "{error}");
+  }
+  assert_eq!(shared.opens.load(Ordering::SeqCst), 1);
+  assert_eq!(shared.selections.load(Ordering::SeqCst), 0);
+  let adapter = shared.adapter.lock().unwrap().clone().unwrap();
+  assert_eq!(adapter.resumes.load(Ordering::SeqCst), 1);
+  runtime.shutdown().await;
 }

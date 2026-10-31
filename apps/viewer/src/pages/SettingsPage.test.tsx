@@ -44,6 +44,13 @@ function openSources() { fireEvent.click(screen.getByRole("button", { name: /^So
 function openHosting() { fireEvent.click(screen.getByRole("button", { name: /^Hosting & access/ })); }
 function openPreferences() { fireEvent.click(screen.getByRole("button", { name: /^Viewer preferences/ })); }
 
+it("opens directly at Agent runtimes for draft configuration recovery", () => {
+  render(<SettingsPage {...props({ initial_section: "agent_runtimes", machine_connected: false })} />);
+  expect(screen.getByRole("button", { name: /^Agent runtimes/ })).toHaveAttribute("aria-current", "page");
+  expect(screen.getByRole("heading", { name: "Agent runtimes" })).toBeVisible();
+  expect(screen.getByText("Connect to a machine to manage its agent runtimes.")).toBeVisible();
+});
+
 describe("SettingsPage", () => {
   it("applies only device preferences immediately and keeps close and reset explicit", () => {
     const change = vi.fn(); const reset = vi.fn(); const close = vi.fn(); const apply = vi.fn();

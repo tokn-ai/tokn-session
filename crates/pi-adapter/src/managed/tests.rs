@@ -162,6 +162,8 @@ def assistant_outcome(stop_reason, error=None):
 
 record({'kind': 'launch', 'args': sys.argv[1:], 'pid': os.getpid()})
 mode = config['mode']
+if '--model' in sys.argv and mode != 'ignore_launch_model':
+    model_id = sys.argv[sys.argv.index('--model') + 1]
 if mode == 'early_exit':
     sys.stderr.write('synthetic startup failure\n')
     sys.exit(23)
@@ -194,17 +196,25 @@ for line in sys.stdin:
             persist()
         reported_id = '00000000-0000-4000-8000-000000000001' if mode == 'wrong_identity' else session_id
         state = {'sessionId': reported_id, 'sessionFile': str(session_file), 'isStreaming': streaming, 'isCompacting': compacting, 'pendingMessageCount': pending, 'model': {'id': model_id, 'provider':'synthetic', 'name':model_id.title(), 'input': ['text', 'image'] if (mode == 'vision' or mode == 'model_controls' and model_id == 'vision') and not (root / 'text-only').exists() else ['text']}}
-        if mode == 'idle_probe_start' and state_count >= 3 and not streaming:
+        if '--no-session' in sys.argv:
+            state.pop('sessionFile')
+        if (mode == 'idle_probe_start' and state_count >= 3 or mode == 'initial_model_work_race' and state_count == 2) and not streaming:
             streaming = True
             record({'kind': 'idle_probe_work', 'pid': os.getpid()})
             # One pipe write makes the start event available beside the idle
             # response, as when an extension begins work during an idle probe.
             response = {'type': 'response', 'id': command['id'], 'command': kind, 'success': True, 'data': state}
-            sys.stdout.write(json.dumps(response) + '\n' + json.dumps({'type': 'agent_start'}) + '\n')
+            frames = [response, {'type': 'agent_start'}] if mode == 'idle_probe_start' else [{'type': 'agent_start'}, response]
+            sys.stdout.write(''.join(json.dumps(frame) + '\n' for frame in frames))
             sys.stdout.flush()
         else:
             reply(command, data=state)
     elif kind == 'get_available_models':
+        if mode == 'catalog_slow':
+            time.sleep(1.2)
+        if mode == 'catalog_wait':
+            while not (root / 'allow-catalog').exists():
+                time.sleep(0.01)
         if mode == 'model_compaction_race':
             compacting = True
             emit({'type':'compaction_start'})
@@ -214,6 +224,10 @@ for line in sys.stdin:
         models = [{'id':'text', 'provider':'synthetic', 'name':'Text', 'input':['text'], 'headers':{'authorization':'secret'}}, {'id':'vision', 'provider':'synthetic', 'name':'Vision', 'input':['text','image']}]
         if (root / 'remove-current-model').exists():
             models = [model for model in models if model['id'] != model_id]
+        if mode == 'catalog_oversized':
+            models = [dict(models[0], id=str(index)) for index in range(513)]
+        if mode == 'catalog_changes_model':
+            model_id = 'text'
         reply(command, data={'models': models})
     elif kind == 'set_model':
         if (root / 'exit-model').exists():
@@ -774,10 +788,12 @@ if mode == 'ignore_eof':
         available: true,
       };
       let request = CreateProjectSessionRequest {
+        runtime_plan_id: None,
         request_id: uuid::Uuid::new_v4().to_string(),
         project_id,
         prompt: prompt.into(),
         image_ids: Vec::new(),
+        model: None,
       };
       Self {
         manager,
@@ -1756,6 +1772,230 @@ if mode == 'ignore_eof':
       );
       fixture.manager.shutdown().await;
     }
+  }
+
+  #[tokio::test]
+  async fn creation_model_is_verified_before_image_prompt_and_not_reapplied_on_resume() {
+    use tokn_interaction_core::{ModelIdentity, creation::FirstInputState};
+    let mut fixture = Fixture::new("model_controls", "handled");
+    fixture.request.model = Some(ModelIdentity {
+      model_provider: Some("synthetic".into()),
+      model_id: "vision".into(),
+      display_name: None,
+    });
+    let image_id = uuid::Uuid::new_v4().to_string();
+    fixture.request.image_ids = vec![image_id.clone()];
+    fixture
+      .manager
+      .create_with_images(fixture.request.clone(), fixture.project.clone(), vec![image(&image_id)])
+      .await
+      .unwrap();
+    fixture
+      .wait_for(|snapshot| {
+        snapshot.status == ManagedSessionStatus::Idle
+          && snapshot.creation_input_state == Some(FirstInputState::Accepted)
+      })
+      .await;
+    assert_eq!(
+      fixture.launches()[0]["args"],
+      json!(["--mode", "rpc", "--provider", "synthetic", "--model", "vision"])
+    );
+    let log = fixture.log();
+    let first_commands: Vec<_> = log.iter().filter_map(|value| value["type"].as_str()).take(4).collect();
+    assert_eq!(
+      first_commands,
+      ["get_state", "get_available_models", "get_state", "prompt"]
+    );
+    assert!(!log.iter().any(|value| value["type"] == "set_model"));
+    assert_eq!(
+      log.iter().find(|value| value["type"] == "prompt").unwrap()["images"]
+        .as_array()
+        .unwrap()
+        .len(),
+      1
+    );
+    let receipt = fixture.manager.latest(&fixture.request.request_id).unwrap().unwrap();
+    assert_eq!(receipt.model, fixture.request.model);
+    let mut changed = fixture.request.clone();
+    changed.model.as_mut().unwrap().model_id = "text".into();
+    assert!(
+      fixture
+        .manager
+        .creation_receipt(&changed)
+        .unwrap_err()
+        .contains("different content")
+    );
+    changed = fixture.request.clone();
+    changed.model.as_mut().unwrap().display_name = Some("New cosmetic name".into());
+    assert!(fixture.manager.creation_receipt(&changed).unwrap().is_some());
+    fixture.manager.shutdown().await;
+    fixture.wait_reaped().await;
+    fixture.manager =
+      ManagedPiSessions::with_executable(Some(fixture.state_path.clone()), fixture.executable.clone()).unwrap();
+    fixture.manager.resume(fixture.identity()).await.unwrap();
+    fixture
+      .wait_for(|snapshot| snapshot.status == ManagedSessionStatus::Idle)
+      .await;
+    assert_eq!(
+      fixture.launches()[1]["args"],
+      json!([
+        "--mode",
+        "rpc",
+        "--session",
+        fixture.folder().join("synthetic-history.jsonl").to_str().unwrap()
+      ])
+    );
+    assert_eq!(fixture.prompts(), ["handled"]);
+    fixture.manager.shutdown().await;
+  }
+
+  #[tokio::test]
+  async fn creation_model_catalog_retains_initial_readback_across_background_ticks() {
+    let mut fixture = Fixture::new("catalog_slow", "handled");
+    fixture.request.model = Some(tokn_interaction_core::ModelIdentity {
+      model_provider: Some("synthetic".into()),
+      model_id: "text".into(),
+      display_name: None,
+    });
+    fixture.create().await;
+    fixture
+      .wait_for(|snapshot| snapshot.status == ManagedSessionStatus::Idle)
+      .await;
+    assert_eq!(fixture.prompts(), ["handled"]);
+    let log = fixture.log();
+    let commands: Vec<_> = log.iter().filter_map(|value| value["type"].as_str()).take(4).collect();
+    assert_eq!(commands, ["get_state", "get_available_models", "get_state", "prompt"]);
+    fixture.manager.shutdown().await;
+  }
+
+  #[tokio::test]
+  async fn creation_model_failures_never_send_or_replay_the_initial_prompt() {
+    use tokn_interaction_core::{ModelIdentity, creation::FirstInputState};
+    for (mode, remove_model, selected, with_image, message) in [
+      ("ignore_launch_model", false, "vision", false, "did not activate"),
+      ("catalog_changes_model", false, "vision", false, "did not activate"),
+      ("model_controls", true, "vision", false, "no longer available"),
+      ("model_controls", false, "text", true, "does not support image"),
+      ("normal", false, "vision", true, "does not support image"),
+      ("model_compaction_race", false, "vision", false, "began work"),
+      ("initial_model_work_race", false, "vision", false, "began work"),
+    ] {
+      let mut fixture = Fixture::new(mode, "first prompt");
+      fixture.request.model = Some(ModelIdentity {
+        model_provider: Some("synthetic".into()),
+        model_id: selected.into(),
+        display_name: None,
+      });
+      if remove_model {
+        std::fs::write(fixture.folder().join("remove-current-model"), "").unwrap();
+      }
+      let images = if with_image {
+        let id = uuid::Uuid::new_v4().to_string();
+        fixture.request.image_ids = vec![id.clone()];
+        vec![image(&id)]
+      } else {
+        Vec::new()
+      };
+      fixture
+        .manager
+        .create_with_images(fixture.request.clone(), fixture.project.clone(), images.clone())
+        .await
+        .unwrap();
+      let failed = fixture
+        .wait_for(|snapshot| snapshot.status == ManagedSessionStatus::Failed)
+        .await;
+      assert!(
+        failed.message.as_deref().unwrap().contains(message),
+        "{mode}: {:?}",
+        failed.message
+      );
+      assert_eq!(failed.creation_input_state, Some(FirstInputState::NotAttempted));
+      fixture
+        .manager
+        .create_with_images(fixture.request.clone(), fixture.project.clone(), images)
+        .await
+        .unwrap();
+      assert!(fixture.prompts().is_empty());
+      assert_eq!(fixture.launches().len(), 1);
+      fixture.manager.shutdown().await;
+    }
+  }
+
+  #[tokio::test]
+  async fn creation_catalog_is_temporary_bounded_and_reaped_on_every_exit() {
+    let fixture = Fixture::new("model_controls", "unused");
+    let models = fixture.manager.creation_models(fixture.folder().into()).await.unwrap();
+    assert_eq!(
+      models
+        .iter()
+        .map(|choice| choice.model.model_id.as_str())
+        .collect::<Vec<_>>(),
+      ["text", "vision"]
+    );
+    assert!(!models[0].supports_images);
+    assert!(models[1].supports_images);
+    assert!(!serde_json::to_string(&models).unwrap().contains("secret"));
+    assert_eq!(fixture.launches()[0]["args"], json!(["--mode", "rpc", "--no-session"]));
+    assert!(fixture.prompts().is_empty());
+    assert!(!fixture.folder().join("synthetic-history.jsonl").exists());
+    assert!(fixture.manager.get(&fixture.identity()).unwrap().is_none());
+    fixture.wait_reaped().await;
+
+    let oversized = Fixture::new("catalog_oversized", "unused");
+    assert!(
+      oversized
+        .manager
+        .creation_models(oversized.folder().into())
+        .await
+        .unwrap_err()
+        .contains("512")
+    );
+    oversized.wait_reaped().await;
+
+    let timed_out = Fixture::new("catalog_wait", "unused");
+    assert!(
+      super::super::catalog::models_with_timeout(
+        timed_out.executable.clone(),
+        timed_out.folder().into(),
+        Duration::from_millis(500)
+      )
+      .await
+      .unwrap_err()
+      .contains("timed out")
+    );
+    timed_out.wait_reaped().await;
+
+    // Two live probes occupy the bounded pool; cancelled callers still leave
+    // an owner awaiting cleanup before those permits can be reused.
+    let first = Fixture::new("catalog_wait", "unused");
+    let second = Fixture::new("catalog_wait", "unused");
+    let launch_probe = |fixture: &Fixture| {
+      let manager = fixture.manager.clone();
+      let folder = fixture.folder().to_path_buf();
+      tokio::spawn(async move { manager.creation_models(folder).await })
+    };
+    let first_task = launch_probe(&first);
+    let second_task = launch_probe(&second);
+    first.wait_log(|value| value["type"] == "get_available_models").await;
+    second.wait_log(|value| value["type"] == "get_available_models").await;
+    assert!(
+      fixture
+        .manager
+        .creation_models(fixture.folder().into())
+        .await
+        .unwrap_err()
+        .contains("busy")
+    );
+    first_task.abort();
+    let _ = first_task.await;
+    second.manager.shutdown().await;
+    assert!(second_task.await.unwrap().unwrap_err().contains("shutting down"));
+    first.wait_reaped().await;
+    second.wait_reaped().await;
+    assert!(!first.folder().join("synthetic-history.jsonl").exists());
+    assert!(!second.folder().join("synthetic-history.jsonl").exists());
+    assert!(fixture.manager.creation_models(fixture.folder().into()).await.is_ok());
+    fixture.wait_reaped().await;
   }
 
   #[tokio::test]

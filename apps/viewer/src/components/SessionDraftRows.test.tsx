@@ -10,7 +10,7 @@ const project: RegisteredProject = {
   project_id: "project", name: "Viewer", group_key: "/repo", folder_path: "/repo", available: true, created_at_ms: 1,
 };
 function draft(draft_id: string, overrides: Partial<SessionDraft> = {}): SessionDraft {
-  return { draft_id, project_id: "project", selection: { provider: "pi" }, prompt: "", images: [], snapshot: null,
+  return { draft_id, project_id: "project", selection: { provider: "pi" }, model: null, prompt: "", images: [], snapshot: null,
     sending: false, uncertain: false, locked: false, can_discard: true, error: null, image_error: null, ...overrides };
 }
 

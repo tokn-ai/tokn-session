@@ -16,6 +16,48 @@ pub struct CreateProjectSessionRequest {
   pub provider: tokn_interaction_core::Provider,
   pub runtime_profile_id: Option<String>,
   pub runtime_revision: Option<u64>,
+  pub runtime_plan_id: Option<String>,
+  pub model: Option<SessionCreationModelSelection>,
+}
+
+/// A draft choice is scoped to a verified catalog, not a live session revision.
+#[derive(Clone, Debug, Deserialize)]
+pub struct SessionCreationModelSelection {
+  pub model_provider: Option<String>,
+  pub model_id: String,
+  pub catalog_revision: String,
+  pub runtime_profile_id: Option<String>,
+  pub runtime_revision: Option<u64>,
+  pub runtime_plan_id: Option<String>,
+}
+
+impl SessionCreationModelSelection {
+  pub(crate) fn identity(&self) -> tokn_interaction_core::ModelIdentity {
+    tokn_interaction_core::ModelIdentity {
+      model_provider: self.model_provider.clone(),
+      model_id: self.model_id.clone(),
+      display_name: None,
+    }
+  }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ListSessionCreationModelsRequest {
+  pub project_id: String,
+  pub provider: tokn_interaction_core::Provider,
+  pub runtime_profile_id: Option<String>,
+  pub runtime_revision: Option<u64>,
+  pub runtime_plan_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SessionCreationModels {
+  pub models: Vec<tokn_interaction_core::ModelChoice>,
+  pub catalog_revision: Option<String>,
+  pub runtime_profile_id: Option<String>,
+  pub runtime_revision: Option<u64>,
+  pub runtime_plan_id: Option<String>,
+  pub reason: Option<String>,
 }
 
 fn default_creation_provider() -> tokn_interaction_core::Provider {
@@ -29,6 +71,8 @@ impl CreateProjectSessionRequest {
       project_id: self.project_id.clone(),
       prompt: self.prompt.clone(),
       image_ids: self.image_ids.clone(),
+      model: self.model.as_ref().map(SessionCreationModelSelection::identity),
+      runtime_plan_id: self.runtime_plan_id.clone(),
     }
   }
 }
@@ -45,6 +89,7 @@ pub struct SessionCreationRuntime {
   pub name: String,
   pub available: bool,
   pub reason: Option<String>,
+  pub runtime_plan_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -55,6 +100,7 @@ pub struct SessionCreationProvider {
   pub supports_images: bool,
   pub default_profile_id: Option<String>,
   pub runtimes: Vec<SessionCreationRuntime>,
+  pub runtime_plan_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

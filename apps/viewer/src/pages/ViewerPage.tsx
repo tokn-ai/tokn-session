@@ -14,6 +14,7 @@ import { DraftConversation } from "../components/DraftConversation";
 import { useLocalSessionDrafts } from "../components/SessionDraftsProvider";
 import { useProjectWorkspace } from "../lib/useProjectWorkspace";
 import { isDesktop } from "../lib/transport";
+import type { SettingsSection } from "./SettingsPage";
 
 interface ViewerPageProps {
   remote?: boolean;
@@ -32,6 +33,7 @@ function ViewerContent({ remote = false, connection, on_open_machines, machine_l
   const viewer = useViewerState();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("viewer");
   const [projectOpen, setProjectOpen] = useState(false);
   const [selected_draft_id, setSelectedDraftId] = useState<string | null>(null);
   const selected_draft_ref = useRef(selected_draft_id);
@@ -47,6 +49,7 @@ function ViewerContent({ remote = false, connection, on_open_machines, machine_l
   const pendingDialog = workspace.pending_dialog_session
     ?? drafts?.drafts.find((draft) => draft.snapshot?.pending_dialog)?.snapshot;
   const settingsTrigger = useRef<HTMLButtonElement>(null);
+  const settingsReturnFocus = useRef<HTMLButtonElement>(null);
   const open_created = useRef(viewer.openCreatedSession);
   open_created.current = viewer.openCreatedSession;
   useEffect(() => drafts?.subscribeCreated((draft_id, session) => {
@@ -60,6 +63,22 @@ function ViewerContent({ remote = false, connection, on_open_machines, machine_l
     selected_draft_ref.current = draft_id;
     setSelectedDraftId(draft_id);
     viewer.clearSessionSelection();
+  }
+
+  function openSettings(section: SettingsSection, trigger: HTMLButtonElement | null) {
+    settingsReturnFocus.current = trigger;
+    setSettingsSection(section);
+    setSettingsOpen(true);
+  }
+
+  function closeSettings() {
+    // Reloading draft options can remove its setup button, even if a profile
+    // event has not removed it yet. Return to the stable status-bar control.
+    if (settingsTrigger.current && (settingsSection === "agent_runtimes" || !settingsReturnFocus.current?.isConnected)) {
+      settingsReturnFocus.current = settingsTrigger.current;
+    }
+    setSettingsOpen(false);
+    workspace.refreshCreationOptions();
   }
 
   function selectSession(session_key: string, question = false) {
@@ -148,8 +167,10 @@ function ViewerContent({ remote = false, connection, on_open_machines, machine_l
             setSelectedDraftId(null);
           }}
           on_add_project={() => { registration_draft.current = selected_draft.draft_id; setProjectOpen(true); }}
+          on_configure_runtime={(trigger) => openSettings("agent_runtimes", trigger)}
           on_sidebar_open={openSessions}
           on_load_options={workspace.loadCreationOptions}
+          on_load_models={workspace.loadCreationModels}
           on_open_session={selected_draft.snapshot?.session ? () => {
             selected_draft_ref.current = null;
             setSelectedDraftId(null);
@@ -223,7 +244,7 @@ function ViewerContent({ remote = false, connection, on_open_machines, machine_l
       </div>
 
       <StatusBar
-        on_open_settings={() => setSettingsOpen(true)}
+        on_open_settings={() => openSettings("viewer", settingsTrigger.current)}
         settings_trigger_ref={settingsTrigger}
         background_updates_scope={viewer.backgroundUpdatesScope}
         background_updates_level={viewer.backgroundUpdatesLevel}
@@ -242,7 +263,7 @@ function ViewerContent({ remote = false, connection, on_open_machines, machine_l
         source_errors={viewer.sourceErrors}
       />
       {settingsOpen && <SettingsDialog key={machine_key} remote={remote} machine_label={machine_label}
-        machine_key={machine_key} return_focus={settingsTrigger} on_close={() => setSettingsOpen(false)} />}
+        machine_key={machine_key} initial_section={settingsSection} return_focus={settingsReturnFocus} on_close={closeSettings} />}
       {localWorkspace ? <>
         <RegisterProjectDialog key={`project:${machine_key}`} open={projectOpen} on_close={() => setProjectOpen(false)}
           on_register={workspace.addProject} on_registered={(project) => {

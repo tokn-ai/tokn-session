@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ManagedSessionSnapshot, RegisteredProject, SessionCreationOptions, SessionSummary } from "../lib/types";
+import type { ManagedSessionSnapshot, RegisteredProject, RpcProvider, SessionCreationOptions, SessionSummary } from "../lib/types";
 import type { SessionDraft } from "../lib/useSessionDrafts";
 import { DraftConversation, type DraftConversationProps } from "./DraftConversation";
 
@@ -19,7 +19,7 @@ function options(project_id = "repo"): SessionCreationOptions {
   ] };
 }
 function draft(overrides: Partial<SessionDraft> = {}): SessionDraft {
-  return { draft_id: "draft-one", project_id: "repo", selection: { provider: "pi" }, prompt: "", images: [], snapshot: null,
+  return { draft_id: "draft-one", project_id: "repo", selection: { provider: "pi" }, model: null, prompt: "", images: [], snapshot: null,
     sending: false, uncertain: false, locked: false, can_discard: true, error: null, image_error: null, ...overrides };
 }
 function snapshot(overrides: Partial<ManagedSessionSnapshot> = {}): ManagedSessionSnapshot {
@@ -29,12 +29,123 @@ function snapshot(overrides: Partial<ManagedSessionSnapshot> = {}): ManagedSessi
 function props(overrides: Partial<DraftConversationProps> = {}): DraftConversationProps {
   return { draft: draft(), projects: [project], workspace_available: true, on_change: vi.fn(), on_add_images: vi.fn(),
     on_remove_image: vi.fn(), on_send: vi.fn(), on_check: vi.fn(), on_discard: vi.fn(), on_add_project: vi.fn(),
-    on_sidebar_open: vi.fn(), on_load_options: vi.fn(async (project_id) => options(project_id)), ...overrides };
+    on_sidebar_open: vi.fn(), on_load_options: vi.fn(async (project_id) => options(project_id)),
+    on_load_models: vi.fn(async () => ({ models: [], catalog_revision: null, runtime_profile_id: null, runtime_revision: null, reason: "Model discovery is unsupported." })), ...overrides };
 }
 async function ready() { await waitFor(() => expect(screen.queryByText("Checking agent configuration…")).not.toBeInTheDocument()); }
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; }
 
 describe("draft conversation", () => {
+  it.each(["pi", "codex", "open_code", "dsh"] as RpcProvider[])("pins %s automatic availability before first Send without loading models", async (provider) => {
+    const available: SessionCreationOptions = { project_id: "repo", providers: [{ provider, available: true, reason: null,
+      supports_images: false, default_profile_id: null, runtimes: [], runtime_plan_id: `${provider}-plan` }] };
+    const input = props({ on_load_options: vi.fn(async () => available) });
+    const send = vi.fn();
+    function Stateful() {
+      const [value, setValue] = useState(draft({ selection: { provider }, prompt: "First task" }));
+      return <DraftConversation {...input} draft={value} on_change={(patch) => setValue((previous) => ({ ...previous, ...patch }))}
+        on_send={() => send(value.selection)} />;
+    }
+    render(<Stateful />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(send).toHaveBeenCalledExactlyOnceWith({ provider, runtime_plan_id: `${provider}-plan` });
+    expect(input.on_load_models).not.toHaveBeenCalled();
+    expect(screen.queryByRole("combobox", { name: "Runtime" })).not.toBeInTheDocument();
+  });
+
+  it("clears a chosen model when automatic configuration changes without saved profiles and preserves the draft", async () => {
+    const file = new File(["png"], "draft.png", { type: "image/png" });
+    const selected = { model: { model_provider: "provider", model_id: "chosen", display_name: "Chosen" }, supports_images: true };
+    const available = (runtime_plan_id: string): SessionCreationOptions => ({ project_id: "repo", providers: [{ provider: "codex", available: true,
+      reason: null, supports_images: true, default_profile_id: null, runtimes: [], runtime_plan_id }] });
+    const input = props({ on_load_models: vi.fn(async () => ({ models: [selected], catalog_revision: "catalog", runtime_profile_id: null,
+      runtime_revision: null, runtime_plan_id: "automatic-one", reason: null })) });
+    function Stateful({ load_options }: { load_options: DraftConversationProps["on_load_options"] }) {
+      const [value, setValue] = useState(draft({ selection: { provider: "codex" }, prompt: "Keep this task", images: [{ draft_id: "image", file, url: "blob:screen" }] }));
+      return <DraftConversation {...input} draft={value} on_load_options={load_options} on_change={(patch) => setValue((previous) => ({ ...previous, ...patch }))} />;
+    }
+    const view = render(<Stateful load_options={async () => available("automatic-one")} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Model: Runtime default/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Chosen provider/ }));
+    expect(screen.getByRole("button", { name: /Model: Chosen/ })).toBeInTheDocument();
+    view.rerender(<Stateful load_options={async () => available("automatic-two")} />);
+    await screen.findByRole("button", { name: /Model: Runtime default/ });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeEnabled());
+    expect(screen.getByRole("textbox", { name: "First message" })).toHaveValue("Keep this task");
+    expect(screen.getByAltText("draft.png")).toBeInTheDocument();
+    expect(input.on_load_models).toHaveBeenCalledExactlyOnceWith({ project_id: "repo", provider: "codex", runtime_plan_id: "automatic-one" });
+    expect(input.on_send).not.toHaveBeenCalled();
+  });
+
+  it("does not suggest saved RPC profiles to repair managed Pi configuration", async () => {
+    const configured = options();
+    configured.providers[0] = { ...configured.providers[0], available: false, reason: "Managed Pi is unavailable." };
+    render(<DraftConversation {...props({ on_load_options: vi.fn(async () => configured), on_configure_runtime: vi.fn() })} />);
+    await ready();
+    expect(screen.getByText("Managed Pi is unavailable.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Configure agent runtime" })).not.toBeInTheDocument();
+  });
+
+  it("loads models on opening the picker, keeps selection local, and gates images by the selected model", async () => {
+    const file = new File(["png"], "draft.png", { type: "image/png" });
+    const chosen = { model: { model_provider: "provider", model_id: "text-only", display_name: "Text model" }, supports_images: false };
+    const input = props({ on_load_models: vi.fn(async () => ({ models: [chosen], catalog_revision: "verified",
+      runtime_profile_id: null, runtime_revision: null, reason: null })) });
+    function Stateful() {
+      const [value, setValue] = useState(draft({ prompt: "Inspect", images: [{ draft_id: "image", file, url: "blob:screen" }] }));
+      return <DraftConversation {...input} draft={value} on_change={(patch) => setValue((previous) => ({ ...previous, ...patch }))} />;
+    }
+    render(<Stateful />); await ready();
+    expect(input.on_load_models).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: /Model: Runtime default/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Text model provider/ }));
+    expect(input.on_load_models).toHaveBeenCalledExactlyOnceWith({ project_id: "repo", provider: "pi" });
+    expect(input.on_send).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(screen.getByText(/This model cannot accept these images/)).toBeInTheDocument();
+    expect(screen.getByAltText("draft.png")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Use runtime default" }));
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+    expect(screen.queryByText("Recorded")).not.toBeInTheDocument();
+  });
+
+  it("allows sending with runtime default after model catalog failure", async () => {
+    const input = props({ draft: draft({ prompt: "Task" }), on_load_models: vi.fn(async () => { throw new Error("Catalog failed"); }) });
+    render(<DraftConversation {...input} />); await ready();
+    fireEvent.click(screen.getByRole("button", { name: /Model: Runtime default/ }));
+    await screen.findByText("Catalog failed");
+    expect(screen.getByRole("button", { name: "Retry models" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /Runtime default Use the agent/ })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(input.on_send).toHaveBeenCalledOnce();
+  });
+
+  it("refreshes a reopened catalog and lets the same model be selected with its new proof", async () => {
+    const chosen = { model: { model_provider: "provider", model_id: "chosen", display_name: "Chosen" }, supports_images: true };
+    const load = vi.fn().mockResolvedValueOnce({ models: [chosen], catalog_revision: "first", runtime_profile_id: null, runtime_revision: null, reason: null })
+      .mockResolvedValueOnce({ models: [chosen], catalog_revision: "second", runtime_profile_id: null, runtime_revision: null, reason: null });
+    const input = props({ on_load_models: load });
+    function Stateful() {
+      const [value, setValue] = useState(draft({ prompt: "Task" }));
+      return <DraftConversation {...input} draft={value} on_change={(patch) => setValue((previous) => ({ ...previous, ...patch }))} />;
+    }
+    render(<Stateful />); await ready();
+    fireEvent.click(screen.getByRole("button", { name: /Model: Runtime default/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Chosen provider/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Close model selection" }));
+    fireEvent.click(screen.getByRole("button", { name: /Model: Chosen/ }));
+    await screen.findByText(/The model catalog changed/);
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: /Chosen provider/ }));
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+    expect(screen.queryByText(/The model catalog changed/)).not.toBeInTheDocument();
+    expect(input.on_send).not.toHaveBeenCalled();
+  });
+
   it("opens an empty conversation and only checks configuration until the first Send", async () => {
     const input = props();
     render(<DraftConversation {...input} />);

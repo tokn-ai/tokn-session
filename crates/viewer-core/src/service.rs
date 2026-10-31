@@ -43,6 +43,7 @@ mod managed_sessions;
 #[cfg(test)]
 mod project_discovery_tests;
 mod session_creation;
+mod session_creation_models;
 pub(crate) use session_creation::validate_creation_profile;
 mod model_projection;
 mod notifications;

@@ -1,6 +1,23 @@
 use super::*;
 
 impl ManagedSessions {
+  pub async fn creation_models(&self, working_directory: PathBuf) -> Result<Vec<crate::ModelChoice>, String> {
+    self.available()?;
+    let directory = working_directory.clone();
+    if !tokio::task::spawn_blocking(move || directory.is_absolute() && directory.is_dir())
+      .await
+      .map_err(|error| format!("Could not check model discovery directory: {error}"))?
+    {
+      return Err("Model discovery requires an available absolute project directory".into());
+    }
+    let mut shutdown = self.inner.shutdown.subscribe();
+    self.available()?;
+    tokio::select! {
+      result = self.inner.driver.creation_models(working_directory) => result,
+      _ = shutdown.changed() => Err("Managed agent runtime is shutting down".into()),
+    }
+  }
+
   pub async fn model_status(&self, session_key: &str) -> Option<Result<SessionModelStatus, String>> {
     self.model_owner(session_key)?;
     Some(match self.model_command(session_key, ModelOperation::Status).await {

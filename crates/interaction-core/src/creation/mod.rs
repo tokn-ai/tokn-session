@@ -7,7 +7,7 @@ pub use routes::CreationRouteLedger;
 mod tests;
 
 use crate::runtime::{CreatedNativeSession, RuntimeSelection};
-use crate::{AdapterFuture, ErrorKind, InteractionError, MessageInput, Provider};
+use crate::{AdapterFuture, ErrorKind, InteractionError, MessageInput, ModelIdentity, Provider};
 use persistence::{RequestLease, Store};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -28,6 +28,10 @@ pub struct CreationRequest {
   pub input: MessageInput,
   pub image_ids: Vec<String>,
   pub runtime: Option<RuntimeSelection>,
+  pub runtime_plan: Option<crate::runtime_plan::RuntimePlan>,
+  pub runtime_plan_id: Option<String>,
+  /// Creation-time intent, separate from generic model-on-message support.
+  pub model: Option<ModelIdentity>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -61,6 +65,12 @@ pub struct CreationSnapshot {
   pub project_id: String,
   pub working_directory: PathBuf,
   pub runtime: Option<RuntimeSelection>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub runtime_plan: Option<crate::runtime_plan::RuntimePlan>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub runtime_plan_id: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub model: Option<ModelIdentity>,
   pub fingerprint: String,
   pub revision: u64,
   pub phase: CreationPhase,
@@ -88,6 +98,7 @@ pub trait CreationHost: Send + Sync + 'static {
     created: &'a CreatedNativeSession,
     request_id: &'a str,
     input: &'a MessageInput,
+    model: Option<&'a ModelIdentity>,
   ) -> AdapterFuture<'a, Result<(), InteractionError>>;
   /// Cancellation is independent of a message awaiting native acknowledgement.
   /// It cancels the native turn and never closes a shared runtime.
@@ -295,6 +306,9 @@ impl CreationManager {
       project_id: request.project_id.clone(),
       working_directory: request.working_directory.clone(),
       runtime: request.runtime.clone(),
+      runtime_plan: request.runtime_plan.clone(),
+      runtime_plan_id: request.runtime_plan_id.clone(),
+      model: request.model.as_ref().map(crate::runtime::creation_model_identity),
       fingerprint: fingerprint_value,
       revision: 1,
       phase: CreationPhase::Admitted,
@@ -396,7 +410,10 @@ impl CreationManager {
       return Ok(());
     }
     let created = receipt.created.as_ref().unwrap().clone();
-    let send = self.0.host.send_initial(&created, &id, &request.input);
+    let send = self
+      .0
+      .host
+      .send_initial(&created, &id, &request.input, request.model.as_ref());
     tokio::pin!(send);
     let poll_period = std::time::Duration::from_millis(500);
     let mut history_poll = tokio::time::interval_at(tokio::time::Instant::now() + poll_period, poll_period);
@@ -726,24 +743,51 @@ fn validate_intent(request: &CreationRequest) -> Result<(), InteractionError> {
   if let Some(selection) = &request.runtime {
     validate_profile_id(&selection.profile_id).map_err(InteractionError::invalid)?;
   }
+  if let Some(model) = &request.model {
+    crate::runtime::validate_creation_model(model)?;
+  }
+  if let Some(plan) = &request.runtime_plan {
+    let selection = plan.shared_runtime_selection().map_err(InteractionError::invalid)?;
+    if plan.provider != request.provider
+      || plan.working_directory != request.working_directory
+      || request.runtime.as_ref().is_some_and(|selected| selected != &selection)
+      || request
+        .runtime_plan_id
+        .as_ref()
+        .is_some_and(|id| plan.fingerprint().as_ref() != Ok(id))
+    {
+      return Err(InteractionError::invalid(
+        "Creation runtime plan does not match its intent",
+      ));
+    }
+  } else if request.runtime_plan_id.is_some() {
+    return Err(InteractionError::invalid("Creation runtime plan is missing"));
+  }
   crate::managed_sessions::validate_message(&request.input.text, !request.image_ids.is_empty())
     .map_err(InteractionError::invalid)
 }
 fn fingerprint(request: &CreationRequest) -> Result<String, InteractionError> {
-  Ok(format!(
-    "{:x}",
-    Sha256::digest(
-      serde_json::to_vec(&(
-        request.provider,
-        &request.project_id,
-        &request.working_directory,
-        &request.input.text,
-        &request.image_ids,
-        &request.runtime,
-      ))
-      .map_err(|_| InteractionError::invalid("Invalid creation intent"))?
-    )
-  ))
+  let legacy = (
+    request.provider,
+    &request.project_id,
+    &request.working_directory,
+    &request.input.text,
+    &request.image_ids,
+    &request.runtime,
+  );
+  // Preserve pre-model receipts byte-for-byte when native defaults are chosen.
+  let payload = match (&request.runtime_plan, &request.runtime_plan_id, &request.model) {
+    (None, None, None) => serde_json::to_vec(&legacy),
+    (None, None, Some(model)) => serde_json::to_vec(&(legacy, crate::runtime::creation_model_identity(model))),
+    _ => serde_json::to_vec(&(
+      legacy,
+      request.model.as_ref().map(crate::runtime::creation_model_identity),
+      &request.runtime_plan,
+      &request.runtime_plan_id,
+    )),
+  }
+  .map_err(|_| InteractionError::invalid("Invalid creation intent"))?;
+  Ok(format!("{:x}", Sha256::digest(payload)))
 }
 fn check_fingerprint(receipt: &CreationSnapshot, fingerprint: &str) -> Result<(), InteractionError> {
   if receipt.fingerprint == fingerprint {

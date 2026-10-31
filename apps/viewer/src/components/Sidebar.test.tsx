@@ -74,7 +74,7 @@ describe("draft project membership", () => {
     { project_id: "beta", name: "Beta", group_key: "/beta", folder_path: "/beta", created_at_ms: 1, available: true },
   ];
   function draft(project_id: string, overrides: Partial<SessionDraft> = {}): SessionDraft {
-    return { draft_id: "draft", project_id, prompt: "Planned task", selection: { provider: "codex" }, images: [],
+    return { draft_id: "draft", project_id, prompt: "Planned task", selection: { provider: "codex" }, model: null, images: [],
       snapshot: null, sending: false, uncertain: false, locked: false, can_discard: true, error: null, image_error: null, ...overrides };
   }
   function ProjectSidebar(props: Partial<ComponentProps<typeof Sidebar>>) {
