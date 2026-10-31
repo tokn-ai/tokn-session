@@ -6042,6 +6042,7 @@ dependencies = [
  "async-trait",
  "axum",
  "futures-util",
+ "libc",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -6051,12 +6052,8 @@ dependencies = [
  "tokio-util",
  "tokn-hub-client-core",
  "tokn-hub-transport",
- "tokn-session-hub",
- "tower-http",
  "url",
  "uuid",
- "webauthn-authenticator-rs",
- "webauthn-rs",
  "zeroize",
 ]
 
@@ -6265,6 +6262,7 @@ dependencies = [
  "tokio-tungstenite 0.26.2",
  "tokio-util",
  "tokn-hub-client-core",
+ "tokn-hub-remote",
  "tokn-hub-transport",
  "tokn-session-storage",
  "tower",

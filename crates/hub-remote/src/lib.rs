@@ -3,7 +3,10 @@ mod direct;
 mod directory;
 pub use direct::{TransportKind, TransportState};
 mod exchange;
+pub mod persistence;
+pub mod store;
 mod stream;
+pub use store::{ClientStore, SavedHost};
 
 use exchange::{Exchange, Socket, connect, receive, send};
 use serde::Serialize;
@@ -17,8 +20,6 @@ use tokn_hub_client_core::{
   protocol,
   secure::{HostAuthOperation, InnerMessage, NoiseIdentity, NoiseInitiator, SecureChannel},
 };
-use tokn_session_hub::onboarding::ClientStore;
-pub use tokn_session_hub::onboarding::SavedHost;
 use url::Url;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -114,11 +115,9 @@ impl RemoteManager {
       } else {
         ClientStore::load_or_create(&state_dir, &hub_copy)?
       };
-      let identity = Arc::new(if require_existing {
-        NoiseIdentity::load(&store.identity_file())?
-      } else {
-        NoiseIdentity::load_or_create(&store.identity_file())?
-      });
+      // The store initializes fresh bundles under its ownership lock. Loading
+      // afterward must never regenerate an identity that disappeared meanwhile.
+      let identity = Arc::new(NoiseIdentity::load(&store.identity_file())?);
       Ok::<_, String>((store, identity))
     })
     .await

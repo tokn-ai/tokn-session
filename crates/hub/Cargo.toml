@@ -27,6 +27,7 @@ serde_json.workspace = true
 sha2 = "0.10"
 subtle = "2"
 tokn-hub-client-core.workspace = true
+tokn-hub-remote.workspace = true
 tokn-hub-transport.workspace = true
 tokn-session-storage.workspace = true
 tokio.workspace = true
@@ -40,6 +41,7 @@ webauthn-rs = "0.5.5"
 zeroize = "1"
 
 [dev-dependencies]
+tower-http = { version = "0.6", features = ["cors"] }
 http-body-util = "0.1"
 tempfile = "3"
 webauthn-authenticator-rs = { version = "0.5.5", default-features = false, features = ["softpasskey"] }

@@ -177,6 +177,14 @@ impl Default for DevicePreferences {
 }
 
 impl DevicePreferences {
+  #[cfg(mobile)]
+  pub fn new(paths: SessionPaths) -> Self {
+    Self {
+      gate: tokio::sync::Mutex::new(0),
+      paths: Ok(paths),
+    }
+  }
+
   pub fn paths(&self) -> Result<SessionPaths, String> {
     self.paths.clone()
   }

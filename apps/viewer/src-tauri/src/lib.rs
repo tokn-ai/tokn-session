@@ -1,18 +1,28 @@
 mod commands;
 mod device_preferences;
+#[cfg(desktop)]
 mod external_host;
+#[cfg(desktop)]
 mod hub_passkey;
+#[cfg(desktop)]
 mod local_host;
+#[cfg(desktop)]
 mod local_viewer;
 mod native_remote;
+#[cfg(desktop)]
 mod relay_settings;
+#[cfg(desktop)]
 mod runtime_management;
+#[cfg(desktop)]
 mod translation;
+#[cfg(desktop)]
 use tauri::Manager;
+#[cfg(desktop)]
 pub use tokn_session_relay::stdio as relay_child;
+#[cfg(desktop)]
 pub use tokn_viewer_core::{model, relay, service};
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[cfg(desktop)]
 pub fn run() {
   tauri::Builder::default()
     .plugin(tauri_plugin_opener::init())
@@ -121,3 +131,8 @@ pub fn run() {
       }
     });
 }
+
+#[cfg(mobile)]
+mod mobile;
+#[cfg(mobile)]
+pub use mobile::run;

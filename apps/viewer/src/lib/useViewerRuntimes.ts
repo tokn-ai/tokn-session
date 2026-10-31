@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createUuid } from "./id";
 import { errorMessage } from "./state";
+import { isMobileApp } from "./platform";
 import { isDesktop } from "./transport";
 import { listViewerRuntimes, listenForViewerRuntimeChanges, restartViewerRuntime } from "./tauri";
 import type { RuntimeInfo, RuntimeInventory } from "./types";
@@ -11,7 +12,7 @@ interface InventoryRead { epoch: number; again: boolean; promise: Promise<void>;
 
 /** Inventory observation is active only while its section is visible. */
 export function useViewerRuntimes(active: boolean) {
-  const desktop = isDesktop();
+  const desktop = isDesktop() && !isMobileApp();
   const notify = useActionNotification();
   const [inventory, setInventory] = useState<RuntimeInventory | null>(null);
   const [loading, setLoading] = useState(false);

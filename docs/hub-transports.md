@@ -69,7 +69,7 @@ revocation, remembered access, and continued direct reads after Hub shutdown.
 Browser unit tests cover authenticated upgrades, unavailable ICE, cancellation,
 event recovery, and no replay of uncertain input.
 
-`cargo run -p tokn-hub-remote --example webrtc_smoke` starts a temporary synthetic
+`cargo run -p tokn-session-hub --example webrtc_smoke` starts a temporary synthetic
 fixture on loopback ports 15578/15579 for browser interoperability checks. Its
 `/smoke/authorize` endpoint deliberately grants an ephemeral test key without
 pairing; it exists only in this example, uses disposable state, and never reads

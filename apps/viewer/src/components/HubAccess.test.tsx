@@ -21,8 +21,49 @@ beforeEach(() => {
   };
   vi.mocked(openHubAccess).mockResolvedValue(service);
 });
-afterEach(() => { cleanup(); selectMachine(); Reflect.deleteProperty(window, "__TAURI_INTERNALS__"); localStorage.clear(); vi.restoreAllMocks(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); selectMachine(); Reflect.deleteProperty(window, "__TAURI_INTERNALS__"); Reflect.deleteProperty(window, "__TOKN_MOBILE__"); localStorage.clear(); vi.restoreAllMocks(); vi.clearAllMocks(); });
 async function ready() { await screen.findByLabelText("Machine address or reference"); }
+
+it("mobile first launch waits for a Hub address without trying a placeholder URL", () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+  Object.defineProperty(window, "__TOKN_MOBILE__", { value: true, configurable: true });
+  render(<HubAccess initial_hub_url="https://" startup_host_id={null} />);
+  expect(screen.getByLabelText("Hub address")).toHaveValue("https://");
+  expect(openHubAccess).not.toHaveBeenCalled();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("mobile pairs through Hub without offering local hosting or an unsupported passkey ceremony", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+  Object.defineProperty(window, "__TOKN_MOBILE__", { value: true, configurable: true });
+  render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />);
+  await ready();
+  expect(screen.queryByRole("heading", { name: "This machine" })).not.toBeInTheDocument();
+  expect(screen.queryByText("Host setup")).not.toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Hub administration" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("radio", { name: "Use machine passkey" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Change Hub" })).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Machine address or reference"), { target: { value: host.machine_address } });
+  fireEvent.change(screen.getByLabelText("Authenticator code"), { target: { value: "123456" } });
+  fireEvent.click(screen.getByRole("button", { name: "Pair and connect" }));
+  expect(await screen.findByText("Encrypted sessions")).toBeInTheDocument();
+  expect(service.pairMachine).toHaveBeenCalledWith(host.machine_address, "123456", expect.any(AbortSignal));
+  expect(service.authenticate).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: /connection settings/i }));
+  expect(screen.queryByRole("button", { name: "Add a machine passkey" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Machines" }));
+  expect(screen.getByLabelText("Authenticator code")).toHaveValue("");
+});
+
+it("mobile reopens a remembered machine using its native pairing", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+  Object.defineProperty(window, "__TOKN_MOBILE__", { value: true, configurable: true });
+  vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: host.host_id, device_public_key: "D".repeat(43) });
+  render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={host.host_id} />);
+  expect(await screen.findByText("Encrypted sessions")).toBeInTheDocument();
+  expect(service.connect).toHaveBeenCalledWith(host, expect.any(AbortSignal));
+  expect(service.pairMachine).not.toHaveBeenCalled();
+});
 
 it("pairs in browser without a local bearer token and closes the selected machine on switching", async () => {
   const close = vi.spyOn(client, "close");

@@ -1,11 +1,17 @@
 # Tokn Sessions Viewer
 
-The viewer is a desktop and browser app for browsing historical Pi, Codex,
+The viewer shares a React UI across desktop, Android/iOS, and browser clients for
+browsing historical Pi, Codex,
 OpenCode, ZCode, WorkBuddy, and DeepSeek Harness (DSH) sessions in one place. It
 shows root sessions in a searchable, provider-filterable sidebar, expands their
 known subagents on demand, and renders each selected normalized event stream as
 a conversation with inspectable technical events.
 Its composer sends messages to supported live sessions through their owning app.
+
+Android and iOS use the native encrypted Hub client to access sessions on a
+paired computer. They do not scan the phone for agent histories or start agents
+locally. See [mobile setup and verification](../../docs/viewer-mobile.md) for
+platform prerequisites, builds, pairing, and device checks.
 
 ## Relay lifetime and data modes
 
