@@ -94,17 +94,17 @@ available from the Tauri CLI on macOS.
 
 ## Continuous integration
 
-The **Mobile builds** workflow runs on pull requests, pushes to `main`, and
-manual dispatch. Both jobs build the shared frontend and compile the native
-application with locked Cargo and pnpm dependencies:
+The **Mobile builds** workflow runs on pull requests, every push to `main`,
+published releases, and manual dispatch. Both platform jobs build the shared
+frontend and compile the native application with locked Cargo and pnpm dependencies:
 
 - **Android build** uses Ubuntu 24.04, JDK 17, SDK 37, and NDK 29.0.14206865.
   It builds the checked-in Android project for ARM64, verifies the APK signature
-  and native library, and uploads `tokn-sessions-android-arm64-debug`.
+  and native library, and uploads `tokn-sessions-android-arm64-debug-<run-attempt>`.
 - **iOS simulator build** uses an Apple Silicon macOS 15 runner. It generates
   the Xcode project, builds an unsigned ARM64 simulator app, verifies its
   executable and simulator platform, and uploads
-  `tokn-sessions-ios-simulator-arm64`. The `.app` is archived as `.tar.gz` to
+  `tokn-sessions-ios-simulator-arm64-<run-attempt>`. The `.app` is archived as `.tar.gz` to
   retain executable permissions and symlinks. The local equivalent is
   `bash apps/viewer/scripts/build-ios-ci.sh` from the repository root.
 
@@ -112,8 +112,17 @@ Artifacts are retained for seven days on the workflow run's **Artifacts** page.
 These build checks require no Apple signing credentials or Android release keys.
 They do not boot devices or exercise pairing; the iOS artifact runs in a
 simulator and needs a separate signed device build for an iPhone or iPad.
-Cargo and Gradle caches speed subsequent builds, and newer pushes cancel stale
-mobile runs on the same PR or branch.
+Cargo and Gradle caches speed subsequent builds. Newer PR pushes cancel stale
+PR runs; pushes to `main` each finish their builds.
+
+Successful builds from `main` update the rolling `nightly` prerelease. Published
+versioned releases receive successful outputs from their exact tagged commit;
+one failed platform does not block the other platform's upload. Release notes
+show each download's commit, build date, and SHA-256 checksum. Nightly retains
+each platform's last successful download, and versioned-release retries add
+missing assets without replacing successful ones. See
+[mobile publication](releasing.md#mobile-downloads) for retry controls and the
+requirement to keep releases editable while uploads remain pending.
 
 ## Device verification
 

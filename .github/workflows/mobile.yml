@@ -5,14 +5,22 @@ on:
   push:
     branches:
       - main
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing published release tag to retry; leave empty for a build only
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
 
 concurrency:
-  group: mobile-builds-${{ github.ref }}
-  cancel-in-progress: true
+  group: mobile-builds-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,14 +29,66 @@ env:
   CARGO_BUILD_JOBS: "2"
 
 jobs:
+  prepare:
+    name: Resolve mobile build revision
+    if: github.event_name != 'release' || github.event.release.tag_name != 'nightly'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.revision.outputs.sha }}
+      built_at: ${{ steps.revision.outputs.built_at }}
+
+    steps:
+      - name: Reject manual nightly publication
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag == 'nightly'
+        run: |
+          echo '::error::Nightly publication is reserved for pushes to main.'
+          exit 1
+
+      - name: Checkout build revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.sha }}
+          persist-credentials: false
+
+      - name: Resolve exact commit
+        id: revision
+        run: |
+          {
+            echo "sha=$(git rev-parse HEAD)"
+            echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+
+  publish-tests:
+    name: Mobile publishing tests
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout workflow revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Test release publication
+        run: python3 -m unittest discover -s scripts -p test_publish_mobile.py
+
   android:
     name: Android build
+    needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
 
       - name: Install pnpm
         uses: pnpm/action-setup@v6
@@ -94,23 +154,30 @@ jobs:
           "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify "$apk"
 
       - name: Upload Android APK
+        id: upload
         uses: actions/upload-artifact@v7
         with:
-          name: tokn-sessions-android-arm64-debug
+          name: tokn-sessions-android-arm64-debug-${{ github.run_attempt }}
           path: apps/viewer/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
           if-no-files-found: error
           retention-days: 7
 
   ios:
     name: iOS simulator build
+    needs: prepare
     runs-on: macos-15
     timeout-minutes: 45
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
 
       - name: Install pnpm
         uses: pnpm/action-setup@v6
@@ -149,9 +216,69 @@ jobs:
         run: bash apps/viewer/scripts/build-ios-ci.sh
 
       - name: Upload iOS simulator app
+        id: upload
         uses: actions/upload-artifact@v7
         with:
-          name: tokn-sessions-ios-simulator-arm64
+          name: tokn-sessions-ios-simulator-arm64-${{ github.run_attempt }}
           path: apps/viewer/src-tauri/gen/apple/build/tokn-sessions-ios-simulator-arm64.tar.gz
           if-no-files-found: error
           retention-days: 7
+
+  publish:
+    name: Publish successful mobile builds
+    needs: [prepare, publish-tests, android, ios]
+    if: >-
+      always() && needs.prepare.result == 'success' && needs.publish-tests.result == 'success' &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'release' && github.event.release.tag_name != 'nightly') ||
+      (github.event_name == 'workflow_dispatch' && inputs.release_tag != ''))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    concurrency:
+      group: mobile-publish-${{ github.event_name == 'push' && 'nightly' || github.event.release.tag_name || inputs.release_tag }}
+      queue: max
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout publication scripts
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Download successful Android build
+        id: download_android
+        if: needs.android.result == 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.android.outputs.artifact_id }}
+          path: downloaded/android
+          merge-multiple: true
+
+      - name: Download successful iOS build
+        id: download_ios
+        if: needs.ios.result == 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.ios.outputs.artifact_id }}
+          path: downloaded/ios
+          merge-multiple: true
+
+      - name: Publish available builds and status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MOBILE_CHANNEL: ${{ github.event_name == 'push' && 'nightly' || 'release' }}
+          MOBILE_TAG: ${{ github.event_name == 'push' && 'nightly' || github.event.release.tag_name || inputs.release_tag }}
+          MOBILE_SHA: ${{ needs.prepare.outputs.sha }}
+          MOBILE_BUILT_AT: ${{ needs.prepare.outputs.built_at }}
+          MOBILE_ANDROID_RESULT: ${{ needs.android.result }}
+          MOBILE_IOS_RESULT: ${{ needs.ios.result }}
+          MOBILE_ANDROID_DOWNLOAD: ${{ steps.download_android.outcome }}
+          MOBILE_IOS_DOWNLOAD: ${{ steps.download_ios.outcome }}
+          MOBILE_ARTIFACT_DIR: ${{ github.workspace }}/downloaded
+        run: python3 scripts/publish-mobile.py
