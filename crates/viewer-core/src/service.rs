@@ -51,6 +51,7 @@ mod question_display;
 mod question_input;
 mod rpc_questions;
 mod rpc_runtimes;
+mod runtime_install;
 mod runtimes;
 mod session_control;
 mod session_models;
@@ -106,6 +107,7 @@ pub struct ViewerService {
   input_broker: crate::input::InputBroker,
   interactions: tokn_interaction_core::InteractionService,
   pub(crate) sessions: crate::session_supervisor::SessionSupervisor,
+  pub(crate) installations: crate::runtime_install::RuntimeInstallManager,
   pub(crate) images: crate::images::ImageStore,
   question_claims: Arc<Mutex<question_input::QuestionClaims>>,
   pub(crate) updates: Arc<Mutex<crate::updates::UpdateStore>>,
@@ -720,8 +722,13 @@ impl ViewerService {
         .map_err(|error| error.to_string())?
         .join(session_directory)
     };
+    let installation_root = session_directory
+      .parent()
+      .expect("viewer directory has a parent")
+      .join("runtimes");
     service.sessions =
       crate::session_supervisor::SessionSupervisor::new(Some(session_directory), service.interactions.clone())?;
+    service.installations = crate::runtime_install::RuntimeInstallManager::new(installation_root);
     let _ = service.creation_manager();
     service.images = crate::images::ImageStore::persistent(image_root.clone())
       .unwrap_or_else(|_| crate::images::ImageStore::configured(image_root));
@@ -767,6 +774,7 @@ impl ViewerService {
       input_broker: crate::input::InputBroker::default(),
       sessions: crate::session_supervisor::SessionSupervisor::new(None, interactions.clone())
         .expect("temporary session supervision should be available"),
+      installations: crate::runtime_install::RuntimeInstallManager::temporary(),
       interactions,
       images: crate::images::ImageStore::temporary().expect("temporary image storage should be available"),
       question_claims: Arc::new(Mutex::new(question_input::QuestionClaims::default())),

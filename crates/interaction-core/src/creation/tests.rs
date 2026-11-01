@@ -155,6 +155,7 @@ async fn creation_plan_survives_restart_without_replaying_input_or_re_resolving_
     configuration: RuntimeConfigurationIdentity {
       id: "64f80e49-1898-462c-8a21-598ad0cd405f".into(),
       revision: 7,
+      generation: None,
     },
     ownership: crate::Ownership::Managed,
     reuse_scope: RuntimeReuseScope::Project,

@@ -213,6 +213,7 @@ impl ViewerService {
   }
 
   pub async fn shutdown_managed_sessions(&self) {
+    self.installations.shutdown().await;
     self.sessions.shutdown().await;
   }
 

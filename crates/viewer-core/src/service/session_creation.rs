@@ -471,11 +471,21 @@ impl CreationHost for Host {
         .or_else(|| request.runtime.clone());
       let cwd = request.working_directory.clone();
       let provider = request.provider;
-      let selection =
-        tokio::task::spawn_blocking(move || runtimes.creation_selection(provider, &cwd, selection.as_ref()))
-          .await
-          .map_err(|_| InteractionError::unavailable("Could not validate the creation runtime"))?
-          .map_err(InteractionError::unavailable)?;
+      let expected_plan = request.runtime_plan.clone();
+      let (selection, _installation_use) = tokio::task::spawn_blocking(move || {
+        let current = runtimes.resolve_plan(provider, &cwd, selection.as_ref())?;
+        if expected_plan.as_ref().is_some_and(|expected| expected != &current) {
+          return Err(
+            "The agent runtime changed; refresh the runtime or model selection before creating a session".into(),
+          );
+        }
+        let installation_use = runtimes.hold_plan_installation(&current)?;
+        let selection = runtimes.creation_selection(provider, &cwd, selection.as_ref())?;
+        Ok::<_, String>((selection, installation_use))
+      })
+      .await
+      .map_err(|_| InteractionError::unavailable("Could not validate the creation runtime"))?
+      .map_err(InteractionError::unavailable)?;
       self
         .runtimes
         .create_native_session(

@@ -17,6 +17,7 @@ mod repository;
 pub mod rpc_profiles;
 pub mod rpc_runtime;
 pub mod runtime;
+pub mod runtime_install;
 pub mod runtimes;
 pub mod service;
 pub mod service_client;

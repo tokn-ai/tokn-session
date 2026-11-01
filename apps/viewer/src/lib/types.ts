@@ -524,6 +524,30 @@ export interface RuntimeRestartRequest { request_id: string; runtime_id: string;
 export interface RuntimeRestartResponse { request_id: string; runtime_id: string; message: string; }
 
 export type RpcProvider = "codex" | "pi" | "open_code" | "dsh";
+export type RuntimeInstallJobState = "resolving" | "downloading" | "installing" | "verifying" | "completed" | "failed" | "cancelled";
+export interface RuntimeInstallJob {
+  job_id: string;
+  request_id: string;
+  provider: RpcProvider;
+  state: RuntimeInstallJobState;
+  downloaded_bytes: number;
+  total_bytes: number | null;
+  error: string | null;
+}
+export interface AgentInstallation {
+  provider: RpcProvider;
+  version: string | null;
+  generation: string | null;
+  requires_node: boolean;
+  available: boolean;
+  unavailable_reason: string | null;
+  in_use: boolean;
+  job: RuntimeInstallJob | null;
+}
+export interface RuntimeInstallInventory { agents: AgentInstallation[]; }
+export interface StartAgentInstallationRequest { request_id: string; provider: RpcProvider; }
+export interface CancelAgentInstallationRequest { job_id: string; }
+export interface RemoveAgentInstallationRequest { provider: RpcProvider; generation: string; }
 export type RpcRuntimeMode = "managed" | "attached";
 export interface RpcRuntimeProfile {
   profile_id: string;

@@ -58,6 +58,9 @@ pub trait RuntimeHost: Send + Sync + 'static {
   type Profile: Clone + Send + Sync + 'static;
   fn resolve_profile(&self, profile_id: &str, revision: u64) -> Result<Self::Profile, String>;
   fn describe(&self, profile: &Self::Profile) -> ProfileDescriptor;
+  fn configuration_generation(&self, _profile: &Self::Profile) -> Option<String> {
+    None
+  }
   fn validate_launch_ready(&self, profile: &Self::Profile) -> Result<(), String>;
   /// Reject unsupported creation-time model overrides before opening a runtime.
   fn validate_creation_model(&self, _profile: &Self::Profile, _model: &ModelIdentity) -> Result<(), InteractionError> {

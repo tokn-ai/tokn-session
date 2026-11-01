@@ -23,6 +23,143 @@ fn install_environment(manager: &RpcRuntimeManager, bin: &Path) {
   });
 }
 
+fn managed_installation(root: &Path, provider: Provider, name: &str) -> (PathBuf, String) {
+  let directory = root.join(name);
+  std::fs::create_dir_all(&directory).unwrap();
+  let entrypoint = executable(&directory, "managed-agent");
+  let generation = uuid::Uuid::new_v4().to_string();
+  std::fs::write(
+    directory.join("tokn-install.json"),
+    serde_json::to_vec(&json!({
+      "provider":provider, "version":"1.0.0-fixture", "generation":generation,
+      "entrypoint":entrypoint.file_name().unwrap().to_str().unwrap(), "node":false, "digest":"fixture",
+    }))
+    .unwrap(),
+  )
+  .unwrap();
+  (entrypoint, generation)
+}
+
+#[test]
+fn managed_installations_precede_path_and_changes_invalidate_the_pinned_plan() {
+  let directory = tempfile::tempdir().unwrap();
+  let root = directory.path().join("runtimes");
+  let manager = RpcRuntimeManager::new(
+    Some(directory.path().join("viewer/rpc-runtimes.json")),
+    InteractionService::default(),
+  );
+  let bin = tempfile::tempdir().unwrap();
+  let fallback = executable(bin.path(), "codex");
+  install_environment(&manager, bin.path());
+  let project = tempfile::tempdir().unwrap();
+  let (installed, generation) = managed_installation(&root, Provider::Codex, "codex");
+  let plan = manager.resolve_plan(Provider::Codex, project.path(), None).unwrap();
+  assert_eq!(plan.configuration.generation, Some(generation));
+  let selection = plan.shared_runtime_selection().unwrap();
+  let resolved = manager.0.resolver.resolve_profile(&selection.profile_id, 0).unwrap();
+  assert_eq!(resolved.profile.executable.as_deref(), installed.to_str());
+  let (_, updated) = managed_installation(&root, Provider::Codex, "codex");
+  assert!(manager.hold_plan_installation(&plan).is_err());
+  assert!(
+    manager
+      .resolve_plan(Provider::Codex, project.path(), Some(&selection))
+      .is_err()
+  );
+  let current = manager.resolve_plan(Provider::Codex, project.path(), None).unwrap();
+  assert_eq!(current.configuration.generation, Some(updated));
+  assert_ne!(current.plan_id().unwrap(), plan.plan_id().unwrap());
+
+  manager.set_discovery_environment(discovery::DiscoveryEnvironment {
+    path: None,
+    executables: BTreeMap::from([("TOKN_SESSION_CODEX_EXECUTABLE".into(), fallback.into_os_string())]),
+  });
+  assert_eq!(
+    manager
+      .resolve_plan(Provider::Codex, project.path(), None)
+      .unwrap()
+      .configuration
+      .generation,
+    None
+  );
+}
+
+#[tokio::test]
+async fn explicit_managed_profiles_hold_installations_and_fence_generation_changes() {
+  let directory = tempfile::tempdir().unwrap();
+  let root = directory.path().join("runtimes");
+  let manager = RpcRuntimeManager::new(
+    Some(directory.path().join("viewer/rpc-runtimes.json")),
+    InteractionService::default(),
+  );
+  let project = tempfile::tempdir().unwrap();
+  let (installed, generation) = managed_installation(&root, Provider::Codex, "codex");
+  let saved = save_profile(
+    &manager,
+    RpcRuntimeProfileInput {
+      mode: RpcRuntimeMode::Managed,
+      executable: Some(installed.to_str().unwrap().into()),
+      working_directory: Some(project.path().to_str().unwrap().into()),
+      endpoint: None,
+      ..attached_profile("unused".into())
+    },
+  );
+  let plan = manager.resolve_plan(Provider::Codex, project.path(), None).unwrap();
+  assert_eq!(plan.configuration.id, saved.profile_id);
+  assert_eq!(plan.configuration.generation, Some(generation.clone()));
+  let guard = manager.hold_plan_installation(&plan).unwrap().unwrap();
+  let installer = crate::runtime_install::RuntimeInstallManager::new(root.clone());
+  assert!(
+    installer
+      .remove(crate::runtime_install::RuntimeInstallRemoveRequest {
+        provider: Provider::Codex,
+        generation: generation.clone(),
+      })
+      .await
+      .unwrap_err()
+      .contains("in use")
+  );
+  drop(guard);
+  let (_, updated) = managed_installation(&root, Provider::Codex, "codex");
+  assert!(manager.hold_plan_installation(&plan).is_err());
+  let current = manager.resolve_plan(Provider::Codex, project.path(), None).unwrap();
+  assert_eq!(current.configuration.id, saved.profile_id);
+  assert_eq!(current.configuration.revision, plan.configuration.revision);
+  assert_eq!(current.configuration.generation, Some(updated));
+  assert_ne!(current.plan_id().unwrap(), plan.plan_id().unwrap());
+  assert!(
+    manager.inventory().runtimes.is_empty(),
+    "configuration reads never launch an agent"
+  );
+}
+
+#[test]
+fn explicit_node_launchers_pin_the_package_entrypoint_installation() {
+  let directory = tempfile::tempdir().unwrap();
+  let root = directory.path().join("runtimes");
+  let manager = RpcRuntimeManager::new(
+    Some(directory.path().join("viewer/rpc-runtimes.json")),
+    InteractionService::default(),
+  );
+  let project = tempfile::tempdir().unwrap();
+  let node = executable(directory.path(), "fixture-node");
+  let (entrypoint, generation) = managed_installation(&root, Provider::Dsh, "dsh");
+  save_profile(
+    &manager,
+    RpcRuntimeProfileInput {
+      provider: Provider::Dsh,
+      mode: RpcRuntimeMode::Managed,
+      executable: Some(node.to_str().unwrap().into()),
+      arguments: vec![entrypoint.to_str().unwrap().into()],
+      working_directory: Some(project.path().to_str().unwrap().into()),
+      endpoint: None,
+      ..attached_profile("unused".into())
+    },
+  );
+  let plan = manager.resolve_plan(Provider::Dsh, project.path(), None).unwrap();
+  assert_eq!(plan.configuration.generation, Some(generation));
+  assert!(manager.hold_plan_installation(&plan).unwrap().is_some());
+}
+
 #[tokio::test]
 async fn all_shared_providers_discover_the_same_plan_for_availability_catalog_and_startup_policy() {
   let manager = manager();
@@ -35,6 +172,7 @@ async fn all_shared_providers_discover_the_same_plan_for_availability_catalog_an
   install_environment(&manager, bin.path());
   let host = Host {
     resolver: manager.0.resolver.clone(),
+    installation_reservations: Arc::new(Mutex::new(Vec::new())),
   };
   for provider in [Provider::Codex, Provider::OpenCode, Provider::Dsh] {
     let plan = manager.resolve_plan(provider, &cwd, None).unwrap();

@@ -860,6 +860,7 @@ fn resolved_test_plan(runtime: &RuntimeCoordinator<FakeHost>) -> crate::runtime_
     configuration: RuntimeConfigurationIdentity {
       id: profile.profile_id.clone(),
       revision: profile.revision,
+      generation: None,
     },
     ownership: profile.ownership,
     reuse_scope: RuntimeReuseScope::Runtime,
@@ -945,7 +946,9 @@ async fn planned_resume_rejects_stale_or_mismatched_configuration_before_opening
   let mut worker = ownership.clone();
   worker.strategy = crate::runtime_plan::RuntimeStrategy::SessionWorker;
   worker.reuse_scope = crate::runtime_plan::RuntimeReuseScope::Session;
-  for invalid in [stale, provider, ownership, worker] {
+  let mut installation = plan.clone();
+  installation.configuration.generation = Some("changed-installation".into());
+  for invalid in [stale, provider, ownership, worker, installation] {
     let descriptor = verified_test_session(&invalid);
     assert!(
       runtime

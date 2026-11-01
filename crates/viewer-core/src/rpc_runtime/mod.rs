@@ -91,9 +91,31 @@ struct Inner {
 #[derive(Clone)]
 struct Host {
   resolver: resolver::RuntimeResolver,
+  installation_reservations: Arc<Mutex<Vec<Arc<dyn Send + Sync>>>>,
 }
 
 impl RpcRuntimeManager {
+  /// Hold the installation selected by a plan across admission and native
+  /// creation; a factory takes its own guard for the actual runtime lifetime.
+  pub(crate) fn hold_plan_installation(
+    &self,
+    plan: &tokn_interaction_core::runtime_plan::RuntimePlan,
+  ) -> Result<Option<crate::runtime_install::RuntimeUseGuard>, String> {
+    let profile = self
+      .0
+      .resolver
+      .resolve_profile(&plan.configuration.id, plan.configuration.revision)?;
+    let generation = profile.installation.as_ref().map(|pin| pin.generation.as_str());
+    if generation != plan.configuration.generation.as_deref() {
+      return Err("The managed agent installation changed; refresh the runtime or model selection".into());
+    }
+    profile
+      .installation
+      .as_ref()
+      .map(|pin| crate::runtime_install::acquire_use(&pin.root, profile.profile.provider, &pin.generation))
+      .transpose()
+  }
+
   pub(crate) fn resolve_plan(
     &self,
     provider: Provider,
@@ -194,6 +216,7 @@ impl RpcRuntimeManager {
 
   pub(crate) fn new(path: Option<PathBuf>, interactions: InteractionService) -> Self {
     let parent = path.as_ref().and_then(|path| path.parent());
+    let installation_root = parent.and_then(|path| path.parent()).map(|path| path.join("runtimes"));
     let lease_directory = parent.map(|path| path.join("rpc-leases"));
     let ownership = crate::session_ownership::SessionOwnership::new(parent.map(|path| path.join("session-leases")));
     let profiles = Arc::new(RpcProfileStore::configured(path));
@@ -201,9 +224,11 @@ impl RpcRuntimeManager {
       profiles,
       transient_profiles: Arc::new(Mutex::new(BTreeMap::new())),
       discovery_environment: Arc::new(Mutex::new(None)),
+      installation_root,
     };
     let host = Host {
       resolver: resolver.clone(),
+      installation_reservations: Arc::new(Mutex::new(Vec::new())),
     };
     Self(Arc::new(Inner {
       resolver,

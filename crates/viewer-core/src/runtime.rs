@@ -168,6 +168,30 @@ impl ViewerRuntime {
       }
     }));
     let mut managed_changes = service.sessions.managed.subscribe();
+    let mut installation_changes = service.installations.subscribe();
+    let installation_events = events.clone();
+    let installation_service = service.clone();
+    tasks.push(tokio::spawn(async move {
+      loop {
+        let mut available_changed = match installation_changes.recv().await {
+          Ok(job) => job.state == "completed",
+          Err(broadcast::error::RecvError::Lagged(_)) => true,
+          Err(_) => return,
+        };
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        while let Ok(job) = installation_changes.try_recv() {
+          available_changed |= job.state == "completed";
+        }
+        let _ = emit(
+          &installation_events,
+          "agent-installations-changed",
+          serde_json::json!({}),
+        );
+        if available_changed {
+          installation_service.sessions.runtimes.changed();
+        }
+      }
+    }));
     let managed_service = service.clone();
     let managed_events = events.clone();
     tasks.push(tokio::spawn(async move {

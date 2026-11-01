@@ -27,6 +27,28 @@ impl Handle {
     Ok(())
   }
 }
+
+struct InstalledHandle {
+  handle: Handle,
+  _installation: Option<Arc<dyn Send + Sync>>,
+}
+
+impl core_runtime::RuntimeHandle for InstalledHandle {
+  fn adapter(&self) -> Arc<dyn InteractionAdapter> {
+    self.handle.adapter()
+  }
+
+  fn bind_native<'a>(&'a self, id: &'a str) -> AdapterFuture<'a, Result<(), String>> {
+    Box::pin(self.handle.bind_native(id))
+  }
+
+  fn create_native<'a>(
+    &'a self,
+    request: &'a core_runtime::CreateNativeSessionRequest,
+  ) -> AdapterFuture<'a, Result<core_runtime::NativeSessionDescriptor, InteractionError>> {
+    core_runtime::RuntimeHandle::create_native(&self.handle, request)
+  }
+}
 fn env(profile: &RpcResolvedProfile) -> BTreeMap<OsString, OsString> {
   profile
     .environment
@@ -89,8 +111,9 @@ pub(super) async fn open(id: &str, profile: &RpcResolvedProfile) -> Result<Handl
       tokn_pi_adapter::EndpointOptions::new(id),
       tokn_pi_adapter::LaunchOptions {
         executable: path(profile)?,
+        launcher_args: profile.profile.arguments.iter().map(OsString::from).collect(),
         working_directory: cwd(profile)?,
-        arguments: profile.profile.arguments.iter().map(OsString::from).collect(),
+        arguments: Vec::new(),
         environment: env(profile),
         session_file: None,
       },
@@ -129,6 +152,7 @@ pub(super) async fn open(id: &str, profile: &RpcResolvedProfile) -> Result<Handl
       let adapter = if owned {
         let mut options = tokn_dsh_adapter::ManagedOptions::new(cwd(profile)?);
         options.program = path(profile)?;
+        options.launcher_args = profile.profile.arguments.clone();
         options.runtime_id = id.into();
         options.env = profile.environment.clone();
         tokn_dsh_adapter::DshAdapter::launch(options).await
@@ -263,6 +287,10 @@ impl core_runtime::RuntimeHost for Host {
     }
   }
 
+  fn configuration_generation(&self, profile: &Self::Profile) -> Option<String> {
+    profile.installation.as_ref().map(|pin| pin.generation.clone())
+  }
+
   fn validate_launch_ready(&self, profile: &Self::Profile) -> Result<(), String> {
     profile.validate_launch_ready()
   }
@@ -302,9 +330,66 @@ impl core_runtime::RuntimeHost for Host {
     profile: &'a Self::Profile,
   ) -> AdapterFuture<'a, Result<Arc<dyn core_runtime::RuntimeHandle>, String>> {
     Box::pin(async move {
-      open(runtime_id, profile)
+      let runtime_id = runtime_id.to_owned();
+      let profile = profile.clone();
+      let reservations = self.installation_reservations.clone();
+      let (send, receive) = tokio::sync::oneshot::channel();
+      let (accept, accepted) = tokio::sync::oneshot::channel();
+      // Startup outlives a caller timeout so the installation lock cannot be
+      // released while an adapter is still starting or reaping its child.
+      tokio::spawn(async move {
+        let guard = profile
+          .installation
+          .as_ref()
+          .map(|pin| {
+            crate::runtime_install::acquire_use(&pin.root, profile.profile.provider, &pin.generation)
+              .map(|guard| Arc::new(guard) as Arc<dyn Send + Sync>)
+          })
+          .transpose();
+        let result = match guard {
+          Err(error) => Err(error),
+          Ok(guard) => match open(&runtime_id, &profile).await {
+            Ok(handle) => Ok(Arc::new(InstalledHandle {
+              handle,
+              _installation: guard,
+            })),
+            Err(error) => {
+              // The coordinator quarantines uncertain startup. Keep the use
+              // lock with the same host lifetime if cleanup was not proven.
+              if let Some(guard) = guard {
+                reservations
+                  .lock()
+                  .unwrap_or_else(|error| error.into_inner())
+                  .push(guard);
+              }
+              Err(error)
+            }
+          },
+        };
+        match result {
+          Ok(handle) => {
+            // Retain our copy until the receiver acknowledges ownership. A
+            // successful send alone does not prove the result was consumed.
+            if send.send(Ok(handle.clone())).is_ok() && accepted.await.is_ok() {
+              return;
+            }
+            if handle.handle.adapter().close().await.is_err() {
+              reservations
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(handle);
+            }
+          }
+          Err(error) => {
+            let _ = send.send(Err(error));
+          }
+        }
+      });
+      let handle = receive
         .await
-        .map(|handle| Arc::new(handle) as Arc<dyn core_runtime::RuntimeHandle>)
+        .map_err(|_| "Runtime startup was interrupted".to_owned())??;
+      let _ = accept.send(());
+      Ok(handle as Arc<dyn core_runtime::RuntimeHandle>)
     })
   }
 

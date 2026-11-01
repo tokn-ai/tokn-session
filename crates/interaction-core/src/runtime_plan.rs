@@ -18,11 +18,20 @@ const MAX_IDENTITY_BYTES: usize = 1024;
 pub struct RuntimeConfigurationIdentity {
   pub id: String,
   pub revision: u64,
+  /// Optional host-owned installation fence. Omission preserves legacy plan
+  /// fingerprints for ordinary saved profiles and externally managed binaries.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub generation: Option<String>,
 }
 
 impl RuntimeConfigurationIdentity {
   pub fn validate(&self) -> Result<(), String> {
-    if !valid_identity(&self.id) {
+    if !valid_identity(&self.id)
+      || self
+        .generation
+        .as_deref()
+        .is_some_and(|generation| !valid_identity(generation))
+    {
       return Err("Invalid runtime configuration identity".into());
     }
     // Revisions are host-owned fences. Zero is a valid initial revision.

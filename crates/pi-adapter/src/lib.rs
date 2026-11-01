@@ -57,6 +57,9 @@ impl EndpointOptions {
 #[derive(Clone, Debug)]
 pub struct LaunchOptions {
   pub executable: PathBuf,
+  /// Prefix before Pi's native arguments, for example a JavaScript entrypoint
+  /// when the host executable is Node.
+  pub launcher_args: Vec<OsString>,
   pub working_directory: PathBuf,
   pub arguments: Vec<OsString>,
   pub environment: BTreeMap<OsString, OsString>,
@@ -133,6 +136,7 @@ impl PiAdapter {
     }
     let mut command = tokio::process::Command::new(&launch.executable);
     command
+      .args(launch.launcher_args)
       .args(["--mode", "rpc"])
       .args(launch.arguments)
       .current_dir(launch.working_directory)

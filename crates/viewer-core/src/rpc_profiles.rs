@@ -123,6 +123,14 @@ pub struct RpcResolvedProfile {
   pub profile: RpcRuntimeProfile,
   pub environment: BTreeMap<String, String>,
   pub credentials: RpcCredentials,
+  /// Host-only pin for a Tokn-managed installation. Never accepted from clients.
+  pub(crate) installation: Option<RpcInstallationPin>,
+}
+
+#[derive(Clone)]
+pub(crate) struct RpcInstallationPin {
+  pub root: PathBuf,
+  pub generation: String,
 }
 
 impl RpcResolvedProfile {
@@ -330,6 +338,7 @@ impl RpcProfileStore {
       profile: stored.public(),
       environment: stored.environment,
       credentials: stored.credentials,
+      installation: None,
     })
   }
 
@@ -530,7 +539,7 @@ fn schema_issues(profile: &StoredProfile) -> Vec<RpcProfileValidationIssue> {
           "Managed runtimes discover their endpoint from their owned process",
         );
       }
-      if matches!(profile.provider, Provider::OpenCode | Provider::Dsh) && !profile.arguments.is_empty() {
+      if profile.provider == Provider::OpenCode && !profile.arguments.is_empty() {
         issue(
           &mut issues,
           "arguments",
@@ -1022,7 +1031,11 @@ mod tests {
       let mut input = managed(directory.path());
       input.provider = provider;
       input.arguments.push("unsupported".into());
-      assert!(!store.validate(input).unwrap().valid);
+      assert_eq!(
+        store.validate(input).unwrap().valid,
+        provider == Provider::Dsh,
+        "DSH accepts a launcher prefix; OpenCode has a fixed native launch"
+      );
     }
     let mut input = attached();
     input.environment = Some(BTreeMap::from([("TOKEN".into(), "secret".into())]));

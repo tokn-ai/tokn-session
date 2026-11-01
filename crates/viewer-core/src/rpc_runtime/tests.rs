@@ -341,6 +341,7 @@ fn runtime_errors_redact_explicit_credentials_and_environment_values() {
     credentials: RpcCredentials::Bearer {
       token: "private-token".into(),
     },
+    installation: None,
   };
   let message = factory::redact_error("request private-token failed; config private-env", &profile);
   assert!(!message.contains("private-token"));

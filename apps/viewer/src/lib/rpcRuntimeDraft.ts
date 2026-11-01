@@ -18,6 +18,9 @@ export interface RpcRuntimeDraft {
   is_default: boolean;
 }
 export const RPC_PROVIDER_LABELS: Record<RpcProvider, string> = { codex: "Codex", pi: "Pi", open_code: "OpenCode", dsh: "DSH" };
+export function rpcRuntimeHasLauncherArguments(provider: RpcProvider): boolean {
+  return provider === "codex" || provider === "pi" || provider === "dsh";
+}
 export function rpcRuntimeDraft(profile?: RpcRuntimeProfile): RpcRuntimeDraft {
   return {
     profile_id: profile?.profile_id ?? null, name: profile?.name ?? "", provider: profile?.provider ?? "codex",
@@ -28,7 +31,7 @@ export function rpcRuntimeDraft(profile?: RpcRuntimeProfile): RpcRuntimeDraft {
 }
 export function rpcRuntimeInput(draft: RpcRuntimeDraft): RpcRuntimeProfileInput {
   let args: string[] = [];
-  if (draft.mode === "managed" && (draft.provider === "codex" || draft.provider === "pi")) {
+  if (draft.mode === "managed" && rpcRuntimeHasLauncherArguments(draft.provider)) {
     let parsed: unknown;
     try { parsed = JSON.parse(draft.arguments); } catch { throw new Error("Arguments must be a JSON array of strings."); }
     if (!Array.isArray(parsed) || parsed.some((arg) => typeof arg !== "string")) throw new Error("Arguments must be a JSON array of strings.");

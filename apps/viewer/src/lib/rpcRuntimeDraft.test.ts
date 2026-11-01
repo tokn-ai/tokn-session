@@ -21,3 +21,10 @@ it("retains the required project directory only for runtimes that use it", () =>
   expect(rpcRuntimeInput({ ...draft, mode: "attached", provider: "codex" }).working_directory).toBeNull();
   expect(rpcRuntimeInput({ ...draft, mode: "attached", provider: "dsh" }).working_directory).toBeNull();
 });
+it("retains DSH launcher arguments and keeps OpenCode launch options host-owned", () => {
+  const draft = { ...rpcRuntimeDraft(), provider: "dsh" as const, arguments: '["/fixture/dsh/lib/bin.js"]' };
+  expect(rpcRuntimeInput(draft).arguments).toEqual(["/fixture/dsh/lib/bin.js"]);
+  expect(rpcRuntimeInput({ ...draft, provider: "open_code" }).arguments).toEqual([]);
+  expect(rpcRuntimeInput({ ...draft, mode: "attached" }).arguments).toEqual([]);
+  expect(() => rpcRuntimeInput({ ...draft, arguments: "[false]" })).toThrow("Arguments must be a JSON array of strings.");
+});

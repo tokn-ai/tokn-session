@@ -1,5 +1,5 @@
 import { useId, useRef, useState } from "react";
-import { rpcRuntimeDraft, rpcRuntimeInput, RPC_PROVIDER_LABELS, type RpcRuntimeDraft } from "../lib/rpcRuntimeDraft";
+import { rpcRuntimeDraft, rpcRuntimeInput, rpcRuntimeHasLauncherArguments, RPC_PROVIDER_LABELS, type RpcRuntimeDraft } from "../lib/rpcRuntimeDraft";
 import type { RpcProvider, RpcRuntimeProfile, RpcRuntimeProfileInput, RpcRuntimeProfileValidation } from "../lib/types";
 
 export function RpcRuntimeProfileForm({ profile, revision, busy, on_save, on_validate, on_cancel }: {
@@ -50,7 +50,7 @@ export function RpcRuntimeProfileForm({ profile, revision, busy, on_save, on_val
       {draft.provider === "pi" && <p className="settings-page__hint">Pi requires a managed process; existing Pi process pipes cannot be attached through an endpoint.</p>}
       {draft.mode === "managed" ? <>
         {textField("executable", "Executable", "Absolute executable path on the selected machine.")}
-        {(draft.provider === "codex" || draft.provider === "pi") && <div className="rpc-profile-form__field"><label htmlFor={`${id}-arguments`}>Arguments</label><textarea id={`${id}-arguments`} value={draft.arguments} rows={3} spellCheck={false} onChange={(event) => change({ arguments: event.currentTarget.value })} /><p>JSON array of arguments. The host adds the provider’s RPC launch options.</p></div>}
+        {rpcRuntimeHasLauncherArguments(draft.provider) && <div className="rpc-profile-form__field"><label htmlFor={`${id}-arguments`}>Arguments</label><textarea id={`${id}-arguments`} value={draft.arguments} rows={3} spellCheck={false} onChange={(event) => change({ arguments: event.currentTarget.value })} /><p>JSON array of launcher arguments, such as a Node CLI entrypoint. The host adds the provider’s RPC launch options.</p></div>}
       </> : textField("endpoint", "RPC endpoint", draft.provider === "codex" ? "A Codex app-server ws:// or wss:// address." : "The agent’s HTTP or HTTPS API address.")}
       {(draft.mode === "managed" || draft.provider === "open_code") && textField("working_directory", "Working directory", "Required absolute project folder path on the selected machine.")}
       {draft.mode === "managed" ? <>

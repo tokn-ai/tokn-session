@@ -98,17 +98,49 @@ pub(super) fn builtin_profile(
   provider: Provider,
   cwd: &Path,
   environment: &DiscoveryEnvironment,
+  installation_root: Option<&Path>,
 ) -> Result<RpcResolvedProfile, String> {
   let (name, command, key) = provider_command(provider)?;
   let cwd = std::fs::canonicalize(cwd).map_err(|_| "The session working directory is unavailable")?;
   if !cwd.is_dir() {
     return Err("The session working directory is unavailable".into());
   }
-  let executable = resolve_executable(
-    environment.executables.get(key).map(OsString::as_os_str),
-    environment.path.as_deref(),
-    command,
-  )?;
+  // An explicit override is authoritative. Installed packages are checked only
+  // before ordinary PATH discovery, and never downloaded by resolution.
+  let installed = if environment.executables.contains_key(key) {
+    None
+  } else {
+    installation_root
+      .map(|root| crate::runtime_install::launch_spec(root, provider))
+      .transpose()?
+      .flatten()
+  };
+  let (executable, arguments, installation) = if let Some(spec) = installed {
+    (
+      spec.executable,
+      spec.arguments,
+      Some(RpcInstallationPin {
+        root: installation_root.expect("installed root").to_path_buf(),
+        generation: spec.generation,
+      }),
+    )
+  } else {
+    (
+      resolve_executable(
+        environment.executables.get(key).map(OsString::as_os_str),
+        environment.path.as_deref(),
+        command,
+      )?,
+      Vec::new(),
+      None,
+    )
+  };
+  let installation = installation.or(
+    installation_root
+      .map(|root| installation_pin(root, provider, &executable, &arguments))
+      .transpose()?
+      .flatten(),
+  );
   let mut profile = RpcResolvedProfile {
     revision: 0,
     profile: RpcRuntimeProfile {
@@ -122,7 +154,7 @@ pub(super) fn builtin_profile(
           .ok_or("Runtime executable paths must be valid Unicode")?
           .to_owned(),
       ),
-      arguments: Vec::new(),
+      arguments,
       working_directory: Some(
         cwd
           .to_str()
@@ -136,6 +168,7 @@ pub(super) fn builtin_profile(
     },
     environment: BTreeMap::new(),
     credentials: RpcCredentials::None,
+    installation,
   };
   profile.profile.profile_id = configuration_id(&profile)?;
   profile.validate_launch_ready()?;
@@ -146,10 +179,48 @@ pub(super) fn builtin_profile(
 /// replaced binary must not silently take over an already verified catalog.
 pub(super) fn validate_builtin(profile: &RpcResolvedProfile) -> Result<(), String> {
   profile.validate_launch_ready()?;
+  if let Some(pin) = &profile.installation {
+    let current = crate::runtime_install::launch_spec(&pin.root, profile.profile.provider)?;
+    if !current.is_some_and(|spec| spec.generation == pin.generation) {
+      return Err("The managed agent installation changed; refresh the runtime or model selection".into());
+    }
+  }
   if configuration_id(profile)? != profile.profile.profile_id {
     return Err("The discovered executable changed; refresh the runtime or model selection".into());
   }
   Ok(())
+}
+
+/// Saved profiles and explicit overrides may also launch files inside an
+/// installed package, including Node outside that tree with a script argument.
+pub(crate) fn installation_pin(
+  root: &Path,
+  provider: Provider,
+  executable: &Path,
+  arguments: &[String],
+) -> Result<Option<RpcInstallationPin>, String> {
+  let directory = root.join(match provider {
+    Provider::Pi => "pi",
+    Provider::Codex => "codex",
+    Provider::OpenCode => "opencode",
+    Provider::Dsh => "dsh",
+  });
+  let canonical = std::fs::canonicalize(&directory).ok();
+  let within = |path: &Path| {
+    path.starts_with(&directory)
+      || canonical
+        .as_ref()
+        .is_some_and(|directory| std::fs::canonicalize(path).is_ok_and(|path| path.starts_with(directory)))
+  };
+  if !within(executable) && !arguments.iter().any(|argument| within(Path::new(argument))) {
+    return Ok(None);
+  }
+  let spec = crate::runtime_install::launch_spec(root, provider)?
+    .ok_or("The configured managed agent installation is unavailable; download it or update the profile")?;
+  Ok(Some(RpcInstallationPin {
+    root: root.to_owned(),
+    generation: spec.generation,
+  }))
 }
 
 fn configuration_id(profile: &RpcResolvedProfile) -> Result<String, String> {
@@ -158,23 +229,36 @@ fn configuration_id(profile: &RpcResolvedProfile) -> Result<String, String> {
     .executable
     .as_deref()
     .ok_or("Discovered runtime executable is missing")?;
+  let mut environment = profile.environment.clone();
+  if let Some(pin) = &profile.installation {
+    environment.insert("TOKN_INSTALLATION_GENERATION".into(), pin.generation.clone());
+  }
   configuration_digest(
     profile.profile.provider,
     profile.profile.working_directory.as_deref(),
     Path::new(executable),
     &profile.profile.arguments,
-    &profile.environment,
+    &environment,
   )
 }
 
-pub(crate) fn executable_configuration_id(provider: Provider, cwd: &Path, executable: &Path) -> Result<String, String> {
+pub(crate) fn launch_configuration_id(
+  provider: Provider,
+  cwd: &Path,
+  executable: &Path,
+  arguments: &[String],
+  generation: Option<&str>,
+) -> Result<String, String> {
   let cwd = std::fs::canonicalize(cwd).map_err(|_| "The runtime project folder is unavailable")?;
+  let environment = generation
+    .map(|generation| BTreeMap::from([("TOKN_INSTALLATION_GENERATION".into(), generation.into())]))
+    .unwrap_or_default();
   configuration_digest(
     provider,
     Some(cwd.to_str().ok_or("Runtime project paths must be valid Unicode")?),
     executable,
-    &[],
-    &BTreeMap::new(),
+    arguments,
+    &environment,
   )
 }
 

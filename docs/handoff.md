@@ -4,6 +4,16 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
+Settings → Agent runtimes includes explicit downloads/updates/removal for one
+Tokn-managed Pi/Codex/OpenCode/DSH installation per selected host. Host-side jobs
+stage and verify replacements under `runtimes/{provider}` beside the viewer
+index; Pi/DSH use host-owned Node/npm and local dependencies, without global
+installation or managed Node. Encrypted remote installation requires the
+existing paired-control/runtime-management permission. Shared use locks protect
+running runtimes; explicit profiles/overrides retain priority over managed
+installations and PATH. New Pi workers resolve the current installation without
+replacing active workers. See [agent downloads](viewer-rpc-runtimes.md#agent-downloads).
+
 The viewer now has a remote-only Android/iOS Tauri entry point, shared native
 Hub pairing/remembered identities, and mobile-private preference storage. Mobile
 does not register local history, hosting, or process commands; onboarding uses
