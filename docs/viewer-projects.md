@@ -42,7 +42,9 @@ The draft model picker offers verified Pi, Codex and OpenCode choices, or
 **Use runtime default**. Choosing stays local; Send revalidates the catalog and
 applies the model before the first prompt. Changing project, agent or runtime
 clears the choice while retaining text/images. An incompatible model keeps image
-attachments visible and blocks Send until corrected. DSH remains default-only.
+attachments visible and blocks Send until corrected. DSH also loads its host
+runtime's configured models for display, but its catalog stays read-only and
+new sessions use the runtime default.
 Codex uses app-server RPC. DSH passes the project directory to native session
 creation and retains the deployment’s default agent preset.
 

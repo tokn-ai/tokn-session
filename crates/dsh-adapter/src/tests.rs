@@ -19,6 +19,7 @@ struct Fake {
   pong_count: AtomicU64,
   created_sessions: Mutex<Vec<Value>>,
   creation_fault: AtomicU64,
+  model_catalog: Mutex<Value>,
 }
 
 struct Server {
@@ -44,6 +45,9 @@ async fn server(initial: Vec<Value>) -> Server {
     pong_count: AtomicU64::new(0),
     created_sessions: Mutex::new(Vec::new()),
     creation_fault: AtomicU64::new(0),
+    model_catalog: Mutex::new(
+      json!({"groups":[{"id":"provider","name":"Provider","models":[{"id":"model","name":"Model","future":true}]}],"failures":[{"id":"failed-provider","message":"offline"}]}),
+    ),
   });
   let router = Router::new()
     .route("/api/events.mux", get(mux_stream))
@@ -160,9 +164,7 @@ async fn call(State(fake): State<Arc<Fake>>, Path(method): Path<String>, body: B
         json!({"sessionId": if fault == 1 { json!("another-session") } else { payload["sessionId"].clone() },"agentPreset": if fault == 3 { json!("another-preset") } else { preset }})
       }
     }
-    "llm.models" => {
-      json!({"groups":[{"id":"provider","name":"Provider","models":[{"id":"model","name":"Model","future":true}]}],"failures":[{"id":"failed-provider","message":"offline"}]})
-    }
+    "llm.models" => fake.model_catalog.lock().await.clone(),
     "session.prompt" | "session.cancel" => json!({"accepted":true}),
     _ => panic!("unexpected native method: {method}"),
   };
@@ -356,6 +358,62 @@ async fn reads_metadata_state_and_catalog_without_resuming_sessions() {
     ["host.describe", "session.list", "llm.models"]
   );
   drop(calls);
+  adapter.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn catalog_failures_remain_retryable_without_hiding_usable_models_or_resuming_sessions() {
+  let server = server(Vec::new()).await;
+  let adapter = attach(&server).await;
+  let failures = json!([{"id":"failed-provider","message":"private-catalog-diagnostic secret-token"}]);
+  *server.fake.model_catalog.lock().await = json!({
+    "groups":[{"id":"failed-provider","name":"Failed provider","models":[]}],
+    "failures":failures,
+  });
+  let mut query = request(&adapter, Command::Models);
+  query.target.session_id = None;
+  let error = adapter.execute(query).await.unwrap_err();
+  assert_eq!(error.kind, ErrorKind::Unavailable);
+  assert_eq!(
+    error.message,
+    "DSH could not load its model catalog; check the host's provider configuration and retry"
+  );
+  assert!(!error.message.contains("secret-token"));
+  assert_eq!(
+    adapter.model_catalog().await.unwrap().failures,
+    failures.as_array().unwrap().clone()
+  );
+
+  *server.fake.model_catalog.lock().await = json!({
+    "groups":[{"id":"usable-provider","name":"Usable provider","models":[{"id":"usable-model","name":"Usable model"}]}],
+    "failures":failures,
+  });
+  let mut query = request(&adapter, Command::Models);
+  query.target.session_id = None;
+  let Reply::Models(models) = adapter.execute(query).await.unwrap() else {
+    panic!()
+  };
+  assert_eq!(models.len(), 1);
+  assert_eq!(models[0].model.model_id, "usable-model");
+  assert_eq!(models[0].model.model_provider.as_deref(), Some("usable-provider"));
+
+  *server.fake.model_catalog.lock().await = json!({"groups":[],"failures":[]});
+  let mut query = request(&adapter, Command::Models);
+  query.target.session_id = None;
+  let Reply::Models(models) = adapter.execute(query).await.unwrap() else {
+    panic!()
+  };
+  assert!(models.is_empty());
+  assert!(
+    server
+      .fake
+      .calls
+      .lock()
+      .await
+      .iter()
+      .all(|call| call["method"] == "llm.models")
+  );
+  assert!(server.fake.created_sessions.lock().await.is_empty());
   adapter.close().await.unwrap();
 }
 

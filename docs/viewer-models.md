@@ -36,8 +36,10 @@ prompt or model-setting call is made during discovery.
 Codex and OpenCode choices stay in the draft until Send, reset when the
 project/provider/runtime changes, and determine image compatibility. A refreshed
 runtime plan also clears the model choice while preserving text/images. DSH
-remains default-only because its creation API does not accept a model. The host verifies
-the complete plan before and after catalog discovery, again before admission,
+displays the host runtime's configured catalog read-only through `llm.models`;
+its creation API still uses the runtime default. Read-only catalog responses set
+`can_select: false` and omit the selection proof, including for older clients.
+The host verifies the complete plan before and after catalog discovery, again before admission,
 and checks the actual creation runtime before applying the model. Stale
 project/profile/default or executable metadata rejects the old selection. Pi
 uses the common plan contract with its existing worker and catalog. Its driver

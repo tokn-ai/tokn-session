@@ -103,9 +103,9 @@ export function SessionModelPicker({ model, provider, input_busy = false, select
         })}
       </div> : model.choices && !model.loading ? <p className="session-model__notice">No verified models are available.</p> : null}
       {!model.can_select && !model.checking && !model.loading && !model.error ? <p className="session-model__notice">{reason}</p> : null}
-      <p className="session-model__footnote">{mode === "creation" ? "Your model choice is applied when you send the first message." : model.running
+      {mode !== "creation" || model.can_select ? <p className="session-model__footnote">{mode === "creation" ? "Your model choice is applied when you send the first message." : model.running
         ? "While this session is responding, Send steers the current model and ignores this choice."
-        : "Your model choice is applied when you send the next message."}</p>
+        : "Your model choice is applied when you send the next message."}</p> : null}
       {model.status?.updates_pi_default ? <p className="session-model__footnote">When applied on Send, this choice also updates Pi’s default for new sessions on this machine.</p> : null}
     </div>, document.body) : null}
   </div>;

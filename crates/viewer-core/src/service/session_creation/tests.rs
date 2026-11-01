@@ -13,6 +13,8 @@ use tokn_interaction_core::creation::FirstInputState;
 use tokn_interaction_core::runtime::NativeSessionDescriptor;
 use tokn_interaction_core::{Capabilities, SessionTarget};
 
+mod dsh_catalog;
+
 struct Repository {
   provider: ViewerProvider,
   location: PathBuf,

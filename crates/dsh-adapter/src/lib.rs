@@ -351,6 +351,11 @@ impl DshAdapter {
       }
       Command::Models => {
         let catalog: api::ModelCatalog = inner.transport.call(rpc_id, "llm.models", json!({}), false).await?;
+        if !catalog.failures.is_empty() && catalog.groups.iter().all(|group| group.models.is_empty()) {
+          return Err(InteractionError::unavailable(
+            "DSH could not load its model catalog; check the host's provider configuration and retry",
+          ));
+        }
         inner.emit(
           None,
           RuntimeEventKind::Native(json!({"type":"model_catalog","catalog":catalog})),

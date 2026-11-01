@@ -100,6 +100,16 @@ the exact plan; retrying an existing request does not resolve a different defaul
 Existing-session activation combines a pinned plan with host-verified native
 history. Executable paths, environment values and credentials remain host-side.
 
+DSH draft pickers query the selected runtime's session-independent `llm.models`
+directory. Managed DSH inherits the host environment and uses its native `web`
+profile; attached runtimes use their own configuration. Tokn does not copy model
+settings into its installation directory. Catalog inspection may briefly launch
+a metadata process, but never creates or resumes a saved conversation. DSH
+choices are displayed read-only with `can_select: false` and no selection proof;
+first Send keeps the native runtime default. Empty catalogs remain distinct from
+provider/runtime failures, which show an error and allow retry. Other providers
+retain their existing model-selection behavior.
+
 Reads expose environment variable names and credential kinds, never their
 values. Writes can retain, replace, or clear saved environment/authentication.
 Attached OpenCode supports Basic authentication; attached Codex/DSH support

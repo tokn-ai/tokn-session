@@ -3,10 +3,20 @@
 use super::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-pub(super) struct HttpPeer {
+pub(crate) struct HttpPeer {
   pub endpoint: String,
   pub requests: Arc<Mutex<Vec<String>>>,
+  pub catalog_result: Arc<Mutex<Value>>,
+  pub active_downlinks: Arc<AtomicUsize>,
   task: tokio::task::JoinHandle<()>,
+}
+
+struct DownlinkLease(Arc<AtomicUsize>);
+
+impl Drop for DownlinkLease {
+  fn drop(&mut self) {
+    self.0.fetch_sub(1, Ordering::SeqCst);
+  }
 }
 
 impl HttpPeer {
@@ -15,6 +25,10 @@ impl HttpPeer {
     let endpoint = format!("http://{}/", listener.local_addr().unwrap());
     let requests = Arc::new(Mutex::new(Vec::new()));
     let recorded = requests.clone();
+    let catalog_result = Arc::new(Mutex::new(json!({"ok":true,"value":{"groups":[]}})));
+    let catalog = catalog_result.clone();
+    let active_downlinks = Arc::new(AtomicUsize::new(0));
+    let downlinks = active_downlinks.clone();
     let task = tokio::spawn(async move {
       let mut peers = JoinSet::new();
       loop {
@@ -23,6 +37,8 @@ impl HttpPeer {
         };
         let directory = directory.clone();
         let recorded = recorded.clone();
+        let catalog = catalog.clone();
+        let downlinks = downlinks.clone();
         peers.spawn(async move {
           let mut preview = [0u8; 8192];
           loop {
@@ -52,6 +68,8 @@ impl HttpPeer {
             let Ok(mut ws) = tokio_tungstenite::accept_async(socket).await else {
               return;
             };
+            downlinks.fetch_add(1, Ordering::SeqCst);
+            let _downlink = DownlinkLease(downlinks);
             while let Some(Ok(frame)) = ws.next().await {
               match frame {
                 tokio_tungstenite::tungstenite::Message::Ping(bytes) => {
@@ -141,14 +159,14 @@ impl HttpPeer {
               route => panic!("unexpected OpenCode native route {route}"),
             },
             Provider::Dsh => {
-              let value = match path.as_str() {
+              let result = match path.as_str() {
                 "/api/host.describe" => {
-                  json!({"version":"viewer-test-dsh","cwd":directory,"attachedSessions":0,"canOpenPath":false})
+                  json!({"ok":true,"value":{"version":"viewer-test-dsh","cwd":directory,"attachedSessions":0,"canOpenPath":false}})
                 }
-                "/api/llm.models" => json!({"groups":[]}),
+                "/api/llm.models" => catalog.lock().unwrap().clone(),
                 route => panic!("unexpected DSH native route {route}"),
               };
-              json!({"type":"server-response","rpcId":request["rpcId"],"result":{"ok":true,"value":value}})
+              json!({"type":"server-response","rpcId":request["rpcId"],"result":result})
             }
             _ => unreachable!(),
           };
@@ -165,6 +183,8 @@ impl HttpPeer {
     Self {
       endpoint,
       requests,
+      catalog_result,
+      active_downlinks,
       task,
     }
   }

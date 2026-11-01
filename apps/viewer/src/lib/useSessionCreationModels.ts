@@ -69,20 +69,20 @@ export function useSessionCreationModels(request: ListSessionCreationModelsReque
     const current = latest.current;
     const verified = current.result?.models.find((entry) => sameModel(entry.model, choice.model));
     if (!enabled || !active.current || latest_owner.current !== owner || current.loading || current.error
-      || !current.result?.catalog_revision || !verified) return null;
+      || current.result?.can_select === false || !current.result?.catalog_revision || !verified) return null;
     return { choice: verified, catalog_revision: current.result.catalog_revision, scope_key,
       runtime_profile_id: current.result.runtime_profile_id, runtime_revision: current.result.runtime_revision,
       ...(current.result.runtime_plan_id !== undefined ? { runtime_plan_id: current.result.runtime_plan_id } : {}) };
   }, [enabled, owner, scope_key]);
   const selectionValid = (selected: SessionDraftModel | null) => !selected || selected.scope_key === scope_key && !value.loading && !value.error
-    && (!value.result || value.result.catalog_revision === selected.catalog_revision
+    && (!value.result || value.result.can_select !== false && value.result.catalog_revision === selected.catalog_revision
       && (value.result.runtime_plan_id ?? null) === (selected.runtime_plan_id ?? null)
       && value.result.models.some((choice) => sameModel(choice.model, selected.choice.model)));
 
   return {
     state: null, checking: false, loading: value.loading, choices: value.result?.models ?? null, error: value.error,
     reason: value.result?.reason ?? (!enabled ? "Choose an available project, agent and runtime first." : null),
-    can_open: enabled, can_select: enabled && !value.loading && !value.error && !!value.result?.catalog_revision,
+    can_open: enabled, can_select: enabled && !value.loading && !value.error && value.result?.can_select !== false && !!value.result?.catalog_revision,
     refresh: loadChoices, loadChoices, selectionFor, selectionValid,
   };
 }

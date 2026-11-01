@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { SessionModelPicker } from "./SessionModelPicker";
 import type { SessionModelController } from "../lib/useSessionModel";
 import type { ModelIdentity, SessionModelState } from "../lib/types";
+import { useSessionCreationModels } from "../lib/useSessionCreationModels";
 
 const first: ModelIdentity = { model_provider: "anthropic", model_id: "first", display_name: "First model" };
 const second: ModelIdentity = { model_provider: "anthropic", model_id: "second", display_name: "Second model" };
@@ -84,4 +85,29 @@ it("retains draft selection through catalog errors and exposes retry", () => {
   expect(screen.getByRole("alert")).toHaveTextContent("Catalog unavailable");
   fireEvent.click(screen.getByRole("button", { name: "Retry models" }));
   expect(model.loadChoices).toHaveBeenCalledTimes(1);
+});
+
+it("lazily displays the host's DSH catalog while retaining runtime default as the only selectable choice", async () => {
+  const reason = "Models are loaded from this host’s DSH configuration. DSH uses its runtime default when creating a session; choosing a different model here is not supported yet.";
+  const load = vi.fn(async () => ({ models: [{ model: first, supports_images: false }], can_select: false,
+    catalog_revision: null, runtime_profile_id: "dsh-runtime", runtime_revision: 1, reason }));
+  const actions = callbacks();
+  function DraftPicker() {
+    const model = useSessionCreationModels({ project_id: "fixture", provider: "dsh" }, "dsh-scope", true, load);
+    return <SessionModelPicker model={model} provider="DSH" mode="creation" {...actions} />;
+  }
+  render(<DraftPicker />);
+  expect(load).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: /Model: Runtime default/ }));
+  const choice = await screen.findByRole("button", { name: /First model anthropic/ });
+  expect(choice).toBeDisabled();
+  expect(screen.getByText(reason)).toBeVisible();
+  expect(screen.queryByText(/Your model choice is applied/)).not.toBeInTheDocument();
+  fireEvent.click(choice);
+  expect(actions.on_select).not.toHaveBeenCalled();
+  const default_choice = within(screen.getByRole("dialog")).getByRole("button", { name: /Runtime default Use the agent’s configured model/ });
+  expect(default_choice).toBeEnabled();
+  fireEvent.click(default_choice);
+  expect(actions.on_clear).toHaveBeenCalledTimes(1);
+  expect(load).toHaveBeenCalledExactlyOnceWith({ project_id: "fixture", provider: "dsh" });
 });

@@ -70,6 +70,33 @@ it("keeps runtime default available after errors or unsupported discovery", asyn
   expect(result.current.can_select).toBe(false);
 });
 
+it.each([null, "catalog-one"])("loads a read-only DSH catalog without admitting selections, even with revision %s", async (catalog_revision) => {
+  const target: ListSessionCreationModelsRequest = { ...request, provider: "dsh" };
+  const load = vi.fn(async () => catalog({ can_select: false, catalog_revision, reason: "DSH uses its runtime default." }));
+  const { result } = renderHook(() => useSessionCreationModels(target, scope(target), true, load));
+  expect(load).not.toHaveBeenCalled();
+  expect(result.current.can_open).toBe(true);
+  await act(() => result.current.loadChoices());
+  expect(load).toHaveBeenCalledExactlyOnceWith(target);
+  expect(result.current.choices).toEqual([choice]);
+  expect(result.current.reason).toBe("DSH uses its runtime default.");
+  expect(result.current.can_select).toBe(false);
+  expect(result.current.selectionFor(choice)).toBeNull();
+  expect(result.current.selectionValid(null)).toBe(true);
+});
+
+it("retires a selected model when a refreshed catalog becomes read-only", async () => {
+  const load = vi.fn().mockResolvedValueOnce(catalog({ can_select: true })).mockResolvedValueOnce(catalog({ can_select: false }));
+  const { result } = renderHook(() => useSessionCreationModels(request, scope(), true, load));
+  await act(() => result.current.loadChoices());
+  const selected = result.current.selectionFor(choice)!;
+  expect(result.current.selectionValid(selected)).toBe(true);
+  await act(() => result.current.loadChoices());
+  expect(result.current.selectionValid(selected)).toBe(false);
+  expect(result.current.selectionFor(choice)).toBeNull();
+  expect(result.current.selectionValid(null)).toBe(true);
+});
+
 it("invalidates a selected choice when a refreshed catalog or automatic runtime changes", async () => {
   const load = vi.fn().mockResolvedValueOnce(catalog()).mockResolvedValueOnce(catalog({ catalog_revision: "catalog-two" }));
   const { result, rerender } = renderHook(({ revision }) => useSessionCreationModels(request,

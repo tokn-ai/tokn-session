@@ -60,8 +60,11 @@ native session or upload starts until the first Send. Opening a draft model
 picker can briefly start a metadata RPC process; it never creates or resumes a
 saved conversation. Pi, Codex and OpenCode choices remain local to each draft,
 reset with project/provider/runtime changes, and are revalidated and applied
-before its first prompt. DSH retains its runtime default. Availability, catalogs
-and first Send share a host-resolved `RuntimePlan`; an opaque `runtime_plan_id`
+before its first prompt. DSH lazily reads the host runtime's `llm.models`
+catalog for display; it retains its runtime default and cannot select a model
+for a new session yet. Read-only catalogs expose `can_select: false` without
+a selection proof. Availability, catalogs and first Send share a host-resolved
+`RuntimePlan`; an opaque `runtime_plan_id`
 pins configuration and project scope without exposing launch configuration.
 Stale plans reject before admission. Creation receipts include model identity
 without changing legacy default-model fingerprints. Draft IDs never

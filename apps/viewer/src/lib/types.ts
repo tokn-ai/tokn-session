@@ -280,6 +280,7 @@ export interface CreateProjectSessionRequest {
 export interface ListSessionCreationModelsRequest extends SessionCreationSelection { project_id: string }
 export interface SessionCreationModels {
   models: ModelChoice[]; catalog_revision: string | null; reason: string | null;
+  can_select?: boolean;
   runtime_profile_id: string | null; runtime_revision: number | null;
   runtime_plan_id?: string | null;
 }

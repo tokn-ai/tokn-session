@@ -7,7 +7,7 @@ use std::{
   time::Duration,
 };
 use tokio::{sync::watch, task::JoinSet};
-mod http_peer;
+pub(crate) mod http_peer;
 mod resolution;
 mod workflow_tests;
 
