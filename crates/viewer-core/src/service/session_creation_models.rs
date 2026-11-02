@@ -48,27 +48,15 @@ impl ViewerService {
     if current_project.folder_path != project.folder_path || current_plan != plan {
       return Err("The project or runtime changed while loading models. Open the model picker again.".into());
     }
-    let can_select = provider != LiveProvider::Dsh;
-    // A read-only catalog is useful independently of model-on-create support.
-    // Omit selection proofs too so older clients cannot treat it as selectable.
-    let revision = can_select
-      .then(|| catalog_revision(&project, provider, &plan, &models))
-      .transpose()?;
+    let revision = catalog_revision(&project, provider, &plan, &models)?;
     Ok(SessionCreationModels {
-      reason: if !can_select {
-        Some(if models.is_empty() {
-          "DSH did not advertise any models from this host's runtime configuration. New sessions use its runtime default."
-        } else {
-          "Models come from this host's DSH configuration. New sessions use its runtime default; choosing a different model here is not supported yet."
-        }.into())
-      } else {
-        models
-          .is_empty()
-          .then(|| "This runtime did not advertise any models. You can use its default.".into())
-      },
+      reason: models
+        .is_empty()
+        .then(|| "This runtime did not advertise any models. You can use its default.".into()),
       models,
-      can_select,
-      catalog_revision: revision,
+      can_select: true,
+      updates_default: matches!(provider, LiveProvider::Pi | LiveProvider::Dsh),
+      catalog_revision: Some(revision),
       runtime_profile_id: runtime.as_ref().map(|runtime| runtime.profile_id.clone()),
       runtime_revision: runtime.as_ref().map(|runtime| runtime.expected_revision),
       runtime_plan_id,
@@ -100,11 +88,6 @@ impl ViewerService {
     let Some(selection) = &request.model else {
       return Ok(());
     };
-    if request.provider == LiveProvider::Dsh {
-      return Err(
-        "DSH uses its runtime default for new sessions; clear the draft model selection before sending.".into(),
-      );
-    }
     if selection.catalog_revision.len() != 64
       || !selection.catalog_revision.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
@@ -272,6 +255,7 @@ mod tests {
     };
     let catalog = SessionCreationModels {
       can_select: true,
+      updates_default: false,
       models: vec![choice("text-only")],
       catalog_revision: Some("a".repeat(64)),
       runtime_profile_id: Some("runtime".into()),

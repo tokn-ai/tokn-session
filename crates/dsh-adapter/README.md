@@ -25,11 +25,25 @@ the host's effective default. The adapter verifies the response identity/preset
 and checks cwd with non-activating `session.list`; native creation returns no
 history path. It sends no prompt and never retries an uncertain creation.
 
+`prepare_created_model` applies an explicit provider/model choice once, after
+the host has durably recorded a created session and before its first prompt.
+Only identities created through this adapter and verified blank/idle qualify.
+It rechecks `llm.models`, invokes native `session.selectModel`, and confirms the
+session's selected route with `session.models`. These wire contracts are verified
+against the pinned upstream
+[schemas](https://github.com/deepseek-ai/deepseek-harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/host/apiproxy/src/api/sessions.schema.ts).
+The native setter also updates DSH's default for later new sessions. Retained
+preparation results prevent repeated setters after rejection, uncertain replies,
+or caller cancellation. A pending preparation rejects prompt admission; ordinary
+later user input remains available after a completed failure.
+
 Metadata uses `host.describe`, state uses `session.list`, and models use the
-session-independent `llm.models` directory. These queries never call
-`session.models`, which can resume cold native Agents. Session models are known
-only after live request-header/context observations; host defaults are not
-presented as a session's current model. Catalog image capability is unknown and
+session-independent `llm.models` directory. These inspection queries never call
+`session.models`, which can resume cold native Agents. Creation-only model
+preparation uses that read for its already created session and retains the
+verified result as a state baseline; later live request-header/context
+observations take priority. Host defaults are not presented as a session's
+current model. Catalog image capability is unknown and
 therefore conservatively false. `model_catalog` exposes the native directory,
 including per-provider failures and unknown fields.
 
@@ -37,9 +51,9 @@ including per-provider failures and unknown fields.
 native `queue`. The response confirms admission, without guessing whether it
 started or steered a turn. Strict `Start` and strict `Steer` reject because the
 native endpoint cannot atomically enforce their runtime-state preconditions.
-Model intent on Send also rejects: native `selectModel` is a separate mutation
+Model intent on ordinary session Send also rejects: native `selectModel` is a separate mutation
 that can affect an active turn and deployment defaults. No model setter is
-called implicitly. Native cancellation preserves pending inbox messages, so
+called by ordinary message admission. Native cancellation preserves pending inbox messages, so
 `CancelTurn` does not mean stopping a worker or clearing its queue.
 
 Questions and one-shot permissions come from native pending-request frames.

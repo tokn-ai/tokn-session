@@ -127,6 +127,12 @@ generic native capability guarantees. Strict delivery modes also remain
 provider-specific; the composer uses native start-or-steer admission and does
 not guess a started/steered outcome when the native reply only says accepted.
 
+New DSH sessions have a separate creation-only model preparation step. The
+creation receipt records their native identity before the adapter applies a
+verified choice once to that blank idle session and confirms it before input.
+This also saves DSH's native default for future sessions. It does not enable
+model changes on ordinary existing-session Send or steering.
+
 Existing question cards can answer only a matching live RPC callback, with exact
 session/request/question IDs and validated complete answer batches. Recorded
 history alone cannot authorize a reply. Native callback envelopes and credentials

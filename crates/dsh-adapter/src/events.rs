@@ -268,6 +268,10 @@ async fn ingest(inner: &Inner, frame: api::Request) -> Result<(), String> {
         _ => false,
       };
       let snapshot = current.clone();
+      if frame.method == "session/event" && snapshot.model.is_some() && changed {
+        let observation = state.model_observations.entry(session_id.clone()).or_default();
+        *observation = observation.wrapping_add(1);
+      }
       drop(state);
       if changed {
         inner.emit(Some(session_id), RuntimeEventKind::State(snapshot));

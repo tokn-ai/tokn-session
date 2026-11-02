@@ -7,6 +7,8 @@ struct Host {
   creates: AtomicUsize,
   sends: AtomicUsize,
   cancels: AtomicUsize,
+  input_fenced: AtomicBool,
+  fenced: Notify,
   uncertain_create: AtomicBool,
   uncertain_send: AtomicBool,
   reject_model: AtomicBool,
@@ -17,6 +19,8 @@ struct Host {
   send_wait: Mutex<Option<oneshot::Receiver<()>>>,
   send_release: Mutex<Option<oneshot::Sender<()>>>,
   send_started: Notify,
+  preparation_wait: Mutex<Option<oneshot::Receiver<()>>>,
+  preparation_started: Notify,
 }
 impl Default for Host {
   fn default() -> Self {
@@ -24,6 +28,8 @@ impl Default for Host {
       creates: AtomicUsize::new(0),
       sends: AtomicUsize::new(0),
       cancels: AtomicUsize::new(0),
+      input_fenced: AtomicBool::new(false),
+      fenced: Notify::new(),
       uncertain_create: AtomicBool::new(false),
       uncertain_send: AtomicBool::new(false),
       reject_model: AtomicBool::new(false),
@@ -34,6 +40,8 @@ impl Default for Host {
       send_wait: Mutex::new(None),
       send_release: Mutex::new(None),
       send_started: Notify::new(),
+      preparation_wait: Mutex::new(None),
+      preparation_started: Notify::new(),
     }
   }
 }
@@ -87,6 +95,17 @@ impl CreationHost for Host {
           "The created model differs from the requested model",
         ));
       }
+      let preparation = self.preparation_wait.lock().unwrap().take();
+      if let Some(wait) = preparation {
+        self.preparation_started.notify_one();
+        let _ = wait.await;
+      }
+      if self.input_fenced.load(Ordering::SeqCst) {
+        return Err(InteractionError::new(
+          ErrorKind::Rejected,
+          "Initial input was cancelled",
+        ));
+      }
       self.sends.fetch_add(1, Ordering::SeqCst);
       self.send_started.notify_one();
       let wait = self.send_wait.lock().unwrap().take();
@@ -99,6 +118,11 @@ impl CreationHost for Host {
         Ok(())
       }
     })
+  }
+  fn fence_initial(&self, _created: &CreatedNativeSession) -> Result<(), InteractionError> {
+    self.input_fenced.store(true, Ordering::SeqCst);
+    self.fenced.notify_one();
+    Ok(())
   }
   fn cancel_initial<'a>(
     &'a self,
@@ -453,6 +477,40 @@ async fn cancellation_unblocks_an_in_flight_initial_admission_without_closing_it
   assert!(host.cancels.load(Ordering::SeqCst) >= 1);
   manager.create(request).await.unwrap();
   assert_eq!(host.sends.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn cancellation_fences_initial_input_before_waiting_for_progress_persistence() {
+  let host = Arc::new(Host::default());
+  let (release, wait) = oneshot::channel();
+  *host.preparation_wait.lock().unwrap() = Some(wait);
+  let manager = CreationManager::new(None, host.clone()).unwrap();
+  let request = request();
+  manager.create(request.clone()).await.unwrap();
+  host.preparation_started.notified().await;
+  // Holding progress simulates a slow receipt write. Stop must fence the
+  // admitted preparation's later prompt without waiting for that write.
+  let progress = manager.0.progress.lock().await;
+  let cancelling = tokio::spawn({
+    let manager = manager.clone();
+    let id = request.request_id.clone();
+    async move { manager.cancel(&id).await }
+  });
+  host.fenced.notified().await;
+  assert!(manager.get(&request.request_id).unwrap().unwrap().cancel_requested);
+  assert!(!cancelling.is_finished());
+  release.send(()).unwrap();
+  tokio::task::yield_now().await;
+  assert_eq!(host.sends.load(Ordering::SeqCst), 0);
+  drop(progress);
+  let snapshot = cancelling.await.unwrap().unwrap().unwrap();
+  assert!(snapshot.cancel_requested);
+  assert_eq!(snapshot.first_input, FirstInputState::Rejected);
+  assert!(snapshot.created.is_some());
+  assert_eq!(host.sends.load(Ordering::SeqCst), 0);
+  manager.create(request).await.unwrap();
+  assert_eq!(host.creates.load(Ordering::SeqCst), 1);
+  assert_eq!(host.sends.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

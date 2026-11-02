@@ -1,13 +1,18 @@
 //! Small native HTTP/event peers for testing viewer factory dispatch. Full
 //! native payload compatibility is independently covered by adapter replays.
 use super::*;
+use std::collections::BTreeMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Semaphore;
+
+pub(crate) type DshRequestHandler = Arc<dyn Fn(&str, &Value) -> Option<Value> + Send + Sync>;
 
 pub(crate) struct HttpPeer {
   pub endpoint: String,
   pub requests: Arc<Mutex<Vec<String>>>,
   pub catalog_result: Arc<Mutex<Value>>,
   pub active_downlinks: Arc<AtomicUsize>,
+  response_gates: Arc<Mutex<BTreeMap<String, Arc<Semaphore>>>>,
   task: tokio::task::JoinHandle<()>,
 }
 
@@ -21,6 +26,24 @@ impl Drop for DownlinkLease {
 
 impl HttpPeer {
   pub async fn start(provider: Provider, directory: String) -> Self {
+    Self::start_with_handler(provider, directory, None).await
+  }
+
+  /// Handles additional native DSH routes using their complete request envelope.
+  /// Returning None closes that request without an acknowledgement.
+  pub async fn start_dsh_with_handler(directory: String, handler: DshRequestHandler) -> Self {
+    Self::start_with_handler(Provider::Dsh, directory, Some(handler)).await
+  }
+
+  /// Hold a route's response after its native handler has run, without blocking
+  /// other requests or the event stream. Each released permit allows one reply.
+  pub fn block_response(&self, route: &str) -> Arc<Semaphore> {
+    let gate = Arc::new(Semaphore::new(0));
+    self.response_gates.lock().unwrap().insert(route.into(), gate.clone());
+    gate
+  }
+
+  async fn start_with_handler(provider: Provider, directory: String, handler: Option<DshRequestHandler>) -> Self {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/", listener.local_addr().unwrap());
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -29,6 +52,8 @@ impl HttpPeer {
     let catalog = catalog_result.clone();
     let active_downlinks = Arc::new(AtomicUsize::new(0));
     let downlinks = active_downlinks.clone();
+    let response_gates = Arc::new(Mutex::new(BTreeMap::<String, Arc<Semaphore>>::new()));
+    let gates = response_gates.clone();
     let task = tokio::spawn(async move {
       let mut peers = JoinSet::new();
       loop {
@@ -39,6 +64,8 @@ impl HttpPeer {
         let recorded = recorded.clone();
         let catalog = catalog.clone();
         let downlinks = downlinks.clone();
+        let handler = handler.clone();
+        let gates = gates.clone();
         peers.spawn(async move {
           let mut preview = [0u8; 8192];
           loop {
@@ -164,12 +191,22 @@ impl HttpPeer {
                   json!({"ok":true,"value":{"version":"viewer-test-dsh","cwd":directory,"attachedSessions":0,"canOpenPath":false}})
                 }
                 "/api/llm.models" => catalog.lock().unwrap().clone(),
-                route => panic!("unexpected DSH native route {route}"),
+                route => match &handler {
+                  Some(handler) => match handler(route, &request) {
+                    Some(result) => result,
+                    None => return,
+                  },
+                  None => panic!("unexpected DSH native route {route}"),
+                },
               };
               json!({"type":"server-response","rpcId":request["rpcId"],"result":result})
             }
             _ => unreachable!(),
           };
+          let gate = gates.lock().unwrap().get(&path).cloned();
+          if let Some(gate) = gate {
+            gate.acquire_owned().await.unwrap().forget();
+          }
           let body = result.to_string();
           let head = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -185,6 +222,7 @@ impl HttpPeer {
       requests,
       catalog_result,
       active_downlinks,
+      response_gates,
       task,
     }
   }

@@ -48,6 +48,14 @@ impl core_runtime::RuntimeHandle for InstalledHandle {
   ) -> AdapterFuture<'a, Result<core_runtime::NativeSessionDescriptor, InteractionError>> {
     core_runtime::RuntimeHandle::create_native(&self.handle, request)
   }
+
+  fn prepare_created_model<'a>(
+    &'a self,
+    native_id: &'a str,
+    model: &'a ModelIdentity,
+  ) -> AdapterFuture<'a, Result<(), InteractionError>> {
+    core_runtime::RuntimeHandle::prepare_created_model(&self.handle, native_id, model)
+  }
 }
 fn env(profile: &RpcResolvedProfile) -> BTreeMap<OsString, OsString> {
   profile
@@ -223,11 +231,6 @@ impl core_runtime::RuntimeHandle for Handle {
           )
         }
         Self::Dsh(adapter) => {
-          if request.model.is_some() {
-            return Err(InteractionError::unsupported(
-              "DSH uses its default model for new sessions",
-            ));
-          }
           let id = request
             .native_id
             .clone()
@@ -265,6 +268,21 @@ impl core_runtime::RuntimeHandle for Handle {
   fn bind_native<'a>(&'a self, id: &'a str) -> AdapterFuture<'a, Result<(), String>> {
     Box::pin(Handle::bind_native(self, id))
   }
+
+  fn prepare_created_model<'a>(
+    &'a self,
+    native_id: &'a str,
+    model: &'a ModelIdentity,
+  ) -> AdapterFuture<'a, Result<(), InteractionError>> {
+    Box::pin(async move {
+      match self {
+        Self::Dsh(adapter) => adapter.prepare_created_model(native_id, model).await,
+        _ => Err(InteractionError::unsupported(
+          "This runtime does not prepare a model after creation",
+        )),
+      }
+    })
+  }
 }
 
 impl core_runtime::RuntimeHost for Host {
@@ -298,9 +316,12 @@ impl core_runtime::RuntimeHost for Host {
   fn validate_creation_model(&self, profile: &Self::Profile, model: &ModelIdentity) -> Result<(), InteractionError> {
     match profile.profile.provider {
       Provider::Codex => Ok(()),
-      Provider::OpenCode if model.model_provider.is_some() => Ok(()),
+      Provider::OpenCode | Provider::Dsh if model.model_provider.is_some() => Ok(()),
       Provider::OpenCode => Err(InteractionError::invalid(
         "OpenCode model selection requires its provider identity",
+      )),
+      Provider::Dsh => Err(InteractionError::invalid(
+        "DSH model selection requires its provider identity",
       )),
       _ => Err(InteractionError::unsupported(
         "This runtime uses its default model for new sessions",

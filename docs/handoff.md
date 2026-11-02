@@ -58,12 +58,16 @@ worktree groups); changing its folder moves the row. Time view retains project
 labels, and drafts awaiting a folder remain separately accessible. No
 native session or upload starts until the first Send. Opening a draft model
 picker can briefly start a metadata RPC process; it never creates or resumes a
-saved conversation. Pi, Codex and OpenCode choices remain local to each draft,
+saved conversation. Pi, Codex, OpenCode and DSH choices remain local to each draft,
 reset with project/provider/runtime changes, and are revalidated and applied
 before its first prompt. DSH lazily reads the host runtime's `llm.models`
-catalog for display; it retains its runtime default and cannot select a model
-for a new session yet. Read-only catalogs expose `can_select: false` without
-a selection proof. Availability, catalogs and first Send share a host-resolved
+catalog. First Send records the new native identity, applies a chosen model
+once to that idle blank session, and verifies it before delivering the prompt.
+History publication waits for preparation; Stop immediately fences the first
+prompt while already admitted native calls drain.
+DSH and Pi preserve their native behavior of also saving the choice as the
+host's default for future sessions; the picker discloses this effect.
+Availability, catalogs and first Send share a host-resolved
 `RuntimePlan`; an opaque `runtime_plan_id`
 pins configuration and project scope without exposing launch configuration.
 Stale plans reject before admission. Creation receipts include model identity

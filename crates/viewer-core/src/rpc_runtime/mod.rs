@@ -193,12 +193,30 @@ impl RpcRuntimeManager {
   ) -> Result<Reply, InteractionError> {
     self.0.runtimes.execute_created(created, request_id, command).await
   }
-  pub(crate) async fn adopt_created(
+  pub(crate) async fn prepare_created_model(
+    &self,
+    created: &core_runtime::CreatedNativeSession,
+    model: ModelIdentity,
+  ) -> Result<(), InteractionError> {
+    self.0.runtimes.prepare_created_model(created, model).await
+  }
+  pub(crate) fn fence_created_input(
+    &self,
+    created: &core_runtime::CreatedNativeSession,
+  ) -> Result<(), InteractionError> {
+    self.0.runtimes.fence_created_input(created)
+  }
+  pub(crate) async fn adopt_created_if_ready(
     &self,
     created: &core_runtime::CreatedNativeSession,
     key: String,
-  ) -> Result<RpcSessionBinding, InteractionError> {
-    self.0.runtimes.adopt_created(created, key).await.map(Into::into)
+  ) -> Result<Option<RpcSessionBinding>, InteractionError> {
+    self
+      .0
+      .runtimes
+      .adopt_created_if_ready(created, key)
+      .await
+      .map(|binding| binding.map(Into::into))
   }
   pub(crate) async fn adopt_verified_creation(
     &self,

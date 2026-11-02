@@ -38,13 +38,14 @@ inside the conversation to register an existing directory and return to the same
 provider, prompt and image draft.
 
 Pi keeps its existing model/authentication settings and exclusive worker.
-The draft model picker offers verified Pi, Codex and OpenCode choices, or
+The draft model picker offers verified Pi, Codex, OpenCode and DSH choices, or
 **Use runtime default**. Choosing stays local; Send revalidates the catalog and
 applies the model before the first prompt. Changing project, agent or runtime
 clears the choice while retaining text/images. An incompatible model keeps image
-attachments visible and blocks Send until corrected. DSH also loads its host
-runtime's configured models for display, but its catalog stays read-only and
-new sessions use the runtime default.
+attachments visible and blocks Send until corrected. DSH applies and verifies
+a selected model only after recording the new native identity, before its first
+prompt. Applying a Pi or DSH choice also updates the host's native default for
+new sessions; choosing in the draft alone does not change that default.
 Codex uses app-server RPC. DSH passes the project directory to native session
 creation and retains the deployment’s default agent preset.
 

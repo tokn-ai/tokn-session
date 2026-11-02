@@ -100,6 +100,12 @@ pub trait CreationHost: Send + Sync + 'static {
     input: &'a MessageInput,
     model: Option<&'a ModelIdentity>,
   ) -> AdapterFuture<'a, Result<(), InteractionError>>;
+  /// Immediately fence automatic first-message admission in memory. This
+  /// callback must be synchronous, nonblocking, and must not call back into the
+  /// creation manager; cancellation invokes it before awaiting persistence.
+  fn fence_initial(&self, _created: &CreatedNativeSession) -> Result<(), InteractionError> {
+    Ok(())
+  }
   /// Cancellation is independent of a message awaiting native acknowledgement.
   /// It cancels the native turn and never closes a shared runtime.
   fn cancel_initial<'a>(
@@ -655,13 +661,17 @@ impl CreationManager {
       }
       Some(lease)
     };
-    {
+    let fence_error = {
       let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
       let Some(receipt) = state.receipts.get_mut(request_id) else {
         return Ok(None);
       };
       receipt.cancel_requested = true;
-    }
+      receipt
+        .created
+        .as_ref()
+        .and_then(|created| self.0.host.fence_initial(created).err())
+    };
     let receipt = {
       let _guard = self.0.progress.lock().await;
       let mut receipt = self.get(request_id)?.ok_or("Creation receipt is unavailable")?;
@@ -689,6 +699,9 @@ impl CreationManager {
           .await
           .map_err(|error| error.to_string())?;
       }
+    }
+    if let Some(error) = fence_error {
+      return Err(error.to_string());
     }
     Ok(Some(receipt))
   }

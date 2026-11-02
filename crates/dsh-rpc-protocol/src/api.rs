@@ -92,6 +92,9 @@ pub struct SessionSummary {
   pub running: bool,
   #[serde(default)]
   pub cwd: Option<String>,
+  /// Verified native no-turn state, required before creation-only model setup.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub blank: Option<bool>,
   #[serde(flatten)]
   pub extra: ExtraFields,
 }
@@ -118,6 +121,45 @@ pub struct SessionCreateResponse {
   pub session_id: String,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub agent_preset: Option<String>,
+  #[serde(flatten)]
+  pub extra: ExtraFields,
+}
+
+/// Native selection recorded for one session; a setter also persists DSH's default.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelSelection {
+  pub provider: String,
+  pub model: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub reasoning_effort: Option<String>,
+  #[serde(flatten)]
+  pub extra: ExtraFields,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSelectModelRequest {
+  pub session_id: String,
+  pub provider: String,
+  pub model: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SessionSelectModelResponse {
+  pub selected: ModelSelection,
+  #[serde(flatten)]
+  pub extra: ExtraFields,
+}
+
+/// Activating native read. Adapters must restrict it to already created sessions.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SessionModels {
+  pub current: ModelSelection,
+  pub routable: bool,
+  pub groups: Vec<ModelGroup>,
+  #[serde(default)]
+  pub failures: Vec<Value>,
   #[serde(flatten)]
   pub extra: ExtraFields,
 }
@@ -202,6 +244,22 @@ mod tests {
     let native = json!({"sessionId":"session-reserved","agentPreset":"default-preset","future":true});
     let response: SessionCreateResponse = serde_json::from_value(native.clone()).unwrap();
     assert_eq!(response.agent_preset.as_deref(), Some("default-preset"));
+    assert_eq!(serde_json::to_value(response).unwrap(), native);
+  }
+
+  #[test]
+  fn creation_model_wire_uses_verified_native_names_and_preserves_extensions() {
+    assert_eq!(
+      serde_json::to_value(SessionSelectModelRequest {
+        session_id: "new-session".into(),
+        provider: "configured-provider".into(),
+        model: "chosen-model".into(),
+      })
+      .unwrap(),
+      json!({"sessionId":"new-session","provider":"configured-provider","model":"chosen-model"})
+    );
+    let native = json!({"current":{"provider":"provider","model":"model","reasoningEffort":"high","future":"kept"},"routable":true,"groups":[],"failures":[],"future":true});
+    let response: SessionModels = serde_json::from_value(native.clone()).unwrap();
     assert_eq!(serde_json::to_value(response).unwrap(), native);
   }
 }

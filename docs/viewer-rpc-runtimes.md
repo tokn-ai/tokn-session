@@ -105,8 +105,11 @@ directory. Managed DSH inherits the host environment and uses its native `web`
 profile; attached runtimes use their own configuration. Tokn does not copy model
 settings into its installation directory. Catalog inspection may briefly launch
 a metadata process, but never creates or resumes a saved conversation. DSH
-choices are displayed read-only with `can_select: false` and no selection proof;
-first Send keeps the native runtime default. Empty catalogs remain distinct from
+choices remain local until first Send, which records the native identity before
+applying the chosen model once and verifying the result on the new idle blank
+session. DSH's native selection also saves the host default for future sessions;
+the picker discloses this effect through `updates_default`, as it does for Pi.
+Choosing **Runtime default** omits selection entirely. Empty catalogs remain distinct from
 provider/runtime failures, which show an error and allow retry. Other providers
 retain their existing model-selection behavior.
 

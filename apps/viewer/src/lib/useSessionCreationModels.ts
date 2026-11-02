@@ -83,6 +83,7 @@ export function useSessionCreationModels(request: ListSessionCreationModelsReque
     state: null, checking: false, loading: value.loading, choices: value.result?.models ?? null, error: value.error,
     reason: value.result?.reason ?? (!enabled ? "Choose an available project, agent and runtime first." : null),
     can_open: enabled, can_select: enabled && !value.loading && !value.error && value.result?.can_select !== false && !!value.result?.catalog_revision,
+    updates_default: value.result?.updates_default === true,
     refresh: loadChoices, loadChoices, selectionFor, selectionValid,
   };
 }

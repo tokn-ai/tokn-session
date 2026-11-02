@@ -70,16 +70,16 @@ it("keeps runtime default available after errors or unsupported discovery", asyn
   expect(result.current.can_select).toBe(false);
 });
 
-it.each([null, "catalog-one"])("loads a read-only DSH catalog without admitting selections, even with revision %s", async (catalog_revision) => {
-  const target: ListSessionCreationModelsRequest = { ...request, provider: "dsh" };
-  const load = vi.fn(async () => catalog({ can_select: false, catalog_revision, reason: "DSH uses its runtime default." }));
+it.each([null, "catalog-one"])("honors read-only catalogs without admitting selections, even with revision %s", async (catalog_revision) => {
+  const target = request;
+  const load = vi.fn(async () => catalog({ can_select: false, catalog_revision, reason: "Model selection is unavailable." }));
   const { result } = renderHook(() => useSessionCreationModels(target, scope(target), true, load));
   expect(load).not.toHaveBeenCalled();
   expect(result.current.can_open).toBe(true);
   await act(() => result.current.loadChoices());
   expect(load).toHaveBeenCalledExactlyOnceWith(target);
   expect(result.current.choices).toEqual([choice]);
-  expect(result.current.reason).toBe("DSH uses its runtime default.");
+  expect(result.current.reason).toBe("Model selection is unavailable.");
   expect(result.current.can_select).toBe(false);
   expect(result.current.selectionFor(choice)).toBeNull();
   expect(result.current.selectionValid(null)).toBe(true);

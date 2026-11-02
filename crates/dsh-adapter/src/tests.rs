@@ -9,6 +9,7 @@ use axum::{
   response::Response,
   routing::{get, post},
 };
+mod created_models;
 
 struct Fake {
   calls: Mutex<Vec<Value>>,
@@ -20,6 +21,10 @@ struct Fake {
   created_sessions: Mutex<Vec<Value>>,
   creation_fault: AtomicU64,
   model_catalog: Mutex<Value>,
+  model_fault: AtomicU64,
+  selections: Mutex<BTreeMap<String, Value>>,
+  default_selection: Mutex<Value>,
+  selection_gate: tokio::sync::Semaphore,
 }
 
 struct Server {
@@ -48,6 +53,10 @@ async fn server(initial: Vec<Value>) -> Server {
     model_catalog: Mutex::new(
       json!({"groups":[{"id":"provider","name":"Provider","models":[{"id":"model","name":"Model","future":true}]}],"failures":[{"id":"failed-provider","message":"offline"}]}),
     ),
+    model_fault: AtomicU64::new(0),
+    selections: Mutex::new(BTreeMap::new()),
+    default_selection: Mutex::new(json!({"provider":"provider","model":"default-model"})),
+    selection_gate: tokio::sync::Semaphore::new(64),
   });
   let router = Router::new()
     .route("/api/events.mux", get(mux_stream))
@@ -152,7 +161,7 @@ async fn call(State(fake): State<Arc<Fake>>, Path(method): Path<String>, body: B
         .created_sessions
         .lock()
         .await
-        .push(json!({"sessionId":payload["sessionId"], "cwd":cwd, "running":false, "agentPreset":preset}));
+        .push(json!({"sessionId":payload["sessionId"], "cwd":cwd, "running":false, "blank":true,"agentPreset":preset}));
       if fault == 5 {
         return axum::Json(
           json!({"type":"server-response","rpcId":request["rpcId"],"result":{"ok":false,"error":{"code":"internal","message":"failed after publication"}}}),
@@ -165,10 +174,41 @@ async fn call(State(fake): State<Arc<Fake>>, Path(method): Path<String>, body: B
       }
     }
     "llm.models" => fake.model_catalog.lock().await.clone(),
+    "session.selectModel" => {
+      let _permit = fake.selection_gate.acquire().await.unwrap();
+      let fault = fake.model_fault.load(Ordering::Relaxed);
+      if fault == 1 {
+        return axum::Json(
+          json!({"type":"server-response","rpcId":request["rpcId"],"result":{"ok":false,"error":{"code":"model-unavailable","message":"private-model-diagnostic"}}}),
+        );
+      }
+      let payload = &request["payload"];
+      let selection = json!({"provider":payload["provider"],"model":payload["model"]});
+      fake
+        .selections
+        .lock()
+        .await
+        .insert(payload["sessionId"].as_str().unwrap().into(), selection.clone());
+      *fake.default_selection.lock().await = selection.clone();
+      json!({"selected":if fault == 2 {json!({"provider":"provider","model":"another-model"})} else {selection}})
+    }
+    "session.models" => {
+      let id = request["payload"]["sessionId"].as_str().unwrap();
+      let current = fake
+        .selections
+        .lock()
+        .await
+        .get(id)
+        .cloned()
+        .unwrap_or(json!({"provider":"provider","model":"default-model"}));
+      json!({"current":if fake.model_fault.load(Ordering::Relaxed)==3 {json!({"provider":"provider","model":"another-model"})} else {current}, "routable":true,"groups":[],"failures":[]})
+    }
     "session.prompt" | "session.cancel" => json!({"accepted":true}),
     _ => panic!("unexpected native method: {method}"),
   };
-  let rpc_id = if fake.wrong_response_id.load(Ordering::Acquire) {
+  let rpc_id = if fake.wrong_response_id.load(Ordering::Acquire)
+    || (method == "session.selectModel" && fake.model_fault.load(Ordering::Relaxed) == 4)
+  {
     json!("wrong-id")
   } else {
     request["rpcId"].clone()

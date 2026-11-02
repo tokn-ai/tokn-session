@@ -1,8 +1,10 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ManagedSessionSnapshot, RegisteredProject, RpcProvider, SessionCreationOptions, SessionSummary } from "../lib/types";
-import type { SessionDraft } from "../lib/useSessionDrafts";
+import type { CreateProjectSessionRequest, ManagedSessionSnapshot, RegisteredProject, RpcProvider, SessionCreationOptions, SessionSummary } from "../lib/types";
+import { useSessionDrafts, type SessionDraft } from "../lib/useSessionDrafts";
+import type { CommandInvoker, EventSubscriber } from "../lib/transport";
+import { listSessionCreationModels } from "../lib/tauri";
 import { DraftConversation, type DraftConversationProps } from "./DraftConversation";
 
 afterEach(cleanup);
@@ -36,6 +38,67 @@ async function ready() { await waitFor(() => expect(screen.queryByText("Checking
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; }
 
 describe("draft conversation", () => {
+  it("stores a DSH choice locally and sends its verified model proof only with the first prompt", async () => {
+    const choice = { model: { model_provider: "host-provider", model_id: "chosen-dsh-model", display_name: "Chosen DSH model" }, supports_images: false };
+    const configured = options();
+    configured.providers[2] = { ...configured.providers[2], runtime_plan_id: "dsh-plan" };
+    let fail_creation = true;
+    const create_requests: CreateProjectSessionRequest[] = [];
+    const invoke = vi.fn(async (command: string, payload?: Record<string, unknown>): Promise<unknown> => {
+      if (command === "list_session_creation_models") return { models: [choice], can_select: true, updates_default: true,
+        catalog_revision: "dsh-catalog", runtime_profile_id: "host-runtime", runtime_revision: 2, runtime_plan_id: "dsh-plan", reason: null };
+      if (command === "create_project_session") {
+        const request = payload!.request as CreateProjectSessionRequest;
+        create_requests.push(request);
+        if (fail_creation) throw { message: "Host configuration changed; choose the model again.", may_have_started: false };
+        return snapshot({ request_id: request.request_id, project_id: "repo", provider: "dsh", creation_phase: "admitted", creation_input_state: "not_attempted" });
+      }
+      if (command === "get_managed_session") return null;
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    const transport = { invoke: invoke as CommandInvoker, listen: vi.fn(async () => () => {}) as EventSubscriber };
+    const load_models = (request: Parameters<typeof listSessionCreationModels>[0]) => listSessionCreationModels(request, transport.invoke);
+    const input = props({ on_load_options: vi.fn(async () => configured), on_load_models: load_models });
+    function Stateful() {
+      const controller = useSessionDrafts({ enabled: true, machine_key: "local", on_created: vi.fn() }, transport);
+      const [id, setId] = useState("");
+      useEffect(() => {
+        const next = controller.createDraft("repo");
+        controller.updateDraft(next, { selection: { provider: "dsh" }, prompt: "First DSH task" });
+        setId(next);
+      }, [controller.createDraft, controller.updateDraft]);
+      const current = controller.drafts.find((draft) => draft.draft_id === id);
+      return current ? <DraftConversation {...input} draft={current} on_change={(patch) => controller.updateDraft(id, patch)}
+        on_send={() => { void controller.sendDraft(id); }} /> : null;
+    }
+    render(<Stateful />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeEnabled());
+    expect(invoke).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /Model: Runtime default/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Chosen DSH model host-provider/ }));
+    expect(screen.getByRole("button", { name: /Model: Chosen DSH model/ })).toBeInTheDocument();
+    expect(invoke.mock.calls.map(([command]) => command)).toEqual(["list_session_creation_models"]);
+    expect(create_requests).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Close model selection" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText("Host configuration changed; choose the model again.");
+    expect(create_requests).toHaveLength(1);
+    expect(create_requests[0]).toMatchObject({ provider: "dsh", project_id: "repo", prompt: "First DSH task", runtime_plan_id: "dsh-plan",
+      model: { model_provider: "host-provider", model_id: "chosen-dsh-model", catalog_revision: "dsh-catalog",
+        runtime_profile_id: "host-runtime", runtime_revision: 2, runtime_plan_id: "dsh-plan" } });
+    expect(screen.getByRole("textbox", { name: "First message" })).toHaveValue("First DSH task");
+    expect(screen.getByRole("button", { name: /Model: Chosen DSH model/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+
+    fail_creation = false;
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(create_requests).toHaveLength(2));
+    expect(create_requests[1].model).toEqual(create_requests[0].model);
+    expect(create_requests[1].request_id).not.toBe(create_requests[0].request_id);
+    expect(invoke.mock.calls.every(([command]) => ["list_session_creation_models", "create_project_session", "get_managed_session"].includes(command))).toBe(true);
+  });
+
   it.each(["pi", "codex", "open_code", "dsh"] as RpcProvider[])("pins %s automatic availability before first Send without loading models", async (provider) => {
     const available: SessionCreationOptions = { project_id: "repo", providers: [{ provider, available: true, reason: null,
       supports_images: false, default_profile_id: null, runtimes: [], runtime_plan_id: `${provider}-plan` }] };

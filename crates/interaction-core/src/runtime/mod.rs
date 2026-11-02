@@ -13,7 +13,7 @@ use crate::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-  collections::BTreeMap,
+  collections::{BTreeMap, BTreeSet},
   fs::File,
   path::{Path, PathBuf},
   sync::{
@@ -47,6 +47,20 @@ pub trait RuntimeHandle: Send + Sync + 'static {
     Box::pin(async {
       Err(InteractionError::unsupported(
         "This runtime cannot create native sessions",
+      ))
+    })
+  }
+  /// Apply creation-only model intent after native identity has been durably
+  /// recorded, but before the one first-message admission. Ordinary message
+  /// model-on-send support remains a separate capability.
+  fn prepare_created_model<'a>(
+    &'a self,
+    _native_id: &'a str,
+    _model: &'a ModelIdentity,
+  ) -> AdapterFuture<'a, Result<(), InteractionError>> {
+    Box::pin(async {
+      Err(InteractionError::unsupported(
+        "This runtime cannot prepare a model separately from native creation",
       ))
     })
   }
@@ -151,9 +165,22 @@ struct State {
   quarantined: BTreeMap<String, QuarantinedRecord>,
   bindings: BTreeMap<String, SessionBinding>,
   binding_owners: BTreeMap<String, BindingOwner>,
+  created_models: BTreeMap<CreatedModelKey, CreatedModelPreparation>,
+  created_input_fences: BTreeSet<CreatedModelKey>,
   gates: BTreeMap<String, Weak<AsyncMutex<()>>>,
   receipts: ReceiptLedger<Result<ActionReply, String>>,
   active_actions: usize,
+}
+type CreatedModelKey = (String, String, String);
+struct CreatedModelPreparation {
+  model: ModelIdentity,
+  input_attempted: bool,
+  status: CreatedModelPreparationStatus,
+}
+enum CreatedModelPreparationStatus {
+  NotAttempted,
+  Pending,
+  Complete(Result<(), InteractionError>),
 }
 struct BindingOwner {
   runtime_id: String,
@@ -220,6 +247,8 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
         quarantined: BTreeMap::new(),
         bindings: BTreeMap::new(),
         binding_owners: BTreeMap::new(),
+        created_models: BTreeMap::new(),
+        created_input_fences: BTreeSet::new(),
         gates: BTreeMap::new(),
         receipts: ReceiptLedger::new(512),
         active_actions: 0,
@@ -686,6 +715,12 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     }
     state.runtimes.remove(&request.runtime_id);
     state
+      .created_models
+      .retain(|(runtime_id, _, _), _| runtime_id != &request.runtime_id);
+    state
+      .created_input_fences
+      .retain(|(runtime_id, _, _)| runtime_id != &request.runtime_id);
+    state
       .binding_owners
       .retain(|_, owner| owner.runtime_id != request.runtime_id);
     state
@@ -855,6 +890,7 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     {
       return Err("Runtime disconnected while recovering the session binding".into());
     }
+    creation::check_model_preparation_not_pending(&state, &binding.target).map_err(|error| error.message)?;
     state.bindings.insert(key, binding.clone());
     drop(state);
     self.changed();
@@ -884,6 +920,8 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     state.quarantined.clear();
     state.bindings.clear();
     state.binding_owners.clear();
+    state.created_models.clear();
+    state.created_input_fences.clear();
   }
 }
 fn runtime_info(

@@ -98,10 +98,11 @@ async fn dsh_catalog_reads_and_refreshes_host_models_without_creating_a_session(
     .list_session_creation_models(fixture.catalog_request())
     .await
     .unwrap();
-  assert!(!catalog.can_select);
+  assert!(catalog.can_select);
+  assert!(catalog.updates_default);
   assert!(
-    catalog.catalog_revision.is_none(),
-    "read-only catalogs must not issue selection proofs to old clients"
+    catalog.catalog_revision.is_some(),
+    "selectable catalogs must provide a verified selection proof"
   );
   assert_eq!(catalog.models.len(), 1);
   assert_eq!(
@@ -116,12 +117,7 @@ async fn dsh_catalog_reads_and_refreshes_host_models_without_creating_a_session(
   assert!(!catalog.models[0].supports_images);
   assert!(catalog.runtime_profile_id.is_some());
   assert!(catalog.runtime_plan_id.is_some());
-  assert!(
-    catalog
-      .reason
-      .as_deref()
-      .is_some_and(|reason| reason.contains("runtime default"))
-  );
+  assert!(catalog.reason.is_none());
   fixture.assert_view_only().await;
 
   fixture.configured_model("changed-host-model");
@@ -156,7 +152,8 @@ async fn dsh_catalog_distinguishes_empty_models_from_runtime_errors_and_allows_r
     .await
     .unwrap();
   assert!(empty.models.is_empty());
-  assert!(!empty.can_select);
+  assert!(empty.can_select);
+  assert!(empty.updates_default);
   assert!(empty.reason.is_some());
   fixture.assert_view_only().await;
 
@@ -184,7 +181,7 @@ async fn dsh_catalog_distinguishes_empty_models_from_runtime_errors_and_allows_r
 }
 
 #[tokio::test]
-async fn dsh_catalog_keeps_default_creation_and_rejects_override_or_stale_plan_before_admission() {
+async fn dsh_catalog_keeps_default_creation_and_rejects_stale_choice_or_plan_before_admission() {
   let fixture = Fixture::start().await;
   fixture.configured_model("host-configured-model");
   let catalog = fixture
@@ -208,16 +205,17 @@ async fn dsh_catalog_keeps_default_creation_and_rejects_override_or_stale_plan_b
   let before = fixture.peer.requests.lock().unwrap().len();
   creation.model = Some(SessionCreationModelSelection {
     model_provider: Some("configured-provider".into()),
-    model_id: "host-configured-model".into(),
-    catalog_revision: "0".repeat(64),
+    model_id: "removed-model".into(),
+    catalog_revision: catalog.catalog_revision.unwrap(),
     runtime_profile_id: catalog.runtime_profile_id,
     runtime_revision: catalog.runtime_revision,
     runtime_plan_id: catalog.runtime_plan_id.clone(),
   });
   let error = fixture.service.create_project_session(creation).await.unwrap_err();
   assert!(!error.may_have_started);
-  assert!(error.message.contains("DSH") && error.message.contains("runtime default"));
-  assert_eq!(fixture.peer.requests.lock().unwrap().len(), before);
+  assert!(error.message.contains("no longer available"));
+  assert!(fixture.peer.requests.lock().unwrap().len() > before);
+  let before = fixture.peer.requests.lock().unwrap().len();
 
   save_profile(
     &fixture.service,

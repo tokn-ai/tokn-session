@@ -1,9 +1,10 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
+import { useState } from "react";
 import { SessionModelPicker } from "./SessionModelPicker";
 import type { SessionModelController } from "../lib/useSessionModel";
 import type { ModelIdentity, SessionModelState } from "../lib/types";
-import { useSessionCreationModels } from "../lib/useSessionCreationModels";
+import { useSessionCreationModels, type SessionDraftModel } from "../lib/useSessionCreationModels";
 
 const first: ModelIdentity = { model_provider: "anthropic", model_id: "first", display_name: "First model" };
 const second: ModelIdentity = { model_provider: "anthropic", model_id: "second", display_name: "Second model" };
@@ -87,27 +88,33 @@ it("retains draft selection through catalog errors and exposes retry", () => {
   expect(model.loadChoices).toHaveBeenCalledTimes(1);
 });
 
-it("lazily displays the host's DSH catalog while retaining runtime default as the only selectable choice", async () => {
-  const reason = "Models are loaded from this host’s DSH configuration. DSH uses its runtime default when creating a session; choosing a different model here is not supported yet.";
-  const load = vi.fn(async () => ({ models: [{ model: first, supports_images: false }], can_select: false,
-    catalog_revision: null, runtime_profile_id: "dsh-runtime", runtime_revision: 1, reason }));
+it.each(["DSH", "Pi"] as const)("keeps %s model choice local until Send and discloses its native default change", async (provider) => {
+  const request = { project_id: "fixture", provider: provider === "DSH" ? "dsh" as const : "pi" as const };
+  const choice = { model: first, supports_images: false };
+  const load = vi.fn(async () => ({ models: [choice], can_select: true, updates_default: true,
+    catalog_revision: "verified-catalog", runtime_profile_id: "host-runtime", runtime_revision: 1, reason: null }));
   const actions = callbacks();
   function DraftPicker() {
-    const model = useSessionCreationModels({ project_id: "fixture", provider: "dsh" }, "dsh-scope", true, load);
-    return <SessionModelPicker model={model} provider="DSH" mode="creation" {...actions} />;
+    const model = useSessionCreationModels(request, "verified-scope", true, load);
+    const [selected, setSelected] = useState<SessionDraftModel | null>(null);
+    return <SessionModelPicker model={model} provider={provider} mode="creation" selected_model={selected?.choice}
+      on_select={(choice) => { const selection = model.selectionFor(choice); if (selection) { setSelected(selection); actions.on_select(choice); } }}
+      on_clear={() => { setSelected(null); actions.on_clear(); }} />;
   }
   render(<DraftPicker />);
   expect(load).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: /Model: Runtime default/ }));
-  const choice = await screen.findByRole("button", { name: /First model anthropic/ });
-  expect(choice).toBeDisabled();
-  expect(screen.getByText(reason)).toBeVisible();
-  expect(screen.queryByText(/Your model choice is applied/)).not.toBeInTheDocument();
-  fireEvent.click(choice);
-  expect(actions.on_select).not.toHaveBeenCalled();
+  const model_choice = await screen.findByRole("button", { name: /First model anthropic/ });
+  expect(model_choice).toBeEnabled();
+  expect(screen.getByText(`Applying a model on first Send also updates ${provider}’s default for new sessions on this host.`)).toBeVisible();
+  expect(screen.getByText("Your model choice is applied when you send the first message.")).toBeVisible();
+  fireEvent.click(model_choice);
+  expect(actions.on_select).toHaveBeenCalledExactlyOnceWith(choice);
+  expect(screen.getByRole("button", { name: /Model: First model/ })).toBeInTheDocument();
   const default_choice = within(screen.getByRole("dialog")).getByRole("button", { name: /Runtime default Use the agent’s configured model/ });
   expect(default_choice).toBeEnabled();
   fireEvent.click(default_choice);
   expect(actions.on_clear).toHaveBeenCalledTimes(1);
-  expect(load).toHaveBeenCalledExactlyOnceWith({ project_id: "fixture", provider: "dsh" });
+  expect(screen.getByRole("button", { name: /Model: Runtime default/ })).toBeInTheDocument();
+  expect(load).toHaveBeenCalledExactlyOnceWith(request);
 });

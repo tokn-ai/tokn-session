@@ -157,7 +157,7 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
       .create_native(&CreateNativeSessionRequest {
         working_directory: working_directory.clone(),
         native_id: native_id.clone(),
-        model,
+        model: model.clone(),
       })
       .await?;
     drop(guard);
@@ -178,7 +178,7 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
         "Native creation returned a different session identity or working directory",
       ));
     }
-    Ok(CreatedNativeSession {
+    let created = CreatedNativeSession {
       provider,
       profile_id,
       target: SessionTarget {
@@ -188,7 +188,37 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
       },
       native,
       capabilities: info.capabilities,
-    })
+    };
+    if let Some(model) = model {
+      let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
+      Self::check_created_state(&state, &created)
+        .map_err(|_| InteractionError::uncertain("The native session was created but its runtime ownership changed"))?;
+      let key = created_model_key(&created);
+      if let Some(existing) = state.created_models.get(&key) {
+        if existing.model != model {
+          return Err(InteractionError::uncertain(
+            "The created session already belongs to another model intent",
+          ));
+        }
+      } else {
+        // Native ownership has the same bound; do not discard a completed or
+        // uncertain preparation and accidentally allow another model mutation.
+        if state.created_models.len() >= 1024 {
+          return Err(InteractionError::uncertain(
+            "The created-session model preparation limit was reached",
+          ));
+        }
+        state.created_models.insert(
+          key,
+          CreatedModelPreparation {
+            model,
+            input_attempted: false,
+            status: CreatedModelPreparationStatus::NotAttempted,
+          },
+        );
+      }
+    }
+    Ok(created)
   }
 
   async fn reserve_created_owner(
@@ -272,6 +302,146 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     }
   }
 
+  /// One creation-only preparation, after durable creation and before any
+  /// initial input. The caller's durable creation receipt remains authoritative
+  /// across host restarts; this process-local guard also rejects concurrent or
+  /// changed attempts and retains uncertain outcomes without native replay.
+  pub async fn prepare_created_model(
+    &self,
+    created: &CreatedNativeSession,
+    model: ModelIdentity,
+  ) -> Result<(), InteractionError> {
+    models::validate_creation_model(&model)?;
+    let model = models::creation_model_identity(&model);
+    let key = created_model_key(created);
+    {
+      self.ensure_open().map_err(InteractionError::unavailable)?;
+      let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
+      Self::check_created_state(&state, created)?;
+      if state.created_input_fences.contains(&key) {
+        return Err(cancelled_created_input());
+      }
+      if state.bindings.values().any(|binding| binding.target == created.target) {
+        return Err(InteractionError::invalid(
+          "A published session cannot use creation-only model preparation",
+        ));
+      }
+      let preparation = state
+        .created_models
+        .get_mut(&key)
+        .ok_or_else(|| InteractionError::invalid("This session has no acknowledged creation-time model intent"))?;
+      if preparation.model != model {
+        return Err(InteractionError::new(
+          ErrorKind::Conflict,
+          "The created session belongs to another model intent",
+        ));
+      }
+      if preparation.input_attempted {
+        return Err(InteractionError::invalid(
+          "Creation-only model preparation must precede the first message",
+        ));
+      }
+      match &preparation.status {
+        CreatedModelPreparationStatus::Complete(result) => return result.clone(),
+        CreatedModelPreparationStatus::Pending => {
+          return Err(InteractionError::uncertain(
+            "Model preparation is still pending; inspect its creation receipt",
+          ));
+        }
+        CreatedModelPreparationStatus::NotAttempted => {}
+      }
+      preparation.status = CreatedModelPreparationStatus::Pending;
+      state.active_actions += 1;
+    }
+    let manager = self.clone();
+    let created = created.clone();
+    tokio::spawn(async move {
+      let _active = ActiveAction {
+        inner: manager.0.clone(),
+        id: String::new(),
+        complete: true,
+      };
+      let result = manager.prepare_created_model_inner(&created, &model).await;
+      let mut state = manager.0.state.lock().unwrap_or_else(|error| error.into_inner());
+      if let Some(preparation) = state.created_models.get_mut(&key) {
+        preparation.status = CreatedModelPreparationStatus::Complete(result.clone());
+      }
+      result
+    })
+    .await
+    .map_err(|_| InteractionError::uncertain("Model preparation was interrupted; inspect its creation receipt"))?
+  }
+
+  async fn prepare_created_model_inner(
+    &self,
+    created: &CreatedNativeSession,
+    model: &ModelIdentity,
+  ) -> Result<(), InteractionError> {
+    let gate = self.gate(&created.profile_id);
+    let _guard = gate.lock().await;
+    self.check_created(created)?;
+    let handle = {
+      let state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
+      if state.bindings.values().any(|binding| binding.target == created.target) {
+        return Err(InteractionError::invalid(
+          "A published session cannot use creation-only model preparation",
+        ));
+      }
+      state.runtimes.get(&created.target.runtime_id).unwrap().handle.clone()
+    };
+    let state = handle
+      .adapter()
+      .execute(InteractionRequest {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        target: created.target.clone(),
+        command: Command::State,
+      })
+      .await?;
+    let Reply::State(state) = state else {
+      return Err(InteractionError::unavailable(
+        "The created session returned invalid model-preparation state",
+      ));
+    };
+    if state.status != ExecutionState::Idle || state.session_id.as_deref() != Some(created.native.native_id.as_str()) {
+      return Err(InteractionError::invalid(
+        "Creation-only model preparation requires the exact idle session",
+      ));
+    }
+    self.check_created(created)?;
+    handle.prepare_created_model(&created.native.native_id, model).await?;
+    self.check_created(created)?;
+    Ok(())
+  }
+
+  /// Immediately fence the automatic first message for this exact created
+  /// target. This is memory-only and must run before cancellation awaits disk
+  /// or native work. Later explicit input through a published binding is separate.
+  pub fn fence_created_input(&self, created: &CreatedNativeSession) -> Result<(), InteractionError> {
+    self.ensure_open().map_err(InteractionError::unavailable)?;
+    let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
+    Self::check_created_state(&state, created)?;
+    let key = created_model_key(created);
+    // Each fenced target owns one of the equally bounded native-session leases.
+    // Never evict a fence and accidentally reenable its initial message.
+    if !state.created_input_fences.contains(&key) && state.created_input_fences.len() >= 1024 {
+      return Err(InteractionError::unavailable(
+        "Created-session input fence limit reached",
+      ));
+    }
+    state.created_input_fences.insert(key);
+    Ok(())
+  }
+
+  fn check_created_input(&self, created: &CreatedNativeSession) -> Result<(), InteractionError> {
+    self.ensure_open().map_err(InteractionError::unavailable)?;
+    let state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
+    Self::check_created_state(&state, created)?;
+    if state.created_input_fences.contains(&created_model_key(created)) {
+      return Err(cancelled_created_input());
+    }
+    Ok(())
+  }
+
   /// Recover native state before first input, without a resume/create call.
   pub async fn execute_created(
     &self,
@@ -280,6 +450,22 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     command: Command,
   ) -> Result<Reply, InteractionError> {
     self.check_created(created)?;
+    let message = matches!(command, Command::Message { .. });
+    if message {
+      self.check_created_input(created)?;
+      let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
+      if let Some(preparation) = state.created_models.get_mut(&created_model_key(created)) {
+        match &preparation.status {
+          CreatedModelPreparationStatus::Pending => {
+            return Err(InteractionError::uncertain(
+              "The created session's model preparation is still pending",
+            ));
+          }
+          CreatedModelPreparationStatus::Complete(Err(error)) => return Err(error.clone()),
+          _ => preparation.input_attempted = true,
+        }
+      }
+    }
     for command in [Command::State, Command::PendingInteractions] {
       self
         .0
@@ -290,8 +476,14 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
           command,
         })
         .await?;
+      if message {
+        self.check_created_input(created)?;
+      }
     }
     self.check_created(created)?;
+    if message {
+      self.check_created_input(created)?;
+    }
     self
       .0
       .interactions
@@ -310,10 +502,31 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     created: &CreatedNativeSession,
     key: String,
   ) -> Result<SessionBinding, InteractionError> {
+    self
+      .adopt_created_if_ready(created, key)
+      .await?
+      .ok_or_else(|| InteractionError::uncertain("The created session's model preparation is still pending"))
+  }
+
+  /// Publish an exact created target, deferring while its admitted model
+  /// preparation is pending. Readiness and binding insertion are checked under
+  /// one lock so callers cannot bypass preparation through a binding race.
+  pub async fn adopt_created_if_ready(
+    &self,
+    created: &CreatedNativeSession,
+    key: String,
+  ) -> Result<Option<SessionBinding>, InteractionError> {
     if key.is_empty() || key.len() > 8192 {
       return Err(InteractionError::invalid("Invalid created-session key"));
     }
-    self.check_created(created)?;
+    self.ensure_open().map_err(InteractionError::unavailable)?;
+    {
+      let state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
+      Self::check_created_state(&state, created)?;
+      if model_preparation_pending(&state, &created.target) {
+        return Ok(None);
+      }
+    }
     // First-input validation may have failed before recovering live state.
     // Adopt only after obtaining a fresh baseline; this never resumes native work.
     self
@@ -327,6 +540,9 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     };
     let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
     Self::check_created_state(&state, created)?;
+    if model_preparation_pending(&state, &created.target) {
+      return Ok(None);
+    }
     if let Some(existing) = state.bindings.get(&key) {
       if existing.target != binding.target {
         return Err(InteractionError::new(
@@ -334,7 +550,7 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
           "This history key already has another runtime binding",
         ));
       }
-      return Ok(existing.clone());
+      return Ok(Some(existing.clone()));
     }
     if state.bindings.len() >= 1024 {
       return Err(InteractionError::unavailable("Runtime session-binding limit reached"));
@@ -342,7 +558,7 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     state.bindings.insert(key, binding.clone());
     drop(state);
     self.changed();
-    Ok(binding)
+    Ok(Some(binding))
   }
 
   /// Reconcile a host-verified planned identity after native creation lost its
@@ -412,6 +628,44 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
       }
     }
   }
+}
+
+fn created_model_key(created: &CreatedNativeSession) -> CreatedModelKey {
+  (
+    created.target.runtime_id.clone(),
+    created.target.instance_id.clone(),
+    created.native.native_id.clone(),
+  )
+}
+
+fn cancelled_created_input() -> InteractionError {
+  InteractionError::new(
+    ErrorKind::Rejected,
+    "The created session's first message was cancelled before admission",
+  )
+}
+
+pub(super) fn check_model_preparation_not_pending(
+  state: &State,
+  target: &SessionTarget,
+) -> Result<(), InteractionError> {
+  if model_preparation_pending(state, target) {
+    return Err(InteractionError::uncertain(
+      "The created session's model preparation is still pending",
+    ));
+  }
+  Ok(())
+}
+
+fn model_preparation_pending(state: &State, target: &SessionTarget) -> bool {
+  let Some(native_id) = &target.session_id else {
+    return false;
+  };
+  let key = (target.runtime_id.clone(), target.instance_id.clone(), native_id.clone());
+  state
+    .created_models
+    .get(&key)
+    .is_some_and(|preparation| matches!(preparation.status, CreatedModelPreparationStatus::Pending))
 }
 
 fn valid_native_id(id: &str) -> bool {

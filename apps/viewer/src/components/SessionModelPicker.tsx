@@ -16,6 +16,7 @@ interface ModelPickerController {
   choices: ModelChoice[] | null;
   can_open: boolean;
   can_select: boolean;
+  updates_default?: boolean;
   running?: boolean;
   refresh: () => Promise<void>;
   loadChoices: () => Promise<void>;
@@ -106,6 +107,7 @@ export function SessionModelPicker({ model, provider, input_busy = false, select
       {mode !== "creation" || model.can_select ? <p className="session-model__footnote">{mode === "creation" ? "Your model choice is applied when you send the first message." : model.running
         ? "While this session is responding, Send steers the current model and ignores this choice."
         : "Your model choice is applied when you send the next message."}</p> : null}
+      {mode === "creation" && model.can_select && model.updates_default ? <p className="session-model__footnote">Applying a model on first Send also updates {provider}’s default for new sessions on this host.</p> : null}
       {model.status?.updates_pi_default ? <p className="session-model__footnote">When applied on Send, this choice also updates Pi’s default for new sessions on this machine.</p> : null}
     </div>, document.body) : null}
   </div>;

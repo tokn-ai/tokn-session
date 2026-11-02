@@ -1,4 +1,5 @@
 //! Attached DSH ApiProxy interactions. Closing detaches; it never stops the host.
+mod created_models;
 mod events;
 mod managed;
 mod responses;
@@ -77,6 +78,7 @@ impl ApiProxyConfig {
 struct StreamState {
   pending: BTreeMap<String, PendingInteraction>,
   sessions: BTreeMap<String, SessionState>,
+  model_observations: BTreeMap<String, u64>,
 }
 
 struct Inner {
@@ -91,6 +93,7 @@ struct Inner {
   shutdown: watch::Sender<bool>,
   tasks: StdMutex<Vec<JoinHandle<()>>>,
   managed: StdMutex<Option<managed::OwnedRuntime>>,
+  created: Mutex<BTreeMap<String, Arc<created_models::CreatedControl>>>,
 }
 
 pub struct DshAdapter {
@@ -179,6 +182,12 @@ impl DshAdapter {
       .inner
       .ensure_live()
       .map_err(|_| InteractionError::uncertain("DSH created a session, but its live connection was lost"))?;
+    created_models::register(
+      &self.inner,
+      &options.session_id,
+      !matched.running && matched.blank == Some(true),
+    )
+    .await;
     Ok(CreatedSession {
       target: SessionTarget {
         runtime_id: self.inner.descriptor.runtime_id.clone(),
@@ -257,6 +266,7 @@ impl DshAdapter {
       shutdown,
       tasks: StdMutex::new(Vec::new()),
       managed: StdMutex::new(None),
+      created: Mutex::new(BTreeMap::new()),
     });
     let tasks = vec![
       events::spawn(
@@ -415,6 +425,7 @@ impl DshAdapter {
         if content.is_empty() {
           return Err(InteractionError::invalid("DSH message must contain text or images"));
         }
+        let _created_admission = created_models::close_preparation(inner, session_id).await?;
         let result: Value = inner
           .transport
           .call(
