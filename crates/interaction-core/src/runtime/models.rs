@@ -4,7 +4,9 @@ use super::*;
 use std::time::Duration;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
-const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
+// Managed adapters have their own bounded stop/reap sequence (DSH: up to ten
+// seconds). Leave room for that original close to settle before quarantining.
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_MODELS: usize = 512;
 const MAX_CATALOG_BYTES: usize = 2 * 1024 * 1024;
 
@@ -196,18 +198,20 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
       .map_err(|_| InteractionError::unavailable("Could not recheck model runtime configuration"))?
       .map_err(InteractionError::unavailable)?;
     self.ensure_open().map_err(InteractionError::unavailable)?;
-    let handle = match tokio::time::timeout(PROBE_TIMEOUT, self.0.host.open(&runtime_id, &resolved)).await {
+    let handle = match tokio::time::timeout(PROBE_TIMEOUT, self.0.host.open_with_cleanup(&runtime_id, &resolved)).await
+    {
       Ok(Ok(handle)) => handle,
       failed => {
-        if descriptor.ownership == Ownership::Managed {
+        let unconfirmed = !matches!(&failed, Ok(Err(error)) if error.cleanup_confirmed);
+        if descriptor.ownership == Ownership::Managed && unconfirmed {
           self.retain_unconfirmed_start(None, lease, &resolved);
         }
         let mut reason = match failed {
           Err(_) => "Model runtime startup timed out".into(),
-          Ok(Err(error)) => self.0.host.redact_error(&error, &resolved),
+          Ok(Err(error)) => self.0.host.redact_error(&error.message, &resolved),
           Ok(Ok(_)) => unreachable!(),
         };
-        if descriptor.ownership == Ownership::Managed {
+        if descriptor.ownership == Ownership::Managed && unconfirmed {
           reason.push_str(" Startup cleanup was not confirmed; this profile remains reserved until host shutdown.");
         }
         return Err(InteractionError::unavailable(reason));

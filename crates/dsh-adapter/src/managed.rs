@@ -23,11 +23,30 @@ pub struct ManagedOptions {
   pub cwd: PathBuf,
   /// Inherited environment with these explicit overrides; credentials stay local.
   pub env: BTreeMap<String, String>,
+  /// Set only for a native generation verified to support --no-open. Older
+  /// ApiProxy Web profiles do not open a browser and reject that flag.
+  pub prevent_browser: bool,
   pub runtime_id: String,
   pub startup_timeout: Duration,
   pub shutdown_timeout: Duration,
   pub request_timeout: Duration,
   pub connect_timeout: Duration,
+}
+
+/// Failure of an owned launch, retaining whether its original child was reaped.
+#[derive(Debug)]
+pub struct ManagedLaunchError {
+  pub error: InteractionError,
+  pub cleanup_confirmed: bool,
+}
+
+impl ManagedLaunchError {
+  fn before_spawn(error: InteractionError) -> Self {
+    Self {
+      error,
+      cleanup_confirmed: true,
+    }
+  }
 }
 
 impl ManagedOptions {
@@ -37,6 +56,7 @@ impl ManagedOptions {
       launcher_args: Vec::new(),
       cwd: cwd.into(),
       env: BTreeMap::new(),
+      prevent_browser: false,
       runtime_id: format!("dsh:{}", uuid::Uuid::new_v4()),
       startup_timeout: Duration::from_secs(30),
       shutdown_timeout: Duration::from_secs(7),
@@ -48,6 +68,7 @@ impl ManagedOptions {
 
 pub(crate) struct Launch {
   pub(crate) endpoint: String,
+  pub(crate) launch_token: Option<String>,
   child: Option<Child>,
   pumps: Vec<JoinHandle<()>>,
 }
@@ -63,16 +84,16 @@ impl Drop for OutputPumps {
 }
 
 impl Launch {
-  pub(crate) async fn start(options: &ManagedOptions) -> Result<Self, InteractionError> {
+  pub(crate) async fn start(options: &ManagedOptions) -> Result<Self, ManagedLaunchError> {
     if !options.cwd.is_absolute() || !options.cwd.is_dir() {
-      return Err(InteractionError::invalid(
+      return Err(ManagedLaunchError::before_spawn(InteractionError::invalid(
         "managed DSH cwd must be an existing absolute directory",
-      ));
+      )));
     }
     if options.startup_timeout.is_zero() || options.shutdown_timeout.is_zero() || options.runtime_id.trim().is_empty() {
-      return Err(InteractionError::invalid(
+      return Err(ManagedLaunchError::before_spawn(InteractionError::invalid(
         "managed DSH runtime id and positive lifecycle timeouts are required",
-      ));
+      )));
     }
     let mut command = Command::new(&options.program);
     command
@@ -84,26 +105,45 @@ impl Launch {
       .stdout(Stdio::piped())
       .stderr(Stdio::piped())
       .kill_on_drop(true);
-    let mut child = command
-      .spawn()
-      .map_err(|_| InteractionError::unavailable("could not launch the configured DSH executable"))?;
-    let stdout = child
-      .stdout
-      .take()
-      .ok_or_else(|| InteractionError::unavailable("managed DSH stdout was not piped"))?;
-    let stderr = child
-      .stderr
-      .take()
-      .ok_or_else(|| InteractionError::unavailable("managed DSH stderr was not piped"))?;
-    let (ready, mut receiver) = oneshot::channel();
-    let pumps = vec![tokio::spawn(stdout_pump(stdout, ready)), tokio::spawn(drain(stderr))];
+    if options.prevent_browser {
+      command.arg("--no-open");
+    }
+    let child = command.spawn().map_err(|_| {
+      ManagedLaunchError::before_spawn(InteractionError::unavailable(
+        "could not launch the configured DSH executable",
+      ))
+    })?;
     let mut launch = Self {
       endpoint: String::new(),
+      launch_token: None,
       child: Some(child),
-      pumps,
+      pumps: Vec::new(),
     };
     let child = launch.child.as_mut().expect("owned DSH child");
-    let endpoint = tokio::time::timeout(options.startup_timeout, async {
+    let Some(stdout) = child.stdout.take() else {
+      return Err(
+        launch
+          .failed(
+            InteractionError::unavailable("managed DSH stdout was not piped"),
+            options.shutdown_timeout,
+          )
+          .await,
+      );
+    };
+    let Some(stderr) = child.stderr.take() else {
+      return Err(
+        launch
+          .failed(
+            InteractionError::unavailable("managed DSH stderr was not piped"),
+            options.shutdown_timeout,
+          )
+          .await,
+      );
+    };
+    let (ready, mut receiver) = oneshot::channel();
+    launch.pumps = vec![tokio::spawn(stdout_pump(stdout, ready)), tokio::spawn(drain(stderr))];
+    let child = launch.child.as_mut().expect("owned DSH child");
+    let readiness = tokio::time::timeout(options.startup_timeout, async {
       tokio::select! {
         ready = &mut receiver => ready.map_err(|_| InteractionError::unavailable("DSH exited or closed stdout before its readiness URL"))?,
         exited = child.wait() => {
@@ -111,16 +151,52 @@ impl Launch {
           Err(InteractionError::unavailable(format!("DSH exited before readiness ({status})")))
         }
       }
-    }).await.map_err(|_| InteractionError::unavailable("DSH did not publish its native readiness URL before the startup timeout"))??;
-    if child
-      .try_wait()
-      .map_err(|_| InteractionError::unavailable("could not inspect the owned DSH child"))?
-      .is_some()
-    {
-      return Err(InteractionError::unavailable("DSH exited immediately after readiness"));
+    }).await.unwrap_or_else(|_| Err(InteractionError::unavailable("DSH did not publish its native readiness URL before the startup timeout")));
+    let readiness = match readiness {
+      Ok(readiness) => readiness,
+      Err(error) => return Err(launch.failed(error, options.shutdown_timeout).await),
+    };
+    match child.try_wait() {
+      Ok(None) => {}
+      Ok(Some(_)) => {
+        return Err(
+          launch
+            .failed(
+              InteractionError::unavailable("DSH exited immediately after readiness"),
+              options.shutdown_timeout,
+            )
+            .await,
+        );
+      }
+      Err(_) => {
+        return Err(
+          launch
+            .failed(
+              InteractionError::unavailable("could not inspect the owned DSH child"),
+              options.shutdown_timeout,
+            )
+            .await,
+        );
+      }
     }
-    launch.endpoint = endpoint;
+    launch.endpoint = readiness.endpoint;
+    launch.launch_token = readiness.launch_token;
     Ok(launch)
+  }
+
+  pub(crate) async fn failed(mut self, error: InteractionError, shutdown_timeout: Duration) -> ManagedLaunchError {
+    let cleanup_confirmed = match self.child.as_mut() {
+      Some(child) => terminate(child, shutdown_timeout).await.is_ok(),
+      None => false,
+    };
+    for task in self.pumps.drain(..) {
+      task.abort();
+      let _ = task.await;
+    }
+    ManagedLaunchError {
+      error,
+      cleanup_confirmed,
+    }
   }
 
   pub(crate) fn supervise(&mut self, inner: Arc<Inner>, shutdown_timeout: Duration) -> OwnedRuntime {
@@ -233,7 +309,7 @@ async fn terminate(child: &mut Child, grace: Duration) -> Result<(), Interaction
   Ok(())
 }
 
-async fn stdout_pump(mut stdout: impl AsyncRead + Unpin, ready: oneshot::Sender<Result<String, InteractionError>>) {
+async fn stdout_pump(mut stdout: impl AsyncRead + Unpin, ready: oneshot::Sender<Result<Readiness, InteractionError>>) {
   let mut ready = Some(ready);
   let mut line = Vec::new();
   let mut discard = false;
@@ -271,22 +347,57 @@ async fn drain(mut reader: impl AsyncRead + Unpin) {
   while matches!(reader.read(&mut bytes).await, Ok(count) if count > 0) {}
 }
 
-fn readiness_url(line: &str) -> Option<String> {
+#[derive(PartialEq, Eq)]
+struct Readiness {
+  endpoint: String,
+  launch_token: Option<String>,
+}
+
+impl std::fmt::Debug for Readiness {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter
+      .debug_struct("Readiness")
+      .field("endpoint", &self.endpoint)
+      .field("authenticated", &self.launch_token.is_some())
+      .finish()
+  }
+}
+
+fn readiness_url(line: &str) -> Option<Readiness> {
   let value = line.strip_prefix("dsh web: ")?;
   let value = value.split_whitespace().next()?;
-  let url = Url::parse(value).ok()?;
+  let mut url = Url::parse(value).ok()?;
   if url.scheme() != "http"
     || url.host_str() != Some("127.0.0.1")
     || url.port().is_none_or(|port| port == 0)
     || !matches!(url.path(), "" | "/")
-    || url.query().is_some()
     || url.fragment().is_some()
     || !url.username().is_empty()
     || url.password().is_some()
   {
     return None;
   }
-  Some(url.to_string())
+  let launch_token = if url.query().is_some() {
+    let pairs = url.query_pairs().collect::<Vec<_>>();
+    if pairs.len() != 1
+      || pairs[0].0 != "token"
+      || pairs[0].1.len() != 43
+      || !pairs[0]
+        .1
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+      return None;
+    }
+    Some(pairs[0].1.to_string())
+  } else {
+    None
+  };
+  url.set_query(None);
+  Some(Readiness {
+    endpoint: url.to_string(),
+    launch_token,
+  })
 }
 
 #[cfg(test)]
@@ -297,7 +408,10 @@ mod tests {
   fn readiness_accepts_only_native_loopback_os_assigned_urls() {
     assert_eq!(
       readiness_url("dsh web: http://127.0.0.1:54321"),
-      Some("http://127.0.0.1:54321/".into())
+      Some(Readiness {
+        endpoint: "http://127.0.0.1:54321/".into(),
+        launch_token: None
+      })
     );
     for line in [
       "http://127.0.0.1:54321",
@@ -316,6 +430,122 @@ mod tests {
     let data = format!("{}\ndsh web: http://127.0.0.1:54321\r\n", "x".repeat(20_000));
     let (sender, receiver) = oneshot::channel();
     stdout_pump(data.as_bytes(), sender).await;
-    assert_eq!(receiver.await.unwrap().unwrap(), "http://127.0.0.1:54321/");
+    assert_eq!(receiver.await.unwrap().unwrap().endpoint, "http://127.0.0.1:54321/");
+  }
+
+  #[test]
+  fn authenticated_readiness_keeps_the_launch_credential_out_of_the_endpoint_and_debug() {
+    let token = "A".repeat(43);
+    let ready = readiness_url(&format!("dsh web: http://127.0.0.1:54321/?token={token}")).unwrap();
+    assert_eq!(ready.endpoint, "http://127.0.0.1:54321/");
+    assert_eq!(ready.launch_token.as_deref(), Some(token.as_str()));
+    assert!(!format!("{ready:?}").contains(&token));
+    for query in [
+      format!("token={token}&token={token}"),
+      format!("token={token}&other=1"),
+      "token=short".into(),
+    ] {
+      assert!(readiness_url(&format!("dsh web: http://127.0.0.1:54321/?{query}")).is_none());
+    }
+  }
+
+  #[cfg(unix)]
+  struct SyntheticExecutable {
+    directory: tempfile::TempDir,
+    executable: PathBuf,
+    pid_file: PathBuf,
+    args_file: PathBuf,
+  }
+
+  #[cfg(unix)]
+  impl SyntheticExecutable {
+    fn new(readiness: Option<&str>) -> Self {
+      use std::os::unix::fs::PermissionsExt;
+      let directory = tempfile::tempdir().unwrap();
+      let executable = directory.path().join("synthetic-dsh");
+      let pid_file = directory.path().join("child.pid");
+      let args_file = directory.path().join("child.args");
+      let announce = readiness
+        .map(|ready| format!("printf '%s\\n' '{ready}'\n"))
+        .unwrap_or_default();
+      std::fs::write(
+        &executable,
+        format!("#!/bin/sh\nprintf '%s' \"$$\" > \"$TOKN_TEST_PID_FILE\"\nprintf '%s\\n' \"$@\" > \"$TOKN_TEST_ARGS_FILE\"\n{announce}exec /bin/sleep 30\n"),
+      )
+      .unwrap();
+      std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+      Self {
+        directory,
+        executable,
+        pid_file,
+        args_file,
+      }
+    }
+
+    fn options(&self) -> ManagedOptions {
+      let mut options = ManagedOptions::new(self.directory.path());
+      options.program = self.executable.clone();
+      options.env.insert(
+        "TOKN_TEST_PID_FILE".into(),
+        self.pid_file.to_string_lossy().into_owned(),
+      );
+      options.env.insert(
+        "TOKN_TEST_ARGS_FILE".into(),
+        self.args_file.to_string_lossy().into_owned(),
+      );
+      options.startup_timeout = Duration::from_millis(200);
+      options.shutdown_timeout = Duration::from_millis(50);
+      options.connect_timeout = Duration::from_millis(50);
+      options.request_timeout = Duration::from_millis(50);
+      options
+    }
+
+    fn assert_reaped(&self) {
+      let pid: libc::pid_t = std::fs::read_to_string(&self.pid_file).unwrap().parse().unwrap();
+      assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+      assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    }
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn readiness_timeout_confirms_cleanup_only_after_reaping_the_original_child() {
+    let executable = SyntheticExecutable::new(None);
+    let failure = Launch::start(&executable.options()).await.err().unwrap();
+    assert!(failure.cleanup_confirmed);
+    assert!(failure.error.message.contains("readiness URL"));
+    executable.assert_reaped();
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn failed_rpc_handshake_reaps_the_original_child_before_reporting_cleanup() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ready = format!("dsh web: http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let executable = SyntheticExecutable::new(Some(&ready));
+    let failure = crate::DshAdapter::launch_with_cleanup(executable.options())
+      .await
+      .err()
+      .unwrap();
+    assert!(failure.cleanup_confirmed);
+    executable.assert_reaped();
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn browser_suppression_is_explicit_to_keep_legacy_web_arguments_compatible() {
+    for prevent_browser in [false, true] {
+      let executable = SyntheticExecutable::new(None);
+      let mut options = executable.options();
+      options.prevent_browser = prevent_browser;
+      let failure = Launch::start(&options).await.err().unwrap();
+      assert!(failure.cleanup_confirmed);
+      let arguments = std::fs::read_to_string(&executable.args_file).unwrap();
+      assert_eq!(
+        arguments.lines().any(|argument| argument == "--no-open"),
+        prevent_browser
+      );
+      executable.assert_reaped();
+    }
   }
 }

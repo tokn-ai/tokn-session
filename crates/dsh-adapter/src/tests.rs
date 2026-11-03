@@ -10,6 +10,7 @@ use axum::{
   routing::{get, post},
 };
 mod created_models;
+mod remote;
 
 struct Fake {
   calls: Mutex<Vec<Value>>,

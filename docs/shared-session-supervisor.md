@@ -108,7 +108,7 @@ message awaiting native acknowledgement, allowing extension preflight to finish.
 | Codex | Explicit app-server create/resume binding; start-or-steer, turn interruption, model catalogs, and live callback questions. Desktop is an explicit alternative. |
 | Pi | Viewer-owned sessions keep the exclusive Pi workflow driver; independently running bridges keep their existing owner. A Pi profile cannot adopt arbitrary saved history from an ID alone. |
 | OpenCode | Native V2 creation, local history, runtime/profile binding and start-or-steer. V1 and mixed histories remain read-only. |
-| DSH | Existing native sessions through a saved or locally discovered ApiProxy runtime. State/model inspection does not activate cold agents. Local project creation uses the native default preset. |
+| DSH | Legacy ApiProxy or managed authenticated Remote runtime. State/model inspection does not activate cold agents. Local project creation uses the native default preset; an explicit draft model is verified before first input. Remote callbacks delegate to native clients; viewer replies remain unavailable for that generation. |
 
 The Pi driver owns model-on-send sequencing, native extension dialogs,
 dialog-aware deadlines, stream/error interpretation and idle eligibility. The

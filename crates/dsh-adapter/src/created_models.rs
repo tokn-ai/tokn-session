@@ -219,21 +219,28 @@ async fn prepare(inner: &Inner, session_id: &str, model: &ModelIdentity) -> Resu
   inner
     .ensure_live()
     .map_err(|_| InteractionError::uncertain("DSH selected a model but its live connection was lost"))?;
-  let confirmed: api::SessionModels = inner
-    .transport
-    .call(
-      &uuid::Uuid::new_v4().to_string(),
-      "session.models",
-      json!({"sessionId":session_id}),
-      false,
-    )
-    .await
-    .map_err(|_| {
-      InteractionError::uncertain(
-        "DSH selected a model but its session model could not be verified; its first prompt was not sent",
+  let mut confirmed_sequence = None;
+  let confirmed = if inner.transport.generation() == crate::transport::Generation::Remote {
+    confirmed_sequence = confirm_remote_selection(inner, session_id, model).await?;
+    confirmed_sequence.is_some()
+  } else {
+    let confirmed: api::SessionModels = inner
+      .transport
+      .call(
+        &uuid::Uuid::new_v4().to_string(),
+        "session.models",
+        json!({"sessionId":session_id}),
+        false,
       )
-    })?;
-  if !confirmed.routable || !matches_selection(&confirmed.current, model) {
+      .await
+      .map_err(|_| {
+        InteractionError::uncertain(
+          "DSH selected a model but its session model could not be verified; its first prompt was not sent",
+        )
+      })?;
+    confirmed.routable && matches_selection(&confirmed.current, model)
+  };
+  if !confirmed {
     return Err(InteractionError::uncertain(
       "The new DSH session did not confirm the selected model; its first prompt was not sent",
     ));
@@ -244,6 +251,18 @@ async fn prepare(inner: &Inner, session_id: &str, model: &ModelIdentity) -> Resu
   // Only a verified native read establishes this baseline. Later request/header
   // or request/context events retain the normal authority over actual state.
   let mut state = inner.state.lock().await;
+  if let Some(confirmed_sequence) = confirmed_sequence
+    && state
+      .remote_model_selections
+      .get(session_id)
+      .is_some_and(|(seq, selected)| {
+        *seq >= confirmed_sequence && selected.as_ref().is_none_or(|selected| !same_model(selected, model))
+      })
+  {
+    return Err(InteractionError::uncertain(
+      "DSH observed a newer conflicting model selection; its first prompt was not sent",
+    ));
+  }
   if state.model_observations.get(session_id).copied().unwrap_or(0) != observation
     || state
       .sessions
@@ -262,9 +281,76 @@ async fn prepare(inner: &Inner, session_id: &str, model: &ModelIdentity) -> Resu
     revision: None,
   });
   current.model = Some(ModelIdentity {
-    model_provider: Some(confirmed.current.provider),
-    model_id: confirmed.current.model,
+    model_provider: model.model_provider.clone(),
+    model_id: model.model_id.clone(),
     display_name: None,
   });
   Ok(())
+}
+
+async fn confirm_remote_selection(
+  inner: &Inner,
+  session_id: &str,
+  model: &ModelIdentity,
+) -> Result<Option<i64>, InteractionError> {
+  let projections: Value = inner
+    .transport
+    .call(
+      &uuid::Uuid::new_v4().to_string(),
+      "session.projections",
+      json!({"sessionId":session_id}),
+      false,
+    )
+    .await
+    .map_err(|_| {
+      InteractionError::uncertain(
+        "DSH selected a model but its durable selection could not be verified; its first prompt was not sent",
+      )
+    })?;
+  let Some(sequence) = projections
+    .get("asOfSeq")
+    .and_then(Value::as_i64)
+    .filter(|seq| *seq >= 0)
+    .filter(|_| projections.get("kind").and_then(Value::as_str) == Some("sequenced"))
+  else {
+    return Ok(None);
+  };
+  let Some(selection) = projections
+    .get("values")
+    .and_then(|values| values.get("modelSelection"))
+  else {
+    return Ok(None);
+  };
+  // Remote records the pending selection before returning from the setter.
+  // A last-used model would mean a request already ran on this new session.
+  if selection.get("lastUsed") != Some(&Value::Null) {
+    return Ok(None);
+  }
+  let selected = selection
+    .get("next")
+    .cloned()
+    .and_then(|value| serde_json::from_value::<api::ModelSelection>(value).ok());
+  if selected
+    .as_ref()
+    .is_none_or(|selected| !matches_selection(selected, model))
+  {
+    return Ok(None);
+  }
+  let sessions: api::SessionList = inner
+    .transport
+    .call(&uuid::Uuid::new_v4().to_string(), "session.list", json!({}), false)
+    .await
+    .map_err(|_| {
+      InteractionError::uncertain(
+        "DSH selected a model but its blank idle session could not be rechecked; its first prompt was not sent",
+      )
+    })?;
+  let mut matches = sessions.items.iter().filter(|entry| entry.session_id == session_id);
+  Ok(
+    (matches
+      .next()
+      .is_some_and(|entry| !entry.running && entry.blank == Some(true))
+      && matches.next().is_none())
+    .then_some(sequence),
+  )
 }

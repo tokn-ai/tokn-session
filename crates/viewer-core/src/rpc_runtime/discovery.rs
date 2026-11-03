@@ -121,6 +121,7 @@ pub(super) fn builtin_profile(
       spec.arguments,
       Some(RpcInstallationPin {
         root: installation_root.expect("installed root").to_path_buf(),
+        version: spec.version,
         generation: spec.generation,
       }),
     )
@@ -219,6 +220,7 @@ pub(crate) fn installation_pin(
     .ok_or("The configured managed agent installation is unavailable; download it or update the profile")?;
   Ok(Some(RpcInstallationPin {
     root: root.to_owned(),
+    version: spec.version,
     generation: spec.generation,
   }))
 }

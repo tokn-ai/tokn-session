@@ -1,6 +1,25 @@
 # tokn-dsh-adapter
 
-Rust `InteractionAdapter` for DeepSeek Harness ApiProxy endpoints.
+Rust `InteractionAdapter` for DeepSeek Harness ApiProxy and managed Remote endpoints.
+
+Managed DSH 0.2 uses its authenticated readiness URL. The adapter validates the
+owned loopback address, exchanges the launch token at `/connect` without following
+redirects or using a proxy, and retains only an in-memory cookie for HTTP and
+`remote.mux`. The published `@deepseek-ai/dsh` 0.2.1-rc.5 generated Remote contracts
+define slash-separated methods with named `args`, `session/modelCatalog`, and
+sequenced session projections. Prompt requests carry the input receipt's
+`requestId`. Creation-only model preparation verifies the durable pending
+selection on the same blank idle session before its first prompt. The mux tracks
+control projections and native notifications with bounded sequence/replay guards.
+Remote question/permission waterfalls delegate to native clients; viewer replies
+remain unavailable on this generation. Legacy ApiProxy callbacks remain supported.
+
+`launch_with_cleanup` retains failure cleanup proof only after the exact owned
+child is reaped. Downlinks close before stopping the child. A factory can release
+its profile/installation reservation on proven cleanup; dropping a child or
+sending a signal alone is not proof. The details below describe legacy ApiProxy
+wire behavior where the generations differ.
+
 `DshAdapter::attach(ApiProxyConfig::new(endpoint)).await` opens native mux and
 host WebSocket downlinks and verifies `host.describe` over HTTP. Ordinary network
 GETs to these downlinks return 426; upstream's SSE codec is only an in-process
@@ -18,6 +37,14 @@ kills this child and closes its bounded output drains. Managed close sends
 SIGTERM on Unix so native disposal can finish, then escalates after the configured
 grace period and waits for exit. Other platforms kill/reap the owned child.
 Dropping the adapter requests the same bounded owned-process cleanup.
+
+Current Web profiles announce a process-token URL. The owned launcher keeps its
+clean loopback endpoint separate, exchanges the token for an API operator cookie,
+and never includes either credential in runtime metadata or errors. Set
+`ManagedOptions::prevent_browser` only for a verified current native version to
+pass `--no-open`; it defaults off because older ApiProxy profiles reject that
+flag and do not open a browser. Failed launches expose explicit cleanup proof
+only after the original child has been reaped.
 
 `create_session` creates a real idle agent using a host-preallocated native ID
 (`new_session_id`) and explicit project cwd. Omitting `agent_preset` preserves

@@ -24,10 +24,10 @@ interface CatalogView {
 }
 const emptyView = (): CatalogView => ({ loading: false, result: null, error: null });
 
-/** Catalog reads never create a session. Their proof belongs to the first-message draft. */
+/** Cache one catalog for this mounted draft scope. First Send revalidates its proof on the host. */
 export function useSessionCreationModels(request: ListSessionCreationModelsRequest, scope_key: string, enabled: boolean,
   load: (request: ListSessionCreationModelsRequest) => Promise<SessionCreationModels>) {
-  const owner = useMemo(() => ({}), [scope_key, enabled, load]);
+  const owner = useMemo(() => ({}), [scope_key, load]);
   const [view, setView] = useState<{ owner: object; value: CatalogView }>(() => ({ owner, value: emptyView() }));
   const latest_owner = useRef(owner);
   latest_owner.current = owner;
@@ -36,6 +36,8 @@ export function useSessionCreationModels(request: ListSessionCreationModelsReque
   latest.current = value;
   const request_ref = useRef(request);
   request_ref.current = request;
+  const latest_enabled = useRef(enabled);
+  latest_enabled.current = enabled;
   const active = useRef(false);
   const epoch = useRef(0);
   useEffect(() => {
@@ -48,8 +50,9 @@ export function useSessionCreationModels(request: ListSessionCreationModelsReque
     latest.current = next;
     setView({ owner, value: next });
   }, [owner]);
-  const loadChoices = useCallback(async () => {
-    if (!enabled || !active.current || latest_owner.current !== owner || latest.current.loading) return;
+  const readChoices = useCallback(async (force: boolean) => {
+    if (!enabled || !latest_enabled.current || !active.current || latest_owner.current !== owner || latest.current.loading
+      || !force && latest.current.result && !latest.current.error) return;
     const lifetime = epoch.current;
     update({ ...latest.current, loading: true, error: null });
     try {
@@ -65,10 +68,12 @@ export function useSessionCreationModels(request: ListSessionCreationModelsReque
       update({ ...latest.current, loading: false, error: errorMessage(failure) });
     }
   }, [enabled, load, owner, update]);
+  const loadChoices = useCallback(() => readChoices(false), [readChoices]);
+  const refresh = useCallback(() => readChoices(true), [readChoices]);
   const selectionFor = useCallback((choice: ModelChoice): SessionDraftModel | null => {
     const current = latest.current;
     const verified = current.result?.models.find((entry) => sameModel(entry.model, choice.model));
-    if (!enabled || !active.current || latest_owner.current !== owner || current.loading || current.error
+    if (!enabled || !latest_enabled.current || !active.current || latest_owner.current !== owner || current.loading || current.error
       || current.result?.can_select === false || !current.result?.catalog_revision || !verified) return null;
     return { choice: verified, catalog_revision: current.result.catalog_revision, scope_key,
       runtime_profile_id: current.result.runtime_profile_id, runtime_revision: current.result.runtime_revision,
@@ -84,6 +89,6 @@ export function useSessionCreationModels(request: ListSessionCreationModelsReque
     reason: value.result?.reason ?? (!enabled ? "Choose an available project, agent and runtime first." : null),
     can_open: enabled, can_select: enabled && !value.loading && !value.error && value.result?.can_select !== false && !!value.result?.catalog_revision,
     updates_default: value.result?.updates_default === true,
-    refresh: loadChoices, loadChoices, selectionFor, selectionValid,
+    refresh, loadChoices, selectionFor, selectionValid,
   };
 }

@@ -101,7 +101,7 @@ Existing-session activation combines a pinned plan with host-verified native
 history. Executable paths, environment values and credentials remain host-side.
 
 DSH draft pickers query the selected runtime's session-independent `llm.models`
-directory. Managed DSH inherits the host environment and uses its native `web`
+directory (ApiProxy) or `session/modelCatalog` (Remote). Managed DSH inherits the host environment and uses its native `web`
 profile; attached runtimes use their own configuration. Tokn does not copy model
 settings into its installation directory. Catalog inspection may briefly launch
 a metadata process, but never creates or resumes a saved conversation. DSH
@@ -110,8 +110,18 @@ applying the chosen model once and verifying the result on the new idle blank
 session. DSH's native selection also saves the host default for future sessions;
 the picker discloses this effect through `updates_default`, as it does for Pi.
 Choosing **Runtime default** omits selection entirely. Empty catalogs remain distinct from
-provider/runtime failures, which show an error and allow retry. Other providers
+provider/runtime failures, which show an error and allow retry. Reopening a
+draft picker reuses its successful catalog within the same project/runtime scope;
+**Refresh models** forces discovery. Configuration checks preserve an in-flight
+read when that scope remains unchanged. First Send revalidates the catalog.
+Other providers
 retain their existing model-selection behavior.
+
+Managed DSH 0.2 uses its owned startup token only to obtain a bounded in-memory
+cookie for HTTP and `remote.mux`. Tokens never enter saved profiles or public
+errors. Known 0.2 installations suppress the native browser launcher. An explicit
+cleanup proof releases a failed startup's profile and installation locks; unknown
+cleanup retains them, and restarting the host clears old reservations.
 
 Reads expose environment variable names and credential kinds, never their
 values. Writes can retain, replace, or clear saved environment/authentication.

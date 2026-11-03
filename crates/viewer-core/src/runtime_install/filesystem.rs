@@ -21,6 +21,7 @@ pub(super) struct InstallRecord {
 pub struct RuntimeLaunchSpec {
   pub executable: PathBuf,
   pub arguments: Vec<String>,
+  pub version: String,
   pub generation: String,
 }
 /// Shared, process-wide software use lease. Keep alive until its child exits.
@@ -133,6 +134,7 @@ pub fn launch_spec(root: &Path, provider: Provider) -> Result<Option<RuntimeLaun
   Ok(Some(RuntimeLaunchSpec {
     executable,
     arguments,
+    version: record.version,
     generation: record.generation,
   }))
 }

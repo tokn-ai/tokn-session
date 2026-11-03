@@ -2,6 +2,7 @@ use super::*;
 use std::sync::atomic::AtomicUsize;
 use tokio::sync::oneshot;
 mod preparation;
+mod startup;
 
 fn test_model() -> ModelIdentity {
   ModelIdentity {
@@ -374,6 +375,7 @@ struct FakeHostState {
   adapter: Mutex<Option<Arc<FakeAdapter>>>,
   open_wait: Mutex<Option<oneshot::Receiver<()>>>,
   open_started: Notify,
+  open_failure: Mutex<Option<RuntimeOpenError>>,
 }
 
 impl RuntimeHost for FakeHost {
@@ -478,6 +480,24 @@ impl RuntimeHost for FakeHost {
 
   fn redact_error(&self, _error: &str, _profile: &Self::Profile) -> String {
     "The host rejected this connection".into()
+  }
+
+  fn open_with_cleanup<'a>(
+    &'a self,
+    runtime_id: &'a str,
+    profile: &'a Self::Profile,
+  ) -> AdapterFuture<'a, Result<Arc<dyn RuntimeHandle>, RuntimeOpenError>> {
+    Box::pin(async move {
+      let failure = self.shared.open_failure.lock().unwrap().take();
+      if let Some(failure) = failure {
+        self.shared.opens.fetch_add(1, Ordering::SeqCst);
+        return Err(failure);
+      }
+      self
+        .open(runtime_id, profile)
+        .await
+        .map_err(RuntimeOpenError::unconfirmed)
+    })
   }
 }
 
@@ -645,6 +665,7 @@ fn fixture() -> (RuntimeCoordinator<FakeHost>, Arc<FakeHostState>) {
     adapter: Mutex::new(None),
     open_wait: Mutex::new(None),
     open_started: Notify::new(),
+    open_failure: Mutex::new(None),
   });
   let host = FakeHost {
     profile: ProfileDescriptor {

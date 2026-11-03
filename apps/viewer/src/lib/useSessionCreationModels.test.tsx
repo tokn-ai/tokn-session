@@ -24,6 +24,44 @@ it("loads only on demand and records the verified choice with its resolved runti
   expect(result.current.selectionFor({ ...choice, model: { ...choice.model, model_id: "invented" } })).toBeNull();
 });
 
+it("reuses a successful catalog across temporary configuration checks and explicitly refreshes it", async () => {
+  const load = vi.fn().mockResolvedValueOnce(catalog()).mockResolvedValueOnce(catalog({ catalog_revision: "catalog-two" }));
+  const { result, rerender } = renderHook(({ enabled }) => useSessionCreationModels(request, scope(), enabled, load),
+    { initialProps: { enabled: true } });
+  await act(() => result.current.loadChoices());
+  const selected = result.current.selectionFor(choice)!;
+  const staleSelect = result.current.selectionFor;
+  const staleRefresh = result.current.refresh;
+  rerender({ enabled: false });
+  expect(result.current.choices).toEqual([choice]);
+  expect(result.current.can_select).toBe(false);
+  expect(staleSelect(choice)).toBeNull();
+  await act(() => staleRefresh());
+  rerender({ enabled: true });
+  await act(() => result.current.loadChoices());
+  expect(load).toHaveBeenCalledTimes(1);
+  expect(result.current.selectionValid(selected)).toBe(true);
+  await act(() => result.current.refresh());
+  expect(load).toHaveBeenCalledTimes(2);
+  expect(result.current.selectionValid(selected)).toBe(false);
+});
+
+it("keeps one in-flight catalog when configuration is temporarily being checked", async () => {
+  const pending = deferred<SessionCreationModels>();
+  const load = vi.fn(() => pending.promise);
+  const { result, rerender } = renderHook(({ enabled }) => useSessionCreationModels(request, scope(), enabled, load),
+    { initialProps: { enabled: true } });
+  let reading!: Promise<void>;
+  act(() => { reading = result.current.loadChoices(); });
+  rerender({ enabled: false });
+  rerender({ enabled: true });
+  await act(() => result.current.loadChoices());
+  expect(load).toHaveBeenCalledTimes(1);
+  await act(async () => { pending.resolve(catalog()); await reading; });
+  expect(result.current.choices).toEqual([choice]);
+  expect(result.current.can_select).toBe(true);
+});
+
 it.each([
   { ...request, project_id: "other" },
   { ...request, provider: "pi" as const },
@@ -91,24 +129,29 @@ it("retires a selected model when a refreshed catalog becomes read-only", async 
   await act(() => result.current.loadChoices());
   const selected = result.current.selectionFor(choice)!;
   expect(result.current.selectionValid(selected)).toBe(true);
-  await act(() => result.current.loadChoices());
+  await act(() => result.current.refresh());
   expect(result.current.selectionValid(selected)).toBe(false);
   expect(result.current.selectionFor(choice)).toBeNull();
   expect(result.current.selectionValid(null)).toBe(true);
 });
 
 it("invalidates a selected choice when a refreshed catalog or automatic runtime changes", async () => {
-  const load = vi.fn().mockResolvedValueOnce(catalog()).mockResolvedValueOnce(catalog({ catalog_revision: "catalog-two" }));
+  const load = vi.fn().mockResolvedValueOnce(catalog()).mockResolvedValueOnce(catalog({ catalog_revision: "catalog-two" }))
+    .mockResolvedValueOnce(catalog({ catalog_revision: "catalog-three", runtime_revision: 4 }));
   const { result, rerender } = renderHook(({ revision }) => useSessionCreationModels(request,
     creationModelScope(request, "local", revision), true, load), { initialProps: { revision: 3 } });
   await act(() => result.current.loadChoices());
   const selected = result.current.selectionFor(choice)!;
   expect(result.current.selectionValid(selected)).toBe(true);
-  await act(() => result.current.loadChoices());
+  await act(() => result.current.refresh());
   expect(result.current.selectionValid(selected)).toBe(false);
   const refreshed = result.current.selectionFor(choice)!;
   rerender({ revision: 4 });
   expect(result.current.selectionValid(refreshed)).toBe(false);
+  expect(result.current.choices).toBeNull();
+  await act(() => result.current.loadChoices());
+  expect(load).toHaveBeenCalledTimes(3);
+  expect(result.current.selectionFor(choice)).toMatchObject({ catalog_revision: "catalog-three", runtime_revision: 4 });
 });
 
 it("pins automatic catalogs without saved profiles and rejects mismatched runtime-plan responses", async () => {
@@ -121,7 +164,7 @@ it("pins automatic catalogs without saved profiles and rejects mismatched runtim
   const selected = result.current.selectionFor(choice)!;
   expect(selected).toMatchObject({ runtime_profile_id: null, runtime_revision: null, runtime_plan_id: "automatic-one" });
   expect(load).toHaveBeenCalledWith(target);
-  await act(() => result.current.loadChoices());
+  await act(() => result.current.refresh());
   expect(result.current.error).toMatch(/runtime configuration changed/);
   expect(result.current.selectionValid(selected)).toBe(false);
   expect(result.current.selectionFor(choice)).toBeNull();

@@ -2,10 +2,12 @@
 mod created_models;
 mod events;
 mod managed;
+mod remote_api;
+mod remote_events;
 mod responses;
 mod transport;
 
-pub use managed::ManagedOptions;
+pub use managed::{ManagedLaunchError, ManagedOptions};
 use serde_json::{Value, json};
 use std::{
   collections::BTreeMap,
@@ -78,6 +80,7 @@ impl ApiProxyConfig {
 struct StreamState {
   pending: BTreeMap<String, PendingInteraction>,
   sessions: BTreeMap<String, SessionState>,
+  remote_model_selections: BTreeMap<String, (i64, Option<ModelIdentity>)>,
   model_observations: BTreeMap<String, u64>,
 }
 
@@ -208,31 +211,66 @@ impl DshAdapter {
   /// Start a fresh native Web profile on an OS-assigned loopback port. Readiness
   /// comes only from this owned child's native URL line, never port probing.
   pub async fn launch(options: ManagedOptions) -> Result<Self, InteractionError> {
+    Self::launch_with_cleanup(options)
+      .await
+      .map_err(|failure| failure.error)
+  }
+
+  /// Like launch, retaining proof that a failed startup's exact child was reaped.
+  pub async fn launch_with_cleanup(options: ManagedOptions) -> Result<Self, ManagedLaunchError> {
     let mut launch = managed::Launch::start(&options).await?;
     let mut config = ApiProxyConfig::new(launch.endpoint.clone());
     config.runtime_id = options.runtime_id.clone();
     config.request_timeout = options.request_timeout;
     config.connect_timeout = options.connect_timeout;
-    let adapter = Self::connect(config, Ownership::Managed).await?;
+    let adapter = match Self::connect_with_launch_token(config, Ownership::Managed, launch.launch_token.take()).await {
+      Ok(adapter) => adapter,
+      Err(error) => return Err(launch.failed(error, options.shutdown_timeout).await),
+    };
     let runtime = launch.supervise(adapter.inner.clone(), options.shutdown_timeout);
     *adapter.inner.managed.lock().expect("DSH managed lock") = Some(runtime);
     Ok(adapter)
   }
 
   async fn connect(config: ApiProxyConfig, ownership: Ownership) -> Result<Self, InteractionError> {
+    Self::connect_with_launch_token(config, ownership, None).await
+  }
+
+  async fn connect_with_launch_token(
+    config: ApiProxyConfig,
+    ownership: Ownership,
+    launch_token: Option<String>,
+  ) -> Result<Self, InteractionError> {
     if config.runtime_id.trim().is_empty() {
       return Err(InteractionError::invalid("DSH runtime_id is required"));
     }
     let max_frame_bytes = config.max_frame_bytes;
     let heartbeat_interval = config.heartbeat_interval;
     let heartbeat_timeout = config.heartbeat_timeout;
+    let connect_timeout = config.connect_timeout;
     let runtime_id = config.runtime_id.clone();
-    let transport = Transport::new(config)?;
-    let mux = transport.stream("api/events.mux").await?;
-    let host = transport.stream("api/events.host").await?;
-    let _: api::HostDescription = transport
-      .call(&uuid::Uuid::new_v4().to_string(), "host.describe", json!({}), false)
-      .await?;
+    let transport = match launch_token {
+      Some(token) => Transport::authenticated(config, token).await?,
+      None => Transport::new(config)?,
+    };
+    enum Connection {
+      ApiProxy(transport::Downlink, transport::Downlink),
+      Remote(remote_events::Prepared),
+    }
+    let connection = match transport.generation() {
+      transport::Generation::ApiProxy => {
+        let mux = transport.stream("api/events.mux").await?;
+        let host = transport.stream("api/events.host").await?;
+        let _: api::HostDescription = transport
+          .call(&uuid::Uuid::new_v4().to_string(), "host.describe", json!({}), false)
+          .await?;
+        Connection::ApiProxy(mux, host)
+      }
+      transport::Generation::Remote => {
+        let stream = transport.stream("api/remote.mux").await?;
+        Connection::Remote(remote_events::prepare(stream, max_frame_bytes, connect_timeout).await?)
+      }
+    };
     let (events, _) = broadcast::channel(256);
     let (shutdown, _) = watch::channel(false);
     let mut capabilities = Capabilities::default()
@@ -248,6 +286,12 @@ impl DshAdapter {
       Operation::Steer,
       Capability::unavailable("native steer also starts idle agents; use start_or_steer"),
     );
+    if transport.generation() == transport::Generation::Remote {
+      capabilities.operations.insert(
+        Operation::Respond,
+        Capability::unavailable("Answer DSH Remote questions and permissions in the native client"),
+      );
+    }
     let inner = Arc::new(Inner {
       descriptor: RuntimeDescriptor {
         runtime_id,
@@ -268,22 +312,30 @@ impl DshAdapter {
       managed: StdMutex::new(None),
       created: Mutex::new(BTreeMap::new()),
     });
-    let tasks = vec![
-      events::spawn(
+    let tasks = match connection {
+      Connection::ApiProxy(mux, host) => vec![
+        events::spawn(
+          inner.clone(),
+          mux,
+          max_frame_bytes,
+          heartbeat_interval,
+          heartbeat_timeout,
+        ),
+        events::spawn(
+          inner.clone(),
+          host,
+          max_frame_bytes,
+          heartbeat_interval,
+          heartbeat_timeout,
+        ),
+      ],
+      Connection::Remote(prepared) => vec![remote_events::spawn(
         inner.clone(),
-        mux,
-        max_frame_bytes,
+        prepared,
         heartbeat_interval,
         heartbeat_timeout,
-      ),
-      events::spawn(
-        inner.clone(),
-        host,
-        max_frame_bytes,
-        heartbeat_interval,
-        heartbeat_timeout,
-      ),
-    ];
+      )],
+    };
     inner.tasks.lock().expect("DSH task lock").extend(tasks);
     Ok(Self { inner })
   }
@@ -320,6 +372,16 @@ impl DshAdapter {
     let session_id = request.target.session_id.as_deref();
     match request.command {
       Command::Metadata => {
+        if inner.transport.generation() == transport::Generation::Remote {
+          return Ok(Reply::Metadata(Metadata {
+            name: Some("DeepSeek Harness Remote".into()),
+            version: None,
+            model: None,
+            commands: Vec::new(),
+            agents: Vec::new(),
+            providers: Vec::new(),
+          }));
+        }
         let host: api::HostDescription = inner.transport.call(rpc_id, "host.describe", json!({}), false).await?;
         Ok(Reply::Metadata(Metadata {
           name: Some("DeepSeek Harness ApiProxy".into()),
@@ -352,7 +414,24 @@ impl DshAdapter {
           } else {
             ExecutionState::Idle
           },
-          model: cached.as_ref().and_then(|state| state.model.clone()),
+          model: cached.as_ref().and_then(|state| state.model.clone()).or_else(|| {
+            if inner.transport.generation() != transport::Generation::Remote
+              || found.extra.get("projections")?.get("kind")?.as_str()? != "sequenced"
+            {
+              return None;
+            }
+            let selection = found.extra.get("projections")?.get("values")?.get("modelSelection")?;
+            let current = selection
+              .get("lastUsed")
+              .filter(|value| !value.is_null())
+              .or_else(|| selection.get("next").filter(|value| !value.is_null()))?;
+            let selected: api::ModelSelection = serde_json::from_value(current.clone()).ok()?;
+            Some(ModelIdentity {
+              model_provider: Some(selected.provider),
+              model_id: selected.model,
+              display_name: None,
+            })
+          }),
           pending_inputs: cached.as_ref().and_then(|state| state.pending_inputs),
           revision: None,
         };
@@ -469,7 +548,14 @@ impl DshAdapter {
       Command::Respond {
         interaction_id,
         response,
-      } => inner.respond(session_id, &interaction_id, response).await,
+      } => {
+        if inner.transport.generation() == transport::Generation::Remote {
+          return Err(InteractionError::unsupported(
+            "Answer DSH Remote questions and permissions in the native client",
+          ));
+        }
+        inner.respond(session_id, &interaction_id, response).await
+      }
     }
   }
 }
@@ -525,16 +611,18 @@ impl InteractionAdapter for DshAdapter {
     Box::pin(async move {
       self.inner.closed.store(true, Ordering::Release);
       let _ = self.inner.shutdown.send(true);
-      let managed = self.inner.managed.lock().expect("DSH managed lock").take();
-      let result = match managed {
-        Some(managed) => managed.close().await,
-        None => Ok(()),
-      };
+      // Release client sockets before signaling the server. Native disposal can
+      // wait for those same connections; retaining them adds shutdown latency.
       let tasks = std::mem::take(&mut *self.inner.tasks.lock().expect("DSH task lock"));
       for task in tasks {
         task.abort();
         let _ = task.await;
       }
+      let managed = self.inner.managed.lock().expect("DSH managed lock").take();
+      let result = match managed {
+        Some(managed) => managed.close().await,
+        None => Ok(()),
+      };
       result
     })
   }

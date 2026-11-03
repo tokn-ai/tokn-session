@@ -161,6 +161,36 @@ fn explicit_node_launchers_pin_the_package_entrypoint_installation() {
 }
 
 #[tokio::test]
+async fn cleaned_dsh_startup_failure_releases_profile_and_installation_for_retry() {
+  let directory = tempfile::tempdir().unwrap();
+  let root = directory.path().join("runtimes");
+  let manager = RpcRuntimeManager::new(
+    Some(directory.path().join("viewer/rpc-runtimes.json")),
+    InteractionService::default(),
+  );
+  let project = tempfile::tempdir().unwrap();
+  // Deliberately invalid native binary: spawn must fail before acquiring a Child.
+  let (_, generation) = managed_installation(&root, Provider::Dsh, "dsh");
+  install_environment(&manager, directory.path());
+  for _ in 0..2 {
+    let error = manager
+      .creation_models(Provider::Dsh, project.path().into(), None)
+      .await
+      .unwrap_err();
+    assert!(!error.message.contains("reserved"));
+    assert!(manager.inventory().runtimes.is_empty());
+  }
+  crate::runtime_install::RuntimeInstallManager::new(root)
+    .remove(crate::runtime_install::RuntimeInstallRemoveRequest {
+      provider: Provider::Dsh,
+      generation,
+    })
+    .await
+    .unwrap();
+  manager.shutdown().await;
+}
+
+#[tokio::test]
 async fn all_shared_providers_discover_the_same_plan_for_availability_catalog_and_startup_policy() {
   let manager = manager();
   let bin = tempfile::tempdir().unwrap();

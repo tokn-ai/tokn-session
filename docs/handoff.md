@@ -58,10 +58,18 @@ worktree groups); changing its folder moves the row. Time view retains project
 labels, and drafts awaiting a folder remain separately accessible. No
 native session or upload starts until the first Send. Opening a draft model
 picker can briefly start a metadata RPC process; it never creates or resumes a
-saved conversation. Pi, Codex, OpenCode and DSH choices remain local to each draft,
+saved conversation. Reopening reuses the same draft's scoped catalog; explicit
+Refresh reloads it, and first Send still validates it on the host.
+Pi, Codex, OpenCode and DSH choices remain local to each draft,
 reset with project/provider/runtime changes, and are revalidated and applied
-before its first prompt. DSH lazily reads the host runtime's `llm.models`
-catalog. First Send records the new native identity, applies a chosen model
+before its first prompt. DSH lazily reads the host runtime's catalog through
+legacy `llm.models` or current `session/modelCatalog`. Managed DSH 0.2 exchanges
+its owned readiness token for an in-memory cookie and uses the authenticated
+Remote mux/API; legacy ApiProxy remains supported. Current Remote callbacks
+delegate to native clients and do not advertise viewer answer support.
+Failed DSH startups release reservations only after explicitly reaping their
+original child; unknown cleanup still reserves the profile until host shutdown.
+First Send records the new native identity, applies a chosen model
 once to that idle blank session, and verifies it before delivering the prompt.
 History publication waits for preparation; Stop immediately fences the first
 prompt while already admitted native calls drain.
@@ -152,7 +160,8 @@ Live interaction now has nine Rust crates: a provider-independent
 adapters. The core owns instance-bound dispatch, capabilities, live pending
 interactions, cancellation-safe admissions, and bounded receipts; protocol and
 core crates do not import providers. Codex uses app-server stdio/WS(S), Pi uses
-stdio, OpenCode V2 HTTP/SSE, and DSH ApiProxy HTTP with two WebSocket downlinks.
+stdio, OpenCode V2 HTTP/SSE, and DSH HTTP with legacy ApiProxy downlinks or the
+authenticated Remote WebSocket mux.
 Each adapter supports owned
 launch and explicit attachment (Pi requires supplied IO); attached close never
 stops an external process. Native start-or-steer/queue admission is separate

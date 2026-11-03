@@ -36,9 +36,13 @@ prompt or model-setting call is made during discovery.
 Codex, OpenCode and DSH choices stay in the draft until Send, reset when the
 project/provider/runtime changes, and determine image compatibility. A refreshed
 runtime plan also clears the model choice while preserving text/images. DSH
-reads the host runtime's catalog through `llm.models`. After native creation
-is durably recorded, its separate model-selection call runs once for that new
-idle blank session; `session.models` confirms the selected model before input.
+reads the host runtime's catalog through `llm.models` or current
+`session/modelCatalog`. After native creation is durably recorded, its separate
+model-selection call runs once for that new idle blank session. Legacy
+`session.models` or Remote's authoritative sequenced `session/projections`
+confirms the selected model before input; cached migration hints are insufficient.
+A newer conflicting observed selection rejects input instead of replacing that
+native state with an older confirmation.
 Selecting a draft choice makes no native mutation. On first Send, DSH and Pi
 also update the host's default for future sessions, as disclosed by the picker.
 The host verifies the complete plan before and after catalog discovery, again before admission,

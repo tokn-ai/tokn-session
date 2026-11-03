@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useEffect, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CreateProjectSessionRequest, ManagedSessionSnapshot, RegisteredProject, RpcProvider, SessionCreationOptions, SessionSummary } from "../lib/types";
+import type { CreateProjectSessionRequest, ManagedSessionSnapshot, RegisteredProject, RpcProvider, SessionCreationModels, SessionCreationOptions, SessionSummary } from "../lib/types";
 import { useSessionDrafts, type SessionDraft } from "../lib/useSessionDrafts";
 import type { CommandInvoker, EventSubscriber } from "../lib/transport";
 import { listSessionCreationModels } from "../lib/tauri";
@@ -186,9 +186,10 @@ describe("draft conversation", () => {
     expect(input.on_send).toHaveBeenCalledOnce();
   });
 
-  it("refreshes a reopened catalog and lets the same model be selected with its new proof", async () => {
+  it("reuses a reopened catalog and explicitly refreshes its model proof", async () => {
     const chosen = { model: { model_provider: "provider", model_id: "chosen", display_name: "Chosen" }, supports_images: true };
     const load = vi.fn().mockResolvedValueOnce({ models: [chosen], catalog_revision: "first", runtime_profile_id: null, runtime_revision: null, reason: null })
+      .mockRejectedValueOnce(new Error("Catalog unavailable"))
       .mockResolvedValueOnce({ models: [chosen], catalog_revision: "second", runtime_profile_id: null, runtime_revision: null, reason: null });
     const input = props({ on_load_models: load });
     function Stateful() {
@@ -200,12 +201,47 @@ describe("draft conversation", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Chosen provider/ }));
     fireEvent.click(screen.getByRole("button", { name: "Close model selection" }));
     fireEvent.click(screen.getByRole("button", { name: /Model: Chosen/ }));
-    await screen.findByText(/The model catalog changed/);
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh models" }));
+    await screen.findByText("Catalog unavailable");
     expect(load).toHaveBeenCalledTimes(2);
+    fireEvent.click(screen.getByRole("button", { name: "Retry models" }));
+    await screen.findByText(/The model catalog changed/);
+    expect(load).toHaveBeenCalledTimes(3);
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: /Chosen provider/ }));
     expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
     expect(screen.queryByText(/The model catalog changed/)).not.toBeInTheDocument();
+    expect(input.on_send).not.toHaveBeenCalled();
+  });
+
+  it("keeps an open catalog request through an unchanged configuration refresh", async () => {
+    const chosen = { model: { model_provider: "provider", model_id: "chosen", display_name: "Chosen" }, supports_images: true };
+    const pending_models = deferred<SessionCreationModels>();
+    const pending_options = deferred<SessionCreationOptions>();
+    const load_models = vi.fn(() => pending_models.promise);
+    const configured = options();
+    configured.providers[1] = { ...configured.providers[1], runtime_plan_id: "codex-plan" };
+    const input = props({ on_load_models: load_models });
+    function Stateful({ load_options }: { load_options: DraftConversationProps["on_load_options"] }) {
+      const [value, setValue] = useState(draft({ prompt: "Keep this task", selection: { provider: "codex" } }));
+      return <DraftConversation {...input} draft={value} on_load_options={load_options}
+        on_change={(patch) => setValue((previous) => ({ ...previous, ...patch }))} />;
+    }
+    const view = render(<Stateful load_options={async () => configured} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Model: Runtime default/ }));
+    await screen.findByText("Loading available models…");
+    view.rerender(<Stateful load_options={() => pending_options.promise} />);
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    await act(async () => pending_options.resolve(configured));
+    expect(load_models).toHaveBeenCalledTimes(1);
+    await act(async () => pending_models.resolve({ models: [chosen], catalog_revision: "catalog", runtime_profile_id: "local",
+      runtime_revision: 3, runtime_plan_id: "codex-plan", reason: null }));
+    fireEvent.click(await screen.findByRole("button", { name: /Chosen provider/ }));
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+    expect(screen.getByRole("textbox", { name: "First message" })).toHaveValue("Keep this task");
+    expect(load_models).toHaveBeenCalledExactlyOnceWith({ project_id: "repo", provider: "codex", runtime_plan_id: "codex-plan" });
     expect(input.on_send).not.toHaveBeenCalled();
   });
 

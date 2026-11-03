@@ -130,6 +130,7 @@ pub struct RpcResolvedProfile {
 #[derive(Clone)]
 pub(crate) struct RpcInstallationPin {
   pub root: PathBuf,
+  pub version: String,
   pub generation: String,
 }
 
