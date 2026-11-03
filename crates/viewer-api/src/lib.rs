@@ -158,6 +158,10 @@ async fn command(
       | "list_rpc_runtimes"
       | "start_rpc_runtime"
       | "close_rpc_runtime"
+      | "get_agent_installations"
+      | "start_agent_installation"
+      | "cancel_agent_installation"
+      | "remove_agent_installation"
   ) {
     let _permit = permit;
     let request = payload.get("request").cloned().unwrap_or_else(|| json!({}));
@@ -197,6 +201,16 @@ async fn command(
       ),
       "start_rpc_runtime" => rpc_call!(start_rpc_runtime),
       "close_rpc_runtime" => rpc_call!(close_rpc_runtime),
+      "get_agent_installations" => serde_json::to_value(
+        state
+          .service
+          .get_agent_installations()
+          .await
+          .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
+      ),
+      "start_agent_installation" => rpc_call!(start_agent_installation),
+      "cancel_agent_installation" => rpc_call!(cancel_agent_installation),
+      "remove_agent_installation" => rpc_call!(remove_agent_installation),
       "get_session_model_status" => {
         let request = serde_json::from_value(request).map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
         serde_json::to_value(
@@ -509,6 +523,10 @@ mod tests {
       "list_rpc_runtimes",
       "start_rpc_runtime",
       "close_rpc_runtime",
+      "get_agent_installations",
+      "start_agent_installation",
+      "cancel_agent_installation",
+      "remove_agent_installation",
     ] {
       let response = app.clone().oneshot(request(command, json!({}), false)).await.unwrap();
       assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{command}");
@@ -564,6 +582,60 @@ mod tests {
         .unwrap()
         .contains("private-runtime-credential")
     );
+  }
+
+  #[tokio::test]
+  async fn installation_routes_use_host_service_and_reject_invalid_actions_before_download() {
+    let directory = tempfile::tempdir().unwrap();
+    let service = ViewerService::native(directory.path().join("index.sqlite")).unwrap();
+    let (events, _) = broadcast::channel(16);
+    let app = router(
+      service,
+      events,
+      Some("admin-token".into()),
+      vec![],
+      CancellationToken::new(),
+    );
+    let request = |command: &str, payload: Value| {
+      Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/v1/{command}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer admin-token")
+        .body(Body::from(payload.to_string()))
+        .unwrap()
+    };
+    let response = app
+      .clone()
+      .oneshot(request("get_agent_installations", json!({})))
+      .await
+      .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let inventory: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(inventory["agents"].as_array().unwrap().len(), 4);
+    assert!(
+      inventory["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["version"].is_null())
+    );
+    for (command, payload) in [
+      (
+        "start_agent_installation",
+        json!({"request":{"request_id":"invalid", "provider":"pi"}}),
+      ),
+      ("cancel_agent_installation", json!({"request":{"job_id":"invalid"}})),
+      (
+        "remove_agent_installation",
+        json!({"request":{"provider":"pi", "generation":"stale"}}),
+      ),
+    ] {
+      let response = app.clone().oneshot(request(command, payload)).await.unwrap();
+      assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{command}");
+    }
+    assert!(!directory.path().join("runtimes/pi").exists());
   }
 
   #[tokio::test]

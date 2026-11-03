@@ -1,6 +1,25 @@
 # tokn-dsh-adapter
 
-Rust `InteractionAdapter` for DeepSeek Harness ApiProxy endpoints.
+Rust `InteractionAdapter` for DeepSeek Harness ApiProxy and managed Remote endpoints.
+
+Managed DSH 0.2 uses its authenticated readiness URL. The adapter validates the
+owned loopback address, exchanges the launch token at `/connect` without following
+redirects or using a proxy, and retains only an in-memory cookie for HTTP and
+`remote.mux`. The published `@deepseek-ai/dsh` 0.2.1-rc.5 generated Remote contracts
+define slash-separated methods with named `args`, `session/modelCatalog`, and
+sequenced session projections. Prompt requests carry the input receipt's
+`requestId`. Creation-only model preparation verifies the durable pending
+selection on the same blank idle session before its first prompt. The mux tracks
+control projections and native notifications with bounded sequence/replay guards.
+Remote question/permission waterfalls delegate to native clients; viewer replies
+remain unavailable on this generation. Legacy ApiProxy callbacks remain supported.
+
+`launch_with_cleanup` retains failure cleanup proof only after the exact owned
+child is reaped. Downlinks close before stopping the child. A factory can release
+its profile/installation reservation on proven cleanup; dropping a child or
+sending a signal alone is not proof. The details below describe legacy ApiProxy
+wire behavior where the generations differ.
+
 `DshAdapter::attach(ApiProxyConfig::new(endpoint)).await` opens native mux and
 host WebSocket downlinks and verifies `host.describe` over HTTP. Ordinary network
 GETs to these downlinks return 426; upstream's SSE codec is only an in-process
@@ -19,17 +38,39 @@ SIGTERM on Unix so native disposal can finish, then escalates after the configur
 grace period and waits for exit. Other platforms kill/reap the owned child.
 Dropping the adapter requests the same bounded owned-process cleanup.
 
+Current Web profiles announce a process-token URL. The owned launcher keeps its
+clean loopback endpoint separate, exchanges the token for an API operator cookie,
+and never includes either credential in runtime metadata or errors. Set
+`ManagedOptions::prevent_browser` only for a verified current native version to
+pass `--no-open`; it defaults off because older ApiProxy profiles reject that
+flag and do not open a browser. Failed launches expose explicit cleanup proof
+only after the original child has been reaped.
+
 `create_session` creates a real idle agent using a host-preallocated native ID
 (`new_session_id`) and explicit project cwd. Omitting `agent_preset` preserves
 the host's effective default. The adapter verifies the response identity/preset
 and checks cwd with non-activating `session.list`; native creation returns no
 history path. It sends no prompt and never retries an uncertain creation.
 
+`prepare_created_model` applies an explicit provider/model choice once, after
+the host has durably recorded a created session and before its first prompt.
+Only identities created through this adapter and verified blank/idle qualify.
+It rechecks `llm.models`, invokes native `session.selectModel`, and confirms the
+session's selected route with `session.models`. These wire contracts are verified
+against the pinned upstream
+[schemas](https://github.com/deepseek-ai/deepseek-harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/host/apiproxy/src/api/sessions.schema.ts).
+The native setter also updates DSH's default for later new sessions. Retained
+preparation results prevent repeated setters after rejection, uncertain replies,
+or caller cancellation. A pending preparation rejects prompt admission; ordinary
+later user input remains available after a completed failure.
+
 Metadata uses `host.describe`, state uses `session.list`, and models use the
-session-independent `llm.models` directory. These queries never call
-`session.models`, which can resume cold native Agents. Session models are known
-only after live request-header/context observations; host defaults are not
-presented as a session's current model. Catalog image capability is unknown and
+session-independent `llm.models` directory. These inspection queries never call
+`session.models`, which can resume cold native Agents. Creation-only model
+preparation uses that read for its already created session and retains the
+verified result as a state baseline; later live request-header/context
+observations take priority. Host defaults are not presented as a session's
+current model. Catalog image capability is unknown and
 therefore conservatively false. `model_catalog` exposes the native directory,
 including per-provider failures and unknown fields.
 
@@ -37,9 +78,9 @@ including per-provider failures and unknown fields.
 native `queue`. The response confirms admission, without guessing whether it
 started or steered a turn. Strict `Start` and strict `Steer` reject because the
 native endpoint cannot atomically enforce their runtime-state preconditions.
-Model intent on Send also rejects: native `selectModel` is a separate mutation
+Model intent on ordinary session Send also rejects: native `selectModel` is a separate mutation
 that can affect an active turn and deployment defaults. No model setter is
-called implicitly. Native cancellation preserves pending inbox messages, so
+called by ordinary message admission. Native cancellation preserves pending inbox messages, so
 `CancelTurn` does not mean stopping a worker or clearing its queue.
 
 Questions and one-shot permissions come from native pending-request frames.

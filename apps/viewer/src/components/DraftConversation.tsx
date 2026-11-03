@@ -68,8 +68,10 @@ export function DraftConversation({ draft, projects, workspace_available, worksp
   const unavailable_projects = projects.filter((entry) => !entry.available);
 
   useEffect(() => {
-    setOptions(null); setOptionsError(null);
-    if (!workspace_available || !project?.available) { setOptionsLoading(false); return; }
+    setOptionsError(null);
+    // Keep the last same-project scope during a configuration check. A focus
+    // refresh must not retire a catalog unless its resolved runtime changes.
+    if (!workspace_available || !project?.available) { setOptions(null); setOptionsLoading(false); return; }
     let cancelled = false;
     setOptionsLoading(true);
     void Promise.resolve().then(() => on_load_options(draft.project_id)).then((result) => {

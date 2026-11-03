@@ -698,6 +698,7 @@ for line in sys.stdin:
     options,
     LaunchOptions {
       executable,
+      launcher_args: Vec::new(),
       working_directory: directory.path().to_owned(),
       arguments: vec![],
       environment: BTreeMap::new(),

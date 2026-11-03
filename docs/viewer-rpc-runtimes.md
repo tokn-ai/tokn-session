@@ -6,6 +6,48 @@ inventories the local desktop's reader, hosting, and existing Pi workers.
 Opening settings, inspecting profiles, and validating configuration never launch
 an agent, resume history, or send a prompt.
 
+## Agent downloads
+
+The **Agent downloads** section manages software on the selected machine, for
+both the local desktop and encrypted remote connections. **Download** installs
+the latest supported upstream release; **Update** replaces the single installed
+copy. There is no automatic download on startup or Send, version picker, global
+package installation, or PATH modification. **Remove** removes only Tokn's copy,
+leaving agent authentication, configuration, and saved conversations in their
+provider-native locations.
+
+Installations live under `~/.tokn/sessions/runtimes/{provider}` (beside a custom
+index when configured). Pi and DSH use the selected host's existing Node/npm
+with a private local dependency tree. Node is a host prerequisite; Tokn does not
+download it. Codex and OpenCode use official native release artifacts for the
+host platform. Unsupported targets or missing prerequisites show an explanation.
+Node/npm must be discoverable on the host's PATH with a standard `npm-cli.js`
+layout; opaque version-manager shims currently require an existing runtime profile.
+Pi/DSH downloads currently require a macOS or Linux host so installer process
+trees can be stopped safely. Windows hosts can use existing runtime profiles;
+native Codex/OpenCode downloads are supported there.
+
+Downloads run as host jobs with progress, cancellation, and retry. Navigating
+away does not cancel a job; reconnecting reloads its current status. Staged
+installation and verification precede replacement, preserving the installed
+copy if an update fails. Cross-process installation/use locks prevent updates
+or removal while Tokn runtimes are using that copy. Stop them first. Startup
+or cleanup failures that leave process ownership uncertain retain the use lock
+until the host service restarts. Explicit profiles and executable overrides
+retain priority; otherwise discovery prefers
+Tokn's installation before searching PATH. New Pi workers see changes without
+an application restart; existing workers keep their original launch configuration.
+
+Async desktop/HTTP commands `get_agent_installations`,
+`start_agent_installation`, `cancel_agent_installation`, and
+`remove_agent_installation` share Rust DTOs with the frontend. Install requests
+carry UUID admission IDs, and removal carries the observed installation
+generation. `agent-installations-changed` invalidates the compact inventory;
+successful changes also invalidate runtime availability and draft model plans.
+Remote downloads happen directly on the selected host and use the same paired
+control plus host-owned **Remote runtime management** permission as profiles.
+Session shares and legacy grants cannot download or remove host software.
+
 ## Profiles and storage
 
 Profiles support managed Codex/Pi/OpenCode/DSH processes, attached Codex WS(S),
@@ -13,7 +55,9 @@ OpenCode V2 HTTP/SSE, and DSH HTTP/WebSocket servers. Pi attachment needs explic
 IO handles and is not available through profiles. Managed profiles require an
 absolute executable and working folder; attached OpenCode also requires its
 native working folder. Endpoint URLs exclude embedded credentials, queries,
-and fragments. OpenCode/DSH managed launch arguments are fixed by their adapters.
+and fragments. OpenCode managed launch arguments are fixed by its adapter.
+DSH accepts launcher arguments before its fixed RPC options, including a local
+JavaScript entrypoint when launched with the host's Node executable.
 
 Native storage defaults to `~/.tokn/sessions/viewer/rpc-runtimes.json`, beside
 the configured viewer index, with private permissions, bounded size, atomic
@@ -43,7 +87,7 @@ canonical paths and executable metadata without launching agents; native
 compatibility is checked on connection. Discovered configurations are scoped to
 their project and pin executable metadata, so a replaced binary requires fresh
 resolution. The bounded transient inventory is not a saved-profile registry.
-Pi creation uses `TOKN_SESSION_PI_EXECUTABLE`/`PATH` through its existing worker,
+Pi creation uses `TOKN_SESSION_PI_EXECUTABLE`, a Tokn installation, or `PATH` through its existing worker,
 represented by the same plan contract; selecting a saved Pi profile for a draft
 is not supported yet.
 
@@ -55,6 +99,29 @@ configuration fence, not an authorization token. RPC creation receipts retain
 the exact plan; retrying an existing request does not resolve a different default.
 Existing-session activation combines a pinned plan with host-verified native
 history. Executable paths, environment values and credentials remain host-side.
+
+DSH draft pickers query the selected runtime's session-independent `llm.models`
+directory (ApiProxy) or `session/modelCatalog` (Remote). Managed DSH inherits the host environment and uses its native `web`
+profile; attached runtimes use their own configuration. Tokn does not copy model
+settings into its installation directory. Catalog inspection may briefly launch
+a metadata process, but never creates or resumes a saved conversation. DSH
+choices remain local until first Send, which records the native identity before
+applying the chosen model once and verifying the result on the new idle blank
+session. DSH's native selection also saves the host default for future sessions;
+the picker discloses this effect through `updates_default`, as it does for Pi.
+Choosing **Runtime default** omits selection entirely. Empty catalogs remain distinct from
+provider/runtime failures, which show an error and allow retry. Reopening a
+draft picker reuses its successful catalog within the same project/runtime scope;
+**Refresh models** forces discovery. Configuration checks preserve an in-flight
+read when that scope remains unchanged. First Send revalidates the catalog.
+Other providers
+retain their existing model-selection behavior.
+
+Managed DSH 0.2 uses its owned startup token only to obtain a bounded in-memory
+cookie for HTTP and `remote.mux`. Tokens never enter saved profiles or public
+errors. Known 0.2 installations suppress the native browser launcher. An explicit
+cleanup proof releases a failed startup's profile and installation locks; unknown
+cleanup retains them, and restarting the host clears old reservations.
 
 Reads expose environment variable names and credential kinds, never their
 values. Writes can retain, replace, or clear saved environment/authentication.

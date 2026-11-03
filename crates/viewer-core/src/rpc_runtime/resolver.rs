@@ -11,6 +11,7 @@ pub(super) struct RuntimeResolver {
   pub profiles: Arc<RpcProfileStore>,
   pub transient_profiles: Arc<Mutex<BTreeMap<String, RpcResolvedProfile>>>,
   pub discovery_environment: Arc<Mutex<Option<discovery::DiscoveryEnvironment>>>,
+  pub installation_root: Option<PathBuf>,
 }
 
 impl RuntimeResolver {
@@ -32,7 +33,7 @@ impl RuntimeResolver {
     } else {
       let saved = self.profiles.snapshot()?;
       if let Some(profile) = select_profile(&saved, provider, &canonical_cwd)? {
-        self.profiles.resolve_at_revision(&profile.profile_id, saved.revision)?
+        self.resolve_profile(&profile.profile_id, saved.revision)?
       } else {
         let environment = self
           .discovery_environment
@@ -40,7 +41,12 @@ impl RuntimeResolver {
           .unwrap_or_else(|error| error.into_inner())
           .clone()
           .unwrap_or_else(discovery::DiscoveryEnvironment::current);
-        let profile = discovery::builtin_profile(provider, &canonical_cwd, &environment)?;
+        let profile = discovery::builtin_profile(
+          provider,
+          &canonical_cwd,
+          &environment,
+          self.installation_root.as_deref(),
+        )?;
         self.pin_builtin_profile(profile.clone())?;
         profile
       }
@@ -66,6 +72,7 @@ impl RuntimeResolver {
       configuration: RuntimeConfigurationIdentity {
         id: profile.profile.profile_id,
         revision: profile.revision,
+        generation: profile.installation.as_ref().map(|pin| pin.generation.clone()),
       },
       ownership: match profile.profile.mode {
         RpcRuntimeMode::Managed => Ownership::Managed,
@@ -97,7 +104,18 @@ impl RuntimeResolver {
       discovery::validate_builtin(&profile)?;
       return Ok(profile);
     }
-    self.profiles.resolve_at_revision(id, revision)
+    let mut profile = self.profiles.resolve_at_revision(id, revision)?;
+    if profile.profile.mode == RpcRuntimeMode::Managed {
+      if let (Some(root), Some(executable)) = (&self.installation_root, &profile.profile.executable) {
+        profile.installation = discovery::installation_pin(
+          root,
+          profile.profile.provider,
+          Path::new(executable),
+          &profile.profile.arguments,
+        )?;
+      }
+    }
+    Ok(profile)
   }
 
   pub fn is_discovered(&self, id: &str) -> bool {

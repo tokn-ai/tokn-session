@@ -1,6 +1,8 @@
 use super::*;
 use std::sync::atomic::AtomicUsize;
 use tokio::sync::oneshot;
+mod preparation;
+mod startup;
 
 fn test_model() -> ModelIdentity {
   ModelIdentity {
@@ -373,6 +375,7 @@ struct FakeHostState {
   adapter: Mutex<Option<Arc<FakeAdapter>>>,
   open_wait: Mutex<Option<oneshot::Receiver<()>>>,
   open_started: Notify,
+  open_failure: Mutex<Option<RuntimeOpenError>>,
 }
 
 impl RuntimeHost for FakeHost {
@@ -454,6 +457,13 @@ impl RuntimeHost for FakeHost {
         events: broadcast::channel(8).0,
         creates: AtomicUsize::new(0),
         created_models: Mutex::new(Vec::new()),
+        prepared_models: Mutex::new(Vec::new()),
+        prepare_error: Mutex::new(None),
+        prepare_wait: Mutex::new(None),
+        prepare_started: Notify::new(),
+        preflight_wait: Mutex::new(None),
+        preflight_started: Notify::new(),
+        running: AtomicBool::new(false),
         model_queries: AtomicUsize::new(0),
         fail_models: AtomicBool::new(false),
         fail_close: AtomicBool::new(self.shared.fail_close.load(Ordering::SeqCst)),
@@ -470,6 +480,24 @@ impl RuntimeHost for FakeHost {
 
   fn redact_error(&self, _error: &str, _profile: &Self::Profile) -> String {
     "The host rejected this connection".into()
+  }
+
+  fn open_with_cleanup<'a>(
+    &'a self,
+    runtime_id: &'a str,
+    profile: &'a Self::Profile,
+  ) -> AdapterFuture<'a, Result<Arc<dyn RuntimeHandle>, RuntimeOpenError>> {
+    Box::pin(async move {
+      let failure = self.shared.open_failure.lock().unwrap().take();
+      if let Some(failure) = failure {
+        self.shared.opens.fetch_add(1, Ordering::SeqCst);
+        return Err(failure);
+      }
+      self
+        .open(runtime_id, profile)
+        .await
+        .map_err(RuntimeOpenError::unconfirmed)
+    })
   }
 }
 
@@ -506,6 +534,22 @@ impl RuntimeHandle for FakeHandle {
       })
     })
   }
+
+  fn prepare_created_model<'a>(
+    &'a self,
+    _native_id: &'a str,
+    model: &'a ModelIdentity,
+  ) -> AdapterFuture<'a, Result<(), InteractionError>> {
+    Box::pin(async move {
+      self.0.prepared_models.lock().unwrap().push(model.clone());
+      self.0.prepare_started.notify_one();
+      let wait = self.0.prepare_wait.lock().unwrap().take();
+      if let Some(wait) = wait {
+        let _ = wait.await;
+      }
+      self.0.prepare_error.lock().unwrap().clone().map_or(Ok(()), Err)
+    })
+  }
 }
 
 struct FakeAdapter {
@@ -513,6 +557,13 @@ struct FakeAdapter {
   events: broadcast::Sender<RuntimeEvent>,
   creates: AtomicUsize,
   created_models: Mutex<Vec<Option<ModelIdentity>>>,
+  prepared_models: Mutex<Vec<ModelIdentity>>,
+  prepare_error: Mutex<Option<InteractionError>>,
+  prepare_wait: Mutex<Option<oneshot::Receiver<()>>>,
+  prepare_started: Notify,
+  preflight_wait: Mutex<Option<(Operation, oneshot::Receiver<()>)>>,
+  preflight_started: Notify,
+  running: AtomicBool,
   model_queries: AtomicUsize,
   fail_models: AtomicBool,
   fail_close: AtomicBool,
@@ -530,6 +581,21 @@ impl InteractionAdapter for FakeAdapter {
 
   fn execute(&self, request: InteractionRequest) -> AdapterFuture<'_, Result<Reply, InteractionError>> {
     Box::pin(async move {
+      let wait = {
+        let mut wait = self.preflight_wait.lock().unwrap();
+        if wait
+          .as_ref()
+          .is_some_and(|(operation, _)| *operation == request.command.operation())
+        {
+          wait.take().map(|(_, wait)| wait)
+        } else {
+          None
+        }
+      };
+      if let Some(wait) = wait {
+        self.preflight_started.notify_one();
+        let _ = wait.await;
+      }
       if matches!(request.command, Command::State) && self.unavailable_state.load(Ordering::SeqCst) {
         return Err(InteractionError::unavailable("Native state recovery failed"));
       }
@@ -551,7 +617,11 @@ impl InteractionAdapter for FakeAdapter {
         }
         Command::State => Reply::State(SessionState {
           session_id: request.target.session_id,
-          status: ExecutionState::Idle,
+          status: if self.running.load(Ordering::SeqCst) {
+            ExecutionState::Running
+          } else {
+            ExecutionState::Idle
+          },
           model: None,
           pending_inputs: Some(0),
           revision: None,
@@ -595,6 +665,7 @@ fn fixture() -> (RuntimeCoordinator<FakeHost>, Arc<FakeHostState>) {
     adapter: Mutex::new(None),
     open_wait: Mutex::new(None),
     open_started: Notify::new(),
+    open_failure: Mutex::new(None),
   });
   let host = FakeHost {
     profile: ProfileDescriptor {
@@ -860,6 +931,7 @@ fn resolved_test_plan(runtime: &RuntimeCoordinator<FakeHost>) -> crate::runtime_
     configuration: RuntimeConfigurationIdentity {
       id: profile.profile_id.clone(),
       revision: profile.revision,
+      generation: None,
     },
     ownership: profile.ownership,
     reuse_scope: RuntimeReuseScope::Runtime,
@@ -945,7 +1017,9 @@ async fn planned_resume_rejects_stale_or_mismatched_configuration_before_opening
   let mut worker = ownership.clone();
   worker.strategy = crate::runtime_plan::RuntimeStrategy::SessionWorker;
   worker.reuse_scope = crate::runtime_plan::RuntimeReuseScope::Session;
-  for invalid in [stale, provider, ownership, worker] {
+  let mut installation = plan.clone();
+  installation.configuration.generation = Some("changed-installation".into());
+  for invalid in [stale, provider, ownership, worker, installation] {
     let descriptor = verified_test_session(&invalid);
     assert!(
       runtime

@@ -2,7 +2,42 @@
 //! through the authenticated HTTP/Hub adapter, never this local state directly.
 use crate::local_viewer::LocalViewer;
 use tauri::{AppHandle, State};
-use tokn_viewer_core::{rpc_profiles::*, rpc_runtime::*};
+use tokn_viewer_core::{rpc_profiles::*, rpc_runtime::*, runtime_install::*};
+
+#[tauri::command]
+pub async fn get_agent_installations(
+  app: AppHandle,
+  state: State<'_, LocalViewer>,
+) -> Result<RuntimeInstallInventory, String> {
+  state.service(&app).await?.get_agent_installations().await
+}
+
+#[tauri::command]
+pub async fn start_agent_installation(
+  app: AppHandle,
+  state: State<'_, LocalViewer>,
+  request: RuntimeInstallRequest,
+) -> Result<RuntimeInstallJob, String> {
+  state.service(&app).await?.start_agent_installation(request).await
+}
+
+#[tauri::command]
+pub async fn cancel_agent_installation(
+  app: AppHandle,
+  state: State<'_, LocalViewer>,
+  request: RuntimeInstallCancelRequest,
+) -> Result<RuntimeInstallJob, String> {
+  state.service(&app).await?.cancel_agent_installation(request).await
+}
+
+#[tauri::command]
+pub async fn remove_agent_installation(
+  app: AppHandle,
+  state: State<'_, LocalViewer>,
+  request: RuntimeInstallRemoveRequest,
+) -> Result<RuntimeInstallInventory, String> {
+  state.service(&app).await?.remove_agent_installation(request).await
+}
 
 #[tauri::command]
 pub async fn get_rpc_runtime_profiles(

@@ -13,7 +13,7 @@ use crate::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-  collections::BTreeMap,
+  collections::{BTreeMap, BTreeSet},
   fs::File,
   path::{Path, PathBuf},
   sync::{
@@ -33,6 +33,32 @@ pub struct ProfileDescriptor {
   pub ownership: Ownership,
 }
 
+/// Failed startup plus the factory's proof about the original acquired native
+/// resources. Sending a kill signal or dropping an owned child is not proof.
+#[derive(Clone, Debug)]
+pub struct RuntimeOpenError {
+  pub message: String,
+  pub cleanup_confirmed: bool,
+}
+
+impl RuntimeOpenError {
+  pub fn unconfirmed(message: impl Into<String>) -> Self {
+    Self {
+      message: message.into(),
+      cleanup_confirmed: false,
+    }
+  }
+
+  /// Use only when startup acquired no native resources, or every resource from
+  /// this exact failed attempt has been explicitly closed and its child reaped.
+  pub fn cleaned(message: impl Into<String>) -> Self {
+    Self {
+      message: message.into(),
+      cleanup_confirmed: true,
+    }
+  }
+}
+
 /// A concrete provider adapter plus its explicit native-session activation.
 /// Generic state inspection must never invoke `bind_native` implicitly.
 pub trait RuntimeHandle: Send + Sync + 'static {
@@ -50,6 +76,20 @@ pub trait RuntimeHandle: Send + Sync + 'static {
       ))
     })
   }
+  /// Apply creation-only model intent after native identity has been durably
+  /// recorded, but before the one first-message admission. Ordinary message
+  /// model-on-send support remains a separate capability.
+  fn prepare_created_model<'a>(
+    &'a self,
+    _native_id: &'a str,
+    _model: &'a ModelIdentity,
+  ) -> AdapterFuture<'a, Result<(), InteractionError>> {
+    Box::pin(async {
+      Err(InteractionError::unsupported(
+        "This runtime cannot prepare a model separately from native creation",
+      ))
+    })
+  }
 }
 
 /// Host-owned profile policy and native factory. Implementations select and
@@ -58,6 +98,9 @@ pub trait RuntimeHost: Send + Sync + 'static {
   type Profile: Clone + Send + Sync + 'static;
   fn resolve_profile(&self, profile_id: &str, revision: u64) -> Result<Self::Profile, String>;
   fn describe(&self, profile: &Self::Profile) -> ProfileDescriptor;
+  fn configuration_generation(&self, _profile: &Self::Profile) -> Option<String> {
+    None
+  }
   fn validate_launch_ready(&self, profile: &Self::Profile) -> Result<(), String>;
   /// Reject unsupported creation-time model overrides before opening a runtime.
   fn validate_creation_model(&self, _profile: &Self::Profile, _model: &ModelIdentity) -> Result<(), InteractionError> {
@@ -75,6 +118,21 @@ pub trait RuntimeHost: Send + Sync + 'static {
     runtime_id: &'a str,
     profile: &'a Self::Profile,
   ) -> AdapterFuture<'a, Result<Arc<dyn RuntimeHandle>, String>>;
+  /// Preserve verified startup cleanup when the concrete factory can prove it.
+  /// Existing factories remain conservative; cancelling this future supplies no
+  /// cleanup proof, even if its owned startup task eventually finishes.
+  fn open_with_cleanup<'a>(
+    &'a self,
+    runtime_id: &'a str,
+    profile: &'a Self::Profile,
+  ) -> AdapterFuture<'a, Result<Arc<dyn RuntimeHandle>, RuntimeOpenError>> {
+    Box::pin(async move {
+      self
+        .open(runtime_id, profile)
+        .await
+        .map_err(RuntimeOpenError::unconfirmed)
+    })
+  }
   fn redact_error(&self, error: &str, profile: &Self::Profile) -> String;
 }
 
@@ -148,9 +206,22 @@ struct State {
   quarantined: BTreeMap<String, QuarantinedRecord>,
   bindings: BTreeMap<String, SessionBinding>,
   binding_owners: BTreeMap<String, BindingOwner>,
+  created_models: BTreeMap<CreatedModelKey, CreatedModelPreparation>,
+  created_input_fences: BTreeSet<CreatedModelKey>,
   gates: BTreeMap<String, Weak<AsyncMutex<()>>>,
   receipts: ReceiptLedger<Result<ActionReply, String>>,
   active_actions: usize,
+}
+type CreatedModelKey = (String, String, String);
+struct CreatedModelPreparation {
+  model: ModelIdentity,
+  input_attempted: bool,
+  status: CreatedModelPreparationStatus,
+}
+enum CreatedModelPreparationStatus {
+  NotAttempted,
+  Pending,
+  Complete(Result<(), InteractionError>),
 }
 struct BindingOwner {
   runtime_id: String,
@@ -217,6 +288,8 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
         quarantined: BTreeMap::new(),
         bindings: BTreeMap::new(),
         binding_owners: BTreeMap::new(),
+        created_models: BTreeMap::new(),
+        created_input_fences: BTreeSet::new(),
         gates: BTreeMap::new(),
         receipts: ReceiptLedger::new(512),
         active_actions: 0,
@@ -469,13 +542,13 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     tokio::task::spawn_blocking(move || manager.0.host.resolve_profile(&profile_id, revision).map(|_| ()))
       .await
       .map_err(|_| "Could not recheck runtime configuration")??;
-    let handle = match self.0.host.open(&runtime_id, &resolved).await {
+    let handle = match self.0.host.open_with_cleanup(&runtime_id, &resolved).await {
       Ok(handle) => handle,
       Err(error) => {
-        let reason = self.0.host.redact_error(&error, &resolved);
-        if self.0.host.describe(&resolved).ownership == Ownership::Managed {
-          // Launch errors do not currently prove whether a child was spawned
-          // and reaped. Reserve ownership rather than risk a second process.
+        let reason = self.0.host.redact_error(&error.message, &resolved);
+        if self.0.host.describe(&resolved).ownership == Ownership::Managed && !error.cleanup_confirmed {
+          // The factory could not prove that its original child was reaped.
+          // Reserve ownership rather than risk a second process.
           self.retain_unconfirmed_start(None, lease, &resolved);
           return Err(format!(
             "{reason} Startup cleanup was not confirmed; reserved until host shutdown."
@@ -683,6 +756,12 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     }
     state.runtimes.remove(&request.runtime_id);
     state
+      .created_models
+      .retain(|(runtime_id, _, _), _| runtime_id != &request.runtime_id);
+    state
+      .created_input_fences
+      .retain(|(runtime_id, _, _)| runtime_id != &request.runtime_id);
+    state
       .binding_owners
       .retain(|_, owner| owner.runtime_id != request.runtime_id);
     state
@@ -852,6 +931,7 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     {
       return Err("Runtime disconnected while recovering the session binding".into());
     }
+    creation::check_model_preparation_not_pending(&state, &binding.target).map_err(|error| error.message)?;
     state.bindings.insert(key, binding.clone());
     drop(state);
     self.changed();
@@ -881,6 +961,8 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     state.quarantined.clear();
     state.bindings.clear();
     state.binding_owners.clear();
+    state.created_models.clear();
+    state.created_input_fences.clear();
   }
 }
 fn runtime_info(

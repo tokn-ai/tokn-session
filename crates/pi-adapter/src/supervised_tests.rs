@@ -282,6 +282,7 @@ printf 'closed\n' > "$TOKN_TEST_EOF"
     EndpointOptions::new("supervised-child"),
     LaunchOptions {
       executable,
+      launcher_args: Vec::new(),
       working_directory: directory.path().to_path_buf(),
       arguments: Vec::new(),
       environment: BTreeMap::from([("TOKN_TEST_EOF".into(), directory.path().join("eof").into_os_string())]),
@@ -344,6 +345,7 @@ os._exit(int(os.environ['TOKN_TEST_EXIT_CODE']))
     EndpointOptions::new("supervised-parent-exit"),
     LaunchOptions {
       executable,
+      launcher_args: Vec::new(),
       working_directory: directory.path().to_path_buf(),
       arguments: Vec::new(),
       environment: BTreeMap::from([

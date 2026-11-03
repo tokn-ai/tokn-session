@@ -1,0 +1,23 @@
+.agent-installations { margin: 0 0 28px; padding: 0 0 24px; border-bottom: 1px solid var(--border); }
+.agent-installations__heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 16px; }
+.agent-installations__heading h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.agent-installations__heading p { margin: 6px 0 0; max-width: 48em; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+.agent-installations__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.agent-installation { min-width: 0; display: flex; flex-direction: column; padding: 16px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface-raised); }
+.agent-installation__heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.agent-installation__heading h4 { margin: 0; font-size: 13px; font-weight: 600; }
+.agent-installation__heading > span { overflow-wrap: anywhere; color: var(--text-muted); font-size: 11px; }
+.agent-installation__heading > span[data-installed="true"] { color: var(--text-soft); font-family: ui-monospace, SFMono-Regular, monospace; }
+.agent-installation__detail { margin: 7px 0 16px; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
+.agent-installation__notice { margin: 0 0 14px; color: var(--text-muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.agent-installation__actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; }
+.agent-installation__actions button { min-height: 30px; }
+.agent-installation__progress { display: grid; gap: 8px; margin: 0 0 16px; font-size: 11px; color: var(--text-soft); }
+.agent-installation__progress progress { width: 100%; height: 4px; border: none; border-radius: 4px; accent-color: var(--text); }
+.agent-installation__progress small { color: var(--text-muted); font-size: 10px; }
+.agent-installations__error, .agent-installation__error { margin: 0 0 14px; font-size: 11px; line-height: 1.6; color: var(--warning); overflow-wrap: anywhere; }
+.agent-installations__error p { margin: 0 0 8px; }
+.agent-installation__confirmation { padding-top: 12px; margin-top: 12px; border-top: 1px solid var(--border); }
+.agent-installation__confirmation p { margin: 0 0 12px; font-size: 11px; line-height: 1.6; color: var(--text-soft); }
+.agent-installations__footnote { margin: 12px 0 0; color: var(--text-muted); font-size: 11px; line-height: 1.6; }
+@media (max-width: 540px) { .agent-installations__grid { grid-template-columns: minmax(0, 1fr); } }

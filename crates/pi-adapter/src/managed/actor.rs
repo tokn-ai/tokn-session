@@ -1,9 +1,10 @@
 //! Pi-native managed workflow driver. Generic ownership, receipts, and
 //! lifecycle persistence live in `tokn_interaction_core::managed_sessions`.
 use super::protocol::{RpcState, parse_extension_dialog, parse_state, pi_choices};
+use super::{PiLaunchConfiguration, PiLaunchSource};
 use crate::{EndpointOptions, LaunchOptions, PiAdapter, SupervisedSession};
 use serde_json::Value;
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{
   sync::{OwnedMutexGuard, mpsc, oneshot, watch},
   time::{Instant, MissedTickBehavior},
@@ -48,7 +49,7 @@ struct Pending {
   kind: PendingKind,
 }
 
-pub(super) async fn run(executable: PathBuf, worker: ManagedWorker) {
+pub(super) async fn run(launch: Arc<dyn PiLaunchSource>, worker: ManagedWorker) {
   let ManagedWorker {
     host,
     lease,
@@ -61,9 +62,17 @@ pub(super) async fn run(executable: PathBuf, worker: ManagedWorker) {
     termination,
   } = worker;
   let lifecycle = ManagedWorkerLifecycle::new(host.clone(), lease, native_lease.clone(), worker_state.clone());
+  let configuration = launch.resolve(
+    &receipt.folder,
+    (!resume).then_some(receipt.runtime_plan_id.as_deref()).flatten(),
+  );
+  let lifetime = configuration
+    .as_ref()
+    .ok()
+    .and_then(|configuration| configuration.lifetime.clone());
   let mut actor = match Actor::spawn(
     host.clone(),
-    executable,
+    configuration,
     receipt,
     prompt,
     resume,
@@ -75,6 +84,9 @@ pub(super) async fn run(executable: PathBuf, worker: ManagedWorker) {
   {
     Ok(actor) => actor,
     Err(error) => {
+      if let Some(lifetime) = lifetime {
+        launch.retain_uncertain(lifetime);
+      }
       lifecycle.close_admission(&mut commands, Some(error.clone()), &error);
       drop(native_lease);
       lifecycle.complete(Some(error), true, None, None).await;
@@ -117,6 +129,11 @@ pub(super) async fn run(executable: PathBuf, worker: ManagedWorker) {
   // metadata are complete, then publish the stopped observation.
   let cleanup = actor.session.close().await;
   let cleanup_confirmed = cleanup.is_ok();
+  if !cleanup_confirmed {
+    if let Some(lifetime) = lifetime {
+      launch.retain_uncertain(lifetime);
+    }
+  }
   let error = result.err().or_else(|| cleanup.err().map(|error| error.to_string()));
   let error = error.map(|error| actor.exit_message(error));
   let stopped = actor.stop_reply.take();
@@ -156,7 +173,7 @@ struct Actor {
 impl Actor {
   async fn spawn(
     host: ManagedHostContext,
-    executable: PathBuf,
+    launch: Result<PiLaunchConfiguration, String>,
     receipt: Receipt,
     prompt: Option<(String, Vec<ResolvedImage>)>,
     resume: bool,
@@ -167,6 +184,7 @@ impl Actor {
     if host.is_shutting_down() {
       return Err("Managed Pi runtime is shutting down".into());
     }
+    let launch = launch?;
     let instance_id = host.instance_id().ok_or("Managed Pi runtime has stopped")?;
     let mut options = EndpointOptions::new(format!("pi:{}", receipt.request_id));
     options.instance_id = instance_id;
@@ -191,7 +209,8 @@ impl Actor {
     let session = PiAdapter::spawn_supervised(
       options,
       LaunchOptions {
-        executable,
+        executable: launch.executable,
+        launcher_args: launch.arguments,
         working_directory: receipt.folder.clone(),
         arguments,
         environment: Default::default(),

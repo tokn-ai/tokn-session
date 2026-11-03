@@ -471,11 +471,21 @@ impl CreationHost for Host {
         .or_else(|| request.runtime.clone());
       let cwd = request.working_directory.clone();
       let provider = request.provider;
-      let selection =
-        tokio::task::spawn_blocking(move || runtimes.creation_selection(provider, &cwd, selection.as_ref()))
-          .await
-          .map_err(|_| InteractionError::unavailable("Could not validate the creation runtime"))?
-          .map_err(InteractionError::unavailable)?;
+      let expected_plan = request.runtime_plan.clone();
+      let (selection, _installation_use) = tokio::task::spawn_blocking(move || {
+        let current = runtimes.resolve_plan(provider, &cwd, selection.as_ref())?;
+        if expected_plan.as_ref().is_some_and(|expected| expected != &current) {
+          return Err(
+            "The agent runtime changed; refresh the runtime or model selection before creating a session".into(),
+          );
+        }
+        let installation_use = runtimes.hold_plan_installation(&current)?;
+        let selection = runtimes.creation_selection(provider, &cwd, selection.as_ref())?;
+        Ok::<_, String>((selection, installation_use))
+      })
+      .await
+      .map_err(|_| InteractionError::unavailable("Could not validate the creation runtime"))?
+      .map_err(InteractionError::unavailable)?;
       self
         .runtimes
         .create_native_session(
@@ -496,6 +506,13 @@ impl CreationHost for Host {
     model: Option<&'a tokn_interaction_core::ModelIdentity>,
   ) -> AdapterFuture<'a, Result<(), InteractionError>> {
     Box::pin(async move {
+      if created.provider == LiveProvider::Dsh
+        && let Some(model) = model
+      {
+        // The durable receipt already knows this native identity. Native DSH
+        // selection is a separate mutation and must never be replayed by Send.
+        self.runtimes.prepare_created_model(created, model.clone()).await?;
+      }
       let state = if model.is_some() || !input.images.is_empty() {
         let state = self
           .runtimes
@@ -561,6 +578,9 @@ impl CreationHost for Host {
       }
     })
   }
+  fn fence_initial(&self, created: &CreatedNativeSession) -> Result<(), InteractionError> {
+    self.runtimes.fence_created_input(created)
+  }
   fn cancel_initial<'a>(
     &'a self,
     created: &'a CreatedNativeSession,
@@ -590,12 +610,17 @@ impl CreationHost for Host {
       if let (Some(created), Some(key)) = (&created, &key) {
         // A restarted host may publish durable history without its old runtime;
         // the next explicit Send will recover the verified session normally.
-        if self.runtimes.adopt_created(created, key.clone()).await.is_err()
-          && self.runtimes.inventory().runtimes.iter().any(|runtime| {
-            runtime.runtime_id == created.target.runtime_id && runtime.instance_id == created.target.instance_id
-          })
-        {
-          return Err("The created runtime is still present, but its session binding could not be recovered. Check Agent runtimes and retry this creation.".into());
+        match self.runtimes.adopt_created_if_ready(created, key.clone()).await {
+          Ok(None) => return Ok(None),
+          Ok(Some(_)) => {}
+          Err(_)
+            if self.runtimes.inventory().runtimes.iter().any(|runtime| {
+              runtime.runtime_id == created.target.runtime_id && runtime.instance_id == created.target.instance_id
+            }) =>
+          {
+            return Err("The created runtime is still present, but its session binding could not be recovered. Check Agent runtimes and retry this creation.".into());
+          }
+          Err(_) => {}
         }
       } else if let (Some(id), Some(key)) = (planned, &key) {
         // A lost create acknowledgement still leaves a host-planned identity.

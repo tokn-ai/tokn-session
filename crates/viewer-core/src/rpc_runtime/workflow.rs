@@ -44,12 +44,26 @@ impl RpcRuntimeManager {
     plan: tokn_interaction_core::runtime_plan::RuntimePlan,
     descriptor: tokn_interaction_core::runtime_plan::VerifiedSessionDescriptor,
   ) -> Result<RpcSessionBinding, String> {
-    self
-      .0
-      .runtimes
-      .ensure_session_with_plan(request_id, session_key, plan, descriptor)
-      .await
-      .map(Into::into)
+    let manager = self.clone();
+    let request_id = request_id.to_owned();
+    let session_key = session_key.to_owned();
+    // Core activation is cancellation-safe. Keep its installation admission
+    // lease in an equally owned task until the child owns its lifetime lease.
+    tokio::spawn(async move {
+      let checker = manager.clone();
+      let selected = plan.clone();
+      let _installation = tokio::task::spawn_blocking(move || checker.hold_plan_installation(&selected))
+        .await
+        .map_err(|_| "Could not verify the selected agent installation")??;
+      manager
+        .0
+        .runtimes
+        .ensure_session_with_plan(&request_id, &session_key, plan, descriptor)
+        .await
+        .map(Into::into)
+    })
+    .await
+    .map_err(|_| "Agent activation was interrupted".to_owned())?
   }
 
   pub(crate) async fn execute_binding(

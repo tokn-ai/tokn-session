@@ -26,7 +26,119 @@ use tokn_interaction_core::{Provider, managed_sessions as shared};
 #[derive(Clone)]
 pub(crate) struct ManagedSessions {
   manager: shared::ManagedSessions,
-  executable: Option<PathBuf>,
+  launch: Option<Arc<PiLaunchSource>>,
+}
+
+/// Select new Pi workers independently of existing workers, which retain their
+/// launcher and installation lock until native transport cleanup finishes.
+struct PiLaunchSource {
+  configured: Option<PathBuf>,
+  installation_root: Option<PathBuf>,
+  reservations: std::sync::Mutex<Vec<Arc<dyn Send + Sync>>>,
+}
+
+impl PiLaunchSource {
+  fn configuration(&self) -> Result<(PathBuf, Vec<String>, Option<String>), String> {
+    if self.configured.is_none() {
+      if let Some(spec) = self
+        .installation_root
+        .as_ref()
+        .map(|root| crate::runtime_install::launch_spec(root, Provider::Pi))
+        .transpose()?
+        .flatten()
+      {
+        return Ok((spec.executable, spec.arguments, Some(spec.generation)));
+      }
+    }
+    let executable = crate::rpc_runtime::discovery::resolve_executable(
+      self.configured.as_deref().map(Path::as_os_str),
+      std::env::var_os("PATH").as_deref(),
+      "pi",
+    )?;
+    let generation = self
+      .installation_root
+      .as_deref()
+      .map(|root| crate::rpc_runtime::discovery::installation_pin(root, Provider::Pi, &executable, &[]))
+      .transpose()?
+      .flatten()
+      .map(|pin| pin.generation);
+    Ok((executable, Vec::new(), generation))
+  }
+
+  fn plan(
+    &self,
+    cwd: &Path,
+    executable: &Path,
+    arguments: &[String],
+    generation: Option<&str>,
+  ) -> Result<RuntimePlan, String> {
+    let canonical = std::fs::canonicalize(cwd).map_err(|_| "The project folder is unavailable")?;
+    if !canonical.is_dir() {
+      return Err("The project folder is unavailable".into());
+    }
+    let plan = RuntimePlan {
+      provider: Provider::Pi,
+      configuration: RuntimeConfigurationIdentity {
+        id: crate::rpc_runtime::discovery::launch_configuration_id(
+          Provider::Pi,
+          &canonical,
+          executable,
+          arguments,
+          generation,
+        )?,
+        revision: 0,
+        generation: generation.map(str::to_owned),
+      },
+      ownership: tokn_interaction_core::Ownership::Managed,
+      reuse_scope: RuntimeReuseScope::Session,
+      strategy: RuntimeStrategy::SessionWorker,
+      working_directory: cwd.to_owned(),
+    };
+    plan.validate()?;
+    Ok(plan)
+  }
+}
+
+impl tokn_pi_adapter::managed::PiLaunchSource for PiLaunchSource {
+  fn resolve(
+    &self,
+    cwd: &Path,
+    expected_plan_id: Option<&str>,
+  ) -> Result<tokn_pi_adapter::managed::PiLaunchConfiguration, String> {
+    let (executable, arguments, generation) = self.configuration()?;
+    let lifetime = generation
+      .as_deref()
+      .map(|generation| {
+        crate::runtime_install::acquire_use(
+          self.installation_root.as_ref().expect("installed root"),
+          Provider::Pi,
+          generation,
+        )
+        .map(|guard| Arc::new(guard) as Arc<dyn Send + Sync>)
+      })
+      .transpose()?;
+    if let Some(expected) = expected_plan_id {
+      if self
+        .plan(cwd, &executable, &arguments, generation.as_deref())?
+        .plan_id()?
+        != expected
+      {
+        return Err("The Pi runtime changed; refresh the runtime or model selection before sending".into());
+      }
+    }
+    Ok(tokn_pi_adapter::managed::PiLaunchConfiguration {
+      executable,
+      arguments: arguments.into_iter().map(Into::into).collect(),
+      lifetime,
+    })
+  }
+  fn retain_uncertain(&self, lifetime: Arc<dyn Send + Sync>) {
+    self
+      .reservations
+      .lock()
+      .unwrap_or_else(|error| error.into_inner())
+      .push(lifetime);
+  }
 }
 
 struct ViewerHost;
@@ -67,25 +179,25 @@ impl ManagedSessions {
     state_path: Option<PathBuf>,
     ownership: SessionOwnership,
   ) -> Result<Self, String> {
-    let executable = std::env::var_os("TOKN_SESSION_PI_EXECUTABLE")
-      .map(PathBuf::from)
-      .unwrap_or_else(|| "pi".into());
+    let executable = std::env::var_os("TOKN_SESSION_PI_EXECUTABLE").map(PathBuf::from);
     Self::with_configuration(state_path, executable, ownership)
   }
 
   fn with_configuration(
     state_path: Option<PathBuf>,
-    executable: PathBuf,
+    executable: Option<PathBuf>,
     ownership: SessionOwnership,
   ) -> Result<Self, String> {
-    // Resolve once for the lifetime of this driver, so its advertised plan and
-    // the executable used by the preserved worker are the same configuration.
-    let resolved = crate::rpc_runtime::discovery::resolve_executable(
-      Some(executable.as_os_str()),
-      std::env::var_os("PATH").as_deref(),
-      "pi",
-    )
-    .ok();
+    let installation_root = state_path
+      .as_deref()
+      .and_then(Path::parent)
+      .and_then(Path::parent)
+      .map(|path| path.join("runtimes"));
+    let launch = Arc::new(PiLaunchSource {
+      configured: executable,
+      installation_root,
+      reservations: Default::default(),
+    });
     let manager = shared::ManagedSessions::new(
       shared::ManagedSessionConfiguration {
         state_path,
@@ -93,42 +205,23 @@ impl ManagedSessions {
         legacy_provider: Some(Provider::Pi),
         lease_prefix: "managed-pi".into(),
       },
-      Arc::new(tokn_pi_adapter::managed::PiSessionDriver::new(
-        resolved.clone().unwrap_or(executable),
+      Arc::new(tokn_pi_adapter::managed::PiSessionDriver::with_launch_source(
+        launch.clone(),
       )),
       Arc::new(ViewerHost),
       ownership,
     )?;
     Ok(Self {
       manager,
-      executable: resolved,
+      launch: Some(launch),
     })
   }
 
   pub(crate) fn runtime_plan(&self, cwd: &Path) -> Result<RuntimePlan, String> {
     self.manager.available()?;
-    let executable = self
-      .executable
-      .as_ref()
-      .ok_or("Pi is unavailable. Install it or set TOKN_SESSION_PI_EXECUTABLE, then restart local sessions.")?;
-    crate::rpc_runtime::discovery::resolve_executable(Some(executable.as_os_str()), None, "pi")?;
-    let canonical = std::fs::canonicalize(cwd).map_err(|_| "The project folder is unavailable")?;
-    if !canonical.is_dir() {
-      return Err("The project folder is unavailable".into());
-    }
-    let plan = RuntimePlan {
-      provider: Provider::Pi,
-      configuration: RuntimeConfigurationIdentity {
-        id: crate::rpc_runtime::discovery::executable_configuration_id(Provider::Pi, &canonical, executable)?,
-        revision: 0,
-      },
-      ownership: tokn_interaction_core::Ownership::Managed,
-      reuse_scope: RuntimeReuseScope::Session,
-      strategy: RuntimeStrategy::SessionWorker,
-      working_directory: cwd.to_owned(),
-    };
-    plan.validate()?;
-    Ok(plan)
+    let launch = self.launch.as_ref().ok_or("Pi is unavailable")?;
+    let (executable, arguments, generation) = launch.configuration()?;
+    launch.plan(cwd, &executable, &arguments, generation.as_deref())
   }
 
   #[cfg(test)]
@@ -139,13 +232,13 @@ impl ManagedSessions {
         .and_then(|path| path.parent())
         .map(|parent| parent.join("session-leases")),
     )?;
-    Self::with_configuration(state_path, executable, ownership)
+    Self::with_configuration(state_path, Some(executable), ownership)
   }
 
   pub(crate) fn disabled(message: String) -> Self {
     Self {
       manager: shared::ManagedSessions::disabled(message, Provider::Pi),
-      executable: None,
+      launch: None,
     }
   }
 

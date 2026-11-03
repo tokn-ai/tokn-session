@@ -21,13 +21,17 @@ dirs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+flate2 = "1"
+tar = "0.4"
+zip = { version = "9.2", default-features = false, features = ["deflate"] }
 base64 = "0.22"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 pulldown-cmark = { version = "0.13.4", default-features = false }
 rusqlite = { version = "0.40", features = ["bundled"] }
 tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
-tokio = { workspace = true, features = ["process"] }
+tokio = { workspace = true, features = ["process", "fs"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tokn-session-relay.workspace = true
 tokn-session-codex.workspace = true

@@ -17,6 +17,7 @@ function fixture(profiles: RpcRuntimeProfile[] = [profile]) {
   let snapshot: RpcRuntimeProfilesSnapshot = { version: 1, revision: 3, profiles };
   let runtimes: RpcRuntimeInfo[] = [];
   return vi.fn(async (command: string, payload?: Record<string, unknown>) => {
+    if (command === "get_agent_installations") return { agents: [] };
     if (command === "get_rpc_runtime_profiles") return snapshot;
     if (command === "list_rpc_runtimes") return { version: 1, runtimes };
     if (command === "save_rpc_runtime_profile") {
@@ -71,6 +72,17 @@ it("creates and deletes a profile with typed argument/environment parsing", asyn
   fireEvent.click(screen.getByRole("button", { name: "Delete profile" }));
   await screen.findByText("No agent runtime profiles yet.");
   expect(send).toHaveBeenCalledWith("delete_rpc_runtime_profile", { request: { expected_revision: 4, profile_id: "created" } });
+});
+
+it("edits DSH Node launcher arguments without discarding the script entrypoint", async () => {
+  const dsh = { ...profile, provider: "dsh" as const, mode: "managed" as const, name: "Local DSH", executable: "/fixture/bin/node",
+    endpoint: null, working_directory: "/fixture/project", arguments: ["/fixture/dsh/lib/bin.js"], credential_kind: null };
+  const send = fixture([dsh]); bind(send); render(<RpcRuntimeSettings {...props} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Edit Local DSH" }));
+  expect(screen.getByLabelText("Arguments")).toHaveValue(JSON.stringify(dsh.arguments, null, 2));
+  fireEvent.click(screen.getByRole("button", { name: "Save profile" }));
+  await waitFor(() => expect(send).toHaveBeenCalledWith("save_rpc_runtime_profile", { request: { expected_revision: 3,
+    profile: expect.objectContaining({ provider: "dsh", executable: "/fixture/bin/node", arguments: ["/fixture/dsh/lib/bin.js"] }) } }));
 });
 
 it("connects and detaches an exact external instance without offering process stop", async () => {
@@ -137,6 +149,7 @@ it.each(["connected", "cleanup_failed"] as const)("does not offer a fresh attemp
 it("does not authorize a fresh attempt from a different saved profile revision", async () => {
   let revision = 3;
   const send = vi.fn(async (command: string) => {
+    if (command === "get_agent_installations") return { agents: [] };
     if (command === "get_rpc_runtime_profiles") return { version: 1, revision, profiles: [profile] };
     if (command === "list_rpc_runtimes") return { version: 1, runtimes: [] };
     throw new Error("Endpoint unavailable");

@@ -53,6 +53,8 @@ pub struct ListSessionCreationModelsRequest {
 #[derive(Clone, Debug, Serialize)]
 pub struct SessionCreationModels {
   pub models: Vec<tokn_interaction_core::ModelChoice>,
+  pub can_select: bool,
+  pub updates_default: bool,
   pub catalog_revision: Option<String>,
   pub runtime_profile_id: Option<String>,
   pub runtime_revision: Option<u64>,

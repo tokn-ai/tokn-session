@@ -114,6 +114,7 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
         || descriptor.revision != plan.configuration.revision
         || descriptor.provider != plan.provider
         || descriptor.ownership != plan.ownership
+        || manager.0.host.configuration_generation(&resolved) != plan.configuration.generation
       {
         return Err("Resolved runtime configuration no longer matches the selected plan".into());
       }

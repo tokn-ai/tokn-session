@@ -41,9 +41,24 @@ import type {
   RpcRuntimeProfileInput, RpcRuntimeProfileValidation, RpcRuntimeInventory, RpcRuntimeInfo,
   StartRpcRuntimeRequest, CloseRpcRuntimeRequest, CloseRpcRuntimeResponse,
   RpcRuntimeAccess,
+  RuntimeInstallInventory, RuntimeInstallJob, StartAgentInstallationRequest,
+  CancelAgentInstallationRequest, RemoveAgentInstallationRequest,
   SessionModelStatusRequest, SessionModelStatus, ListSessionModelsResponse,
   SessionControlRequest, SetSessionControlRequest, SessionControlStatus, CancelSessionTurnRequest,
 } from "./types";
+
+export function getAgentInstallations(send: CommandInvoker = invoke): Promise<RuntimeInstallInventory> {
+  return send("get_agent_installations");
+}
+export function startAgentInstallation(request: StartAgentInstallationRequest, send: CommandInvoker = invoke): Promise<RuntimeInstallJob> {
+  return send("start_agent_installation", { request });
+}
+export function cancelAgentInstallation(request: CancelAgentInstallationRequest, send: CommandInvoker = invoke): Promise<RuntimeInstallJob> {
+  return send("cancel_agent_installation", { request });
+}
+export function removeAgentInstallation(request: RemoveAgentInstallationRequest, send: CommandInvoker = invoke): Promise<RuntimeInstallInventory> {
+  return send("remove_agent_installation", { request });
+}
 
 export function getRpcRuntimeProfiles(send: CommandInvoker = invoke): Promise<RpcRuntimeProfilesSnapshot> {
   return send("get_rpc_runtime_profiles");

@@ -26,16 +26,6 @@ impl ViewerService {
       None
     };
     let runtime_plan_id = Some(plan.fingerprint()?);
-    if request.provider == LiveProvider::Dsh {
-      return Ok(SessionCreationModels {
-        models: Vec::new(),
-        catalog_revision: None,
-        runtime_profile_id: runtime.as_ref().map(|runtime| runtime.profile_id.clone()),
-        runtime_revision: runtime.as_ref().map(|runtime| runtime.expected_revision),
-        runtime_plan_id,
-        reason: Some("DSH uses its runtime default when creating a session.".into()),
-      });
-    }
     let cwd = PathBuf::from(&project.folder_path);
     let models = if plan.strategy == RuntimeStrategy::SessionWorker {
       self.sessions.managed.creation_models(cwd).await?
@@ -64,6 +54,8 @@ impl ViewerService {
         .is_empty()
         .then(|| "This runtime did not advertise any models. You can use its default.".into()),
       models,
+      can_select: true,
+      updates_default: matches!(provider, LiveProvider::Pi | LiveProvider::Dsh),
       catalog_revision: Some(revision),
       runtime_profile_id: runtime.as_ref().map(|runtime| runtime.profile_id.clone()),
       runtime_revision: runtime.as_ref().map(|runtime| runtime.expected_revision),
@@ -175,6 +167,9 @@ fn catalog_revision(
 
 fn validate_selection(request: &CreateProjectSessionRequest, catalog: &SessionCreationModels) -> Result<(), String> {
   let Some(selection) = &request.model else { return Ok(()) };
+  if !catalog.can_select {
+    return Err("This runtime's model catalog is read-only. Use the runtime default before sending.".into());
+  }
   if catalog.catalog_revision.as_deref() != Some(&selection.catalog_revision)
     || catalog.runtime_profile_id != selection.runtime_profile_id
     || catalog.runtime_revision != selection.runtime_revision
@@ -259,6 +254,8 @@ mod tests {
       }),
     };
     let catalog = SessionCreationModels {
+      can_select: true,
+      updates_default: false,
       models: vec![choice("text-only")],
       catalog_revision: Some("a".repeat(64)),
       runtime_profile_id: Some("runtime".into()),

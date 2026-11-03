@@ -7,6 +7,7 @@ fn plan() -> RuntimePlan {
     configuration: RuntimeConfigurationIdentity {
       id: "12345678-1234-4234-8234-123456789012".into(),
       revision: 0,
+      generation: None,
     },
     ownership: Ownership::Managed,
     reuse_scope: RuntimeReuseScope::Project,
@@ -35,6 +36,28 @@ fn shared_selection_preserves_the_explicit_configuration_fence() {
   plan.configuration.id = "factory-owned-opaque-identity".into();
   assert!(plan.validate().is_ok());
   assert!(plan.shared_runtime_selection().unwrap_err().contains("profile ID"));
+}
+
+#[test]
+fn optional_installation_generation_fences_catalogs_and_preserves_legacy_encoding() {
+  let mut plan = plan();
+  let legacy = serde_json::to_value(&plan).unwrap();
+  assert!(legacy["configuration"].get("generation").is_none());
+  let fingerprint = plan.fingerprint().unwrap();
+  assert_eq!(
+    serde_json::from_value::<RuntimePlan>(legacy)
+      .unwrap()
+      .fingerprint()
+      .unwrap(),
+    fingerprint
+  );
+  plan.configuration.generation = Some("installation-one".into());
+  assert_ne!(plan.fingerprint().unwrap(), fingerprint);
+  let first = plan.fingerprint().unwrap();
+  plan.configuration.generation = Some("installation-two".into());
+  assert_ne!(plan.fingerprint().unwrap(), first);
+  plan.configuration.generation = Some(String::new());
+  assert!(plan.validate().is_err());
 }
 
 #[test]

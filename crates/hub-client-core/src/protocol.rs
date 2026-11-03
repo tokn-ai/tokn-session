@@ -193,6 +193,10 @@ pub fn runtime_management_route(method: &str, path: &str) -> bool {
         | "/api/v1/list_rpc_runtimes"
         | "/api/v1/start_rpc_runtime"
         | "/api/v1/close_rpc_runtime"
+        | "/api/v1/get_agent_installations"
+        | "/api/v1/start_agent_installation"
+        | "/api/v1/cancel_agent_installation"
+        | "/api/v1/remove_agent_installation"
     )
 }
 
@@ -265,6 +269,10 @@ mod tests {
       "list_rpc_runtimes",
       "start_rpc_runtime",
       "close_rpc_runtime",
+      "get_agent_installations",
+      "start_agent_installation",
+      "cancel_agent_installation",
+      "remove_agent_installation",
     ] {
       let path = format!("/api/v1/{command}");
       assert!(runtime_management_route("POST", &path));

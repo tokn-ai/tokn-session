@@ -50,6 +50,10 @@ impl SessionPaths {
     self.root().join("viewer")
   }
 
+  pub fn runtimes_dir(&self) -> PathBuf {
+    self.root().join("runtimes")
+  }
+
   pub fn desktop_client_dir(&self) -> PathBuf {
     self.hub_dir().join("desktop-client")
   }
@@ -71,6 +75,7 @@ mod tests {
     assert_eq!(paths.index_path(), paths.root().join("index.sqlite"));
     assert_eq!(paths.hub_dir(), paths.root().join("hub"));
     assert_eq!(paths.viewer_dir(), paths.root().join("viewer"));
+    assert_eq!(paths.runtimes_dir(), paths.root().join("runtimes"));
     assert_eq!(paths.desktop_client_dir(), paths.hub_dir().join("desktop-client"));
     assert!(!paths.root().exists());
   }

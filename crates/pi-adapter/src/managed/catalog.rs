@@ -1,8 +1,9 @@
 //! Disposable Pi model discovery. No session file or prompt is admitted.
 use super::protocol::{parse_state, pi_choices};
+use super::{PiLaunchConfiguration, PiLaunchSource};
 use crate::{EndpointOptions, LaunchOptions, PiAdapter, SupervisedSession};
 use serde_json::Value;
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tokn_interaction_core::ModelChoice;
@@ -11,14 +12,38 @@ use tokn_pi_rpc_protocol as wire;
 const DEADLINE: Duration = Duration::from_secs(15);
 static PROBE_SLOTS: Semaphore = Semaphore::const_new(2);
 
-pub(super) async fn models(executable: PathBuf, working_directory: PathBuf) -> Result<Vec<ModelChoice>, String> {
-  models_with_timeout(executable, working_directory, DEADLINE).await
+pub(super) async fn models(
+  launch: Arc<dyn PiLaunchSource>,
+  working_directory: PathBuf,
+) -> Result<Vec<ModelChoice>, String> {
+  let configuration = launch.resolve(&working_directory, None)?;
+  models_configuration_with_timeout(configuration, working_directory, DEADLINE, Some(launch)).await
 }
 
+#[cfg(test)]
 pub(super) async fn models_with_timeout(
   executable: PathBuf,
   working_directory: PathBuf,
   deadline: Duration,
+) -> Result<Vec<ModelChoice>, String> {
+  models_configuration_with_timeout(
+    PiLaunchConfiguration {
+      executable,
+      arguments: Vec::new(),
+      lifetime: None,
+    },
+    working_directory,
+    deadline,
+    None,
+  )
+  .await
+}
+
+async fn models_configuration_with_timeout(
+  configuration: PiLaunchConfiguration,
+  working_directory: PathBuf,
+  deadline: Duration,
+  launch: Option<Arc<dyn PiLaunchSource>>,
 ) -> Result<Vec<ModelChoice>, String> {
   let permit = PROBE_SLOTS
     .try_acquire()
@@ -29,20 +54,30 @@ pub(super) async fn models_with_timeout(
   // for stopping and reaping its process before releasing the probe slot.
   tokio::spawn(async move {
     let _permit = permit;
+    let launch_lifetime = configuration.lifetime;
     let mut options = EndpointOptions::new(format!("pi-model-catalog:{}", uuid::Uuid::new_v4()));
     options.request_timeout = deadline;
-    let mut session = PiAdapter::spawn_supervised(
+    let session = PiAdapter::spawn_supervised(
       options,
       LaunchOptions {
-        executable,
+        executable: configuration.executable,
+        launcher_args: configuration.arguments,
         working_directory,
         arguments: vec!["--no-session".into()],
         environment: Default::default(),
         session_file: None,
       },
     )
-    .await
-    .map_err(|error| error.to_string())?;
+    .await;
+    let mut session = match session {
+      Ok(session) => session,
+      Err(error) => {
+        if let (Some(launch), Some(lifetime)) = (&launch, launch_lifetime) {
+          launch.retain_uncertain(lifetime);
+        }
+        return Err(error.to_string());
+      }
+    };
     let result = tokio::select! {
       biased;
       _ = cancelled.cancelled() => Err("Pi model discovery was cancelled".into()),
@@ -50,7 +85,12 @@ pub(super) async fn models_with_timeout(
         result.unwrap_or_else(|_| Err("Pi model discovery timed out".into()))
       }
     };
-    session.close().await.map_err(|error| error.to_string())?;
+    if let Err(error) = session.close().await {
+      if let (Some(launch), Some(lifetime)) = (&launch, launch_lifetime) {
+        launch.retain_uncertain(lifetime);
+      }
+      return Err(error.to_string());
+    }
     result
   })
   .await

@@ -343,6 +343,82 @@ if mode == 'ignore_eof':
   }
 
   #[tokio::test]
+  async fn host_launchers_refresh_for_new_processes_and_retain_resources_until_reaped() {
+    use std::sync::{
+      Mutex,
+      atomic::{AtomicUsize, Ordering},
+    };
+    struct UseToken(Arc<AtomicUsize>);
+    impl Drop for UseToken {
+      fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+      }
+    }
+    struct Launch {
+      executable: PathBuf,
+      prefix: Mutex<String>,
+      uses: Arc<AtomicUsize>,
+      reservations: Mutex<Vec<Arc<dyn Send + Sync>>>,
+    }
+    impl PiLaunchSource for Launch {
+      fn resolve(&self, _: &Path, _: Option<&str>) -> Result<PiLaunchConfiguration, String> {
+        self.uses.fetch_add(1, Ordering::SeqCst);
+        Ok(PiLaunchConfiguration {
+          executable: self.executable.clone(),
+          arguments: vec![self.prefix.lock().unwrap().clone().into()],
+          lifetime: Some(Arc::new(UseToken(self.uses.clone()))),
+        })
+      }
+      fn retain_uncertain(&self, lifetime: Arc<dyn Send + Sync>) {
+        self.reservations.lock().unwrap().push(lifetime);
+      }
+    }
+    let mut fixture = Fixture::new("model_controls", "handled");
+    let uses = Arc::new(AtomicUsize::new(0));
+    let launch = Arc::new(Launch {
+      executable: fixture.executable.clone(),
+      prefix: Mutex::new("metadata-launcher".into()),
+      uses: uses.clone(),
+      reservations: Mutex::new(Vec::new()),
+    });
+    fixture.manager.manager = ManagedSessions::new(
+      ManagedSessionConfiguration {
+        state_path: Some(fixture.state_path.clone()),
+        idle_timeout: IDLE_TIMEOUT,
+        legacy_provider: Some(Provider::Pi),
+        lease_prefix: "managed-pi".into(),
+      },
+      Arc::new(PiSessionDriver::with_launch_source(launch.clone())),
+      Arc::new(Host),
+      fixture.manager.ownership.clone(),
+    )
+    .unwrap();
+    fixture.manager.creation_models(fixture.folder().into()).await.unwrap();
+    fixture.wait_reaped().await;
+    assert_eq!(uses.load(Ordering::SeqCst), 0);
+    assert_eq!(
+      fixture.launches()[0]["args"],
+      json!(["metadata-launcher", "--mode", "rpc", "--no-session"])
+    );
+
+    *launch.prefix.lock().unwrap() = "worker-launcher".into();
+    fixture.create().await;
+    let key = fixture.idle().await.session_key.unwrap();
+    assert_eq!(uses.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.launches()[1]["args"][0], "worker-launcher");
+    *launch.prefix.lock().unwrap() = "future-launcher".into();
+    fixture
+      .manager
+      .submit_owned_input(&key, &uuid::Uuid::new_v4().to_string(), "handled")
+      .await
+      .unwrap();
+    assert_eq!(fixture.launches().len(), 2, "an existing worker keeps its launcher");
+    fixture.manager.shutdown().await;
+    fixture.wait_reaped().await;
+    assert_eq!(uses.load(Ordering::SeqCst), 0);
+  }
+
+  #[tokio::test]
   async fn owned_model_drafts_apply_only_with_idle_send_and_refresh_effective_image_support() {
     use tokn_interaction_core::managed_sessions::*;
     let fixture = Fixture::new("model_controls", "handled");

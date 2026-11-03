@@ -27,6 +27,36 @@ impl Handle {
     Ok(())
   }
 }
+
+struct InstalledHandle {
+  handle: Handle,
+  _installation: Option<Arc<dyn Send + Sync>>,
+}
+
+impl core_runtime::RuntimeHandle for InstalledHandle {
+  fn adapter(&self) -> Arc<dyn InteractionAdapter> {
+    self.handle.adapter()
+  }
+
+  fn bind_native<'a>(&'a self, id: &'a str) -> AdapterFuture<'a, Result<(), String>> {
+    Box::pin(self.handle.bind_native(id))
+  }
+
+  fn create_native<'a>(
+    &'a self,
+    request: &'a core_runtime::CreateNativeSessionRequest,
+  ) -> AdapterFuture<'a, Result<core_runtime::NativeSessionDescriptor, InteractionError>> {
+    core_runtime::RuntimeHandle::create_native(&self.handle, request)
+  }
+
+  fn prepare_created_model<'a>(
+    &'a self,
+    native_id: &'a str,
+    model: &'a ModelIdentity,
+  ) -> AdapterFuture<'a, Result<(), InteractionError>> {
+    core_runtime::RuntimeHandle::prepare_created_model(&self.handle, native_id, model)
+  }
+}
 fn env(profile: &RpcResolvedProfile) -> BTreeMap<OsString, OsString> {
   profile
     .environment
@@ -64,7 +94,38 @@ fn bearer(profile: &RpcResolvedProfile) -> Option<&str> {
     None
   }
 }
-pub(super) async fn open(id: &str, profile: &RpcResolvedProfile) -> Result<Handle, String> {
+fn managed_dsh_options(id: &str, profile: &RpcResolvedProfile) -> Result<tokn_dsh_adapter::ManagedOptions, String> {
+  let mut options = tokn_dsh_adapter::ManagedOptions::new(cwd(profile)?);
+  options.program = path(profile)?;
+  options.launcher_args = profile.profile.arguments.clone();
+  options.runtime_id = id.into();
+  options.env = profile.environment.clone();
+  // Only the verified newer installation accepts this flag; legacy Web profiles
+  // never opened a browser and reject it as an unknown argument.
+  options.prevent_browser = profile
+    .installation
+    .as_ref()
+    .is_some_and(|pin| pin.version.starts_with("0.2."));
+  Ok(options)
+}
+
+async fn open_with_cleanup(id: &str, profile: &RpcResolvedProfile) -> Result<Handle, core_runtime::RuntimeOpenError> {
+  if profile.profile.provider == Provider::Dsh && profile.profile.mode == RpcRuntimeMode::Managed {
+    let options = managed_dsh_options(id, profile).map_err(core_runtime::RuntimeOpenError::cleaned)?;
+    return tokn_dsh_adapter::DshAdapter::launch_with_cleanup(options)
+      .await
+      .map(|adapter| Handle::Dsh(Arc::new(adapter)))
+      .map_err(|failure| core_runtime::RuntimeOpenError {
+        message: failure.error.to_string(),
+        cleanup_confirmed: failure.cleanup_confirmed,
+      });
+  }
+  open_other(id, profile)
+    .await
+    .map_err(core_runtime::RuntimeOpenError::unconfirmed)
+}
+
+async fn open_other(id: &str, profile: &RpcResolvedProfile) -> Result<Handle, String> {
   let owned = profile.profile.mode == RpcRuntimeMode::Managed;
   let result = match profile.profile.provider {
     Provider::Codex => {
@@ -89,8 +150,9 @@ pub(super) async fn open(id: &str, profile: &RpcResolvedProfile) -> Result<Handl
       tokn_pi_adapter::EndpointOptions::new(id),
       tokn_pi_adapter::LaunchOptions {
         executable: path(profile)?,
+        launcher_args: profile.profile.arguments.iter().map(OsString::from).collect(),
         working_directory: cwd(profile)?,
-        arguments: profile.profile.arguments.iter().map(OsString::from).collect(),
+        arguments: Vec::new(),
         environment: env(profile),
         session_file: None,
       },
@@ -126,19 +188,11 @@ pub(super) async fn open(id: &str, profile: &RpcResolvedProfile) -> Result<Handl
       adapter.map(|adapter| Handle::OpenCode(Arc::new(adapter)))
     }
     Provider::Dsh => {
-      let adapter = if owned {
-        let mut options = tokn_dsh_adapter::ManagedOptions::new(cwd(profile)?);
-        options.program = path(profile)?;
-        options.runtime_id = id.into();
-        options.env = profile.environment.clone();
-        tokn_dsh_adapter::DshAdapter::launch(options).await
-      } else {
-        let mut options = tokn_dsh_adapter::ApiProxyConfig::new(endpoint(profile)?);
-        options.runtime_id = id.into();
-        options.bearer_token = bearer(profile).map(str::to_owned);
-        options.connect_timeout = Duration::from_secs(5);
-        tokn_dsh_adapter::DshAdapter::attach(options).await
-      };
+      let mut options = tokn_dsh_adapter::ApiProxyConfig::new(endpoint(profile)?);
+      options.runtime_id = id.into();
+      options.bearer_token = bearer(profile).map(str::to_owned);
+      options.connect_timeout = Duration::from_secs(5);
+      let adapter = tokn_dsh_adapter::DshAdapter::attach(options).await;
       adapter.map(|adapter| Handle::Dsh(Arc::new(adapter)))
     }
   };
@@ -199,11 +253,6 @@ impl core_runtime::RuntimeHandle for Handle {
           )
         }
         Self::Dsh(adapter) => {
-          if request.model.is_some() {
-            return Err(InteractionError::unsupported(
-              "DSH uses its default model for new sessions",
-            ));
-          }
           let id = request
             .native_id
             .clone()
@@ -241,6 +290,21 @@ impl core_runtime::RuntimeHandle for Handle {
   fn bind_native<'a>(&'a self, id: &'a str) -> AdapterFuture<'a, Result<(), String>> {
     Box::pin(Handle::bind_native(self, id))
   }
+
+  fn prepare_created_model<'a>(
+    &'a self,
+    native_id: &'a str,
+    model: &'a ModelIdentity,
+  ) -> AdapterFuture<'a, Result<(), InteractionError>> {
+    Box::pin(async move {
+      match self {
+        Self::Dsh(adapter) => adapter.prepare_created_model(native_id, model).await,
+        _ => Err(InteractionError::unsupported(
+          "This runtime does not prepare a model after creation",
+        )),
+      }
+    })
+  }
 }
 
 impl core_runtime::RuntimeHost for Host {
@@ -263,6 +327,10 @@ impl core_runtime::RuntimeHost for Host {
     }
   }
 
+  fn configuration_generation(&self, profile: &Self::Profile) -> Option<String> {
+    profile.installation.as_ref().map(|pin| pin.generation.clone())
+  }
+
   fn validate_launch_ready(&self, profile: &Self::Profile) -> Result<(), String> {
     profile.validate_launch_ready()
   }
@@ -270,9 +338,12 @@ impl core_runtime::RuntimeHost for Host {
   fn validate_creation_model(&self, profile: &Self::Profile, model: &ModelIdentity) -> Result<(), InteractionError> {
     match profile.profile.provider {
       Provider::Codex => Ok(()),
-      Provider::OpenCode if model.model_provider.is_some() => Ok(()),
+      Provider::OpenCode | Provider::Dsh if model.model_provider.is_some() => Ok(()),
       Provider::OpenCode => Err(InteractionError::invalid(
         "OpenCode model selection requires its provider identity",
+      )),
+      Provider::Dsh => Err(InteractionError::invalid(
+        "DSH model selection requires its provider identity",
       )),
       _ => Err(InteractionError::unsupported(
         "This runtime uses its default model for new sessions",
@@ -302,9 +373,78 @@ impl core_runtime::RuntimeHost for Host {
     profile: &'a Self::Profile,
   ) -> AdapterFuture<'a, Result<Arc<dyn core_runtime::RuntimeHandle>, String>> {
     Box::pin(async move {
-      open(runtime_id, profile)
+      core_runtime::RuntimeHost::open_with_cleanup(self, runtime_id, profile)
         .await
-        .map(|handle| Arc::new(handle) as Arc<dyn core_runtime::RuntimeHandle>)
+        .map_err(|failure| failure.message)
+    })
+  }
+
+  fn open_with_cleanup<'a>(
+    &'a self,
+    runtime_id: &'a str,
+    profile: &'a Self::Profile,
+  ) -> AdapterFuture<'a, Result<Arc<dyn core_runtime::RuntimeHandle>, core_runtime::RuntimeOpenError>> {
+    Box::pin(async move {
+      let runtime_id = runtime_id.to_owned();
+      let profile = profile.clone();
+      let reservations = self.installation_reservations.clone();
+      let (send, receive) = tokio::sync::oneshot::channel();
+      let (accept, accepted) = tokio::sync::oneshot::channel();
+      // Startup outlives a caller timeout so the installation lock cannot be
+      // released while an adapter is still starting or reaping its child.
+      tokio::spawn(async move {
+        let guard = profile
+          .installation
+          .as_ref()
+          .map(|pin| {
+            crate::runtime_install::acquire_use(&pin.root, profile.profile.provider, &pin.generation)
+              .map(|guard| Arc::new(guard) as Arc<dyn Send + Sync>)
+          })
+          .transpose();
+        let result = match guard {
+          Err(error) => Err(core_runtime::RuntimeOpenError::cleaned(error)),
+          Ok(guard) => match open_with_cleanup(&runtime_id, &profile).await {
+            Ok(handle) => Ok(Arc::new(InstalledHandle {
+              handle,
+              _installation: guard,
+            })),
+            Err(error) => {
+              // The coordinator quarantines uncertain startup. Keep the use
+              // lock with the same host lifetime if cleanup was not proven.
+              if let Some(guard) = guard.filter(|_| !error.cleanup_confirmed) {
+                reservations
+                  .lock()
+                  .unwrap_or_else(|error| error.into_inner())
+                  .push(guard);
+              }
+              Err(error)
+            }
+          },
+        };
+        match result {
+          Ok(handle) => {
+            // Retain our copy until the receiver acknowledges ownership. A
+            // successful send alone does not prove the result was consumed.
+            if send.send(Ok(handle.clone())).is_ok() && accepted.await.is_ok() {
+              return;
+            }
+            if handle.handle.adapter().close().await.is_err() {
+              reservations
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(handle);
+            }
+          }
+          Err(error) => {
+            let _ = send.send(Err(error));
+          }
+        }
+      });
+      let handle = receive
+        .await
+        .map_err(|_| core_runtime::RuntimeOpenError::unconfirmed("Runtime startup was interrupted"))??;
+      let _ = accept.send(());
+      Ok(handle as Arc<dyn core_runtime::RuntimeHandle>)
     })
   }
 

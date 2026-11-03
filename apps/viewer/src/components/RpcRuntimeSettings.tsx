@@ -5,6 +5,7 @@ import type { RpcRuntimeProfile } from "../lib/types";
 import { useRpcRuntimes } from "../lib/useRpcRuntimes";
 import { RpcRuntimeProfileForm } from "./RpcRuntimeProfileForm";
 import { RpcRuntimeAccessSettings } from "./RpcRuntimeAccessSettings";
+import { AgentInstallations } from "./AgentInstallations";
 import "./RpcRuntimeSettings.css";
 
 interface RpcRuntimeSettingsProps {
@@ -25,6 +26,7 @@ function RpcRuntimeSettingsForMachine({ active, connected, machine_key, machine_
     <div className="settings-page__section-heading"><span className="settings-page__scope">{machine_label}</span><h2 id={heading_id}>Agent runtimes</h2><p>Configure agent processes and RPC connections on the selected machine.</p></div>
     {machine_key === "local" && isDesktop() && <RpcRuntimeAccessSettings active={active} />}
     {!connected ? <div className="settings-page__empty"><p>Connect to a machine to manage its agent runtimes.</p></div> : <>
+      <AgentInstallations active={active} connected={connected} machine_label={machine_label} runtime_error={state.error} />
       <div className="rpc-runtime-settings__toolbar"><p>Saved changes apply to the next launch or connection.</p><button type="button" disabled={state.loading || !!state.busy} onClick={() => { void state.refresh(true); }}>Refresh</button><button type="button" disabled={!state.profiles || !!state.busy || !!editor} onClick={() => setEditor({ revision: state.profiles!.revision })}>Add profile</button></div>
       {state.error && <div className="settings-page__empty" role="alert"><p>{state.error}</p><button type="button" disabled={state.loading || !!state.busy} onClick={() => { void state.refresh(true); }}>Retry agent runtimes</button></div>}
       {state.live_error && <p className="settings-page__notice" role="status">{state.live_error}</p>}

@@ -1056,6 +1056,31 @@ mod tests {
         .verify_runtime_management(&config, &device.public_key(), None, "POST", "/api/v1/start_rpc_runtime")
         .is_err()
     );
+    for command in [
+      "get_agent_installations",
+      "start_agent_installation",
+      "cancel_agent_installation",
+      "remove_agent_installation",
+    ] {
+      let path = format!("/api/v1/{command}");
+      assert!(
+        host
+          .verify_runtime_management(&config, &device.public_key(), None, "POST", &path)
+          .is_err()
+      );
+      crate::onboarding::set_runtime_management_enabled(&state_file, true).unwrap();
+      host
+        .verify_runtime_management(&config, &device.public_key(), None, "POST", &path)
+        .unwrap();
+      let mut view_only = config.clone();
+      view_only.allow_control = false;
+      assert!(
+        host
+          .verify_runtime_management(&view_only, &device.public_key(), None, "POST", &path)
+          .is_err()
+      );
+      crate::onboarding::set_runtime_management_enabled(&state_file, false).unwrap();
+    }
   }
 
   #[tokio::test]

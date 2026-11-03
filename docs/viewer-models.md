@@ -33,16 +33,26 @@ configuration/extensions and can run native migrations. No saved conversation,
 prompt or model-setting call is made during discovery.
 
 **Use runtime default** preserves existing creation behavior. Explicit Pi,
-Codex and OpenCode choices stay in the draft until Send, reset when the
+Codex, OpenCode and DSH choices stay in the draft until Send, reset when the
 project/provider/runtime changes, and determine image compatibility. A refreshed
 runtime plan also clears the model choice while preserving text/images. DSH
-remains default-only because its creation API does not accept a model. The host verifies
-the complete plan before and after catalog discovery, again before admission,
+reads the host runtime's catalog through `llm.models` or current
+`session/modelCatalog`. After native creation is durably recorded, its separate
+model-selection call runs once for that new idle blank session. Legacy
+`session.models` or Remote's authoritative sequenced `session/projections`
+confirms the selected model before input; cached migration hints are insufficient.
+A newer conflicting observed selection rejects input instead of replacing that
+native state with an older confirmation.
+Selecting a draft choice makes no native mutation. On first Send, DSH and Pi
+also update the host's default for future sessions, as disclosed by the picker.
+The host verifies the complete plan before and after catalog discovery, again before admission,
 and checks the actual creation runtime before applying the model. Stale
 project/profile/default or executable metadata rejects the old selection. Pi
 uses the common plan contract with its existing worker and catalog. Its driver
 passes creation-only launch arguments and verifies native state;
-Codex/OpenCode pass native creation parameters. The selected model
+Codex/OpenCode pass native creation parameters. A failed or uncertain DSH
+selection retains the created identity and never replays selection or input.
+The selected model
 identity and runtime-plan proof belong to the same durable creation fingerprint
 as the first prompt. RPC receipts also retain the exact resolved plan;
 uncertain results never trigger a separate setter or prompt replay. Native

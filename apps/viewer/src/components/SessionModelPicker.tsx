@@ -16,6 +16,7 @@ interface ModelPickerController {
   choices: ModelChoice[] | null;
   can_open: boolean;
   can_select: boolean;
+  updates_default?: boolean;
   running?: boolean;
   refresh: () => Promise<void>;
   loadChoices: () => Promise<void>;
@@ -62,7 +63,7 @@ export function SessionModelPicker({ model, provider, input_busy = false, select
   }, [open, mode, model.choices, model.loading, model.error, model.loadChoices]);
 
   useEffect(() => {
-    // Opening a draft picker also recovers a catalog rejected at first Send.
+    // Draft catalogs are reused until their scope changes or the user refreshes.
     if (open && mode === "creation") void model.loadChoices();
   }, [open, mode, model.loadChoices]);
 
@@ -85,8 +86,10 @@ export function SessionModelPicker({ model, provider, input_busy = false, select
       {model.loading || model.checking ? <p className="session-model__notice" role="status"><span className="inline-spinner" />Loading available models…</p> : null}
       {model.error ? <div className="session-model__error" role="alert"><p>{model.error}</p>
         <button type="button" className="text-button" disabled={model.loading || model.checking}
-          onClick={() => { if (mode === "session" && !model.status) void model.refresh(); else void model.loadChoices(); }}>
+          onClick={() => { if (mode === "creation" || !model.status) void model.refresh(); else void model.loadChoices(); }}>
           {mode === "session" && !model.status ? "Refresh model status" : "Retry models"}</button></div> : null}
+      {mode === "creation" && model.choices !== null && !model.error ? <button type="button" className="text-button session-model__retry"
+        disabled={!model.can_open || model.loading || model.checking || input_busy} onClick={() => { void model.refresh(); }}>Refresh models</button> : null}
       {mode === "creation" ? <div className="session-model__choices"><button type="button" className="session-model__choice"
         aria-pressed={!selected_model} disabled={input_busy} onClick={on_clear}>
         <span><strong>Runtime default</strong> <small>Use the agent’s configured model</small></span><span aria-hidden="true">{!selected_model ? "✓" : ""}</span>
@@ -103,9 +106,10 @@ export function SessionModelPicker({ model, provider, input_busy = false, select
         })}
       </div> : model.choices && !model.loading ? <p className="session-model__notice">No verified models are available.</p> : null}
       {!model.can_select && !model.checking && !model.loading && !model.error ? <p className="session-model__notice">{reason}</p> : null}
-      <p className="session-model__footnote">{mode === "creation" ? "Your model choice is applied when you send the first message." : model.running
+      {mode !== "creation" || model.can_select ? <p className="session-model__footnote">{mode === "creation" ? "Your model choice is applied when you send the first message." : model.running
         ? "While this session is responding, Send steers the current model and ignores this choice."
-        : "Your model choice is applied when you send the next message."}</p>
+        : "Your model choice is applied when you send the next message."}</p> : null}
+      {mode === "creation" && model.can_select && model.updates_default ? <p className="session-model__footnote">Applying a model on first Send also updates {provider}’s default for new sessions on this host.</p> : null}
       {model.status?.updates_pi_default ? <p className="session-model__footnote">When applied on Send, this choice also updates Pi’s default for new sessions on this machine.</p> : null}
     </div>, document.body) : null}
   </div>;

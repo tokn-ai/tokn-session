@@ -4,6 +4,16 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
+Settings → Agent runtimes includes explicit downloads/updates/removal for one
+Tokn-managed Pi/Codex/OpenCode/DSH installation per selected host. Host-side jobs
+stage and verify replacements under `runtimes/{provider}` beside the viewer
+index; Pi/DSH use host-owned Node/npm and local dependencies, without global
+installation or managed Node. Encrypted remote installation requires the
+existing paired-control/runtime-management permission. Shared use locks protect
+running runtimes; explicit profiles/overrides retain priority over managed
+installations and PATH. New Pi workers resolve the current installation without
+replacing active workers. See [agent downloads](viewer-rpc-runtimes.md#agent-downloads).
+
 The viewer now has a remote-only Android/iOS Tauri entry point, shared native
 Hub pairing/remembered identities, and mobile-private preference storage. Mobile
 does not register local history, hosting, or process commands; onboarding uses
@@ -48,10 +58,25 @@ worktree groups); changing its folder moves the row. Time view retains project
 labels, and drafts awaiting a folder remain separately accessible. No
 native session or upload starts until the first Send. Opening a draft model
 picker can briefly start a metadata RPC process; it never creates or resumes a
-saved conversation. Pi, Codex and OpenCode choices remain local to each draft,
+saved conversation. Reopening reuses the same draft's scoped catalog; explicit
+Refresh reloads it, and first Send still validates it on the host.
+Pi, Codex, OpenCode and DSH choices remain local to each draft,
 reset with project/provider/runtime changes, and are revalidated and applied
-before its first prompt. DSH retains its runtime default. Availability, catalogs
-and first Send share a host-resolved `RuntimePlan`; an opaque `runtime_plan_id`
+before its first prompt. DSH lazily reads the host runtime's catalog through
+legacy `llm.models` or current `session/modelCatalog`. Managed DSH 0.2 exchanges
+its owned readiness token for an in-memory cookie and uses the authenticated
+Remote mux/API; legacy ApiProxy remains supported. Current Remote callbacks
+delegate to native clients and do not advertise viewer answer support.
+Failed DSH startups release reservations only after explicitly reaping their
+original child; unknown cleanup still reserves the profile until host shutdown.
+First Send records the new native identity, applies a chosen model
+once to that idle blank session, and verifies it before delivering the prompt.
+History publication waits for preparation; Stop immediately fences the first
+prompt while already admitted native calls drain.
+DSH and Pi preserve their native behavior of also saving the choice as the
+host's default for future sessions; the picker discloses this effect.
+Availability, catalogs and first Send share a host-resolved
+`RuntimePlan`; an opaque `runtime_plan_id`
 pins configuration and project scope without exposing launch configuration.
 Stale plans reject before admission. Creation receipts include model identity
 without changing legacy default-model fingerprints. Draft IDs never
@@ -135,7 +160,8 @@ Live interaction now has nine Rust crates: a provider-independent
 adapters. The core owns instance-bound dispatch, capabilities, live pending
 interactions, cancellation-safe admissions, and bounded receipts; protocol and
 core crates do not import providers. Codex uses app-server stdio/WS(S), Pi uses
-stdio, OpenCode V2 HTTP/SSE, and DSH ApiProxy HTTP with two WebSocket downlinks.
+stdio, OpenCode V2 HTTP/SSE, and DSH HTTP with legacy ApiProxy downlinks or the
+authenticated Remote WebSocket mux.
 Each adapter supports owned
 launch and explicit attachment (Pi requires supplied IO); attached close never
 stops an external process. Native start-or-steer/queue admission is separate
