@@ -8,6 +8,7 @@ const host = { host_id: "550e8400-e29b-41d4-a716-446655440000", host_public_key:
 const descriptor = { ...host, connection_id: "connection-one", endpoint: "https://hub.example/encrypted/machine" };
 const handlers = new Map<string, (event: { payload: unknown }) => void>();
 beforeEach(() => {
+  vi.stubGlobal("__TAURI_INTERNALS__", {});
   handlers.clear();
   vi.mocked(listen).mockImplementation(async (name, handler) => { handlers.set(name, handler as (event: { payload: unknown }) => void); return () => { handlers.delete(name); }; });
   vi.mocked(invoke).mockImplementation(async (name) => {
@@ -16,7 +17,7 @@ beforeEach(() => {
     return undefined;
   });
 });
-afterEach(() => { vi.clearAllMocks(); });
+afterEach(() => { vi.clearAllMocks(); vi.unstubAllGlobals(); });
 it("registers native event listeners before starting the pump and ignores retired connections", async () => {
   const client = await NativeHubClient.connect("https://hub.example", host);
   const changed = vi.fn();

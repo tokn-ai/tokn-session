@@ -8,6 +8,24 @@ fn seed() -> TotpSecret {
 }
 
 #[test]
+fn host_entropy_pairing_interoperates_with_native_host_without_browser_policy() {
+  let host_identity = NoiseIdentity::generate().unwrap();
+  let client_identity = NoiseIdentity::from_secret([7; 32]).unwrap();
+  let secret = seed();
+  let (client, hello) =
+    ClientPairing::start_with_entropy(HOST, &client_identity, &secret.code_at(NOW), NOW, [1; 32]).unwrap();
+  let (_, other_hello) =
+    ClientPairing::start_with_entropy(HOST, &client_identity, &secret.code_at(NOW), NOW, [2; 32]).unwrap();
+  assert_ne!(hello, other_hello);
+  let (host, reply) = HostPairing::respond(&secret, HOST, &host_identity, &hello, NOW).unwrap();
+  let (client, proof) = client.confirm(&reply).unwrap();
+  let (_, acknowledgement) = host.finish(&proof, NOW).unwrap();
+  let authenticated = client.finish(&acknowledgement).unwrap();
+  assert_eq!(authenticated.client_kind, ClientKind::Native);
+  assert_eq!(authenticated.host_public_key, host_identity.public_key());
+}
+
+#[test]
 fn rfc6238_sha256_vectors_and_six_digit_truncation() {
   let seed = TotpSecret(Zeroizing::new(b"12345678901234567890123456789012".to_vec()));
   for (time, expected) in [

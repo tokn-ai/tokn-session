@@ -2,12 +2,12 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { browserTranslationEngine } from "../lib/browserTranslation";
 import { getTranslationStatus } from "../lib/tauri";
-import { isDesktop } from "../lib/transport";
+import { viewerCapabilities } from "../lib/platform";
 import type { TranslationStatus } from "../lib/types";
 import { TranslationProvider, useTranslationStatus } from "./TranslationProvider";
 
 vi.mock("../lib/tauri", () => ({ getTranslationStatus: vi.fn() }));
-vi.mock("../lib/transport", () => ({ isDesktop: vi.fn() }));
+vi.mock("../lib/platform", async (original) => ({ ...await original<typeof import("../lib/platform")>(), viewerCapabilities: vi.fn() }));
 vi.mock("../lib/browserTranslation", () => ({
   browserTranslationEngine: {
     label: "Browser Translation",
@@ -24,7 +24,7 @@ function Status({ label = "status" }: { label?: string }) {
 
 beforeEach(() => {
   vi.resetAllMocks();
-  vi.mocked(isDesktop).mockReturnValue(true);
+  vi.mocked(viewerCapabilities).mockReturnValue({ native_translation: true } as ReturnType<typeof viewerCapabilities>);
   vi.mocked(getTranslationStatus).mockResolvedValue({ available: true, reason: null });
   vi.mocked(browserTranslationEngine.getStatus).mockResolvedValue({ available: true, reason: null });
 });
@@ -42,7 +42,7 @@ describe("TranslationProvider", () => {
   });
 
   it("shares one browser availability check without invoking native commands or preparing models", async () => {
-    vi.mocked(isDesktop).mockReturnValue(false);
+    vi.mocked(viewerCapabilities).mockReturnValue({ native_translation: false } as ReturnType<typeof viewerCapabilities>);
     const view = render(<TranslationProvider><Status label="first" /><Status label="second" /></TranslationProvider>);
     expect(await screen.findAllByText("Available")).toHaveLength(2);
     view.rerender(<TranslationProvider><Status /></TranslationProvider>);
@@ -53,7 +53,7 @@ describe("TranslationProvider", () => {
   });
 
   it("provides the browser's reason when local translation is unavailable", async () => {
-    vi.mocked(isDesktop).mockReturnValue(false);
+    vi.mocked(viewerCapabilities).mockReturnValue({ native_translation: false } as ReturnType<typeof viewerCapabilities>);
     vi.mocked(browserTranslationEngine.getStatus).mockResolvedValue({ available: false, reason: "This browser does not support local translation." });
     render(<TranslationProvider><Status /></TranslationProvider>);
     expect(await screen.findByText("This browser does not support local translation.")).toBeInTheDocument();
@@ -72,7 +72,7 @@ describe("TranslationProvider", () => {
   });
 
   it("labels browser availability failures without referring to Apple Translation", async () => {
-    vi.mocked(isDesktop).mockReturnValue(false);
+    vi.mocked(viewerCapabilities).mockReturnValue({ native_translation: false } as ReturnType<typeof viewerCapabilities>);
     vi.mocked(browserTranslationEngine.getStatus).mockRejectedValue(new Error("Browser policy blocked translation."));
     render(<TranslationProvider><Status /></TranslationProvider>);
     expect(await screen.findByText("Browser Translation is unavailable in this viewer.")).toBeInTheDocument();
@@ -80,7 +80,7 @@ describe("TranslationProvider", () => {
   });
 
   it.each(["desktop", "browser"])("ignores a late %s availability result from an unmounted provider", async (platform) => {
-    vi.mocked(isDesktop).mockReturnValue(platform === "desktop");
+    vi.mocked(viewerCapabilities).mockReturnValue({ native_translation: platform === "desktop" } as ReturnType<typeof viewerCapabilities>);
     const get_status = platform === "desktop" ? getTranslationStatus : browserTranslationEngine.getStatus;
     let resolve!: (status: TranslationStatus) => void;
     vi.mocked(get_status).mockReturnValueOnce(new Promise((done) => { resolve = done; }));

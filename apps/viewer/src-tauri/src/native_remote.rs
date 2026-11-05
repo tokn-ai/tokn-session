@@ -171,8 +171,3 @@ mod tests {
     assert!(new_paths.desktop_client_dir().join("client-hosts.json").exists());
   }
 }
-
-#[cfg(mobile)]
-fn prepare(paths: &SessionPaths, _legacy: PathBuf) -> Result<RemoteManager, String> {
-  Ok(RemoteManager::new(paths.desktop_client_dir()))
-}

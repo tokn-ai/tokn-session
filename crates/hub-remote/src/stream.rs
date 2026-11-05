@@ -1,10 +1,11 @@
 use crate::Connection;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::oneshot;
 
-const MAX_EVENT: usize = 2 * 1024 * 1024;
-const MAX_SESSION_UPDATE: usize = 64 * 1024 * 1024;
+use tokn_hub_client_core::events::EventParser;
+#[cfg(test)]
+use tokn_hub_client_core::events::MAX_EVENT;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) async fn pump(connection: Arc<Connection>, ready: oneshot::Sender<Result<(), String>>) {
@@ -82,53 +83,6 @@ async fn pump_with_startup_timeout(
   connection.listening.store(false, std::sync::atomic::Ordering::Release);
   if let Some(ready) = ready {
     let _ = ready.send(Err(failure));
-  }
-}
-
-#[derive(Default)]
-struct EventParser {
-  buffer: Vec<u8>,
-}
-
-impl EventParser {
-  fn feed(&mut self, bytes: &[u8]) -> Result<Vec<(String, Value)>, String> {
-    // Viewer API emits LF delimiters; remove CR to tolerate CRLF on the wire.
-    self.buffer.extend(bytes.iter().copied().filter(|byte| *byte != b'\r'));
-    let mut events = Vec::new();
-    while let Some(end) = self.buffer.windows(2).position(|pair| pair == b"\n\n") {
-      self.check_limit(end)?;
-      let frame = std::str::from_utf8(&self.buffer[..end]).map_err(|_| "Invalid UTF-8 event stream")?;
-      let mut event = "message";
-      let mut data = Vec::new();
-      for line in frame.lines() {
-        if let Some(value) = line.strip_prefix("event:") {
-          event = value.trim();
-        }
-        if let Some(value) = line.strip_prefix("data:") {
-          data.push(value.trim_start());
-        }
-      }
-      if !data.is_empty() {
-        let payload = serde_json::from_str(&data.join("\n")).map_err(|_| "Host sent malformed live event JSON")?;
-        events.push((event.to_owned(), payload));
-      }
-      self.buffer.drain(..end + 2);
-    }
-    self.check_limit(self.buffer.len())?;
-    Ok(events)
-  }
-
-  fn check_limit(&self, length: usize) -> Result<(), String> {
-    let max =
-      if self.buffer.starts_with(b"event: session-updated\n") || self.buffer.starts_with(b"event:session-updated\n") {
-        MAX_SESSION_UPDATE
-      } else {
-        MAX_EVENT
-      };
-    if length > max {
-      return Err("Host event exceeds size limit".into());
-    }
-    Ok(())
   }
 }
 

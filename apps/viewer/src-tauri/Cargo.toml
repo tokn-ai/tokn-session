@@ -8,7 +8,7 @@ publish = false
 
 [lib]
 name = "tokn_session_viewer"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [build-dependencies]
 serde_json.workspace = true
@@ -26,13 +26,6 @@ tokn-hub-remote.workspace = true
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 
-[dev-dependencies]
-tempfile = "3"
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
-[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 axum = "0.8"
 base64 = "0.22"
 dirs.workspace = true
@@ -44,3 +37,9 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tokn-viewer-core.workspace = true
 tokn-session-relay.workspace = true
 tokn-session-hub = { path = "../../../crates/hub" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

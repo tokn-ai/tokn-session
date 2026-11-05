@@ -1,3 +1,4 @@
+import { installViewerHost, viewerHost } from "./platform";
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { useLayoutEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -47,6 +48,9 @@ import { ViewerPage } from "../pages/ViewerPage";
 vi.mock("../components/RelayConnection", () => ({ RelayConnection: () => null }));
 
 vi.mock("./tauri", () => ({
+  listViewerRuntimes: vi.fn(async () => ({ version: 1, runtimes: [] })),
+  listenForViewerRuntimeChanges: vi.fn(async () => () => {}),
+  restartViewerRuntime: vi.fn(),
   subscribeBackgroundUpdates: vi.fn((request) => Promise.resolve({ subscription_id: request.subscription_id, generation: "background", revision: "0", scope: request.scope, subscribed: true })),
   renewBackgroundSubscriptions: vi.fn(() => Promise.resolve()),
   listenForBackgroundUpdates: vi.fn(() => Promise.resolve(vi.fn())),
@@ -77,6 +81,7 @@ vi.mock("./tauri", () => ({
   retrySessionIndex: vi.fn(() => new Promise(() => undefined)),
 }));
 
+let restore_host: (() => void) | undefined;
 beforeEach(() => {
   localStorage.clear();
   vi.mocked(subscribeBackgroundUpdates).mockReset().mockImplementation(async (request) => ({ subscription_id: request.subscription_id, generation: "background", revision: "0", scope: request.scope, subscribed: true }));
@@ -112,6 +117,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  restore_host?.(); restore_host = undefined;
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -1302,6 +1308,8 @@ describe("useViewerState Relay updates", () => {
 
 describe("useViewerState refresh after message input", () => {
   it("keeps the conversation, draft, and subscriptions mounted while viewing runtime settings", async () => {
+    const host = viewerHost();
+    restore_host = installViewerHost({ ...host, capabilities: { ...host.capabilities, runtime_management: true } });
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
     vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, toolEventPage()));
     const { container } = render(<ViewerPage remote machine_label="Remote machine" machine_key="remote" />);

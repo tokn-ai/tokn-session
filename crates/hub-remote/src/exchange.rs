@@ -8,8 +8,8 @@ use tokio_tungstenite::{
   tungstenite::{Message, protocol::WebSocketConfig},
 };
 use tokn_hub_client_core::{
-  protocol,
-  secure::{InnerMessage, MAX_CHUNK, MAX_RECORD, NoiseIdentity, NoiseInitiator, SecureChannel},
+  exchange::{RequestFrames, ResponseState},
+  secure::{MAX_RECORD, NoiseIdentity, NoiseInitiator, SecureChannel},
 };
 use tokn_hub_transport::{BoxTransport, RecordTransport};
 use url::Url;
@@ -90,6 +90,7 @@ pub(crate) struct Exchange {
   pub channel: SecureChannel,
   pub status: u16,
   pub content_type: Option<String>,
+  response: ResponseState,
 }
 
 impl Exchange {
@@ -101,59 +102,33 @@ impl Exchange {
     path: &str,
     body: &[u8],
   ) -> Result<Self, String> {
+    let frames = RequestFrames::new(method, path, body)?;
     let mut initiator = NoiseInitiator::new(identity, host_key)?;
     transport.send(initiator.start()?).await?;
     let mut channel = initiator.finish(&read_record(&mut transport).await?)?;
-    transport
-      .send(channel.encrypt(&InnerMessage::DeviceRequest {
-        method: method.into(),
-        path: path.into(),
-      })?)
-      .await?;
-    for chunk in body.chunks(MAX_CHUNK) {
-      transport
-        .send(channel.encrypt(&InnerMessage::RequestBody {
-          data: protocol::encode(chunk),
-        })?)
-        .await?;
+    for frame in frames {
+      transport.send(channel.encrypt(&frame)?).await?;
     }
-    transport.send(channel.encrypt(&InnerMessage::RequestEnd {})?).await?;
-    match channel.decrypt(&read_record(&mut transport).await?)? {
-      InnerMessage::Response { status, content_type } if (200..=599).contains(&status) => {
-        if !matches!(
-          content_type
-            .as_deref()
-            .map(|value| value.split(';').next().unwrap_or_default().trim()),
-          Some("application/json" | "text/event-stream")
-        ) && !(status == 204 && content_type.is_none())
-        {
-          return Err("Host returned an unsupported response type".into());
-        }
-        Ok(Self {
-          transport,
-          channel,
-          status,
-          content_type,
-        })
-      }
-      InnerMessage::Error { message } => Err(message),
-      _ => Err("Expected authenticated host response".into()),
-    }
+    let response = ResponseState::from_header(channel.decrypt(&read_record(&mut transport).await?)?, None)?;
+    Ok(Self {
+      status: response.status,
+      content_type: response.content_type.clone(),
+      transport,
+      channel,
+      response,
+    })
   }
 
   pub async fn next(&mut self) -> Result<Option<Vec<u8>>, String> {
-    match self.channel.decrypt(&read_record(&mut self.transport).await?)? {
-      InnerMessage::Chunk { data } => Ok(Some(protocol::decode(&data, MAX_CHUNK)?)),
-      InnerMessage::End {} => Ok(None),
-      InnerMessage::Error { message } => Err(message),
-      _ => Err("Unexpected encrypted response record".into()),
-    }
+    self
+      .response
+      .next(self.channel.decrypt(&read_record(&mut self.transport).await?)?)
   }
 
   pub async fn acknowledge(&mut self) -> Result<(), String> {
     self
       .transport
-      .send(self.channel.encrypt(&InnerMessage::Window { credits: 1 })?)
+      .send(self.channel.encrypt(&self.response.acknowledge()?)?)
       .await
   }
 

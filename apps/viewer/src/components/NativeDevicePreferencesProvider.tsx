@@ -1,11 +1,11 @@
 import { useEffect, type ReactNode } from "react";
 import { initializeNativeDevicePreferences, useNativeDevicePreferencesStatus } from "../lib/devicePreferences";
-import { isDesktop } from "../lib/transport";
+import { viewerCapabilities } from "../lib/platform";
 import { NativePreferenceSaveNotice } from "./NativePreferenceSaveNotice";
 
 /** Native configuration must be hydrated before opening sessions or local hosting. */
 export function NativeDevicePreferencesProvider({ children }: { children: ReactNode }) {
-  const native = isDesktop();
+  const native = viewerCapabilities().device_preferences;
   const status = useNativeDevicePreferencesStatus();
   useEffect(() => {
     if (native) void initializeNativeDevicePreferences().catch(() => { /* The startup state exposes errors and Retry. */ });

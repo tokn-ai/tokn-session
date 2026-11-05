@@ -1,4 +1,4 @@
-import { isMobileApp } from "./platform";
+import { isDesktopHost, invokeHost, listenHost, viewerCapabilities, viewerHost } from "./platform";
 import { LiveSessionSocket } from "./liveSessionSocket";
 import type { BackgroundUpdatesRequest, SessionUpdatesRequest, TransportState } from "./types";
 export type UnlistenFn = () => void;
@@ -13,9 +13,7 @@ const MAX_SESSION_UPDATE_FRAME_LENGTH = 64 * 1024 * 1024;
 export function eventFrameLimit(frame: string): number {
   return /^event: ?session-updated\n/.test(frame) ? MAX_SESSION_UPDATE_FRAME_LENGTH : MAX_EVENT_FRAME_LENGTH;
 }
-// Legacy name: this detects Tauri IPC on both desktop and mobile. Local
-// capabilities additionally require !isMobileApp().
-export const isDesktop = () => "__TAURI_INTERNALS__" in window;
+export const isDesktop = isDesktopHost;
 
 export interface ViewerClient {
   readonly endpoint: string;
@@ -228,7 +226,7 @@ export function parseEvent(frame: string): { event: string; payload: unknown } |
 
 let selected: ViewerClient | undefined;
 export function viewerStorageScope(): string {
-  return selected?.endpoint ?? (isDesktop() ? "desktop" : window.location.origin);
+  return selected?.endpoint ?? (viewerHost().kind === "browser" ? window.location.origin : viewerHost().kind);
 }
 
 export function selectMachine(client?: ViewerClient) {
@@ -241,12 +239,12 @@ export function deselectMachine(client: ViewerClient) {
 }
 export async function invoke<T>(command: string, payload?: Record<string, unknown>): Promise<T> {
   if (selected) return selected.invoke<T>(command, payload);
-  if (isDesktop() && !isMobileApp()) return (await import("@tauri-apps/api/core")).invoke<T>(command, payload);
+  if (viewerCapabilities().local_machine) return invokeHost<T>(command, payload);
   throw new Error("Connect to a machine first");
 }
 export async function listen<T>(event: string, handler: (event: { payload: T }) => void): Promise<UnlistenFn> {
   if (selected) return selected.listen<T>(event, handler);
-  if (isDesktop() && !isMobileApp()) return (await import("@tauri-apps/api/event")).listen<T>(event, handler);
+  if (viewerCapabilities().local_machine) return listenHost<T>(event, handler);
   throw new Error("Connect to a machine first");
 }
 
@@ -257,11 +255,11 @@ export function captureTransport(): {
   release: (command: string, payload?: Record<string, unknown>) => Promise<void>;
   on_close: (handler: () => void) => UnlistenFn;
 } {
-  if (!selected && isDesktop() && !isMobileApp()) {
+  if (!selected && viewerCapabilities().local_machine) {
     const local: CommandInvoker = async <T>(command: string, payload?: Record<string, unknown>) =>
-      (await import("@tauri-apps/api/core")).invoke<T>(command, payload);
+      invokeHost<T>(command, payload);
     const subscribe: EventSubscriber = async <T>(event: string, handler: (event: { payload: T }) => void) =>
-      (await import("@tauri-apps/api/event")).listen<T>(event, handler);
+      listenHost<T>(event, handler);
     return { invoke: local, listen: subscribe, release: local, on_close: () => () => {} };
   }
   const client = selected;

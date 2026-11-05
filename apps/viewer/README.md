@@ -1,6 +1,6 @@
 # Tokn Sessions Viewer
 
-The viewer shares a React UI across desktop, Android/iOS, and browser clients for
+The viewer shares a React UI across desktop, Apell, and browser clients for
 browsing historical Pi, Codex,
 OpenCode, ZCode, WorkBuddy, and DeepSeek Harness (DSH) sessions in one place. It
 shows root sessions in a searchable, provider-filterable sidebar, expands their
@@ -8,10 +8,11 @@ known subagents on demand, and renders each selected normalized event stream as
 a conversation with inspectable technical events.
 Its composer sends messages to supported live sessions through their owning app.
 
-Android and iOS use the native encrypted Hub client to access sessions on a
-paired computer. They do not scan the phone for agent histories or start agents
-locally. See [mobile setup and verification](../../docs/viewer-mobile.md) for
-platform prerequisites, builds, pairing, and device checks.
+Android and iOS run the Tokn Session applet inside Apell. Its Rust guest owns
+encrypted Hub connections through Apell host services; it shares this viewer’s
+components, session caches and interaction UI with desktop. Standalone native
+mobile targets are removed. See [the Apell applet](../../docs/viewer-apell.md) for
+packaging, host prerequisites and verification.
 
 ## Relay lifetime and data modes
 

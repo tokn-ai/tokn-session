@@ -1,3 +1,4 @@
+import { invokeHost, listenHost } from "./platform";
 import { type SavedHubHost } from "./hubDeviceStore";
 import type { ConnectionState, UnlistenFn, ViewerClient } from "./transport";
 import type { PasskeyProvider } from "./hubEncryptedClient";
@@ -11,7 +12,7 @@ export interface NativeHubStatus {
 }
 interface Descriptor extends SavedHubHost { connection_id: string; endpoint: string; transport?: TransportState; }
 async function command<T>(name: string, request: Record<string, unknown>): Promise<T> {
-  return (await import("@tauri-apps/api/core")).invoke<T>(name, request);
+  return invokeHost<T>(name, request);
 }
 export function nativeHubStatus(hub_url: string): Promise<NativeHubStatus> { return command("hub_client_status", { hub_url }); }
 export function nativeHubPair(hub_url: string, host_id: string, code: string, expected_host_public_key?: string, machine_address?: string): Promise<SavedHubHost> { return command("hub_client_pair", { hub_url, host_id, code, expected_host_public_key, ...(machine_address ? { machine_address } : {}) }); }
@@ -72,7 +73,7 @@ export class NativeHubClient implements ViewerClient {
   setTransportListener(handler: (transport: TransportState) => void): void { this.on_transport = handler; handler(this.transport); }
   private async start(): Promise<void> {
     try {
-      const { listen } = await import("@tauri-apps/api/event");
+      const listen = listenHost;
       const stop_events = await listen<{ connection_id: string; event: string; payload: unknown }>("hub-client-event", ({ payload }) => {
         if (this.closed || payload.connection_id !== this.descriptor.connection_id) return;
         for (const handler of this.listeners.get(payload.event) ?? []) handler({ payload: payload.payload });

@@ -14,7 +14,7 @@ vi.mock("./tauri", () => ({
   listenForViewerPreferences: native.listen_viewer,
   listenForMachinePreferences: native.listen_machines,
 }));
-vi.mock("./transport", () => ({ isDesktop: native.desktop }));
+vi.mock("./platform", () => ({ viewerCapabilities: () => ({ device_preferences: native.desktop() }) }));
 
 const viewer: ViewerPreferences = { version: 1, sidebar_order: "time", background_updates_scope: "all",
   background_update_level: "messages", conversation_update_level: "steps", show_lifecycle: false };

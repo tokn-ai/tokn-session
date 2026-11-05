@@ -1,4 +1,4 @@
-# Releasing crates and mobile builds
+# Releasing crates and viewer clients
 
 ## Version 0.1.1
 
@@ -83,38 +83,11 @@ After confirming all packages are available, tag the same commit `v0.1.1` and
 record the release on GitHub. Install the four executable packages into a fresh
 directory with `cargo install --version 0.1.1 --locked` and repeat the smoke tests.
 
-## Mobile downloads
+## Mobile delivery through Apell
 
-The **Mobile builds** workflow keeps CI artifacts for seven days and publishes
-verified Android ARM64 debug APKs and unsigned iOS ARM64 simulator archives:
-
-| Trigger | Publication |
-| --- | --- |
-| Every push to `main` | Update the rolling `nightly` prerelease. |
-| GitHub Release published | Attach successful builds of the event's exact commit to that release. |
-| Manual dispatch with `release_tag` | Retry an existing published release, building its current tag. |
-| PR or manual dispatch with an empty `release_tag` | Build and retain CI artifacts only. |
-
-Every main commit finishes its builds; only superseded PR runs are canceled.
-Each platform publishes independently, so a failed build does not block a
-successful platform's download. Any build or publication failure still leaves
-the workflow failed. Nightly keeps the last successful download per platform;
-release notes identify its commit, UTC build date, and SHA-256 checksum. Late
-older runs cannot replace newer downloads or roll back the latest attempt's status.
-
-Versioned-release retries add missing assets and retain existing successful
-ones. Publication checks that the tag still points to the built commit.
-Set `release_tag` in the workflow's **Run workflow** form to retry that release;
-`nightly` is reserved for pushes to `main`. Keep the release editable until all
-desired assets are attached. GitHub immutable releases lock assets on publication
-and cannot support these later uploads; supporting them would require uploading
-to a draft before publishing. See
-[GitHub immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases).
-
-Only the publisher job grants `GITHUB_TOKEN` release write permission; PRs
-cannot publish, and no extra secrets are required. These remain development
-downloads: the Android APK uses debug signing, and the iOS archive runs only in
-the simulator. Android CI does not configure a persistent signing key for
-installed-app upgrades. Device signing and App Store/Play uploads remain separate work;
-see [mobile build setup](viewer-mobile.md). This workflow does not invoke
-`scripts/publish-crates.py`; crates.io publication stays explicit as described above.
+Android and iOS use the Tokn Session `.apel` package inside Apell. The standalone
+viewer mobile targets, native build workflow and APK/simulator publication scripts
+are removed. Publish the applet package rather than maintaining a second native
+mobile shell. Existing installed viewers pair Apell as a new device; private
+identities are not automatically transferred across OS application sandboxes.
+See [the Apell applet](viewer-apell.md) for builds, installation and verification.

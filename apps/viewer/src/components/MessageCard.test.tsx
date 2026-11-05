@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { browserTranslationEngine } from "../lib/browserTranslation";
 import { cancelTranslation, getTranslationStatus, loadEventDetail, openTranslationSettings, translateText } from "../lib/tauri";
 import type { TranslationJob, TranslationProgress } from "../lib/translationEngine";
-import { isDesktop } from "../lib/transport";
+import { viewerCapabilities } from "../lib/platform";
 import type { EventDetail, EventSummary, TranslateTextResponse, TrajectoryEventPageState } from "../lib/types";
 import { EventCard } from "./EventCard";
 import { MessageCard } from "./MessageCard";
@@ -16,7 +16,7 @@ vi.mock("../lib/tauri", () => ({
   openTranslationSettings: vi.fn(),
   translateText: vi.fn(),
 }));
-vi.mock("../lib/transport", () => ({ isDesktop: vi.fn() }));
+vi.mock("../lib/platform", async (original) => ({ ...await original<typeof import("../lib/platform")>(), viewerCapabilities: vi.fn() }));
 vi.mock("../lib/browserTranslation", () => ({
   browserTranslationEngine: {
     label: "Browser Translation",
@@ -88,7 +88,7 @@ async function startTranslation() {
 
 beforeEach(() => {
   vi.resetAllMocks();
-  vi.mocked(isDesktop).mockReturnValue(true);
+  vi.mocked(viewerCapabilities).mockReturnValue({ native_translation: true } as ReturnType<typeof viewerCapabilities>);
   vi.mocked(getTranslationStatus).mockResolvedValue({ available: true, reason: null });
   vi.mocked(loadEventDetail).mockResolvedValue(detail());
   vi.mocked(translateText).mockResolvedValue({ texts: ["中文译文。"] });
@@ -141,7 +141,7 @@ describe("message translation availability", () => {
   });
 
   it("explains unavailable browser translation without invoking native commands", async () => {
-    vi.mocked(isDesktop).mockReturnValue(false);
+    vi.mocked(viewerCapabilities).mockReturnValue({ native_translation: false } as ReturnType<typeof viewerCapabilities>);
     vi.mocked(browserTranslationEngine.getStatus).mockResolvedValue({ available: false, reason: "This browser does not support local translation." });
     render(card(message()));
     const button = await screen.findByRole("button", { name: "Translate → 简体中文" });
@@ -156,7 +156,7 @@ describe("message translation availability", () => {
 });
 
 describe("browser message translation", () => {
-  beforeEach(() => { vi.mocked(isDesktop).mockReturnValue(false); });
+  beforeEach(() => { vi.mocked(viewerCapabilities).mockReturnValue({ native_translation: false } as ReturnType<typeof viewerCapabilities>); });
 
   it("prepares models in the click before full detail loads, with download progress and a continuation action", async () => {
     const pending_detail = deferred<EventDetail>();
@@ -426,7 +426,7 @@ describe("native translation recovery", () => {
   });
 
   it("never offers native settings for a browser or history-load failure", async () => {
-    vi.mocked(isDesktop).mockReturnValue(false);
+    vi.mocked(viewerCapabilities).mockReturnValue({ native_translation: false } as ReturnType<typeof viewerCapabilities>);
     browser_translate.mockRejectedValueOnce(model_failure);
     const view = render(card(message()));
     await startTranslation();
@@ -434,7 +434,7 @@ describe("native translation recovery", () => {
     expect(screen.queryByRole("button", { name: "Open Translation Settings" })).not.toBeInTheDocument();
     view.unmount();
 
-    vi.mocked(isDesktop).mockReturnValue(true);
+    vi.mocked(viewerCapabilities).mockReturnValue({ native_translation: true } as ReturnType<typeof viewerCapabilities>);
     vi.mocked(loadEventDetail).mockRejectedValueOnce(model_failure);
     render(card(message()));
     await startTranslation();

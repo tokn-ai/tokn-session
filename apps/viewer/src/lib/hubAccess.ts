@@ -2,7 +2,8 @@ import { loadHubCrypto, type CryptoApi } from "./hubCrypto";
 import { HubDeviceStore, validateHost, canonicalHubUrl, type SavedHubHost } from "./hubDeviceStore";
 import { EncryptedHubClient, pairHubHost, authenticateHubHost } from "./hubEncryptedClient";
 import { NativeHubClient, nativeHubAuthenticate, nativeHubForget, nativeHubPair, nativeHubStatus, nativeHubResolve, nativeHubRememberMetadata } from "./hubNativeClient";
-import { isDesktop, type ViewerClient } from "./transport";
+import { type ViewerClient } from "./transport";
+import { viewerCapabilities } from "./platform";
 import { parseMachineTarget, resolveBrowserMachine, validateResolvedMachine } from "./hubAddress";
 import type { ResolvedMachine } from "./types";
 
@@ -121,7 +122,7 @@ export class BrowserHubAccess implements HubAccessBackend {
 }
 export async function openHubAccess(hub_url: string): Promise<HubAccessService> {
   const canonical = canonicalHubUrl(hub_url);
-  if (isDesktop()) return withMachineAddressing({
+  if (viewerCapabilities().native_hub) return withMachineAddressing({
     hub_url: canonical,
     status: () => nativeHubStatus(canonical),
     pair: async (host_id, code, signal, expected_host_public_key, machine) => { const host = await nativeHubPair(canonical, host_id, code, expected_host_public_key, machine?.machine_address); if (signal.aborted) throw new Error("Machine disconnected"); return host; },

@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useMemo, useRef, type ReactNode } from "react";
 import { useSessionDrafts } from "../lib/useSessionDrafts";
-import type { CommandInvoker, EventSubscriber } from "../lib/transport";
+import { invokeHost, listenHost } from "../lib/platform";
 import type { SessionSummary } from "../lib/types";
 
 type CreatedListener = (draft_id: string, session: SessionSummary) => void;
@@ -12,14 +12,8 @@ const SessionDraftsContext = createContext<LocalSessionDrafts | null>(null);
 
 // Draft creation belongs to this computer even when the global viewer transport
 // is displaying a remote machine. Load native APIs only when the owner uses them.
-const invokeLocal: CommandInvoker = async (command, payload) => {
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke(command, payload);
-};
-const listenLocal: EventSubscriber = async (event, handler) => {
-  const { listen } = await import("@tauri-apps/api/event");
-  return listen(event, handler);
-};
+const invokeLocal = invokeHost;
+const listenLocal = listenHost;
 const local_transport = {
   invoke: invokeLocal,
   listen: listenLocal,

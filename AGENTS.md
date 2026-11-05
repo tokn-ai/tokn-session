@@ -65,6 +65,7 @@ The core abstraction is `AgentEvent`: provider-native historical sessions and li
 - `crates/viewer-core`: shared viewer domain, index scheduler, snapshot/follow readers, and Relay supervision.
 - `crates/viewer-api`: HTTP/SSE adapter and optional static web UI host for browser clients.
 - `apps/viewer`: shared React UI; local desktop uses viewer-core, remote app/browser clients reach the host through encrypted Hub tunnels.
+- `apps/apell` and `crates/apell-client`: Apell package entry and portable Rust guest, sharing the viewer and Hub core with desktop; iOS/Android run this applet.
 - `vendor/`: source-of-truth checkouts for upstream projects. Do not edit vendored code unless explicitly asked.
 - `deploy/`: generic deployment scripts and configuration examples only. Keep actual host names, public domains/IPs, rendered configurations, secrets and rollout/backup records outside this repository; use placeholders in tracked examples.
 

@@ -1,3 +1,5 @@
+import { installViewerHost } from "../lib/platform";
+import { createApellHost } from "../lib/apellHost";
 import { StrictMode, type ReactNode } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -11,6 +13,7 @@ vi.mock("../pages/ViewerPage", () => ({ ViewerPage: ({ connection }: { connectio
 const host = { host_id: "550e8400-e29b-41d4-a716-446655440000", host_public_key: "H".repeat(43), machine_address: "alice:workstation", name: "Workstation" };
 let service: HubAccessService;
 let client: RemoteClient;
+let restore_host: (() => void) | undefined;
 beforeEach(() => {
   client = new RemoteClient("https://hub.example/encrypted/machine", "");
   service = {
@@ -21,21 +24,19 @@ beforeEach(() => {
   };
   vi.mocked(openHubAccess).mockResolvedValue(service);
 });
-afterEach(() => { cleanup(); selectMachine(); Reflect.deleteProperty(window, "__TAURI_INTERNALS__"); Reflect.deleteProperty(window, "__TOKN_MOBILE__"); localStorage.clear(); vi.restoreAllMocks(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); restore_host?.(); restore_host = undefined; selectMachine(); Reflect.deleteProperty(window, "__TAURI_INTERNALS__"); localStorage.clear(); vi.restoreAllMocks(); vi.clearAllMocks(); });
 async function ready() { await screen.findByLabelText("Machine address or reference"); }
 
-it("mobile first launch waits for a Hub address without trying a placeholder URL", () => {
-  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
-  Object.defineProperty(window, "__TOKN_MOBILE__", { value: true, configurable: true });
+it("applet first launch waits for a Hub address without trying a placeholder URL", () => {
+  restore_host = installViewerHost(createApellHost({ invoke: vi.fn(), onEvent: () => () => {} }));
   render(<HubAccess initial_hub_url="https://" startup_host_id={null} />);
   expect(screen.getByLabelText("Hub address")).toHaveValue("https://");
   expect(openHubAccess).not.toHaveBeenCalled();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
-it("mobile pairs through Hub without offering local hosting or an unsupported passkey ceremony", async () => {
-  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
-  Object.defineProperty(window, "__TOKN_MOBILE__", { value: true, configurable: true });
+it("applet pairs through Hub without offering local hosting or an unsupported passkey ceremony", async () => {
+  restore_host = installViewerHost(createApellHost({ invoke: vi.fn(), onEvent: () => () => {} }));
   render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />);
   await ready();
   expect(screen.queryByRole("heading", { name: "This machine" })).not.toBeInTheDocument();
@@ -55,9 +56,8 @@ it("mobile pairs through Hub without offering local hosting or an unsupported pa
   expect(screen.getByLabelText("Authenticator code")).toHaveValue("");
 });
 
-it("mobile reopens a remembered machine using its native pairing", async () => {
-  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
-  Object.defineProperty(window, "__TOKN_MOBILE__", { value: true, configurable: true });
+it("applet reopens a remembered machine using its native pairing", async () => {
+  restore_host = installViewerHost(createApellHost({ invoke: vi.fn(), onEvent: () => () => {} }));
   vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: host.host_id, device_public_key: "D".repeat(43) });
   render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={host.host_id} />);
   expect(await screen.findByText("Encrypted sessions")).toBeInTheDocument();

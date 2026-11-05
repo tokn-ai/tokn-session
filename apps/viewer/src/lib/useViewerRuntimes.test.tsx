@@ -5,7 +5,7 @@ import { useViewerRuntimes } from "./useViewerRuntimes";
 import type { RuntimeInfo, RuntimeInventory, RuntimeRestartResponse } from "./types";
 
 const { desktop, notify } = vi.hoisted(() => ({ desktop: { value: true }, notify: vi.fn() }));
-vi.mock("./transport", () => ({ isDesktop: () => desktop.value }));
+vi.mock("./platform", () => ({ viewerCapabilities: () => ({ runtime_management: desktop.value }) }));
 vi.mock("./tauri", () => ({ listViewerRuntimes: vi.fn(), listenForViewerRuntimeChanges: vi.fn(), restartViewerRuntime: vi.fn() }));
 vi.mock("../components/ActionNotifications", () => ({ useActionNotification: () => notify }));
 let changed: () => void;

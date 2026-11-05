@@ -4,29 +4,15 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
-The viewer now has a remote-only Android/iOS Tauri entry point, shared native
-Hub pairing/remembered identities, and mobile-private preference storage. Mobile
-does not register local history, hosting, or process commands; onboarding uses
-authenticator codes (mobile passkey ceremonies remain unimplemented). Android
-scaffolding and platform build scripts/configuration are in `apps/viewer`.
-Phone layouts account for safe areas and the visual viewport when keyboards open.
-`hub-remote` now owns native client trust persistence, with the existing Hub
-onboarding exports preserved, so mobile avoids server/SQLite/WebAuthn dependencies.
-Host/client integration tests and the WebRTC smoke example live in the Hub crate
-to keep both runtime and published dependency graphs acyclic.
-Android ARM64 checking, linking, and debug APK packaging pass, along with the
-workspace/viewer tests and Chromium phone/tablet layout checks. The Mobile builds
-workflow builds an ARM64 Android debug APK and unsigned iOS 16.4+ ARM64 simulator
-app on PRs/main/releases/manual dispatch, retaining CI artifacts for seven days.
-Every main commit builds and updates a rolling `nightly` prerelease with each
-platform's last successful download; older runs cannot replace newer outputs.
-Published versioned releases receive successful builds of the event's exact
-commit, and retries add missing assets without replacing good ones. Failed
-platforms leave CI red without blocking successful uploads. Release notes record
-source commits, build dates, and checksums. Releases must remain editable for
-uploads; signing and store publication remain separate. The iOS job generates
-its Xcode project on macOS; native pairing and keyboard checks remain. See
-[mobile viewer](viewer-mobile.md) and [publication](releasing.md#mobile-downloads).
+Desktop and Apell now share the React viewer, resource caches and command/event
+contracts through explicit host capabilities. Apell uses the remote-only workspace
+and applet bridge; desktop retains local history, hosting, creation and native
+services. Phone layout depends on viewport size, not runtime identity. The
+standalone Android/iOS Tauri entry, generated project/configuration and mobile
+release workflow are removed; mobile delivery uses the `.apel` applet.
+Applets use durable app-style device trust and authenticator pairing, without
+browser per-document passkey semantics. Browser behavior remains separate.
+See [the Apell applet](viewer-apell.md) for guest/host boundaries and verification.
 
 Local folders discovered in saved session `cwd` metadata now register
 automatically across all six historical providers. Migration 13 preserves
