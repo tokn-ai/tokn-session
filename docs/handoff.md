@@ -15,6 +15,9 @@ browser per-document passkey semantics. Browser behavior remains separate.
 See [the Apell applet](viewer-apell.md) for guest/host boundaries and verification.
 Cargo and CI use the merged Apell service revision; the Wasmi test resolves
 relative guest paths from the workspace root rather than its crate directory.
+Viewer CI packs the complete `.apel` and retains it as an Actions artifact.
+Successful main CI publishes stable applet/checksum assets to the rolling nightly
+prerelease; serialized publication skips stale commits and updates its tag.
 
 Local folders discovered in saved session `cwd` metadata now register
 automatically across all six historical providers. Migration 13 preserves

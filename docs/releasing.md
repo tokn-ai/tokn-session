@@ -91,3 +91,15 @@ are removed. Publish the applet package rather than maintaining a second native
 mobile shell. Existing installed viewers pair Apell as a new device; private
 identities are not automatically transferred across OS application sandboxes.
 See [the Apell applet](viewer-apell.md) for builds, installation and verification.
+
+CI builds and validates the complete package for every pull request and main
+push, and retains `apell-package` as an Actions artifact. After the main CI jobs
+pass, the main-only publisher checks its SHA-256 and uploads `tokn-session.apel`
+and `tokn-session.sha256` to the existing `nightly` release. It moves the nightly
+tag to the built commit and keeps the release marked as a prerelease. Apell can
+install and update it using `tokn-ai/tokn-session@nightly`, including builds with
+an unchanged applet version.
+
+Publication is serialized; delayed runs skip if their commit is no longer main.
+To retry a failed upload, rerun the latest main CI run. Only the publisher has
+repository-content write permission, using the workflow's GitHub token.

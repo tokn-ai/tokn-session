@@ -73,6 +73,11 @@ Install the file through Apell's **+ → Install from file**, then pair using th
 Hub URL, trusted machine reference and authenticator code. Applet code updates
 take effect in a fresh Apell run; restart Apell if that applet already ran.
 
+For nightly installs and updates, choose **Install from GitHub** and enter
+`tokn-ai/tokn-session@nightly`. Main CI publishes the tested package and SHA-256
+after its checks pass. The stable asset name and prerelease channel let Apell
+replace builds even when their applet version is unchanged.
+
 ## Verification
 
 Run the shared viewer tests/build and Rust workspace checks. The portable core
