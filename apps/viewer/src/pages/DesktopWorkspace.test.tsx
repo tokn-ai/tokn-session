@@ -11,6 +11,7 @@ import { listen } from "@tauri-apps/api/event";
 
 const selection: HubMachineSelection = { kind: "hub", hub_url: "https://hub.example", host_id: "550e8400-e29b-41d4-a716-446655440000" };
 vi.mock("../components/LocalHostProvider", () => ({ LocalHostProvider: ({ children }: { children: import("react").ReactNode }) => children }));
+vi.mock("../components/NativeDevicePreferencesProvider", () => ({ NativeDevicePreferencesProvider: ({ children }: { children: import("react").ReactNode }) => children }));
 
 vi.mock("../lib/tauri", async (original) => ({ ...await original<typeof import("../lib/tauri")>(), initializeLocalViewer: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(vi.fn()) }));
@@ -31,8 +32,8 @@ vi.mock("./ViewerPage", () => ({ ViewerPage: ({ on_open_machines }: { on_open_ma
   </>;
 } }));
 
-beforeEach(() => { vi.mocked(initializeLocalViewer).mockResolvedValue(undefined); });
-afterEach(() => { cleanup(); selectMachine(); localStorage.clear(); vi.restoreAllMocks(); vi.clearAllMocks(); });
+beforeEach(() => { vi.stubGlobal("__TAURI_INTERNALS__", {}); vi.mocked(initializeLocalViewer).mockResolvedValue(undefined); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); selectMachine(); localStorage.clear(); vi.restoreAllMocks(); vi.clearAllMocks(); });
 
 it("starts in Machines without initializing local sessions on a new installation", () => {
   render(<DesktopWorkspace />);

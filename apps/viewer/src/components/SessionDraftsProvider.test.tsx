@@ -29,7 +29,7 @@ function Consumer({ on_created }: { on_created?: (draft_id: string, session: Ses
   useEffect(() => on_created && controller?.subscribeCreated(on_created), [controller?.subscribeCreated, on_created]);
   return null;
 }
-beforeEach(() => {
+beforeEach(() => { vi.stubGlobal("__TAURI_INTERNALS__", {});
   vi.mocked(listen).mockImplementation(async (_name, handler) => {
     emit = handler as typeof emit;
     return unlisten;
@@ -40,7 +40,7 @@ beforeEach(() => {
     throw new Error(`Unexpected command: ${command}`);
   });
 });
-afterEach(() => { cleanup(); selectMachine(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); selectMachine(); vi.clearAllMocks(); });
 
 it("waits for local initialization and keeps creation on native transport while a remote machine is selected", async () => {
   const remote = { invoke: vi.fn(), listen: vi.fn(), close: vi.fn() } as unknown as ViewerClient;

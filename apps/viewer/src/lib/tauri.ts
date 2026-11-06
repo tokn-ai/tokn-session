@@ -1,5 +1,5 @@
-import { isMobileApp } from "./platform";
-import { invoke, isDesktop, listen, type CommandInvoker, type EventSubscriber, type UnlistenFn } from "./transport";
+import { invokeHost, listenHost, viewerCapabilities } from "./platform";
+import { invoke, listen, type CommandInvoker, type EventSubscriber, type UnlistenFn } from "./transport";
 import type {
   ListSessionCreationModelsRequest, SessionCreationModels,
   RelaySettings, RelayStatus, RelayChange,
@@ -127,14 +127,14 @@ export function listSessionModels(request: SessionModelStatusRequest, send: Comm
 
 /** Prepare this device's viewer independently of the selected remote transport. */
 export async function initializeLocalViewer(): Promise<void> {
-  if (!isDesktop() || isMobileApp()) throw new Error("This machine is available in the desktop app.");
-  await (await import("@tauri-apps/api/core")).invoke<void>("initialize_local_viewer");
+  if (!viewerCapabilities().local_machine) throw new Error("This machine is available in the desktop app.");
+  await invokeHost<void>("initialize_local_viewer");
 }
 
 /** Runtime ownership belongs to this desktop viewer, not the selected machine. */
 async function viewerRuntimeCommand<T>(command: string, payload?: Record<string, unknown>): Promise<T> {
-  if (!isDesktop() || isMobileApp()) throw new Error("Runtime management is available in the desktop app.");
-  return (await import("@tauri-apps/api/core")).invoke<T>(command, payload);
+  if (!viewerCapabilities().runtime_management) throw new Error("Runtime management is available in the desktop app.");
+  return invokeHost<T>(command, payload);
 }
 export function listViewerRuntimes(): Promise<RuntimeInventory> {
   return viewerRuntimeCommand("list_viewer_runtimes");
@@ -143,13 +143,13 @@ export function restartViewerRuntime(request: RuntimeRestartRequest): Promise<Ru
   return viewerRuntimeCommand("restart_viewer_runtime", { request });
 }
 export async function listenForViewerRuntimeChanges(handler: () => void): Promise<UnlistenFn> {
-  if (!isDesktop() || isMobileApp()) throw new Error("Runtime management is available in the desktop app.");
-  return (await import("@tauri-apps/api/event")).listen("viewer-runtimes-changed", handler);
+  if (!viewerCapabilities().runtime_management) throw new Error("Runtime management is available in the desktop app.");
+  return listenHost("viewer-runtimes-changed", handler);
 }
 
 async function nativeDeviceCommand<T>(command: string, payload: Record<string, unknown>): Promise<T> {
-  if (!isDesktop()) throw new Error("Native device preferences are available in the app.");
-  return (await import("@tauri-apps/api/core")).invoke<T>(command, payload);
+  if (!viewerCapabilities().device_preferences) throw new Error("Device preferences are available in the app.");
+  return invokeHost<T>(command, payload);
 }
 
 export function initializeDevicePreferences(request: InitializeDevicePreferencesRequest): Promise<DevicePreferencesSnapshot> {
@@ -165,8 +165,8 @@ export function writeMachinePreferences(preferences: MachinePreferences, write_i
 }
 
 async function nativeDeviceListener<T>(name: string, handler: (preferences: T) => void): Promise<UnlistenFn> {
-  if (!isDesktop()) throw new Error("Native device preferences are available in the app.");
-  return (await import("@tauri-apps/api/event")).listen<T>(name, (event) => handler(event.payload));
+  if (!viewerCapabilities().device_preferences) throw new Error("Device preferences are available in the app.");
+  return listenHost<T>(name, (event) => handler(event.payload));
 }
 
 export function listenForViewerPreferences(handler: (preferences: NativePreferenceUpdate<ViewerPreferences>) => void): Promise<UnlistenFn> {
@@ -194,14 +194,14 @@ export function cancelTranslation(requestId: string): Promise<void> {
 }
 
 export async function openTranslationSettings(): Promise<void> {
-  if (!isDesktop() || isMobileApp()) throw new Error("Translation Settings are available in the macOS desktop app.");
-  await (await import("@tauri-apps/api/core")).invoke<void>("open_translation_settings");
+  if (!viewerCapabilities().native_translation) throw new Error("Translation Settings are available in the macOS desktop app.");
+  await invokeHost<void>("open_translation_settings");
 }
 
 async function localTranslation<T>(command: string, payload?: Record<string, unknown>): Promise<T> {
   // Translation belongs to the viewing device even when session data is remote.
-  if (isMobileApp()) throw new Error("Native translation is unavailable in the mobile app.");
-  if (isDesktop()) return (await import("@tauri-apps/api/core")).invoke<T>(command,payload);
+  if (viewerCapabilities().native_translation) return invokeHost<T>(command, payload);
+  if (viewerCapabilities().native_hub) throw new Error("Native translation is unavailable in this host.");
   return invoke<T>(command,payload);
 }
 
@@ -406,8 +406,8 @@ export function listenForBackgroundUpdates(handler: (update: import("./types").B
 
 // Hosting belongs to this app, independent of the currently selected machine.
 async function localHostCommand<T>(command: string, payload?: Record<string, unknown>): Promise<T> {
-  if (!isDesktop() || isMobileApp()) throw new Error("Host setup is available in the desktop app.");
-  return (await import("@tauri-apps/api/core")).invoke<T>(command, payload);
+  if (!viewerCapabilities().hosting) throw new Error("Host setup is available in the desktop app.");
+  return invokeHost<T>(command, payload);
 }
 export function getLocalHostStatus(): Promise<import("./types").LocalHostStatus> {
   return localHostCommand("local_host_status");
@@ -428,8 +428,8 @@ export function getLocalHostPairing(): Promise<import("./types").LocalHostPairin
   return localHostCommand("local_host_pairing");
 }
 export async function listenForLocalHostStatus(handler: (status: import("./types").LocalHostStatus) => void): Promise<UnlistenFn> {
-  if (!isDesktop() || isMobileApp()) throw new Error("Host setup is available in the desktop app.");
-  return (await import("@tauri-apps/api/event")).listen<import("./types").LocalHostStatus>("local-host-status", (event) => handler(event.payload));
+  if (!viewerCapabilities().hosting) throw new Error("Host setup is available in the desktop app.");
+  return listenHost<import("./types").LocalHostStatus>("local-host-status", (event) => handler(event.payload));
 }
 
 export function getSessionQuestionStatus(request: import("./types").SessionQuestionStatusRequest, send: CommandInvoker = invoke): Promise<import("./types").SessionQuestionStatus> {

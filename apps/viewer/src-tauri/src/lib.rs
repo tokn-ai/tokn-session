@@ -132,8 +132,3 @@ pub fn run() {
       }
     });
 }
-
-#[cfg(mobile)]
-mod mobile;
-#[cfg(mobile)]
-pub use mobile::run;

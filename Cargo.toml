@@ -32,6 +32,7 @@ members = [
   "crates/hub",
   "crates/hub-remote",
   "crates/hub-client-core",
+  "crates/apell-client",
   "crates/hub-transport",
   "crates/viewer-core",
   "crates/viewer-api",

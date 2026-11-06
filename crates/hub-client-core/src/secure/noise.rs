@@ -3,7 +3,15 @@ use super::{
   identity::{NOISE_PROTOCOL, decode_noise_public_key},
 };
 use crate::protocol::{decode, encode};
+use rand::{RngCore, SeedableRng};
+use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
+use snow::{
+  params::{CipherChoice, DHChoice, HashChoice},
+  resolvers::{CryptoResolver, DefaultResolver},
+  types::{Cipher, Dh, Hash, Random},
+};
+use std::sync::Mutex;
 use zeroize::Zeroizing;
 
 pub const MAX_RECORD: usize = 65_535;
@@ -190,9 +198,27 @@ pub struct NoiseInitiator {
 }
 
 impl NoiseInitiator {
+  #[cfg(any(not(target_arch = "wasm32"), feature = "system-rng"))]
   pub fn new(identity: &NoiseIdentity, pinned_host: &str) -> Result<Self, String> {
+    Self::from_builder(identity, pinned_host, builder()?)
+  }
+
+  /// Build a fresh handshake from host-provided cryptographically secure
+  /// entropy. This does not import a platform RNG or JavaScript into a guest.
+  /// Supply a new independently generated seed for every handshake.
+  pub fn new_with_entropy(identity: &NoiseIdentity, pinned_host: &str, entropy: [u8; 32]) -> Result<Self, String> {
+    let builder = snow::Builder::with_resolver(
+      NOISE_PROTOCOL.parse().map_err(noise_error)?,
+      Box::new(EntropyResolver(Mutex::new(Some(ChaCha20Rng::from_seed(entropy))))),
+    )
+    .prologue(PROLOGUE)
+    .map_err(noise_error)?;
+    Self::from_builder(identity, pinned_host, builder)
+  }
+
+  fn from_builder(identity: &NoiseIdentity, pinned_host: &str, builder: snow::Builder<'_>) -> Result<Self, String> {
     let host = decode_noise_public_key(pinned_host)?;
-    let state = builder()?
+    let state = builder
       .local_private_key(identity.private_key())
       .map_err(noise_error)?
       .remote_public_key(&host)
@@ -231,6 +257,7 @@ impl NoiseInitiator {
 pub struct NoiseResponder(snow::HandshakeState);
 
 impl NoiseResponder {
+  #[cfg(any(not(target_arch = "wasm32"), feature = "system-rng"))]
   pub fn new(identity: &NoiseIdentity) -> Result<Self, String> {
     Ok(Self(
       builder()?
@@ -357,10 +384,43 @@ impl SecureChannel {
   }
 }
 
+#[cfg(any(not(target_arch = "wasm32"), feature = "system-rng"))]
 fn builder<'a>() -> Result<snow::Builder<'a>, String> {
   snow::Builder::new(NOISE_PROTOCOL.parse().map_err(noise_error)?)
     .prologue(PROLOGUE)
     .map_err(noise_error)
+}
+
+/// The resolver owns one seeded CSPRNG for one handshake. All cryptographic
+/// primitives still use Snow's default implementations; only entropy
+/// acquisition is supplied by the embedding host.
+struct EntropyResolver(Mutex<Option<ChaCha20Rng>>);
+struct EntropyRandom(ChaCha20Rng);
+
+impl Random for EntropyRandom {
+  fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), snow::Error> {
+    self.0.try_fill_bytes(dest).map_err(|_| snow::Error::Rng)
+  }
+}
+
+impl CryptoResolver for EntropyResolver {
+  fn resolve_rng(&self) -> Option<Box<dyn Random>> {
+    self
+      .0
+      .lock()
+      .ok()?
+      .take()
+      .map(|rng| Box::new(EntropyRandom(rng)) as Box<dyn Random>)
+  }
+  fn resolve_dh(&self, choice: &DHChoice) -> Option<Box<dyn Dh>> {
+    DefaultResolver.resolve_dh(choice)
+  }
+  fn resolve_hash(&self, choice: &HashChoice) -> Option<Box<dyn Hash>> {
+    DefaultResolver.resolve_hash(choice)
+  }
+  fn resolve_cipher(&self, choice: &CipherChoice) -> Option<Box<dyn Cipher>> {
+    DefaultResolver.resolve_cipher(choice)
+  }
 }
 
 fn read_empty_handshake(state: &mut snow::HandshakeState, message: &[u8]) -> Result<(), String> {
@@ -387,6 +447,28 @@ fn noise_error(error: snow::Error) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn injected_entropy_handshake_interoperates_and_preserves_host_pin() {
+    let client = NoiseIdentity::from_secret([7; 32]).unwrap();
+    let host = NoiseIdentity::generate().unwrap();
+    let mut first = NoiseInitiator::new_with_entropy(&client, &host.public_key(), [1; 32]).unwrap();
+    let hello = first.start().unwrap();
+    let mut second = NoiseInitiator::new_with_entropy(&client, &host.public_key(), [2; 32]).unwrap();
+    assert_ne!(hello, second.start().unwrap());
+    let (reply, mut host_channel) = NoiseResponder::new(&host).unwrap().accept(&hello).unwrap();
+    let mut client_channel = first.finish(&reply).unwrap();
+    let message = InnerMessage::DeviceRequest {
+      method: "GET".into(),
+      path: "/api/v1/health".into(),
+    };
+    assert_eq!(
+      host_channel
+        .decrypt(&client_channel.encrypt(&message).unwrap())
+        .unwrap(),
+      message
+    );
+  }
 
   fn pair() -> (SecureChannel, SecureChannel) {
     let client = NoiseIdentity::generate().unwrap();

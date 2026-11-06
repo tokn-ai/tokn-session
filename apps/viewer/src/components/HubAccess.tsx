@@ -2,14 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { hubErrorMessage } from "../lib/hub";
 import { openHubAccess, type HubAccessService } from "../lib/hubAccess";
 import { canonicalHubUrl, machineReference, type SavedHubHost } from "../lib/hubDeviceStore";
-import { deselectMachine, isDesktop, selectMachine, type ConnectionState, type ViewerClient } from "../lib/transport";
+import { deselectMachine, selectMachine, type ConnectionState, type ViewerClient } from "../lib/transport";
 import type { HubMachineSelection, TransportState } from "../lib/types";
 import { ViewerPage } from "../pages/ViewerPage";
 import { RemoteConnection } from "./RemoteConnection";
 import { HostSetup } from "./HostSetup";
 import { SettingsEntry } from "./SettingsEntry";
 import "./HubAccess.css";
-import { isMobileApp } from "../lib/platform";
+import { viewerCapabilities } from "../lib/platform";
 
 type Operation = "loading_hub" | "opening_machine" | "pairing" | "signing_in" | "adding_passkey" | "forgetting";
 const OPERATION_LABELS: Record<Operation, string> = {
@@ -53,9 +53,9 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
   const callbacks = useRef({ on_machine_open, on_hub_ready });
   callbacks.current = { on_machine_open, on_hub_ready };
   const busy = !!pending;
-  const native = isDesktop();
-  const mobile = isMobileApp();
-  const desktop = native && !mobile;
+  const capabilities = viewerCapabilities();
+  const native = capabilities.native_hub;
+  const desktop = capabilities.local_machine;
   const known_hubs = [...new Set([initial_hub_url, ...known_hub_urls, ...(service ? [service.hub_url] : [])].flatMap((url) => {
     const canonical = validHubUrl(url); return canonical ? [canonical] : [];
   }))];
@@ -117,7 +117,7 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
   }, []);
 
   useEffect(() => {
-    if (isDesktop()) return;
+    if (native) return;
     const lock = () => {
       operation.current?.abort(); operation.current = undefined;
       selectMachine(); active_client.current = undefined;
@@ -164,7 +164,7 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
       <div className="connection-primary-actions"><button className="connection-panel__primary" onClick={changeHost}>Machines</button></div>
       <div className="connection-secondary-settings">
         {progress}{notice && <p role="status">{notice}</p>}{error && <p className="hub-error" role="alert">{error}</p>}
-        {!mobile && <button disabled={busy} onClick={() => { void action("adding_passkey", (signal) => addPasskey(active.host, signal), active.host.host_id); }}>Add a machine passkey</button>}
+        {capabilities.passkeys && <button disabled={busy} onClick={() => { void action("adding_passkey", (signal) => addPasskey(active.host, signal), active.host.host_id); }}>Add a machine passkey</button>}
         <details><summary>Machine identity</summary><p>Use this reference when signing in from a new device.</p><code className="hub-machine-reference">{machineReference(active.host)}</code></details>
       </div>
     </RemoteConnection>
@@ -183,7 +183,7 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
       {known_hubs.map((url) => <button key={url} aria-pressed={service?.hub_url === url} disabled={busy} onClick={() => { changeHost(); setDraftHubUrl(url); void action("loading_hub", (signal) => loadService(url, signal, null)); }}>{url}</button>)}
     </nav>}
     {service && <section className="hub-origin" aria-label="Current Hub"><div><span className="hub-field-label">Hub</span><strong>{service.hub_url}</strong></div>
-      {isDesktop() && <button disabled={busy} onClick={() => { setDraftHubUrl(service.hub_url); setEditingHub((value) => !value); }}>Change Hub</button>}</section>}
+      {native && <button disabled={busy} onClick={() => { setDraftHubUrl(service.hub_url); setEditingHub((value) => !value); }}>Change Hub</button>}</section>}
     {(!service || editing_hub) && <form className="hub-origin-form" onSubmit={(event) => { event.preventDefault(); changeHost(); void action("loading_hub", (signal) => loadService(draft_hub_url, signal, null)); }}>
       {!service && <><h2>Connect a machine</h2><p className="hub-muted">Enter its Hub address to open saved machines or pair another machine.</p></>}
       <label htmlFor="encrypted-hub-url">Hub address</label><input id="encrypted-hub-url" type="url" value={draft_hub_url} onChange={(event) => setDraftHubUrl(event.target.value)} required disabled={busy} placeholder="https://hub.example.com" />
@@ -192,14 +192,14 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
     {progress}{error && <p className="hub-error hub-feedback" role="alert">{error}</p>}{notice && <p className="hub-feedback" role="status">{notice}</p>}
     {service && <div className="hub-access-layout">
       <section className="hub-saved-machines" aria-labelledby="saved-machines-title"><div className="hub-section-heading"><h2 id="saved-machines-title">Saved machines</h2><span>{hosts.length}</span></div>
-        <p className="hub-muted">{isDesktop() ? "Apps paired with an authenticator reconnect without a code." : "Sign in with a passkey in each new tab or after reloading."}</p>
+        <p className="hub-muted">{native ? "Apps paired with an authenticator reconnect without a code." : "Sign in with a passkey in each new tab or after reloading."}</p>
         {hosts.length === 0 ? <div className="hub-empty-state"><h3>No saved machines</h3><p>Connect a machine using its address and authenticator code.</p></div>
           : <ul className="hub-hosts" aria-label="Saved machines">{hosts.map((host) => <li key={`${service.hub_url}/${host.host_id}`} className="hub-host hub-saved-host">
             <div className="hub-host-details"><h3>{hostLabel(host)}</h3>{host.machine_address && host.name && host.name !== host.machine_address && <p>{host.name}</p>}
               <p>End-to-end encrypted</p></div>
-            <button aria-label={`${isDesktop() ? "Open" : "Sign in to"} ${hostLabel(host)}`} disabled={busy} onClick={() => { void action("opening_machine", (signal) => openHost(service, host, signal), host.host_id); }}>{pending?.host_id === host.host_id && pending.kind === "opening_machine" ? "Connecting…" : isDesktop() ? "Open" : "Sign in"}</button>
+            <button aria-label={`${native ? "Open" : "Sign in to"} ${hostLabel(host)}`} disabled={busy} onClick={() => { void action("opening_machine", (signal) => openHost(service, host, signal), host.host_id); }}>{pending?.host_id === host.host_id && pending.kind === "opening_machine" ? "Connecting…" : native ? "Open" : "Sign in"}</button>
             <details className="hub-machine-settings"><summary>Machine settings</summary><div>
-              {!mobile && <button disabled={busy} onClick={() => { void action("adding_passkey", (signal) => addPasskey(host, signal), host.host_id); }}>Add a passkey</button>}
+              {capabilities.passkeys && <button disabled={busy} onClick={() => { void action("adding_passkey", (signal) => addPasskey(host, signal), host.host_id); }}>Add a passkey</button>}
               <p className="hub-field-label">Machine reference</p><code className="hub-machine-reference">{machineReference(host)}</code>
               <button className="hub-secondary" disabled={busy} onClick={() => { void action("forgetting", async (signal) => { await service.forget(host.host_id); await refreshHosts(service, signal); }, host.host_id); }}>Forget {hostLabel(host)}</button>
               <p className="machine-hint">Forgetting removes this device’s saved reference. It does not revoke authorization on the machine.</p>
@@ -209,14 +209,14 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
       <section className="hub-add-machine" aria-labelledby="encrypted-pair-title"><h2 id="encrypted-pair-title">Connect a machine</h2>
         <form className="hub-machine-form" onSubmit={(event) => { event.preventDefault(); void action(method === "code" ? "pairing" : "signing_in", addMachine); }}>
           <label htmlFor="encrypted-machine">Machine address or reference</label><input id="encrypted-machine" value={machine} onChange={(event) => setMachine(event.target.value)} required autoComplete="off" spellCheck={false} disabled={busy} placeholder="username:host" />
-          {!mobile && <fieldset className="hub-auth-method" disabled={busy}><legend>Connect using</legend>
+          {capabilities.passkeys && <fieldset className="hub-auth-method" disabled={busy}><legend>Connect using</legend>
             <label><input type="radio" name="machine-auth-method" checked={method === "code"} onChange={() => { setMethod("code"); setError(undefined); }} />Use authenticator code</label>
             <label><input type="radio" name="machine-auth-method" checked={method === "passkey"} onChange={() => { setMethod("passkey"); setCode(""); setError(undefined); }} />Use machine passkey</label>
           </fieldset>}
           {method === "code" ? <><label htmlFor="encrypted-code">Authenticator code</label><input id="encrypted-code" value={code} onChange={(event) => setCode(event.target.value)} type="password" inputMode="numeric" pattern="[0-9]{6}" minLength={6} maxLength={6} required autoComplete="one-time-code" disabled={busy} />
             <p className="machine-hint">Enter the current six-digit code from the machine’s authenticator. Your machine verifies it.</p></>
             : <p className="machine-hint">On a new device, paste <strong>username:host@public_key</strong> or the complete machine reference from its connector. Remembered machines can use their address.</p>}
-          <button className="hub-connect-primary" disabled={busy || !machine.trim() || (method === "code" && !/^[0-9]{6}$/.test(code))}>{method === "code" ? (isDesktop() ? "Pair and connect" : "Pair and set up passkey") : "Sign in with machine passkey"}</button>
+          <button className="hub-connect-primary" disabled={busy || !machine.trim() || (method === "code" && !/^[0-9]{6}$/.test(code))}>{method === "code" ? (native ? "Pair and connect" : "Pair and set up passkey") : "Sign in with machine passkey"}</button>
           <details className="hub-input-help"><summary>Where do I find the address?</summary><p>Use the address assigned in Hub administration, or paste the machine ID or reference printed by the host connector.</p></details>
         </form>
       </section>

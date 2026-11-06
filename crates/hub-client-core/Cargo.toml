@@ -11,29 +11,40 @@ repository.workspace = true
 [lib]
 crate-type = ["rlib", "cdylib"]
 
+[features]
+default = ["browser"]
+# The browser wrapper uses JS entropy. Wasmi guests disable default features and
+# supply fresh host entropy explicitly to the portable cryptographic APIs.
+browser = ["system-rng", "dep:wasm-bindgen", "dep:getrandom02", "dep:getrandom03"]
+system-rng = ["rand/getrandom", "snow/use-getrandom", "spake2/getrandom"]
+
 [dependencies]
 base64 = "0.22"
 data-encoding = "2"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 hkdf = "0.12"
 hmac = "0.12"
-rand = "0.8"
+rand = { version = "0.8", default-features = false, features = ["alloc", "std_rng"] }
+rand_chacha = "0.3"
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
-snow = { version = "0.10", default-features = false, features = ["use-chacha20poly1305", "use-blake2", "use-curve25519", "use-getrandom"] }
-spake2 = "0.4"
+snow = { version = "0.10", default-features = false, features = ["use-chacha20poly1305", "use-blake2", "use-curve25519"] }
+spake2 = { version = "0.4", default-features = false }
 url = "2"
 uuid = "1"
 zeroize = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 libc = "0.2"
+rand = { version = "0.8", features = ["std"] }
+snow = { version = "0.10", default-features = false, features = ["use-getrandom"] }
+spake2 = { version = "0.4", features = ["getrandom"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
-getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
-wasm-bindgen = "=0.2.126"
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"], optional = true }
+getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"], optional = true }
+wasm-bindgen = { version = "=0.2.126", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tempfile = "3"

@@ -82,6 +82,7 @@ async function startDraft(prompt: string) {
   return firstRequest().request_id;
 }
 beforeEach(() => {
+  vi.stubGlobal("__TAURI_INTERNALS__", {});
   vi.mocked(listen).mockImplementation(async (_name, handler) => { emit = handler as typeof emit; return () => {}; });
   vi.mocked(invoke).mockImplementation(async (command, payload) => {
     const request = (payload as { request: { request_id: string } }).request;
@@ -94,7 +95,7 @@ beforeEach(() => {
     throw new Error(`Unexpected draft command: ${command}`);
   });
 });
-afterEach(() => { cleanup(); receipts.clear(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); receipts.clear(); vi.clearAllMocks(); });
 
 describe("draft selection in the viewer", () => {
   it("clears native selection and keeps multiple draft texts while navigating saved sessions", async () => {

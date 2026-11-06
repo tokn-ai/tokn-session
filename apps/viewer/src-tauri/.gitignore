@@ -6,5 +6,6 @@
 # will have schema files for capabilities auto-completion
 /gen/schemas
 
-# Generated locally or by the iOS CI helper; configuration lives outside gen.
+# Native mobile projects are delivered by Apell rather than this shell.
 /gen/apple/
+/gen/android/

@@ -1,8 +1,7 @@
 import { createUuid } from "./id";
 import { browserTranslationEngine } from "./browserTranslation";
 import { cancelTranslation, getTranslationStatus, openTranslationSettings, translateText } from "./tauri";
-import { isMobileApp } from "./platform";
-import { isDesktop } from "./transport";
+import { viewerCapabilities } from "./platform";
 import type { TranslationFailure, TranslationStatus } from "./types";
 
 /** Tauri versions may reject with a structured failure, a string, or an Error. */
@@ -79,5 +78,5 @@ const appleTranslationEngine: TranslationEngine = {
 };
 
 export function createTranslationEngine(): TranslationEngine {
-  return isDesktop() && !isMobileApp() ? appleTranslationEngine : browserTranslationEngine;
+  return viewerCapabilities().native_translation ? appleTranslationEngine : browserTranslationEngine;
 }

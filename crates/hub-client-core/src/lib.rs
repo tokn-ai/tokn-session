@@ -3,9 +3,11 @@
 //! Transports and endpoint authorization remain outside this crate. A Noise
 //! handshake authenticates keys but never authorizes session access by itself.
 pub mod address;
+pub mod events;
+pub mod exchange;
 pub mod pairing;
 pub mod protocol;
 pub mod secure;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
 mod wasm;

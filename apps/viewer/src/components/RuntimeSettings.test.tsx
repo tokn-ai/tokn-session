@@ -12,8 +12,9 @@ function state(overrides: Partial<ReturnType<typeof useViewerRuntimes>> = {}): R
   return { desktop: true, inventory: { version: 1, runtimes: [row] }, loading: false, error: null, live_error: null,
     actions: new Map(), refresh: vi.fn(async () => {}), restart: vi.fn(async () => {}), ...overrides };
 }
-beforeEach(() => { vi.resetAllMocks(); vi.mocked(useViewerRuntimes).mockReturnValue(state()); });
-afterEach(cleanup);
+beforeEach(() => {
+  vi.stubGlobal("__TAURI_INTERNALS__", {}); vi.resetAllMocks(); vi.mocked(useViewerRuntimes).mockReturnValue(state()); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 it("keeps metadata in Details and offers only supported viewer restart actions", () => {
   const current = state({ inventory: { version: 1, runtimes: [row,

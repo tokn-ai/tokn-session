@@ -5,7 +5,8 @@ const { nativeInvoke, nativeListen, remoteInvoke, desktop } = vi.hoisted(() => (
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: nativeInvoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: nativeListen }));
-vi.mock("./transport", () => ({ isDesktop: () => desktop.value, invoke: remoteInvoke, listen: vi.fn() }));
+vi.mock("./transport", () => ({ invoke: remoteInvoke, listen: vi.fn() }));
+vi.mock("./platform", () => ({ viewerCapabilities: () => ({ runtime_management: desktop.value }), invokeHost: (...args: unknown[]) => nativeInvoke(...args), listenHost: (...args: unknown[]) => nativeListen(...args) }));
 beforeEach(() => { vi.resetAllMocks(); desktop.value = true; nativeListen.mockResolvedValue(vi.fn()); });
 afterEach(() => vi.restoreAllMocks());
 

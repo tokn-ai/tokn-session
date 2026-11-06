@@ -1,3 +1,5 @@
+import { installViewerHost } from "./platform";
+import { createApellHost } from "./apellHost";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseEvent, RemoteClient, selectMachine, deselectMachine, invoke, listen, viewerStorageScope, captureTransport } from "./transport";
 import { invoke as nativeInvoke } from "@tauri-apps/api/core";
@@ -8,7 +10,8 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
 const clients: RemoteClient[] = [];
-afterEach(() => { for (const client of clients) client.close(); clients.length = 0; selectMachine(); LiveSocket.instances = []; vi.unstubAllGlobals(); vi.useRealTimers(); });
+let restore_host: (() => void) | undefined;
+afterEach(() => { restore_host?.(); restore_host = undefined; for (const client of clients) client.close(); clients.length = 0; selectMachine(); LiveSocket.instances = []; vi.unstubAllGlobals(); vi.useRealTimers(); });
 function client() { const result = new RemoteClient("http://machine:5558", "secret"); clients.push(result); return result; }
 function stream() {
   let controller!: ReadableStreamDefaultController<Uint8Array>;
@@ -16,9 +19,8 @@ function stream() {
   return { response: new Response(body), send: (value: string) => controller.enqueue(new TextEncoder().encode(value)), end: () => controller.close() };
 }
 
-it("mobile requires a selected remote machine and never falls through to local commands", async () => {
-  vi.stubGlobal("__TAURI_INTERNALS__", {});
-  vi.stubGlobal("__TOKN_MOBILE__", true);
+it("applet requires a selected remote machine and never falls through to local commands", async () => {
+  restore_host = installViewerHost(createApellHost({ invoke: vi.fn(), onEvent: () => () => {} }));
   const captured = captureTransport();
   await expect(invoke("list_sessions")).rejects.toThrow("Connect to a machine first");
   await expect(captured.invoke("list_sessions")).rejects.toThrow("Connect to a machine first");

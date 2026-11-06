@@ -1,6 +1,7 @@
 use super::grant::{Grant, SignedGrant};
 use crate::protocol::{decode, encode};
 use ed25519_dalek::{Signer, SigningKey};
+#[cfg(any(not(target_arch = "wasm32"), feature = "system-rng"))]
 use rand::rngs::OsRng;
 use snow::{
   params::DHChoice,
@@ -25,6 +26,7 @@ pub struct NoiseIdentity {
 }
 
 impl NoiseIdentity {
+  #[cfg(any(not(target_arch = "wasm32"), feature = "system-rng"))]
   pub fn generate() -> Result<Self, String> {
     let pair = snow::Builder::new(
       NOISE_PROTOCOL
@@ -100,6 +102,7 @@ impl NoiseIdentity {
 pub struct OwnerIdentity(SigningKey);
 
 impl OwnerIdentity {
+  #[cfg(any(not(target_arch = "wasm32"), feature = "system-rng"))]
   pub fn generate() -> Self {
     Self(SigningKey::generate(&mut OsRng))
   }

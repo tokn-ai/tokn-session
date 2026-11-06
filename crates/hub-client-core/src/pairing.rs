@@ -18,7 +18,10 @@ use crate::{
 use data_encoding::BASE32_NOPAD;
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
+use rand::SeedableRng;
+#[cfg(any(not(target_arch = "wasm32"), feature = "system-rng"))]
 use rand::{RngCore, rngs::OsRng};
+use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use spake2::{Ed25519Group, Identity, Password, Spake2};
@@ -34,6 +37,7 @@ const AUTH_FAILED: &str = "Authenticator pairing failed; wait for a new code and
 pub struct TotpSecret(Zeroizing<Vec<u8>>);
 
 impl TotpSecret {
+  #[cfg(any(not(target_arch = "wasm32"), feature = "system-rng"))]
   pub fn generate() -> Self {
     let mut bytes = Zeroizing::new(vec![0; 32]);
     OsRng.fill_bytes(&mut bytes);
@@ -184,16 +188,48 @@ pub fn peek_step(bytes: &[u8]) -> Result<u64, String> {
 }
 
 impl ClientPairing {
+  #[cfg(any(not(target_arch = "wasm32"), feature = "system-rng"))]
   pub fn start(host_id: &str, identity: &NoiseIdentity, code: &str, now: u64) -> Result<(Self, Vec<u8>), String> {
     Self::start_for(host_id, identity, code, now, ClientKind::Native)
   }
 
+  #[cfg(any(not(target_arch = "wasm32"), feature = "system-rng"))]
   pub fn start_for(
     host_id: &str,
     identity: &NoiseIdentity,
     code: &str,
     now: u64,
     client_kind: ClientKind,
+  ) -> Result<(Self, Vec<u8>), String> {
+    Self::start_with_rng(host_id, identity, code, now, client_kind, OsRng)
+  }
+
+  /// Start native-device pairing using a fresh 32-byte seed from the host's
+  /// cryptographically secure randomness service. Never reuse an entropy seed.
+  pub fn start_with_entropy(
+    host_id: &str,
+    identity: &NoiseIdentity,
+    code: &str,
+    now: u64,
+    entropy: [u8; 32],
+  ) -> Result<(Self, Vec<u8>), String> {
+    Self::start_with_rng(
+      host_id,
+      identity,
+      code,
+      now,
+      ClientKind::Native,
+      ChaCha20Rng::from_seed(entropy),
+    )
+  }
+
+  fn start_with_rng(
+    host_id: &str,
+    identity: &NoiseIdentity,
+    code: &str,
+    now: u64,
+    client_kind: ClientKind,
+    rng: impl rand::CryptoRng + rand::RngCore,
   ) -> Result<(Self, Vec<u8>), String> {
     validate_host_id(host_id)?;
     if code.len() != 6 || !code.bytes().all(|value| value.is_ascii_digit()) {
@@ -207,7 +243,8 @@ impl ClientPairing {
       pake: String::new(),
     };
     let (client_id, host_id) = identities(&hello);
-    let (state, message) = Spake2::<Ed25519Group>::start_a(&Password::new(code.as_bytes()), &client_id, &host_id);
+    let (state, message) =
+      Spake2::<Ed25519Group>::start_a_with_rng(&Password::new(code.as_bytes()), &client_id, &host_id, rng);
     hello.pake = encode(&message);
     let hello_wire = write_record(&hello)?;
     Ok((
@@ -256,6 +293,7 @@ impl ClientAwaitingAck {
 
 impl HostPairing {
   /// The caller must reserve a rate-limited attempt before invoking this method.
+  #[cfg(any(not(target_arch = "wasm32"), feature = "system-rng"))]
   pub fn respond(
     secret: &TotpSecret,
     host_id: &str,

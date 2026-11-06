@@ -6,6 +6,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -36,6 +39,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+          targets: wasm32-unknown-unknown
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -48,6 +52,14 @@ jobs:
 
       - name: Test workspace
         run: cargo test --workspace
+
+      - name: Build portable Apell guest
+        run: cargo build --locked --release --target wasm32-unknown-unknown -p tokn-session-apell
+
+      - name: Test interpreted Apell pairing and delivery
+        env:
+          TOKN_APELL_TEST_WASM: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/tokn_session_apell.wasm
+        run: cargo test --locked -p tokn-session-apell --test wasmi -- --ignored
 
       - name: Build CLI
         run: cargo build -p tokn-session-cli
@@ -88,6 +100,32 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm run check
+
+      - name: Checkout pinned Apell SDK
+        uses: actions/checkout@v4
+        with:
+          repository: agentic-rs/apell
+          ref: 51e17021c5e12839013bd6a098eb1cd18b285d49
+          path: .apell-sdk
+
+      - name: Build and validate Apell package
+        working-directory: apps/viewer
+        env:
+          APELL_SOURCE: ${{ github.workspace }}/.apell-sdk
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: node --import tsx scripts/build-apell.ts
+
+      - name: Save Apell package
+        uses: actions/upload-artifact@v4
+        with:
+          name: apell-package
+          path: |
+            artifacts/tokn-session.apel
+            artifacts/tokn-session.sha256
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 14
 
   bun-apps:
     name: Bun apps
@@ -145,3 +183,37 @@ jobs:
         run: |
           bun install --frozen-lockfile
           bun run check
+
+  publish-apell:
+    name: Publish Apell nightly
+    needs: [rust, viewer, bun-apps, codex-ipc]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: apell-nightly
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Download tested Apell package
+        uses: actions/download-artifact@v4
+        with:
+          name: apell-package
+          path: artifacts
+
+      - name: Publish nightly package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node --experimental-strip-types apps/viewer/scripts/publish-apell-nightly.ts
