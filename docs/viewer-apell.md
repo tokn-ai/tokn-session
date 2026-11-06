@@ -56,7 +56,8 @@ runtime ownership remain desktop functionality.
 
 Use an Apell checkout containing the generic backend network/secure-storage
 services. Set `APELL_SOURCE` locally to that checkout; no machine paths enter the
-package or repository. The unchanged guest ABI is pinned through Cargo.
+package or repository. Cargo and CI pin the same merged Apell revision for the
+guest/runtime and frontend SDK.
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -85,6 +86,9 @@ cargo build --locked --release --target wasm32-unknown-unknown -p tokn-session-a
 TOKN_APELL_TEST_WASM=target/wasm32-unknown-unknown/release/tokn_session_apell.wasm \
   cargo test --locked -p tokn-session-apell --test wasmi -- --ignored
 ```
+
+`TOKN_APELL_TEST_WASM` accepts an absolute path or a path relative to the workspace
+root, independently of Cargo's per-crate test working directory.
 
 On iOS/Android verify fresh pairing, remembered reconnect, session loading,
 images, input, question replies, view reload, OS resume, network changes and host

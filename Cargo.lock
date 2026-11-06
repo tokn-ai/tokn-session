@@ -141,7 +141,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 [[package]]
 name = "apell-guest"
 version = "0.1.0"
-source = "git+https://github.com/agentic-rs/apell?rev=270682d1cfd6d9e81dac0076d754a97fb2feaf05#270682d1cfd6d9e81dac0076d754a97fb2feaf05"
+source = "git+https://github.com/agentic-rs/apell?rev=51e17021c5e12839013bd6a098eb1cd18b285d49#51e17021c5e12839013bd6a098eb1cd18b285d49"
 dependencies = [
  "serde",
  "serde_json",
@@ -150,7 +150,7 @@ dependencies = [
 [[package]]
 name = "apell-runtime"
 version = "0.1.0"
-source = "git+https://github.com/agentic-rs/apell?rev=270682d1cfd6d9e81dac0076d754a97fb2feaf05#270682d1cfd6d9e81dac0076d754a97fb2feaf05"
+source = "git+https://github.com/agentic-rs/apell?rev=51e17021c5e12839013bd6a098eb1cd18b285d49#51e17021c5e12839013bd6a098eb1cd18b285d49"
 dependencies = [
  "apell-guest",
  "serde",

@@ -29,10 +29,10 @@ fn guest() -> Vec<u8> {
   static WASM: OnceLock<Vec<u8>> = OnceLock::new();
   WASM
     .get_or_init(|| {
-      if let Some(path) = std::env::var_os("TOKN_APELL_TEST_WASM") {
-        return std::fs::read(path).expect("read supplied applet test module");
-      }
       let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+      if let Some(path) = std::env::var_os("TOKN_APELL_TEST_WASM") {
+        return std::fs::read(root.join(path)).expect("read supplied applet test module");
+      }
       let target = root.join("target/apell-integration");
       let status = Command::new(env!("CARGO"))
         .current_dir(&root)

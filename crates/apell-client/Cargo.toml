@@ -11,7 +11,7 @@ description = "Tokn Session's portable Apell applet backend."
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-apell-guest = { git = "https://github.com/agentic-rs/apell", rev = "270682d1cfd6d9e81dac0076d754a97fb2feaf05" }
+apell-guest = { git = "https://github.com/agentic-rs/apell", rev = "51e17021c5e12839013bd6a098eb1cd18b285d49" }
 tokn-hub-client-core = { path = "../hub-client-core", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
@@ -22,5 +22,5 @@ zeroize = "1"
 
 [dev-dependencies]
 tokio.workspace = true
-apell-runtime = { git = "https://github.com/agentic-rs/apell", rev = "270682d1cfd6d9e81dac0076d754a97fb2feaf05" }
+apell-runtime = { git = "https://github.com/agentic-rs/apell", rev = "51e17021c5e12839013bd6a098eb1cd18b285d49" }
 tokio-tungstenite = "0.26"

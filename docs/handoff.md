@@ -13,6 +13,8 @@ release workflow are removed; mobile delivery uses the `.apel` applet.
 Applets use durable app-style device trust and authenticator pairing, without
 browser per-document passkey semantics. Browser behavior remains separate.
 See [the Apell applet](viewer-apell.md) for guest/host boundaries and verification.
+Cargo and CI use the merged Apell service revision; the Wasmi test resolves
+relative guest paths from the workspace root rather than its crate directory.
 
 Local folders discovered in saved session `cwd` metadata now register
 automatically across all six historical providers. Migration 13 preserves
