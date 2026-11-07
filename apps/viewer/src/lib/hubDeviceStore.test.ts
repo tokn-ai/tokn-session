@@ -97,3 +97,18 @@ it("removes legacy browser secrets while preserving host pins and selection", as
     version: 2, hub_url: "https://hub.example", hosts: [first_host], selected_host_id: first_host.host_id,
   });
 });
+
+it("persists authenticated discovery references with host pins and protects nested state from callers", async () => {
+  const storage = new MemoryStorage();
+  const store = await HubDeviceStore.open("https://hub.example", crypto, storage);
+  const discovery_group = { namespace: "personal", secret_digest: "A".repeat(43) };
+  await store.saveHost({ ...first_host, discovery_group });
+  const returned = store.hosts[0];
+  returned.discovery_group!.namespace = "changed";
+  expect(store.hosts[0].discovery_group).toEqual(discovery_group);
+  await store.saveHost(first_host);
+  const reopened = await HubDeviceStore.open("https://hub.example", crypto, storage);
+  expect(reopened.hosts).toEqual([{ ...first_host, discovery_group }]);
+  await expect(reopened.saveHost({ ...second_host, discovery_group: { ...discovery_group, secret_digest: "bad" } })).rejects.toThrow("discovery group");
+  expect(reopened.hosts).toHaveLength(1);
+});

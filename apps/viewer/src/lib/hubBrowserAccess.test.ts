@@ -1,10 +1,10 @@
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { BrowserHubAccess } from "./hubAccess";
 import { HubDeviceStore, type DeviceStorage, type HubDeviceRecord } from "./hubDeviceStore";
-import { authenticateHubHost, EncryptedHubClient, pairHubHost } from "./hubEncryptedClient";
+import { authenticateHubHost, EncryptedHubClient, pairHubHost, readHubDiscoveryGroup } from "./hubEncryptedClient";
 import type { CryptoApi } from "./hubCrypto";
 vi.mock("./hubEncryptedClient", () => ({
-  authenticateHubHost: vi.fn(), pairHubHost: vi.fn(), EncryptedHubClient: { connect: vi.fn() },
+  authenticateHubHost: vi.fn(), pairHubHost: vi.fn(), readHubDiscoveryGroup: vi.fn(), EncryptedHubClient: { connect: vi.fn() },
 }));
 const host = { host_id: "550e8400-e29b-41d4-a716-446655440000", host_public_key: "H".repeat(43) };
 let next_identity = 0;
@@ -21,7 +21,9 @@ beforeEach(() => {
   vi.mocked(pairHubHost).mockResolvedValue(host);
   vi.mocked(authenticateHubHost).mockResolvedValue(undefined);
   vi.mocked(EncryptedHubClient.connect).mockResolvedValue({ close: vi.fn() } as unknown as EncryptedHubClient);
+  vi.mocked(readHubDiscoveryGroup).mockRejectedValue(new Error("Discovery unavailable"));
 });
+afterEach(() => vi.unstubAllGlobals());
 it("TOTP enrolls a passkey then signs in before allowing session reads", async () => {
   const service = await open();
   await service.pair(host.host_id, "123456", signal());
@@ -64,4 +66,47 @@ it("disposing a tab destroys its private identity and prevents reuse", async () 
   expect(store.identity.free).toHaveBeenCalledOnce();
   await expect(service.connect(host, signal())).rejects.toThrow("disconnected");
   expect(EncryptedHubClient.connect).not.toHaveBeenCalled();
+});
+
+it("learns a discovery group only from successful machine pairing and keeps candidates unpaired", async () => {
+  const service = await open();
+  const group = { namespace: "personal", secret_digest: "A".repeat(43) };
+  const candidate = { host_id: "550e8400-e29b-41d4-a716-446655440001", name: "Laptop", online: true };
+  const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ...group, machines: [candidate] }), { headers: { "Content-Type": "application/json" } }));
+  vi.stubGlobal("fetch", fetcher);
+  await expect(service.discover(group, signal())).rejects.toThrow("Pair a machine");
+  expect(fetcher).not.toHaveBeenCalled();
+  vi.mocked(pairHubHost).mockResolvedValueOnce({ ...host, discovery_group: group });
+  await service.pair(host.host_id, "123456", signal());
+  expect(await service.discover(group, signal())).toEqual({ ...group, machines: [candidate] });
+  expect((await service.status()).hosts).toEqual([{ ...host, discovery_group: group }]);
+  expect(authenticateHubHost).not.toHaveBeenCalled();
+  expect(EncryptedHubClient.connect).not.toHaveBeenCalled();
+});
+
+it("refreshes a previously paired machine's group through its authenticated connection and preserves it on lookup errors", async () => {
+  const service = await open();
+  const group = { namespace: "personal", secret_digest: "A".repeat(43) };
+  await service.pair(host.host_id, "123456", signal());
+  vi.mocked(readHubDiscoveryGroup).mockResolvedValueOnce(group);
+  await service.connect(host, signal());
+  expect(vi.mocked(authenticateHubHost).mock.invocationCallOrder[1]).toBeLessThan(vi.mocked(readHubDiscoveryGroup).mock.invocationCallOrder[0]);
+  expect((await service.status()).hosts[0].discovery_group).toEqual(group);
+  await service.connect(host, signal());
+  expect((await service.status()).hosts[0].discovery_group).toEqual(group);
+  vi.mocked(readHubDiscoveryGroup).mockResolvedValueOnce(null);
+  await service.connect(host, signal());
+  expect((await service.status()).hosts[0]).not.toHaveProperty("discovery_group");
+});
+
+it("does not restore an opted-out group when adding a passkey from an older host snapshot", async () => {
+  const service = await open();
+  const grouped_host = { ...host, discovery_group: { namespace: "personal", secret_digest: "A".repeat(43) } };
+  vi.mocked(pairHubHost).mockResolvedValueOnce(grouped_host);
+  await service.pair(host.host_id, "123456", signal());
+  vi.mocked(readHubDiscoveryGroup).mockResolvedValueOnce(null);
+  await service.connect(grouped_host, signal());
+  expect((await service.status()).hosts[0]).not.toHaveProperty("discovery_group");
+  await service.authenticate(grouped_host, true, signal());
+  expect((await service.status()).hosts[0]).not.toHaveProperty("discovery_group");
 });

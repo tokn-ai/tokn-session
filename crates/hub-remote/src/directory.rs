@@ -1,7 +1,8 @@
 //! Exact public name lookup. Directory metadata is not a Noise trust anchor.
-use crate::{ResolvedMachine, canonical_hub};
+use crate::{DiscoveryGroup, DiscoveryResult, ResolvedMachine, canonical_hub};
 use std::time::Duration;
-use tokn_hub_client_core::address::parse_machine_address;
+use tokn_hub_client_core::{address::parse_machine_address, discovery::MAX_DISCOVERY_RESPONSE};
+use url::Url;
 
 const MAX_RESPONSE: usize = 4096;
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -18,6 +19,28 @@ async fn resolve_with_timeout(
   let (username, machine_name) = parse_machine_address(machine_address)?;
   let mut endpoint = canonical_hub(hub_url)?;
   endpoint.set_path(&format!("/hub/v1/resolve/{username}/{machine_name}"));
+  let body = fetch(endpoint, MAX_RESPONSE, timeout).await?;
+  let resolved: ResolvedMachine =
+    serde_json::from_slice(&body).map_err(|_| "Hub directory returned invalid machine metadata")?;
+  resolved.validate_for(machine_address)?;
+  Ok(resolved)
+}
+
+pub(crate) async fn discover(hub_url: &str, group: &DiscoveryGroup) -> Result<DiscoveryResult, String> {
+  group.validate()?;
+  let mut endpoint = canonical_hub(hub_url)?;
+  endpoint.set_path(&format!(
+    "/hub/v1/discovery/{}/{}",
+    group.namespace, group.secret_digest
+  ));
+  let body = fetch(endpoint, MAX_DISCOVERY_RESPONSE, LOOKUP_TIMEOUT).await?;
+  let discovered: DiscoveryResult =
+    serde_json::from_slice(&body).map_err(|_| "Hub directory returned invalid discovery metadata")?;
+  discovered.validate_for(group)?;
+  Ok(discovered)
+}
+
+async fn fetch(endpoint: Url, maximum: usize, timeout: Duration) -> Result<Vec<u8>, String> {
   let client = reqwest::Client::builder()
     .no_proxy()
     .redirect(reqwest::redirect::Policy::none())
@@ -32,10 +55,7 @@ async fn resolve_with_timeout(
       .await
       .map_err(|_| "Could not resolve machine address through the Hub")?;
     let status = response.status();
-    if response
-      .content_length()
-      .is_some_and(|length| length > MAX_RESPONSE as u64)
-    {
+    if response.content_length().is_some_and(|length| length > maximum as u64) {
       return Err("Hub directory response exceeds its size limit".into());
     }
     let json_type = response
@@ -57,7 +77,7 @@ async fn resolve_with_timeout(
       .await
       .map_err(|_| "Could not read Hub directory response")?
     {
-      if body.len() + chunk.len() > MAX_RESPONSE {
+      if body.len() + chunk.len() > maximum {
         return Err("Hub directory response exceeds its size limit".into());
       }
       body.extend_from_slice(&chunk);
@@ -74,10 +94,7 @@ async fn resolve_with_timeout(
         .filter(|message| !message.is_empty() && message.len() <= 512 && !message.chars().any(char::is_control));
       return Err(message.unwrap_or_else(|| format!("Hub directory rejected lookup ({status})")));
     }
-    let resolved: ResolvedMachine =
-      serde_json::from_slice(&body).map_err(|_| "Hub directory returned invalid machine metadata")?;
-    resolved.validate_for(machine_address)?;
-    Ok(resolved)
+    Ok(body)
   })
   .await
   .map_err(|_| "Hub directory lookup timed out")?

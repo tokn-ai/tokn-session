@@ -485,12 +485,14 @@ async fn authenticate(socket: &mut Socket, config: &ConnectorConfig, key: &Signi
   }
   let public_key = protocol::encode(key.verifying_key().as_bytes());
   if let Some(paired) = &config.paired {
-    let signature = key.sign(&protocol::registration_proof(
+    let discovery_group = secure_transport::discovery_group(config)?;
+    let signature = key.sign(&protocol::discovery_registration_proof(
       &nonce,
       &paired.host_id,
       &public_key,
       &config.name,
       config.allow_control,
+      discovery_group.as_ref(),
     ));
     return send(
       socket,
@@ -500,6 +502,7 @@ async fn authenticate(socket: &mut Socket, config: &ConnectorConfig, key: &Signi
         public_key,
         name: config.name.clone(),
         allow_control: config.allow_control,
+        discovery_group,
         signature: protocol::encode(&signature.to_bytes()),
       },
     )

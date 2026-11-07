@@ -12,8 +12,13 @@
 //! authorization and OTP consumption before sending the final acknowledgment,
 //! and save a client-side pin only after verifying that acknowledgment.
 use crate::{
+  discovery::DiscoveryGroup,
   protocol::{decode, encode},
   secure::{NoiseIdentity, decode_public_key},
+};
+use chacha20poly1305::{
+  ChaCha20Poly1305, KeyInit, Nonce,
+  aead::{Aead, Payload},
 };
 use data_encoding::BASE32_NOPAD;
 use hkdf::Hkdf;
@@ -73,6 +78,10 @@ impl TotpSecret {
     BASE32_NOPAD.encode(&self.0)
   }
 
+  pub fn discovery_group(&self, hub_url: &str, namespace: &str) -> Result<DiscoveryGroup, String> {
+    DiscoveryGroup::derive(&self.0, hub_url, namespace)
+  }
+
   /// This URI contains the secret. Never send it through the Hub.
   pub fn provisioning_uri(&self, label: &str) -> Result<String, String> {
     if label.is_empty() || label.len() > 128 || label.chars().any(char::is_control) {
@@ -99,7 +108,7 @@ impl TotpSecret {
   }
 
   fn hotp(&self, step: u64) -> u32 {
-    let mut hmac = Hmac::<Sha256>::new_from_slice(&self.0).expect("HMAC accepts any key length");
+    let mut hmac = <Hmac<Sha256> as Mac>::new_from_slice(&self.0).expect("HMAC accepts any key length");
     hmac.update(&step.to_be_bytes());
     let output = hmac.finalize().into_bytes();
     let offset = (output[output.len() - 1] & 0x0f) as usize;
@@ -127,6 +136,8 @@ pub struct AuthenticatedPairing {
   pub client_public_key: String,
   pub step: u64,
   pub client_kind: ClientKind,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub discovery_group: Option<DiscoveryGroup>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -157,6 +168,14 @@ struct HostReply {
 #[serde(deny_unknown_fields)]
 struct Confirmation {
   confirmation: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Acknowledgement {
+  confirmation: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  discovery: Option<String>,
 }
 
 pub struct ClientPairing {
@@ -277,6 +296,7 @@ impl ClientPairing {
       client_public_key: self.hello.client_public_key,
       step: self.hello.step,
       client_kind: self.hello.client_kind,
+      discovery_group: None,
     };
     Ok((ClientAwaitingAck { keys, identities }, confirmation))
   }
@@ -284,9 +304,25 @@ impl ClientPairing {
 
 impl ClientAwaitingAck {
   /// Only this successful result may become a persisted host pin.
-  pub fn finish(self, ack: &[u8]) -> Result<AuthenticatedPairing, String> {
-    let ack: Confirmation = read_record(ack)?;
-    self.keys.verify(b"host-accepted", &ack.confirmation)?;
+  pub fn finish(mut self, ack: &[u8]) -> Result<AuthenticatedPairing, String> {
+    let ack: Acknowledgement = read_record(ack)?;
+    self.keys.verify_ack(ack.discovery.as_deref(), &ack.confirmation)?;
+    if let Some(encrypted) = ack.discovery {
+      let plaintext = self
+        .keys
+        .discovery_cipher()
+        .decrypt(
+          Nonce::from_slice(&[0; 12]),
+          Payload {
+            msg: &decode(&encrypted, 1024)?,
+            aad: &self.keys.transcript,
+          },
+        )
+        .map_err(|_| AUTH_FAILED)?;
+      let group: DiscoveryGroup = serde_json::from_slice(&plaintext).map_err(|_| AUTH_FAILED)?;
+      group.validate()?;
+      self.identities.discovery_group = Some(group);
+    }
     Ok(self.identities)
   }
 }
@@ -323,6 +359,7 @@ impl HostPairing {
       client_public_key: hello.client_public_key,
       step: hello.step,
       client_kind: hello.client_kind,
+      discovery_group: None,
     };
     let reply = write_record(&HostReply {
       hello: reply_hello,
@@ -333,12 +370,44 @@ impl HostPairing {
 
   /// Commit the returned device and consumed step before releasing the ack.
   pub fn finish(self, confirmation: &[u8], now: u64) -> Result<(AuthenticatedPairing, Vec<u8>), String> {
+    self.finish_with_discovery(confirmation, now, None)
+  }
+
+  pub fn finish_with_discovery(
+    mut self,
+    confirmation: &[u8],
+    now: u64,
+    discovery_group: Option<DiscoveryGroup>,
+  ) -> Result<(AuthenticatedPairing, Vec<u8>), String> {
     validate_step(self.identities.step, now)?;
     let confirmation: Confirmation = read_record(confirmation)?;
     self.keys.verify(b"client-proof", &confirmation.confirmation)?;
-    let ack = write_record(&Confirmation {
-      confirmation: self.keys.sign(b"host-accepted"),
+    let discovery = discovery_group
+      .as_ref()
+      .map(|group| -> Result<String, String> {
+        group.validate()?;
+        let plaintext = serde_json::to_vec(group).map_err(|_| "Could not encode discovery group")?;
+        // This key is derived from a fresh PAKE transcript and used once, for
+        // exactly this final acknowledgement, so a fixed nonce is unique per key.
+        self
+          .keys
+          .discovery_cipher()
+          .encrypt(
+            Nonce::from_slice(&[0; 12]),
+            Payload {
+              msg: &plaintext,
+              aad: &self.keys.transcript,
+            },
+          )
+          .map(|ciphertext| encode(&ciphertext))
+          .map_err(|_| "Could not encrypt discovery group".into())
+      })
+      .transpose()?;
+    let ack = write_record(&Acknowledgement {
+      confirmation: self.keys.sign_ack(discovery.as_deref()),
+      discovery,
     })?;
+    self.identities.discovery_group = discovery_group;
     Ok((self.identities, ack))
   }
 }
@@ -369,7 +438,7 @@ impl ConfirmationKeys {
     Hkdf::<Sha256>::new(Some(DOMAIN), self.secret.as_ref())
       .expand(purpose, key.as_mut())
       .expect("32-byte HKDF output is within bounds");
-    let mut mac = Hmac::<Sha256>::new_from_slice(key.as_ref()).expect("HMAC accepts any key length");
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key.as_ref()).expect("HMAC accepts any key length");
     mac.update(DOMAIN);
     mac.update(purpose);
     mac.update(&self.transcript);
@@ -378,6 +447,36 @@ impl ConfirmationKeys {
 
   fn sign(&self, purpose: &[u8]) -> String {
     encode(&self.mac(purpose).finalize().into_bytes())
+  }
+
+  fn acknowledgement_mac(&self, discovery: Option<&str>) -> Hmac<Sha256> {
+    match discovery {
+      None => self.mac(b"host-accepted"),
+      Some(ciphertext) => {
+        let mut mac = self.mac(b"host-accepted-discovery-v1");
+        mac.update(ciphertext.as_bytes());
+        mac
+      }
+    }
+  }
+
+  fn sign_ack(&self, discovery: Option<&str>) -> String {
+    encode(&self.acknowledgement_mac(discovery).finalize().into_bytes())
+  }
+
+  fn verify_ack(&self, discovery: Option<&str>, confirmation: &str) -> Result<(), String> {
+    self
+      .acknowledgement_mac(discovery)
+      .verify_slice(&decode(confirmation, 32)?)
+      .map_err(|_| AUTH_FAILED.into())
+  }
+
+  fn discovery_cipher(&self) -> ChaCha20Poly1305 {
+    let mut key = Zeroizing::new([0; 32]);
+    Hkdf::<Sha256>::new(Some(&self.transcript), self.secret.as_ref())
+      .expand(b"tokn-hub-pairing-discovery-v1", key.as_mut())
+      .expect("32-byte HKDF output is within bounds");
+    ChaCha20Poly1305::new_from_slice(key.as_ref()).expect("fixed ChaCha20 key length")
   }
 
   fn verify(&self, purpose: &[u8], received: &str) -> Result<(), String> {

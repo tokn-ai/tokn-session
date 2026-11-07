@@ -97,7 +97,13 @@ impl Store {
            machine_name TEXT NOT NULL,
            host_id TEXT NOT NULL UNIQUE REFERENCES encrypted_hosts(host_id),
            PRIMARY KEY (username, machine_name)
-         );",
+         );
+         CREATE TABLE IF NOT EXISTS host_discovery (
+           host_id TEXT PRIMARY KEY REFERENCES encrypted_hosts(host_id),
+           namespace TEXT NOT NULL,
+           secret_digest TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS host_discovery_group ON host_discovery(namespace, secret_digest);",
       )
       .map_err(database_error)?;
     connection
@@ -267,6 +273,17 @@ impl Store {
   /// Register only an encrypted routing identity. The host owns authorization;
   /// no Hub passkey or administrative approval can authorize one of its clients.
   pub fn register_encrypted_host(&self, host: HostRecord) -> Result<HostRecord, String> {
+    self.register_encrypted_host_with_discovery(host, None)
+  }
+
+  pub fn register_encrypted_host_with_discovery(
+    &self,
+    host: HostRecord,
+    discovery_group: Option<&tokn_hub_client_core::discovery::DiscoveryGroup>,
+  ) -> Result<HostRecord, String> {
+    if let Some(group) = discovery_group {
+      group.validate()?;
+    }
     if !crate::protocol::valid_host_uuid(&host.host_id)
       || host.name.trim().is_empty()
       || host.name.len() > 128
@@ -349,8 +366,47 @@ impl Store {
         )
         .map_err(database_error)?;
     }
+    match discovery_group {
+      Some(group) => {
+        transaction.execute(
+          "INSERT INTO host_discovery (host_id, namespace, secret_digest) VALUES (?1, ?2, ?3) ON CONFLICT(host_id) DO UPDATE SET namespace = excluded.namespace, secret_digest = excluded.secret_digest",
+          params![host.host_id, group.namespace, group.secret_digest],
+        ).map_err(database_error)?;
+      }
+      None => {
+        transaction
+          .execute("DELETE FROM host_discovery WHERE host_id = ?1", [&host.host_id])
+          .map_err(database_error)?;
+      }
+    }
     transaction.commit().map_err(database_error)?;
     Ok(host)
+  }
+
+  pub fn discover_machines(
+    &self,
+    group: &tokn_hub_client_core::discovery::DiscoveryGroup,
+  ) -> Result<Vec<tokn_hub_client_core::discovery::DiscoveredMachine>, String> {
+    use tokn_hub_client_core::discovery::{DiscoveredMachine, MAX_DISCOVERY_MACHINES};
+    group.validate()?;
+    let connection = self.connection()?;
+    let mut statement = connection.prepare(
+      "SELECT h.host_id, h.name FROM host_discovery d JOIN hosts h ON d.host_id = h.host_id JOIN encrypted_hosts e ON h.host_id = e.host_id AND h.public_key = e.public_key WHERE d.namespace = ?1 AND d.secret_digest = ?2 AND e.revoked = 0 ORDER BY h.name, h.host_id LIMIT ?3"
+    ).map_err(database_error)?;
+    statement
+      .query_map(
+        params![group.namespace, group.secret_digest, MAX_DISCOVERY_MACHINES as u32],
+        |row| {
+          Ok(DiscoveredMachine {
+            host_id: row.get(0)?,
+            name: row.get(1)?,
+            online: false,
+          })
+        },
+      )
+      .map_err(database_error)?
+      .collect::<Result<Vec<_>, _>>()
+      .map_err(database_error)
   }
 }
 

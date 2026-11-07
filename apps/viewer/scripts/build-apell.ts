@@ -1,11 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import react from "@vitejs/plugin-react";
+import { rustBuildEnvironment } from "./rust-build-env";
 
 const viewer = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repository = resolve(viewer, "../..");
@@ -18,10 +19,8 @@ const target = resolve(process.env.CARGO_TARGET_DIR ?? join(repository, "target"
 const artifact = join(repository, "artifacts/tokn-session.apel");
 const check_only = process.argv.includes("--check");
 try {
-  const prior = process.env.CARGO_ENCODED_RUSTFLAGS?.split("\x1f") ?? (process.env.RUSTFLAGS ?? "").split(/\s+/).filter(Boolean);
   execFileSync("cargo", ["build", "--locked", "--release", "--target", "wasm32-unknown-unknown", "-p", "tokn-session-apell"], {
-    cwd: repository, stdio: "inherit", env: { ...process.env,
-      CARGO_ENCODED_RUSTFLAGS: [...prior, `--remap-path-prefix=${homedir()}=/build`, `--remap-path-prefix=${repository}=/tokn-session`, `--remap-path-prefix=${apell}=/apell`].join("\x1f") },
+    cwd: repository, stdio: "inherit", env: rustBuildEnvironment(repository, [[apell, "/apell"]]),
   });
   await build({
     configFile: false, root: source, base: "./", plugins: [react()],

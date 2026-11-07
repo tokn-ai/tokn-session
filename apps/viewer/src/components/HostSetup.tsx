@@ -40,6 +40,10 @@ function PairingSetup() {
     {error ? <><p role="alert" className="hub-error">{error}</p><button type="button" onClick={() => setAttempt((value) => value + 1)}>Retry pairing display</button></>
       : !pairing ? <p role="status">Loading pairing setup…</p> : <>
         <label>Machine reference<code className="hub-machine-reference">{pairing.machine_reference}</code></label>
+        {pairing.discovery_group && <details><summary>Discovery group</summary>
+          <p>{pairing.discovery_group.namespace}</p><code className="hub-machine-reference">{pairing.discovery_group.secret_digest}</code>
+          <p>Devices learn this group after pairing. Each discovered computer requires its own pairing.</p>
+        </details>}
         <p>Use this reference to connect from another device. Scan the QR with an authenticator that supports SHA-256.</p>
         <img src={pairing.qr_data_url} width="220" height="220" alt="SHA-256 authenticator setup QR" />
         <div className="host-current-code"><span>Current verification code</span><strong>{pairing.current_code}</strong><span>Valid for {remaining}s</span></div>
@@ -87,6 +91,7 @@ export function HostDialog() {
   const [show_pairing, setShowPairing] = useState(false);
   const settings = draft ?? host.status ?? { hub_url: "", name: "This computer", allow_control: false };
   const { hub_url, name, allow_control } = settings;
+  const discovery_namespace = settings.discovery_namespace ?? "";
   useEffect(() => {
     const opener = host.return_focus ?? document.activeElement;
     dialog.current?.showModal();
@@ -105,12 +110,21 @@ export function HostDialog() {
       {hosting || external || background ? <>
         <dl className="host-summary"><div><dt>Computer</dt><dd>{host.status?.name}</dd></div>
           <div><dt>Hub</dt><dd>{host.status?.hub_url}</dd></div>
+          {host.status?.discovery_namespace && <div><dt>Discovery namespace</dt><dd>{host.status.discovery_namespace}</dd></div>}
           <div><dt>Access</dt><dd>{host.status?.allow_control ? "Viewing and agent input" : "Viewing only"}</dd></div></dl>
         {!external && !background && <button type="button" disabled={host.busy || unavailable} onClick={() => { setShowPairing(false); void host.change(); }}>{host.busy ? "Stopping…" : "Stop hosting"}</button>}
         {hosting && <p className="host-hint">Stop hosting to change these settings.</p>}
-            </> : <form onSubmit={(event) => { event.preventDefault(); setShowPairing(false); void host.change({ hub_url, name, allow_control }); }}>
+            </> : <form onSubmit={(event) => {
+              event.preventDefault(); setShowPairing(false);
+              void host.change({ hub_url, name, allow_control,
+                ...(settings.discovery_namespace !== undefined ? { discovery_namespace } : {}) });
+            }}>
         <label htmlFor={`${id}-hub`}>Hosting Hub address</label><input id={`${id}-hub`} type="url" required placeholder="https://hub.example.com" value={hub_url} disabled={host.busy || unavailable} onChange={(event) => setDraft({ ...settings, hub_url: event.target.value })} />
         <label htmlFor={`${id}-name`}>Host name</label><input id={`${id}-name`} required maxLength={128} value={name} disabled={host.busy || unavailable} onChange={(event) => setDraft({ ...settings, name: event.target.value })} />
+        <label htmlFor={`${id}-namespace`}>Discovery namespace (optional)</label>
+        <input id={`${id}-namespace`} maxLength={63} pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" placeholder="personal" value={discovery_namespace}
+          disabled={host.busy || unavailable} onChange={(event) => setDraft({ ...settings, discovery_namespace: event.target.value })} />
+        <p className="host-hint">Computers using the same namespace and authenticator seed appear together after pairing one of them. Use lowercase letters, digits, and internal hyphens.</p>
         <label className="host-control"><input type="checkbox" checked={allow_control} disabled={host.busy || unavailable} onChange={(event) => setDraft({ ...settings, allow_control: event.target.checked })} />Allow remote agent input</label>
         <button disabled={host.busy || unavailable || !host.status || !hub_url.trim() || !name.trim()}>{host.busy ? "Starting…" : "Start hosting"}</button>
       </form>}

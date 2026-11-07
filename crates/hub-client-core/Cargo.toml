@@ -20,6 +20,7 @@ system-rng = ["rand/getrandom", "snow/use-getrandom", "spake2/getrandom"]
 
 [dependencies]
 base64 = "0.22"
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 data-encoding = "2"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 hkdf = "0.12"

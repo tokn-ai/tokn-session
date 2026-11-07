@@ -3,10 +3,11 @@ import { hubErrorMessage } from "../lib/hub";
 import { openHubAccess, type HubAccessService } from "../lib/hubAccess";
 import { canonicalHubUrl, machineReference, type SavedHubHost } from "../lib/hubDeviceStore";
 import { deselectMachine, selectMachine, type ConnectionState, type ViewerClient } from "../lib/transport";
-import type { HubMachineSelection, TransportState } from "../lib/types";
+import type { DiscoveredMachine, HubMachineSelection, TransportState } from "../lib/types";
 import { ViewerPage } from "../pages/ViewerPage";
 import { RemoteConnection } from "./RemoteConnection";
 import { HostSetup } from "./HostSetup";
+import { HubDiscoveryGroups } from "./HubDiscoveryGroups";
 import { SettingsEntry } from "./SettingsEntry";
 import "./HubAccess.css";
 import { viewerCapabilities } from "../lib/platform";
@@ -38,6 +39,8 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
   const [machine, setMachine] = useState("");
   const [code, setCode] = useState("");
   const [method, setMethod] = useState<"code" | "passkey">("code");
+  const [pair_target, setPairTarget] = useState<DiscoveredMachine>();
+  const code_input = useRef<HTMLInputElement>(null);
   const [editing_hub, setEditingHub] = useState(false);
   const [active, setActive] = useState<{ host: SavedHubHost; client: ViewerClient }>();
   const [connection_state, setConnectionState] = useState<ConnectionState>("connecting");
@@ -65,6 +68,9 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
     setConnectionState("connecting"); setTransport({ kind: "relay" });
     const client = await current.connect(host, signal);
     if (signal.aborted) { client.close(); return; }
+    try { await refreshHosts(current, signal); }
+    catch (error) { client.close(); throw error; }
+    if (signal.aborted) { client.close(); return; }
     active_client.current = client;
     client.setStateListener((state) => { if (active_client.current === client) setConnectionState(state); });
     client.setTransportListener?.((next) => { if (active_client.current === client) setTransport(next); });
@@ -73,7 +79,7 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
   }
   async function loadService(url: string, signal: AbortSignal, requested_host_id: string | null | undefined) {
     service_ref.current?.dispose?.(); service_ref.current = undefined;
-    setService(undefined); setHosts([]); setMachine(""); setCode("");
+    setService(undefined); setHosts([]); setMachine(""); setCode(""); setPairTarget(undefined);
     const next = await openHubAccess(url);
     if (signal.aborted) { next.dispose?.(); return; }
     let status: Awaited<ReturnType<HubAccessService["status"]>>;
@@ -116,6 +122,8 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
   // Startup props describe this mounted picker. Preference writes must not reopen it.
   }, []);
 
+  useEffect(() => { if (pair_target) code_input.current?.focus(); }, [pair_target]);
+
   useEffect(() => {
     if (native) return;
     const lock = () => {
@@ -142,7 +150,7 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
     const pairing_code = code; setCode("");
     const host = method === "code" ? await service.pairMachine(target, pairing_code, signal) : await service.loginMachine(target, signal);
     if (signal.aborted) return;
-    setMachine(""); await refreshHosts(service, signal);
+    setMachine(""); setPairTarget(undefined); await refreshHosts(service, signal);
     if (signal.aborted) return;
     setPending({ kind: "opening_machine", host_id: host.host_id });
     await openHost(service, host, signal);
@@ -191,6 +199,7 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
     </form>}
     {progress}{error && <p className="hub-error hub-feedback" role="alert">{error}</p>}{notice && <p className="hub-feedback" role="status">{notice}</p>}
     {service && <div className="hub-access-layout">
+      <div className="hub-machine-catalog">
       <section className="hub-saved-machines" aria-labelledby="saved-machines-title"><div className="hub-section-heading"><h2 id="saved-machines-title">Saved machines</h2><span>{hosts.length}</span></div>
         <p className="hub-muted">{native ? "Apps paired with an authenticator reconnect without a code." : "Sign in with a passkey in each new tab or after reloading."}</p>
         {hosts.length === 0 ? <div className="hub-empty-state"><h3>No saved machines</h3><p>Connect a machine using its address and authenticator code.</p></div>
@@ -206,14 +215,19 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
             </div></details>
           </li>)}</ul>}
       </section>
+      <HubDiscoveryGroups service={service} hosts={hosts} busy={busy} on_pair={(candidate) => {
+        setMachine(candidate.host_id); setPairTarget(candidate); setMethod("code"); setCode(""); setError(undefined); setNotice(undefined);
+      }} />
+      </div>
       <section className="hub-add-machine" aria-labelledby="encrypted-pair-title"><h2 id="encrypted-pair-title">Connect a machine</h2>
         <form className="hub-machine-form" onSubmit={(event) => { event.preventDefault(); void action(method === "code" ? "pairing" : "signing_in", addMachine); }}>
-          <label htmlFor="encrypted-machine">Machine address or reference</label><input id="encrypted-machine" value={machine} onChange={(event) => setMachine(event.target.value)} required autoComplete="off" spellCheck={false} disabled={busy} placeholder="username:host" />
+          {pair_target && <p className="machine-hint">Pairing with <strong>{pair_target.name}</strong>. Enter its current authenticator code to verify this machine.</p>}
+          <label htmlFor="encrypted-machine">Machine address or reference</label><input id="encrypted-machine" value={machine} onChange={(event) => { setMachine(event.target.value); setPairTarget(undefined); }} required autoComplete="off" spellCheck={false} disabled={busy} placeholder="username:host" />
           {capabilities.passkeys && <fieldset className="hub-auth-method" disabled={busy}><legend>Connect using</legend>
             <label><input type="radio" name="machine-auth-method" checked={method === "code"} onChange={() => { setMethod("code"); setError(undefined); }} />Use authenticator code</label>
             <label><input type="radio" name="machine-auth-method" checked={method === "passkey"} onChange={() => { setMethod("passkey"); setCode(""); setError(undefined); }} />Use machine passkey</label>
           </fieldset>}
-          {method === "code" ? <><label htmlFor="encrypted-code">Authenticator code</label><input id="encrypted-code" value={code} onChange={(event) => setCode(event.target.value)} type="password" inputMode="numeric" pattern="[0-9]{6}" minLength={6} maxLength={6} required autoComplete="one-time-code" disabled={busy} />
+          {method === "code" ? <><label htmlFor="encrypted-code">Authenticator code</label><input ref={code_input} id="encrypted-code" value={code} onChange={(event) => setCode(event.target.value)} type="password" inputMode="numeric" pattern="[0-9]{6}" minLength={6} maxLength={6} required autoComplete="one-time-code" disabled={busy} />
             <p className="machine-hint">Enter the current six-digit code from the machine’s authenticator. Your machine verifies it.</p></>
             : <p className="machine-hint">On a new device, paste <strong>username:host@public_key</strong> or the complete machine reference from its connector. Remembered machines can use their address.</p>}
           <button className="hub-connect-primary" disabled={busy || !machine.trim() || (method === "code" && !/^[0-9]{6}$/.test(code))}>{method === "code" ? (native ? "Pair and connect" : "Pair and set up passkey") : "Sign in with machine passkey"}</button>

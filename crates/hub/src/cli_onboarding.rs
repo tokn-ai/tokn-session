@@ -21,6 +21,9 @@ pub fn prepare_host(options: HostOptions) -> Result<ConnectorConfig, String> {
   let profile = prepared.config.paired.as_ref().expect("paired host setup");
   eprintln!("Host ID: {}", profile.host_id);
   eprintln!("Machine reference: {}", prepared.reference);
+  if let Some(namespace) = &prepared.discovery_namespace {
+    eprintln!("Discovery namespace: {namespace}");
+  }
   if let Some(origin) = &prepared.passkey_origin {
     eprintln!("Host passkey browser origin: {origin}");
   }
@@ -254,6 +257,7 @@ mod tests {
     let setup = |hub| HostOptions {
       hub,
       name: None,
+      discovery_namespace: None,
       viewer_url: None,
       passkey_origin: None,
       ice_servers: None,
@@ -316,6 +320,7 @@ mod tests {
     let setup = || HostOptions {
       hub: Some(Url::parse("https://hub.example").unwrap()),
       name: None,
+      discovery_namespace: None,
       viewer_url: None,
       passkey_origin: None,
       ice_servers: None,

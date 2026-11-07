@@ -16,7 +16,24 @@ use std::{
 };
 use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
+use tokn_hub_client_core::discovery::DiscoveryGroup;
 use tokn_hub_transport::{BoxTransport, WebRtcPeer};
+
+pub(super) fn discovery_group(config: &ConnectorConfig) -> Result<Option<DiscoveryGroup>, String> {
+  let Some(paired) = &config.paired else { return Ok(None) };
+  let profile = paired
+    .state_file
+    .parent()
+    .map(|directory| crate::onboarding::HostProfile::load(&directory.join("host.json")))
+    .transpose()?
+    .flatten();
+  let Some(namespace) = profile.and_then(|profile| profile.discovery_namespace) else {
+    return Ok(None);
+  };
+  crate::onboarding::read_totp_secret(&paired.state_file)?
+    .discovery_group(config.hub_url.as_str(), &namespace)
+    .map(Some)
+}
 
 #[derive(Clone)]
 enum RecordOutput {
@@ -211,6 +228,7 @@ pub(super) struct Host {
   identity: NoiseIdentity,
   trust: HostTrust,
   passkeys: Option<HostPasskeys>,
+  discovery_group: Option<DiscoveryGroup>,
 }
 
 enum HostTrust {
@@ -255,6 +273,7 @@ impl Host {
         identity: NoiseIdentity::load_or_create(&paired.noise_key_file)?,
         trust: HostTrust::PairedDevices(paired.clone()),
         passkeys,
+        discovery_group: discovery_group(config)?,
       }
     } else if let Some(config) = &config.secure {
       let bytes: [u8; 32] = protocol::decode(&config.owner_public_key, 32)?
@@ -265,6 +284,7 @@ impl Host {
         identity: NoiseIdentity::load_or_create(&config.noise_key_file)?,
         trust: HostTrust::SignedGrants(config.clone()),
         passkeys: None,
+        discovery_group: None,
       }
     } else {
       return Ok(None);
@@ -353,7 +373,8 @@ impl Host {
     crate::onboarding::begin_pairing(&config.state_file, now()?, step)?;
     let (pending, reply) = crate::pairing::HostPairing::respond(&secret, host_id, &self.identity, first, now()?)?;
     send_record(outgoing, reply).await?;
-    let (authenticated, ack) = pending.finish(&receive(incoming).await?, now()?)?;
+    let (authenticated, ack) =
+      pending.finish_with_discovery(&receive(incoming).await?, now()?, self.discovery_group.clone())?;
     // Persist consumption and authorization together before letting the client
     // save its pin. Concurrent completions with the same TOTP step lose here.
     crate::onboarding::authorize_pairing(
@@ -511,6 +532,27 @@ async fn run_records(
     let result = host
       .authenticate(host_id, operation, payload, &mut channel, &mut incoming, outgoing)
       .await;
+    if let Err(message) = &result {
+      if let Ok(record) = channel.encrypt(&InnerMessage::Error {
+        message: message.clone(),
+      }) {
+        let _ = send_record(outgoing, record).await;
+      }
+    }
+    return result;
+  }
+  if let InnerMessage::DiscoveryRequest {} = header {
+    let result = async {
+      host.verify(None, host_id, channel.remote_public_key())?;
+      send_record(
+        outgoing,
+        channel.encrypt(&InnerMessage::DiscoveryResponse {
+          group: discovery_group(config)?,
+        })?,
+      )
+      .await
+    }
+    .await;
     if let Err(message) = &result {
       if let Ok(record) = channel.encrypt(&InnerMessage::Error {
         message: message.clone(),
@@ -970,6 +1012,59 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn discovery_metadata_requires_independent_device_authorization_and_tracks_group_opt_out() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = paired_host(directory.path());
+    let profile_path = directory.path().join("host.json");
+    let mut profile = crate::onboarding::HostProfile {
+      version: 1,
+      host_id: config.paired.as_ref().unwrap().host_id.clone(),
+      hub_url: config.hub_url.to_string(),
+      name: config.name.clone(),
+      viewer_url: config.local_url.to_string(),
+      allow_control: false,
+      insecure_loopback: false,
+      passkey_origin: Some(config.hub_url.to_string()),
+      ice_servers: Vec::new(),
+      discovery_namespace: Some("personal".into()),
+    };
+    profile.save(&profile_path).unwrap();
+    let device = NoiseIdentity::generate().unwrap();
+    let request = |channel: &mut SecureChannel| channel.encrypt(&InnerMessage::DiscoveryRequest {}).unwrap();
+    let (task, incoming, mut frames, mut channel) = open_host(&config, &device).await;
+    incoming.send(request(&mut channel)).await.unwrap();
+    assert!(matches!(
+      read_inner(&mut frames, &mut channel).await,
+      InnerMessage::Error { .. }
+    ));
+    assert!(task.await.unwrap().is_err());
+    let current = now().unwrap();
+    let state_file = &config.paired.as_ref().unwrap().state_file;
+    crate::onboarding::authorize_device(state_file, &device.public_key(), current / 30, current).unwrap();
+    for namespace in [Some("personal"), None] {
+      profile.discovery_namespace = namespace.map(str::to_owned);
+      profile.save(&profile_path).unwrap();
+      let (task, incoming, mut frames, mut channel) = open_host(&config, &device).await;
+      incoming.send(request(&mut channel)).await.unwrap();
+      assert_eq!(
+        read_inner(&mut frames, &mut channel).await,
+        InnerMessage::DiscoveryResponse {
+          group: discovery_group(&config).unwrap()
+        }
+      );
+      task.await.unwrap().unwrap();
+    }
+    crate::onboarding::remove_device(state_file, &device.public_key()).unwrap();
+    let (task, incoming, mut frames, mut channel) = open_host(&config, &device).await;
+    incoming.send(request(&mut channel)).await.unwrap();
+    assert!(matches!(
+      read_inner(&mut frames, &mut channel).await,
+      InnerMessage::Error { .. }
+    ));
+    assert!(task.await.unwrap().is_err());
+  }
+
+  #[tokio::test]
   async fn runtime_administration_requires_both_host_permissions_before_forwarding() {
     let directory = tempfile::tempdir().unwrap();
     let mut config = paired_host(directory.path());
@@ -1069,6 +1164,7 @@ mod tests {
         path: "/api/v1/health".into(),
       },
       InnerMessage::DirectConfigRequest {},
+      InnerMessage::DiscoveryRequest {},
       InnerMessage::DirectOffer { sdp: "v=0\r\n".into() },
       InnerMessage::AuthRequest {
         operation: HostAuthOperation::RegisterStart,
@@ -1111,6 +1207,7 @@ mod tests {
       insecure_loopback: config.insecure_loopback,
       passkey_origin: Some(config.hub_url.to_string()),
       ice_servers: Vec::new(),
+      discovery_namespace: None,
     };
     let profile_path = directory.path().join("host.json");
     profile.save(&profile_path).unwrap();

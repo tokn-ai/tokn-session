@@ -47,6 +47,33 @@ it("loads QR and current code on disclosure and clears them when hidden", async 
   expect(screen.queryByText("123456")).not.toBeInTheDocument();
   expect(screen.queryByAltText("SHA-256 authenticator setup QR")).not.toBeInTheDocument();
 });
+
+it("saves the discovery namespace from the hosting dialog and shows it while online", async () => {
+  vi.mocked(startLocalHost).mockResolvedValue({ ...online, discovery_namespace: "personal" });
+  render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
+  await screen.findByText("Hosting off");
+  fireEvent.change(screen.getByLabelText("Discovery namespace (optional)"), { target: { value: "personal" } });
+  fireEvent.click(screen.getByRole("button", { name: "Start hosting", hidden: true }));
+  await waitFor(() => expect(startLocalHost).toHaveBeenCalledWith({
+    hub_url: stopped.hub_url, name: stopped.name, allow_control: false, discovery_namespace: "personal",
+  }));
+  await screen.findByText("Hosting online");
+  expect(screen.getByText("Discovery namespace")).toBeInTheDocument();
+  expect(screen.getByText("personal")).toBeInTheDocument();
+});
+
+it("can clear a saved discovery namespace while retaining the host configuration", async () => {
+  vi.mocked(getLocalHostStatus).mockResolvedValue({ ...stopped, discovery_namespace: "personal" });
+  render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
+  await screen.findByDisplayValue("personal");
+  fireEvent.change(screen.getByLabelText("Discovery namespace (optional)"), { target: { value: "" } });
+  fireEvent.click(screen.getByRole("button", { name: "Start hosting", hidden: true }));
+  await waitFor(() => expect(startLocalHost).toHaveBeenCalledWith({
+    hub_url: stopped.hub_url, name: stopped.name, allow_control: false, discovery_namespace: "",
+  }));
+});
 it("preserves newer connection events over a late start response", async () => {
   let finish!: (status: LocalHostStatus) => void;
   vi.mocked(startLocalHost).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));

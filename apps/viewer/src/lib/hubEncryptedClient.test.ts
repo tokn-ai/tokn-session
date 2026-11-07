@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { EncryptedHubClient, authenticateHubHost, pairHubHost, type SocketFactory } from "./hubEncryptedClient";
+import { EncryptedHubClient, authenticateHubHost, pairHubHost, readHubDiscoveryGroup, type SocketFactory } from "./hubEncryptedClient";
 import type { CryptoApi, DeviceIdentity } from "./hubCrypto";
 import { encodeBase64Url } from "./hub";
 import { PeerRetiredError, RelayCarrier, type DirectPeer, type DirectPeerFactory } from "./hubTransport";
@@ -92,6 +92,26 @@ it("pairs directly through Hub and returns only a host-confirmed machine pin", a
   const { factory, sockets } = harness();
   expect(await pairHubHost("https://hub.example", host.host_id, "123456", identity, crypto(), new AbortController().signal, factory)).toEqual(host);
   expect(sockets[0].url).toBe(`wss://hub.example/hub/v1/secure/${host.host_id}`);
+  expect(sockets[0].closed).toBe(true);
+});
+
+it("reads discovery metadata through a pinned encrypted exchange and closes its socket", async () => {
+  const group = { namespace: "personal", secret_digest: "A".repeat(43) };
+  const { factory, sockets } = harness((socket, message) => {
+    if (message.type === "discovery_request") socket.push({ type: "discovery_response", group });
+  });
+  expect(await readHubDiscoveryGroup("https://hub.example", host, identity, crypto(), new AbortController().signal, factory)).toEqual(group);
+  expect(sockets[0].messages).toEqual([{ type: "discovery_request" }]);
+  expect(sockets[0].closed).toBe(true);
+});
+
+it("bounds old-host discovery metadata waits and closes the abandoned encrypted exchange", async () => {
+  vi.useFakeTimers();
+  const { factory, sockets } = harness(() => {});
+  const pending = readHubDiscoveryGroup("https://hub.example", host, identity, crypto(), new AbortController().signal, factory);
+  const rejected = expect(pending).rejects.toThrow();
+  await vi.advanceTimersByTimeAsync(5000);
+  await rejected;
   expect(sockets[0].closed).toBe(true);
 });
 

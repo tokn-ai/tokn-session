@@ -47,6 +47,11 @@ pub enum InnerMessage {
   AuthResponse {
     payload: serde_json::Value,
   },
+  /// Learn current discovery metadata from an already authorized host.
+  DiscoveryRequest {},
+  DiscoveryResponse {
+    group: Option<crate::discovery::DiscoveryGroup>,
+  },
   /// Direct negotiation is authenticated and encrypted before any peer is created.
   DirectConfigRequest {},
   DirectConfig {
@@ -104,6 +109,11 @@ impl InnerMessage {
       Self::DirectConfig { ice_servers } => {
         validate_ice_servers(ice_servers)?;
       }
+      Self::DiscoveryResponse { group } => {
+        if let Some(group) = group {
+          group.validate()?;
+        }
+      }
       Self::DirectOffer { sdp } | Self::DirectAnswer { sdp } => {
         if sdp.is_empty()
           || sdp.len() > MAX_DIRECT_SDP
@@ -153,7 +163,7 @@ impl InnerMessage {
           return Err("Invalid encrypted response window".into());
         }
       }
-      Self::DirectConfigRequest {} | Self::RequestEnd {} | Self::End {} => {}
+      Self::DiscoveryRequest {} | Self::DirectConfigRequest {} | Self::RequestEnd {} | Self::End {} => {}
     }
     Ok(())
   }

@@ -46,6 +46,7 @@ pub struct HostStatus {
   pub phase: HostPhase,
   pub hub_url: String,
   pub name: String,
+  pub discovery_namespace: Option<String>,
   pub allow_control: bool,
   pub machine_reference: Option<String>,
   pub error: Option<String>,
@@ -59,6 +60,7 @@ impl Default for HostStatus {
       phase: HostPhase::Stopped,
       hub_url: String::new(),
       name: "This computer".into(),
+      discovery_namespace: None,
       allow_control: false,
       machine_reference: None,
       error: None,
@@ -73,11 +75,14 @@ impl Default for HostStatus {
 pub struct StartHostRequest {
   pub hub_url: String,
   pub name: String,
+  #[serde(default)]
+  pub discovery_namespace: Option<String>,
   pub allow_control: bool,
 }
 #[derive(Serialize)]
 pub struct HostPairing {
   pub machine_reference: String,
+  pub discovery_group: Option<tokn_hub_client_core::discovery::DiscoveryGroup>,
   pub qr_data_url: String,
   pub setup_uri: String,
   pub current_code: String,
@@ -227,6 +232,7 @@ impl LocalHost {
       host_setup::prepare_host(HostOptions {
         hub: Some(url::Url::parse(&request.hub_url).map_err(|_| "Enter a valid HTTPS Hub address")?),
         name: Some(request.name),
+        discovery_namespace: request.discovery_namespace,
         viewer_url: None,
         passkey_origin: None,
         state_dir: path,
@@ -250,6 +256,7 @@ impl LocalHost {
       phase: HostPhase::Connecting,
       hub_url: config.hub_url.origin().ascii_serialization(),
       name: config.name.clone(),
+      discovery_namespace: prepared.discovery_namespace,
       allow_control: config.allow_control,
       machine_reference: Some(prepared.reference),
       error: None,
@@ -682,6 +689,7 @@ fn profile_status(path: &std::path::Path, profile: Option<&HostProfile>) -> Resu
     phase: HostPhase::Stopped,
     hub_url: profile.hub_url.clone(),
     name: profile.name.clone(),
+    discovery_namespace: profile.discovery_namespace.clone(),
     allow_control: profile.allow_control,
     machine_reference: Some(format!("{}@{}", profile.host_id, identity.public_key())),
     error: None,
@@ -703,6 +711,11 @@ fn pairing(path: &std::path::Path) -> Result<HostPairing, String> {
   let now = tokn_session_hub::secure_client::unix_time()?;
   Ok(HostPairing {
     machine_reference: format!("{}@{}", profile.host_id, identity.public_key()),
+    discovery_group: profile
+      .discovery_namespace
+      .as_deref()
+      .map(|namespace| secret.discovery_group(&profile.hub_url, namespace))
+      .transpose()?,
     qr_data_url: format!("data:image/svg+xml;base64,{}", STANDARD.encode(svg)),
     setup_uri,
     current_code: secret.code_at(now),
@@ -735,6 +748,7 @@ mod tests {
     host_setup::prepare_host(HostOptions {
       hub: Some(url::Url::parse("https://hub.example").unwrap()),
       name: Some("Test machine".into()),
+      discovery_namespace: None,
       viewer_url: None,
       passkey_origin: None,
       state_dir: path.to_owned(),
@@ -777,6 +791,26 @@ mod tests {
     assert_eq!(
       saved_status(path).unwrap().machine_reference.as_deref(),
       Some(prepared.reference.as_str())
+    );
+  }
+
+  #[test]
+  fn pairing_display_uses_the_saved_discovery_namespace_and_seed() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    setup(path);
+    let profile_file = path.join("host.json");
+    let mut profile = HostProfile::load(&profile_file).unwrap().unwrap();
+    profile.discovery_namespace = Some("personal".into());
+    profile.save(&profile_file).unwrap();
+    let secret = tokn_session_hub::onboarding::read_totp_secret(&path.join("host-access.json")).unwrap();
+    assert_eq!(
+      pairing(path).unwrap().discovery_group,
+      Some(secret.discovery_group(&profile.hub_url, "personal").unwrap())
+    );
+    assert_eq!(
+      saved_status(path).unwrap().discovery_namespace.as_deref(),
+      Some("personal")
     );
   }
   #[test]
@@ -896,6 +930,7 @@ mod tests {
       configuration: Some(StartHostRequest {
         hub_url: "https://hub.example".into(),
         name: "Existing host".into(),
+        discovery_namespace: Some("personal".into()),
         allow_control: false,
       }),
     };
@@ -907,6 +942,7 @@ mod tests {
     let configuration = restart_configuration(&host, "owned-instance").unwrap();
     assert_eq!(configuration.hub_url, "https://hub.example");
     assert_eq!(configuration.name, "Existing host");
+    assert_eq!(configuration.discovery_namespace.as_deref(), Some("personal"));
     assert!(!configuration.allow_control);
     let row = hosting_runtime(HostStatus::default(), Some(&host));
     assert_eq!(row.instance_id, "owned-instance");

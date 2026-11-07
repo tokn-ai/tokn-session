@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { NativeHubClient, nativeHubAuthenticate, nativeHubPair } from "./hubNativeClient";
+import { NativeHubClient, nativeHubAuthenticate, nativeHubPair, nativeHubDiscover } from "./hubNativeClient";
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 const host = { host_id: "550e8400-e29b-41d4-a716-446655440000", host_public_key: "H".repeat(43) };
@@ -75,6 +75,11 @@ it("cancels the same pending native passkey channel when browser credential work
 it("sends a verified machine pin to native pairing before persistence", async () => {
   await nativeHubPair("https://hub.example", host.host_id, "123456", host.host_public_key);
   expect(invoke).toHaveBeenCalledWith("hub_client_pair", { hub_url: "https://hub.example", host_id: host.host_id, code: "123456", expected_host_public_key: host.host_public_key });
+});
+it("uses the native discovery contract with a saved group reference", async () => {
+  const group = { namespace: "personal", secret_digest: "A".repeat(43) };
+  await nativeHubDiscover("https://hub.example", group);
+  expect(invoke).toHaveBeenCalledWith("hub_client_discover", { hub_url: "https://hub.example", ...group });
 });
 it("keeps readable display metadata out of cryptographic IPC arguments", async () => {
   const named = { ...host, machine_address: "alice:macbook", name: "MacBook" };

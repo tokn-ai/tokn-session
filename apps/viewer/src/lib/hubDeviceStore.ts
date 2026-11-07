@@ -1,6 +1,7 @@
 import type { DeviceIdentity, CryptoApi } from "./hubCrypto";
-import type { SavedHubHost } from "./types";
+import type { DiscoveryGroup, SavedHubHost } from "./types";
 import { parseMachineAddress } from "./hubAddress";
+import { validateDiscoveryGroup } from "./hubDiscovery";
 export type { SavedHubHost } from "./types";
 export interface HubDeviceRecord {
   version: 2;
@@ -41,6 +42,7 @@ export function validateHost(host: SavedHubHost): SavedHubHost {
     host_id: host.host_id, host_public_key: host.host_public_key,
     ...(host.machine_address === undefined ? {} : { machine_address: host.machine_address }),
     ...(host.name === undefined ? {} : { name: host.name }),
+    ...(host.discovery_group === undefined ? {} : { discovery_group: validateDiscoveryGroup(host.discovery_group) }),
   };
 }
 export function machineReference(host: SavedHubHost): string {
@@ -126,7 +128,7 @@ export class HubDeviceStore {
   }
   private disposed = false;
   dispose(): void { if (!this.disposed) { this.disposed = true; this.identity.free(); } }
-  get hosts(): SavedHubHost[] { return this.record.hosts.map((host) => ({ ...host })); }
+  get hosts(): SavedHubHost[] { return this.record.hosts.map(validateHost); }
   get selected_host_id(): string | null { return this.record.selected_host_id; }
   async refresh(): Promise<void> {
     this.record = await this.storage.update(this.hub_url, (stored) => {
@@ -148,7 +150,18 @@ export class HubDeviceStore {
       const current = validateRecord(stored!, this.hub_url);
       // Metadata cannot recreate a pin forgotten in another tab, or change
       // which machine the user selected while directory lookup was pending.
-      return { ...current, hosts: mergeHost(current.hosts, host, true) };
+      const previous = current.hosts.find((entry) => entry.host_id === host.host_id);
+      return { ...current, hosts: mergeHost(current.hosts, { ...host, discovery_group: previous?.discovery_group }, true) };
+    });
+  }
+  async rememberDiscoveryGroup(host: SavedHubHost, group: DiscoveryGroup | null): Promise<void> {
+    const verified = group === null ? undefined : validateDiscoveryGroup(group);
+    this.record = await this.storage.update(this.hub_url, (stored) => {
+      const current = validateRecord(stored!, this.hub_url);
+      const previous = current.hosts.find((entry) => entry.host_id === host.host_id);
+      if (!previous) throw new Error("This machine was forgotten. Pair it again before saving its group.");
+      if (previous.host_public_key !== host.host_public_key) throw new Error("This machine's saved encryption key changed.");
+      return { ...current, hosts: current.hosts.map((entry) => entry.host_id === host.host_id ? { ...entry, discovery_group: verified } : entry) };
     });
   }
   async selectHost(host_id: string | null): Promise<void> {

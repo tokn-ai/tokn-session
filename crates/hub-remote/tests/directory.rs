@@ -14,8 +14,10 @@ use std::{
     atomic::{AtomicUsize, Ordering},
   },
 };
-use tokn_hub_client_core::secure::NoiseIdentity;
-use tokn_hub_remote::{ClientStore, RemoteManager, ResolvedMachine, SavedHost};
+use tokn_hub_client_core::{discovery::MAX_DISCOVERY_RESPONSE, protocol, secure::NoiseIdentity};
+use tokn_hub_remote::{
+  ClientStore, DiscoveredMachine, DiscoveryGroup, DiscoveryResult, RemoteManager, ResolvedMachine, SavedHost,
+};
 use url::Url;
 
 #[derive(Clone)]
@@ -24,6 +26,36 @@ struct Directory {
   mode: Arc<AtomicUsize>,
   lookups: Arc<AtomicUsize>,
   redirects: Arc<AtomicUsize>,
+  discovery: Arc<Mutex<DiscoveryResult>>,
+}
+
+async fn discover(State(state): State<Directory>) -> Response {
+  state.lookups.fetch_add(1, Ordering::SeqCst);
+  match state.mode.load(Ordering::SeqCst) {
+    1 => (
+      StatusCode::TEMPORARY_REDIRECT,
+      [
+        (header::LOCATION, "/redirected"),
+        (header::CONTENT_TYPE, "application/json"),
+      ],
+      "{}",
+    )
+      .into_response(),
+    2 => Json(json!({"padding":"x".repeat(MAX_DISCOVERY_RESPONSE + 1)})).into_response(),
+    3 => {
+      let mut value = serde_json::to_value(state.discovery.lock().unwrap().clone()).unwrap();
+      value["machines"][0]["host_public_key"] = "unverified-key".into();
+      Json(value).into_response()
+    }
+    _ => Json(state.discovery.lock().unwrap().clone()).into_response(),
+  }
+}
+
+fn group() -> DiscoveryGroup {
+  DiscoveryGroup {
+    namespace: "personal".into(),
+    secret_digest: protocol::encode(&[1; 32]),
+  }
 }
 
 async fn lookup(State(state): State<Directory>) -> Response {
@@ -88,10 +120,23 @@ impl Harness {
       mode: Arc::new(AtomicUsize::new(0)),
       lookups: Arc::new(AtomicUsize::new(0)),
       redirects: Arc::new(AtomicUsize::new(0)),
+      discovery: Arc::new(Mutex::new(DiscoveryResult {
+        namespace: group().namespace,
+        secret_digest: group().secret_digest,
+        machines: vec![DiscoveredMachine {
+          host_id: uuid::Uuid::new_v4().to_string(),
+          name: "Another machine".into(),
+          online: false,
+        }],
+      })),
     };
     let redirected = state.redirects.clone();
     let router = Router::new()
       .route("/hub/v1/resolve/alice/workstation", get(lookup))
+      .route(
+        &format!("/hub/v1/discovery/{}/{}", group().namespace, group().secret_digest),
+        get(discover),
+      )
       .route(
         "/redirected",
         get(move || {
@@ -153,6 +198,7 @@ async fn offline_resolution_and_verified_metadata_preserve_pins_and_saved_select
     host_public_key: NoiseIdentity::generate().unwrap().public_key(),
     machine_address: None,
     name: None,
+    discovery_group: Some(group()),
   };
   let store = harness.store();
   store.save_host(host.clone()).unwrap();
@@ -162,6 +208,7 @@ async fn offline_resolution_and_verified_metadata_preserve_pins_and_saved_select
     .await
     .unwrap();
   assert_eq!(remembered.host_public_key, host.host_public_key);
+  assert_eq!(remembered.discovery_group, host.discovery_group);
   let restarted = harness.manager();
   let status = restarted.status(&harness.hub_url).await.unwrap();
   assert_eq!(status.hosts, vec![remembered.clone()]);
@@ -178,6 +225,7 @@ async fn offline_resolution_and_verified_metadata_preserve_pins_and_saved_select
     host_public_key: NoiseIdentity::generate().unwrap().public_key(),
     machine_address: None,
     name: None,
+    discovery_group: None,
   };
   store.save_host(second.clone()).unwrap();
   harness.state.resolved.lock().unwrap().host_id = second.host_id.clone();
@@ -197,6 +245,73 @@ async fn offline_resolution_and_verified_metadata_preserve_pins_and_saved_select
   );
   assert_eq!(store.hosts().unwrap()[0], remembered);
   assert_eq!(store.selected_host().unwrap().as_deref(), Some(host.host_id.as_str()));
+}
+
+#[tokio::test]
+async fn discovery_requires_a_paired_group_and_never_saves_candidate_pins_or_changes_selection() {
+  let harness = Harness::start().await;
+  let manager = harness.manager();
+  assert!(
+    manager
+      .discover(&harness.hub_url, &group())
+      .await
+      .unwrap_err()
+      .contains("Pair a machine")
+  );
+  assert_eq!(harness.state.lookups.load(Ordering::SeqCst), 0);
+  let host = SavedHost {
+    host_id: harness.state.resolved.lock().unwrap().host_id.clone(),
+    host_public_key: NoiseIdentity::generate().unwrap().public_key(),
+    machine_address: None,
+    name: None,
+    discovery_group: Some(group()),
+  };
+  let store = harness.store();
+  store.save_host(host.clone()).unwrap();
+  store.select_host(&host.host_id).unwrap();
+  let result = manager.discover(&harness.hub_url, &group()).await.unwrap();
+  assert_eq!(result, *harness.state.discovery.lock().unwrap());
+  assert!(!result.machines[0].online);
+  assert_eq!(store.hosts().unwrap(), vec![host.clone()]);
+  assert_eq!(store.selected_host().unwrap().as_deref(), Some(host.host_id.as_str()));
+  let wrong_group = DiscoveryGroup {
+    namespace: "personal".into(),
+    secret_digest: protocol::encode(&[2; 32]),
+  };
+  assert!(manager.discover(&harness.hub_url, &wrong_group).await.is_err());
+  assert_eq!(harness.state.lookups.load(Ordering::SeqCst), 1);
+  manager.forget(&harness.hub_url, &host.host_id).await.unwrap();
+  assert!(manager.discover(&harness.hub_url, &group()).await.is_err());
+  assert_eq!(harness.state.lookups.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn discovery_rejects_redirects_oversized_bodies_unverified_pins_and_changed_groups() {
+  let harness = Harness::start().await;
+  harness
+    .store()
+    .save_host(SavedHost {
+      host_id: uuid::Uuid::new_v4().to_string(),
+      host_public_key: NoiseIdentity::generate().unwrap().public_key(),
+      machine_address: None,
+      name: None,
+      discovery_group: Some(group()),
+    })
+    .unwrap();
+  let manager = harness.manager();
+  for (mode, expected) in [
+    (1, "rejected lookup"),
+    (2, "size limit"),
+    (3, "invalid discovery metadata"),
+  ] {
+    harness.state.mode.store(mode, Ordering::SeqCst);
+    let error = manager.discover(&harness.hub_url, &group()).await.unwrap_err();
+    assert!(error.contains(expected), "mode {mode}: {error}");
+  }
+  assert_eq!(harness.state.redirects.load(Ordering::SeqCst), 0);
+  harness.state.mode.store(0, Ordering::SeqCst);
+  harness.state.discovery.lock().unwrap().namespace = "other".into();
+  assert!(manager.discover(&harness.hub_url, &group()).await.is_err());
 }
 
 #[tokio::test]

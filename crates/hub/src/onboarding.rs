@@ -24,6 +24,9 @@ pub struct HostProfile {
   pub host_id: String,
   pub hub_url: String,
   pub name: String,
+  /// Optional host-chosen discovery label, scoped by a shared seed digest.
+  #[serde(default)]
+  pub discovery_namespace: Option<String>,
   pub viewer_url: String,
   pub allow_control: bool,
   pub insecure_loopback: bool,
@@ -40,6 +43,9 @@ impl HostProfile {
     let value: Option<Self> = read_optional(path)?;
     if let Some(value) = &value {
       validate_uuid(&value.host_id)?;
+      if let Some(namespace) = &value.discovery_namespace {
+        tokn_hub_client_core::discovery::validate_namespace(namespace)?;
+      }
       tokn_hub_transport::validate_stun_urls(&value.ice_servers)?;
       if value.version != 1 {
         return Err("Unsupported host configuration version".into());
@@ -50,6 +56,9 @@ impl HostProfile {
 
   pub fn save(&self, path: &Path) -> Result<(), String> {
     validate_uuid(&self.host_id)?;
+    if let Some(namespace) = &self.discovery_namespace {
+      tokn_hub_client_core::discovery::validate_namespace(namespace)?;
+    }
     tokn_hub_transport::validate_stun_urls(&self.ice_servers)?;
     let _lock = lock(path)?;
     if let Some(previous) = Self::load(path)? {

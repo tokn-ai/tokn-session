@@ -4,6 +4,16 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
+Host-chosen discovery namespaces group machines by a versioned digest derived
+from their shared authenticator seed, Hub origin and namespace. Pairing one host
+provides the encrypted group reference, and authenticated opens refresh it for
+previously paired devices. Machines lists candidates with individual pairing
+actions across desktop, browser and Apell. CLI `connect --namespace` and the
+hosting dialog configure the optional label. Discovery and per-host authorization
+remain independent. See [discovery groups](hub-pairing.md#discovery-groups).
+Browser and guest WASM builds share compiler path remapping so local builds can
+be packaged without embedding workstation source paths.
+
 Desktop and Apell now share the React viewer, resource caches and command/event
 contracts through explicit host capabilities. Apell uses the remote-only workspace
 and applet bridge; desktop retains local history, hosting, creation and native

@@ -10,9 +10,10 @@ use std::{
   rc::Rc,
 };
 use tokn_hub_client_core::{
+  discovery::DiscoveryGroup,
   exchange::{RequestFrames, ResponseState},
   protocol,
-  secure::{NoiseInitiator, SecureChannel},
+  secure::{InnerMessage, NoiseInitiator, SecureChannel},
 };
 
 const MAX_CONNECTIONS: usize = 8;
@@ -33,7 +34,17 @@ struct Connection {
 }
 impl Connection {
   fn descriptor(&self) -> Value {
-    json!({"connection_id":self.id,"endpoint":format!("{}/machines/{}",self.store.hub.origin().ascii_serialization(),self.host_id),"host_id":self.host_id,"host_public_key":self.host_key,"transport":{"kind":"relay"}})
+    let discovery_group = self
+      .store
+      .hosts()
+      .into_iter()
+      .find(|host| host.host_id == self.host_id)
+      .and_then(|host| host.discovery_group);
+    let mut descriptor = json!({"connection_id":self.id,"endpoint":format!("{}/machines/{}",self.store.hub.origin().ascii_serialization(),self.host_id),"host_id":self.host_id,"host_public_key":self.host_key,"transport":{"kind":"relay"}});
+    if let Some(group) = discovery_group {
+      descriptor["discovery_group"] = json!(group);
+    }
+    descriptor
   }
   fn state(&self, state: &str) {
     if !self.closed.get() {
@@ -84,6 +95,34 @@ impl Connection {
       exchange.ack().await?;
     }
     serde_json::from_slice(&body).map_err(|_| "Invalid machine health response".into())
+  }
+  async fn discovery_group(self: &Rc<Self>) -> Result<Option<DiscoveryGroup>, String> {
+    let socket = host::Socket::open(&self.endpoint).await?;
+    self.sockets.borrow_mut().insert(socket.handle.clone());
+    let exchange = Exchange {
+      socket,
+      channel: None,
+      response: None,
+      owner: self.clone(),
+    };
+    let mut initiator = NoiseInitiator::new_with_entropy(&self.store.identity, &self.host_key, host::entropy().await?)?;
+    exchange.socket.send(initiator.start()?).await?;
+    let mut channel = initiator.finish(&exchange.socket.receive().await?)?;
+    exchange
+      .socket
+      .send(channel.encrypt(&InnerMessage::DiscoveryRequest {})?)
+      .await?;
+    match channel.decrypt(&exchange.socket.receive().await?)? {
+      InnerMessage::DiscoveryResponse { group } => {
+        if let Some(group) = &group {
+          group.validate()?;
+        }
+        exchange.socket.close().await;
+        Ok(group)
+      }
+      InnerMessage::Error { message } => Err(message),
+      _ => Err("Machine returned invalid discovery metadata".into()),
+    }
   }
   async fn stop_stream(&self) {
     self.stream_epoch.set(self.stream_epoch.get().wrapping_add(1));
@@ -189,6 +228,7 @@ pub async fn open(params: Value) -> Result<Value, String> {
     if connection.closed.get() {
       return Err("Machine disconnected".into());
     }
+    refresh_discovery(&connection).await?;
     store.select(host_id).await?;
     return Ok(connection.descriptor());
   }
@@ -209,6 +249,7 @@ pub async fn open(params: Value) -> Result<Value, String> {
     stream_channel: RefCell::new(None),
   });
   verify_health(&connection).await?;
+  refresh_discovery(&connection).await?;
   store.select(host_id).await?;
   CONNECTIONS.with(|connections| {
     let mut connections = connections.borrow_mut();
@@ -245,6 +286,25 @@ async fn verify_health(connection: &Rc<Connection>) -> Result<(), String> {
     }
     Either::Right(_) => Err("Machine health check timed out".into()),
   }
+}
+
+async fn refresh_discovery(connection: &Rc<Connection>) -> Result<(), String> {
+  let watchdog = bridge::Channel::new(format!("discovery-{}", apell_guest::create_id()))?;
+  watchdog.timeout(5)?;
+  let result = select(
+    Box::pin(connection.discovery_group()),
+    Box::pin(watchdog.cancellation()),
+  )
+  .await;
+  if let Either::Left((Ok(group), _)) = result {
+    if !connection.closed.get() {
+      connection
+        .store
+        .remember_discovery_group(&connection.host_id, &connection.host_key, group)
+        .await?;
+    }
+  }
+  Ok(())
 }
 pub async fn request(params: Value) -> Result<Value, String> {
   let connection = get(host::string(&params, "connection_id")?)?;

@@ -17,6 +17,7 @@ use std::{
 use tokio::sync::{Mutex as AsyncMutex, watch};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 use tokn_hub_client_core::{
+  discovery::{DiscoveredMachine, DiscoveryGroup, DiscoveryResult},
   pairing::{ClientKind, HostPairing, TotpSecret, is_pairing_record},
   protocol,
   secure::{InnerMessage, MAX_CHUNK, NoiseIdentity, NoiseResponder},
@@ -71,6 +72,7 @@ struct Services {
   next: AtomicUsize,
   secrets: Mutex<BTreeMap<String, String>>,
   config: Mutex<BTreeMap<String, Value>>,
+  discovery: Mutex<Option<DiscoveryResult>>,
 }
 impl Services {
   fn socket(&self, handle: &str) -> Result<Arc<Socket>, String> {
@@ -178,6 +180,28 @@ impl Services {
           .insert(text("key")?.into(), params["value"].clone());
         Ok(Value::Null)
       }
+      "http.request" => {
+        let url = url::Url::parse(text("url")?).map_err(|_| "Invalid fixture URL")?;
+        if url.path() == "/hub/v1/resolve/personal/fixture" {
+          return Ok(json!({"status":200,"body":serde_json::to_vec(&json!({
+            "host_id":HOST_ID,
+            "machine_address":"personal:fixture",
+            "name":"Named machine",
+            "online":true,
+          })).unwrap()}));
+        }
+        let discovery = self
+          .discovery
+          .lock()
+          .unwrap()
+          .clone()
+          .ok_or("Missing discovery fixture")?;
+        assert_eq!(
+          url.path(),
+          format!("/hub/v1/discovery/{}/{}", discovery.namespace, discovery.secret_digest)
+        );
+        Ok(json!({"status":200,"body":serde_json::to_vec(&discovery).unwrap()}))
+      }
       _ => Err(format!("Unexpected fixture service {method}")),
     }
   }
@@ -204,6 +228,7 @@ struct Peer {
   mutations: Arc<AtomicUsize>,
   drop_ack: Arc<AtomicBool>,
   revoked: Arc<AtomicBool>,
+  discovery: Arc<Mutex<Option<DiscoveryGroup>>>,
   task: tokio::task::JoinHandle<()>,
 }
 impl Drop for Peer {
@@ -230,22 +255,30 @@ impl Peer {
     let identity = Arc::new(NoiseIdentity::generate().unwrap());
     let key = identity.public_key();
     let secret = Arc::new(TotpSecret::generate());
+    let discovery = Arc::new(Mutex::new(Some(secret.discovery_group(&hub, "personal").unwrap())));
     let paired = Arc::new(Mutex::new(None::<String>));
     let mutations = Arc::new(AtomicUsize::new(0));
     let drop_ack = Arc::new(AtomicBool::new(false));
     let revoked = Arc::new(AtomicBool::new(false));
-    let (counter, lost, revocation, seed) = (mutations.clone(), drop_ack.clone(), revoked.clone(), secret.clone());
+    let (counter, lost, revocation, seed, group) = (
+      mutations.clone(),
+      drop_ack.clone(),
+      revoked.clone(),
+      secret.clone(),
+      discovery.clone(),
+    );
     let task = tokio::spawn(async move {
       let mut clients = tokio::task::JoinSet::new();
       loop {
         let (socket, _) = listener.accept().await.unwrap();
-        let (identity, secret, paired, counter, lost, revoked) = (
+        let (identity, secret, paired, counter, lost, revoked, discovery) = (
           identity.clone(),
           seed.clone(),
           paired.clone(),
           counter.clone(),
           lost.clone(),
           revocation.clone(),
+          group.clone(),
         );
         clients.spawn(async move {
           let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
@@ -253,7 +286,13 @@ impl Peer {
           if is_pairing_record(&first) {
             let (state, response) = HostPairing::respond(&secret, HOST_ID, &identity, &first, now()).unwrap();
             socket.send(Message::Binary(response.into())).await.unwrap();
-            let (authorized, ack) = state.finish(&record(&mut socket).await.unwrap(), now()).unwrap();
+            let (authorized, ack) = state
+              .finish_with_discovery(
+                &record(&mut socket).await.unwrap(),
+                now(),
+                discovery.lock().unwrap().clone(),
+              )
+              .unwrap();
             assert_eq!(authorized.client_kind, ClientKind::Native);
             *paired.lock().unwrap() = Some(authorized.client_public_key);
             socket.send(Message::Binary(ack.into())).await.unwrap();
@@ -262,10 +301,26 @@ impl Peer {
           let (response, mut channel) = NoiseResponder::new(&identity).unwrap().accept(&first).unwrap();
           assert_eq!(paired.lock().unwrap().as_deref(), Some(channel.remote_public_key()));
           socket.send(Message::Binary(response.into())).await.unwrap();
+          let header = channel.decrypt(&record(&mut socket).await.unwrap()).unwrap();
+          if matches!(header, InnerMessage::DiscoveryRequest {}) {
+            let response = InnerMessage::DiscoveryResponse {
+              group: discovery.lock().unwrap().clone(),
+            };
+            socket
+              .send(Message::Binary(channel.encrypt(&response).unwrap().into()))
+              .await
+              .unwrap();
+            return;
+          }
+          let mut first_frame = Some(header);
           let mut path = String::new();
           let mut body = Vec::new();
           loop {
-            match channel.decrypt(&record(&mut socket).await.unwrap()).unwrap() {
+            let frame = match first_frame.take() {
+              Some(frame) => frame,
+              None => channel.decrypt(&record(&mut socket).await.unwrap()).unwrap(),
+            };
+            match frame {
               InnerMessage::DeviceRequest { path: requested, .. } => path = requested,
               InnerMessage::RequestBody { data } => body.extend(protocol::decode(&data, MAX_CHUNK).unwrap()),
               InnerMessage::RequestEnd {} => break,
@@ -346,6 +401,7 @@ impl Peer {
       mutations,
       drop_ack,
       revoked,
+      discovery,
       task,
     }
   }
@@ -381,6 +437,23 @@ async fn chunk(run: &RuntimeHandle, events: &mut tokio::sync::broadcast::Receive
 async fn interpreted_guest_pairs_streams_reuses_view_connections_and_never_replays_uncertain_input() {
   let peer = Peer::start().await;
   let services = Arc::new(Services::default());
+  let discovery_group = peer.discovery.lock().unwrap().clone().unwrap();
+  *services.discovery.lock().unwrap() = Some(DiscoveryResult {
+    namespace: discovery_group.namespace.clone(),
+    secret_digest: discovery_group.secret_digest.clone(),
+    machines: vec![
+      DiscoveredMachine {
+        host_id: HOST_ID.into(),
+        name: "Paired machine".into(),
+        online: true,
+      },
+      DiscoveredMachine {
+        host_id: "11111111-2222-4333-8444-666666666666".into(),
+        name: "Unpaired machine".into(),
+        online: false,
+      },
+    ],
+  });
   let wasm = guest();
   let run = RuntimeHandle::start(wasm.clone(), Arc::new(Adapter(services.clone())))
     .await
@@ -390,6 +463,15 @@ async fn interpreted_guest_pairs_streams_reuses_view_connections_and_never_repla
     .await
     .unwrap();
   assert!(before["hosts"].as_array().unwrap().is_empty());
+  assert!(
+    invoke(
+      &run,
+      "hub_client_discover",
+      json!({"hub_url":peer.hub,"namespace":discovery_group.namespace,"secret_digest":discovery_group.secret_digest})
+    )
+    .await
+    .is_err()
+  );
   let host = invoke(
     &run,
     "hub_client_pair",
@@ -398,6 +480,20 @@ async fn interpreted_guest_pairs_streams_reuses_view_connections_and_never_repla
   .await
   .unwrap();
   assert_eq!(host["host_public_key"], peer.key);
+  assert_eq!(host["discovery_group"], json!(discovery_group));
+  let discovered = invoke(
+    &run,
+    "hub_client_discover",
+    json!({"hub_url":peer.hub,"namespace":discovery_group.namespace,"secret_digest":discovery_group.secret_digest}),
+  )
+  .await
+  .unwrap();
+  assert_eq!(discovered["machines"].as_array().unwrap().len(), 2);
+  let status = invoke(&run, "hub_client_status", json!({"hub_url":peer.hub}))
+    .await
+    .unwrap();
+  assert_eq!(status["hosts"].as_array().unwrap().len(), 1);
+  assert!(status["selected_host_id"].is_null());
   // Four views finishing startup together still claim one run connection.
   let simultaneous = futures_util::future::join_all((0..4).map(|_| {
     invoke(
@@ -432,6 +528,46 @@ async fn interpreted_guest_pairs_streams_reuses_view_connections_and_never_repla
     1
   );
   let id = descriptor["connection_id"].as_str().unwrap().to_owned();
+  *peer.discovery.lock().unwrap() = None;
+  let refreshed = invoke(
+    &run,
+    "hub_client_open",
+    json!({"hub_url":peer.hub,"host_id":HOST_ID,"host_public_key":peer.key}),
+  )
+  .await
+  .unwrap();
+  assert!(refreshed["discovery_group"].is_null());
+  let named = invoke(
+    &run,
+    "hub_client_remember_metadata",
+    json!({
+      "hub_url":peer.hub,"host_id":HOST_ID,"machine_address":"personal:fixture","name":"Named machine",
+    }),
+  )
+  .await
+  .unwrap();
+  assert!(named["discovery_group"].is_null());
+  assert_eq!(named["host_public_key"], peer.key);
+  *peer.discovery.lock().unwrap() = Some(discovery_group.clone());
+  let refreshed = invoke(
+    &run,
+    "hub_client_open",
+    json!({"hub_url":peer.hub,"host_id":HOST_ID,"host_public_key":peer.key}),
+  )
+  .await
+  .unwrap();
+  assert_eq!(refreshed["discovery_group"], json!(discovery_group));
+  let named = invoke(
+    &run,
+    "hub_client_remember_metadata",
+    json!({
+      "hub_url":peer.hub,"host_id":HOST_ID,"machine_address":"personal:fixture","name":"Named machine",
+    }),
+  )
+  .await
+  .unwrap();
+  assert_eq!(named["discovery_group"], json!(discovery_group));
+  assert_eq!(named["host_public_key"], peer.key);
   let mut events = run.subscribe();
   let reader = run.clone();
   let connection_id = id.clone();
@@ -482,6 +618,7 @@ async fn interpreted_guest_pairs_streams_reuses_view_connections_and_never_repla
     .unwrap();
   assert_eq!(after["device_public_key"], before["device_public_key"]);
   assert_eq!(after["hosts"].as_array().unwrap().len(), 1);
+  assert_eq!(after["hosts"][0]["discovery_group"], json!(discovery_group));
   peer.revoked.store(true, Ordering::SeqCst);
   assert!(
     invoke(

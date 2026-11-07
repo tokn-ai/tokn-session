@@ -64,6 +64,7 @@ pub fn router(state: HubState) -> Router {
     .route("/hub/v1/tunnel", get(tunnel))
     .route("/hub/v1/secure/{host_id}", get(secure_tunnel))
     .route("/hub/v1/resolve/{username}/{machine_name}", get(resolve_machine))
+    .route("/hub/v1/discovery/{namespace}/{secret_digest}", get(discover_machines))
     .route("/hub/v1/health", get(|| async { Json(json!({ "version": 1 })) }))
     .route("/hub", any(not_found))
     .route("/hub/{*path}", any(not_found))
@@ -267,6 +268,37 @@ async fn resolve_machine(
     Ok(None) => error(StatusCode::NOT_FOUND, "Unknown machine address").into_response(),
     Err(error) => namespace_error(error).into_response(),
   }
+}
+
+async fn discover_machines(
+  State(state): State<HubState>,
+  Path((namespace, secret_digest)): Path<(String, String)>,
+  headers: HeaderMap,
+) -> Result<Json<tokn_hub_client_core::discovery::DiscoveryResult>, ApiError> {
+  use tokn_hub_client_core::discovery::{DiscoveryGroup, DiscoveryResult};
+  state
+    .auth
+    .check_optional_origin(&headers)
+    .map_err(|failure| error(failure.status, "Invalid discovery request origin"))?;
+  let group = DiscoveryGroup {
+    namespace,
+    secret_digest,
+  };
+  group
+    .validate()
+    .map_err(|message| error(StatusCode::BAD_REQUEST, message))?;
+  let mut machines = state
+    .store
+    .discover_machines(&group)
+    .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Could not load discovery group"))?;
+  for machine in &mut machines {
+    machine.online = state.tunnels.online(&machine.host_id);
+  }
+  Ok(Json(DiscoveryResult {
+    namespace: group.namespace,
+    secret_digest: group.secret_digest,
+    machines,
+  }))
 }
 
 async fn enrollments(State(state): State<HubState>) -> Json<Value> {

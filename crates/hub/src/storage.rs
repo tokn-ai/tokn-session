@@ -195,6 +195,7 @@ mod tests {
         host_public_key: NoiseIdentity::generate().unwrap().public_key(),
         machine_address: None,
         name: None,
+        discovery_group: None,
       })
       .unwrap();
     client.select_host(&host_id).unwrap();
@@ -230,6 +231,7 @@ mod tests {
       allow_control: None,
       insecure_loopback: false,
       ice_servers: None,
+      discovery_namespace: None,
     }
   }
 
