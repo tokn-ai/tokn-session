@@ -1,0 +1,32 @@
+.hub-pair-dialog {
+  width: min(440px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
+  box-sizing: border-box;
+  margin: auto;
+  padding: 0;
+  overflow: auto;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+}
+.hub-pair-dialog::backdrop { background: rgb(0 0 0 / 35%); backdrop-filter: blur(3px); }
+.hub-pair-dialog > header { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 20px; border-bottom: 1px solid var(--border); }
+.hub-pair-dialog h2 { margin: 0; font-size: 17px; }
+.hub-pair-dialog__body { display: grid; gap: 16px; padding: 20px; font-size: 13px; }
+.hub-pair-dialog .hub-machine-form { display: grid; gap: 12px; }
+.hub-pair-dialog input:not([type="radio"]) { width: 100%; min-height: 42px; box-sizing: border-box; padding: 10px 12px; color: var(--text); background: var(--surface); border: 1px solid var(--border-strong); border-radius: 8px; font: inherit; }
+.hub-pair-dialog button:not(.icon-button) { min-height: 40px; padding: 9px 13px; color: var(--text); background: var(--surface); border: 1px solid var(--border-strong); border-radius: 8px; font: inherit; cursor: pointer; }
+.hub-pair-dialog button:not(.icon-button):hover:not(:disabled) { background: var(--surface-hover); }
+.hub-pair-dialog button:disabled { cursor: default; opacity: .6; }
+.hub-pair-dialog .hub-connect-primary { color: var(--app-bg); background: var(--text); }
+.hub-pair-dialog .hub-connect-primary:hover:not(:disabled) { background: var(--text-soft); }
+.hub-pair-dialog .hub-auth-method { background: var(--surface); }
+.hub-pair-dialog .machine-hint { margin: 0; color: var(--text-soft); font-size: 12px; line-height: 1.6; }
+.hub-pair-dialog .hub-feedback, .hub-pair-dialog .hub-progress { margin: 0; }
+.hub-pair-dialog .hub-error { color: var(--danger); }
+@media (max-width: 600px) {
+  .hub-pair-dialog input:not([type="radio"]) { font-size: 16px; }
+  .hub-pair-dialog button { min-height: 44px; }
+}

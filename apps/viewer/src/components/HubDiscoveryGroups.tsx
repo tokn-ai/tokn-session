@@ -3,6 +3,7 @@ import { hubErrorMessage } from "../lib/hub";
 import type { HubAccessService } from "../lib/hubAccess";
 import { discoveryGroupKey, validateDiscoveryGroup } from "../lib/hubDiscovery";
 import type { DiscoveryGroup, DiscoveredMachine, SavedHubHost } from "../lib/types";
+import { ConnectionIcon } from "./Icons";
 
 interface GroupState {
   loading: boolean;
@@ -56,11 +57,23 @@ export function HubDiscoveryGroups({ service, hosts, busy, on_pair }: {
     const group = validateDiscoveryGroup(host.discovery_group);
     groups.set(discoveryGroupKey(group), group);
   }
-  if (groups.size === 0) return null;
   const paired = new Set(hosts.map((host) => host.host_id));
   return <section className="hub-discovery" aria-labelledby="discovery-groups-title">
-    <h2 id="discovery-groups-title">Discovered groups</h2>
-    <p className="hub-muted">Groups are learned from paired machines. Pair each additional machine with its own authenticator code.</p>
+    <header className="hub-discovery-heading"><div><ConnectionIcon /><h2 id="discovery-groups-title">Discovered groups</h2></div><span className="hub-discovery-count" aria-label={`${groups.size} discovery groups`}>{groups.size}</span></header>
+    {groups.size === 0 && <div className="hub-empty-state hub-discovery-setup">
+      <h3>No groups yet</h3>
+      <p>{hosts.length === 0
+        ? "Pair your first machine to discover its group."
+        : "Open a saved machine to check for its group."}</p>
+    </div>}
     {[...groups].map(([key, group]) => <DiscoveryGroupCard key={`${service.hub_url}/${key}`} group={group} service={service} paired={paired} busy={busy} on_pair={on_pair} />)}
+    <details className="hub-discovery-help">
+      <summary>Set up discovery</summary>
+      <ol>
+        <li>On the hosting computer, update Tokn and set a discovery namespace in the desktop app’s <strong>Host this computer</strong> dialog, or use the connector’s <code>--namespace</code> option.</li>
+        <li>Use the same namespace and authenticator secret on the computers you want to discover together through this Hub.</li>
+        <li>Pair one known machine using its address and authenticator code. If it is already paired, open or sign in to it, then return to Machines to refresh its group. Each additional machine requires its own pairing.</li>
+      </ol>
+    </details>
   </section>;
 }

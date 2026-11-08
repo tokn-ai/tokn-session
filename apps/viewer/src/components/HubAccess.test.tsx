@@ -27,7 +27,12 @@ beforeEach(() => {
   vi.mocked(openHubAccess).mockResolvedValue(service);
 });
 afterEach(() => { cleanup(); restore_host?.(); restore_host = undefined; selectMachine(); Reflect.deleteProperty(window, "__TAURI_INTERNALS__"); localStorage.clear(); vi.restoreAllMocks(); vi.clearAllMocks(); });
-async function ready() { await screen.findByLabelText("Machine address or reference"); }
+async function ready() { await screen.findByRole("button", { name: "Add machine" }); }
+async function pairingReady() {
+  await ready();
+  fireEvent.click(screen.getByRole("button", { name: "Add machine" }));
+  await screen.findByLabelText("Machine address or reference");
+}
 
 const discovery_group = { namespace: "personal", secret_digest: "A".repeat(43) };
 const discovered_laptop = { host_id: "550e8400-e29b-41d4-a716-446655440001", name: "Laptop", online: true };
@@ -38,7 +43,7 @@ it("discovers the first paired machine's group and requires a separate pairing f
   vi.mocked(service.status).mockImplementation(async () => status);
   vi.mocked(service.pairMachine).mockImplementation(async () => { status.hosts = [paired]; return paired; });
   vi.mocked(service.discover).mockResolvedValue({ ...discovery_group, machines: [discovered_laptop] });
-  render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
+  render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await pairingReady();
   expect(service.discover).not.toHaveBeenCalled();
   fireEvent.change(screen.getByLabelText("Machine address or reference"), { target: { value: host.host_id } });
   fireEvent.change(screen.getByLabelText("Authenticator code"), { target: { value: "123456" } });
@@ -89,7 +94,9 @@ it("cancels discovery when switching Hubs and ignores its late machine list", as
   finish({ ...discovery_group, machines: [discovered_laptop] });
   await Promise.resolve();
   expect(screen.queryByRole("button", { name: "Pair Laptop" })).not.toBeInTheDocument();
-  expect(screen.queryByRole("heading", { name: "Discovered groups" })).not.toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Discovered groups" })).toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Discovery group personal AAAAAAAA" })).not.toBeInTheDocument();
+  expect(service.discover).toHaveBeenCalledOnce();
 });
 
 it("offers retry for failed group discovery and shows its empty result", async () => {
@@ -113,7 +120,7 @@ it("applet first launch waits for a Hub address without trying a placeholder URL
 it("applet pairs through Hub without offering local hosting or an unsupported passkey ceremony", async () => {
   restore_host = installViewerHost(createApellHost({ invoke: vi.fn(), onEvent: () => () => {} }));
   render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />);
-  await ready();
+  await pairingReady();
   expect(screen.queryByRole("heading", { name: "This machine" })).not.toBeInTheDocument();
   expect(screen.queryByText("Host setup")).not.toBeInTheDocument();
   expect(screen.queryByRole("link", { name: "Hub administration" })).not.toBeInTheDocument();
@@ -128,6 +135,7 @@ it("applet pairs through Hub without offering local hosting or an unsupported pa
   fireEvent.click(screen.getByRole("button", { name: /connection settings/i }));
   expect(screen.queryByRole("button", { name: "Add a machine passkey" })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Machines" }));
+  await pairingReady();
   expect(screen.getByLabelText("Authenticator code")).toHaveValue("");
 });
 
@@ -143,7 +151,7 @@ it("applet reopens a remembered machine using its native pairing", async () => {
 it("pairs in browser without a local bearer token and closes the selected machine on switching", async () => {
   const close = vi.spyOn(client, "close");
   render(<StrictMode><HubAccess initial_hub_url="https://hub.example" /></StrictMode>);
-  await ready();
+  await pairingReady();
   expect(screen.getByRole("link", { name: "Hub administration" })).toHaveAttribute("href", "/admin");
   fireEvent.change(screen.getByLabelText("Machine address or reference"), { target: { value: host.machine_address } });
   fireEvent.change(screen.getByLabelText("Authenticator code"), { target: { value: "123456" } });
@@ -156,11 +164,12 @@ it("pairs in browser without a local bearer token and closes the selected machin
   expect(screen.getByRole("dialog")).toHaveTextContent("End-to-end encrypted");
   fireEvent.click(screen.getByRole("button", { name: "Machines" }));
   expect(close).toHaveBeenCalledOnce();
+  await pairingReady();
   expect(screen.getByLabelText("Authenticator code")).toHaveValue("");
 });
 
 it("requires the complete machine reference before passkey first use", async () => {
-  render(<HubAccess initial_hub_url="https://hub.example" />); await ready();
+  render(<HubAccess initial_hub_url="https://hub.example" />); await pairingReady();
   vi.mocked(service.loginMachine).mockRejectedValueOnce(new Error("Paste the complete machine reference."));
   fireEvent.click(screen.getByRole("radio", { name: "Use machine passkey" }));
   expect(screen.queryByLabelText("Authenticator code")).not.toBeInTheDocument();
@@ -261,7 +270,7 @@ it("keeps a long machine address visible beside a concise accessible open action
 it("clears the code and does not open a machine after canceled pairing", async () => {
   let finish_pairing!: (result: typeof host) => void;
   vi.mocked(service.pairMachine).mockImplementation(() => new Promise((resolve) => { finish_pairing = resolve; }));
-  render(<HubAccess initial_hub_url="https://hub.example" />); await ready();
+  render(<HubAccess initial_hub_url="https://hub.example" />); await pairingReady();
   expect(screen.getByText("No saved machines")).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("Machine address or reference"), { target: { value: host.machine_address } });
   fireEvent.change(screen.getByLabelText("Authenticator code"), { target: { value: "123456" } });
@@ -273,6 +282,27 @@ it("clears the code and does not open a machine after canceled pairing", async (
   finish_pairing(host);
   await waitFor(() => expect(screen.getByRole("button", { name: "Pair and set up passkey" })).toBeDisabled());
   expect(service.connect).not.toHaveBeenCalled();
+});
+
+it("closing the pairing dialog cancels pending pairing and preserves only the address draft", async () => {
+  let finish_pairing!: (result: typeof host) => void;
+  vi.mocked(service.pairMachine).mockImplementation(() => new Promise((resolve) => { finish_pairing = resolve; }));
+  render(<HubAccess initial_hub_url="https://hub.example" />); await ready();
+  expect(screen.queryByRole("dialog", { name: "Add machine" })).not.toBeInTheDocument();
+  await pairingReady();
+  fireEvent.change(screen.getByLabelText("Machine address or reference"), { target: { value: host.machine_address } });
+  fireEvent.change(screen.getByLabelText("Authenticator code"), { target: { value: "123456" } });
+  fireEvent.click(screen.getByRole("button", { name: "Pair and set up passkey" }));
+  const signal = vi.mocked(service.pairMachine).mock.calls[0][2];
+  fireEvent.click(screen.getByRole("button", { name: "Close Add machine" }));
+  expect(signal.aborted).toBe(true);
+  expect(screen.queryByRole("dialog", { name: "Add machine" })).not.toBeInTheDocument();
+  finish_pairing(host);
+  await pairingReady();
+  expect(screen.getByLabelText("Machine address or reference")).toHaveValue(host.machine_address);
+  expect(screen.getByLabelText("Authenticator code")).toHaveValue("");
+  expect(service.connect).not.toHaveBeenCalled();
+  expect(service.pairMachine).toHaveBeenCalledOnce();
 });
 
 it("separates a draft Hub address and removes the previous service after a failed switch", async () => {

@@ -75,8 +75,8 @@ does not consume it:
 tokn-session-hub authenticator
 ```
 
-Open the Hub URL, or enter it in the app's **Machines** screen. On **Machines**, choose
-**Authenticator code** and enter the machine address or UUID and current code. The host verifies the code
+Open the Hub URL, or enter it in the app's **Machines** screen. Choose **Add machine**,
+then use **Authenticator code** to enter the machine address or UUID and current code. The host verifies the code
 through password-authenticated key exchange; the relay does not receive the raw
 code. The device saves the verified host encryption key only after authenticated
 acknowledgment. Save the full reference from the connector or connection settings
@@ -171,6 +171,11 @@ then lists the group's online and offline candidates, with refresh and retry
 controls. Select **Pair** on another machine and complete its own pairing before
 opening its sessions. Previously paired clients refresh group metadata through
 their authenticated connection when opening a machine.
+
+**Discovered groups** stays visible when no group has been learned. Expand
+**Set up discovery** for host setup and pairing guidance. If the machine is already paired, open or sign in to
+it after updating its connector and configuring a namespace, then return to
+Machines. The client only queries the directory after learning a group reference.
 
 The digest is an opaque lookup value derived from the seed using HKDF-SHA256
 with versioned, Hub-specific and namespace-specific context. It contains no
