@@ -11,10 +11,13 @@ previously paired devices. Machines lists candidates with individual pairing
 actions across desktop, browser and Apell. CLI `connect --namespace` and the
 hosting dialog configure the optional label. Discovery and per-host authorization
 remain independent. See [discovery groups](hub-pairing.md#discovery-groups).
-Machines uses a compact app header and machine cards, with pairing in an
-**Add machine** dialog. Closing it cancels pending pairing and clears its code.
-Discovery stays visible before a group is known; setup guidance is collapsed
-under **Set up discovery**. Unknown groups never trigger directory requests.
+Machines combines saved and discovered machines in one card gallery, merging
+duplicate host IDs while preserving saved identities. A plus tile opens the
+**Add machine** dialog; closing it cancels pending pairing and clears its code.
+Discovery controls remain compact, with **Set up discovery** collapsed below the
+gallery. Group results cache independently across host-list refreshes; removed
+groups and Hub changes cancel requests and exclude stale results. Unknown groups
+never trigger directory requests.
 Browser and guest WASM builds share compiler path remapping so local builds can
 be packaged without embedding workstation source paths.
 

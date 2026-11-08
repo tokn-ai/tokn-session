@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { hubErrorMessage } from "../lib/hub";
 import { openHubAccess, type HubAccessService } from "../lib/hubAccess";
-import { canonicalHubUrl, machineReference, type SavedHubHost } from "../lib/hubDeviceStore";
+import { canonicalHubUrl, hubHostLabel as hostLabel, machineReference, type SavedHubHost } from "../lib/hubDeviceStore";
 import { deselectMachine, selectMachine, type ConnectionState, type ViewerClient } from "../lib/transport";
 import type { DiscoveredMachine, HubMachineSelection, TransportState } from "../lib/types";
 import { ViewerPage } from "../pages/ViewerPage";
 import { RemoteConnection } from "./RemoteConnection";
 import { HostSetup } from "./HostSetup";
-import { HubDiscoveryGroups } from "./HubDiscoveryGroups";
+import { HubMachineGallery } from "./HubMachineGallery";
 import { HubPairingDialog } from "./HubPairingDialog";
 import { ConnectionIcon, ServerIcon } from "./Icons";
 import { SettingsEntry } from "./SettingsEntry";
@@ -19,7 +19,6 @@ const OPERATION_LABELS: Record<Operation, string> = {
   loading_hub: "Loading saved machines…", opening_machine: "Connecting to machine…", pairing: "Pairing with machine…",
   signing_in: "Waiting for machine passkey…", adding_passkey: "Adding a passkey…", forgetting: "Forgetting machine…",
 };
-function hostLabel(host: SavedHubHost): string { return host.machine_address ?? host.name ?? `Machine ${host.host_id.slice(0, 8)}`; }
 function validHubUrl(value: string): string | undefined {
   try { return canonicalHubUrl(value); } catch { return undefined; }
 }
@@ -191,7 +190,7 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
 
   return <main className="hub-home hub-access"><div className="hub-content">
     <header className="hub-header"><div className="hub-app-title"><span className="hub-app-mark"><ServerIcon /></span><div><span className="hub-app-brand">Tokn Sessions</span><h1>Machines</h1></div></div>
-      <div className="hub-actions"><SettingsEntry />{service && <button className="hub-add-action" type="button" disabled={busy} aria-haspopup="dialog" onClick={openPairing}><span aria-hidden="true">+</span>Add machine</button>}</div>
+      <div className="hub-actions"><SettingsEntry /></div>
     </header>
     {desktop && <section className="hub-this-machine" aria-labelledby="this-machine-title">
       <div><h2 id="this-machine-title">This machine</h2><p>Open sessions saved on this computer.</p>{local_error && <p className="hub-error" role="alert">{local_error}</p>}</div>
@@ -209,28 +208,14 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
       <div className="hub-actions"><button disabled={busy}>Connect to Hub</button>{service && <button type="button" disabled={busy} onClick={() => setEditingHub(false)}>Keep current Hub</button>}</div>
     </form>}
     {!pairing_open && <>{progress}{error && <p className="hub-error hub-feedback" role="alert">{error}</p>}{notice && <p className="hub-feedback" role="status">{notice}</p>}</>}
-    {service && <div className="hub-access-layout">
-      <div className="hub-machine-catalog">
-      <section className="hub-saved-machines" aria-labelledby="saved-machines-title"><div className="hub-section-heading"><h2 id="saved-machines-title">Saved machines</h2><span>{hosts.length}</span></div>
-        {hosts.length === 0 ? <div className="hub-empty-state hub-machines-empty"><span className="hub-empty-icon"><ServerIcon /></span><h3>No saved machines</h3><p>Your sessions, across your computers.</p><button type="button" disabled={busy} onClick={openPairing}>Connect a machine</button></div>
-          : <ul className="hub-hosts" aria-label="Saved machines">{hosts.map((host) => <li key={`${service.hub_url}/${host.host_id}`} className="hub-host hub-saved-host">
-            <span className="hub-machine-avatar"><ServerIcon /></span>
-            <div className="hub-host-details"><h3>{hostLabel(host)}</h3>{host.machine_address && host.name && host.name !== host.machine_address && <p>{host.name}</p>}
-              <p>End-to-end encrypted</p></div>
-            <button aria-label={`${native ? "Open" : "Sign in to"} ${hostLabel(host)}`} disabled={busy} onClick={() => { void action("opening_machine", (signal) => openHost(service, host, signal), host.host_id); }}>{pending?.host_id === host.host_id && pending.kind === "opening_machine" ? "Connecting…" : native ? "Open" : "Sign in"}</button>
-            <details className="hub-machine-settings"><summary>Machine settings</summary><div>
-              {capabilities.passkeys && <button disabled={busy} onClick={() => { void action("adding_passkey", (signal) => addPasskey(host, signal), host.host_id); }}>Add a passkey</button>}
-              <p className="hub-field-label">Machine reference</p><code className="hub-machine-reference">{machineReference(host)}</code>
-              <button className="hub-secondary" disabled={busy} onClick={() => { void action("forgetting", async (signal) => { await service.forget(host.host_id); await refreshHosts(service, signal); }, host.host_id); }}>Forget {hostLabel(host)}</button>
-              <p className="machine-hint">Forgetting removes this device’s saved reference. It does not revoke authorization on the machine.</p>
-            </div></details>
-          </li>)}</ul>}
-      </section>
-      </div>
-      <HubDiscoveryGroups service={service} hosts={hosts} busy={busy} on_pair={(candidate) => {
+    {service && <HubMachineGallery key={service.hub_url} service={service} hosts={hosts} busy={busy}
+      opening_host_id={pending?.kind === "opening_machine" ? pending.host_id : undefined}
+      on_open={(host) => { void action("opening_machine", (signal) => openHost(service, host, signal), host.host_id); }}
+      on_pair={(candidate) => {
         setMachine(candidate.host_id); setPairTarget(candidate); setMethod("code"); setCode(""); openPairing();
-      }} />
-    </div>}
+      }} on_add={openPairing}
+      on_passkey={(host) => { void action("adding_passkey", (signal) => addPasskey(host, signal), host.host_id); }}
+      on_forget={(host) => { void action("forgetting", async (signal) => { await service.forget(host.host_id); await refreshHosts(service, signal); }, host.host_id); }} />}
     {!native && <footer className="hub-app-footer"><a href="/admin">Hub administration</a></footer>}
     {service && pairing_open && <HubPairingDialog on_close={closePairing}>
         {progress}{error && <p className="hub-error hub-feedback" role="alert">{error}</p>}{notice && <p className="hub-feedback" role="status">{notice}</p>}
