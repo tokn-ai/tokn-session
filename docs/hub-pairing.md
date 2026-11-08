@@ -104,6 +104,13 @@ opened local or remote machine. Loading another Hub browses its saved machines
 without changing that startup selection. Local session readers start only when
 requested, so a local database error does not prevent opening a remote machine.
 
+Saved and discovered machine cards show their connector's **Online** or **Offline**
+status independently of discovery setup. The gallery checks only its listed
+machine IDs in bounded batches, every 15 seconds while visible and when focused.
+It shows **Checking…** initially and **Status unavailable** if the Hub cannot be
+queried. Presence grants no session access; opening a machine still requires its
+normal authorization.
+
 ## Host from the desktop app
 
 Under **Machines → This machine → Host this computer**, enter the Hub address

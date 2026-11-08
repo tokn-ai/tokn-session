@@ -147,6 +147,10 @@ no remote recovery bypass; preserve an additional passkey before that happens.
   assigns a registered encrypted machine its permanent address.
 - Public `GET /hub/v1/resolve/alice/macbook` returns `host_id`, `machine_address`,
   `name`, and `online`. No directory key establishes encryption trust.
+- Public `POST /hub/v1/presence` accepts `{"host_ids":["UUID"]}` for up to 128
+  unique canonical machine IDs and returns only `host_id`/`online` rows for those
+  IDs. Unknown or revoked hosts are offline; no catalog, key or session access is
+  exposed. Browser origins are checked and responses are not cached.
 - `GET /hub/v1/enrollments` lists pending connections. Authenticated
   `POST /hub/v1/enrollments/approve` accepts `{"pairing_code":"…"}`.
 - `/hosts/<host_id>/api/v1/<command>` forwards the existing viewer API.

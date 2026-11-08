@@ -1,11 +1,12 @@
 import { loadHubCrypto, type CryptoApi } from "./hubCrypto";
 import { HubDeviceStore, validateHost, canonicalHubUrl, type SavedHubHost } from "./hubDeviceStore";
 import { EncryptedHubClient, pairHubHost, authenticateHubHost, readHubDiscoveryGroup } from "./hubEncryptedClient";
-import { NativeHubClient, nativeHubAuthenticate, nativeHubForget, nativeHubPair, nativeHubStatus, nativeHubResolve, nativeHubRememberMetadata, nativeHubDiscover } from "./hubNativeClient";
+import { NativeHubClient, nativeHubAuthenticate, nativeHubForget, nativeHubPair, nativeHubStatus, nativeHubResolve, nativeHubRememberMetadata, nativeHubDiscover, nativeHubPresence } from "./hubNativeClient";
 import { type ViewerClient } from "./transport";
 import { viewerCapabilities } from "./platform";
 import { parseMachineTarget, resolveBrowserMachine, validateResolvedMachine } from "./hubAddress";
-import type { DiscoveryGroup, DiscoveryResult, ResolvedMachine } from "./types";
+import type { DiscoveryGroup, DiscoveryResult, PresenceResult, ResolvedMachine } from "./types";
+import { loadBrowserPresence, validatePresenceIds, validatePresenceResult } from "./hubPresence";
 import { discoverBrowserGroup, discoveryGroupKey, validateDiscoveryGroup, validateDiscoveryResult } from "./hubDiscovery";
 
 export interface HubAccessBackend {
@@ -19,6 +20,7 @@ export interface HubAccessBackend {
   resolve(machine_address: string, signal: AbortSignal): Promise<ResolvedMachine>;
   rememberMetadata(machine: ResolvedMachine, signal: AbortSignal): Promise<SavedHubHost>;
   discover(group: DiscoveryGroup, signal: AbortSignal): Promise<DiscoveryResult>;
+  presence(host_ids: string[], signal: AbortSignal): Promise<PresenceResult>;
 }
 export interface HubAccessService extends HubAccessBackend {
   pairMachine(input: string, code: string, signal: AbortSignal): Promise<SavedHubHost>;
@@ -72,6 +74,12 @@ export class BrowserHubAccess implements HubAccessBackend {
   dispose(): void { this.disposed = true; this.enrollment_hosts.clear(); this.unlocked_hosts.clear(); this.store.dispose(); }
   constructor(readonly hub_url: string, private crypto: CryptoApi, private store: HubDeviceStore) {}
   async status() { this.checkActive(); await this.store.refresh(); this.checkActive(); return { hosts: this.store.hosts, selected_host_id: this.store.selected_host_id, device_public_key: this.store.identity.public_key() }; }
+  async presence(host_ids: string[], signal: AbortSignal) {
+    this.checkActive(signal);
+    const result = await loadBrowserPresence(this.hub_url, host_ids, signal);
+    this.checkActive(signal);
+    return result;
+  }
   async pair(host_id: string, code: string, signal: AbortSignal, expected_host_public_key?: string, machine?: ResolvedMachine) {
     this.checkActive(signal);
     const host = await pairHubHost(this.hub_url, host_id, code, this.store.identity, this.crypto, signal);
@@ -163,6 +171,12 @@ export async function openHubAccess(hub_url: string): Promise<HubAccessService> 
       const result = await nativeHubDiscover(canonical, reference);
       checkCancelled(signal);
       return validateDiscoveryResult(result, reference);
+    },
+    presence: async (host_ids, signal) => {
+      checkCancelled(signal); validatePresenceIds(host_ids);
+      const result = await nativeHubPresence(canonical, host_ids);
+      checkCancelled(signal);
+      return validatePresenceResult(result, host_ids);
     },
   });
   const crypto = await loadHubCrypto();

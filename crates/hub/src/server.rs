@@ -19,6 +19,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use tokn_hub_client_core::address::ResolvedMachine;
+use tokn_hub_client_core::presence::{MachinePresence, PresenceRequest, PresenceResult};
 use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -65,6 +66,10 @@ pub fn router(state: HubState) -> Router {
     .route("/hub/v1/secure/{host_id}", get(secure_tunnel))
     .route("/hub/v1/resolve/{username}/{machine_name}", get(resolve_machine))
     .route("/hub/v1/discovery/{namespace}/{secret_digest}", get(discover_machines))
+    .route(
+      "/hub/v1/presence",
+      post(machine_presence).layer(DefaultBodyLimit::max(8 * 1024)),
+    )
     .route("/hub/v1/health", get(|| async { Json(json!({ "version": 1 })) }))
     .route("/hub", any(not_found))
     .route("/hub/{*path}", any(not_found))
@@ -298,6 +303,38 @@ async fn discover_machines(
     namespace: group.namespace,
     secret_digest: group.secret_digest,
     machines,
+  }))
+}
+
+async fn machine_presence(
+  State(state): State<HubState>,
+  headers: HeaderMap,
+  request: Result<Json<PresenceRequest>, JsonRejection>,
+) -> Result<Json<PresenceResult>, ApiError> {
+  state
+    .auth
+    .check_optional_origin(&headers)
+    .map_err(|failure| error(failure.status, "Invalid presence request origin"))?;
+  let Json(request) = request.map_err(|failure| {
+    let status = if failure.status() == StatusCode::PAYLOAD_TOO_LARGE {
+      StatusCode::PAYLOAD_TOO_LARGE
+    } else {
+      StatusCode::BAD_REQUEST
+    };
+    error(status, "Expected a bounded presence request")
+  })?;
+  request
+    .validate()
+    .map_err(|message| error(StatusCode::BAD_REQUEST, message))?;
+  Ok(Json(PresenceResult {
+    machines: request
+      .host_ids
+      .into_iter()
+      .map(|host_id| MachinePresence {
+        online: state.tunnels.online(&host_id),
+        host_id,
+      })
+      .collect(),
   }))
 }
 

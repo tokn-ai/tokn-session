@@ -7,6 +7,7 @@ pub mod discovery;
 pub mod events;
 pub mod exchange;
 pub mod pairing;
+pub mod presence;
 pub mod protocol;
 pub mod secure;
 

@@ -13,7 +13,7 @@ beforeEach(() => {
     status: vi.fn(async () => ({ hosts, selected_host_id: null, device_public_key: "D".repeat(43) })),
     pair: vi.fn(async () => { hosts.push(host); return host; }),
     authenticate: vi.fn(async (saved) => { hosts.push(saved); }),
-    connect: vi.fn(), forget: vi.fn(), discover: vi.fn(),
+    connect: vi.fn(), forget: vi.fn(), discover: vi.fn(), presence: vi.fn(),
     resolve: vi.fn(async () => machine),
     rememberMetadata: vi.fn(async (resolved) => ({ ...host, machine_address: resolved.machine_address, name: resolved.name })),
   };

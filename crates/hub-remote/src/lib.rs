@@ -16,6 +16,7 @@ use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 pub use tokn_hub_client_core::address::ResolvedMachine;
 pub use tokn_hub_client_core::discovery::{DiscoveredMachine, DiscoveryGroup, DiscoveryResult};
+pub use tokn_hub_client_core::presence::{MachinePresence, PresenceResult};
 use tokn_hub_client_core::{
   pairing::ClientPairing,
   protocol,
@@ -144,6 +145,11 @@ impl RemoteManager {
 
   pub async fn resolve(&self, hub_url: &str, machine_address: &str) -> Result<ResolvedMachine, String> {
     directory::resolve(hub_url, machine_address).await
+  }
+
+  /// Advisory routing availability; this neither opens a host nor changes trust.
+  pub async fn presence(&self, hub_url: &str, host_ids: &[String]) -> Result<PresenceResult, String> {
+    directory::presence(hub_url, host_ids).await
   }
 
   /// A group becomes discoverable locally only after an authenticated pairing

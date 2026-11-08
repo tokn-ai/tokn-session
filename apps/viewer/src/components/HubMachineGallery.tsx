@@ -5,6 +5,7 @@ import { discoveryGroupKey } from "../lib/hubDiscovery";
 import { viewerCapabilities } from "../lib/platform";
 import type { DiscoveryGroup, DiscoveredMachine, SavedHubHost } from "../lib/types";
 import { useHubDiscovery, type HubDiscoveryGroupState } from "../lib/useHubDiscovery";
+import { useHubPresence } from "../lib/useHubPresence";
 import { ConnectionIcon, RefreshIcon, ServerIcon } from "./Icons";
 import "./HubMachineGallery.css";
 
@@ -61,6 +62,7 @@ export function HubMachineGallery({ service, hosts, busy, opening_host_id, on_op
   const capabilities = viewerCapabilities();
   const heading_id = useId();
   const machines = galleryMachines(hosts, groups);
+  const presence = useHubPresence(service, machines.map((machine) => machine.host_id));
   const namespaces = new Map<string, number>();
   for (const { group } of groups) namespaces.set(group.namespace, (namespaces.get(group.namespace) ?? 0) + 1);
 
@@ -71,20 +73,24 @@ export function HubMachineGallery({ service, hosts, busy, opening_host_id, on_op
         const host = machine.saved;
         const candidate = machine.candidate;
         const label = host ? hubHostLabel(host) : candidate!.name;
+        const status = presence.get(machine.host_id)!;
+        const online = status.state === "online" || (status.state !== "offline" && machine.online === true);
         return <li className="hub-machine-card" key={machine.host_id}>
           <div className="hub-machine-card__top"><span className="hub-machine-card__icon"><ServerIcon /></span>
             <span className="hub-machine-card__trust">{host ? "Paired" : "Pairing required"}</span></div>
           <div className="hub-machine-card__identity"><h3>{label}</h3>
             {host?.machine_address && host.name && host.name !== host.machine_address && <p>{host.name}</p>}
-            {machine.online !== undefined && <span className={`hub-machine-card__presence${machine.online ? " is-online" : ""}`} title="Availability reported by discovery groups">{machine.online ? "Online" : "Offline"}</span>}
+            <span className={`hub-machine-card__presence${status.state === "online" ? " is-online" : ""}`} title={status.error ?? "Connector status reported by the Hub"}>
+              {status.state === "checking" ? "Checking…" : status.state === "unavailable" ? "Status unavailable" : status.state === "online" ? "Online" : "Offline"}
+            </span>
           </div>
           {machine.groups.size > 0 && <div className="hub-machine-card__groups" aria-label="Discovery groups">{[...machine.groups].map(([key, group]) => <span key={key} title={`${group.namespace} · ${group.secret_digest}`}>{groupLabel(group, namespaces)}</span>)}</div>}
           <div className="hub-machine-card__actions">
             {host ? <button className="hub-machine-card__primary" type="button" disabled={busy}
               aria-label={`${capabilities.native_hub ? "Open" : "Sign in to"} ${label}`} onClick={() => on_open(host)}>
               {opening_host_id === host.host_id ? "Connecting…" : capabilities.native_hub ? "Open" : "Sign in"}
-            </button> : <button className="hub-machine-card__primary" type="button" disabled={busy || !machine.online}
-              aria-label={`Pair ${label}`} onClick={() => on_pair({ ...candidate!, online: machine.online === true })}>Pair</button>}
+            </button> : <button className="hub-machine-card__primary" type="button" disabled={busy || !online}
+              aria-label={`Pair ${label}`} onClick={() => on_pair({ ...candidate!, online })}>Pair</button>}
             {host && <details className="hub-machine-card__settings"><summary>Machine settings</summary><div>
               {capabilities.passkeys && <button type="button" disabled={busy} onClick={() => on_passkey(host)}>Add a passkey</button>}
               <span className="hub-field-label">Machine reference</span><code className="hub-machine-reference">{machineReference(host)}</code>

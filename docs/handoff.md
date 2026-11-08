@@ -18,6 +18,10 @@ Discovery controls remain compact, with **Set up discovery** collapsed below the
 gallery. Group results cache independently across host-list refreshes; removed
 groups and Hub changes cancel requests and exclude stale results. Unknown groups
 never trigger directory requests.
+All gallery cards use batched Hub connector presence, including saved UUID-only
+machines outside discovery groups. Checks refresh every 15 seconds while visible
+and on focus; failures show **Status unavailable**, never an inferred offline
+state. Browser, desktop and Apell share the bounded presence contract.
 Browser and guest WASM builds share compiler path remapping so local builds can
 be packaged without embedding workstation source paths.
 

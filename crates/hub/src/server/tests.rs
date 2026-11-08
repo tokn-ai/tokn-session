@@ -17,6 +17,8 @@ use tower::ServiceExt;
 
 const ORIGIN: &str = "http://localhost:5559";
 
+mod presence;
+
 #[tokio::test]
 async fn discovery_groups_are_scoped_by_namespace_and_digest_without_admin_enrollment() {
   use tokn_hub_client_core::discovery::{DiscoveryGroup, DiscoveryResult};

@@ -8,6 +8,7 @@ use tokn_hub_client_core::{
   address::ResolvedMachine,
   discovery::{DiscoveryGroup, DiscoveryResult, MAX_DISCOVERY_RESPONSE},
   pairing::ClientPairing,
+  presence::{MAX_PRESENCE_RESPONSE, PresenceRequest, PresenceResult},
   protocol,
   secure::{NoiseIdentity, decode_public_key},
 };
@@ -284,6 +285,34 @@ pub async fn discover(params: Value) -> Result<Value, String> {
   serde_json::to_value(result).map_err(|_| "Invalid Hub discovery metadata".into())
 }
 
+pub async fn presence(params: Value) -> Result<Value, String> {
+  let request = presence_request(&params)?;
+  let mut endpoint = canonical_hub(host::string(&params, "hub_url")?)?;
+  if request.host_ids.is_empty() {
+    return Ok(json!({"machines":[]}));
+  }
+  endpoint.set_path("/hub/v1/presence");
+  let body = serde_json::to_vec(&request).map_err(|_| "Could not encode Hub presence request")?;
+  let response: Value = host::call(
+    "http.request",
+    json!({"url":endpoint.as_str(),"method":"POST","headers":[{"name":"Content-Type","value":"application/json"},{"name":"Accept","value":"application/json"}],"body":body,"timeout_ms":10000}),
+  )
+  .await?;
+  let bytes = directory_body(response, MAX_PRESENCE_RESPONSE)?;
+  let result: PresenceResult = serde_json::from_slice(&bytes).map_err(|_| "Invalid Hub presence metadata")?;
+  result.validate_for(&request.host_ids)?;
+  serde_json::to_value(result).map_err(|_| "Invalid Hub presence metadata".into())
+}
+
+fn presence_request(params: &Value) -> Result<PresenceRequest, String> {
+  let host_ids = params.get("host_ids").ok_or("Missing host_ids")?;
+  let request = PresenceRequest {
+    host_ids: serde_json::from_value(host_ids.clone()).map_err(|_| "Invalid presence host_ids")?,
+  };
+  request.validate()?;
+  Ok(request)
+}
+
 fn directory_body(mut response: Value, maximum: usize) -> Result<Vec<u8>, String> {
   if response["status"] != 200 {
     return Err("Could not load machine directory through the Hub".into());
@@ -365,6 +394,26 @@ pub async fn forget(params: Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn presence_parameters_require_a_bounded_unique_list_of_canonical_machine_ids() {
+    let host_id = "550e8400-e29b-41d4-a716-446655440000";
+    assert_eq!(
+      presence_request(&json!({"host_ids":[host_id]})).unwrap().host_ids,
+      [host_id]
+    );
+    assert!(presence_request(&json!({"host_ids":[]})).unwrap().host_ids.is_empty());
+    for params in [
+      json!({}),
+      json!({"host_ids":"not an array"}),
+      json!({"host_ids":["invalid"]}),
+      json!({"host_ids":[host_id,host_id]}),
+      json!({"host_ids":vec![host_id;129]}),
+    ] {
+      assert!(presence_request(&params).is_err());
+    }
+  }
+
   #[test]
   fn hub_origin_never_accepts_embedded_trust_or_remote_plaintext() {
     assert!(canonical_hub("https://hub.example").is_ok());

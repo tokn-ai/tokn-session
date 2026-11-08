@@ -35,6 +35,7 @@ async fn dispatch(command: &str, params: Value) -> Result<Value, String> {
     }
     "hub_client_remember_metadata" => storage::remember(params).await,
     "hub_client_discover" => storage::discover(params).await,
+    "hub_client_presence" => storage::presence(params).await,
     "hub_client_pair" => storage::pair(params).await,
     "hub_client_forget" => storage::forget(params).await,
     "hub_client_open" => connection::open(params).await,

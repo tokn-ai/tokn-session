@@ -83,6 +83,20 @@ export interface DiscoveryResult extends DiscoveryGroup {
   machines: DiscoveredMachine[];
 }
 
+/** Advisory Hub connector presence; never a saved identity or authorization. */
+export interface PresenceRequest {
+  host_ids: string[];
+}
+
+export interface MachinePresence {
+  host_id: string;
+  online: boolean;
+}
+
+export interface PresenceResult {
+  machines: MachinePresence[];
+}
+
 /** Public Hub routing metadata. It deliberately contains no encryption key. */
 export interface ResolvedMachine {
   host_id: string;

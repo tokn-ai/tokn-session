@@ -23,6 +23,7 @@ beforeEach(() => {
     pairMachine: vi.fn().mockResolvedValue(host), loginMachine: vi.fn().mockResolvedValue(host), resolve: vi.fn(), rememberMetadata: vi.fn(),
     connect: vi.fn().mockResolvedValue(client), forget: vi.fn().mockResolvedValue(undefined),
     discover: vi.fn().mockImplementation(async (group) => ({ ...group, machines: [] })),
+    presence: vi.fn().mockImplementation(async (host_ids: string[]) => ({ machines: host_ids.map((host_id) => ({ host_id, online: true })) })),
   };
   vi.mocked(openHubAccess).mockResolvedValue(service);
 });
@@ -85,6 +86,7 @@ it("merges saved and discovered machines without replacing saved identity or pai
     { host_id: host.host_id, name: "Unverified directory name", online: false },
     discovered_laptop,
   ] });
+  vi.mocked(service.presence).mockImplementation(async (host_ids) => ({ machines: host_ids.map((host_id) => ({ host_id, online: host_id !== host.host_id })) }));
   render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
   await screen.findByRole("button", { name: "Pair Laptop" });
   const gallery = screen.getByRole("list", { name: "Machines" });
@@ -92,7 +94,7 @@ it("merges saved and discovered machines without replacing saved identity or pai
   expect(within(gallery).queryByText("Unverified directory name")).not.toBeInTheDocument();
   const saved_card = within(gallery).getByRole("heading", { name: host.machine_address }).closest("li")!;
   expect(within(saved_card).getByText("Paired")).toBeInTheDocument();
-  expect(within(saved_card).getByText("Offline")).toBeInTheDocument();
+  expect(await within(saved_card).findByText("Offline")).toBeInTheDocument();
   const open = within(saved_card).getByRole("button", { name: `Sign in to ${host.machine_address}` });
   expect(open).toBeEnabled();
   expect(screen.getAllByRole("button", { name: "Add machine" })).toHaveLength(1);
@@ -106,11 +108,35 @@ it("merges saved and discovered machines without replacing saved identity or pai
 it("shows offline discoveries as cards without permitting pairing", async () => {
   vi.mocked(service.status).mockResolvedValue({ hosts: [{ ...host, discovery_group }], selected_host_id: null, device_public_key: "D".repeat(43) });
   vi.mocked(service.discover).mockResolvedValue({ ...discovery_group, machines: [{ ...discovered_laptop, online: false }] });
+  vi.mocked(service.presence).mockImplementation(async (host_ids) => ({ machines: host_ids.map((host_id) => ({ host_id, online: host_id !== discovered_laptop.host_id })) }));
   render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
   const pair = await screen.findByRole("button", { name: "Pair Laptop" });
   expect(pair).toBeDisabled();
-  expect(within(pair.closest("li")!).getByText("Offline")).toBeInTheDocument();
+  expect(await within(pair.closest("li")!).findByText("Offline")).toBeInTheDocument();
   expect(service.pairMachine).not.toHaveBeenCalled();
+});
+
+it("shows Hub presence for every saved machine without an address or discovery group", async () => {
+  const saved = { host_id: host.host_id, host_public_key: host.host_public_key, name: "Workstation" };
+  const other = { ...saved, host_id: discovered_laptop.host_id, name: "Laptop" };
+  vi.mocked(service.status).mockResolvedValue({ hosts: [saved, other], selected_host_id: null, device_public_key: "D".repeat(43) });
+  vi.mocked(service.presence).mockImplementation(async (host_ids) => ({ machines: host_ids.map((host_id) => ({ host_id, online: host_id === saved.host_id })) }));
+  render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
+  const first = screen.getByRole("heading", { name: "Workstation" }).closest("li")!;
+  const second = screen.getByRole("heading", { name: "Laptop" }).closest("li")!;
+  expect(await within(first).findByText("Online")).toBeInTheDocument();
+  expect(await within(second).findByText("Offline")).toBeInTheDocument();
+  expect(service.presence).toHaveBeenCalledWith([saved.host_id, other.host_id], expect.any(AbortSignal));
+  expect(service.discover).not.toHaveBeenCalled();
+});
+
+it("does not label an unreachable Hub as an offline machine", async () => {
+  vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: null, device_public_key: "D".repeat(43) });
+  vi.mocked(service.presence).mockRejectedValue(new Error("Hub unreachable"));
+  render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
+  expect(await screen.findByText("Status unavailable")).toHaveAttribute("title", "Hub unreachable");
+  expect(screen.queryByText("Offline")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: `Sign in to ${host.machine_address}` })).toBeEnabled();
 });
 
 it("allows verified pairing when another group reports a duplicated candidate online", async () => {
