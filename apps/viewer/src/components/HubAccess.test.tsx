@@ -1,11 +1,12 @@
 import { installViewerHost } from "../lib/platform";
 import { createApellHost } from "../lib/apellHost";
 import { StrictMode, type ReactNode } from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { HubAccess } from "./HubAccess";
 import { openHubAccess, type HubAccessService } from "../lib/hubAccess";
 import { machineReference } from "../lib/hubDeviceStore";
+import type { DiscoveryResult, SavedHubHost } from "../lib/types";
 import { RemoteClient, selectMachine, viewerStorageScope } from "../lib/transport";
 vi.mock("./HostSetup", async (importOriginal) => ({ ...await importOriginal<typeof import("./HostSetup")>(), HostSetup: () => <div>Host setup</div> }));
 vi.mock("../lib/hubAccess", () => ({ openHubAccess: vi.fn() }));
@@ -21,11 +22,85 @@ beforeEach(() => {
     pair: vi.fn().mockResolvedValue(host), authenticate: vi.fn().mockResolvedValue(undefined),
     pairMachine: vi.fn().mockResolvedValue(host), loginMachine: vi.fn().mockResolvedValue(host), resolve: vi.fn(), rememberMetadata: vi.fn(),
     connect: vi.fn().mockResolvedValue(client), forget: vi.fn().mockResolvedValue(undefined),
+    discover: vi.fn().mockImplementation(async (group) => ({ ...group, machines: [] })),
   };
   vi.mocked(openHubAccess).mockResolvedValue(service);
 });
 afterEach(() => { cleanup(); restore_host?.(); restore_host = undefined; selectMachine(); Reflect.deleteProperty(window, "__TAURI_INTERNALS__"); localStorage.clear(); vi.restoreAllMocks(); vi.clearAllMocks(); });
 async function ready() { await screen.findByLabelText("Machine address or reference"); }
+
+const discovery_group = { namespace: "personal", secret_digest: "A".repeat(43) };
+const discovered_laptop = { host_id: "550e8400-e29b-41d4-a716-446655440001", name: "Laptop", online: true };
+
+it("discovers the first paired machine's group and requires a separate pairing for another machine", async () => {
+  const paired = { ...host, discovery_group };
+  const status = { hosts: [] as SavedHubHost[], selected_host_id: null, device_public_key: "D".repeat(43) };
+  vi.mocked(service.status).mockImplementation(async () => status);
+  vi.mocked(service.pairMachine).mockImplementation(async () => { status.hosts = [paired]; return paired; });
+  vi.mocked(service.discover).mockResolvedValue({ ...discovery_group, machines: [discovered_laptop] });
+  render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
+  expect(service.discover).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText("Machine address or reference"), { target: { value: host.host_id } });
+  fireEvent.change(screen.getByLabelText("Authenticator code"), { target: { value: "123456" } });
+  fireEvent.click(screen.getByRole("button", { name: "Pair and set up passkey" }));
+  await screen.findByText("Encrypted sessions");
+  fireEvent.click(screen.getByRole("button", { name: /connection settings/i }));
+  fireEvent.click(screen.getByRole("button", { name: "Machines" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Pair Laptop" }));
+  expect(service.discover).toHaveBeenCalledWith(discovery_group, expect.any(AbortSignal));
+  expect(service.pairMachine).toHaveBeenCalledOnce();
+  expect(screen.getByLabelText("Machine address or reference")).toHaveValue(discovered_laptop.host_id);
+  expect(screen.getByLabelText("Authenticator code")).toHaveValue("");
+  expect(screen.getByLabelText("Authenticator code")).toHaveFocus();
+  expect(screen.getByRole("list", { name: "Saved machines" })).not.toHaveTextContent("Laptop");
+  fireEvent.change(screen.getByLabelText("Authenticator code"), { target: { value: "654321" } });
+  fireEvent.click(screen.getByRole("button", { name: "Pair and set up passkey" }));
+  await waitFor(() => expect(service.pairMachine).toHaveBeenLastCalledWith(discovered_laptop.host_id, "654321", expect.any(AbortSignal)));
+});
+
+it("keeps equal namespace names with different digests in separate discovery groups", async () => {
+  const other_group = { ...discovery_group, secret_digest: `${"B".repeat(42)}A` };
+  vi.mocked(service.status).mockResolvedValue({ hosts: [{ ...host, discovery_group }, { ...host, host_id: discovered_laptop.host_id, machine_address: "alice:laptop", discovery_group: other_group }], selected_host_id: null, device_public_key: "D".repeat(43) });
+  vi.mocked(service.discover).mockImplementation(async (group) => ({ ...group, machines: [{ ...discovered_laptop, name: group.secret_digest === discovery_group.secret_digest ? "First group member" : "Second group member" }] }));
+  render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
+  const first = await screen.findByRole("region", { name: "Discovery group personal AAAAAAAA" });
+  const second = screen.getByRole("region", { name: "Discovery group personal BBBBBBBB" });
+  expect(await within(first).findByText("First group member")).toBeInTheDocument();
+  expect(await within(second).findByText("Second group member")).toBeInTheDocument();
+  expect(within(first).queryByText("Second group member")).not.toBeInTheDocument();
+  expect(service.pairMachine).not.toHaveBeenCalled();
+});
+
+it("cancels discovery when switching Hubs and ignores its late machine list", async () => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+  vi.mocked(service.status).mockResolvedValue({ hosts: [{ ...host, discovery_group }], selected_host_id: null, device_public_key: "D".repeat(43) });
+  let finish!: (result: DiscoveryResult) => void;
+  vi.mocked(service.discover).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+  const next = { ...service, hub_url: "https://other.example", status: vi.fn().mockResolvedValue({ hosts: [], selected_host_id: null, device_public_key: "D".repeat(43) }) };
+  vi.mocked(openHubAccess).mockResolvedValueOnce(service).mockResolvedValueOnce(next);
+  render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
+  await waitFor(() => expect(service.discover).toHaveBeenCalledOnce());
+  const signal = vi.mocked(service.discover).mock.calls[0][1];
+  fireEvent.click(screen.getByRole("button", { name: "Change Hub" }));
+  fireEvent.change(screen.getByLabelText("Hub address"), { target: { value: next.hub_url } });
+  fireEvent.click(screen.getByRole("button", { name: "Connect to Hub" }));
+  await waitFor(() => expect(screen.getByRole("region", { name: "Current Hub" })).toHaveTextContent(next.hub_url));
+  expect(signal.aborted).toBe(true);
+  finish({ ...discovery_group, machines: [discovered_laptop] });
+  await Promise.resolve();
+  expect(screen.queryByRole("button", { name: "Pair Laptop" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Discovered groups" })).not.toBeInTheDocument();
+});
+
+it("offers retry for failed group discovery and shows its empty result", async () => {
+  vi.mocked(service.status).mockResolvedValue({ hosts: [{ ...host, discovery_group }], selected_host_id: null, device_public_key: "D".repeat(43) });
+  vi.mocked(service.discover).mockRejectedValueOnce(new Error("Group unavailable"));
+  render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
+  expect(await screen.findByRole("alert")).toHaveTextContent("Group unavailable");
+  fireEvent.click(screen.getByRole("button", { name: "Retry discovery group personal AAAAAAAA" }));
+  expect(await screen.findByText("No machines are registered in this group.")).toBeInTheDocument();
+  expect(service.discover).toHaveBeenCalledTimes(2);
+});
 
 it("applet first launch waits for a Hub address without trying a placeholder URL", () => {
   restore_host = installViewerHost(createApellHost({ invoke: vi.fn(), onEvent: () => () => {} }));

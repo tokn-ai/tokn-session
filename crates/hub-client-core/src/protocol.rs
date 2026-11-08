@@ -36,6 +36,8 @@ pub enum Frame {
     public_key: String,
     name: String,
     allow_control: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    discovery_group: Option<crate::discovery::DiscoveryGroup>,
     signature: String,
   },
   /// Advisory registration failure. Never changes endpoint-owned trust.
@@ -126,6 +128,29 @@ pub fn registration_proof(nonce: &str, host_id: &str, public_key: &str, name: &s
     allow_control,
   ))
   .expect("string tuple")
+}
+
+pub fn discovery_registration_proof(
+  nonce: &str,
+  host_id: &str,
+  public_key: &str,
+  name: &str,
+  allow_control: bool,
+  discovery_group: Option<&crate::discovery::DiscoveryGroup>,
+) -> Vec<u8> {
+  match discovery_group {
+    None => registration_proof(nonce, host_id, public_key, name, allow_control),
+    Some(group) => serde_json::to_vec(&(
+      "tokn-hub-discovery-host-v1",
+      nonce,
+      host_id,
+      public_key,
+      name,
+      allow_control,
+      group,
+    ))
+    .expect("validated discovery registration tuple"),
+  }
 }
 
 pub fn valid_host_uuid(host_id: &str) -> bool {

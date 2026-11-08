@@ -104,6 +104,7 @@ mod tests {
         endpoint: endpoint.to_string(),
         host_id: uuid::Uuid::new_v4().to_string(),
         host_public_key: identity.public_key(),
+        discovery_group: None,
         transport: crate::TransportState::default(),
       },
       endpoint,

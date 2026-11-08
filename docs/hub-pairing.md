@@ -143,6 +143,43 @@ first if you want the app to own hosting. The CLI's saved viewer URL remains
 intact; the app uses a separate ephemeral API port and token with its existing
 local reader and event stream.
 
+## Discovery groups
+
+Hosts can choose a discovery namespace in **Host this computer**, or with the
+connector's `--namespace` option. The namespace uses 1–63 lowercase letters,
+digits and internal hyphens. Hosts with the same namespace and authenticator
+seed derive the same discovery digest for a Hub. Different seeds, namespaces or
+Hub origins produce separate groups, even when their display names match.
+
+```sh
+# Existing host: preserve its identity and authenticator while enabling discovery.
+tokn-session-hub connect --namespace personal
+tokn-session-hub authenticator --export-file ./authenticator.secret
+
+# New host: transfer the private seed file securely before its first setup.
+tokn-session-hub connect --hub https://hub.example.com --namespace personal \
+  --totp-secret-file ./authenticator.secret
+```
+
+The setup file must belong to the current user and have mode 0600. Each host
+retains its own UUID, encryption keys and authorized devices. To stop advertising
+a group, clear the dialog field or start the connector with `--namespace ""`.
+
+Pair one known machine using its reference and authenticator code. The completed
+pairing delivers its group reference through authenticated encryption. Machines
+then lists the group's online and offline candidates, with refresh and retry
+controls. Select **Pair** on another machine and complete its own pairing before
+opening its sessions. Previously paired clients refresh group metadata through
+their authenticated connection when opening a machine.
+
+The digest is an opaque lookup value derived from the seed using HKDF-SHA256
+with versioned, Hub-specific and namespace-specific context. It contains no
+authenticator seed or current code. The Hub can see group membership, and anyone
+who obtains the group reference can request its machine list. Listing and signed
+host registration establish routing metadata. Machine authorization and saved
+key verification still happen independently on each host. The Machines picker
+only saves a candidate as a paired machine after its pairing succeeds.
+
 ## Readable machine addresses
 
 The Hub administrator can create a namespace such as `alice` at `/admin`, then
@@ -151,11 +188,16 @@ assign a registered encrypted machine a name such as `macbook`. Its address is
 digits with internal hyphens. A namespace is a managed name, not a user account;
 the Hub still has one administrator. Connector `--name` remains its display name.
 
+These administrator-assigned addresses have separate ownership from host-chosen
+discovery namespaces. Choosing a discovery namespace does not reserve a readable
+address.
+
 Addresses are permanent: an address cannot move to a different UUID, and revoking
 the host does not free its name. Only administrator authentication can assign
 names; registering a connector cannot claim another namespace. Public lookup is
 exact, works while a host is offline, and reveals the address, UUID, display name,
-and online status to anyone who knows the address. There is no public machine list.
+and online status to anyone who knows the address. Group listing uses the separate
+discovery reference.
 
 The Hub directory is trusted to associate an address with a UUID. Lookup supplies
 no host encryption key. OTP pairing still verifies the host through PAKE, and

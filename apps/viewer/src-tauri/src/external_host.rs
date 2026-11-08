@@ -342,6 +342,7 @@ mod macos {
         host_id: "fixture".into(),
         hub_url: "https://hub.example/".into(),
         name: "Studio Mac".into(),
+        discovery_namespace: None,
         viewer_url: "http://127.0.0.1:5558/".into(),
         allow_control: true,
         insecure_loopback: false,

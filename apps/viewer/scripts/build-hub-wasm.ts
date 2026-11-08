@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
+import { rustBuildEnvironment } from "./rust-build-env";
 
 const viewer_root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const workspace_root = resolve(viewer_root, "../..");
@@ -26,6 +27,7 @@ if (!targets.includes("wasm32-unknown-unknown")) {
 execFileSync("cargo", ["build", "--locked", "--release", "--target", "wasm32-unknown-unknown", "-p", "tokn-hub-client-core"], {
   cwd: workspace_root,
   stdio: "inherit",
+  env: rustBuildEnvironment(workspace_root),
 });
 mkdirSync(output_dir, { recursive: true });
 execFileSync("wasm-bindgen", [

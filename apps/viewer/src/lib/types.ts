@@ -63,6 +63,24 @@ export interface SavedHubHost {
   host_public_key: string;
   machine_address?: string;
   name?: string;
+  discovery_group?: DiscoveryGroup;
+}
+
+/** A group reference learned from an authenticated machine pairing. */
+export interface DiscoveryGroup {
+  namespace: string;
+  secret_digest: string;
+}
+
+/** Discovery candidates require their own machine pairing before use. */
+export interface DiscoveredMachine {
+  host_id: string;
+  name: string;
+  online: boolean;
+}
+
+export interface DiscoveryResult extends DiscoveryGroup {
+  machines: DiscoveredMachine[];
 }
 
 /** Public Hub routing metadata. It deliberately contains no encryption key. */
@@ -1018,6 +1036,7 @@ export interface BackgroundServiceStatus {
   error: string | null;
 }
 export interface LocalHostStatus {
+  discovery_namespace?: string | null;
   background_services?: { api: BackgroundServiceStatus; connector: BackgroundServiceStatus };
   external_remove_supported?: boolean;
   external_stop_supported?: boolean;
@@ -1029,11 +1048,13 @@ export interface LocalHostStatus {
   error: string | null;
 }
 export interface StartLocalHostRequest {
+  discovery_namespace?: string | null;
   hub_url: string;
   name: string;
   allow_control: boolean;
 }
 export interface LocalHostPairing {
+  discovery_group?: DiscoveryGroup | null;
   machine_reference: string;
   qr_data_url: string;
   setup_uri: string;

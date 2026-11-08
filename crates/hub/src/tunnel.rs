@@ -259,12 +259,14 @@ impl HubTunnels {
       return;
     };
     let result = tokio::time::timeout(IO_TIMEOUT, self.authenticate(&mut socket)).await;
-    let Ok(Ok((record, allow_control, encrypted_registration))) = result else {
+    let Ok(Ok((record, allow_control, encrypted_registration, discovery_group))) = result else {
       return;
     };
     let registered = if encrypted_registration {
       drop(handshake_permit);
-      self.store.register_encrypted_host(record)
+      self
+        .store
+        .register_encrypted_host_with_discovery(record, discovery_group.as_ref())
     } else {
       self.await_approval(&mut socket, record, handshake_permit).await
     };
@@ -370,7 +372,18 @@ impl HubTunnels {
     }
   }
 
-  async fn authenticate(&self, socket: &mut WebSocket) -> Result<(HostRecord, bool, bool), String> {
+  async fn authenticate(
+    &self,
+    socket: &mut WebSocket,
+  ) -> Result<
+    (
+      HostRecord,
+      bool,
+      bool,
+      Option<tokn_hub_client_core::discovery::DiscoveryGroup>,
+    ),
+    String,
+  > {
     let mut random = [0u8; 32];
     OsRng.fill_bytes(&mut random);
     let nonce = protocol::encode(&random);
@@ -388,29 +401,40 @@ impl HubTunnels {
     if text.len() > 4096 {
       return Err("Host authentication is too large".into());
     }
-    let (version, registered_id, public_key, name, allow_control, signature) = match serde_json::from_str(&text)
-      .map_err(|_| "Invalid host authentication")?
-    {
-      Frame::Authenticate {
-        version,
-        public_key,
-        name,
-        allow_control,
-        signature,
-      } => (version, None, public_key, name, allow_control, signature),
-      Frame::Register {
-        version,
-        host_id,
-        public_key,
-        name,
-        allow_control,
-        signature,
-      } if protocol::valid_host_uuid(&host_id) => (version, Some(host_id), public_key, name, allow_control, signature),
-      _ => return Err("Expected host authentication or encrypted registration".into()),
-    };
+    let (version, registered_id, public_key, name, allow_control, signature, discovery_group) =
+      match serde_json::from_str(&text).map_err(|_| "Invalid host authentication")? {
+        Frame::Authenticate {
+          version,
+          public_key,
+          name,
+          allow_control,
+          signature,
+        } => (version, None, public_key, name, allow_control, signature, None),
+        Frame::Register {
+          version,
+          host_id,
+          public_key,
+          name,
+          allow_control,
+          signature,
+          discovery_group,
+        } if protocol::valid_host_uuid(&host_id) => (
+          version,
+          Some(host_id),
+          public_key,
+          name,
+          allow_control,
+          signature,
+          discovery_group,
+        ),
+        _ => return Err("Expected host authentication or encrypted registration".into()),
+      };
     if version != protocol::VERSION || name.trim().is_empty() || name.len() > 128 || name.chars().any(char::is_control)
     {
       return Err("Invalid host version or name".into());
+    }
+    if let Some(group) = &discovery_group {
+      group.validate()?;
     }
     let key_bytes: [u8; 32] = protocol::decode(&public_key, 32)?
       .try_into()
@@ -418,7 +442,14 @@ impl HubTunnels {
     let key = VerifyingKey::from_bytes(&key_bytes).map_err(|_| "Invalid host key")?;
     let signature = Signature::from_slice(&protocol::decode(&signature, 64)?).map_err(|_| "Invalid host proof")?;
     let proof = if let Some(host_id) = &registered_id {
-      protocol::registration_proof(&nonce, host_id, &public_key, &name, allow_control)
+      protocol::discovery_registration_proof(
+        &nonce,
+        host_id,
+        &public_key,
+        &name,
+        allow_control,
+        discovery_group.as_ref(),
+      )
     } else {
       protocol::proof(&nonce, &public_key, &name, allow_control)
     };
@@ -435,6 +466,7 @@ impl HubTunnels {
       },
       allow_control,
       encrypted_registration,
+      discovery_group,
     ))
   }
 

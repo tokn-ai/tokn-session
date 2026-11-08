@@ -3,7 +3,8 @@ import type { CryptoApi, DeviceIdentity, NoiseChannel } from "./hubCrypto";
 import { canonicalHubUrl, validateHost, type SavedHubHost } from "./hubDeviceStore";
 import { eventFrameLimit, parseEvent, type ConnectionState, type UnlistenFn, type ViewerClient } from "./transport";
 import { browserDirectPeer, browserSocket, disconnected, PeerRetiredError, RelayCarrier, type DirectPeer, type DirectPeerFactory, type RecordCarrier, type RecordTransport } from "./hubTransport";
-import type { TransportState } from "./types";
+import type { DiscoveryGroup, TransportState } from "./types";
+import { validateDiscoveryGroup } from "./hubDiscovery";
 import type { SocketFactory } from "./hubTransport";
 export type { SocketFactory } from "./hubTransport";
 
@@ -73,6 +74,27 @@ async function openChannel(host: SavedHubHost, identity: DeviceIdentity, crypto:
     return { socket, channel };
   } catch (error) { socket.close(); throw error; }
   finally { initiator?.free(); }
+}
+
+/** Refresh group metadata only through a channel pinned to an authorized host. */
+export async function readHubDiscoveryGroup(hub_url: string, host: SavedHubHost, identity: DeviceIdentity, crypto: CryptoApi, signal: AbortSignal, factory: SocketFactory = browserSocket): Promise<DiscoveryGroup | null> {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal.aborted) abort();
+  signal.addEventListener("abort", abort, { once: true });
+  const deadline = setTimeout(abort, 5000);
+  let opened: { socket: RecordTransport; channel: NoiseChannel } | undefined;
+  try {
+    opened = await openChannel(host, identity, crypto, controller.signal, new RelayCarrier(socketUrl(hub_url, host.host_id), factory));
+    opened.socket.send(opened.channel.encrypt_json(JSON.stringify({ type: "discovery_request" })));
+    const message = receiveMessage(opened.channel, await opened.socket.read(5000));
+    if (controller.signal.aborted) throw aborted();
+    if (message.type !== "discovery_response" || !("group" in message)) throw new Error("Machine returned invalid discovery metadata.");
+    return message.group === null ? null : validateDiscoveryGroup(message.group);
+  } finally {
+    opened?.socket.close(); opened?.channel.free();
+    clearTimeout(deadline); signal.removeEventListener("abort", abort);
+  }
 }
 function receiveMessage(channel: NoiseChannel, record: Uint8Array): Message {
   const message = JSON.parse(channel.decrypt_json(record)) as Message;

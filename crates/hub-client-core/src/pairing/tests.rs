@@ -78,6 +78,36 @@ fn matching_code_authenticates_both_noise_keys_and_final_ack() {
 }
 
 #[test]
+fn final_ack_encrypts_and_authenticates_discovery_metadata() {
+  let seed = seed();
+  let group = seed.discovery_group("https://hub.example", "personal").unwrap();
+  let pair = || {
+    let host_identity = NoiseIdentity::generate().unwrap();
+    let client_identity = NoiseIdentity::generate().unwrap();
+    let (client, hello) = ClientPairing::start(HOST, &client_identity, &seed.code_at(NOW), NOW).unwrap();
+    let (host, response) = HostPairing::respond(&seed, HOST, &host_identity, &hello, NOW).unwrap();
+    let (client, confirmation) = client.confirm(&response).unwrap();
+    let (authenticated, ack) = host
+      .finish_with_discovery(&confirmation, NOW, Some(group.clone()))
+      .unwrap();
+    (client, authenticated, ack)
+  };
+  let (client, host, ack) = pair();
+  assert!(!String::from_utf8_lossy(&ack).contains(&group.namespace));
+  assert!(!String::from_utf8_lossy(&ack).contains(&group.secret_digest));
+  assert_eq!(client.finish(&ack).unwrap(), host);
+  assert_eq!(host.discovery_group, Some(group.clone()));
+  let (client, _, ack) = pair();
+  let mut modified: Acknowledgement = read_record(&ack).unwrap();
+  modified.discovery = None;
+  assert!(client.finish(&write_record(&modified).unwrap()).is_err());
+  let (client, _, ack) = pair();
+  let mut modified: Acknowledgement = read_record(&ack).unwrap();
+  modified.discovery = Some(encode(&[0; 64]));
+  assert!(client.finish(&write_record(&modified).unwrap()).is_err());
+}
+
+#[test]
 fn wrong_code_never_authenticates_host() {
   let seed = seed();
   let actual = seed.code_at(NOW);

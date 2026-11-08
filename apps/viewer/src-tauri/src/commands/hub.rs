@@ -4,7 +4,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
 #[cfg(desktop)]
 use tokn_hub_remote::AuthOptions;
-use tokn_hub_remote::{ClientStatus, ConnectionInfo, ResolvedMachine};
+use tokn_hub_remote::{ClientStatus, ConnectionInfo, DiscoveryGroup, DiscoveryResult, ResolvedMachine};
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn hub_client_status(state: State<'_, NativeRemote>, hub_url: String) -> Result<ClientStatus, String> {
@@ -18,6 +18,26 @@ pub async fn hub_client_resolve(
   machine_address: String,
 ) -> Result<ResolvedMachine, String> {
   state.manager().await?.resolve(&hub_url, &machine_address).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn hub_client_discover(
+  state: State<'_, NativeRemote>,
+  hub_url: String,
+  namespace: String,
+  secret_digest: String,
+) -> Result<DiscoveryResult, String> {
+  state
+    .manager()
+    .await?
+    .discover(
+      &hub_url,
+      &DiscoveryGroup {
+        namespace,
+        secret_digest,
+      },
+    )
+    .await
 }
 
 #[tauri::command(rename_all = "snake_case")]

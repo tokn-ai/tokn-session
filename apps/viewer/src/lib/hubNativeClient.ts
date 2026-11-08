@@ -2,7 +2,7 @@ import { invokeHost, listenHost } from "./platform";
 import { type SavedHubHost } from "./hubDeviceStore";
 import type { ConnectionState, UnlistenFn, ViewerClient } from "./transport";
 import type { PasskeyProvider } from "./hubEncryptedClient";
-import type { ResolvedMachine, TransportState } from "./types";
+import type { DiscoveryGroup, DiscoveryResult, ResolvedMachine, TransportState } from "./types";
 
 export interface NativeHubStatus {
   hub_url: string;
@@ -15,6 +15,9 @@ async function command<T>(name: string, request: Record<string, unknown>): Promi
   return invokeHost<T>(name, request);
 }
 export function nativeHubStatus(hub_url: string): Promise<NativeHubStatus> { return command("hub_client_status", { hub_url }); }
+export function nativeHubDiscover(hub_url: string, group: DiscoveryGroup): Promise<DiscoveryResult> {
+  return command("hub_client_discover", { hub_url, namespace: group.namespace, secret_digest: group.secret_digest });
+}
 export function nativeHubPair(hub_url: string, host_id: string, code: string, expected_host_public_key?: string, machine_address?: string): Promise<SavedHubHost> { return command("hub_client_pair", { hub_url, host_id, code, expected_host_public_key, ...(machine_address ? { machine_address } : {}) }); }
 export function nativeHubForget(hub_url: string, host_id: string): Promise<void> { return command("hub_client_forget", { hub_url, host_id }); }
 export function nativeHubResolve(hub_url: string, machine_address: string): Promise<ResolvedMachine> {

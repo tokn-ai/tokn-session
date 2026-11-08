@@ -274,6 +274,7 @@ async fn perform_pairing(state: &ClientState, host_id: &str, code: &str) -> Resu
     host_public_key: paired.host_public_key,
     machine_address: None,
     name: None,
+    discovery_group: paired.discovery_group,
   })
 }
 
@@ -434,6 +435,7 @@ mod tests {
           host_public_key: NoiseIdentity::generate().unwrap().public_key(),
           machine_address: None,
           name: None,
+          discovery_group: None,
         })
         .unwrap();
     }
@@ -563,6 +565,7 @@ mod tests {
         host_public_key: host.public_key(),
         machine_address: None,
         name: None,
+        discovery_group: None,
       }]
     );
     assert!(
@@ -573,6 +576,7 @@ mod tests {
           host_public_key: NoiseIdentity::generate().unwrap().public_key(),
           machine_address: None,
           name: None,
+          discovery_group: None,
         })
         .is_err()
     );

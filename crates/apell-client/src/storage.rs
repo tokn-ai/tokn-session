@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 use tokn_hub_client_core::{
   address::ResolvedMachine,
+  discovery::{DiscoveryGroup, DiscoveryResult, MAX_DISCOVERY_RESPONSE},
   pairing::ClientPairing,
   protocol,
   secure::{NoiseIdentity, decode_public_key},
@@ -20,6 +21,8 @@ pub struct SavedHost {
   pub host_public_key: String,
   pub machine_address: Option<String>,
   pub name: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub discovery_group: Option<DiscoveryGroup>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -127,6 +130,9 @@ fn validate(saved: &Saved) -> Result<(), String> {
       return Err("Saved machine identity is invalid".into());
     }
     decode_public_key(&host.host_public_key)?;
+    if let Some(group) = &host.discovery_group {
+      group.validate()?;
+    }
     if let Some(address) = &host.machine_address {
       tokn_hub_client_core::address::parse_machine_address(address)?;
     }
@@ -181,6 +187,52 @@ impl Store {
     *self.saved.borrow_mut() = saved;
     Ok(())
   }
+
+  async fn remember_metadata(&self, machine: ResolvedMachine) -> Result<SavedHost, String> {
+    let gate = GATE.with(Clone::clone);
+    let _guard = gate.lock().await;
+    let mut saved = clone_saved(&self.saved.borrow());
+    let host = saved
+      .hosts
+      .iter_mut()
+      .find(|host| host.host_id == machine.host_id)
+      .ok_or("Pair this machine before saving its address")?;
+    host.machine_address = Some(machine.machine_address);
+    host.name = Some(machine.name);
+    let remembered = host.clone();
+    save(&self.hub, &saved).await?;
+    *self.saved.borrow_mut() = saved;
+    Ok(remembered)
+  }
+
+  pub async fn remember_discovery_group(
+    &self,
+    host_id: &str,
+    host_key: &str,
+    group: Option<DiscoveryGroup>,
+  ) -> Result<(), String> {
+    if let Some(group) = &group {
+      group.validate()?;
+    }
+    let gate = GATE.with(Clone::clone);
+    let _guard = gate.lock().await;
+    let mut saved = clone_saved(&self.saved.borrow());
+    let host = saved
+      .hosts
+      .iter_mut()
+      .find(|host| host.host_id == host_id)
+      .ok_or("Pair this machine before remembering its discovery group")?;
+    if host.host_public_key != host_key {
+      return Err("Machine key differs from its remembered identity".into());
+    }
+    if host.discovery_group == group {
+      return Ok(());
+    }
+    host.discovery_group = group;
+    save(&self.hub, &saved).await?;
+    *self.saved.borrow_mut() = saved;
+    Ok(())
+  }
 }
 fn clone_saved(saved: &Saved) -> Saved {
   Saved {
@@ -201,13 +253,46 @@ pub async fn resolve(hub: &str, address: &str) -> Result<Value, String> {
   let mut endpoint = canonical_hub(hub)?;
   endpoint.set_path(&format!("/hub/v1/resolve/{user}/{machine}"));
   let response: Value = host::call("http.request", json!({"url":endpoint.as_str(),"timeout_ms":10000})).await?;
-  let bytes: Vec<u8> = serde_json::from_value(response["body"].clone()).map_err(|_| "Invalid directory response")?;
-  if bytes.len() > 4096 || response["status"] != 200 {
-    return Err("Could not resolve machine address through the Hub".into());
-  }
+  let bytes = directory_body(response, 4096)?;
   let machine: ResolvedMachine = serde_json::from_slice(&bytes).map_err(|_| "Invalid Hub directory metadata")?;
   machine.validate_for(address)?;
   serde_json::to_value(machine).map_err(|_| "Invalid Hub metadata".into())
+}
+pub async fn discover(params: Value) -> Result<Value, String> {
+  let store = load(host::string(&params, "hub_url")?).await?;
+  let group = DiscoveryGroup {
+    namespace: host::string(&params, "namespace")?.into(),
+    secret_digest: host::string(&params, "secret_digest")?.into(),
+  };
+  group.validate()?;
+  if !store
+    .hosts()
+    .iter()
+    .any(|host| host.discovery_group.as_ref() == Some(&group))
+  {
+    return Err("Pair a machine in this discovery group first".into());
+  }
+  let mut endpoint = store.hub.clone();
+  endpoint.set_path(&format!(
+    "/hub/v1/discovery/{}/{}",
+    group.namespace, group.secret_digest
+  ));
+  let response: Value = host::call("http.request", json!({"url":endpoint.as_str(),"timeout_ms":10000})).await?;
+  let bytes = directory_body(response, MAX_DISCOVERY_RESPONSE)?;
+  let result: DiscoveryResult = serde_json::from_slice(&bytes).map_err(|_| "Invalid Hub discovery metadata")?;
+  result.validate_for(&group)?;
+  serde_json::to_value(result).map_err(|_| "Invalid Hub discovery metadata".into())
+}
+
+fn directory_body(mut response: Value, maximum: usize) -> Result<Vec<u8>, String> {
+  if response["status"] != 200 {
+    return Err("Could not load machine directory through the Hub".into());
+  }
+  let body = response.get_mut("body").ok_or("Missing Hub directory response body")?;
+  if !body.as_array().is_some_and(|bytes| bytes.len() <= maximum) {
+    return Err("Hub directory response exceeds its size limit".into());
+  }
+  serde_json::from_value(body.take()).map_err(|_| "Invalid Hub directory response".into())
 }
 pub async fn remember(params: Value) -> Result<Value, String> {
   let store = load(host::string(&params, "hub_url")?).await?;
@@ -218,15 +303,7 @@ pub async fn remember(params: Value) -> Result<Value, String> {
   if resolved.host_id != id {
     return Err("Machine address now identifies another machine".into());
   }
-  let mut host = store
-    .hosts()
-    .into_iter()
-    .find(|entry| entry.host_id == id)
-    .ok_or("Pair this machine before saving its address")?;
-  host.machine_address = Some(resolved.machine_address);
-  host.name = Some(resolved.name);
-  store.put(host.clone()).await?;
-  Ok(json!(host))
+  Ok(json!(store.remember_metadata(resolved).await?))
 }
 pub async fn pair(params: Value) -> Result<Value, String> {
   let store = load(host::string(&params, "hub_url")?).await?;
@@ -255,6 +332,7 @@ pub async fn pair(params: Value) -> Result<Value, String> {
     host_public_key: verified.host_public_key,
     machine_address: None,
     name: None,
+    discovery_group: verified.discovery_group,
   };
   if let Some(address) = params.get("machine_address").and_then(Value::as_str) {
     let resolved: ResolvedMachine =
@@ -299,5 +377,42 @@ mod tests {
     ] {
       assert!(canonical_hub(value).is_err());
     }
+  }
+
+  #[test]
+  fn discovery_metadata_is_optional_for_saved_hosts_but_always_validated() {
+    let identity = NoiseIdentity::from_secret([3; 32]).unwrap();
+    let mut saved: Saved = serde_json::from_value(json!({
+      "version":1,
+      "identity":identity.export_secret(),
+      "hosts":[{
+        "host_id":"11111111-2222-4333-8444-555555555555",
+        "host_public_key":identity.public_key(),
+        "machine_address":null,
+        "name":null,
+      }],
+      "selected_host_id":null,
+    }))
+    .unwrap();
+    validate(&saved).unwrap();
+    assert!(saved.hosts[0].discovery_group.is_none());
+    saved.hosts[0].discovery_group = Some(DiscoveryGroup {
+      namespace: "personal".into(),
+      secret_digest: protocol::encode(&[1; 32]),
+    });
+    validate(&saved).unwrap();
+    saved.hosts[0].discovery_group.as_mut().unwrap().namespace = "Personal".into();
+    assert!(validate(&saved).is_err());
+  }
+
+  #[test]
+  fn directory_bodies_are_bounded_before_decoding_bytes() {
+    assert_eq!(
+      directory_body(json!({"status":200,"body":[123,125]}), 2).unwrap(),
+      b"{}"
+    );
+    assert!(directory_body(json!({"status":200,"body":[123,125]}), 1).is_err());
+    assert!(directory_body(json!({"status":200,"body":[256]}), 1).is_err());
+    assert!(directory_body(json!({"status":302,"body":[]}), 2).is_err());
   }
 }

@@ -17,6 +17,76 @@ use tower::ServiceExt;
 
 const ORIGIN: &str = "http://localhost:5559";
 
+#[tokio::test]
+async fn discovery_groups_are_scoped_by_namespace_and_digest_without_admin_enrollment() {
+  use tokn_hub_client_core::discovery::{DiscoveryGroup, DiscoveryResult};
+  let directory = tempfile::tempdir().unwrap();
+  let state = state(directory.path());
+  let first = crate::store::HostRecord {
+    host_id: uuid::Uuid::new_v4().to_string(),
+    name: "Laptop".into(),
+    public_key: protocol::encode(&[1; 32]),
+    access: "view".into(),
+  };
+  let second = crate::store::HostRecord {
+    host_id: uuid::Uuid::new_v4().to_string(),
+    name: "Workstation".into(),
+    public_key: protocol::encode(&[2; 32]),
+    access: "view".into(),
+  };
+  let group = DiscoveryGroup {
+    namespace: "personal".into(),
+    secret_digest: protocol::encode(&[7; 32]),
+  };
+  let other = DiscoveryGroup {
+    namespace: "personal".into(),
+    secret_digest: protocol::encode(&[8; 32]),
+  };
+  state
+    .store
+    .register_encrypted_host_with_discovery(first.clone(), Some(&group))
+    .unwrap();
+  state
+    .store
+    .register_encrypted_host_with_discovery(second.clone(), Some(&other))
+    .unwrap();
+  let app = router(state.clone());
+  let path = format!("/hub/v1/discovery/{}/{}", group.namespace, group.secret_digest);
+  let response = get(app.clone(), &path, None).await;
+  assert_eq!(response.status(), StatusCode::OK);
+  assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+  let result: DiscoveryResult = serde_json::from_value(json_body(response).await).unwrap();
+  result.validate_for(&group).unwrap();
+  assert_eq!(result.machines.len(), 1);
+  assert_eq!(result.machines[0].host_id, first.host_id);
+  assert!(!result.machines[0].online);
+  assert!(state.store.namespaces().unwrap().is_empty());
+  let mut wrong_namespace = group.clone();
+  wrong_namespace.namespace = "work".into();
+  assert!(state.store.discover_machines(&wrong_namespace).unwrap().is_empty());
+  assert_eq!(
+    get(app.clone(), "/hub/v1/discovery/personal/invalid", None)
+      .await
+      .status(),
+    StatusCode::BAD_REQUEST
+  );
+  state
+    .store
+    .register_encrypted_host_with_discovery(second.clone(), Some(&group))
+    .unwrap();
+  assert_eq!(state.store.discover_machines(&group).unwrap().len(), 2);
+  state.store.register_encrypted_host(second).unwrap();
+  assert_eq!(state.store.discover_machines(&group).unwrap().len(), 1);
+  state.store.remove_host(&first.host_id).unwrap();
+  assert!(state.store.discover_machines(&group).unwrap().is_empty());
+  assert!(
+    json_body(get(app, &path, None).await).await["machines"]
+      .as_array()
+      .unwrap()
+      .is_empty()
+  );
+}
+
 fn state(directory: &std::path::Path) -> HubState {
   HubState::new(Store::open(directory.join("hub.sqlite")).unwrap(), ORIGIN).unwrap()
 }

@@ -1,11 +1,12 @@
 import { loadHubCrypto, type CryptoApi } from "./hubCrypto";
 import { HubDeviceStore, validateHost, canonicalHubUrl, type SavedHubHost } from "./hubDeviceStore";
-import { EncryptedHubClient, pairHubHost, authenticateHubHost } from "./hubEncryptedClient";
-import { NativeHubClient, nativeHubAuthenticate, nativeHubForget, nativeHubPair, nativeHubStatus, nativeHubResolve, nativeHubRememberMetadata } from "./hubNativeClient";
+import { EncryptedHubClient, pairHubHost, authenticateHubHost, readHubDiscoveryGroup } from "./hubEncryptedClient";
+import { NativeHubClient, nativeHubAuthenticate, nativeHubForget, nativeHubPair, nativeHubStatus, nativeHubResolve, nativeHubRememberMetadata, nativeHubDiscover } from "./hubNativeClient";
 import { type ViewerClient } from "./transport";
 import { viewerCapabilities } from "./platform";
 import { parseMachineTarget, resolveBrowserMachine, validateResolvedMachine } from "./hubAddress";
-import type { ResolvedMachine } from "./types";
+import type { DiscoveryGroup, DiscoveryResult, ResolvedMachine } from "./types";
+import { discoverBrowserGroup, discoveryGroupKey, validateDiscoveryGroup, validateDiscoveryResult } from "./hubDiscovery";
 
 export interface HubAccessBackend {
   readonly hub_url: string;
@@ -17,6 +18,7 @@ export interface HubAccessBackend {
   forget(host_id: string): Promise<void>;
   resolve(machine_address: string, signal: AbortSignal): Promise<ResolvedMachine>;
   rememberMetadata(machine: ResolvedMachine, signal: AbortSignal): Promise<SavedHubHost>;
+  discover(group: DiscoveryGroup, signal: AbortSignal): Promise<DiscoveryResult>;
 }
 export interface HubAccessService extends HubAccessBackend {
   pairMachine(input: string, code: string, signal: AbortSignal): Promise<SavedHubHost>;
@@ -92,7 +94,11 @@ export class BrowserHubAccess implements HubAccessBackend {
     }
     await authenticateHubHost(this.hub_url, host, this.store.identity, this.crypto, register, signal);
     if (signal.aborted) throw new Error("Machine disconnected");
-    await this.store.saveHost(host);
+    // Passkey callers may hold an older host snapshot. Discovery metadata is
+    // updated only by pairing or an authenticated discovery response.
+    const reference = { ...host };
+    delete reference.discovery_group;
+    await this.store.saveHost(reference);
     this.checkActive(signal);
     if (register) this.enrollment_hosts.delete(host.host_id);
     else this.unlocked_hosts.set(host.host_id, Date.now() + 8 * 60 * 60 * 1000);
@@ -104,11 +110,31 @@ export class BrowserHubAccess implements HubAccessBackend {
       await this.authenticate(host, false, signal);
     }
     const client = await EncryptedHubClient.connect(this.hub_url, host, this.store.identity, this.crypto, signal);
-    try { await this.store.selectHost(host.host_id); return client; }
+    try {
+      let group: DiscoveryGroup | null | undefined;
+      try { group = await readHubDiscoveryGroup(this.hub_url, host, this.store.identity, this.crypto, signal); }
+      catch { this.checkActive(signal); }
+      this.checkActive(signal);
+      if (group !== undefined) await this.store.rememberDiscoveryGroup(host, group);
+      await this.store.selectHost(host.host_id);
+      return client;
+    }
     catch (error) { client.close(); throw error; }
   }
   forget(host_id: string) { this.enrollment_hosts.delete(host_id); this.unlocked_hosts.delete(host_id); return this.store.forgetHost(host_id); }
   resolve(machine_address: string, signal: AbortSignal) { return resolveBrowserMachine(this.hub_url, machine_address, signal); }
+  async discover(group: DiscoveryGroup, signal: AbortSignal) {
+    this.checkActive(signal);
+    const reference = validateDiscoveryGroup(group);
+    await this.store.refresh();
+    this.checkActive(signal);
+    if (!this.store.hosts.some((host) => host.discovery_group && discoveryGroupKey(host.discovery_group) === discoveryGroupKey(reference))) {
+      throw new Error("Pair a machine in this group before discovering its machines.");
+    }
+    const result = await discoverBrowserGroup(this.hub_url, reference, signal);
+    this.checkActive(signal);
+    return result;
+  }
   async rememberMetadata(machine: ResolvedMachine, signal: AbortSignal) {
     const resolved = await this.resolve(machine.machine_address, signal);
     checkCancelled(signal);
@@ -131,6 +157,13 @@ export async function openHubAccess(hub_url: string): Promise<HubAccessService> 
     forget: (host_id) => nativeHubForget(canonical, host_id),
     resolve: async (machine_address, signal) => { checkCancelled(signal); const resolved = await nativeHubResolve(canonical, machine_address); checkCancelled(signal); return validateResolvedMachine(resolved, machine_address); },
     rememberMetadata: async (machine, signal) => { checkCancelled(signal); const host = await nativeHubRememberMetadata(canonical, machine); checkCancelled(signal); return host; },
+    discover: async (group, signal) => {
+      checkCancelled(signal);
+      const reference = validateDiscoveryGroup(group);
+      const result = await nativeHubDiscover(canonical, reference);
+      checkCancelled(signal);
+      return validateDiscoveryResult(result, reference);
+    },
   });
   const crypto = await loadHubCrypto();
   return withMachineAddressing(new BrowserHubAccess(canonical, crypto, await HubDeviceStore.open(canonical, crypto)));

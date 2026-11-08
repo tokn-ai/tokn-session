@@ -8,7 +8,7 @@ use std::{
   fs::OpenOptions,
   path::{Path, PathBuf},
 };
-use tokn_hub_client_core::secure::decode_public_key;
+use tokn_hub_client_core::{discovery::DiscoveryGroup, secure::decode_public_key};
 use url::Url;
 use uuid::Uuid;
 
@@ -21,6 +21,8 @@ pub struct SavedHost {
   pub machine_address: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub name: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub discovery_group: Option<DiscoveryGroup>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -207,6 +209,36 @@ impl ClientStore {
     Ok(remembered)
   }
 
+  /// Update only metadata returned by an authenticated channel to this pin.
+  pub fn remember_discovery_group(
+    &self,
+    host_id: &str,
+    host_public_key: &str,
+    group: Option<DiscoveryGroup>,
+  ) -> Result<SavedHost, String> {
+    if let Some(group) = &group {
+      group.validate()?;
+    }
+    let path = self.path();
+    let _lock = lock(&path)?;
+    let mut state = self.read()?;
+    let host = state
+      .hubs
+      .get_mut(&self.hub)
+      .and_then(|hub| hub.hosts.iter_mut().find(|host| host.host_id == host_id))
+      .ok_or("Pair this machine before remembering its discovery group")?;
+    if host.host_public_key != host_public_key {
+      return Err("Machine key does not match its remembered identity".into());
+    }
+    if host.discovery_group == group {
+      return Ok(host.clone());
+    }
+    host.discovery_group = group;
+    let remembered = host.clone();
+    write_atomic(&path, &state)?;
+    Ok(remembered)
+  }
+
   pub fn selected_host(&self) -> Result<Option<String>, String> {
     Ok(
       self
@@ -291,6 +323,9 @@ fn validate_client_state(state: &ClientHosts) -> Result<(), String> {
 }
 
 fn validate_host_metadata(host: &SavedHost) -> Result<(), String> {
+  if let Some(group) = &host.discovery_group {
+    group.validate()?;
+  }
   if let Some(address) = &host.machine_address {
     tokn_hub_client_core::address::parse_machine_address(address)?;
   }
@@ -343,6 +378,7 @@ mod tests {
       host_public_key: NoiseIdentity::generate().unwrap().public_key(),
       machine_address: None,
       name: None,
+      discovery_group: None,
     };
     store.save_host(host.clone()).unwrap();
     store.select_host(&host.host_id).unwrap();
@@ -440,6 +476,7 @@ mod tests {
     .unwrap();
     assert_eq!(host.machine_address, None);
     assert_eq!(host.name, None);
+    assert_eq!(host.discovery_group, None);
     store.save_host(host.clone()).unwrap();
     store.select_host(&host.host_id).unwrap();
     let remembered = store
@@ -467,6 +504,7 @@ mod tests {
       host_public_key: NoiseIdentity::generate().unwrap().public_key(),
       machine_address: None,
       name: None,
+      discovery_group: None,
     };
     reopened.save_host(second.clone()).unwrap();
     assert!(
@@ -487,5 +525,35 @@ mod tests {
       .unwrap();
     assert_eq!(reopened.hosts().unwrap()[0], renamed);
     assert_eq!(reopened.selected_host().unwrap(), Some(host.host_id));
+  }
+
+  #[test]
+  fn discovery_group_survives_reconnect_and_metadata_changes_and_rejects_invalid_storage() {
+    let directory = tempfile::tempdir().unwrap();
+    let hub = Url::parse("https://hub.example").unwrap();
+    let store = ClientStore::load_or_create(directory.path(), &hub).unwrap();
+    let host = SavedHost {
+      host_id: Uuid::new_v4().to_string(),
+      host_public_key: NoiseIdentity::generate().unwrap().public_key(),
+      machine_address: None,
+      name: None,
+      discovery_group: Some(DiscoveryGroup {
+        namespace: "personal".into(),
+        secret_digest: tokn_hub_client_core::protocol::encode(&[3; 32]),
+      }),
+    };
+    store.save_host(host.clone()).unwrap();
+    let mut reconnect = host.clone();
+    reconnect.discovery_group = None;
+    store.save_host(reconnect).unwrap();
+    let remembered = store
+      .remember_metadata(&host.host_id, "alice:laptop", "Laptop")
+      .unwrap();
+    assert_eq!(remembered.discovery_group, host.discovery_group);
+    let reopened = ClientStore::load_or_create(directory.path(), &hub).unwrap();
+    assert_eq!(reopened.hosts().unwrap(), vec![remembered]);
+    let mut invalid = host;
+    invalid.discovery_group.as_mut().unwrap().secret_digest = "short".into();
+    assert!(reopened.save_host(invalid).is_err());
   }
 }

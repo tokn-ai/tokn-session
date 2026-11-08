@@ -339,6 +339,7 @@ async fn encrypted_registration_proof_binds_uuid_and_reports_replacement_or_revo
       public_key,
       name: "Host".into(),
       allow_control: false,
+      discovery_group: None,
       signature: protocol::encode(&signing_key.sign(&proof).to_bytes()),
     };
     socket
@@ -369,6 +370,63 @@ async fn encrypted_registration_proof_binds_uuid_and_reports_replacement_or_revo
     assert!(tunnels.pending().is_empty());
   }
   assert!(store.hosts().unwrap().is_empty());
+  tunnels.shutdown();
+  task.abort();
+}
+
+#[tokio::test]
+async fn encrypted_registration_proof_binds_discovery_group_and_cannot_be_stripped() {
+  use tokn_hub_client_core::discovery::DiscoveryGroup;
+  let directory = tempfile::tempdir().unwrap();
+  let store = Store::open(directory.path().join("hub.sqlite")).unwrap();
+  let tunnels = HubTunnels::new(store.clone());
+  let (mut endpoint, task) = hub(tunnels.clone()).await;
+  endpoint.set_scheme("ws").unwrap();
+  endpoint.set_path(protocol::TUNNEL_PATH);
+  let host_id = uuid::Uuid::new_v4().to_string();
+  let key = SigningKey::generate(&mut OsRng);
+  let public_key = protocol::encode(key.verifying_key().as_bytes());
+  let group = DiscoveryGroup {
+    namespace: "personal".into(),
+    secret_digest: protocol::encode(&[1; 32]),
+  };
+  let other = DiscoveryGroup {
+    namespace: "personal".into(),
+    secret_digest: protocol::encode(&[2; 32]),
+  };
+  for sent_group in [Some(other), None, Some(group.clone())] {
+    let (mut socket, _) = connect_async(endpoint.as_str()).await.unwrap();
+    let Some(Frame::Challenge { nonce, .. }) = next_frame(&mut socket).await else {
+      panic!("challenge missing")
+    };
+    let signature = key.sign(&protocol::discovery_registration_proof(
+      &nonce,
+      &host_id,
+      &public_key,
+      "Host",
+      false,
+      Some(&group),
+    ));
+    let expected = sent_group.as_ref() == Some(&group);
+    let frame = Frame::Register {
+      version: protocol::VERSION,
+      host_id: host_id.clone(),
+      public_key: public_key.clone(),
+      name: "Host".into(),
+      allow_control: false,
+      discovery_group: sent_group,
+      signature: protocol::encode(&signature.to_bytes()),
+    };
+    socket
+      .send(ClientMessage::Text(serde_json::to_string(&frame).unwrap().into()))
+      .await
+      .unwrap();
+    assert_eq!(
+      matches!(next_frame(&mut socket).await, Some(Frame::Ready { .. })),
+      expected
+    );
+  }
+  assert_eq!(store.discover_machines(&group).unwrap().len(), 1);
   tunnels.shutdown();
   task.abort();
 }

@@ -79,6 +79,9 @@ impl Harness {
     Self::start_with_event_failures(0).await
   }
   async fn start_with_event_failures(event_failures: usize) -> Self {
+    Self::start_with_options(event_failures, None).await
+  }
+  async fn start_with_options(event_failures: usize, namespace: Option<&str>) -> Self {
     let directory = tempfile::tempdir().unwrap();
     let event_attempts = Arc::new(AtomicUsize::new(0));
     let attempts = event_attempts.clone();
@@ -151,6 +154,7 @@ impl Harness {
       allow_control: false,
       insecure_loopback: true,
       ice_servers: Vec::new(),
+      discovery_namespace: namespace.map(str::to_owned),
       passkey_origin: Some(hub_url.clone()),
     }
     .save(&host_dir.join("host.json"))
@@ -199,6 +203,122 @@ impl Harness {
   fn manager(&self, name: &str) -> RemoteManager {
     RemoteManager::new(self.directory.path().join(name))
   }
+
+  async fn add_discovery_host(&mut self, name: &str, shared_seed: bool) -> (String, String, TotpSecret) {
+    let directory = self.directory.path().join(name);
+    std::fs::create_dir(&directory).unwrap();
+    let secret = if shared_seed {
+      TotpSecret::from_base32(&self.secret.to_base32()).unwrap()
+    } else {
+      TotpSecret::generate()
+    };
+    let original = HostProfile::load(&self.directory.path().join("host/host.json"))
+      .unwrap()
+      .unwrap();
+    let host_id = uuid::Uuid::new_v4().to_string();
+    let noise_key = directory.join("host-noise.key");
+    let host_key = NoiseIdentity::load_or_create(&noise_key).unwrap().public_key();
+    onboarding::initialize_host_access(&directory.join("host-access.json"), &secret).unwrap();
+    HostProfile {
+      host_id: host_id.clone(),
+      name: name.into(),
+      ..original.clone()
+    }
+    .save(&directory.join("host.json"))
+    .unwrap();
+    let config = ConnectorConfig {
+      hub_url: self.hub_url.parse().unwrap(),
+      local_url: original.viewer_url.parse().unwrap(),
+      key_file: directory.join("host-enrollment.key"),
+      name: name.into(),
+      local_token: None,
+      allow_control: false,
+      insecure_loopback: true,
+      ice_servers: Vec::new(),
+      secure: None,
+      paired: Some(PairedHostConfig {
+        host_id: host_id.clone(),
+        noise_key_file: noise_key,
+        state_file: directory.join("host-access.json"),
+      }),
+    };
+    let stop = self.stop.clone();
+    self.tasks.push(tokio::spawn(async move {
+      connector::run(config, stop).await.unwrap();
+    }));
+    tokio::time::timeout(Duration::from_secs(5), async {
+      while !self.hub_state.tunnels.online(&host_id) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+      }
+    })
+    .await
+    .unwrap();
+    (host_id, host_key, secret)
+  }
+}
+
+#[tokio::test]
+async fn discovering_shared_seed_hosts_never_pairs_an_additional_machine() {
+  let mut harness = Harness::start_with_options(0, Some("personal")).await;
+  let (second_id, second_key, second_secret) = harness.add_discovery_host("second", true).await;
+  let (other_id, _, _) = harness.add_discovery_host("other", false).await;
+  let manager = harness.manager("app");
+  let current = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .unwrap()
+    .as_secs();
+  let first = manager
+    .pair(
+      &harness.hub_url,
+      &harness.host_id,
+      harness.secret.code_at(current),
+      Some(&harness.host_key),
+    )
+    .await
+    .unwrap();
+  let group = first
+    .discovery_group
+    .clone()
+    .expect("paired host supplied discovery reference");
+  let result = manager.discover(&harness.hub_url, &group).await.unwrap();
+  assert_eq!(result.machines.len(), 2);
+  assert!(result.machines.iter().all(|machine| machine.online));
+  assert!(result.machines.iter().any(|machine| machine.host_id == second_id));
+  assert!(!result.machines.iter().any(|machine| machine.host_id == other_id));
+  assert_eq!(manager.status(&harness.hub_url).await.unwrap().hosts.len(), 1);
+  assert!(
+    manager
+      .open(&harness.hub_url, &second_id, None, Arc::new(|_, _| {}))
+      .await
+      .is_err()
+  );
+  let second_access = harness.directory.path().join("second/host-access.json");
+  let client_key = manager.status(&harness.hub_url).await.unwrap().device_public_key;
+  assert!(!onboarding::is_authorized(&second_access, &client_key).unwrap());
+  let second = manager
+    .pair(
+      &harness.hub_url,
+      &second_id,
+      second_secret.code_at(current),
+      Some(&second_key),
+    )
+    .await
+    .unwrap();
+  assert_eq!(second.discovery_group, Some(group));
+  assert_ne!(first.host_public_key, second.host_public_key);
+  assert!(onboarding::is_authorized(&second_access, &client_key).unwrap());
+  let opened = manager
+    .open(&harness.hub_url, &second_id, None, Arc::new(|_, _| {}))
+    .await
+    .unwrap();
+  assert_eq!(
+    manager
+      .request(&opened.connection_id, "list_sessions", json!({}))
+      .await
+      .unwrap()["sessions"][0]["text"],
+    "private native history"
+  );
+  manager.close(&opened.connection_id).await;
 }
 
 #[tokio::test]
@@ -385,6 +505,7 @@ async fn named_native_pairing_alias_collision_preserves_the_previous_pin_and_sel
     host_public_key: NoiseIdentity::generate().unwrap().public_key(),
     machine_address: Some("alice:workstation".into()),
     name: Some("Original remembered host".into()),
+    discovery_group: None,
   };
   store.save_host(original.clone()).unwrap();
   store.select_host(&original.host_id).unwrap();
@@ -437,6 +558,7 @@ async fn native_passkey_ceremony_authorizes_a_new_device_on_its_original_channel
       host_public_key: harness.host_key.clone(),
       machine_address: None,
       name: None,
+      discovery_group: None,
     })
     .unwrap();
   let mut authenticator = WebauthnAuthenticator::new(SoftPasskey::new(true));
@@ -523,6 +645,7 @@ async fn native_stream_retries_transient_failures_before_its_first_ready_event()
       host_public_key: harness.host_key.clone(),
       machine_address: None,
       name: None,
+      discovery_group: None,
     })
     .unwrap();
   let info = manager
@@ -685,6 +808,7 @@ async fn authorize_native(harness: &Harness, manager: &RemoteManager, name: &str
     host_public_key: harness.host_key.clone(),
     machine_address: None,
     name: None,
+    discovery_group: None,
   })
   .unwrap();
 }

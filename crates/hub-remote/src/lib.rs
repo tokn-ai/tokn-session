@@ -15,6 +15,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 pub use tokn_hub_client_core::address::ResolvedMachine;
+pub use tokn_hub_client_core::discovery::{DiscoveredMachine, DiscoveryGroup, DiscoveryResult};
 use tokn_hub_client_core::{
   pairing::ClientPairing,
   protocol,
@@ -41,6 +42,8 @@ pub struct ConnectionInfo {
   pub endpoint: String,
   pub host_id: String,
   pub host_public_key: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub discovery_group: Option<DiscoveryGroup>,
   pub transport: TransportState,
 }
 
@@ -143,6 +146,21 @@ impl RemoteManager {
     directory::resolve(hub_url, machine_address).await
   }
 
+  /// A group becomes discoverable locally only after an authenticated pairing
+  /// supplies its reference. Directory entries never become saved host pins.
+  pub async fn discover(&self, hub_url: &str, group: &DiscoveryGroup) -> Result<DiscoveryResult, String> {
+    group.validate()?;
+    let (_, store, _) = self.stored(hub_url).await?;
+    if !store
+      .hosts()?
+      .iter()
+      .any(|host| host.discovery_group.as_ref() == Some(group))
+    {
+      return Err("Pair a machine in this discovery group first".into());
+    }
+    directory::discover(hub_url, group).await
+  }
+
   pub async fn remember_metadata(
     &self,
     hub_url: &str,
@@ -225,6 +243,7 @@ impl RemoteManager {
       host_public_key: verified.host_public_key,
       machine_address: metadata.as_ref().map(|metadata| metadata.machine_address.clone()),
       name: metadata.map(|metadata| metadata.name),
+      discovery_group: verified.discovery_group,
     };
     let saved = host.clone();
     tokio::task::spawn_blocking(move || store.save_host(saved))
@@ -250,14 +269,15 @@ impl RemoteManager {
     if host_public_key.is_some_and(|key| key != host.host_public_key) {
       return Err("Machine key does not match its remembered identity".into());
     }
-    let info = ConnectionInfo {
+    let mut info = ConnectionInfo {
       connection_id: Uuid::new_v4().to_string(),
       endpoint: format!("{}/machines/{}", hub.origin().ascii_serialization(), host_id),
-      host_id: host.host_id,
-      host_public_key: host.host_public_key,
+      host_id: host.host_id.clone(),
+      host_public_key: host.host_public_key.clone(),
+      discovery_group: host.discovery_group.clone(),
       transport: TransportState::default(),
     };
-    let connection = Arc::new(Connection {
+    let mut connection = Connection {
       endpoint: secure_endpoint(&hub, host_id)?,
       info: info.clone(),
       identity,
@@ -266,11 +286,23 @@ impl RemoteManager {
       listening: std::sync::atomic::AtomicBool::new(false),
       sink,
       direct: direct::DirectRoute::default(),
-    });
+    };
     let health = connection.request("health", json!({})).await?;
     if health.get("version").and_then(Value::as_u64) != Some(1) {
       return Err("Machine uses an unsupported viewer API version".into());
     }
+    if let Ok(group) = discovery_group(&hub, &connection.identity, &host).await {
+      let host_id = host.host_id;
+      let host_public_key = host.host_public_key;
+      let store_copy = store.clone();
+      info.discovery_group =
+        tokio::task::spawn_blocking(move || store_copy.remember_discovery_group(&host_id, &host_public_key, group))
+          .await
+          .map_err(|error| error.to_string())??
+          .discovery_group;
+    }
+    connection.info = info.clone();
+    let connection = Arc::new(connection);
     store.select_host(host_id)?;
     let mut connections = self.connections.lock().await;
     if connections.len() >= 16 {
@@ -388,7 +420,8 @@ impl RemoteManager {
     let (hub, store, identity) = self.stored(hub_url).await?;
     validate_host(host_id)?;
     tokn_hub_client_core::secure::decode_public_key(host_public_key)?;
-    if let Some(saved) = store.hosts()?.iter().find(|host| host.host_id == host_id) {
+    let saved_host = store.hosts()?.into_iter().find(|host| host.host_id == host_id);
+    if let Some(saved) = &saved_host {
       if saved.host_public_key != host_public_key {
         return Err("Machine key does not match its remembered identity".into());
       }
@@ -438,12 +471,13 @@ impl RemoteManager {
           socket,
           channel,
           store,
-          host: SavedHost {
+          host: saved_host.unwrap_or_else(|| SavedHost {
             host_id: host_id.into(),
             host_public_key: host_public_key.into(),
             machine_address: None,
             name: None,
-          },
+            discovery_group: None,
+          }),
           register,
         })),
         cancellation: CancellationToken::new(),
@@ -480,6 +514,32 @@ impl RemoteManager {
       authentication.cancellation.cancel();
     }
   }
+}
+
+async fn discovery_group(
+  hub: &Url,
+  identity: &NoiseIdentity,
+  host: &SavedHost,
+) -> Result<Option<DiscoveryGroup>, String> {
+  tokio::time::timeout(Duration::from_secs(5), async {
+    let mut socket = connect(&secure_endpoint(hub, &host.host_id)?).await?;
+    let mut initiator = NoiseInitiator::new(identity, &host.host_public_key)?;
+    send(&mut socket, initiator.start()?).await?;
+    let mut channel = initiator.finish(&receive(&mut socket).await?)?;
+    send(&mut socket, channel.encrypt(&InnerMessage::DiscoveryRequest {})?).await?;
+    match channel.decrypt(&receive(&mut socket).await?)? {
+      InnerMessage::DiscoveryResponse { group } => {
+        if let Some(group) = &group {
+          group.validate()?;
+        }
+        Ok(group)
+      }
+      InnerMessage::Error { message } => Err(message),
+      _ => Err("Machine returned invalid discovery metadata".into()),
+    }
+  })
+  .await
+  .map_err(|_| "Machine discovery metadata timed out".to_owned())?
 }
 
 impl Authentication {
@@ -601,6 +661,7 @@ mod inventory_tests {
         endpoint: "https://hub.example/machines/example".into(),
         host_id: "example".into(),
         host_public_key: identity.public_key(),
+        discovery_group: None,
         transport: TransportState::default(),
       },
       endpoint: Url::parse("wss://hub.example/hub/v1/secure/example").unwrap(),

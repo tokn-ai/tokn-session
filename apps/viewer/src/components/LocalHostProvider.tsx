@@ -70,6 +70,7 @@ export function LocalHostProvider({ children }: { children: ReactNode }) {
     try {
       const next = hosting ? await stopLocalHost() : await startLocalHost({
         hub_url: settings.hub_url.trim(), name: settings.name.trim(), allow_control: settings.allow_control,
+        ...(settings.discovery_namespace !== undefined ? { discovery_namespace: settings.discovery_namespace?.trim() ?? "" } : {}),
       });
       if (alive.current && before === revision.current) { revision.current++; setStatus(next); }
     } catch (error) {

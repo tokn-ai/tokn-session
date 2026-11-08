@@ -65,6 +65,9 @@ enum Command {
     hub: Option<Url>,
     #[arg(long)]
     name: Option<String>,
+    /// Discover hosts with the same namespace and authenticator seed. Empty clears it.
+    #[arg(long = "namespace", conflicts_with_all = ["trusted_hub", "owner_public_key"])]
+    discovery_namespace: Option<String>,
     #[arg(long)]
     viewer_url: Option<Url>,
     /// Stable Hub browser origin for host passkeys; defaults to --hub when it uses a hostname.
@@ -286,6 +289,7 @@ async fn run(args: Args) -> Result<(), String> {
     Command::Connect {
       hub,
       name,
+      discovery_namespace,
       viewer_url,
       passkey_origin,
       ice_servers,
@@ -309,6 +313,7 @@ async fn run(args: Args) -> Result<(), String> {
         let config = cli_onboarding::prepare_host(cli_onboarding::HostOptions {
           hub,
           name,
+          discovery_namespace,
           viewer_url,
           passkey_origin,
           ice_servers,
