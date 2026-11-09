@@ -20,6 +20,7 @@ use std::{
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
+use tokn_hub_client_core::presence::MachinePresence;
 
 const PAIR_LIFETIME: Duration = Duration::from_secs(300);
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -66,6 +67,7 @@ struct Connection {
   next_id: std::sync::atomic::AtomicU64,
   allow_control: bool,
   secure_only: std::sync::atomic::AtomicBool,
+  connector_version: Option<String>,
   shutdown: CancellationToken,
 }
 
@@ -217,6 +219,24 @@ impl HubTunnels {
       .is_some_and(|connection| !connection.shutdown.is_cancelled())
   }
 
+  pub(crate) fn machine_presence(&self, host_id: String, include_version: bool) -> MachinePresence {
+    let inner = self.inner.lock().unwrap();
+    let connection = inner
+      .online
+      .get(&host_id)
+      .filter(|connection| !connection.shutdown.is_cancelled());
+    let connector_version = if include_version {
+      connection.and_then(|connection| connection.connector_version.clone())
+    } else {
+      None
+    };
+    MachinePresence {
+      host_id,
+      online: connection.is_some(),
+      connector_version,
+    }
+  }
+
   pub fn access(&self, host_id: &str) -> Option<String> {
     self
       .inner
@@ -254,7 +274,11 @@ impl HubTunnels {
     }
   }
 
-  pub async fn handle_socket(&self, mut socket: WebSocket) {
+  pub async fn handle_socket(&self, socket: WebSocket) {
+    self.handle_socket_with_version(socket, None).await;
+  }
+
+  pub(crate) async fn handle_socket_with_version(&self, mut socket: WebSocket, connector_version: Option<String>) {
     let Ok(handshake_permit) = self.handshakes.clone().try_acquire_owned() else {
       return;
     };
@@ -311,6 +335,7 @@ impl HubTunnels {
         next_id: std::sync::atomic::AtomicU64::new(1),
         allow_control: allow_control && stored.access == "control",
         secure_only: std::sync::atomic::AtomicBool::new(encrypted_registration),
+        connector_version,
         shutdown: self.shutdown.child_token(),
       });
       if let Some(previous) = inner.online.insert(record.host_id.clone(), connection.clone()) {

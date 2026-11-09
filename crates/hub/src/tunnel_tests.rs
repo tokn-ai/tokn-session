@@ -1373,6 +1373,7 @@ async fn blind_channels_accept_opaque_bytes_and_cancel_only_the_saturated_channe
     next_id: std::sync::atomic::AtomicU64::new(1),
     allow_control: false,
     secure_only: AtomicBool::new(false),
+    connector_version: None,
     shutdown: CancellationToken::new(),
   });
   let (sender, mut received) = mpsc::channel(1);

@@ -19,7 +19,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 use tokn_hub_client_core::{
   discovery::{DiscoveredMachine, DiscoveryGroup, DiscoveryResult},
   pairing::{ClientKind, HostPairing, TotpSecret, is_pairing_record},
-  presence::{MachinePresence, PresenceRequest, PresenceResult},
+  presence::{MachinePresence, PRESENCE_VERSIONS_HEADER, PresenceRequest, PresenceResult},
   protocol,
   secure::{InnerMessage, MAX_CHUNK, NoiseIdentity, NoiseResponder},
 };
@@ -193,6 +193,7 @@ impl Services {
             json!([
               {"name":"Content-Type","value":"application/json"},
               {"name":"Accept","value":"application/json"},
+              {"name":PRESENCE_VERSIONS_HEADER,"value":"1"},
             ])
           );
           let body: Vec<u8> = serde_json::from_value(params["body"].clone()).unwrap();
@@ -205,6 +206,7 @@ impl Services {
               .into_iter()
               .map(|host_id| MachinePresence {
                 online: host_id == HOST_ID,
+                connector_version: (host_id == HOST_ID).then(|| "0.1.1".into()),
                 host_id,
               })
               .collect(),
@@ -501,7 +503,7 @@ async fn interpreted_guest_pairs_streams_reuses_view_connections_and_never_repla
   assert_eq!(
     presence,
     json!({"machines":[
-      {"host_id":HOST_ID,"online":true},
+      {"host_id":HOST_ID,"online":true,"connector_version":"0.1.1"},
       {"host_id":unpaired_id,"online":false},
     ]})
   );
@@ -529,6 +531,7 @@ async fn interpreted_guest_pairs_streams_reuses_view_connections_and_never_repla
     machines: vec![MachinePresence {
       host_id: unpaired_id.into(),
       online: true,
+      connector_version: None,
     }],
   });
   assert!(

@@ -21,7 +21,9 @@ never trigger directory requests.
 All gallery cards use batched Hub connector presence, including saved UUID-only
 machines outside discovery groups. Checks refresh every 15 seconds while visible
 and on focus; failures show **Status unavailable**, never an inferred offline
-state. Browser, desktop and Apell share the bounded presence contract.
+state. Browser, desktop and Apell share the bounded presence contract. The Hub
+and connector exchange package versions during the WebSocket upgrade. The
+gallery displays the live connector version when the Hub reports one.
 Browser and guest WASM builds share compiler path remapping so local builds can
 be packaged without embedding workstation source paths.
 

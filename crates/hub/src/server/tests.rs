@@ -590,6 +590,10 @@ async fn passkey_owner_routes_multiple_hosts_and_logout_stops_live_streams() {
   }
   let enrolled = state.store.hosts().unwrap();
   wait_until(|| enrolled.iter().all(|host| state.tunnels.online(&host.host_id))).await;
+  for host in &enrolled {
+    let presence = state.tunnels.machine_presence(host.host_id.clone(), true);
+    assert_eq!(presence.connector_version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+  }
   let host_list = json_body(get(app.clone(), "/hub/v1/hosts", Some(&token)).await).await;
   assert_eq!(host_list["hosts"].as_array().unwrap().len(), 2);
   assert!(

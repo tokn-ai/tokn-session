@@ -8,7 +8,7 @@ use tokn_hub_client_core::{
   address::ResolvedMachine,
   discovery::{DiscoveryGroup, DiscoveryResult, MAX_DISCOVERY_RESPONSE},
   pairing::ClientPairing,
-  presence::{MAX_PRESENCE_RESPONSE, PresenceRequest, PresenceResult},
+  presence::{MAX_PRESENCE_RESPONSE, PRESENCE_VERSIONS_HEADER, PresenceRequest, PresenceResult},
   protocol,
   secure::{NoiseIdentity, decode_public_key},
 };
@@ -295,7 +295,17 @@ pub async fn presence(params: Value) -> Result<Value, String> {
   let body = serde_json::to_vec(&request).map_err(|_| "Could not encode Hub presence request")?;
   let response: Value = host::call(
     "http.request",
-    json!({"url":endpoint.as_str(),"method":"POST","headers":[{"name":"Content-Type","value":"application/json"},{"name":"Accept","value":"application/json"}],"body":body,"timeout_ms":10000}),
+    json!({
+      "url": endpoint.as_str(),
+      "method": "POST",
+      "headers": [
+        {"name": "Content-Type", "value": "application/json"},
+        {"name": "Accept", "value": "application/json"},
+        {"name": PRESENCE_VERSIONS_HEADER, "value": "1"},
+      ],
+      "body": body,
+      "timeout_ms": 10000,
+    }),
   )
   .await?;
   let bytes = directory_body(response, MAX_PRESENCE_RESPONSE)?;

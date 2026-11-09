@@ -19,7 +19,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use tokn_hub_client_core::address::ResolvedMachine;
-use tokn_hub_client_core::presence::{MachinePresence, PresenceRequest, PresenceResult};
+use tokn_hub_client_core::presence::{
+  CONNECTOR_VERSION_HEADER, HUB_VERSION_HEADER, PRESENCE_VERSIONS_HEADER, PresenceRequest, PresenceResult,
+  valid_software_version,
+};
 use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -326,14 +329,13 @@ async fn machine_presence(
   request
     .validate()
     .map_err(|message| error(StatusCode::BAD_REQUEST, message))?;
+  // Earlier native clients require the original response shape.
+  let include_version = headers.get(PRESENCE_VERSIONS_HEADER).is_some_and(|value| value == "1");
   Ok(Json(PresenceResult {
     machines: request
       .host_ids
       .into_iter()
-      .map(|host_id| MachinePresence {
-        online: state.tunnels.online(&host_id),
-        host_id,
-      })
+      .map(|host_id| state.tunnels.machine_presence(host_id, include_version))
       .collect(),
   }))
 }
@@ -370,10 +372,24 @@ async fn tunnel(State(state): State<HubState>, headers: HeaderMap, websocket: We
   if headers.contains_key(header::ORIGIN) {
     return error(StatusCode::FORBIDDEN, "Browser tunnel connections are not supported").into_response();
   }
-  websocket
+  let connector_version = headers
+    .get(CONNECTOR_VERSION_HEADER)
+    .and_then(|value| value.to_str().ok())
+    .filter(|version| valid_software_version(version))
+    .map(str::to_owned);
+  let mut response = websocket
     .max_message_size(2 * 1024 * 1024)
     .max_frame_size(2 * 1024 * 1024)
-    .on_upgrade(move |socket| async move { state.tunnels.handle_socket(socket).await })
+    .on_upgrade(move |socket| async move {
+      state
+        .tunnels
+        .handle_socket_with_version(socket, connector_version)
+        .await;
+    });
+  response
+    .headers_mut()
+    .insert(HUB_VERSION_HEADER, HeaderValue::from_static(env!("CARGO_PKG_VERSION")));
+  response
 }
 
 async fn secure_tunnel(

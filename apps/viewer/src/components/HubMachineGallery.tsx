@@ -80,8 +80,11 @@ export function HubMachineGallery({ service, hosts, busy, opening_host_id, on_op
             <span className="hub-machine-card__trust">{host ? "Paired" : "Pairing required"}</span></div>
           <div className="hub-machine-card__identity"><h3>{label}</h3>
             {host?.machine_address && host.name && host.name !== host.machine_address && <p>{host.name}</p>}
-            <span className={`hub-machine-card__presence${status.state === "online" ? " is-online" : ""}`} title={status.error ?? "Connector status reported by the Hub"}>
-              {status.state === "checking" ? "Checking…" : status.state === "unavailable" ? "Status unavailable" : status.state === "online" ? "Online" : "Offline"}
+            <span className={`hub-machine-card__presence${status.state === "online" ? " is-online" : ""}`}>
+              <span title={status.error ?? "Connector status reported by the Hub"}>
+                {status.state === "checking" ? "Checking…" : status.state === "unavailable" ? "Status unavailable" : status.state === "online" ? "Online" : "Offline"}
+              </span>
+              {status.connector_version && <span className="hub-machine-card__version" title="Connector version">· v{status.connector_version}</span>}
             </span>
           </div>
           {machine.groups.size > 0 && <div className="hub-machine-card__groups" aria-label="Discovery groups">{[...machine.groups].map(([key, group]) => <span key={key} title={`${group.namespace} · ${group.secret_digest}`}>{groupLabel(group, namespaces)}</span>)}</div>}

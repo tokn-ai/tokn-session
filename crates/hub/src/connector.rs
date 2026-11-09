@@ -20,9 +20,10 @@ use tokio::{
 };
 use tokio_tungstenite::{
   MaybeTlsStream, WebSocketStream, connect_async_with_config,
-  tungstenite::{Message, protocol::WebSocketConfig},
+  tungstenite::{Message, client::IntoClientRequest, http::HeaderValue, protocol::WebSocketConfig},
 };
 use tokio_util::sync::CancellationToken;
+use tokn_hub_client_core::presence::{CONNECTOR_VERSION_HEADER, HUB_VERSION_HEADER, valid_software_version};
 use url::{Host, Url};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -330,13 +331,26 @@ async fn connect_once(
   let ws_config = WebSocketConfig::default()
     .max_message_size(Some(protocol::MAX_FRAME))
     .max_frame_size(Some(protocol::MAX_FRAME));
-  let (mut socket, _) = tokio::time::timeout(
+  let mut request = endpoint
+    .as_str()
+    .into_client_request()
+    .map_err(|e| format!("Could not build Hub request: {e}"))?;
+  request.headers_mut().insert(
+    CONNECTOR_VERSION_HEADER,
+    HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
+  );
+  let (mut socket, response) = tokio::time::timeout(
     Duration::from_secs(15),
-    connect_async_with_config(endpoint.as_str(), Some(ws_config), false),
+    connect_async_with_config(request, Some(ws_config), false),
   )
   .await
   .map_err(|_| "Hub connection timed out")?
   .map_err(|e| format!("Could not connect to Hub: {e}"))?;
+  let hub_version = response
+    .headers()
+    .get(HUB_VERSION_HEADER)
+    .and_then(|value| value.to_str().ok())
+    .filter(|version| valid_software_version(version));
   tokio::time::timeout(Duration::from_secs(10), authenticate(&mut socket, config, key))
     .await
     .map_err(|_| "Hub authentication timed out")??;
@@ -370,6 +384,9 @@ async fn connect_once(
                 notify(status, ConnectorStatus::Online);
                 if secure.is_some() { enqueue(&outgoing, Frame::SecureOnly {}).await?; }
                 eprintln!("Connected to Hub as {host_id} ({})", if config.allow_control && allow_control { "control enabled" } else { "view access" });
+                if let Some(version) = hub_version {
+                  eprintln!("Hub version: {version}");
+                }
               }
               Frame::Request { request_id, method, path, body } if ready => {
                 if secure.is_some() {

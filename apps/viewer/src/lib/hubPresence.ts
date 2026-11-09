@@ -1,7 +1,7 @@
 import type { PresenceRequest, PresenceResult } from "./types";
 
 export const MAX_PRESENCE_HOSTS = 128;
-const MAX_RESPONSE = 16 * 1024;
+const MAX_RESPONSE = 24 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export function validatePresenceIds(host_ids: string[]): void {
@@ -22,7 +22,16 @@ export function validatePresenceResult(value: unknown, host_ids: string[]): Pres
       || typeof machine.online !== "boolean" || !remaining.delete(machine.host_id)) {
       throw new Error("Hub returned invalid machine presence.");
     }
-    return { host_id: machine.host_id, online: machine.online };
+    const { connector_version } = machine;
+    if (connector_version !== undefined && (
+      !machine.online || typeof connector_version !== "string" || connector_version.length > 64
+      || !/^[0-9]/.test(connector_version) || /[^A-Za-z0-9.+-]/.test(connector_version)
+    )) throw new Error("Hub returned an invalid connector version.");
+    return {
+      host_id: machine.host_id,
+      online: machine.online,
+      ...(connector_version === undefined ? {} : { connector_version }),
+    };
   });
   return { machines: validated };
 }
@@ -38,7 +47,8 @@ export async function loadBrowserPresence(hub_url: string, host_ids: string[], s
   try {
     const request: PresenceRequest = { host_ids };
     const response = await fetch(`${hub_url}/hub/v1/presence`, {
-      method: "POST", body: JSON.stringify(request), headers: { Accept: "application/json", "Content-Type": "application/json" },
+      method: "POST", body: JSON.stringify(request),
+      headers: { Accept: "application/json", "Content-Type": "application/json", "X-Tokn-Presence-Versions": "1" },
       signal: controller.signal, credentials: "omit", redirect: "error", cache: "no-store",
     });
     if (!response.ok) throw new Error(`Could not check machine presence (${response.status}).`);

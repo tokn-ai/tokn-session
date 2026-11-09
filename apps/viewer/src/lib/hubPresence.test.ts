@@ -20,8 +20,13 @@ it("bounds requests to unique canonical UUIDs and accepts the full batch", () =>
 it("requires exactly the requested identities and strips directory authority fields", () => {
   expect(validatePresenceResult({ machines: [
     { host_id: second, online: false, host_public_key: "untrusted", name: "Untrusted name" },
-    { host_id: first, online: true },
-  ] }, [first, second])).toEqual({ machines: [{ host_id: second, online: false }, { host_id: first, online: true }] });
+    { host_id: first, online: true, connector_version: "0.1.1-beta.2+build" },
+  ] }, [first, second])).toEqual({
+    machines: [
+      { host_id: second, online: false },
+      { host_id: first, online: true, connector_version: "0.1.1-beta.2+build" },
+    ],
+  });
   for (const value of [null, [], {}, { machines: [] },
     { machines: [{ host_id: first, online: true }] },
     { machines: [{ host_id: first, online: true }, { host_id: first, online: false }] },
@@ -30,6 +35,12 @@ it("requires exactly the requested identities and strips directory authority fie
     { machines: [{ host_id: first, online: true }, null] },
   ]) expect(() => validatePresenceResult(value, [first, second])).toThrow();
   expect(validatePresenceResult({ machines: [] }, [])).toEqual({ machines: [] });
+  for (const connector_version of ["1".repeat(65), "0.1.1\n", "v0.1.1", 1]) {
+    expect(() => validatePresenceResult({ machines: [{ host_id: first, online: true, connector_version }] }, [first])).toThrow("connector version");
+  }
+  expect(() => validatePresenceResult({
+    machines: [{ host_id: first, online: false, connector_version: "0.1.1" }],
+  }, [first])).toThrow("connector version");
 });
 
 it("sends bounded presence IDs without credentials and treats a successful false result as offline", async () => {
@@ -38,7 +49,7 @@ it("sends bounded presence IDs without credentials and treats a successful false
   expect(await loadBrowserPresence("https://hub.example", [first], new AbortController().signal)).toEqual({ machines: [{ host_id: first, online: false }] });
   expect(fetcher).toHaveBeenCalledWith("https://hub.example/hub/v1/presence", expect.objectContaining({
     method: "POST", body: JSON.stringify({ host_ids: [first] }), credentials: "omit", redirect: "error", cache: "no-store",
-    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    headers: { Accept: "application/json", "Content-Type": "application/json", "X-Tokn-Presence-Versions": "1" },
   }));
   expect(await loadBrowserPresence("https://hub.example", [], new AbortController().signal)).toEqual({ machines: [] });
   expect(fetcher).toHaveBeenCalledOnce();
@@ -55,7 +66,7 @@ it("does not translate server or transport failures into offline presence", asyn
 it("rejects oversized, non-JSON and incomplete responses", async () => {
   const fetcher = vi.fn();
   vi.stubGlobal("fetch", fetcher);
-  fetcher.mockResolvedValue(new Response(" ".repeat(16 * 1024 + 1), { headers: { "Content-Type": "application/json" } }));
+  fetcher.mockResolvedValue(new Response(" ".repeat(24 * 1024 + 1), { headers: { "Content-Type": "application/json" } }));
   await expect(loadBrowserPresence("https://hub.example", [first], new AbortController().signal)).rejects.toThrow("too large");
   fetcher.mockResolvedValue(new Response("<html>Not presence</html>", { headers: { "Content-Type": "text/html" } }));
   await expect(loadBrowserPresence("https://hub.example", [first], new AbortController().signal)).rejects.toThrow("invalid machine presence");

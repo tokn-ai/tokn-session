@@ -10,7 +10,8 @@
 .hub-machine-card__identity { min-width: 0; }
 .hub-machine-card__identity h3 { margin: 0; font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
 .hub-machine-card__identity p { margin: 6px 0 0; color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
-.hub-machine-card__presence { display: inline-flex; align-items: center; gap: 6px; margin-top: 9px; color: var(--text-muted); font-size: 12px; }
+.hub-machine-card__presence { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 9px; color: var(--text-muted); font-size: 12px; }
+.hub-machine-card__version { min-width: 0; overflow-wrap: anywhere; }
 .hub-machine-card__presence::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); }
 .hub-machine-card__presence.is-online::before { background: var(--codex); }
 .hub-machine-card__groups { display: flex; flex-wrap: wrap; gap: 5px; }

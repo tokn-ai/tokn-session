@@ -148,14 +148,18 @@ no remote recovery bypass; preserve an additional passkey before that happens.
 - Public `GET /hub/v1/resolve/alice/macbook` returns `host_id`, `machine_address`,
   `name`, and `online`. No directory key establishes encryption trust.
 - Public `POST /hub/v1/presence` accepts `{"host_ids":["UUID"]}` for up to 128
-  unique canonical machine IDs and returns only `host_id`/`online` rows for those
-  IDs. Unknown or revoked hosts are offline; no catalog, key or session access is
-  exposed. Browser origins are checked and responses are not cached.
+  unique canonical machine IDs and returns `host_id` and `online` for those IDs.
+  A request with `X-Tokn-Presence-Versions: 1` also receives `connector_version`
+  when the active connector reports it. Unknown or revoked hosts are offline.
+  Browser origins are checked and responses are not cached.
 - `GET /hub/v1/enrollments` lists pending connections. Authenticated
   `POST /hub/v1/enrollments/approve` accepts `{"pairing_code":"…"}`.
 - `/hosts/<host_id>/api/v1/<command>` forwards the existing viewer API.
   The browser's Hub bearer credential stays at the Hub.
 - `/hub/v1/tunnel` is the native connector's versioned WebSocket transport.
+  Its upgrade exchanges package versions through `X-Tokn-Connector-Version`
+  on the request and `X-Tokn-Hub-Version` on the response. The Hub retains the
+  connector version with its authenticated live connection.
 
 Forwarding uses an exact viewer-route allowlist, bounded bodies, bounded
 in-flight requests and streaming queues. The connector independently checks

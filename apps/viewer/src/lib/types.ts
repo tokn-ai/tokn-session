@@ -91,6 +91,7 @@ export interface PresenceRequest {
 export interface MachinePresence {
   host_id: string;
   online: boolean;
+  connector_version?: string;
 }
 
 export interface PresenceResult {

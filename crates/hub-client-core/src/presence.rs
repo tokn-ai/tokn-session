@@ -4,7 +4,18 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 pub const MAX_PRESENCE_HOSTS: usize = 128;
-pub const MAX_PRESENCE_RESPONSE: usize = 16 * 1024;
+pub const MAX_PRESENCE_RESPONSE: usize = 24 * 1024;
+pub const CONNECTOR_VERSION_HEADER: &str = "x-tokn-connector-version";
+pub const HUB_VERSION_HEADER: &str = "x-tokn-hub-version";
+pub const PRESENCE_VERSIONS_HEADER: &str = "x-tokn-presence-versions";
+
+pub fn valid_software_version(version: &str) -> bool {
+  version.len() <= 64
+    && version.as_bytes().first().is_some_and(u8::is_ascii_digit)
+    && version
+      .bytes()
+      .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +47,8 @@ impl PresenceRequest {
 pub struct MachinePresence {
   pub host_id: String,
   pub online: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub connector_version: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +71,13 @@ impl PresenceResult {
         || !seen.insert(machine.host_id.as_str())
       {
         return Err("Hub presence response contains a different machine set".into());
+      }
+      if machine
+        .connector_version
+        .as_deref()
+        .is_some_and(|version| !machine.online || !valid_software_version(version))
+      {
+        return Err("Hub presence response contains an invalid connector version".into());
       }
     }
     Ok(())
@@ -102,10 +122,12 @@ mod tests {
         MachinePresence {
           host_id: FIRST.into(),
           online: true,
+          connector_version: Some("0.1.1-rc.1+abc".into()),
         },
         MachinePresence {
           host_id: SECOND.into(),
           online: false,
+          connector_version: None,
         },
       ],
     };
@@ -120,10 +142,40 @@ mod tests {
       machines: vec![MachinePresence {
         host_id: FIRST.to_uppercase(),
         online: true,
+        connector_version: None,
       }],
     };
     assert!(invalid.validate_for(&[FIRST.into()]).is_err());
     assert!(PresenceResult { machines: vec![] }.validate_for(&[]).is_ok());
+  }
+
+  #[test]
+  fn connector_versions_require_a_live_host_and_fit_the_batch_budget() {
+    let mut result = PresenceResult {
+      machines: (0..MAX_PRESENCE_HOSTS)
+        .map(|id| MachinePresence {
+          host_id: format!("550e8400-e29b-41d4-a716-{id:012x}"),
+          online: true,
+          connector_version: Some(format!("1{}", "a".repeat(63))),
+        })
+        .collect(),
+    };
+    let ids: Vec<_> = result.machines.iter().map(|machine| machine.host_id.clone()).collect();
+    assert!(result.validate_for(&ids).is_ok());
+    assert!(serde_json::to_vec(&result).unwrap().len() <= MAX_PRESENCE_RESPONSE);
+    result.machines[0].online = false;
+    assert!(result.validate_for(&ids).is_err());
+    result.machines[0].online = true;
+    for version in [
+      "".to_owned(),
+      "v1.0".into(),
+      "1.0 with space".into(),
+      "1.0-é".into(),
+      "1".repeat(65),
+    ] {
+      result.machines[0].connector_version = Some(version);
+      assert!(result.validate_for(&ids).is_err());
+    }
   }
 
   #[test]

@@ -120,12 +120,18 @@ it("shows Hub presence for every saved machine without an address or discovery g
   const saved = { host_id: host.host_id, host_public_key: host.host_public_key, name: "Workstation" };
   const other = { ...saved, host_id: discovered_laptop.host_id, name: "Laptop" };
   vi.mocked(service.status).mockResolvedValue({ hosts: [saved, other], selected_host_id: null, device_public_key: "D".repeat(43) });
-  vi.mocked(service.presence).mockImplementation(async (host_ids) => ({ machines: host_ids.map((host_id) => ({ host_id, online: host_id === saved.host_id })) }));
+  vi.mocked(service.presence).mockImplementation(async (host_ids) => ({
+    machines: host_ids.map((host_id) => host_id === saved.host_id
+      ? { host_id, online: true, connector_version: "0.1.1" }
+      : { host_id, online: false }),
+  }));
   render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
   const first = screen.getByRole("heading", { name: "Workstation" }).closest("li")!;
   const second = screen.getByRole("heading", { name: "Laptop" }).closest("li")!;
   expect(await within(first).findByText("Online")).toBeInTheDocument();
+  expect(within(first).getByTitle("Connector version")).toHaveTextContent("v0.1.1");
   expect(await within(second).findByText("Offline")).toBeInTheDocument();
+  expect(within(second).queryByTitle("Connector version")).not.toBeInTheDocument();
   expect(service.presence).toHaveBeenCalledWith([saved.host_id, other.host_id], expect.any(AbortSignal));
   expect(service.discover).not.toHaveBeenCalled();
 });

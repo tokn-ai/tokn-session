@@ -1,15 +1,28 @@
 use super::*;
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::SinkExt;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+  MaybeTlsStream, WebSocketStream, connect_async,
+  tungstenite::{Message, client::IntoClientRequest},
+};
 use tokn_hub_client_core::presence::{MAX_PRESENCE_HOSTS, PresenceResult};
 
 const FIRST: &str = "550e8400-e29b-41d4-a716-446655440000";
 const SECOND: &str = "550e8400-e29b-41d4-a716-446655440001";
 
-async fn registered_socket(hub_url: &str) -> WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>> {
+async fn registered_socket(
+  hub_url: &str,
+  connector_version: Option<&str>,
+) -> WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>> {
   let endpoint = format!("{}/hub/v1/tunnel", hub_url.replacen("http://", "ws://", 1));
-  let (mut socket, _) = connect_async(endpoint).await.unwrap();
+  let mut request = endpoint.into_client_request().unwrap();
+  if let Some(version) = connector_version {
+    request
+      .headers_mut()
+      .insert(CONNECTOR_VERSION_HEADER, version.parse().unwrap());
+  }
+  let (mut socket, response) = connect_async(request).await.unwrap();
+  assert_eq!(response.headers()[HUB_VERSION_HEADER], env!("CARGO_PKG_VERSION"));
   let challenge: protocol::Frame =
     serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
   let protocol::Frame::Challenge { nonce, .. } = challenge else {
@@ -36,6 +49,19 @@ async fn registered_socket(hub_url: &str) -> WebSocketStream<MaybeTlsStream<toki
   socket
 }
 
+async fn versioned_presence(app: Router, payload: &Value) -> Value {
+  let request = Request::builder()
+    .method("POST")
+    .uri("/hub/v1/presence")
+    .header(header::CONTENT_TYPE, "application/json")
+    .header(PRESENCE_VERSIONS_HEADER, "1")
+    .body(Body::from(payload.to_string()))
+    .unwrap();
+  let response = app.oneshot(request).await.unwrap();
+  assert_eq!(response.status(), StatusCode::OK);
+  json_body(response).await
+}
+
 #[tokio::test]
 async fn presence_tracks_connect_disconnect_and_revocation_without_exposing_identity_metadata() {
   let directory = tempfile::tempdir().unwrap();
@@ -52,7 +78,7 @@ async fn presence_tracks_connect_disconnect_and_revocation_without_exposing_iden
   let result: PresenceResult = serde_json::from_value(body).unwrap();
   result.validate_for(&ids).unwrap();
   let (hub_url, task) = listen(app.clone()).await;
-  let mut socket = registered_socket(&hub_url).await;
+  let mut socket = registered_socket(&hub_url, Some("0.2.0-rc.1")).await;
   assert!(state.tunnels.online(FIRST));
   let (status, body) = post_json(app.clone(), "/hub/v1/presence", Some(ORIGIN), None, payload.clone()).await;
   assert_eq!(status, StatusCode::OK);
@@ -60,14 +86,24 @@ async fn presence_tracks_connect_disconnect_and_revocation_without_exposing_iden
     body,
     json!({"machines":[{"host_id":FIRST,"online":true},{"host_id":SECOND,"online":false}]})
   );
+  let body = versioned_presence(app.clone(), &payload).await;
+  assert_eq!(
+    body,
+    json!({"machines":[{"host_id":FIRST,"online":true,"connector_version":"0.2.0-rc.1"},{"host_id":SECOND,"online":false}]})
+  );
   socket.close(None).await.unwrap();
   wait_until(|| !state.tunnels.online(FIRST)).await;
-  let (_, body) = post_json(app.clone(), "/hub/v1/presence", None, None, payload.clone()).await;
-  assert_eq!(body["machines"][0]["online"], false);
-  let _socket = registered_socket(&hub_url).await;
+  let body = versioned_presence(app.clone(), &payload).await;
+  assert_eq!(body["machines"][0], json!({"host_id":FIRST,"online":false}));
+  let _old_socket = registered_socket(&hub_url, None).await;
+  let body = versioned_presence(app.clone(), &payload).await;
+  assert_eq!(body["machines"][0], json!({"host_id":FIRST,"online":true}));
+  let _socket = registered_socket(&hub_url, Some("0.2.0")).await;
+  let body = versioned_presence(app.clone(), &payload).await;
+  assert_eq!(body["machines"][0]["connector_version"], "0.2.0");
   state.tunnels.revoke(FIRST).unwrap();
-  let (_, body) = post_json(app, "/hub/v1/presence", None, None, payload).await;
-  assert_eq!(body["machines"][0]["online"], false);
+  let body = versioned_presence(app, &payload).await;
+  assert_eq!(body["machines"][0], json!({"host_id":FIRST,"online":false}));
   task.abort();
 }
 

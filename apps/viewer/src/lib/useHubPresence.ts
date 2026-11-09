@@ -4,7 +4,10 @@ import { hubErrorMessage } from "./hub";
 import { MAX_PRESENCE_HOSTS, validatePresenceResult } from "./hubPresence";
 
 export const PRESENCE_REFRESH_MS = 15_000;
-export type MachinePresenceStatus = { state: "checking" | "online" | "offline" | "unavailable"; error?: string };
+export type MachinePresenceStatus =
+  | { state: "checking" | "offline"; error?: never; connector_version?: never }
+  | { state: "online"; error?: never; connector_version?: string }
+  | { state: "unavailable"; error: string; connector_version?: never };
 interface PresenceSnapshot {
   service: HubAccessService;
   membership: string;
@@ -42,7 +45,10 @@ export function useHubPresence(service: HubAccessService, host_ids: string[]): M
           try {
             const result = validatePresenceResult(await service.presence(batch, current.signal), batch);
             if (disposed || current.signal.aborted) return;
-            publish(new Map(result.machines.map((machine) => [machine.host_id, { state: machine.online ? "online" : "offline" }])));
+            publish(new Map(result.machines.map((machine) => [
+              machine.host_id,
+              machine.online ? { state: "online", connector_version: machine.connector_version } : { state: "offline" },
+            ])));
           } catch (error) {
             if (disposed || current.signal.aborted) return;
             publish(new Map(batch.map((id) => [id, { state: "unavailable", error: hubErrorMessage(error) }])));
