@@ -12,8 +12,10 @@ actions across desktop, browser and Apell. CLI `connect --namespace` and the
 hosting dialog configure the optional label. Discovery and per-host authorization
 remain independent. See [discovery groups](hub-pairing.md#discovery-groups).
 Machines combines saved and discovered machines in one card gallery, merging
-duplicate host IDs while preserving saved identities. A plus tile opens the
-**Add machine** dialog; closing it cancels pending pairing and clears its code.
+duplicate host IDs while preserving saved identities. Cards prefer an assigned
+machine address, then show `namespace:host` when discovery supplies the name.
+A plus tile opens the **Add machine** dialog. Closing it cancels pending pairing
+and clears its code.
 Discovery controls remain compact, with **Set up discovery** collapsed below the
 gallery. Group results cache independently across host-list refreshes; removed
 groups and Hub changes cancel requests and exclude stale results. Unknown groups

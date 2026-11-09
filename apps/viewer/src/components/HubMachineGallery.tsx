@@ -12,7 +12,7 @@ import "./HubMachineGallery.css";
 interface GalleryMachine {
   host_id: string;
   saved?: SavedHubHost;
-  candidate?: DiscoveredMachine;
+  discovery?: { candidate: DiscoveredMachine; group: DiscoveryGroup };
   online?: boolean;
   groups: Map<string, DiscoveryGroup>;
 }
@@ -28,12 +28,16 @@ function galleryMachines(hosts: SavedHubHost[], groups: HubDiscoveryGroupState[]
     for (const candidate of state.machines) {
       let machine = machines.get(candidate.host_id);
       if (!machine) {
-        machine = { host_id: candidate.host_id, candidate, groups: new Map() };
+        machine = { host_id: candidate.host_id, groups: new Map() };
         machines.set(candidate.host_id, machine);
       }
-      // Directory metadata may add presence and group labels, never a saved key
-      // or authority. One online report permits a pairing attempt; an older
-      // offline group result must not block the host's own verification.
+      // Directory metadata can supply a display label for a UUID-only card.
+      // Pairing still uses the UUID, and saved identity takes precedence.
+      // Keep any online report so an older group result cannot block pairing.
+      const saved_group = machine.saved?.discovery_group;
+      if (!machine.discovery || (saved_group && discoveryGroupKey(saved_group) === state.group_key)) {
+        machine.discovery = { candidate, group: state.group };
+      }
       machine.online = machine.online === true || candidate.online;
       machine.groups.set(state.group_key, state.group);
     }
@@ -71,8 +75,11 @@ export function HubMachineGallery({ service, hosts, busy, opening_host_id, on_op
     <ul className="hub-machine-grid" aria-label="Machines">
       {machines.map((machine) => {
         const host = machine.saved;
-        const candidate = machine.candidate;
-        const label = host ? hubHostLabel(host) : candidate!.name;
+        const candidate = machine.discovery?.candidate;
+        const name = host?.name ?? candidate?.name;
+        const namespace = machine.discovery?.group.namespace ?? host?.discovery_group?.namespace;
+        const fallback = host ? hubHostLabel(host) : candidate!.name;
+        const label = host?.machine_address ?? (namespace && name ? `${namespace}:${name}` : fallback);
         const status = presence.get(machine.host_id)!;
         const online = status.state === "online" || (status.state !== "offline" && machine.online === true);
         return <li className="hub-machine-card" key={machine.host_id}>
