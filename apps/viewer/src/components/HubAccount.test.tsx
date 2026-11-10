@@ -1,12 +1,6 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { HubAccount, HubAccountLink } from "./HubAccount";
-import type { HubAccessProps } from "./HubAccess";
-
-vi.mock("./HubAccess", () => ({
-  HubAccess: ({ initial_machine, account_control }: HubAccessProps) =>
-    <><p>Machine picker for {initial_machine?.machine_address}</p>{account_control}</>,
-}));
+import { HubAccount } from "./HubAccount";
 
 const identity = {
   user_id: "550e8400-e29b-41d4-a716-446655440000",
@@ -15,12 +9,6 @@ const identity = {
 const other_identity = {
   user_id: "550e8400-e29b-41d4-a716-446655440002",
   username: "bob",
-};
-const machine = {
-  host_id: "550e8400-e29b-41d4-a716-446655440001",
-  machine_address: "alice:macbook",
-  name: "Work laptop",
-  online: true,
 };
 const key = {
   key_id: "deployment-key",
@@ -37,10 +25,10 @@ afterEach(() => {
 });
 
 function mockAccount({
-  signup = false, machines = [] as typeof machine[], enabled = true, signed_in = false, logout,
+  signup = false, email_configured = true, signed_in = false, logout,
   current_identity = () => identity,
 }: {
-  signup?: boolean; machines?: typeof machine[]; enabled?: boolean; signed_in?: boolean;
+  signup?: boolean; email_configured?: boolean; signed_in?: boolean;
   logout?: () => Promise<Response>; current_identity?: () => typeof identity;
 } = {}) {
   let keys: Omit<typeof key, "token">[] = [];
@@ -50,7 +38,7 @@ function mockAccount({
     const headers = new Headers(init?.headers);
     expect(init).toMatchObject({ credentials: "same-origin", mode: "same-origin", referrerPolicy: "strict-origin" });
     expect(headers.has("Authorization")).toBe(false);
-    if (path.endsWith("/capabilities")) return Response.json({ enabled });
+    if (path.endsWith("/capabilities")) return Response.json({ enabled: true, email_configured });
     if (path.endsWith("/email/start")) return Response.json({}, { status: 202 });
     if (path.endsWith("/account/browser/email/verify")) {
       if (signup && !request.username) return Response.json({ error: "Choose a username", username_required: true }, { status: 409 });
@@ -70,7 +58,6 @@ function mockAccount({
       if (response.ok) signed_in = false;
       return response;
     }
-    if (path.endsWith("/machines")) return Response.json({ machines });
     if (path.endsWith("/keys") && init?.method === "POST") {
       const { token, ...metadata } = key;
       keys = [metadata];
@@ -90,7 +77,7 @@ async function submitEmailCode() {
 }
 
 it("explains the email setup requirement while keeping account details behind sign-in", async () => {
-  mockAccount({ enabled: false });
+  mockAccount({ email_configured: false });
   render(<HubAccount />);
   expect(await screen.findByText("Ask your Hub administrator to set up email delivery for account sign-in.")).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Open your machines" })).toHaveAttribute("href", "/");
@@ -100,7 +87,7 @@ it("explains the email setup requirement while keeping account details behind si
 
 it("asks for a username only after email verification and requires explicit CLI approval", async () => {
   window.history.replaceState(null, "", "/account?user_code=ABCD-EFGH");
-  const request = mockAccount({ signup: true, machines: [machine] });
+  const request = mockAccount({ signup: true });
   render(<HubAccount />);
   expect(await screen.findByText("ABCD-EFGH")).toBeInTheDocument();
   expect(screen.queryByLabelText("Username")).not.toBeInTheDocument();
@@ -117,10 +104,8 @@ it("asks for a username only after email verification and requires explicit CLI 
   expect(request).toHaveBeenCalledWith(expect.stringContaining("/device/approve"), expect.objectContaining({
     body: JSON.stringify({ user_code: "ABCD-EFGH" }),
   }));
-  fireEvent.click(await screen.findByRole("button", { name: "Connect to alice:macbook" }));
-  expect(screen.getByText("Machine picker for alice:macbook")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Back to Hub account" }));
-  expect(await screen.findByRole("heading", { name: "alice:macbook" })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Open your machines" })).toHaveAttribute("href", "/");
+  expect(request).not.toHaveBeenCalledWith(expect.stringContaining("/account/machines"), expect.anything());
 });
 
 it("creates a scoped key, shows its secret once, and revokes it after confirmation", async () => {
@@ -160,14 +145,11 @@ it("restores a signed-in account after reopening the page", async () => {
   expect(request).not.toHaveBeenCalledWith(expect.stringContaining("/email/"), expect.anything());
 });
 
-it("refreshes a signed-in browser account when the gallery opens and regains focus", async () => {
-  const request = mockAccount({ signed_in: true });
-  render(<HubAccountLink />);
-  expect(await screen.findByRole("link", { name: "Hub account" })).toHaveAttribute("href", "/account");
-  const refreshes = () => request.mock.calls.filter(([input]) => String(input).endsWith("/account/browser/refresh"));
-  expect(refreshes()).toHaveLength(1);
-  fireEvent.focus(window);
-  await waitFor(() => expect(refreshes()).toHaveLength(2));
+it("restores an existing account when email delivery is unavailable", async () => {
+  mockAccount({ email_configured: false, signed_in: true });
+  render(<HubAccount />);
+  expect(await screen.findByRole("region", { name: "Profile" })).toHaveTextContent(identity.username);
+  expect(screen.getByRole("link", { name: "Open your machines" })).toHaveAttribute("href", "/");
 });
 
 it("recovers from a stale account action without replaying it against the active account", async () => {

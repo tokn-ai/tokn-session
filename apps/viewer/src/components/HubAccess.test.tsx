@@ -38,17 +38,40 @@ async function pairingReady() {
 const discovery_group = { namespace: "personal", secret_digest: "A".repeat(43) };
 const discovered_laptop = { host_id: "550e8400-e29b-41d4-a716-446655440001", name: "Laptop", online: true };
 
-it("takes an account machine to its existing passkey flow without opening it automatically", async () => {
-  const remembered = { host_id: host.host_id, host_public_key: host.host_public_key };
+it("merges the account roster, saved pairing and discovery without replacing the saved alias", async () => {
+  const remembered = { ...host, machine_address: "legacy:workstation", discovery_group };
+  const account_machine = { host_id: host.host_id, machine_address: host.machine_address, name: host.name, online: true };
+  const roster_only = { ...discovered_laptop, machine_address: "alice:laptop" };
   vi.mocked(service.status).mockResolvedValue({ hosts: [remembered], selected_host_id: null, device_public_key: "D".repeat(43) });
-  render(<HubAccess initial_hub_url="https://hub.example" initial_machine={{
-    host_id: host.host_id, machine_address: host.machine_address, name: host.name, online: true,
+  vi.mocked(service.discover).mockResolvedValue({ ...discovery_group, machines: [account_machine] });
+  render(<HubAccess initial_hub_url="https://hub.example" account_roster={{
+    hub_url: "https://hub.example", machines: [account_machine, roster_only], on_retry: vi.fn(),
   }} />);
-  expect(await screen.findByLabelText("Machine address or reference")).toHaveValue(host.machine_address);
-  expect(screen.getByRole("radio", { name: "Use machine passkey" })).toBeChecked();
+  const card = (await screen.findByRole("heading", { name: "alice:workstation" })).closest("li")!;
+  expect(within(card).getByText("Account machine")).toBeInTheDocument();
+  expect(within(card).getByText("Paired")).toBeInTheDocument();
+  expect(within(card).getByText(machineReference(remembered))).toBeInTheDocument();
+  expect(screen.getByRole("list", { name: "Machines" }).children).toHaveLength(3);
+  const pair = screen.getByRole("button", { name: "Pair alice:laptop" });
+  expect(within(pair.closest("li")!).getByText("Pairing required")).toBeInTheDocument();
+  fireEvent.click(pair);
+  expect(screen.getByLabelText("Machine address or reference")).toHaveValue(roster_only.host_id);
   expect(service.connect).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: "Sign in with machine passkey" }));
-  await waitFor(() => expect(service.loginMachine).toHaveBeenCalledWith(host.machine_address, expect.any(AbortSignal)));
+  expect(service.pairMachine).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Close Add machine" }));
+  fireEvent.click(within(card).getByRole("button", { name: "Sign in to alice:workstation" }));
+  await screen.findByText("Encrypted sessions");
+  expect(service.connect).toHaveBeenCalledWith(remembered, expect.any(AbortSignal));
+  expect(service.rememberMetadata).not.toHaveBeenCalled();
+});
+
+it("keeps the account roster scoped to the same Hub", async () => {
+  vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: null, device_public_key: "D".repeat(43) });
+  render(<HubAccess initial_hub_url="https://hub.example" account_roster={{
+    hub_url: "https://other.example", machines: [{ ...discovered_laptop, machine_address: "alice:laptop" }], on_retry: vi.fn(),
+  }} />);
+  expect(await screen.findByRole("heading", { name: host.machine_address })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "alice:laptop" })).not.toBeInTheDocument();
 });
 
 it("discovers the first paired machine's group and requires a separate pairing for another machine", async () => {
@@ -65,14 +88,14 @@ it("discovers the first paired machine's group and requires a separate pairing f
   await screen.findByText("Encrypted sessions");
   fireEvent.click(screen.getByRole("button", { name: /connection settings/i }));
   fireEvent.click(screen.getByRole("button", { name: "Machines" }));
-  fireEvent.click(await screen.findByRole("button", { name: "Pair personal:Laptop" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Pair Laptop" }));
   expect(service.discover).toHaveBeenCalledWith(discovery_group, expect.any(AbortSignal));
   expect(service.pairMachine).toHaveBeenCalledOnce();
   expect(screen.getByLabelText("Machine address or reference")).toHaveValue(discovered_laptop.host_id);
   expect(screen.getByLabelText("Authenticator code")).toHaveValue("");
   expect(screen.getByLabelText("Authenticator code")).toHaveFocus();
   expect(screen.getByRole("list", { name: "Machines" })).toHaveTextContent("Laptop");
-  expect(screen.queryByRole("button", { name: "Sign in to personal:Laptop" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Sign in to Laptop" })).not.toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("Authenticator code"), { target: { value: "654321" } });
   fireEvent.click(screen.getByRole("button", { name: "Pair and set up passkey" }));
   await waitFor(() => expect(service.pairMachine).toHaveBeenLastCalledWith(discovered_laptop.host_id, "654321", expect.any(AbortSignal)));
@@ -83,12 +106,14 @@ it("keeps equal namespace names with different digests in separate discovery gro
   vi.mocked(service.status).mockResolvedValue({ hosts: [{ ...host, discovery_group }, { ...host, host_id: "550e8400-e29b-41d4-a716-446655440003", machine_address: "alice:laptop", discovery_group: other_group }], selected_host_id: null, device_public_key: "D".repeat(43) });
   vi.mocked(service.discover).mockImplementation(async (group) => ({ ...group, machines: [{ ...discovered_laptop, host_id: group.secret_digest === discovery_group.secret_digest ? discovered_laptop.host_id : "550e8400-e29b-41d4-a716-446655440002", name: group.secret_digest === discovery_group.secret_digest ? "First group member" : "Second group member" }] }));
   render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
-  const first = await screen.findByRole("region", { name: "Discovery group personal AAAAAAAA" });
-  const second = screen.getByRole("region", { name: "Discovery group personal BBBBBBBB" });
-  expect(first).toHaveTextContent("personal · AAAAAAAA");
-  expect(second).toHaveTextContent("personal · BBBBBBBB");
-  expect(await screen.findByRole("button", { name: "Pair personal:First group member" })).toBeEnabled();
-  expect(await screen.findByRole("button", { name: "Pair personal:Second group member" })).toBeEnabled();
+  const first = await screen.findByRole("region", { name: "Discovery group personal · 1" });
+  const second = screen.getByRole("region", { name: "Discovery group personal · 2" });
+  expect(first).toHaveTextContent("personal · 1");
+  expect(second).toHaveTextContent("personal · 2");
+  expect(first.outerHTML).not.toContain(discovery_group.secret_digest.slice(0, 8));
+  expect(second.outerHTML).not.toContain(other_group.secret_digest.slice(0, 8));
+  expect(await screen.findByRole("button", { name: "Pair First group member" })).toBeEnabled();
+  expect(await screen.findByRole("button", { name: "Pair Second group member" })).toBeEnabled();
   expect(service.pairMachine).not.toHaveBeenCalled();
 });
 
@@ -101,7 +126,7 @@ it("merges saved and discovered machines without replacing saved identity or pai
   ] });
   vi.mocked(service.presence).mockImplementation(async (host_ids) => ({ machines: host_ids.map((host_id) => ({ host_id, online: host_id !== host.host_id })) }));
   render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
-  await screen.findByRole("button", { name: "Pair personal:Laptop" });
+  await screen.findByRole("button", { name: "Pair Laptop" });
   const gallery = screen.getByRole("list", { name: "Machines" });
   expect(within(gallery).getAllByRole("listitem")).toHaveLength(3);
   expect(within(gallery).queryByText("Unverified directory name")).not.toBeInTheDocument();
@@ -118,20 +143,20 @@ it("merges saved and discovered machines without replacing saved identity or pai
   expect(service.connect).toHaveBeenCalledWith(saved, expect.any(AbortSignal));
 });
 
-it("labels UUID-paired cards with their discovery namespace and name without changing their identity", async () => {
+it("labels UUID-paired cards with a real discovery address or a display name without changing their identity", async () => {
   const saved = { host_id: host.host_id, host_public_key: host.host_public_key, discovery_group };
   const other = { ...saved, host_id: discovered_laptop.host_id, name: "Saved laptop" };
   vi.mocked(service.status).mockResolvedValue({ hosts: [saved, other], selected_host_id: null, device_public_key: "D".repeat(43) });
   vi.mocked(service.discover).mockResolvedValue({ ...discovery_group, machines: [
-    { host_id: saved.host_id, name: "Workstation", online: true },
+    { host_id: saved.host_id, machine_address: "personal:workstation", name: "Workstation", online: true },
     discovered_laptop,
   ] });
   render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
-  const card = (await screen.findByRole("heading", { name: "personal:Workstation" })).closest("li")!;
+  const card = (await screen.findByRole("heading", { name: "personal:workstation" })).closest("li")!;
   expect(within(card).getByText(machineReference(saved))).toBeInTheDocument();
-  expect(screen.getByRole("heading", { name: "personal:Saved laptop" })).toBeInTheDocument();
-  expect(screen.queryByRole("heading", { name: "personal:Laptop" })).not.toBeInTheDocument();
-  fireEvent.click(within(card).getByRole("button", { name: "Sign in to personal:Workstation" }));
+  expect(screen.getByRole("heading", { name: "Saved laptop" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "personal:Saved laptop" })).not.toBeInTheDocument();
+  fireEvent.click(within(card).getByRole("button", { name: "Sign in to personal:workstation" }));
   await screen.findByText("Encrypted sessions");
   expect(service.connect).toHaveBeenCalledWith(saved, expect.any(AbortSignal));
 });
@@ -141,7 +166,7 @@ it("shows offline discoveries as cards without permitting pairing", async () => 
   vi.mocked(service.discover).mockResolvedValue({ ...discovery_group, machines: [{ ...discovered_laptop, online: false }] });
   vi.mocked(service.presence).mockImplementation(async (host_ids) => ({ machines: host_ids.map((host_id) => ({ host_id, online: host_id !== discovered_laptop.host_id })) }));
   render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
-  const pair = await screen.findByRole("button", { name: "Pair personal:Laptop" });
+  const pair = await screen.findByRole("button", { name: "Pair Laptop" });
   expect(pair).toBeDisabled();
   expect(await within(pair.closest("li")!).findByText("Offline")).toBeInTheDocument();
   expect(service.pairMachine).not.toHaveBeenCalled();
@@ -186,8 +211,8 @@ it("allows verified pairing when another group reports a duplicated candidate on
     { ...discovered_laptop, online: group.secret_digest === other_group.secret_digest },
   ] }));
   render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
-  await waitFor(() => expect(screen.getByRole("button", { name: "Pair personal:Laptop" })).toBeEnabled());
-  expect(screen.getAllByRole("heading", { name: "personal:Laptop" })).toHaveLength(1);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Pair Laptop" })).toBeEnabled());
+  expect(screen.getAllByRole("heading", { name: "Laptop" })).toHaveLength(1);
   expect(within(screen.getByRole("list", { name: "Machines" })).getAllByRole("listitem")).toHaveLength(4);
   expect(service.pairMachine).not.toHaveBeenCalled();
 });
@@ -209,18 +234,20 @@ it("cancels discovery when switching Hubs and ignores its late machine list", as
   expect(signal.aborted).toBe(true);
   finish({ ...discovery_group, machines: [discovered_laptop] });
   await Promise.resolve();
-  expect(screen.queryByRole("button", { name: "Pair personal:Laptop" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Pair Laptop" })).not.toBeInTheDocument();
   expect(screen.getByRole("list", { name: "Machines" })).toBeInTheDocument();
-  expect(screen.queryByRole("region", { name: "Discovery group personal AAAAAAAA" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Discovery group personal" })).not.toBeInTheDocument();
   expect(service.discover).toHaveBeenCalledOnce();
 });
 
 it("offers retry for failed group discovery and shows its empty result", async () => {
   vi.mocked(service.status).mockResolvedValue({ hosts: [{ ...host, discovery_group }], selected_host_id: null, device_public_key: "D".repeat(43) });
-  vi.mocked(service.discover).mockRejectedValueOnce(new Error("Group unavailable"));
+  vi.mocked(service.discover).mockRejectedValueOnce(new Error(`Group unavailable: ${discovery_group.secret_digest}`));
   render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
-  expect(await screen.findByRole("alert")).toHaveTextContent("Group unavailable");
-  fireEvent.click(screen.getByRole("button", { name: "Retry discovery group personal AAAAAAAA" }));
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Group unavailable");
+  expect(alert).not.toHaveTextContent(discovery_group.secret_digest);
+  fireEvent.click(screen.getByRole("button", { name: "Retry discovery group personal" }));
   expect(await screen.findByText("Empty group")).toBeInTheDocument();
   expect(service.discover).toHaveBeenCalledTimes(2);
 });

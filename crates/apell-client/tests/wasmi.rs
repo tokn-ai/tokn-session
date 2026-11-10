@@ -17,7 +17,7 @@ use std::{
 use tokio::sync::{Mutex as AsyncMutex, watch};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 use tokn_hub_client_core::{
-  discovery::{DiscoveredMachine, DiscoveryGroup, DiscoveryResult},
+  discovery::{DISCOVERY_ADDRESSES_HEADER, DiscoveredMachine, DiscoveryGroup, DiscoveryResult},
   pairing::{ClientKind, HostPairing, TotpSecret, is_pairing_record},
   presence::{MachinePresence, PRESENCE_VERSIONS_HEADER, PresenceRequest, PresenceResult},
   protocol,
@@ -230,6 +230,10 @@ impl Services {
         assert_eq!(
           url.path(),
           format!("/hub/v1/discovery/{}/{}", discovery.namespace, discovery.secret_digest)
+        );
+        assert_eq!(
+          params["headers"],
+          json!([{"name":DISCOVERY_ADDRESSES_HEADER,"value":"1"}])
         );
         Ok(json!({"status":200,"body":serde_json::to_vec(&discovery).unwrap()}))
       }
@@ -477,11 +481,13 @@ async fn interpreted_guest_pairs_streams_reuses_view_connections_and_never_repla
         host_id: HOST_ID.into(),
         name: "Paired machine".into(),
         online: true,
+        machine_address: Some(format!("{}:paired", discovery_group.namespace)),
       },
       DiscoveredMachine {
         host_id: "11111111-2222-4333-8444-666666666666".into(),
         name: "Unpaired machine".into(),
         online: false,
+        machine_address: None,
       },
     ],
   });
@@ -575,6 +581,10 @@ async fn interpreted_guest_pairs_streams_reuses_view_connections_and_never_repla
   .await
   .unwrap();
   assert_eq!(discovered["machines"].as_array().unwrap().len(), 2);
+  assert_eq!(
+    discovered["machines"][0]["machine_address"],
+    format!("{}:paired", discovery_group.namespace)
+  );
   let status = invoke(&run, "hub_client_status", json!({"hub_url":peer.hub}))
     .await
     .unwrap();

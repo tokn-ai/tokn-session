@@ -3,8 +3,13 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "./App";
 import { RemoteClient } from "./lib/transport";
 import { StrictMode, type ReactNode } from "react";
+import type { HubAccessProps } from "./components/HubAccess";
 vi.mock("./components/HubAccess", () => ({
-  HubAccess: ({ account_control }: { account_control?: ReactNode }) => <div>Machine access{account_control}</div>,
+  HubAccess: ({ account_control, account_roster }: HubAccessProps) => <div>
+    Machine access{account_control}
+    {account_roster?.machines.map((machine) => <p key={machine.host_id}>{machine.machine_address}</p>)}
+    {account_roster?.unavailable && <button type="button" onClick={account_roster.on_retry}>Retry account machines</button>}
+  </div>,
 }));
 vi.mock("./pages/ViewerPage", () => ({ ViewerPage: ({ remote, connection }: { remote?: boolean; connection?: ReactNode }) => <><div>{remote ? "Remote sessions" : "Desktop sessions"}</div>{connection}</> }));
 beforeEach(() => { vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 404 })); });
@@ -90,4 +95,46 @@ it("links to the Hub account page from Machines when email delivery needs setup"
   });
   render(<App />);
   expect(await screen.findByRole("link", { name: "Hub account" })).toHaveAttribute("href", "/account");
+});
+
+it("loads the same-origin account roster and clears it when the account signs out in another tab", async () => {
+  let signed_in = true;
+  const identity = { user_id: "550e8400-e29b-41d4-a716-446655440000", username: "alice" };
+  const machine = { host_id: "550e8400-e29b-41d4-a716-446655440001", machine_address: "alice:laptop", name: "Laptop", online: true };
+  const request = vi.mocked(fetch).mockImplementation(async (input) => {
+    if (String(input).endsWith("/account/capabilities")) return Response.json({ enabled: true, email_configured: false });
+    if (String(input).endsWith("/account/browser/refresh")) {
+      return signed_in ? Response.json(identity) : Response.json({ error: "Sign in required" }, { status: 401 });
+    }
+    if (String(input).endsWith("/account/machines")) return Response.json({ machines: [machine] });
+    return Response.json({ configured: true, authenticated: false });
+  });
+  render(<App />);
+  expect(await screen.findByText(machine.machine_address)).toBeInTheDocument();
+  expect(request).toHaveBeenCalledWith(`${window.location.origin}/hub/v1/account/machines`, expect.objectContaining({
+    credentials: "same-origin", headers: expect.objectContaining({ "X-Tokn-Account-Id": identity.user_id }),
+  }));
+  signed_in = false;
+  fireEvent.focus(window);
+  await waitFor(() => expect(screen.queryByText(machine.machine_address)).not.toBeInTheDocument());
+  expect(screen.getByText("Machine access")).toBeInTheDocument();
+  expect(request.mock.calls.filter(([url]) => String(url).endsWith("/account/browser/refresh"))).toHaveLength(2);
+});
+
+it("keeps machine access available and retries a failed account roster request", async () => {
+  let unavailable = true;
+  vi.mocked(fetch).mockImplementation(async (input) => {
+    if (String(input).endsWith("/account/capabilities")) return Response.json({ enabled: true });
+    if (String(input).endsWith("/account/browser/refresh")) return Response.json({ user_id: "550e8400-e29b-41d4-a716-446655440000", username: "alice" });
+    if (String(input).endsWith("/account/machines")) {
+      return unavailable ? Response.json({ error: "Unavailable" }, { status: 503 }) : Response.json({ machines: [] });
+    }
+    return Response.json({ configured: true, authenticated: false });
+  });
+  render(<App />);
+  const retry = await screen.findByRole("button", { name: "Retry account machines" });
+  expect(screen.getByText("Machine access")).toBeInTheDocument();
+  unavailable = false;
+  fireEvent.click(retry);
+  await waitFor(() => expect(retry).not.toBeInTheDocument());
 });

@@ -45,6 +45,18 @@ it("reuses remembered pins and rejects a directory remapping an address", async 
   expect(backend.pair).not.toHaveBeenCalled();
 });
 
+it("opens a machine by its canonical address without replacing its saved legacy alias", async () => {
+  const saved = { ...host, machine_address: "legacy:macbook" };
+  hosts = [saved];
+  const service = withMachineAddressing(backend);
+  expect(await service.loginMachine(machine.machine_address, signal())).toEqual(saved);
+  expect(backend.authenticate).toHaveBeenCalledWith(saved, false, expect.any(AbortSignal));
+  vi.mocked(backend.pair).mockResolvedValue(saved);
+  expect(await service.pairMachine(machine.machine_address, "123456", signal())).toEqual(saved);
+  expect(backend.pair).toHaveBeenCalledWith(host.host_id, "123456", expect.any(AbortSignal), host.host_public_key, undefined);
+  expect(backend.rememberMetadata).not.toHaveBeenCalled();
+});
+
 it("rejects cancellation and explicit pin changes before authorization or metadata persistence", async () => {
   hosts = [host];
   const service = withMachineAddressing(backend);

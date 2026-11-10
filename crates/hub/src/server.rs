@@ -17,7 +17,6 @@ use axum::{
   routing::{any, get, post},
 };
 use futures_util::StreamExt;
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use tokn_hub_client_core::address::ResolvedMachine;
@@ -45,7 +44,7 @@ impl HubState {
       crate::onboarding::canonical_hub(&url::Url::parse(public_url).map_err(|_| "Invalid Hub public URL")?)?;
     Ok(Self {
       auth,
-      tunnels: HubTunnels::new(store.clone()).require_account(accounts.enabled()),
+      tunnels: HubTunnels::new(store.clone()),
       accounts,
       public_origin,
       store,
@@ -63,13 +62,13 @@ pub fn router(state: HubState) -> Router {
   let protected = Router::new()
     .route("/hub/v1/hosts", get(hosts))
     .route("/hub/v1/hosts/{host_id}", axum::routing::delete(revoke_host))
-    .route("/hub/v1/namespaces", get(namespaces).post(create_namespace))
+    .route("/hub/v1/namespaces", get(namespaces).post(legacy_registration_retired))
     .route(
       "/hub/v1/namespaces/{username}/machines/{machine_name}",
-      post(bind_machine),
+      post(legacy_registration_retired),
     )
     .route("/hub/v1/enrollments", get(enrollments))
-    .route("/hub/v1/enrollments/approve", post(approve_host))
+    .route("/hub/v1/enrollments/approve", post(legacy_registration_retired))
     .route("/hosts/{host_id}/api/v1/{command}", any(proxy))
     .layer(middleware::from_fn_with_state(state.clone(), authorize));
   let auth = state.auth.router();
@@ -310,41 +309,8 @@ async fn namespaces(State(state): State<HubState>) -> Result<Json<Value>, ApiErr
   ))
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CreateNamespaceRequest {
-  username: String,
-}
-
-async fn create_namespace(
-  State(state): State<HubState>,
-  request: Result<Json<CreateNamespaceRequest>, JsonRejection>,
-) -> Result<Json<Value>, ApiError> {
-  let Json(request) = request.map_err(|_| error(StatusCode::BAD_REQUEST, "Expected a username object"))?;
-  let namespace = state
-    .store
-    .create_namespace(&request.username)
-    .map_err(namespace_error)?;
-  Ok(Json(json!({"username": namespace.username})))
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BindMachineRequest {
-  host_id: String,
-}
-
-async fn bind_machine(
-  State(state): State<HubState>,
-  Path((username, machine_name)): Path<(String, String)>,
-  request: Result<Json<BindMachineRequest>, JsonRejection>,
-) -> Result<Json<ResolvedMachine>, ApiError> {
-  let Json(request) = request.map_err(|_| error(StatusCode::BAD_REQUEST, "Expected a host_id object"))?;
-  let machine = state
-    .store
-    .bind_machine(&username, &machine_name, &request.host_id)
-    .map_err(namespace_error)?;
-  Ok(Json(resolved_machine(&state, machine)))
+async fn legacy_registration_retired() -> ApiError {
+  error(StatusCode::GONE, crate::store::ACCOUNT_REQUIRED)
 }
 
 fn resolved_machine(state: &HubState, machine: MachineRecord) -> ResolvedMachine {
@@ -376,7 +342,7 @@ async fn discover_machines(
   Path((namespace, secret_digest)): Path<(String, String)>,
   headers: HeaderMap,
 ) -> Result<Json<tokn_hub_client_core::discovery::DiscoveryResult>, ApiError> {
-  use tokn_hub_client_core::discovery::{DiscoveryGroup, DiscoveryResult};
+  use tokn_hub_client_core::discovery::{DISCOVERY_ADDRESSES_HEADER, DiscoveryGroup, DiscoveryResult};
   state
     .auth
     .check_optional_origin(&headers)
@@ -392,8 +358,14 @@ async fn discover_machines(
     .store
     .discover_machines(&group)
     .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Could not load discovery group"))?;
+  let include_addresses = headers
+    .get(DISCOVERY_ADDRESSES_HEADER)
+    .is_some_and(|value| value == "1");
   for machine in &mut machines {
     machine.online = state.tunnels.online(&machine.host_id);
+    if !include_addresses {
+      machine.machine_address = None;
+    }
   }
   Ok(Json(DiscoveryResult {
     namespace: group.namespace,
@@ -433,25 +405,8 @@ async fn machine_presence(
   }))
 }
 
-async fn enrollments(State(state): State<HubState>) -> Json<Value> {
-  Json(json!({ "enrollments": state.tunnels.pending() }))
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ApproveRequest {
-  pairing_code: String,
-}
-
-async fn approve_host(
-  State(state): State<HubState>,
-  Json(request): Json<ApproveRequest>,
-) -> Result<Json<Value>, ApiError> {
-  let host = state
-    .tunnels
-    .approve(&request.pairing_code)
-    .map_err(|message| error(StatusCode::BAD_REQUEST, message))?;
-  Ok(Json(json!({ "host_id": host.host_id })))
+async fn enrollments() -> Json<Value> {
+  Json(json!({ "enrollments": [] }))
 }
 
 async fn revoke_host(State(state): State<HubState>, Path(host_id): Path<String>) -> Result<StatusCode, ApiError> {

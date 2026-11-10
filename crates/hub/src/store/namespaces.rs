@@ -2,6 +2,7 @@
 use super::*;
 use tokn_hub_client_core::address::parse_machine_address;
 
+#[cfg(test)]
 const MAX_NAMESPACES: u32 = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -58,9 +59,9 @@ impl Store {
       .map_err(NamespaceError::database)
   }
 
-  /// Only the administrator API calls this mutation. The Hub's stable owner
-  /// identity owns the namespace; a host registration cannot claim it.
-  pub fn create_namespace(&self, username: &str) -> Result<Namespace, NamespaceError> {
+  /// Seed an administrator-owned namespace for compatibility tests.
+  #[cfg(test)]
+  pub(crate) fn create_namespace(&self, username: &str) -> Result<Namespace, NamespaceError> {
     address(username, "machine")?;
     let mut connection = self.connection().map_err(NamespaceError::Internal)?;
     let transaction = connection
@@ -99,7 +100,8 @@ impl Store {
   /// The unique address and host constraints reserve the mapping forever,
   /// including when remove_host deletes the active host row. The persistent
   /// encrypted UUID ledger is the foreign-key target rather than that row.
-  pub fn bind_machine(
+  #[cfg(test)]
+  pub(crate) fn bind_machine(
     &self,
     username: &str,
     machine_name: &str,

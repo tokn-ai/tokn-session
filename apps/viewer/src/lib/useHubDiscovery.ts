@@ -61,7 +61,8 @@ export function useHubDiscovery(service: HubAccessService, hosts: SavedHubHost[]
       publish(current);
     }).catch((error: unknown) => {
       if (!active()) return;
-      current.entries.set(group_key, { state: { ...state, loading: false, error: hubErrorMessage(error) } });
+      const message = hubErrorMessage(error).split(group.secret_digest).join("[discovery key]");
+      current.entries.set(group_key, { state: { ...state, loading: false, error: message } });
       publish(current);
     });
   }, [publish]);

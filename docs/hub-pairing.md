@@ -50,11 +50,14 @@ origin exactly. Hub administration at `/admin` is optional and uses separate
 passkeys; it does not grant access to encrypted machine content. Paired hosts
 register without administrator approval. See [Hub administration](hub.md).
 
-On each host, run the API and connector in separate terminals:
+Configure [Hub account email delivery](hub.md#hub-accounts-and-cli-login) to
+enable signup. On each host, run the API in a separate terminal, sign in to
+the Hub, and register a machine name.
 
 ```sh
 tokn-viewer-api --api-only
-tokn-session-hub connect --hub https://hub.example.com --name "Workstation"
+tokn-session-hub auth login --hub https://hub.example.com
+tokn-session-hub connect --hub https://hub.example.com --machine workstation
 ```
 
 First setup generates a UUID, dedicated keys, and an authenticator seed. Scan
@@ -113,9 +116,11 @@ normal authorization.
 
 ## Host from the desktop app
 
-Under **Machines → This machine → Host this computer**, enter the Hub address
-and machine name in the floating dialog, choose whether to allow remote agent
-input, and click **Start hosting**. The bottom-left connection panel in local
+On a new host, sign in and use `tokn-session-hub connect --machine workstation
+--register-only` with the selected Hub while desktop hosting is stopped.
+Under **Machines → This machine → Host this computer**, select the registered
+Hub, choose whether to allow remote agent input, and click **Start hosting**.
+The bottom-left connection panel in local
 and remote views also shows this computer’s hosting status and an on/off switch.
 The switch uses saved settings; without a configured Hub it opens the same
 dialog. Configuration and pairing setup remain on Machines. External
@@ -152,70 +157,37 @@ local reader and event stream.
 
 ## Discovery groups
 
-On an account-enabled Hub, machines inherit the account username and discovery
-group when they register. Opening or pairing a machine delivers its group
-reference to the client through the authenticated connection. See
-[Hub accounts](hub.md#hub-accounts-and-cli-login) for signup and registration.
+Machines inherit their account username and discovery group when they register.
+Sign in to a Hub account in the browser to see its machines alongside saved
+and discovered machines in one gallery. Each machine appears once. Select
+**Pair** on an unpaired machine and complete that machine's own pairing.
 
-### Legacy discovery
+Viewers can also discover machines after pairing one known machine. Pairing or
+opening a machine delivers its group reference through the authenticated
+connection. If a machine was paired before joining its account group, open it
+again and return to Machines to learn the group.
 
-Hosts can choose a discovery namespace in **Host this computer**, or with the
-connector's `--namespace` option. The namespace uses 1–63 lowercase letters,
-digits and internal hyphens. Hosts with the same namespace and authenticator
-seed derive the same discovery digest for a Hub. Different seeds, namespaces or
-Hub origins produce separate groups, even when their display names match.
+The Hub issues an opaque account discovery capability. Each host can use its
+own authenticator seed. The Hub can see group membership, and a client with the
+group reference can request its machine list. Pairing and saved key verification
+happen separately on each host.
 
-```sh
-# Existing host: preserve its identity and authenticator while enabling discovery.
-tokn-session-hub connect --namespace personal
-tokn-session-hub authenticator --export-file ./authenticator.secret
-
-# New host: transfer the private seed file securely before its first setup.
-tokn-session-hub connect --hub https://hub.example.com --namespace personal \
-  --totp-secret-file ./authenticator.secret
-```
-
-The setup file must belong to the current user and have mode 0600. Each host
-retains its own UUID, encryption keys and authorized devices. To stop advertising
-a group, clear the dialog field or start the connector with `--namespace ""`.
-
-Pair one known machine using its reference and authenticator code. The completed
-pairing delivers its group reference through authenticated encryption. Machines
-shows saved machines and the group's online and offline candidates in one gallery,
-with refresh and retry controls below it. Each machine appears once, and saved
-identity details take precedence over directory metadata. Select **Pair** on
-another machine and complete its own pairing before
-opening its sessions. Previously paired clients refresh group metadata through
-their authenticated connection when opening a machine.
-
-**Discovery** stays visible below the gallery when no group has been learned. Expand
-**Set up discovery** for host setup and pairing guidance. If the machine is already paired, open or sign in to
-it after updating its connector and configuring a namespace, then return to
-Machines. The client only queries the directory after learning a group reference.
-
-The digest is an opaque lookup value derived from the seed using HKDF-SHA256
-with versioned, Hub-specific and namespace-specific context. It contains no
-authenticator seed or current code. The Hub can see group membership, and anyone
-who obtains the group reference can request its machine list. Listing and signed
-host registration establish routing metadata. Machine authorization and saved
-key verification still happen independently on each host. The Machines picker
-only saves a candidate as a paired machine after its pairing succeeds.
+Previously configured discovery groups remain usable for existing unclaimed
+hosts. Claiming a host under an account moves it to the account group and
+preserves its UUID, keys, and existing pairings.
+Remove `--namespace` from existing connector launch commands when upgrading.
+The connector reads legacy group information from its saved profile.
 
 ## Readable machine addresses
 
-The Hub administrator can create a namespace such as `alice` at `/admin`, then
-assign a registered encrypted machine a name such as `macbook`. Its address is
-`alice:macbook`, scoped to that Hub. Names use 1–63 lowercase ASCII letters or
-digits with internal hyphens. A namespace is a managed name, not a user account;
-the Hub still has one administrator. Connector `--name` remains its display name.
-
-Account registration assigns a readable address under the account's username.
-Legacy discovery labels remain scoped to their group and can be shared by
-unrelated users. The administrator's reserved legacy addresses remain usable.
+The Hub uses the account username as the namespace. When account `alice` registers
+`macbook`, its address on that Hub is `alice:macbook`. Names use 1–63 lowercase
+ASCII letters or digits with internal hyphens. Connector `--name` sets the
+separate display name. Previously assigned legacy addresses remain usable.
 
 Addresses stay reserved to the original machine UUID, even after revocation.
 Account registration requires an account credential and proof of the machine
-key. Administrators assign legacy addresses at `/admin`. Public lookup is
+key. Public lookup is
 exact, works while a host is offline, and reveals the address, UUID, display name,
 and online status to anyone who knows the address. Group listing uses the separate
 discovery reference.
@@ -388,5 +360,6 @@ SPAKE2 composition is experimental, unaudited, and not RFC 9382 wire-compatible.
 
 The installed `tokn-session-hub client` helper is optional compatibility. In
 paired mode, it terminates encryption in a local Rust process and serves
-`/connect` with a local bearer link. The [owner-signed grant workflow](hub-e2ee.md) and explicit
-`connect --trusted-hub` plaintext mode also remain available.
+`/connect` with a local bearer link. Existing hosts enrolled with the
+[owner-signed grant workflow](hub-e2ee.md) or `connect --trusted-hub` can
+reconnect with their saved identities.

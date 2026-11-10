@@ -12,6 +12,7 @@ use futures_util::StreamExt;
 use serde_json::json;
 use std::{
   convert::Infallible,
+  path::Path,
   sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -21,6 +22,7 @@ use std::{
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tokn_hub_client_core::{
+  discovery::DiscoveryGroup,
   pairing::TotpSecret,
   secure::{HostAuthOperation, InnerMessage, NoiseIdentity, NoiseResponder},
 };
@@ -28,6 +30,7 @@ use tokn_hub_remote::{RemoteManager, ResolvedMachine, SavedHost};
 use tokn_session_hub::{
   connector::{self, ConnectorConfig, PairedHostConfig},
   onboarding::{self, HostProfile},
+  protocol,
   server::{self, HubState},
   store::Store,
 };
@@ -72,6 +75,49 @@ impl Drop for Harness {
       task.abort();
     }
   }
+}
+
+fn restore_legacy_registration(
+  database: &Path,
+  host_id: &str,
+  config: &ConnectorConfig,
+  group: Option<&DiscoveryGroup>,
+) {
+  connector::initialize_identity(&config.key_file).unwrap();
+  let key: serde_json::Value = serde_json::from_slice(&std::fs::read(&config.key_file).unwrap()).unwrap();
+  let secret = protocol::decode(key["secret_key"].as_str().unwrap(), 32)
+    .unwrap()
+    .try_into()
+    .unwrap();
+  let public_key = protocol::encode(
+    &ed25519_dalek::SigningKey::from_bytes(&secret)
+      .verifying_key()
+      .to_bytes(),
+  );
+  // Model the state of a Hub upgraded after this machine was enrolled.
+  let mut connection = rusqlite::Connection::open(database).unwrap();
+  let transaction = connection.transaction().unwrap();
+  transaction
+    .execute(
+      "INSERT INTO encrypted_hosts (host_id, public_key) VALUES (?1, ?2)",
+      (host_id, &public_key),
+    )
+    .unwrap();
+  transaction
+    .execute(
+      "INSERT INTO hosts (host_id, name, public_key, access) VALUES (?1, ?2, ?3, 'view')",
+      (host_id, &config.name, &public_key),
+    )
+    .unwrap();
+  if let Some(group) = group {
+    transaction
+      .execute(
+        "INSERT INTO host_discovery (host_id, namespace, secret_digest) VALUES (?1, ?2, ?3)",
+        (host_id, &group.namespace, &group.secret_digest),
+      )
+      .unwrap();
+  }
+  transaction.commit().unwrap();
 }
 
 impl Harness {
@@ -128,7 +174,8 @@ impl Harness {
       lookups: Arc::new(AtomicUsize::new(0)),
     };
     let directory_lookup = pairing_directory.clone();
-    let state = HubState::new(Store::open(directory.path().join("hub.sqlite")).unwrap(), &hub_url).unwrap();
+    let database = directory.path().join("hub.sqlite");
+    let state = HubState::new(Store::open(&database).unwrap(), &hub_url).unwrap();
     let hub = server::router(state.clone()).route(
       "/hub/v1/resolve/alice/workstation",
       get(move || {
@@ -175,6 +222,8 @@ impl Harness {
         state_file: host_dir.join("host-access.json"),
       }),
     };
+    let group = namespace.map(|namespace| secret.discovery_group(&hub_url, namespace).unwrap());
+    restore_legacy_registration(&database, &host_id, &config, group.as_ref());
     let stop = CancellationToken::new();
     let connector_stop = stop.clone();
     let connector_task = tokio::spawn(async move {
@@ -242,6 +291,16 @@ impl Harness {
         state_file: directory.join("host-access.json"),
       }),
     };
+    let group = original
+      .discovery_namespace
+      .as_deref()
+      .map(|namespace| secret.discovery_group(&self.hub_url, namespace).unwrap());
+    restore_legacy_registration(
+      &self.directory.path().join("hub.sqlite"),
+      &host_id,
+      &config,
+      group.as_ref(),
+    );
     let stop = self.stop.clone();
     self.tasks.push(tokio::spawn(async move {
       connector::run(config, stop).await.unwrap();

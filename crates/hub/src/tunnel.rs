@@ -11,7 +11,6 @@ use axum::{
 };
 use ed25519_dalek::{Signature, VerifyingKey};
 use rand::{RngCore, rngs::OsRng};
-use serde::Serialize;
 use std::{
   collections::HashMap,
   io,
@@ -22,16 +21,13 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tokn_hub_client_core::presence::MachinePresence;
 
-const PAIR_LIFETIME: Duration = Duration::from_secs(300);
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct HubTunnels {
   store: Store,
-  require_account: bool,
   inner: Arc<Mutex<HubInner>>,
   handshakes: Arc<Semaphore>,
-  enrollments: Arc<Semaphore>,
   approved: Arc<Semaphore>,
   secure_capacity: Arc<Semaphore>,
   shutdown: CancellationToken,
@@ -39,23 +35,7 @@ pub struct HubTunnels {
 
 #[derive(Default)]
 struct HubInner {
-  pending: HashMap<String, Pending>,
   online: HashMap<String, Arc<Connection>>,
-}
-
-struct Pending {
-  record: HostRecord,
-  expires: Instant,
-  approval: oneshot::Sender<HostRecord>,
-}
-
-#[derive(Clone, Serialize)]
-pub struct PendingEnrollment {
-  pub pairing_code: String,
-  pub host_id: String,
-  pub name: String,
-  pub access: String,
-  pub expires_in: u64,
 }
 
 struct Connection {
@@ -152,58 +132,18 @@ impl Drop for RequestGuard {
 
 impl HubTunnels {
   pub fn new(store: Store) -> Self {
-    Self::with_limits(store, 32, 16, 64)
+    Self::with_limits(store, 32, 64)
   }
 
-  fn with_limits(store: Store, handshakes: usize, enrollments: usize, approved: usize) -> Self {
+  fn with_limits(store: Store, handshakes: usize, approved: usize) -> Self {
     Self {
       store,
-      require_account: false,
       inner: Arc::new(Mutex::new(HubInner::default())),
       handshakes: Arc::new(Semaphore::new(handshakes)),
-      enrollments: Arc::new(Semaphore::new(enrollments)),
       approved: Arc::new(Semaphore::new(approved)),
       secure_capacity: Arc::new(Semaphore::new(128)),
       shutdown: CancellationToken::new(),
     }
-  }
-
-  pub(crate) fn require_account(mut self, required: bool) -> Self {
-    self.require_account = required;
-    self
-  }
-
-  pub fn pending(&self) -> Vec<PendingEnrollment> {
-    let mut inner = self.inner.lock().unwrap();
-    inner
-      .pending
-      .retain(|_, pending| pending.expires > Instant::now() && !pending.approval.is_closed());
-    let mut result: Vec<_> = inner
-      .pending
-      .iter()
-      .map(|(code, pending)| PendingEnrollment {
-        pairing_code: code.clone(),
-        host_id: pending.record.host_id.clone(),
-        name: pending.record.name.clone(),
-        access: pending.record.access.clone(),
-        expires_in: pending.expires.saturating_duration_since(Instant::now()).as_secs(),
-      })
-      .collect();
-    result.sort_by(|a, b| a.host_id.cmp(&b.host_id));
-    result
-  }
-
-  pub fn approve(&self, code: &str) -> Result<HostRecord, String> {
-    let mut inner = self.inner.lock().unwrap();
-    let pending = inner.pending.remove(code).ok_or("Unknown or expired pairing code")?;
-    if pending.expires <= Instant::now() || pending.approval.is_closed() {
-      return Err("Pairing request expired or host disconnected".into());
-    }
-    self.store.approve_host(pending.record.clone())?;
-    // A host that disconnects immediately after approval stays approved and can
-    // reconnect using the same identity, without repeating enrollment.
-    let _ = pending.approval.send(pending.record.clone());
-    Ok(pending.record)
   }
 
   pub fn revoke(&self, host_id: &str) -> Result<(), String> {
@@ -212,7 +152,6 @@ impl HubTunnels {
     if let Some(connection) = inner.online.remove(host_id) {
       connection.shutdown.cancel();
     }
-    inner.pending.retain(|_, pending| pending.record.host_id != host_id);
     Ok(())
   }
 
@@ -274,8 +213,7 @@ impl HubTunnels {
 
   pub fn shutdown(&self) {
     self.shutdown.cancel();
-    let mut inner = self.inner.lock().unwrap();
-    inner.pending.clear();
+    let inner = self.inner.lock().unwrap();
     for connection in inner.online.values() {
       connection.shutdown.cancel();
     }
@@ -293,13 +231,11 @@ impl HubTunnels {
     let Ok(Ok((record, allow_control, encrypted_registration, discovery_group))) = result else {
       return;
     };
+    drop(handshake_permit);
     let registered = if encrypted_registration {
-      drop(handshake_permit);
-      self
-        .store
-        .register_tunnel_host(record, discovery_group.as_ref(), self.require_account)
+      self.store.register_tunnel_host(record, discovery_group.as_ref())
     } else {
-      self.await_approval(&mut socket, record, handshake_permit).await
+      self.reconnect_legacy_host(record)
     };
     let record = match registered {
       Ok(record) => record,
@@ -502,77 +438,15 @@ impl HubTunnels {
     ))
   }
 
-  async fn await_approval(
-    &self,
-    socket: &mut WebSocket,
-    record: HostRecord,
-    handshake_permit: OwnedSemaphorePermit,
-  ) -> Result<HostRecord, String> {
-    let (approval, mut approved) = oneshot::channel();
-    let (code, _enrollment_permit) = {
-      let mut inner = self.inner.lock().unwrap();
-      if let Some(stored) = self.store.host(&record.host_id)? {
-        if stored.public_key != record.public_key {
-          return Err("Host key changed".into());
-        }
-        return Ok(stored);
-      }
-      if self.require_account {
-        return Err(crate::store::ACCOUNT_REQUIRED.into());
-      }
-      let enrollment_permit = self
-        .enrollments
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| "Pending enrollment capacity reached")?;
-      inner.pending.retain(|_, pending| {
-        pending.record.host_id != record.host_id && pending.expires > Instant::now() && !pending.approval.is_closed()
-      });
-      let mut random = [0u8; 9];
-      OsRng.fill_bytes(&mut random);
-      let code = protocol::encode(&random);
-      inner.pending.insert(
-        code.clone(),
-        Pending {
-          record,
-          expires: Instant::now() + PAIR_LIFETIME,
-          approval,
-        },
-      );
-      (code, enrollment_permit)
-    };
-    // Pending enrollment is a separate, smaller budget. An unknown proved key
-    // waiting five minutes for approval must not block approved reconnections.
-    drop(handshake_permit);
-    let result = async {
-      send(
-        socket,
-        &Frame::Pending {
-          code: code.clone(),
-          expires_in: PAIR_LIFETIME.as_secs(),
-        },
-      )
-      .await?;
-      let deadline = tokio::time::sleep(PAIR_LIFETIME);
-      tokio::pin!(deadline);
-      let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
-      loop {
-        tokio::select! {
-          _ = self.shutdown.cancelled() => return Err("Hub stopped".into()),
-          _ = &mut deadline => return Err("Pairing expired".into()),
-          approved = &mut approved => return approved.map_err(|_| "Pairing cancelled".into()),
-          incoming = socket.recv() => match incoming {
-            Some(Ok(Message::Ping(data))) => send_message(socket, Message::Pong(data)).await?,
-            Some(Ok(Message::Pong(_))) => {},
-            _ => return Err("Host disconnected during pairing".into()),
-          },
-          _ = heartbeat.tick() => send_message(socket, Message::Ping(Bytes::new())).await?,
-        }
-      }
+  fn reconnect_legacy_host(&self, record: HostRecord) -> Result<HostRecord, String> {
+    let stored = self
+      .store
+      .host(&record.host_id)?
+      .ok_or(crate::store::ACCOUNT_REQUIRED)?;
+    if stored.public_key != record.public_key {
+      return Err("Host key changed".into());
     }
-    .await;
-    self.inner.lock().unwrap().pending.remove(&code);
-    result
+    Ok(stored)
   }
 
   pub async fn proxy(&self, host_id: &str, method: Method, path: &str, body: Bytes) -> Result<Response, ProxyError> {

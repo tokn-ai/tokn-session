@@ -21,7 +21,6 @@
 .account-section .hub-error { color: var(--danger); }
 .account-section summary { cursor: pointer; font-weight: 600; }
 .account-section[open] summary { margin-bottom: 12px; }
-.account-section-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 .account-section > button { justify-self: start; }
 .account-section .hub-host { background: var(--surface-raised); }
 

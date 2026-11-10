@@ -167,201 +167,62 @@ async fn unauthenticated_routes_and_unknown_api_paths_never_serve_the_spa() {
 }
 
 #[tokio::test]
-async fn namespaces_are_admin_owned_and_public_discovery_never_returns_a_key() {
+async fn legacy_machine_addresses_resolve_but_administrators_cannot_assign_new_ones() {
   let directory = tempfile::tempdir().unwrap();
   let state = state(directory.path());
-  let first = crate::store::HostRecord {
+  let legacy = crate::store::HostRecord {
     host_id: uuid::Uuid::new_v4().to_string(),
     name: "Workstation".into(),
     public_key: crate::protocol::encode(&[1; 32]),
     access: "view".into(),
   };
-  let second = crate::store::HostRecord {
-    host_id: uuid::Uuid::new_v4().to_string(),
-    name: "Laptop".into(),
-    public_key: crate::protocol::encode(&[2; 32]),
-    access: "view".into(),
-  };
-  let legacy = crate::store::HostRecord {
-    host_id: uuid::Uuid::new_v4().to_string(),
-    name: "Legacy".into(),
-    public_key: crate::protocol::encode(&[3; 32]),
-    access: "view".into(),
-  };
-  state.store.register_encrypted_host(first.clone()).unwrap();
-  state.store.register_encrypted_host(second.clone()).unwrap();
-  state.store.approve_host(legacy.clone()).unwrap();
+  state.store.register_encrypted_host(legacy.clone()).unwrap();
+  state.store.create_namespace("alice").unwrap();
+  state
+    .store
+    .bind_machine("alice", "workstation", &legacy.host_id)
+    .unwrap();
   let app = router(state.clone());
   assert_eq!(
     get(app.clone(), "/hub/v1/namespaces", None).await.status(),
     StatusCode::UNAUTHORIZED
   );
-  assert_eq!(
-    post_json(
-      app.clone(),
-      "/hub/v1/namespaces",
-      Some(ORIGIN),
-      None,
-      json!({"username": "alice"})
-    )
-    .await
-    .0,
-    StatusCode::UNAUTHORIZED
-  );
-  let binding_path = "/hub/v1/namespaces/alice/machines/workstation";
-  assert_eq!(
-    post_json(
-      app.clone(),
-      binding_path,
-      Some(ORIGIN),
-      None,
-      json!({"host_id": first.host_id})
-    )
-    .await
-    .0,
-    StatusCode::UNAUTHORIZED
-  );
   let token = login_for_test(app.clone(), &state.auth).await;
-  assert_eq!(
-    post_json(
-      app.clone(),
-      "/hub/v1/namespaces",
-      Some("https://untrusted.example"),
-      Some(&token),
-      json!({"username": "alice"})
-    )
-    .await
-    .0,
-    StatusCode::FORBIDDEN
-  );
-  assert!(state.store.namespaces().unwrap().is_empty());
-  for username in ["Alice", "a_b", "-alice", "alice-", "alice:other"] {
-    assert_eq!(
-      post_json(
-        app.clone(),
-        "/hub/v1/namespaces",
-        Some(ORIGIN),
-        Some(&token),
-        json!({"username": username})
-      )
-      .await
-      .0,
-      StatusCode::BAD_REQUEST
-    );
-  }
-  assert_eq!(
-    post_json(
-      app.clone(),
-      "/hub/v1/namespaces",
-      Some(ORIGIN),
-      Some(&token),
-      json!({"username": "alice", "owner_id": "attacker"})
-    )
-    .await
-    .0,
-    StatusCode::BAD_REQUEST
-  );
-  assert_eq!(
-    post_json(
-      app.clone(),
-      "/hub/v1/namespaces",
-      Some(ORIGIN),
-      Some(&token),
-      json!({"username": "alice"})
-    )
-    .await,
-    (StatusCode::OK, json!({"username": "alice"}))
-  );
-  assert_eq!(
-    post_json(
-      app.clone(),
-      "/hub/v1/namespaces",
-      Some(ORIGIN),
-      Some(&token),
-      json!({"username": "alice"})
-    )
-    .await
-    .0,
-    StatusCode::CONFLICT
-  );
   assert_eq!(
     json_body(get(app.clone(), "/hub/v1/namespaces", Some(&token)).await).await,
     json!({"namespaces": [{"username": "alice"}]})
   );
-
-  for (path, host_id, status) in [
+  for (path, body) in [
+    ("/hub/v1/namespaces", json!({"username": "bob"})),
     (
-      "/hub/v1/namespaces/unknown/machines/workstation",
-      first.host_id.as_str(),
-      StatusCode::NOT_FOUND,
+      "/hub/v1/namespaces/alice/machines/other",
+      json!({"host_id": legacy.host_id}),
     ),
-    (
-      "/hub/v1/namespaces/alice/machines/Workstation",
-      first.host_id.as_str(),
-      StatusCode::BAD_REQUEST,
-    ),
-    (
-      "/hub/v1/namespaces/alice/machines/legacy",
-      legacy.host_id.as_str(),
-      StatusCode::NOT_FOUND,
-    ),
-    (binding_path, "not-a-uuid", StatusCode::BAD_REQUEST),
+    ("/hub/v1/enrollments/approve", json!({"pairing_code": "example"})),
   ] {
     assert_eq!(
-      post_json(
-        app.clone(),
-        path,
-        Some(ORIGIN),
-        Some(&token),
-        json!({"host_id": host_id})
-      )
-      .await
-      .0,
-      status,
-      "{path}"
+      post_json(app.clone(), path, Some(ORIGIN), None, body.clone()).await.0,
+      StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+      post_json(app.clone(), path, Some(ORIGIN), Some(&token), body).await,
+      (StatusCode::GONE, json!({"error": crate::store::ACCOUNT_REQUIRED}))
     );
   }
-  let binding = post_json(
-    app.clone(),
-    binding_path,
-    Some(ORIGIN),
-    Some(&token),
-    json!({"host_id": first.host_id}),
-  )
-  .await;
-  let expected =
-    json!({"host_id": first.host_id, "machine_address": "alice:workstation", "name": "Workstation", "online": false});
-  assert_eq!(binding, (StatusCode::OK, expected.clone()));
   assert_eq!(
-    post_json(
-      app.clone(),
-      binding_path,
-      Some(ORIGIN),
-      Some(&token),
-      json!({"host_id": second.host_id})
-    )
-    .await
-    .0,
-    StatusCode::CONFLICT
+    json_body(get(app.clone(), "/hub/v1/enrollments", Some(&token)).await).await,
+    json!({"enrollments": []})
   );
-  assert_eq!(
-    post_json(
-      app.clone(),
-      "/hub/v1/namespaces/alice/machines/other",
-      Some(ORIGIN),
-      Some(&token),
-      json!({"host_id": first.host_id})
-    )
-    .await
-    .0,
-    StatusCode::CONFLICT
-  );
+
   let public = get(app.clone(), "/hub/v1/resolve/alice/workstation", None).await;
   assert_eq!(public.status(), StatusCode::OK);
   assert_eq!(public.headers()[header::CACHE_CONTROL], "no-store");
-  assert_eq!(json_body(public).await, expected);
   assert_eq!(
-    get(app.clone(), "/hub/v1/resolve/alice/unknown", None).await.status(),
+    json_body(public).await,
+    json!({"host_id": legacy.host_id, "machine_address": "alice:workstation", "name": "Workstation", "online": false})
+  );
+  assert_eq!(
+    get(app.clone(), "/hub/v1/resolve/alice/other", None).await.status(),
     StatusCode::NOT_FOUND
   );
   assert_eq!(
@@ -380,27 +241,13 @@ async fn namespaces_are_admin_owned_and_public_discovery_never_returns_a_key() {
     StatusCode::FORBIDDEN
   );
   let catalog = json_body(get(app.clone(), "/hub/v1/hosts", Some(&token)).await).await;
-  let registered = catalog["hosts"]
-    .as_array()
-    .unwrap()
-    .iter()
-    .find(|host| host["host_id"] == first.host_id)
-    .unwrap();
-  assert_eq!(registered["secure_only"], true);
-  assert_eq!(registered["online"], false);
-  assert_eq!(registered["machine_address"], "alice:workstation");
-  let legacy_host = catalog["hosts"]
-    .as_array()
-    .unwrap()
-    .iter()
-    .find(|host| host["host_id"] == legacy.host_id)
-    .unwrap();
-  assert_eq!(legacy_host["secure_only"], false);
-  assert!(legacy_host.get("machine_address").is_none());
+  assert_eq!(catalog["hosts"][0]["secure_only"], true);
+  assert_eq!(catalog["hosts"][0]["online"], false);
+  assert_eq!(catalog["hosts"][0]["machine_address"], "alice:workstation");
 
   let removal = Request::builder()
     .method("DELETE")
-    .uri(format!("/hub/v1/hosts/{}", first.host_id))
+    .uri(format!("/hub/v1/hosts/{}", legacy.host_id))
     .header(header::AUTHORIZATION, format!("Bearer {token}"))
     .body(Body::empty())
     .unwrap();
@@ -409,46 +256,8 @@ async fn namespaces_are_admin_owned_and_public_discovery_never_returns_a_key() {
     StatusCode::NO_CONTENT
   );
   assert_eq!(
-    get(app.clone(), "/hub/v1/resolve/alice/workstation", None)
-      .await
-      .status(),
+    get(app, "/hub/v1/resolve/alice/workstation", None).await.status(),
     StatusCode::NOT_FOUND
-  );
-  assert_eq!(
-    post_json(
-      app.clone(),
-      binding_path,
-      Some(ORIGIN),
-      Some(&token),
-      json!({"host_id": second.host_id})
-    )
-    .await
-    .0,
-    StatusCode::CONFLICT
-  );
-  assert_eq!(
-    post_json(
-      app.clone(),
-      "/hub/v1/auth/logout",
-      Some(ORIGIN),
-      Some(&token),
-      json!({})
-    )
-    .await
-    .0,
-    StatusCode::NO_CONTENT
-  );
-  assert_eq!(
-    post_json(
-      app,
-      "/hub/v1/namespaces",
-      Some(ORIGIN),
-      Some(&token),
-      json!({"username": "after-logout"})
-    )
-    .await
-    .0,
-    StatusCode::UNAUTHORIZED
   );
 }
 
@@ -572,21 +381,8 @@ async fn passkey_owner_routes_multiple_hosts_and_logout_stops_live_streams() {
       secure: None,
       paired: None,
     };
+    connector::remember_legacy_host(&state.store, &config);
     connectors.push(tokio::spawn(connector::run(config, stop.clone())));
-  }
-  wait_until(|| state.tunnels.pending().len() == 2).await;
-  let pending = json_body(get(app.clone(), "/hub/v1/enrollments", Some(&token)).await).await;
-  for enrollment in pending["enrollments"].as_array().unwrap() {
-    let request = json!({"pairing_code": enrollment["pairing_code"]});
-    let (status, _) = post_json(
-      app.clone(),
-      "/hub/v1/enrollments/approve",
-      Some(ORIGIN),
-      Some(&token),
-      request,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
   }
   let enrolled = state.store.hosts().unwrap();
   wait_until(|| enrolled.iter().all(|host| state.tunnels.online(&host.host_id))).await;

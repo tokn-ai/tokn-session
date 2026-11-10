@@ -77,6 +77,7 @@ export interface DiscoveredMachine {
   host_id: string;
   name: string;
   online: boolean;
+  machine_address?: string;
 }
 
 export interface DiscoveryResult extends DiscoveryGroup {
@@ -104,10 +105,6 @@ export interface ResolvedMachine {
   machine_address: string;
   name: string;
   online: boolean;
-}
-
-export interface HubNamespace {
-  username: string;
 }
 
 /** Availability of the viewer's local translation engine. */
@@ -1064,7 +1061,6 @@ export interface LocalHostStatus {
   error: string | null;
 }
 export interface StartLocalHostRequest {
-  discovery_namespace?: string | null;
   hub_url: string;
   name: string;
   allow_control: boolean;

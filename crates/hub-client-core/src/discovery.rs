@@ -1,5 +1,8 @@
 //! Public discovery references. A matching group never authorizes a machine.
-use crate::{address::validate_machine_name, protocol};
+use crate::{
+  address::{parse_machine_address, validate_machine_name},
+  protocol,
+};
 use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -7,6 +10,7 @@ use std::collections::HashSet;
 
 pub const MAX_DISCOVERY_MACHINES: usize = 64;
 pub const MAX_DISCOVERY_RESPONSE: usize = 32 * 1024;
+pub const DISCOVERY_ADDRESSES_HEADER: &str = "x-tokn-discovery-addresses";
 const DOMAIN: &[u8] = b"tokn-hub-discovery-group-v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +79,8 @@ pub struct DiscoveredMachine {
   pub host_id: String,
   pub name: String,
   pub online: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub machine_address: Option<String>,
 }
 
 impl DiscoveredMachine {
@@ -106,6 +112,12 @@ impl DiscoveryResult {
     let mut identities = HashSet::new();
     for machine in &self.machines {
       machine.validate()?;
+      if let Some(address) = &machine.machine_address {
+        let (username, _) = parse_machine_address(address)?;
+        if username != group.namespace {
+          return Err("Hub returned an address outside the discovery namespace".into());
+        }
+      }
       if !identities.insert(&machine.host_id) {
         return Err("Hub returned duplicate discovered machines".into());
       }
@@ -150,6 +162,7 @@ mod tests {
       host_id: "11111111-2222-4333-8444-555555555555".into(),
       name: "Laptop".into(),
       online: false,
+      machine_address: Some("personal:laptop".into()),
     };
     let mut result = DiscoveryResult {
       namespace: group.namespace.clone(),
@@ -157,6 +170,16 @@ mod tests {
       machines: vec![machine.clone()],
     };
     result.validate_for(&group).unwrap();
+    result.machines[0].machine_address = Some("other:laptop".into());
+    assert!(result.validate_for(&group).is_err());
+    result.machines[0].machine_address = None;
+    result.validate_for(&group).unwrap();
+    assert!(
+      !serde_json::to_value(&result).unwrap()["machines"][0]
+        .as_object()
+        .unwrap()
+        .contains_key("machine_address")
+    );
     result.machines.push(machine.clone());
     assert!(result.validate_for(&group).is_err());
     result.machines = vec![machine; MAX_DISCOVERY_MACHINES + 1];

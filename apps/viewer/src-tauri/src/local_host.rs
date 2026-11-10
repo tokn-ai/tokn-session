@@ -77,8 +77,6 @@ impl Default for HostStatus {
 pub struct StartHostRequest {
   pub hub_url: String,
   pub name: String,
-  #[serde(default)]
-  pub discovery_namespace: Option<String>,
   pub allow_control: bool,
 }
 #[derive(Serialize)]
@@ -234,7 +232,6 @@ impl LocalHost {
       host_setup::prepare_host(HostOptions {
         hub: Some(url::Url::parse(&request.hub_url).map_err(|_| "Enter a valid HTTPS Hub address")?),
         name: Some(request.name),
-        discovery_namespace: request.discovery_namespace,
         viewer_url: None,
         passkey_origin: None,
         state_dir: path,
@@ -706,6 +703,15 @@ fn pairing(path: &std::path::Path) -> Result<HostPairing, String> {
   let profile = HostProfile::load(&path.join("host.json"))?.ok_or("Start hosting to set up this machine first")?;
   let identity = NoiseIdentity::load(&path.join("host-noise.key"))?;
   let secret = tokn_session_hub::onboarding::read_totp_secret(&path.join("host-access.json"))?;
+  let discovery_group =
+    match tokn_session_hub::account_host::saved_discovery_group(path, &profile.hub_url, &profile.host_id)? {
+      Some(group) => Some(group),
+      None => profile
+        .discovery_namespace
+        .as_deref()
+        .map(|namespace| secret.discovery_group(&profile.hub_url, namespace))
+        .transpose()?,
+    };
   let setup_uri = secret.provisioning_uri(&profile.name)?;
   let svg = qrcode::QrCode::new(setup_uri.as_bytes())
     .map_err(|_| "Could not render authenticator QR")?
@@ -715,11 +721,7 @@ fn pairing(path: &std::path::Path) -> Result<HostPairing, String> {
   let now = tokn_session_hub::secure_client::unix_time()?;
   Ok(HostPairing {
     machine_reference: format!("{}@{}", profile.host_id, identity.public_key()),
-    discovery_group: profile
-      .discovery_namespace
-      .as_deref()
-      .map(|namespace| secret.discovery_group(&profile.hub_url, namespace))
-      .transpose()?,
+    discovery_group,
     qr_data_url: format!("data:image/svg+xml;base64,{}", STANDARD.encode(svg)),
     setup_uri,
     current_code: secret.code_at(now),
@@ -752,7 +754,6 @@ mod tests {
     host_setup::prepare_host(HostOptions {
       hub: Some(url::Url::parse("https://hub.example").unwrap()),
       name: Some("Test machine".into()),
-      discovery_namespace: None,
       viewer_url: None,
       passkey_origin: None,
       state_dir: path.to_owned(),
@@ -816,6 +817,32 @@ mod tests {
       saved_status(path).unwrap().discovery_namespace.as_deref(),
       Some("personal")
     );
+  }
+
+  #[test]
+  fn pairing_display_prefers_the_account_discovery_group_and_keeps_the_machine_reference() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let prepared = setup(path);
+    let profile_file = path.join("host.json");
+    let mut profile = HostProfile::load(&profile_file).unwrap().unwrap();
+    profile.discovery_namespace = Some("legacy".into());
+    profile.save(&profile_file).unwrap();
+    let group = tokn_hub_client_core::discovery::DiscoveryGroup {
+      namespace: "alice".into(),
+      secret_digest: "A".repeat(43),
+    };
+    tokn_session_hub::onboarding::save_configuration(
+      &path.join("host-account.json"),
+      &serde_json::json!({
+        "hub_origin": profile.hub_url,
+        "claim": { "host_id": profile.host_id, "machine_address": "alice:workstation", "group": group },
+      }),
+    )
+    .unwrap();
+    let display = pairing(path).unwrap();
+    assert_eq!(display.discovery_group, Some(group));
+    assert_eq!(display.machine_reference, prepared.reference);
   }
   #[test]
   fn inspecting_unconfigured_host_does_not_create_keys_or_pairing_state() {
@@ -934,7 +961,6 @@ mod tests {
       configuration: Some(StartHostRequest {
         hub_url: "https://hub.example".into(),
         name: "Existing host".into(),
-        discovery_namespace: Some("personal".into()),
         allow_control: false,
       }),
     };
@@ -946,7 +972,6 @@ mod tests {
     let configuration = restart_configuration(&host, "owned-instance").unwrap();
     assert_eq!(configuration.hub_url, "https://hub.example");
     assert_eq!(configuration.name, "Existing host");
-    assert_eq!(configuration.discovery_namespace.as_deref(), Some("personal"));
     assert!(!configuration.allow_control);
     let row = hosting_runtime(HostStatus::default(), Some(&host));
     assert_eq!(row.instance_id, "owned-instance");

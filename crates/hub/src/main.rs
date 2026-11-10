@@ -65,21 +65,18 @@ enum Command {
     #[arg(long)]
     api_only: bool,
   },
-  /// Enroll this host and keep an outbound tunnel to its loopback viewer-api.
+  /// Register a machine in your Hub account or reconnect an existing host.
   Connect {
     #[arg(long)]
     hub: Option<Url>,
     #[arg(long)]
     name: Option<String>,
     /// Register this host under this machine name in your signed-in Hub account.
-    #[arg(long, conflicts_with_all = ["trusted_hub", "owner_public_key", "discovery_namespace"], value_parser = machine_name)]
+    #[arg(long, conflicts_with_all = ["trusted_hub", "owner_public_key"], value_parser = machine_name)]
     machine: Option<String>,
     /// Register the machine, then exit so another local launcher can host it.
     #[arg(long, requires = "machine")]
     register_only: bool,
-    /// Legacy discovery for Hubs without account hosting. Empty clears it.
-    #[arg(long = "namespace", conflicts_with_all = ["trusted_hub", "owner_public_key"])]
-    discovery_namespace: Option<String>,
     #[arg(long)]
     viewer_url: Option<Url>,
     /// Stable Hub browser origin for host passkeys; defaults to --hub when it uses a hostname.
@@ -100,7 +97,7 @@ enum Command {
     /// Generated enrollment identity. Reuse it when reconnecting to the same Hub.
     #[arg(long)]
     identity_file: Option<PathBuf>,
-    /// Independently obtained owner signing public key. Requires E2EE for host content.
+    /// Reconnect a legacy host using its owner signing public key and signed grants.
     #[arg(long, conflicts_with = "trusted_hub")]
     owner_public_key: Option<String>,
     /// Private host encryption identity, separate from its enrollment identity.
@@ -109,7 +106,7 @@ enum Command {
     /// Local JSON array of revoked grant IDs; reloaded while serving requests.
     #[arg(long, requires = "owner_public_key", conflicts_with = "trusted_hub")]
     revocations_file: Option<PathBuf>,
-    /// Explicit legacy mode: the Hub can read content and authorize clients.
+    /// Reconnect a legacy trusted host. The Hub can read content and authorize clients.
     #[arg(long)]
     trusted_hub: bool,
     /// Allow sending input to live agents. Use --allow-control=false to disable it again.
@@ -309,7 +306,6 @@ async fn run(args: Args) -> Result<(), String> {
       name,
       machine,
       register_only,
-      discovery_namespace,
       viewer_url,
       passkey_origin,
       ice_servers,
@@ -330,10 +326,14 @@ async fn run(args: Args) -> Result<(), String> {
         }
         let state_dir = state_dir_or_default(state_dir)?;
         let lease = connector::HostLease::acquire(&state_dir.join("host-enrollment.key"))?;
+        if machine.is_none() && onboarding::HostProfile::load(&state_dir.join("host.json"))?.is_none() {
+          return Err(
+            "Sign in with tokn-session-hub auth login, then register this machine with connect --machine <name>".into(),
+          );
+        }
         let config = cli_onboarding::prepare_host(cli_onboarding::HostOptions {
           hub,
           name,
-          discovery_namespace,
           viewer_url,
           passkey_origin,
           ice_servers,
@@ -362,6 +362,7 @@ async fn run(args: Args) -> Result<(), String> {
         Some(path) => path,
         None => state_file_or_default(state_dir.as_deref(), "host.key")?,
       };
+      connector::validate_existing_identity(&key_file)?;
       let secure = match owner_public_key {
         Some(owner_public_key) => Some(SecureHostConfig {
           noise_key_file: match noise_key_file {
@@ -679,6 +680,7 @@ mod tests {
     assert!(Args::try_parse_from(["hub", "connect"]).is_ok());
     assert!(Args::try_parse_from(["hub", "client", "--hub", "https://hub.example"]).is_ok());
     assert!(Args::try_parse_from(connect.into_iter().chain(["--trusted-hub"])).is_ok());
+    assert!(Args::try_parse_from(connect.into_iter().chain(["--namespace", "personal"])).is_err());
     assert!(Args::try_parse_from(connect.into_iter().chain(["--owner-public-key", "owner"])).is_ok());
     assert!(
       Args::try_parse_from(

@@ -48,31 +48,39 @@ it("loads QR and current code on disclosure and clears them when hidden", async 
   expect(screen.queryByAltText("SHA-256 authenticator setup QR")).not.toBeInTheDocument();
 });
 
-it("saves the discovery namespace from the hosting dialog and shows it while online", async () => {
+it("reconnects a legacy host without changing its saved discovery group", async () => {
+  vi.mocked(getLocalHostStatus).mockResolvedValue({ ...stopped, discovery_namespace: "personal" });
   vi.mocked(startLocalHost).mockResolvedValue({ ...online, discovery_namespace: "personal" });
   render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
   fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
   await screen.findByText("Hosting off");
-  fireEvent.change(screen.getByLabelText("Legacy discovery namespace (optional)"), { target: { value: "personal" } });
+  expect(screen.queryByLabelText(/discovery namespace/i)).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Start hosting", hidden: true }));
   await waitFor(() => expect(startLocalHost).toHaveBeenCalledWith({
-    hub_url: stopped.hub_url, name: stopped.name, allow_control: false, discovery_namespace: "personal",
+    hub_url: stopped.hub_url, name: stopped.name, allow_control: false,
   }));
   await screen.findByText("Hosting online");
-  expect(screen.getByText("Discovery namespace")).toBeInTheDocument();
+  expect(screen.getByText("Legacy discovery group")).toBeInTheDocument();
   expect(screen.getByText("personal")).toBeInTheDocument();
 });
 
-it("can clear a saved discovery namespace while retaining the host configuration", async () => {
-  vi.mocked(getLocalHostStatus).mockResolvedValue({ ...stopped, discovery_namespace: "personal" });
+it("shows account registration for the chosen Hub and refreshes its assigned address", async () => {
+  vi.mocked(getLocalHostStatus).mockResolvedValue({ ...stopped, hub_url: "", machine_reference: null });
   render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
   fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
-  await screen.findByDisplayValue("personal");
-  fireEvent.change(screen.getByLabelText("Legacy discovery namespace (optional)"), { target: { value: "" } });
-  fireEvent.click(screen.getByRole("button", { name: "Start hosting", hidden: true }));
-  await waitFor(() => expect(startLocalHost).toHaveBeenCalledWith({
-    hub_url: stopped.hub_url, name: stopped.name, allow_control: false, discovery_namespace: "",
-  }));
+  await screen.findByText("Register this computer with a Hub account");
+  const hub_input = screen.getByLabelText("Hosting Hub address");
+  fireEvent.change(hub_input, { target: { value: "https://hub.example/" } });
+  expect(screen.getByText("tokn-session-hub auth login --hub https://hub.example")).toBeInTheDocument();
+  expect(screen.getByText("tokn-session-hub connect --hub https://hub.example --machine my-computer --register-only")).toBeInTheDocument();
+  vi.mocked(getLocalHostStatus).mockResolvedValue({ ...stopped, machine_address: "alice:workstation" });
+  fireEvent.click(screen.getByRole("button", { name: "Refresh hosting status" }));
+  expect(await screen.findByText("alice:workstation")).toBeInTheDocument();
+  expect(screen.queryByText("Register this computer with a Hub account")).not.toBeInTheDocument();
+  fireEvent.change(hub_input, { target: { value: "https://another.example" } });
+  expect(screen.queryByText("alice:workstation")).not.toBeInTheDocument();
+  expect(screen.getByText("tokn-session-hub auth login --hub https://another.example")).toBeInTheDocument();
+  expect(startLocalHost).not.toHaveBeenCalled();
 });
 it("preserves newer connection events over a late start response", async () => {
   let finish!: (status: LocalHostStatus) => void;

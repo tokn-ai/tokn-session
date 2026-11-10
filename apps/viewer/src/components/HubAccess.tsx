@@ -3,11 +3,11 @@ import { hubErrorMessage } from "../lib/hub";
 import { openHubAccess, type HubAccessService } from "../lib/hubAccess";
 import { canonicalHubUrl, hubHostLabel as hostLabel, machineReference, type SavedHubHost } from "../lib/hubDeviceStore";
 import { deselectMachine, selectMachine, type ConnectionState, type ViewerClient } from "../lib/transport";
-import type { DiscoveredMachine, HubMachineSelection, ResolvedMachine, TransportState } from "../lib/types";
+import type { DiscoveredMachine, HubMachineSelection, TransportState } from "../lib/types";
 import { ViewerPage } from "../pages/ViewerPage";
 import { RemoteConnection } from "./RemoteConnection";
 import { HostSetup } from "./HostSetup";
-import { HubMachineGallery } from "./HubMachineGallery";
+import { HubMachineGallery, type HubGalleryAccountRoster } from "./HubMachineGallery";
 import { HubPairingDialog } from "./HubPairingDialog";
 import { ConnectionIcon, ServerIcon } from "./Icons";
 import { SettingsEntry } from "./SettingsEntry";
@@ -31,11 +31,11 @@ export interface HubAccessProps {
   on_machine_open?: (selection: HubMachineSelection) => void;
   on_hub_ready?: (hub_url: string) => void;
   known_hub_urls?: string[];
-  initial_machine?: ResolvedMachine;
+  account_roster?: HubGalleryAccountRoster;
   account_control?: ReactNode;
 }
 
-export function HubAccess({ initial_hub_url = window.location.origin, startup_host_id, on_local, local_error, on_machine_open, on_hub_ready, known_hub_urls = [], initial_machine, account_control }: HubAccessProps) {
+export function HubAccess({ initial_hub_url = window.location.origin, startup_host_id, on_local, local_error, on_machine_open, on_hub_ready, known_hub_urls = [], account_roster, account_control }: HubAccessProps) {
   const [draft_hub_url, setDraftHubUrl] = useState(initial_hub_url);
   const [service, setService] = useState<HubAccessService>();
   const [hosts, setHosts] = useState<SavedHubHost[]>([]);
@@ -57,7 +57,7 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
   const lifetime = useRef(0);
   const service_ref = useRef<HubAccessService>(undefined);
   const active_client = useRef<ViewerClient>(undefined);
-  const startup = useRef({ hub_url: initial_hub_url, host_id: startup_host_id, machine: initial_machine });
+  const startup = useRef({ hub_url: initial_hub_url, host_id: startup_host_id });
   const callbacks = useRef({ on_machine_open, on_hub_ready });
   callbacks.current = { on_machine_open, on_hub_ready };
   const busy = !!pending;
@@ -82,7 +82,7 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
     setPairingOpen(false); selectMachine(client); setActive({ host, client });
     callbacks.current.on_machine_open?.({ kind: "hub", hub_url: current.hub_url, host_id: host.host_id });
   }
-  async function loadService(url: string, signal: AbortSignal, requested_host_id: string | null | undefined, account_machine?: ResolvedMachine) {
+  async function loadService(url: string, signal: AbortSignal, requested_host_id: string | null | undefined) {
     service_ref.current?.dispose?.(); service_ref.current = undefined;
     setService(undefined); setHosts([]); setMachine(""); setCode(""); setPairTarget(undefined); setPairingOpen(false);
     const next = await openHubAccess(url);
@@ -92,13 +92,6 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
     catch (error) { next.dispose?.(); throw error; }
     if (signal.aborted) { next.dispose?.(); return; }
     service_ref.current = next; setService(next); setDraftHubUrl(next.hub_url); setHosts(status.hosts); setEditingHub(false);
-    if (account_machine) {
-      const paired = capabilities.passkeys && status.hosts.some((host) => host.host_id === account_machine.host_id);
-      setMachine(account_machine.machine_address);
-      setMethod(paired ? "passkey" : "code");
-      if (!paired) setPairTarget(account_machine);
-      setPairingOpen(true);
-    }
     callbacks.current.on_hub_ready?.(next.hub_url);
     const selected_id = requested_host_id === undefined ? status.selected_host_id : requested_host_id;
     const selected = status.hosts.find((host) => host.host_id === selected_id);
@@ -119,8 +112,8 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
   }
   useEffect(() => {
     const generation = ++lifetime.current;
-    const { hub_url, host_id, machine } = startup.current;
-    if (!native || validHubUrl(hub_url)) void action("loading_hub", (signal) => loadService(hub_url, signal, host_id, machine));
+    const { hub_url, host_id } = startup.current;
+    if (!native || validHubUrl(hub_url)) void action("loading_hub", (signal) => loadService(hub_url, signal, host_id));
     return () => {
       const owned_client = active_client.current;
       operation.current?.abort(); active_client.current = undefined;
@@ -218,6 +211,7 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
     </form>}
     {!pairing_open && <>{progress}{error && <p className="hub-error hub-feedback" role="alert">{error}</p>}{notice && <p className="hub-feedback" role="status">{notice}</p>}</>}
     {service && <HubMachineGallery key={service.hub_url} service={service} hosts={hosts} busy={busy}
+      account_roster={account_roster?.hub_url === service.hub_url ? account_roster : undefined}
       opening_host_id={pending?.kind === "opening_machine" ? pending.host_id : undefined}
       on_open={(host) => { void action("opening_machine", (signal) => openHost(service, host, signal), host.host_id); }}
       on_pair={(candidate) => {

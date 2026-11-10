@@ -20,11 +20,21 @@ it("keeps directory candidates separate from trusted machine pins and rejects du
   }
 });
 
+it("retains a negotiated canonical address without accepting an invalid address", () => {
+  const registered = { ...machine, machine_address: "personal:laptop" };
+  expect(validateDiscoveryResult({ ...group, machines: [registered] }, group).machines).toEqual([registered]);
+  expect(() => validateDiscoveryResult({ ...group, machines: [{ ...machine, machine_address: "personal:Laptop" }] }, group)).toThrow();
+  expect(() => validateDiscoveryResult({ ...group, machines: [{ ...machine, machine_address: "other:laptop" }] }, group)).toThrow("outside the discovery namespace");
+});
+
 it("fetches the exact group without credentials, redirects or cached discovery and bounds the body", async () => {
   const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ...group, machines: [machine] }), { headers: { "Content-Type": "application/json" } }));
   vi.stubGlobal("fetch", fetcher);
   expect(await discoverBrowserGroup("https://hub.example", group, new AbortController().signal)).toEqual({ ...group, machines: [machine] });
-  expect(fetcher).toHaveBeenCalledWith(`https://hub.example/hub/v1/discovery/personal/${group.secret_digest}`, expect.objectContaining({ credentials: "omit", redirect: "error", cache: "no-store" }));
+  expect(fetcher).toHaveBeenCalledWith(`https://hub.example/hub/v1/discovery/personal/${group.secret_digest}`, expect.objectContaining({
+    credentials: "omit", redirect: "error", cache: "no-store",
+    headers: { Accept: "application/json", "X-Tokn-Discovery-Addresses": "1" },
+  }));
   fetcher.mockResolvedValue(new Response(" ".repeat(32769), { headers: { "Content-Type": "application/json" } }));
   await expect(discoverBrowserGroup("https://hub.example", group, new AbortController().signal)).rejects.toThrow("too large");
 });

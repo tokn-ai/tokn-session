@@ -231,7 +231,6 @@ mod tests {
       allow_control: None,
       insecure_loopback: false,
       ice_servers: None,
-      discovery_namespace: None,
     }
   }
 

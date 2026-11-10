@@ -3,7 +3,7 @@ use crate::{DiscoveryGroup, DiscoveryResult, PresenceResult, ResolvedMachine, ca
 use std::time::Duration;
 use tokn_hub_client_core::{
   address::parse_machine_address,
-  discovery::MAX_DISCOVERY_RESPONSE,
+  discovery::{DISCOVERY_ADDRESSES_HEADER, MAX_DISCOVERY_RESPONSE},
   presence::{MAX_PRESENCE_RESPONSE, PRESENCE_VERSIONS_HEADER, PresenceRequest},
 };
 use url::Url;
@@ -37,7 +37,10 @@ pub(crate) async fn discover(hub_url: &str, group: &DiscoveryGroup) -> Result<Di
     "/hub/v1/discovery/{}/{}",
     group.namespace, group.secret_digest
   ));
-  let body = fetch(endpoint, MAX_DISCOVERY_RESPONSE, LOOKUP_TIMEOUT).await?;
+  let request = directory_client()?
+    .get(endpoint)
+    .header(DISCOVERY_ADDRESSES_HEADER, "1");
+  let body = fetch_request(request, MAX_DISCOVERY_RESPONSE, LOOKUP_TIMEOUT).await?;
   let discovered: DiscoveryResult =
     serde_json::from_slice(&body).map_err(|_| "Hub directory returned invalid discovery metadata")?;
   discovered.validate_for(group)?;

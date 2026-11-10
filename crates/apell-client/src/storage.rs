@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 use tokn_hub_client_core::{
   address::ResolvedMachine,
-  discovery::{DiscoveryGroup, DiscoveryResult, MAX_DISCOVERY_RESPONSE},
+  discovery::{DISCOVERY_ADDRESSES_HEADER, DiscoveryGroup, DiscoveryResult, MAX_DISCOVERY_RESPONSE},
   pairing::ClientPairing,
   presence::{MAX_PRESENCE_RESPONSE, PRESENCE_VERSIONS_HEADER, PresenceRequest, PresenceResult},
   protocol,
@@ -278,7 +278,15 @@ pub async fn discover(params: Value) -> Result<Value, String> {
     "/hub/v1/discovery/{}/{}",
     group.namespace, group.secret_digest
   ));
-  let response: Value = host::call("http.request", json!({"url":endpoint.as_str(),"timeout_ms":10000})).await?;
+  let response: Value = host::call(
+    "http.request",
+    json!({
+      "url": endpoint.as_str(),
+      "timeout_ms": 10000,
+      "headers": [{"name": DISCOVERY_ADDRESSES_HEADER, "value": "1"}],
+    }),
+  )
+  .await?;
   let bytes = directory_body(response, MAX_DISCOVERY_RESPONSE)?;
   let result: DiscoveryResult = serde_json::from_slice(&bytes).map_err(|_| "Invalid Hub discovery metadata")?;
   result.validate_for(&group)?;

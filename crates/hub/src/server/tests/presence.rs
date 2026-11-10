@@ -10,10 +10,10 @@ use tokn_hub_client_core::presence::{MAX_PRESENCE_HOSTS, PresenceResult};
 const FIRST: &str = "550e8400-e29b-41d4-a716-446655440000";
 const SECOND: &str = "550e8400-e29b-41d4-a716-446655440001";
 
-async fn registered_socket(
+async fn registration_socket(
   hub_url: &str,
   connector_version: Option<&str>,
-) -> WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>> {
+) -> (WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>, protocol::Frame) {
   let endpoint = format!("{}/hub/v1/tunnel", hub_url.replacen("http://", "ws://", 1));
   let mut request = endpoint.into_client_request().unwrap();
   if let Some(version) = connector_version {
@@ -44,9 +44,8 @@ async fn registered_socket(
     .send(Message::Text(serde_json::to_string(&registration).unwrap().into()))
     .await
     .unwrap();
-  let ready: protocol::Frame = serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
-  assert!(matches!(ready, protocol::Frame::Ready { .. }));
-  socket
+  let result = serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+  (socket, result)
 }
 
 async fn versioned_presence(app: Router, payload: &Value) -> Value {
@@ -78,7 +77,22 @@ async fn presence_tracks_connect_disconnect_and_revocation_without_exposing_iden
   let result: PresenceResult = serde_json::from_value(body).unwrap();
   result.validate_for(&ids).unwrap();
   let (hub_url, task) = listen(app.clone()).await;
-  let mut socket = registered_socket(&hub_url, Some("0.2.0-rc.1")).await;
+  let (_, rejected) = registration_socket(&hub_url, Some("0.2.0-rc.1")).await;
+  assert!(
+    matches!(rejected, protocol::Frame::RegistrationRejected { message } if message == crate::store::ACCOUNT_REQUIRED)
+  );
+  assert!(state.store.host(FIRST).unwrap().is_none());
+  state
+    .store
+    .register_encrypted_host(crate::store::HostRecord {
+      host_id: FIRST.into(),
+      name: "Workstation".into(),
+      public_key: protocol::encode(SigningKey::from_bytes(&[7; 32]).verifying_key().as_bytes()),
+      access: "view".into(),
+    })
+    .unwrap();
+  let (mut socket, ready) = registration_socket(&hub_url, Some("0.2.0-rc.1")).await;
+  assert!(matches!(ready, protocol::Frame::Ready { .. }));
   assert!(state.tunnels.online(FIRST));
   let (status, body) = post_json(app.clone(), "/hub/v1/presence", Some(ORIGIN), None, payload.clone()).await;
   assert_eq!(status, StatusCode::OK);
@@ -95,10 +109,12 @@ async fn presence_tracks_connect_disconnect_and_revocation_without_exposing_iden
   wait_until(|| !state.tunnels.online(FIRST)).await;
   let body = versioned_presence(app.clone(), &payload).await;
   assert_eq!(body["machines"][0], json!({"host_id":FIRST,"online":false}));
-  let _old_socket = registered_socket(&hub_url, None).await;
+  let (_old_socket, ready) = registration_socket(&hub_url, None).await;
+  assert!(matches!(ready, protocol::Frame::Ready { .. }));
   let body = versioned_presence(app.clone(), &payload).await;
   assert_eq!(body["machines"][0], json!({"host_id":FIRST,"online":true}));
-  let _socket = registered_socket(&hub_url, Some("0.2.0")).await;
+  let (_socket, ready) = registration_socket(&hub_url, Some("0.2.0")).await;
+  assert!(matches!(ready, protocol::Frame::Ready { .. }));
   let body = versioned_presence(app.clone(), &payload).await;
   assert_eq!(body["machines"][0]["connector_version"], "0.2.0");
   state.tunnels.revoke(FIRST).unwrap();

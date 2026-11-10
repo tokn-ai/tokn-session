@@ -44,14 +44,15 @@ export function withMachineAddressing(backend: HubAccessBackend): HubAccessServi
     if (alias_pin && alias_pin.host_id !== host_id) throw new Error("This address now points to another machine. Its saved identity was preserved.");
     const remembered = status.hosts.find((host) => host.host_id === host_id);
     if (remembered && parsed.host_public_key && remembered.host_public_key !== parsed.host_public_key) throw new Error("Machine key differs from its remembered identity. Its saved key was preserved.");
-    return { host_id, host_public_key: parsed.host_public_key ?? remembered?.host_public_key, resolved, remembered };
+    const metadata = remembered?.machine_address && remembered.machine_address !== resolved?.machine_address ? undefined : resolved;
+    return { host_id, host_public_key: parsed.host_public_key ?? remembered?.host_public_key, metadata, remembered };
   }
   return Object.assign(backend, {
     async pairMachine(input: string, code: string, signal: AbortSignal) {
       const selected = await target(input, signal);
-      const host = await backend.pair(selected.host_id, code, signal, selected.host_public_key, selected.resolved);
+      const host = await backend.pair(selected.host_id, code, signal, selected.host_public_key, selected.metadata);
       checkCancelled(signal);
-      return selected.resolved ? backend.rememberMetadata(selected.resolved, signal) : host;
+      return selected.metadata ? backend.rememberMetadata(selected.metadata, signal) : host;
     },
     async loginMachine(input: string, signal: AbortSignal) {
       const selected = await target(input, signal);
@@ -59,7 +60,7 @@ export function withMachineAddressing(backend: HubAccessBackend): HubAccessServi
       const host = validateHost({ host_id: selected.host_id, host_public_key: selected.host_public_key, ...selected.remembered });
       await backend.authenticate(host, false, signal);
       checkCancelled(signal);
-      return selected.resolved ? backend.rememberMetadata(selected.resolved, signal) : host;
+      return selected.metadata ? backend.rememberMetadata(selected.metadata, signal) : host;
     },
   });
 }
