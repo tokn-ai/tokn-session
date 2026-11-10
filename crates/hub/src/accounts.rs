@@ -15,7 +15,7 @@ use std::{
 use axum::{
   Json, Router,
   extract::{DefaultBodyLimit, Path, Request, State},
-  http::{HeaderMap, StatusCode, header},
+  http::{HeaderMap, HeaderValue, StatusCode, header},
   middleware::{self, Next},
   response::{IntoResponse, Response},
   routing::{delete, get, post},
@@ -43,6 +43,11 @@ const MAX_DEVICE_REQUESTS_PER_MINUTE: u32 = 64;
 const MAX_DEVICE_APPROVALS_PER_MINUTE: u32 = 128;
 const MAX_DEVICE_ATTEMPTS_PER_ACCOUNT: u32 = 10;
 const USER_CODE_ALPHABET: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+const BROWSER_COOKIE: &str = "__Host-tokn-hub-account";
+const LOCAL_BROWSER_COOKIE: &str = "tokn_hub_account_dev";
+const ACCOUNT_ID_HEADER: &str = "x-tokn-account-id";
+const BEARER_TOKEN_PREFIX: &str = "tkna_";
+const COOKIE_TOKEN_PREFIX: &str = "tknw_";
 
 pub const MACHINES_READ: &str = "machines:read";
 pub const MACHINES_REGISTER: &str = "machines:register";
@@ -60,6 +65,7 @@ pub struct AccountError {
   pub status: StatusCode,
   message: &'static str,
   username_required: bool,
+  account_session_changed: bool,
 }
 
 impl AccountError {
@@ -68,11 +74,19 @@ impl AccountError {
       status,
       message,
       username_required: false,
+      account_session_changed: false,
     }
   }
 
   fn unauthorized() -> Self {
     Self::new(StatusCode::UNAUTHORIZED, "Sign in to your Hub account")
+  }
+
+  fn session_changed() -> Self {
+    Self {
+      account_session_changed: true,
+      ..Self::new(StatusCode::CONFLICT, "Your browser Hub account session changed")
+    }
   }
 
   fn forbidden() -> Self {
@@ -109,6 +123,8 @@ impl IntoResponse for AccountError {
   fn into_response(self) -> Response {
     let body = if self.username_required {
       json!({"error": self.message, "username_required": true})
+    } else if self.account_session_changed {
+      json!({"error": self.message, "account_session_changed": true})
     } else {
       json!({"error": self.message})
     };
@@ -124,9 +140,42 @@ pub struct Accounts {
 struct Inner {
   store: Store,
   origin: String,
+  local_http: bool,
   mailer: Option<Sendmail>,
   code_key: Hash,
   pending: Mutex<Pending>,
+}
+
+struct AccountToken {
+  hash: Hash,
+  from_cookie: bool,
+  expected_user_id: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum BrowserAccess {
+  Restore,
+  Read,
+  Write,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TokenTransport {
+  Bearer,
+  Cookie,
+}
+
+impl TokenTransport {
+  fn prefix(self) -> &'static str {
+    match self {
+      Self::Bearer => BEARER_TOKEN_PREFIX,
+      Self::Cookie => COOKIE_TOKEN_PREFIX,
+    }
+  }
+
+  fn valid_token(self, token: &str) -> bool {
+    token.strip_prefix(self.prefix()).is_some_and(valid_secret)
+  }
 }
 
 #[derive(Default)]
@@ -181,10 +230,9 @@ impl Accounts {
   }
 
   fn with_mailer(store: Store, public_url: &str, mailer: Option<Sendmail>) -> Result<Self, String> {
-    let origin = Url::parse(public_url)
-      .map_err(|_| "Invalid Hub URL for account authentication")?
-      .origin()
-      .ascii_serialization();
+    let public_url = Url::parse(public_url).map_err(|_| "Invalid Hub URL for account authentication")?;
+    let origin = public_url.origin().ascii_serialization();
+    let local_http = public_url.scheme() == "http" && public_url.domain() == Some("localhost");
     storage::initialize(&store)?;
     let mut code_key = Hash::default();
     OsRng.fill_bytes(&mut code_key);
@@ -192,6 +240,7 @@ impl Accounts {
       inner: Arc::new(Inner {
         store,
         origin,
+        local_http,
         mailer,
         code_key,
         pending: Mutex::new(Pending::default()),
@@ -208,6 +257,8 @@ impl Accounts {
       .route("/hub/v1/account/capabilities", get(capabilities))
       .route("/hub/v1/account/email/start", post(email_start))
       .route("/hub/v1/account/email/verify", post(email_verify))
+      .route("/hub/v1/account/browser/email/verify", post(browser_email_verify))
+      .route("/hub/v1/account/browser/refresh", post(browser_refresh))
       .route("/hub/v1/account/device/start", post(device_start))
       .route("/hub/v1/account/device/approve", post(device_approve))
       .route("/hub/v1/account/device/token", post(device_token))
@@ -221,32 +272,101 @@ impl Accounts {
   }
 
   pub async fn authenticate(&self, headers: &HeaderMap, required_scope: &str) -> Result<AccountIdentity, AccountError> {
-    let credential = self.credential(headers).await?;
+    self.check_origin(headers, false)?;
+    self
+      .authenticate_scope(
+        AccountToken {
+          hash: bearer_hash(headers)?,
+          from_cookie: false,
+          expected_user_id: None,
+        },
+        required_scope,
+      )
+      .await
+  }
+
+  pub async fn authenticate_machine_reader(&self, headers: &HeaderMap) -> Result<AccountIdentity, AccountError> {
+    self.check_origin(headers, false)?;
+    self
+      .authenticate_scope(self.account_token(headers, BrowserAccess::Read)?, MACHINES_READ)
+      .await
+  }
+
+  async fn authenticate_scope(
+    &self,
+    token: AccountToken,
+    required_scope: &str,
+  ) -> Result<AccountIdentity, AccountError> {
+    let credential = self.credential(token).await?;
     if !credential.permits(required_scope) {
       return Err(AccountError::forbidden());
     }
     Ok(credential.identity)
   }
 
-  async fn credential(&self, headers: &HeaderMap) -> Result<Credential, AccountError> {
-    self.check_origin(headers)?;
-    let hash = bearer_hash(headers)?;
+  async fn credential(&self, token: AccountToken) -> Result<Credential, AccountError> {
     self
-      .blocking(move |state| storage::credential(&state.inner.store, &hash))
+      .blocking(move |state| storage::credential(&state.inner.store, &token))
       .await
   }
 
-  fn check_origin(&self, headers: &HeaderMap) -> Result<(), AccountError> {
+  fn account_token(&self, headers: &HeaderMap, access: BrowserAccess) -> Result<AccountToken, AccountError> {
+    if headers.contains_key(header::AUTHORIZATION) {
+      return Ok(AccountToken {
+        hash: bearer_hash(headers)?,
+        from_cookie: false,
+        expected_user_id: None,
+      });
+    }
+    let token = cookie_token(headers, self.cookie_name())?;
+    if matches!(access, BrowserAccess::Write) {
+      self.check_origin(headers, true)?;
+    }
+    let expected_user_id = if matches!(access, BrowserAccess::Restore) {
+      None
+    } else {
+      Some(expected_account_id(headers)?.to_owned())
+    };
+    Ok(AccountToken {
+      hash: hash(token),
+      from_cookie: true,
+      expected_user_id,
+    })
+  }
+
+  fn cookie_name(&self) -> &'static str {
+    if self.inner.local_http {
+      LOCAL_BROWSER_COOKIE
+    } else {
+      BROWSER_COOKIE
+    }
+  }
+
+  fn browser_cookie(&self, value: &str, max_age: i64) -> Result<HeaderValue, AccountError> {
+    let (path, security) = if self.inner.local_http {
+      ("/hub/v1/account", "")
+    } else {
+      ("/", "; Secure")
+    };
+    let mut cookie = HeaderValue::from_str(&format!(
+      "{}={value}; Path={path}; Max-Age={max_age}; HttpOnly; SameSite=Strict{security}",
+      self.cookie_name()
+    ))
+    .map_err(|_| AccountError::internal("Invalid Hub account cookie"))?;
+    cookie.set_sensitive(true);
+    Ok(cookie)
+  }
+
+  fn check_origin(&self, headers: &HeaderMap, required: bool) -> Result<(), AccountError> {
     let mut origins = headers.get_all(header::ORIGIN).iter();
-    if let Some(origin) = origins.next()
-      && (origin.to_str().ok() != Some(self.inner.origin.as_str()) || origins.next().is_some())
-    {
-      return Err(AccountError::new(
+    match origins.next() {
+      Some(origin) if origin.to_str().ok() == Some(self.inner.origin.as_str()) && origins.next().is_none() => Ok(()),
+      None if !required => Ok(()),
+      _ => Err(AccountError::new(
         StatusCode::FORBIDDEN,
         "Request origin does not match the Hub",
-      ));
+      )),
     }
-    Ok(())
   }
 
   fn pending(&self) -> Result<MutexGuard<'_, Pending>, AccountError> {
@@ -299,7 +419,13 @@ impl Accounts {
     Ok((code, hash))
   }
 
-  fn verify_email_code(&self, email: &str, code: &str, username: Option<&str>) -> Result<Login, AccountError> {
+  fn verify_email_code(
+    &self,
+    email: &str,
+    code: &str,
+    username: Option<&str>,
+    transport: TokenTransport,
+  ) -> Result<Login, AccountError> {
     let invalid = || AccountError::new(StatusCode::UNAUTHORIZED, "Email code is invalid or expired");
     let mut pending = self.pending()?;
     let challenge = pending.emails.get_mut(email).ok_or_else(invalid)?;
@@ -313,7 +439,7 @@ impl Accounts {
       challenge.attempts += 1;
       return Err(invalid());
     }
-    let login = storage::email_login(&self.inner.store, email, username)?;
+    let login = storage::email_login(&self.inner.store, email, username, transport)?;
     challenge.attempts = MAX_MAIL_ATTEMPTS;
     Ok(login)
   }
@@ -324,7 +450,7 @@ async fn capabilities(State(state): State<Accounts>) -> Json<serde_json::Value> 
 }
 
 async fn account_headers(State(state): State<Accounts>, request: Request, next: Next) -> Response {
-  let mut response = match state.check_origin(request.headers()) {
+  let mut response = match state.check_origin(request.headers(), false) {
     Ok(()) => next.run(request).await,
     Err(error) => error.into_response(),
   };
@@ -390,12 +516,54 @@ async fn email_verify(
   State(state): State<Accounts>,
   Json(request): Json<VerifyRequest>,
 ) -> Result<Json<Login>, AccountError> {
+  verify_login(&state, request, TokenTransport::Bearer).await.map(Json)
+}
+
+async fn browser_email_verify(
+  State(state): State<Accounts>,
+  headers: HeaderMap,
+  Json(request): Json<VerifyRequest>,
+) -> Result<Response, AccountError> {
+  state.check_origin(&headers, true)?;
+  let login = verify_login(&state, request, TokenTransport::Cookie).await?;
+  let cookie = state.browser_cookie(&login.token, storage::BROWSER_COOKIE_TTL)?;
+  Ok(([(header::SET_COOKIE, cookie)], Json(login.identity)).into_response())
+}
+
+async fn browser_refresh(State(state): State<Accounts>, headers: HeaderMap) -> Result<Response, AccountError> {
+  state.check_origin(&headers, true)?;
+  if headers.contains_key(header::AUTHORIZATION) {
+    return Err(AccountError::unauthorized());
+  }
+  let value = cookie_token(&headers, state.cookie_name())?;
+  let token = AccountToken {
+    hash: hash(value),
+    from_cookie: true,
+    expected_user_id: None,
+  };
+  let (identity, renewed) = state
+    .blocking(move |state| storage::refresh_browser(&state.inner.store, &token))
+    .await?;
+  let mut response = Json(identity).into_response();
+  if renewed {
+    response.headers_mut().insert(
+      header::SET_COOKIE,
+      state.browser_cookie(value, storage::BROWSER_COOKIE_TTL)?,
+    );
+  }
+  Ok(response)
+}
+
+async fn verify_login(
+  state: &Accounts,
+  request: VerifyRequest,
+  transport: TokenTransport,
+) -> Result<Login, AccountError> {
   let email = mail::mailbox(&request.email)
     .ok_or_else(|| AccountError::new(StatusCode::BAD_REQUEST, "Enter a valid email address"))?;
   state
-    .blocking(move |state| state.verify_email_code(&email, request.code.trim(), request.username.as_deref()))
+    .blocking(move |state| state.verify_email_code(&email, request.code.trim(), request.username.as_deref(), transport))
     .await
-    .map(Json)
 }
 
 #[derive(Serialize)]
@@ -461,7 +629,9 @@ async fn device_approve(
   headers: HeaderMap,
   Json(request): Json<ApproveRequest>,
 ) -> Result<StatusCode, AccountError> {
-  let credential = state.credential(&headers).await?;
+  let credential = state
+    .credential(state.account_token(&headers, BrowserAccess::Write)?)
+    .await?;
   if credential.kind != CredentialKind::Browser {
     return Err(AccountError::forbidden());
   }
@@ -527,21 +697,33 @@ async fn device_token(
 }
 
 async fn me(State(state): State<Accounts>, headers: HeaderMap) -> Result<Json<AccountIdentity>, AccountError> {
-  Ok(Json(state.credential(&headers).await?.identity))
+  Ok(Json(
+    state
+      .credential(state.account_token(&headers, BrowserAccess::Restore)?)
+      .await?
+      .identity,
+  ))
 }
 
-async fn logout(State(state): State<Accounts>, headers: HeaderMap) -> Result<StatusCode, AccountError> {
-  let hash = bearer_hash(&headers)?;
+async fn logout(State(state): State<Accounts>, headers: HeaderMap) -> Result<Response, AccountError> {
+  let token = state.account_token(&headers, BrowserAccess::Write)?;
+  let from_cookie = token.from_cookie;
   state
-    .blocking(move |state| storage::logout(&state.inner.store, &hash))
+    .blocking(move |state| storage::logout(&state.inner.store, &token))
     .await?;
-  Ok(StatusCode::NO_CONTENT)
+  let mut response = StatusCode::NO_CONTENT.into_response();
+  if from_cookie {
+    response
+      .headers_mut()
+      .insert(header::SET_COOKIE, state.browser_cookie("", 0)?);
+  }
+  Ok(response)
 }
 
 async fn keys(State(state): State<Accounts>, headers: HeaderMap) -> Result<Json<serde_json::Value>, AccountError> {
-  let hash = bearer_hash(&headers)?;
+  let token = state.account_token(&headers, BrowserAccess::Read)?;
   let keys = state
-    .blocking(move |state| storage::keys(&state.inner.store, &hash))
+    .blocking(move |state| storage::keys(&state.inner.store, &token))
     .await?;
   Ok(Json(json!({"keys": keys})))
 }
@@ -559,9 +741,9 @@ async fn create_key(
   headers: HeaderMap,
   Json(request): Json<KeyRequest>,
 ) -> Result<(StatusCode, Json<storage::CreatedKey>), AccountError> {
-  let hash = bearer_hash(&headers)?;
+  let token = state.account_token(&headers, BrowserAccess::Write)?;
   let key = state
-    .blocking(move |state| storage::create_key(&state.inner.store, &hash, request))
+    .blocking(move |state| storage::create_key(&state.inner.store, &token, request))
     .await?;
   Ok((StatusCode::CREATED, Json(key)))
 }
@@ -571,9 +753,9 @@ async fn revoke_key(
   headers: HeaderMap,
   Path(key_id): Path<String>,
 ) -> Result<StatusCode, AccountError> {
-  let hash = bearer_hash(&headers)?;
+  let token = state.account_token(&headers, BrowserAccess::Write)?;
   state
-    .blocking(move |state| storage::revoke_key(&state.inner.store, &hash, &key_id))
+    .blocking(move |state| storage::revoke_key(&state.inner.store, &token, &key_id))
     .await?;
   Ok(StatusCode::NO_CONTENT)
 }
@@ -601,10 +783,37 @@ fn bearer_hash(headers: &HeaderMap) -> Result<Hash, AccountError> {
     .next()
     .and_then(|value| value.to_str().ok())
     .and_then(|value| value.strip_prefix("Bearer "))
-    .filter(|token| token.strip_prefix("tkna_").is_some_and(valid_secret))
+    .filter(|token| TokenTransport::Bearer.valid_token(token))
     .ok_or_else(AccountError::unauthorized)?;
   if headers.next().is_some() {
     return Err(AccountError::unauthorized());
   }
   Ok(hash(token))
+}
+
+fn cookie_token<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str, AccountError> {
+  let mut token = None;
+  for value in headers.get_all(header::COOKIE) {
+    let value = value.to_str().map_err(|_| AccountError::unauthorized())?;
+    for (cookie_name, cookie_value) in value.split(';').filter_map(|cookie| cookie.trim().split_once('=')) {
+      if cookie_name == name
+        && (!TokenTransport::Cookie.valid_token(cookie_value) || token.replace(cookie_value).is_some())
+      {
+        return Err(AccountError::unauthorized());
+      }
+    }
+  }
+  token.ok_or_else(AccountError::unauthorized)
+}
+
+fn expected_account_id(headers: &HeaderMap) -> Result<&str, AccountError> {
+  let mut values = headers.get_all(ACCOUNT_ID_HEADER).iter();
+  let value = values
+    .next()
+    .and_then(|value| value.to_str().ok())
+    .ok_or_else(AccountError::session_changed)?;
+  if values.next().is_some() {
+    return Err(AccountError::session_changed());
+  }
+  Ok(value)
 }

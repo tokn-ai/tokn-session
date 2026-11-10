@@ -1,7 +1,7 @@
 //! The public Hub boundary: owner authentication, host selection, and forwarding.
 use crate::{
   account_host::ClaimRequest,
-  accounts::{Accounts, MACHINES_READ, MACHINES_REGISTER},
+  accounts::{Accounts, MACHINES_REGISTER},
   auth::AuthState,
   protocol,
   store::{MachineRecord, NamespaceError, Store},
@@ -100,7 +100,7 @@ async fn account_machines(State(state): State<HubState>, headers: HeaderMap) -> 
   if let Err(error) = state.auth.check_optional_origin(&headers) {
     return error.into_response();
   }
-  let principal = match state.accounts.authenticate(&headers, MACHINES_READ).await {
+  let principal = match state.accounts.authenticate_machine_reader(&headers).await {
     Ok(principal) => principal,
     Err(error) => return error.into_response(),
   };

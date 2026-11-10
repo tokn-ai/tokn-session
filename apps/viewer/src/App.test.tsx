@@ -69,9 +69,11 @@ it("keeps Hub administrator login separate from machine access", async () => {
 
 it("opens account sign-in for a CLI request on the Hub", async () => {
   window.history.replaceState(null, "", "/account?user_code=ABCD-EFGH");
-  vi.mocked(fetch).mockImplementation(async (input) => String(input).endsWith("/account/capabilities")
-    ? Response.json({ enabled: true })
-    : Response.json({ configured: true, authenticated: false }));
+  vi.mocked(fetch).mockImplementation(async (input) => {
+    if (String(input).endsWith("/account/capabilities")) return Response.json({ enabled: true });
+    if (String(input).endsWith("/account/browser/refresh")) return Response.json({ error: "Sign in required" }, { status: 401 });
+    return Response.json({ configured: true, authenticated: false });
+  });
   try {
     render(<App />);
     expect(await screen.findByLabelText("Email address")).toBeInTheDocument();
@@ -81,9 +83,11 @@ it("opens account sign-in for a CLI request on the Hub", async () => {
 });
 
 it("links to the Hub account page from Machines when email delivery needs setup", async () => {
-  vi.mocked(fetch).mockImplementation(async (input) => String(input).endsWith("/account/capabilities")
-    ? Response.json({ enabled: false })
-    : Response.json({ configured: true, authenticated: false }));
+  vi.mocked(fetch).mockImplementation(async (input) => {
+    if (String(input).endsWith("/account/capabilities")) return Response.json({ enabled: false });
+    if (String(input).endsWith("/account/browser/refresh")) return Response.json({ error: "Sign in required" }, { status: 401 });
+    return Response.json({ configured: true, authenticated: false });
+  });
   render(<App />);
   expect(await screen.findByRole("link", { name: "Hub account" })).toHaveAttribute("href", "/account");
 });

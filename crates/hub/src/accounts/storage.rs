@@ -4,7 +4,8 @@ use tokn_hub_client_core::address::parse_machine_address;
 use uuid::Uuid;
 
 use super::{
-  AccountError, AccountIdentity, Hash, KeyRequest, Login, MACHINES_READ, MACHINES_REGISTER, hash, random_secret,
+  AccountError, AccountIdentity, AccountToken, KeyRequest, Login, MACHINES_READ, MACHINES_REGISTER, TokenTransport,
+  hash, random_secret,
 };
 use crate::{secure_client::unix_time, store::Store};
 use axum::http::StatusCode;
@@ -12,7 +13,11 @@ use axum::http::StatusCode;
 const READ_SCOPE: u8 = 1;
 const REGISTER_SCOPE: u8 = 2;
 const ALL_SCOPES: u8 = READ_SCOPE | REGISTER_SCOPE;
-const BROWSER_TTL: i64 = 3600;
+const BROWSER_BEARER_TTL: i64 = 3600;
+pub(super) const BROWSER_COOKIE_TTL: i64 = 90 * 24 * 3600;
+const BROWSER_REFRESH_INTERVAL: i64 = 24 * 3600;
+// Browser credentials have no user-visible name. Mark cookie sessions without a schema change.
+const COOKIE_CREDENTIAL_NAME: &str = "browser_cookie";
 const CLI_TTL: i64 = 90 * 24 * 3600;
 const MAX_KEY_TTL: i64 = 365 * 24 * 3600;
 const MAX_ACCOUNTS: u32 = 4096;
@@ -52,6 +57,7 @@ pub(super) struct Credential {
   pub(super) identity: AccountIdentity,
   pub(super) kind: CredentialKind,
   scopes: u8,
+  expires_at: i64,
 }
 
 impl Credential {
@@ -94,32 +100,40 @@ fn scope_names(scopes: u8) -> Vec<&'static str> {
     .collect()
 }
 
-fn authenticate(connection: &Connection, token: &Hash, now: i64) -> Result<Credential, AccountError> {
-  let (user_id, username, kind, scopes): (String, String, String, u8) = connection
+fn authenticate(connection: &Connection, token: &AccountToken, now: i64) -> Result<Credential, AccountError> {
+  let (user_id, username, kind, scopes, expires_at): (String, String, String, u8, i64) = connection
     .query_row(
-      "SELECT a.user_id, a.username, c.kind, c.scopes FROM hub_account_credentials c
+      "SELECT a.user_id, a.username, c.kind, c.scopes, c.expires_at FROM hub_account_credentials c
        JOIN hub_accounts a ON c.user_id = a.user_id
-       WHERE c.token_hash = ?1 AND c.expires_at > ?2",
-      params![token.as_slice(), now],
-      |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+       WHERE c.token_hash = ?1 AND c.expires_at > ?2 AND (c.kind = 'browser' AND c.name IS ?3) = ?4",
+      params![token.hash.as_slice(), now, COOKIE_CREDENTIAL_NAME, token.from_cookie],
+      |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
     )
     .optional()
     .map_err(AccountError::internal)?
     .ok_or_else(AccountError::unauthorized)?;
+  if token
+    .expected_user_id
+    .as_ref()
+    .is_some_and(|expected| expected != &user_id)
+  {
+    return Err(AccountError::session_changed());
+  }
   Ok(Credential {
     identity: AccountIdentity { user_id, username },
     kind: CredentialKind::parse(&kind)?,
     scopes,
+    expires_at,
   })
 }
 
-pub(super) fn credential(store: &Store, token: &Hash) -> Result<Credential, AccountError> {
+pub(super) fn credential(store: &Store, token: &AccountToken) -> Result<Credential, AccountError> {
   let now = now()?;
   let connection = store.connection().map_err(AccountError::internal)?;
   authenticate(&connection, token, now)
 }
 
-fn browser_account(connection: &Connection, token: &Hash, now: i64) -> Result<AccountIdentity, AccountError> {
+fn browser_account(connection: &Connection, token: &AccountToken, now: i64) -> Result<AccountIdentity, AccountError> {
   let credential = authenticate(connection, token, now)?;
   if credential.kind != CredentialKind::Browser {
     return Err(AccountError::forbidden());
@@ -133,9 +147,11 @@ fn issue(
   kind: CredentialKind,
   name: Option<&str>,
   scopes: u8,
-  now: i64,
   lifetime: i64,
-) -> Result<(String, String), AccountError> {
+  transport: TokenTransport,
+) -> Result<(String, String, i64), AccountError> {
+  let now = now()?;
+  let from_cookie = transport == TokenTransport::Cookie;
   tx.execute(
     "DELETE FROM hub_account_credentials WHERE user_id = ?1 AND expires_at <= ?2",
     params![user_id, now],
@@ -143,31 +159,48 @@ fn issue(
   .map_err(AccountError::internal)?;
   let count: u32 = tx
     .query_row(
-      "SELECT COUNT(*) FROM hub_account_credentials WHERE user_id = ?1 AND kind = ?2",
-      params![user_id, kind.name()],
+      "SELECT COUNT(*) FROM hub_account_credentials WHERE user_id = ?1 AND kind = ?2
+       AND (kind = 'browser' AND name IS ?3) = ?4",
+      params![user_id, kind.name(), COOKIE_CREDENTIAL_NAME, from_cookie],
       |row| row.get(0),
     )
     .map_err(AccountError::internal)?;
   if count >= MAX_CREDENTIALS_PER_KIND {
-    return Err(AccountError::new(
-      StatusCode::CONFLICT,
-      "Account credential limit reached",
-    ));
+    if !from_cookie {
+      return Err(AccountError::new(
+        StatusCode::CONFLICT,
+        "Account credential limit reached",
+      ));
+    }
+    tx.execute(
+      "DELETE FROM hub_account_credentials WHERE credential_id = (
+         SELECT credential_id FROM hub_account_credentials
+         WHERE user_id = ?1 AND kind = 'browser' AND name IS ?2
+         ORDER BY expires_at, credential_id LIMIT 1
+       )",
+      params![user_id, COOKIE_CREDENTIAL_NAME],
+    )
+    .map_err(AccountError::internal)?;
   }
   let id = Uuid::new_v4().to_string();
-  let token = format!("tkna_{}", random_secret());
+  let token = format!("{}{}", transport.prefix(), random_secret());
   let hash = hash(&token);
+  let expires_at = now + lifetime;
   tx.execute(
     "INSERT INTO hub_account_credentials (credential_id, token_hash, user_id, kind, name, scopes, expires_at)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-    params![id, hash.as_slice(), user_id, kind.name(), name, scopes, now + lifetime],
+    params![id, hash.as_slice(), user_id, kind.name(), name, scopes, expires_at],
   )
   .map_err(AccountError::internal)?;
-  Ok((id, token))
+  Ok((id, token, expires_at))
 }
 
-pub(super) fn email_login(store: &Store, email: &str, username: Option<&str>) -> Result<Login, AccountError> {
-  let now = now()?;
+pub(super) fn email_login(
+  store: &Store,
+  email: &str,
+  username: Option<&str>,
+  transport: TokenTransport,
+) -> Result<Login, AccountError> {
   let mut connection = store.connection().map_err(AccountError::internal)?;
   let tx = connection
     .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -189,9 +222,8 @@ pub(super) fn email_login(store: &Store, email: &str, username: Option<&str>) ->
     identity
   } else {
     let username = username.map(str::trim).ok_or(AccountError {
-      status: StatusCode::CONFLICT,
-      message: "Choose a username for your Hub account",
       username_required: true,
+      ..AccountError::new(StatusCode::CONFLICT, "Choose a username for your Hub account")
     })?;
     parse_machine_address(&format!("{username}:machine")).map_err(|_| {
       AccountError::new(
@@ -233,21 +265,24 @@ pub(super) fn email_login(store: &Store, email: &str, username: Option<&str>) ->
       username: username.to_owned(),
     }
   };
-  let (_, token) = issue(
+  let (name, lifetime) = match transport {
+    TokenTransport::Bearer => (None, BROWSER_BEARER_TTL),
+    TokenTransport::Cookie => (Some(COOKIE_CREDENTIAL_NAME), BROWSER_COOKIE_TTL),
+  };
+  let (_, token, _) = issue(
     &tx,
     &identity.user_id,
     CredentialKind::Browser,
-    None,
+    name,
     ALL_SCOPES,
-    now,
-    BROWSER_TTL,
+    lifetime,
+    transport,
   )?;
   tx.commit().map_err(AccountError::internal)?;
   Ok(Login { identity, token })
 }
 
 pub(super) fn device_login(store: &Store, user_id: &str) -> Result<Login, AccountError> {
-  let now = now()?;
   let mut connection = store.connection().map_err(AccountError::internal)?;
   let tx = connection
     .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -261,7 +296,15 @@ pub(super) fn device_login(store: &Store, user_id: &str) -> Result<Login, Accoun
     .optional()
     .map_err(AccountError::internal)?
     .ok_or_else(AccountError::unauthorized)?;
-  let (_, token) = issue(&tx, user_id, CredentialKind::Cli, None, ALL_SCOPES, now, CLI_TTL)?;
+  let (_, token, _) = issue(
+    &tx,
+    user_id,
+    CredentialKind::Cli,
+    None,
+    ALL_SCOPES,
+    CLI_TTL,
+    TokenTransport::Bearer,
+  )?;
   tx.commit().map_err(AccountError::internal)?;
   Ok(Login {
     identity: AccountIdentity {
@@ -272,14 +315,48 @@ pub(super) fn device_login(store: &Store, user_id: &str) -> Result<Login, Accoun
   })
 }
 
-pub(super) fn logout(store: &Store, token: &Hash) -> Result<(), AccountError> {
+pub(super) fn refresh_browser(store: &Store, token: &AccountToken) -> Result<(AccountIdentity, bool), AccountError> {
   let connection = store.connection().map_err(AccountError::internal)?;
-  connection
+  let observed_at = now()?;
+  let credential = authenticate(&connection, token, observed_at)?;
+  if credential.expires_at > observed_at + BROWSER_COOKIE_TTL - BROWSER_REFRESH_INTERVAL {
+    return Ok((credential.identity, false));
+  }
+  let renewed_at = now()?;
+  let changed = connection
     .execute(
-      "DELETE FROM hub_account_credentials WHERE token_hash = ?1",
-      [token.as_slice()],
+      "UPDATE hub_account_credentials SET expires_at = ?1
+       WHERE token_hash = ?2 AND expires_at > ?3 AND expires_at <= ?4 AND kind = 'browser' AND name IS ?5",
+      params![
+        renewed_at + BROWSER_COOKIE_TTL,
+        token.hash.as_slice(),
+        renewed_at,
+        renewed_at + BROWSER_COOKIE_TTL - BROWSER_REFRESH_INTERVAL,
+        COOKIE_CREDENTIAL_NAME,
+      ],
     )
     .map_err(AccountError::internal)?;
+  if changed == 0 {
+    // A concurrent refresh may have renewed it. A revoked or expired token still fails.
+    return Ok((authenticate(&connection, token, now()?)?.identity, false));
+  }
+  Ok((credential.identity, true))
+}
+
+pub(super) fn logout(store: &Store, token: &AccountToken) -> Result<(), AccountError> {
+  let mut connection = store.connection().map_err(AccountError::internal)?;
+  let tx = connection
+    .transaction_with_behavior(TransactionBehavior::Immediate)
+    .map_err(AccountError::internal)?;
+  if token.from_cookie {
+    authenticate(&tx, token, now()?)?;
+  }
+  tx.execute(
+    "DELETE FROM hub_account_credentials WHERE token_hash = ?1 AND (kind = 'browser' AND name IS ?2) = ?3",
+    params![token.hash.as_slice(), COOKIE_CREDENTIAL_NAME, token.from_cookie],
+  )
+  .map_err(AccountError::internal)?;
+  tx.commit().map_err(AccountError::internal)?;
   Ok(())
 }
 
@@ -298,7 +375,7 @@ pub(super) struct CreatedKey {
   token: String,
 }
 
-pub(super) fn keys(store: &Store, token: &Hash) -> Result<Vec<KeyMetadata>, AccountError> {
+pub(super) fn keys(store: &Store, token: &AccountToken) -> Result<Vec<KeyMetadata>, AccountError> {
   let now = now()?;
   let connection = store.connection().map_err(AccountError::internal)?;
   let account = browser_account(&connection, token, now)?;
@@ -322,7 +399,7 @@ pub(super) fn keys(store: &Store, token: &Hash) -> Result<Vec<KeyMetadata>, Acco
     .map_err(AccountError::internal)
 }
 
-pub(super) fn create_key(store: &Store, token: &Hash, request: KeyRequest) -> Result<CreatedKey, AccountError> {
+pub(super) fn create_key(store: &Store, token: &AccountToken, request: KeyRequest) -> Result<CreatedKey, AccountError> {
   let name = request.name.trim();
   if name.is_empty() || name.len() > 80 || name.chars().any(char::is_control) {
     return Err(AccountError::new(
@@ -356,14 +433,14 @@ pub(super) fn create_key(store: &Store, token: &Hash, request: KeyRequest) -> Re
     .transaction_with_behavior(TransactionBehavior::Immediate)
     .map_err(AccountError::internal)?;
   let account = browser_account(&tx, token, now)?;
-  let (key_id, token) = issue(
+  let (key_id, token, expires_at) = issue(
     &tx,
     &account.user_id,
     CredentialKind::ApiKey,
     Some(name),
     scopes,
-    now,
     lifetime,
+    TokenTransport::Bearer,
   )?;
   tx.commit().map_err(AccountError::internal)?;
   Ok(CreatedKey {
@@ -371,13 +448,13 @@ pub(super) fn create_key(store: &Store, token: &Hash, request: KeyRequest) -> Re
       key_id,
       name: name.to_owned(),
       scopes: scope_names(scopes),
-      expires_at: now + lifetime,
+      expires_at,
     },
     token,
   })
 }
 
-pub(super) fn revoke_key(store: &Store, token: &Hash, key_id: &str) -> Result<(), AccountError> {
+pub(super) fn revoke_key(store: &Store, token: &AccountToken, key_id: &str) -> Result<(), AccountError> {
   let now = now()?;
   let mut connection = store.connection().map_err(AccountError::internal)?;
   let tx = connection

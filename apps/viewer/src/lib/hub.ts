@@ -112,7 +112,11 @@ export function credentialJson(credential: PublicKeyCredential): Record<string, 
 
 export class HubClient {
   private lifetime = new AbortController();
-  constructor(private token = "", readonly endpoint = window.location.origin) {}
+  constructor(
+    private token = "",
+    readonly endpoint = window.location.origin,
+    private readonly browser_account?: { user_id?: string },
+  ) {}
   get signal(): AbortSignal { return this.lifetime.signal; }
   get access_token(): string { return this.token; }
 
@@ -129,10 +133,13 @@ export class HubClient {
           Accept: "application/json",
           ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
           ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+          ...(this.browser_account?.user_id ? { "X-Tokn-Account-Id": this.browser_account.user_id } : {}),
         },
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: controller.signal,
-        credentials: "omit",
+        credentials: this.browser_account ? "same-origin" : "omit",
+        // Keep the Origin header on account writes even when the document uses no-referrer.
+        ...(this.browser_account ? { mode: "same-origin", referrerPolicy: "strict-origin" } : {}),
         redirect: "error",
       });
       if (!response.ok) {

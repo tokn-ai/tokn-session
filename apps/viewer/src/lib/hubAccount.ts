@@ -15,13 +15,32 @@ export interface AccountKey {
   expires_at: number;
 }
 
-export interface AccountSession {
+interface AccountIdentity {
   user_id: string;
   username: string;
+}
+
+export interface AccountSession extends AccountIdentity {
   client: HubClient;
 }
 
 export type HubAccountAvailability = "available" | "email_unconfigured" | "unsupported";
+
+export function browserAccountClient(user_id?: string): HubClient {
+  return new HubClient("", window.location.origin, { user_id });
+}
+
+function validateAccountIdentity(reply: AccountIdentity): AccountIdentity {
+  if (typeof reply?.username !== "string" || typeof reply.user_id !== "string" || !UUID.test(reply.user_id)) {
+    throw new Error("Hub returned an invalid account session.");
+  }
+  parseMachineAddress(`${reply.username}:machine`);
+  return { user_id: reply.user_id, username: reply.username };
+}
+
+export function accountSession(identity: AccountIdentity): AccountSession {
+  return { ...identity, client: browserAccountClient(identity.user_id) };
+}
 
 export async function hubAccountAvailability(client: HubClient): Promise<HubAccountAvailability> {
   try {
@@ -34,18 +53,23 @@ export async function hubAccountAvailability(client: HubClient): Promise<HubAcco
   }
 }
 
+export async function refreshBrowserAccount(client: HubClient): Promise<AccountIdentity | undefined> {
+  try {
+    return validateAccountIdentity(await client.request<AccountIdentity>(`${ACCOUNT}/browser/refresh`, "POST", {}));
+  } catch (error) {
+    if (error instanceof HubError && error.status === 401) return;
+    throw error;
+  }
+}
+
 export function requestAccountCode(client: HubClient, email: string): Promise<void> {
   return client.request(`${ACCOUNT}/email/start`, "POST", { email });
 }
 
 export async function verifyAccountCode(client: HubClient, email: string, code: string, username?: string): Promise<AccountSession | undefined> {
   try {
-    const reply = await client.request<{ user_id: string; username: string; token: string }>(`${ACCOUNT}/email/verify`, "POST", { email, code, username });
-    if (typeof reply?.username !== "string" || !UUID.test(reply.user_id) || typeof reply.token !== "string" || !/^tkna_[A-Za-z0-9_-]{43}$/.test(reply.token)) {
-      throw new Error("Hub returned an invalid account session.");
-    }
-    parseMachineAddress(`${reply.username}:machine`);
-    return { user_id: reply.user_id, username: reply.username, client: new HubClient(reply.token, client.endpoint) };
+    const reply = await client.request<AccountIdentity>(`${ACCOUNT}/browser/email/verify`, "POST", { email, code, username });
+    return accountSession(validateAccountIdentity(reply));
   } catch (error) {
     if (error instanceof HubError && error.status === 409 && error.details?.username_required === true) return;
     throw error;

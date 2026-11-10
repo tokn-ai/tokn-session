@@ -79,6 +79,11 @@ tokn-session-hub auth status
 tokn-session-hub auth logout
 ```
 
+The browser keeps your Hub account signed in for 90 days and renews that period
+when you return to the Hub, at most once per day. Sign out to end that account
+session early. Each machine still requires its own passkey unlock in every new
+or reloaded tab.
+
 The CLI prints a device code and opens the Hub's account page. Verify your email
 and approve that code. The CLI saves its revocable credential in private local
 storage for the selected Hub. For automation, create a named API key in the
