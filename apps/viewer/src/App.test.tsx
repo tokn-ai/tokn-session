@@ -3,7 +3,9 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "./App";
 import { RemoteClient } from "./lib/transport";
 import { StrictMode, type ReactNode } from "react";
-vi.mock("./components/HubAccess", () => ({ HubAccess: () => <div>Machine access</div> }));
+vi.mock("./components/HubAccess", () => ({
+  HubAccess: ({ account_control }: { account_control?: ReactNode }) => <div>Machine access{account_control}</div>,
+}));
 vi.mock("./pages/ViewerPage", () => ({ ViewerPage: ({ remote, connection }: { remote?: boolean; connection?: ReactNode }) => <><div>{remote ? "Remote sessions" : "Desktop sessions"}</div>{connection}</> }));
 beforeEach(() => { vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 404 })); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
@@ -63,4 +65,29 @@ it("keeps Hub administrator login separate from machine access", async () => {
   expect(await screen.findByRole("heading", { name: "Hub administration" })).toBeInTheDocument();
   expect(screen.queryByText("Machine access")).not.toBeInTheDocument();
   window.history.replaceState(null, "", "/");
+});
+
+it("opens account sign-in for a CLI request on the Hub", async () => {
+  window.history.replaceState(null, "", "/account?user_code=ABCD-EFGH");
+  vi.mocked(fetch).mockImplementation(async (input) => {
+    if (String(input).endsWith("/account/capabilities")) return Response.json({ enabled: true });
+    if (String(input).endsWith("/account/browser/refresh")) return Response.json({ error: "Sign in required" }, { status: 401 });
+    return Response.json({ configured: true, authenticated: false });
+  });
+  try {
+    render(<App />);
+    expect(await screen.findByLabelText("Email address")).toBeInTheDocument();
+    expect(screen.getByText("ABCD-EFGH")).toBeInTheDocument();
+    expect(screen.queryByText("Machine access")).not.toBeInTheDocument();
+  } finally { window.history.replaceState(null, "", "/"); }
+});
+
+it("links to the Hub account page from Machines when email delivery needs setup", async () => {
+  vi.mocked(fetch).mockImplementation(async (input) => {
+    if (String(input).endsWith("/account/capabilities")) return Response.json({ enabled: false });
+    if (String(input).endsWith("/account/browser/refresh")) return Response.json({ error: "Sign in required" }, { status: 401 });
+    return Response.json({ configured: true, authenticated: false });
+  });
+  render(<App />);
+  expect(await screen.findByRole("link", { name: "Hub account" })).toHaveAttribute("href", "/account");
 });

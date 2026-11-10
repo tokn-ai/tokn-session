@@ -92,6 +92,7 @@ export function HostDialog() {
   const settings = draft ?? host.status ?? { hub_url: "", name: "This computer", allow_control: false };
   const { hub_url, name, allow_control } = settings;
   const discovery_namespace = settings.discovery_namespace ?? "";
+  const machine_address = hub_url === host.status?.hub_url ? host.status.machine_address : undefined;
   useEffect(() => {
     const opener = host.return_focus ?? document.activeElement;
     dialog.current?.showModal();
@@ -110,7 +111,8 @@ export function HostDialog() {
       {hosting || external || background ? <>
         <dl className="host-summary"><div><dt>Computer</dt><dd>{host.status?.name}</dd></div>
           <div><dt>Hub</dt><dd>{host.status?.hub_url}</dd></div>
-          {host.status?.discovery_namespace && <div><dt>Discovery namespace</dt><dd>{host.status.discovery_namespace}</dd></div>}
+          {machine_address ? <div><dt>Machine address</dt><dd>{machine_address}</dd></div>
+            : host.status?.discovery_namespace && <div><dt>Discovery namespace</dt><dd>{host.status.discovery_namespace}</dd></div>}
           <div><dt>Access</dt><dd>{host.status?.allow_control ? "Viewing and agent input" : "Viewing only"}</dd></div></dl>
         {!external && !background && <button type="button" disabled={host.busy || unavailable} onClick={() => { setShowPairing(false); void host.change(); }}>{host.busy ? "Stopping…" : "Stop hosting"}</button>}
         {hosting && <p className="host-hint">Stop hosting to change these settings.</p>}
@@ -121,10 +123,12 @@ export function HostDialog() {
             }}>
         <label htmlFor={`${id}-hub`}>Hosting Hub address</label><input id={`${id}-hub`} type="url" required placeholder="https://hub.example.com" value={hub_url} disabled={host.busy || unavailable} onChange={(event) => setDraft({ ...settings, hub_url: event.target.value })} />
         <label htmlFor={`${id}-name`}>Host name</label><input id={`${id}-name`} required maxLength={128} value={name} disabled={host.busy || unavailable} onChange={(event) => setDraft({ ...settings, name: event.target.value })} />
-        <label htmlFor={`${id}-namespace`}>Discovery namespace (optional)</label>
-        <input id={`${id}-namespace`} maxLength={63} pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" placeholder="personal" value={discovery_namespace}
-          disabled={host.busy || unavailable} onChange={(event) => setDraft({ ...settings, discovery_namespace: event.target.value })} />
-        <p className="host-hint">Computers using the same namespace and authenticator seed appear together after pairing one of them. Use lowercase letters, digits, and internal hyphens.</p>
+        {machine_address ? <p className="host-hint">Machine address <strong>{machine_address}</strong></p> : <>
+          <label htmlFor={`${id}-namespace`}>Legacy discovery namespace (optional)</label>
+          <input id={`${id}-namespace`} maxLength={63} pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" placeholder="personal" value={discovery_namespace}
+            disabled={host.busy || unavailable} onChange={(event) => setDraft({ ...settings, discovery_namespace: event.target.value })} />
+          <p className="host-hint">For account hosting, register this machine with the Hub CLI first.</p>
+        </>}
         <label className="host-control"><input type="checkbox" checked={allow_control} disabled={host.busy || unavailable} onChange={(event) => setDraft({ ...settings, allow_control: event.target.checked })} />Allow remote agent input</label>
         <button disabled={host.busy || unavailable || !host.status || !hub_url.trim() || !name.trim()}>{host.busy ? "Starting…" : "Start hosting"}</button>
       </form>}

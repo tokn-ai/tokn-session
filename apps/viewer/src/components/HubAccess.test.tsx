@@ -38,6 +38,19 @@ async function pairingReady() {
 const discovery_group = { namespace: "personal", secret_digest: "A".repeat(43) };
 const discovered_laptop = { host_id: "550e8400-e29b-41d4-a716-446655440001", name: "Laptop", online: true };
 
+it("takes an account machine to its existing passkey flow without opening it automatically", async () => {
+  const remembered = { host_id: host.host_id, host_public_key: host.host_public_key };
+  vi.mocked(service.status).mockResolvedValue({ hosts: [remembered], selected_host_id: null, device_public_key: "D".repeat(43) });
+  render(<HubAccess initial_hub_url="https://hub.example" initial_machine={{
+    host_id: host.host_id, machine_address: host.machine_address, name: host.name, online: true,
+  }} />);
+  expect(await screen.findByLabelText("Machine address or reference")).toHaveValue(host.machine_address);
+  expect(screen.getByRole("radio", { name: "Use machine passkey" })).toBeChecked();
+  expect(service.connect).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Sign in with machine passkey" }));
+  await waitFor(() => expect(service.loginMachine).toHaveBeenCalledWith(host.machine_address, expect.any(AbortSignal)));
+});
+
 it("discovers the first paired machine's group and requires a separate pairing for another machine", async () => {
   const paired = { ...host, discovery_group };
   const status = { hosts: [] as SavedHubHost[], selected_host_id: null, device_public_key: "D".repeat(43) };

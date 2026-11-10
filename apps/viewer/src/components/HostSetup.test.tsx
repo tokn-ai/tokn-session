@@ -53,7 +53,7 @@ it("saves the discovery namespace from the hosting dialog and shows it while onl
   render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
   fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
   await screen.findByText("Hosting off");
-  fireEvent.change(screen.getByLabelText("Discovery namespace (optional)"), { target: { value: "personal" } });
+  fireEvent.change(screen.getByLabelText("Legacy discovery namespace (optional)"), { target: { value: "personal" } });
   fireEvent.click(screen.getByRole("button", { name: "Start hosting", hidden: true }));
   await waitFor(() => expect(startLocalHost).toHaveBeenCalledWith({
     hub_url: stopped.hub_url, name: stopped.name, allow_control: false, discovery_namespace: "personal",
@@ -68,7 +68,7 @@ it("can clear a saved discovery namespace while retaining the host configuration
   render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
   fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
   await screen.findByDisplayValue("personal");
-  fireEvent.change(screen.getByLabelText("Discovery namespace (optional)"), { target: { value: "" } });
+  fireEvent.change(screen.getByLabelText("Legacy discovery namespace (optional)"), { target: { value: "" } });
   fireEvent.click(screen.getByRole("button", { name: "Start hosting", hidden: true }));
   await waitFor(() => expect(startLocalHost).toHaveBeenCalledWith({
     hub_url: stopped.hub_url, name: stopped.name, allow_control: false, discovery_namespace: "",

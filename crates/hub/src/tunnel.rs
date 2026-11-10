@@ -28,6 +28,7 @@ const IO_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Clone)]
 pub struct HubTunnels {
   store: Store,
+  require_account: bool,
   inner: Arc<Mutex<HubInner>>,
   handshakes: Arc<Semaphore>,
   enrollments: Arc<Semaphore>,
@@ -157,6 +158,7 @@ impl HubTunnels {
   fn with_limits(store: Store, handshakes: usize, enrollments: usize, approved: usize) -> Self {
     Self {
       store,
+      require_account: false,
       inner: Arc::new(Mutex::new(HubInner::default())),
       handshakes: Arc::new(Semaphore::new(handshakes)),
       enrollments: Arc::new(Semaphore::new(enrollments)),
@@ -164,6 +166,11 @@ impl HubTunnels {
       secure_capacity: Arc::new(Semaphore::new(128)),
       shutdown: CancellationToken::new(),
     }
+  }
+
+  pub(crate) fn require_account(mut self, required: bool) -> Self {
+    self.require_account = required;
+    self
   }
 
   pub fn pending(&self) -> Vec<PendingEnrollment> {
@@ -290,13 +297,13 @@ impl HubTunnels {
       drop(handshake_permit);
       self
         .store
-        .register_encrypted_host_with_discovery(record, discovery_group.as_ref())
+        .register_tunnel_host(record, discovery_group.as_ref(), self.require_account)
     } else {
       self.await_approval(&mut socket, record, handshake_permit).await
     };
     let record = match registered {
       Ok(record) => record,
-      Err(error) if encrypted_registration => {
+      Err(error) if encrypted_registration || error == crate::store::ACCOUNT_REQUIRED => {
         let _ = send(
           &mut socket,
           &Frame::RegistrationRejected {
@@ -509,6 +516,9 @@ impl HubTunnels {
           return Err("Host key changed".into());
         }
         return Ok(stored);
+      }
+      if self.require_account {
+        return Err(crate::store::ACCOUNT_REQUIRED.into());
       }
       let enrollment_permit = self
         .enrollments
@@ -837,6 +847,7 @@ impl Connection {
 /// errors can contain local details and never become remote diagnostics.
 fn registration_diagnostic(error: &str) -> &'static str {
   match error {
+    crate::store::ACCOUNT_REQUIRED => crate::store::ACCOUNT_REQUIRED,
     "New host registration rate limit reached; retry in one minute" => {
       "New host registration rate limit reached; retry in one minute"
     }
