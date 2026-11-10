@@ -20,6 +20,9 @@ use tokn_hub_client_core::discovery::DiscoveryGroup;
 use tokn_hub_transport::{BoxTransport, WebRtcPeer};
 
 pub(super) fn discovery_group(config: &ConnectorConfig) -> Result<Option<DiscoveryGroup>, String> {
+  if let Some(group) = crate::account_host::membership_group(config)? {
+    return Ok(Some(group));
+  }
   let Some(paired) = &config.paired else { return Ok(None) };
   let profile = paired
     .state_file

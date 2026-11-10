@@ -7,6 +7,7 @@ import { PairedConnection } from "./components/PairedConnection";
 import { HubConnection } from "./components/HubConnection";
 import { detectHub, hubErrorMessage, type HubStatus } from "./lib/hub";
 import { HubAccess } from "./components/HubAccess";
+import { HubAccount, HubAccountLink } from "./components/HubAccount";
 import { NativePasskey } from "./components/NativePasskey";
 import { DesktopWorkspace } from "./pages/DesktopWorkspace";
 import { RemoteWorkspace } from "./pages/RemoteWorkspace";
@@ -83,9 +84,11 @@ function BrowserGateway({ bootstrap_token }: { bootstrap_token?: string }) {
     return () => { cancelled = true; clearTimeout(timer); controller.abort(); };
   }, [attempt]);
   if (status === null) return <BrowserViewer />;
-  if (status) return window.location.pathname === "/admin"
-    ? <HubConnection initial_status={status} bootstrap_token={bootstrap_token} />
-    : <HubAccess />;
+  if (status) {
+    if (window.location.pathname === "/admin") return <HubConnection initial_status={status} bootstrap_token={bootstrap_token} />;
+    if (window.location.pathname === "/account") return <HubAccount />;
+    return <HubAccess account_control={<HubAccountLink />} />;
+  }
   return <main className="machine-connect"><form onSubmit={(event) => { event.preventDefault(); setAttempt((value) => value + 1); }}>
     <h1>Session viewer</h1>
     {error ? <><p role="alert">{error}</p><button>Retry connection</button></> : <p role="status">Connecting…</p>}

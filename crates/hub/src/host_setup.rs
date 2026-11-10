@@ -19,6 +19,7 @@ pub struct PreparedHost {
   pub reference: String,
   pub passkey_origin: Option<String>,
   pub discovery_namespace: Option<String>,
+  pub machine_address: Option<String>,
 }
 
 pub struct HostOptions {
@@ -162,12 +163,14 @@ pub fn prepare_host(options: HostOptions) -> Result<PreparedHost, String> {
     onboarding::initialize_host_access(&state_file, &secret)?;
   }
   profile.save(&profile_path)?;
+  let machine_address = crate::account_host::saved_address(&options.state_dir, &profile.hub_url, &profile.host_id)?;
   Ok(PreparedHost {
     config,
     is_new_secret,
     reference: format!("{}@{}", profile.host_id, noise_identity.public_key()),
     passkey_origin: profile.passkey_origin,
     discovery_namespace: profile.discovery_namespace,
+    machine_address,
   })
 }
 

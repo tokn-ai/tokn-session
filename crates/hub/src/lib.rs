@@ -1,4 +1,6 @@
 //! Passwordless access to multiple session hosts through one endpoint.
+pub mod account_host;
+mod accounts;
 pub mod auth;
 pub mod client_onboarding;
 pub mod connector;

@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use webauthn_rs::prelude::{AuthenticationResult, Passkey};
 
+mod account_machines;
 mod namespaces;
+pub(crate) use account_machines::{ACCOUNT_REQUIRED, ADDRESS_TAKEN, AccountMachineClaim, HOST_CLAIMED};
 pub use namespaces::{HostCatalogEntry, MachineRecord, Namespace, NamespaceError};
 
 const MAX_PASSKEYS: u32 = 32;
@@ -92,6 +94,11 @@ impl Store {
            username TEXT PRIMARY KEY,
            owner_id TEXT NOT NULL
          );
+         CREATE TABLE IF NOT EXISTS hub_accounts (
+           user_id TEXT PRIMARY KEY,
+           username TEXT NOT NULL UNIQUE,
+           email TEXT NOT NULL UNIQUE
+         );
          CREATE TABLE IF NOT EXISTS host_addresses (
            username TEXT NOT NULL REFERENCES namespaces(username),
            machine_name TEXT NOT NULL,
@@ -103,7 +110,17 @@ impl Store {
            namespace TEXT NOT NULL,
            secret_digest TEXT NOT NULL
          );
-         CREATE INDEX IF NOT EXISTS host_discovery_group ON host_discovery(namespace, secret_digest);",
+         CREATE INDEX IF NOT EXISTS host_discovery_group ON host_discovery(namespace, secret_digest);
+         CREATE TABLE IF NOT EXISTS account_discovery (
+           user_id TEXT PRIMARY KEY REFERENCES hub_accounts(user_id),
+           secret_digest TEXT NOT NULL UNIQUE
+         );
+         CREATE TABLE IF NOT EXISTS account_machines (
+           host_id TEXT PRIMARY KEY REFERENCES encrypted_hosts(host_id),
+           user_id TEXT NOT NULL REFERENCES hub_accounts(user_id),
+           machine_name TEXT NOT NULL,
+           UNIQUE(user_id, machine_name)
+         );",
       )
       .map_err(database_error)?;
     connection
@@ -121,7 +138,7 @@ impl Store {
     })
   }
 
-  fn connection(&self) -> Result<MutexGuard<'_, Connection>, String> {
+  pub(crate) fn connection(&self) -> Result<MutexGuard<'_, Connection>, String> {
     self
       .connection
       .lock()
@@ -281,6 +298,39 @@ impl Store {
     host: HostRecord,
     discovery_group: Option<&tokn_hub_client_core::discovery::DiscoveryGroup>,
   ) -> Result<HostRecord, String> {
+    self.register_tunnel_host(host, discovery_group, false)
+  }
+
+  pub(crate) fn register_tunnel_host(
+    &self,
+    host: HostRecord,
+    discovery_group: Option<&tokn_hub_client_core::discovery::DiscoveryGroup>,
+    require_account: bool,
+  ) -> Result<HostRecord, String> {
+    self
+      .register_host_inner(host, discovery_group, require_account, None)
+      .map(|(host, _)| host)
+  }
+
+  pub(crate) fn claim_account_host(
+    &self,
+    host: HostRecord,
+    user_id: &str,
+    machine_name: &str,
+  ) -> Result<AccountMachineClaim, String> {
+    self
+      .register_host_inner(host, None, true, Some((user_id, machine_name)))?
+      .1
+      .ok_or_else(|| "Missing account machine assignment".into())
+  }
+
+  fn register_host_inner(
+    &self,
+    host: HostRecord,
+    discovery_group: Option<&tokn_hub_client_core::discovery::DiscoveryGroup>,
+    require_account: bool,
+    claim: Option<(&str, &str)>,
+  ) -> Result<(HostRecord, Option<AccountMachineClaim>), String> {
     if let Some(group) = discovery_group {
       group.validate()?;
     }
@@ -310,6 +360,9 @@ impl Store {
         return Err("Host UUID registration is revoked or belongs to a different identity".into());
       }
     }
+    if require_account && registration.is_none() && claim.is_none() {
+      return Err(ACCOUNT_REQUIRED.into());
+    }
     let existing = transaction
       .query_row(
         "SELECT host_id, name, public_key, access FROM hosts WHERE host_id = ?1",
@@ -322,12 +375,14 @@ impl Store {
       if registration.is_none() || existing.public_key != host.public_key {
         return Err("Host UUID is registered to a different identity".into());
       }
-      transaction
-        .execute(
-          "UPDATE hosts SET name = ?2, access = ?3 WHERE host_id = ?1",
-          params![host.host_id, host.name, host.access],
-        )
-        .map_err(database_error)?;
+      if claim.is_none() {
+        transaction
+          .execute(
+            "UPDATE hosts SET name = ?2, access = ?3 WHERE host_id = ?1",
+            params![host.host_id, host.name, host.access],
+          )
+          .map_err(database_error)?;
+      }
     } else {
       let (active, total): (u32, u32) = transaction
         .query_row(
@@ -345,14 +400,6 @@ impl Store {
       if total >= MAX_REGISTRATION_LEDGER {
         return Err("Encrypted host revocation ledger is full; Hub administrator maintenance is required before registering new hosts".into());
       }
-      // Only genuinely new identities consume this Hub-wide budget. Reconnects
-      // remain available during a registration flood. The budget is shared by
-      // Store clones and resets on process restart, unlike host-local OTP limits.
-      self
-        .registrations
-        .lock()
-        .map_err(|_| "Hub registration budget lock poisoned")?
-        .reserve()?;
       transaction
         .execute(
           "INSERT INTO hosts (host_id, name, public_key, access) VALUES (?1, ?2, ?3, ?4)",
@@ -366,7 +413,20 @@ impl Store {
         )
         .map_err(database_error)?;
     }
-    match discovery_group {
+    let assignment = claim
+      .map(|(user_id, machine_name)| account_machines::bind(&transaction, &host.host_id, user_id, machine_name))
+      .transpose()?;
+    // Only valid new identities consume the budget. Existing hosts can
+    // reconnect and name conflicts can be corrected without using a slot.
+    if registration.is_none() {
+      self
+        .registrations
+        .lock()
+        .map_err(|_| "Hub registration budget lock poisoned")?
+        .reserve()?;
+    }
+    let account_owned = assignment.is_some() || account_machines::is_owned(&transaction, &host.host_id)?;
+    match discovery_group.filter(|_| !account_owned) {
       Some(group) => {
         transaction.execute(
           "INSERT INTO host_discovery (host_id, namespace, secret_digest) VALUES (?1, ?2, ?3) ON CONFLICT(host_id) DO UPDATE SET namespace = excluded.namespace, secret_digest = excluded.secret_digest",
@@ -380,7 +440,7 @@ impl Store {
       }
     }
     transaction.commit().map_err(database_error)?;
-    Ok(host)
+    Ok((host, assignment))
   }
 
   pub fn discover_machines(
@@ -390,9 +450,25 @@ impl Store {
     use tokn_hub_client_core::discovery::{DiscoveredMachine, MAX_DISCOVERY_MACHINES};
     group.validate()?;
     let connection = self.connection()?;
-    let mut statement = connection.prepare(
-      "SELECT h.host_id, h.name FROM host_discovery d JOIN hosts h ON d.host_id = h.host_id JOIN encrypted_hosts e ON h.host_id = e.host_id AND h.public_key = e.public_key WHERE d.namespace = ?1 AND d.secret_digest = ?2 AND e.revoked = 0 ORDER BY h.name, h.host_id LIMIT ?3"
-    ).map_err(database_error)?;
+    let mut statement = connection
+      .prepare(
+        "SELECT h.host_id AS machine_id, h.name AS display_name FROM host_discovery d
+       JOIN hosts h ON d.host_id = h.host_id
+       JOIN encrypted_hosts e ON h.host_id = e.host_id AND h.public_key = e.public_key
+       WHERE d.namespace = ?1 AND d.secret_digest = ?2 AND e.revoked = 0
+         AND NOT EXISTS (SELECT 1 FROM account_machines m WHERE m.host_id = h.host_id)
+         AND NOT EXISTS (SELECT 1 FROM account_discovery g JOIN hub_accounts a ON a.user_id = g.user_id
+                         WHERE a.username = d.namespace AND g.secret_digest = d.secret_digest)
+       UNION ALL
+       SELECT h.host_id AS machine_id, m.machine_name AS display_name FROM account_machines m
+       JOIN hub_accounts a ON a.user_id = m.user_id
+       JOIN account_discovery d ON d.user_id = a.user_id
+       JOIN hosts h ON h.host_id = m.host_id
+       JOIN encrypted_hosts e ON h.host_id = e.host_id AND h.public_key = e.public_key
+       WHERE a.username = ?1 AND d.secret_digest = ?2 AND e.revoked = 0
+       ORDER BY display_name, machine_id LIMIT ?3",
+      )
+      .map_err(database_error)?;
     statement
       .query_map(
         params![group.namespace, group.secret_digest, MAX_DISCOVERY_MACHINES as u32],

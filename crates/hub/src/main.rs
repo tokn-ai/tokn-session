@@ -19,6 +19,7 @@ use tokn_session_hub::{
 };
 use url::Url;
 
+mod account_cli;
 mod cli_onboarding;
 
 #[derive(Parser)]
@@ -38,6 +39,11 @@ enum KeyKind {
 
 #[derive(Subcommand)]
 enum Command {
+  /// Sign in to a Hub account and manage the saved CLI credential.
+  Auth {
+    #[command(subcommand)]
+    command: account_cli::Command,
+  },
   /// Move legacy Hub and desktop-client state into ~/.tokn/sessions.
   MigrateStorage {
     /// Confirm all Hub servers, connectors, and desktop apps are stopped.
@@ -65,7 +71,13 @@ enum Command {
     hub: Option<Url>,
     #[arg(long)]
     name: Option<String>,
-    /// Discover hosts with the same namespace and authenticator seed. Empty clears it.
+    /// Register this host under this machine name in your signed-in Hub account.
+    #[arg(long, conflicts_with_all = ["trusted_hub", "owner_public_key", "discovery_namespace"], value_parser = machine_name)]
+    machine: Option<String>,
+    /// Register the machine, then exit so another local launcher can host it.
+    #[arg(long, requires = "machine")]
+    register_only: bool,
+    /// Legacy discovery for Hubs without account hosting. Empty clears it.
     #[arg(long = "namespace", conflicts_with_all = ["trusted_hub", "owner_public_key"])]
     discovery_namespace: Option<String>,
     #[arg(long)]
@@ -232,9 +244,15 @@ fn state_file_or_default(state_dir: Option<&Path>, file: &str) -> Result<PathBuf
   }
 }
 
+fn machine_name(value: &str) -> Result<String, String> {
+  tokn_hub_client_core::address::parse_machine_address(&format!("account:{value}"))?;
+  Ok(value.into())
+}
+
 async fn run(args: Args) -> Result<(), String> {
   let shutdown = CancellationToken::new();
   match args.command {
+    Command::Auth { command } => account_cli::run(command).await,
     Command::MigrateStorage { offline } => {
       let paths = tokn_session_storage::SessionPaths::discover()?;
       let hub_dir = storage::migrate_legacy_storage(&paths, offline)?;
@@ -289,6 +307,8 @@ async fn run(args: Args) -> Result<(), String> {
     Command::Connect {
       hub,
       name,
+      machine,
+      register_only,
       discovery_namespace,
       viewer_url,
       passkey_origin,
@@ -323,6 +343,16 @@ async fn run(args: Args) -> Result<(), String> {
           allow_control,
           insecure_loopback,
         })?;
+        if let Some(machine_name) = machine {
+          let token = account_cli::saved_token(&config.hub_url)
+            .await?
+            .ok_or("Sign in to this Hub with tokn-session-hub auth login before registering a machine")?;
+          let address = tokn_session_hub::account_host::claim(&config, &machine_name, token.as_str()).await?;
+          eprintln!("Registered machine {address}");
+          if register_only {
+            return Ok(());
+          }
+        }
         let signal = shutdown_signal(shutdown.clone());
         let result = connector::run_owned(config, shutdown, lease, None).await;
         signal.abort();

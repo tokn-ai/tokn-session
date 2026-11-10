@@ -1,0 +1,57 @@
+.hub-account-login .account-secondary {
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+}
+
+.hub-account-login { overflow: auto; }
+
+.account-section {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.account-section h2 { margin: 0; font-size: 17px; }
+.account-section p { margin: 0; color: var(--text-soft); font-size: 13px; line-height: 1.5; }
+.account-section .hub-error { color: var(--danger); }
+.account-section summary { cursor: pointer; font-weight: 600; }
+.account-section[open] summary { margin-bottom: 12px; }
+.account-section-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.account-section > button { justify-self: start; }
+.account-section .hub-host { background: var(--surface-raised); }
+
+.account-form {
+  display: grid;
+  gap: 10px;
+  max-width: 440px;
+  margin: 0;
+}
+
+.account-form > label { font-size: 13px; font-weight: 600; }
+.account-form > input {
+  min-height: 42px;
+  width: 100%;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--text);
+  background: var(--surface-raised);
+  font: inherit;
+}
+.account-form > button { justify-self: start; }
+.account-form .hub-auth-method { background: var(--surface-raised); }
+.account-key-value {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-raised);
+}
+.account-key-value code { overflow-wrap: anywhere; user-select: all; }
+.account-key-value button { justify-self: start; }

@@ -145,6 +145,13 @@ local reader and event stream.
 
 ## Discovery groups
 
+On an account-enabled Hub, machines inherit the account username and discovery
+group when they register. Opening or pairing a machine delivers its group
+reference to the client through the authenticated connection. See
+[Hub accounts](hub.md#hub-accounts-and-cli-login) for signup and registration.
+
+### Legacy discovery
+
 Hosts can choose a discovery namespace in **Host this computer**, or with the
 connector's `--namespace` option. The namespace uses 1–63 lowercase letters,
 digits and internal hyphens. Hosts with the same namespace and authenticator
@@ -188,13 +195,13 @@ assign a registered encrypted machine a name such as `macbook`. Its address is
 digits with internal hyphens. A namespace is a managed name, not a user account;
 the Hub still has one administrator. Connector `--name` remains its display name.
 
-These administrator-assigned addresses have separate ownership from host-chosen
-discovery namespaces. Choosing a discovery namespace does not reserve a readable
-address.
+Account registration assigns a readable address under the account's username.
+Legacy discovery labels remain scoped to their group and can be shared by
+unrelated users. The administrator's reserved legacy addresses remain usable.
 
-Addresses are permanent: an address cannot move to a different UUID, and revoking
-the host does not free its name. Only administrator authentication can assign
-names; registering a connector cannot claim another namespace. Public lookup is
+Addresses stay reserved to the original machine UUID, even after revocation.
+Account registration requires an account credential and proof of the machine
+key. Administrators assign legacy addresses at `/admin`. Public lookup is
 exact, works while a host is offline, and reveals the address, UUID, display name,
 and online status to anyone who knows the address. Group listing uses the separate
 discovery reference.
