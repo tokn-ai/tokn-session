@@ -16,16 +16,20 @@ export interface AccountKey {
 }
 
 export interface AccountSession {
+  user_id: string;
   username: string;
   client: HubClient;
 }
 
-export async function hubAccountsEnabled(client: HubClient): Promise<boolean> {
+export type HubAccountAvailability = "available" | "email_unconfigured" | "unsupported";
+
+export async function hubAccountAvailability(client: HubClient): Promise<HubAccountAvailability> {
   try {
     const response = await client.request<{ enabled: boolean }>(`${ACCOUNT}/capabilities`);
-    return response?.enabled === true;
+    if (typeof response?.enabled !== "boolean") throw new Error("Hub returned invalid account settings.");
+    return response.enabled ? "available" : "email_unconfigured";
   } catch (error) {
-    if (error instanceof HubError && error.status === 404) return false;
+    if (error instanceof HubError && error.status === 404) return "unsupported";
     throw error;
   }
 }
@@ -41,7 +45,7 @@ export async function verifyAccountCode(client: HubClient, email: string, code: 
       throw new Error("Hub returned an invalid account session.");
     }
     parseMachineAddress(`${reply.username}:machine`);
-    return { username: reply.username, client: new HubClient(reply.token, client.endpoint) };
+    return { user_id: reply.user_id, username: reply.username, client: new HubClient(reply.token, client.endpoint) };
   } catch (error) {
     if (error instanceof HubError && error.status === 409 && error.details?.username_required === true) return;
     throw error;

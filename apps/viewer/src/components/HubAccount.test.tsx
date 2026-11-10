@@ -66,6 +66,15 @@ async function submitEmailCode() {
   fireEvent.click(screen.getByRole("button", { name: "Verify email code" }));
 }
 
+it("explains the email setup requirement while keeping account details behind sign-in", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ enabled: false }));
+  render(<HubAccount />);
+  expect(await screen.findByText("Ask your Hub administrator to set up email delivery for account sign-in.")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Open your machines" })).toHaveAttribute("href", "/");
+  expect(screen.queryByRole("heading", { name: "Profile" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "API keys" })).not.toBeInTheDocument();
+});
+
 it("asks for a username only after email verification and requires explicit CLI approval", async () => {
   window.history.replaceState(null, "", "/account?user_code=ABCD-EFGH");
   const request = mockAccount({ signup: true, machines: [machine] });
@@ -95,6 +104,9 @@ it("creates a scoped key, shows its secret once, and revokes it after confirmati
   const request = mockAccount();
   render(<HubAccount />);
   await submitEmailCode();
+  const profile = await screen.findByRole("region", { name: "Profile" });
+  expect(profile).toHaveTextContent(credentials.username);
+  expect(profile).toHaveTextContent(credentials.user_id);
   fireEvent.change(await screen.findByLabelText("Key name"), { target: { value: "Deploy" } });
   fireEvent.click(screen.getByLabelText("Register machines"));
   fireEvent.click(screen.getByRole("button", { name: "Create API key" }));

@@ -1,28 +1,28 @@
 import { useEffect, useRef, useState } from "react";
 import { HubClient, HubError, hubErrorMessage } from "../lib/hub";
 import {
-  approveAccountDevice, createAccountKey, hubAccountsEnabled, loadAccountKeys, loadAccountMachines,
+  approveAccountDevice, createAccountKey, hubAccountAvailability, loadAccountKeys, loadAccountMachines,
   logoutAccount, MACHINE_READ, MACHINE_REGISTER, requestAccountCode, revokeAccountKey, verifyAccountCode,
-  type AccountKey, type AccountKeyScope, type AccountSession,
+  type AccountKey, type AccountKeyScope, type AccountSession, type HubAccountAvailability,
 } from "../lib/hubAccount";
 import type { ResolvedMachine } from "../lib/types";
 import { HubAccess } from "./HubAccess";
 import "./HubAccount.css";
 
 export function HubAccountLink() {
-  const [enabled, setEnabled] = useState(false);
+  const [supported, setSupported] = useState(false);
   useEffect(() => {
     const client = new HubClient();
-    void hubAccountsEnabled(client).then((available) => {
-      if (!client.signal.aborted) setEnabled(available);
+    void hubAccountAvailability(client).then((availability) => {
+      if (!client.signal.aborted) setSupported(availability !== "unsupported");
     }).catch(() => {});
     return () => client.close();
   }, []);
-  return enabled ? <a href="/account">Hub account</a> : null;
+  return supported ? <a href="/account">Hub account</a> : null;
 }
 
 export function HubAccount() {
-  const [enabled, setEnabled] = useState<boolean>();
+  const [availability, setAvailability] = useState<HubAccountAvailability>();
   const [check_error, setCheckError] = useState<string>();
   const [attempt, setAttempt] = useState(0);
   const [session, setSession] = useState<AccountSession>();
@@ -38,8 +38,8 @@ export function HubAccount() {
   useEffect(() => {
     const client = new HubClient();
     setCheckError(undefined);
-    void hubAccountsEnabled(client).then((available) => {
-      if (!client.signal.aborted) setEnabled(available);
+    void hubAccountAvailability(client).then((next) => {
+      if (!client.signal.aborted) setAvailability(next);
     }).catch((error: unknown) => {
       if (!client.signal.aborted) setCheckError(hubErrorMessage(error));
     });
@@ -90,21 +90,28 @@ export function HubAccount() {
   if (selected_machine) return <HubAccess initial_machine={selected_machine}
     account_control={<button type="button" onClick={() => setSelectedMachine(undefined)}>Back to Hub account</button>} />;
 
-  if (enabled !== true || !session) return <main className="machine-connect hub-login hub-account-login">
-    {enabled === true ? <AccountSignIn user_code={user_code} notice={notice} on_signed_in={signedIn} />
+  if (availability !== "available" || !session) return <main className="machine-connect hub-login hub-account-login">
+    {availability === "available" ? <AccountSignIn user_code={user_code} notice={notice} on_signed_in={signedIn} />
       : <form onSubmit={(event) => { event.preventDefault(); setAttempt((value) => value + 1); }}>
         <h1>Hub account</h1>
         <a href="/">Open your machines</a>
         {check_error ? <><p role="alert">{check_error}</p><button>Retry connection</button></>
-          : enabled === false ? <p>Account sign-in is unavailable on this Hub.</p> : <p role="status">Connecting…</p>}
+          : availability === "email_unconfigured" ? <p>Ask your Hub administrator to set up email delivery for account sign-in.</p>
+            : availability === "unsupported" ? <p>Account sign-in is unavailable on this Hub.</p>
+              : <p role="status">Connecting…</p>}
       </form>}
   </main>;
 
   return <main className="hub-home hub-account"><div className="hub-content">
     <header className="hub-header">
-      <div><p className="hub-eyebrow">Tokn Hub</p><h1>Hub account</h1><p>Signed in as <strong>{session.username}</strong></p></div>
+      <div><p className="hub-eyebrow">Tokn Hub</p><h1>Hub account</h1></div>
       <div className="hub-actions"><a href="/">Open your machines</a><button type="button" onClick={logout}>Sign out</button></div>
     </header>
+    <section className="account-section" aria-labelledby="account-profile-title">
+      <h2 id="account-profile-title">Profile</h2>
+      <p>Signed in as <strong>{session.username}</strong></p>
+      <p>Account ID <code>{session.user_id}</code></p>
+    </section>
     <AccountDeviceApproval client={session.client} initial_code={user_code}
       approved={approved} on_approved={() => { setUserCode(""); setApproved(true); }}
       on_reset={() => setApproved(false)} on_failure={onFailure} />
