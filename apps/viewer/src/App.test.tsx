@@ -64,3 +64,16 @@ it("keeps Hub administrator login separate from machine access", async () => {
   expect(screen.queryByText("Machine access")).not.toBeInTheDocument();
   window.history.replaceState(null, "", "/");
 });
+
+it("opens account sign-in for a CLI request on the Hub", async () => {
+  window.history.replaceState(null, "", "/account?user_code=ABCD-EFGH");
+  vi.mocked(fetch).mockImplementation(async (input) => String(input).endsWith("/account/capabilities")
+    ? Response.json({ enabled: true })
+    : Response.json({ configured: true, authenticated: false }));
+  try {
+    render(<App />);
+    expect(await screen.findByLabelText("Email address")).toBeInTheDocument();
+    expect(screen.getByText("ABCD-EFGH")).toBeInTheDocument();
+    expect(screen.queryByText("Machine access")).not.toBeInTheDocument();
+  } finally { window.history.replaceState(null, "", "/"); }
+});

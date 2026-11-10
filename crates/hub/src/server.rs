@@ -1,5 +1,7 @@
 //! The public Hub boundary: owner authentication, host selection, and forwarding.
 use crate::{
+  account_host::ClaimRequest,
+  accounts::{Accounts, MACHINES_READ, MACHINES_REGISTER},
   auth::AuthState,
   protocol,
   store::{MachineRecord, NamespaceError, Store},
@@ -27,13 +29,21 @@ pub struct HubState {
   pub auth: AuthState,
   pub store: Store,
   pub tunnels: HubTunnels,
+  accounts: Accounts,
+  public_origin: String,
 }
 
 impl HubState {
   pub fn new(store: Store, public_url: &str) -> Result<Self, String> {
+    let auth = AuthState::new(store.clone(), public_url)?;
+    let accounts = Accounts::new(store.clone(), public_url)?;
+    let public_origin =
+      crate::onboarding::canonical_hub(&url::Url::parse(public_url).map_err(|_| "Invalid Hub public URL")?)?;
     Ok(Self {
-      auth: AuthState::new(store.clone(), public_url)?,
-      tunnels: HubTunnels::new(store.clone()),
+      auth,
+      tunnels: HubTunnels::new(store.clone()).require_account(accounts.enabled()),
+      accounts,
+      public_origin,
       store,
     })
   }
@@ -59,11 +69,17 @@ pub fn router(state: HubState) -> Router {
     .route("/hosts/{host_id}/api/v1/{command}", any(proxy))
     .layer(middleware::from_fn_with_state(state.clone(), authorize));
   let auth = state.auth.router();
+  let accounts = state.accounts.router();
   Router::new()
     .merge(protected)
     .route("/hub/v1/tunnel", get(tunnel))
     .route("/hub/v1/secure/{host_id}", get(secure_tunnel))
     .route("/hub/v1/resolve/{username}/{machine_name}", get(resolve_machine))
+    .route("/hub/v1/account/machines", get(account_machines))
+    .route(
+      "/hub/v1/account/machines/claim",
+      post(claim_account_machine).layer(DefaultBodyLimit::max(4096)),
+    )
     .route("/hub/v1/discovery/{namespace}/{secret_digest}", get(discover_machines))
     .route("/hub/v1/health", get(|| async { Json(json!({ "version": 1 })) }))
     .route("/hub", any(not_found))
@@ -75,8 +91,85 @@ pub fn router(state: HubState) -> Router {
     .route("/api/{*path}", any(not_found))
     .with_state(state)
     .merge(auth)
+    .merge(accounts)
     .layer(DefaultBodyLimit::max(1024 * 1024))
     .layer(middleware::from_fn(response_headers))
+}
+
+async fn account_machines(State(state): State<HubState>, headers: HeaderMap) -> Response {
+  if let Err(error) = state.auth.check_optional_origin(&headers) {
+    return error.into_response();
+  }
+  let principal = match state.accounts.authenticate(&headers, MACHINES_READ).await {
+    Ok(principal) => principal,
+    Err(error) => return error.into_response(),
+  };
+  let store = state.store.clone();
+  match tokio::task::spawn_blocking(move || store.account_machines(&principal.user_id)).await {
+    Ok(Ok(machines)) => Json(json!({
+      "machines": machines.into_iter().map(|machine| resolved_machine(&state, machine)).collect::<Vec<_>>()
+    }))
+    .into_response(),
+    _ => error(StatusCode::INTERNAL_SERVER_ERROR, "Could not load account machines").into_response(),
+  }
+}
+
+async fn claim_account_machine(
+  State(state): State<HubState>,
+  headers: HeaderMap,
+  Json(claim): Json<ClaimRequest>,
+) -> Response {
+  if let Err(error) = state.auth.check_optional_origin(&headers) {
+    return error.into_response();
+  }
+  let principal = match state.accounts.authenticate(&headers, MACHINES_REGISTER).await {
+    Ok(principal) => principal,
+    Err(error) => return error.into_response(),
+  };
+  if !protocol::valid_host_uuid(&claim.host_id)
+    || claim.name.trim().is_empty()
+    || claim.name.len() > 128
+    || claim.name.chars().any(char::is_control)
+    || tokn_hub_client_core::address::parse_machine_address(&format!("{}:{}", principal.username, claim.machine_name))
+      .is_err()
+  {
+    return error(StatusCode::BAD_REQUEST, "Invalid machine identity or name").into_response();
+  }
+  if let Err(message) = claim.verify(&state.public_origin, &principal.user_id) {
+    return error(StatusCode::FORBIDDEN, message).into_response();
+  }
+  let record = crate::store::HostRecord {
+    host_id: claim.host_id,
+    public_key: claim.public_key,
+    name: claim.name,
+    access: if claim.allow_control { "control" } else { "view" }.into(),
+  };
+  let result = tokio::task::spawn_blocking(move || {
+    state
+      .store
+      .claim_account_host(record, &principal.user_id, &claim.machine_name)
+  })
+  .await;
+  match result {
+    Ok(Ok(assignment)) => Json(assignment).into_response(),
+    Ok(Err(message))
+      if matches!(
+        message.as_str(),
+        crate::store::ADDRESS_TAKEN
+          | crate::store::HOST_CLAIMED
+          | "Host UUID registration is revoked or belongs to a different identity"
+          | "Host UUID is registered to a different identity"
+      ) =>
+    {
+      error(StatusCode::CONFLICT, message).into_response()
+    }
+    Ok(Err(message)) if message.starts_with("New host registration rate limit reached") => error(
+      StatusCode::TOO_MANY_REQUESTS,
+      "New host registration rate limit reached; retry in one minute",
+    )
+    .into_response(),
+    _ => error(StatusCode::INTERNAL_SERVER_ERROR, "Could not register account machine").into_response(),
+  }
 }
 
 pub fn with_web_ui(app: Router, web_root: PathBuf) -> Result<Router, String> {

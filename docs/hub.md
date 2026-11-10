@@ -37,9 +37,8 @@ Open the setup link printed by the Hub. It contains a generated bootstrap
 credential in the URL fragment, which the browser removes before rendering.
 Create the owner's first passkey. Use `http://localhost:5559` for this setup;
 an IP address cannot serve as the WebAuthn relying-party domain.
-Subsequent logins use a passkey. An authenticated owner can add another passkey
-from the host screen; keep a second authenticator available for recovery.
-There are no user-chosen passwords or email/SMS/TOTP fallback logins.
+Subsequent owner logins use a passkey. An authenticated owner can add another
+passkey from the host screen and keep a second authenticator for recovery.
 
 On each session host, run the existing API and a connector:
 
@@ -62,6 +61,46 @@ revoke it and explicitly approve the new enrollment. A connector started
 without `--allow-control` always enforces viewing-only access, even if the Hub
 previously approved control. Viewer bookkeeping, such as read markers and cache
 leases, is included in viewing access.
+
+## Hub accounts and CLI login
+
+Set `TOKN_HUB_ACCOUNT_FROM` to enable account signup and login by email. The Hub
+delivers codes through a sendmail-compatible executable. It defaults to
+`/usr/sbin/sendmail`; set `TOKN_HUB_ACCOUNT_SENDMAIL` to an absolute executable
+path to use your configured mail relay. The service user needs permission to use
+the relay. With email enabled, anyone with a verified address can choose an
+available username and create an account on this Hub.
+
+Open **Hub account** in the browser, or start a CLI login:
+
+```sh
+tokn-session-hub auth login --hub https://hub.example.com
+tokn-session-hub auth status
+tokn-session-hub auth logout
+```
+
+The CLI prints a device code and opens the Hub's account page. Verify your email
+and approve that code. The CLI saves its revocable credential in private local
+storage for the selected Hub. For automation, create a named API key in the
+account page with machine listing or registration scope. Supply it on stdin to
+`auth login --with-token --hub https://hub.example.com`.
+
+Register a machine with its stable local host identity and a machine name:
+
+```sh
+tokn-session-hub connect --hub https://hub.example.com --machine macbook
+```
+
+For account `alice` this reserves `alice:macbook` on that Hub. Add
+`--register-only` while app hosting is stopped to make the assignment and then
+start hosting from the desktop app. Subsequent connector starts use the saved
+host key. The account lists its machines, and pairing a machine also reveals
+the account's discovery group. Each machine verifies access to its sessions.
+Browser access to a paired machine still uses its passkey.
+
+New hosts on an account-enabled Hub require a machine assignment. Previously
+registered hosts can reconnect with their existing keys and explicitly claim an
+account address with `--machine`. Existing assigned addresses remain valid.
 
 ## Remote operation
 
@@ -103,15 +142,15 @@ creates no hosting resources or deployments.
 
 ## Identity and lifecycle
 
-The initial version has one owner per Hub. The owner can access its approved
-hosts, approve enrollments, revoke hosts, and add passkeys. Separate users,
-team permissions, and unattended client credentials are not implemented.
+Each Hub has one administrator, who can approve legacy enrollments, revoke
+hosts, and add administration passkeys. On an account-enabled Hub, users
+manage their own machine addresses and automation keys.
 
-The administrator can reserve namespaces and assign permanent `username:host`
-addresses to registered encrypted machines at `/admin`. These are Hub-local
-names, not separate user accounts or content permissions. The directory exposes
-only exact address lookup and never supplies Noise keys. Addresses remain reserved
-after revocation; their UUID mapping cannot be reassigned. See
+The administrator can also reserve legacy namespaces and assign permanent
+`username:host` addresses to registered encrypted machines at `/admin`.
+Public lookup resolves an exact address to a machine UUID and presence.
+Addresses remain reserved to the original UUID after revocation. Clients
+verify Noise keys through machine pairing. See
 [readable machine addresses](hub-pairing.md#readable-machine-addresses).
 
 The Hub persists public passkey credentials and approved hosts in

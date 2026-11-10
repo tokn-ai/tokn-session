@@ -129,7 +129,7 @@ struct KeyFile {
   secret_key: String,
 }
 
-fn load_key(path: &Path) -> Result<SigningKey, String> {
+pub(crate) fn load_key(path: &Path) -> Result<SigningKey, String> {
   if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
     fs::create_dir_all(parent).map_err(|e| format!("Could not create host key directory: {e}"))?;
   }

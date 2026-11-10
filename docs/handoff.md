@@ -4,6 +4,14 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
+Account-enabled Hubs support verified-email self-signup and login, with usernames
+unique per Hub and stable user UUIDs. Browser device approval powers CLI
+`auth login`; scoped automation keys are issued and revoked in **Hub account**.
+New machines claim `username:machine` with an account credential and proof of
+their existing host key. They inherit account discovery and reconnect using the
+host key. Legacy registered hosts can claim addresses without changing keys or
+pairing. See [Hub accounts](hub.md#hub-accounts-and-cli-login).
+
 Host-chosen discovery namespaces group machines by a versioned digest derived
 from their shared authenticator seed, Hub origin and namespace. Pairing one host
 provides the encrypted group reference, and authenticated opens refresh it for

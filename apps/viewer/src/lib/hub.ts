@@ -41,7 +41,7 @@ type RequestOptions = Omit<PublicKeyCredentialRequestOptions, "challenge" | "all
 };
 
 export class HubError extends Error {
-  constructor(message: string, readonly status: number) { super(message); }
+  constructor(message: string, readonly status: number, readonly details?: Record<string, unknown>) { super(message); }
 }
 
 export async function detectHub(signal: AbortSignal): Promise<HubStatus | null> {
@@ -136,8 +136,10 @@ export class HubClient {
         redirect: "error",
       });
       if (!response.ok) {
-        const error = await response.json().catch(() => ({})) as { error?: string };
-        throw new HubError(error.error ?? `Hub returned ${response.status}`, response.status);
+        const body: unknown = await response.json().catch(() => undefined);
+        const details = body && typeof body === "object" ? body as Record<string, unknown> : undefined;
+        const message = typeof details?.error === "string" ? details.error : `Hub returned ${response.status}`;
+        throw new HubError(message, response.status, details);
       }
       return response.status === 204 ? undefined as T : await response.json() as T;
     } finally {
