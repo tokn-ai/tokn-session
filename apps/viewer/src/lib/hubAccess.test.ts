@@ -13,7 +13,7 @@ beforeEach(() => {
     status: vi.fn(async () => ({ hosts, selected_host_id: null, device_public_key: "D".repeat(43) })),
     pair: vi.fn(async () => { hosts.push(host); return host; }),
     authenticate: vi.fn(async (saved) => { hosts.push(saved); }),
-    connect: vi.fn(), forget: vi.fn(), discover: vi.fn(),
+    connect: vi.fn(), forget: vi.fn(), discover: vi.fn(), presence: vi.fn(),
     resolve: vi.fn(async () => machine),
     rememberMetadata: vi.fn(async (resolved) => ({ ...host, machine_address: resolved.machine_address, name: resolved.name })),
   };
@@ -43,6 +43,18 @@ it("reuses remembered pins and rejects a directory remapping an address", async 
   vi.mocked(backend.resolve).mockResolvedValue({ ...machine, host_id: "550e8400-e29b-41d4-a716-446655440001" });
   await expect(service.pairMachine(machine.machine_address, "123456", signal())).rejects.toThrow("another machine");
   expect(backend.pair).not.toHaveBeenCalled();
+});
+
+it("opens a machine by its canonical address without replacing its saved legacy alias", async () => {
+  const saved = { ...host, machine_address: "legacy:macbook" };
+  hosts = [saved];
+  const service = withMachineAddressing(backend);
+  expect(await service.loginMachine(machine.machine_address, signal())).toEqual(saved);
+  expect(backend.authenticate).toHaveBeenCalledWith(saved, false, expect.any(AbortSignal));
+  vi.mocked(backend.pair).mockResolvedValue(saved);
+  expect(await service.pairMachine(machine.machine_address, "123456", signal())).toEqual(saved);
+  expect(backend.pair).toHaveBeenCalledWith(host.host_id, "123456", expect.any(AbortSignal), host.host_public_key, undefined);
+  expect(backend.rememberMetadata).not.toHaveBeenCalled();
 });
 
 it("rejects cancellation and explicit pin changes before authorization or metadata persistence", async () => {

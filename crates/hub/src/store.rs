@@ -39,6 +39,16 @@ pub struct Store {
   registrations: Arc<Mutex<RegistrationBudget>>,
 }
 
+enum HostRegistration<'a> {
+  Reconnect,
+  Claim {
+    user_id: &'a str,
+    machine_name: &'a str,
+  },
+  #[cfg(test)]
+  LegacyFixture,
+}
+
 struct RegistrationBudget {
   window_start: Instant,
   used: u32,
@@ -248,7 +258,8 @@ impl Store {
       .map_err(database_error)
   }
 
-  pub fn approve_host(&self, host: HostRecord) -> Result<(), String> {
+  #[cfg(test)]
+  pub(crate) fn approve_host(&self, host: HostRecord) -> Result<(), String> {
     if host.host_id.is_empty()
       || host.host_id.len() > 128
       || !host
@@ -289,26 +300,29 @@ impl Store {
 
   /// Register only an encrypted routing identity. The host owns authorization;
   /// no Hub passkey or administrative approval can authorize one of its clients.
-  pub fn register_encrypted_host(&self, host: HostRecord) -> Result<HostRecord, String> {
+  #[cfg(test)]
+  pub(crate) fn register_encrypted_host(&self, host: HostRecord) -> Result<HostRecord, String> {
     self.register_encrypted_host_with_discovery(host, None)
   }
 
-  pub fn register_encrypted_host_with_discovery(
+  #[cfg(test)]
+  pub(crate) fn register_encrypted_host_with_discovery(
     &self,
     host: HostRecord,
     discovery_group: Option<&tokn_hub_client_core::discovery::DiscoveryGroup>,
   ) -> Result<HostRecord, String> {
-    self.register_tunnel_host(host, discovery_group, false)
+    self
+      .register_host_inner(host, discovery_group, HostRegistration::LegacyFixture)
+      .map(|(host, _)| host)
   }
 
   pub(crate) fn register_tunnel_host(
     &self,
     host: HostRecord,
     discovery_group: Option<&tokn_hub_client_core::discovery::DiscoveryGroup>,
-    require_account: bool,
   ) -> Result<HostRecord, String> {
     self
-      .register_host_inner(host, discovery_group, require_account, None)
+      .register_host_inner(host, discovery_group, HostRegistration::Reconnect)
       .map(|(host, _)| host)
   }
 
@@ -319,7 +333,7 @@ impl Store {
     machine_name: &str,
   ) -> Result<AccountMachineClaim, String> {
     self
-      .register_host_inner(host, None, true, Some((user_id, machine_name)))?
+      .register_host_inner(host, None, HostRegistration::Claim { user_id, machine_name })?
       .1
       .ok_or_else(|| "Missing account machine assignment".into())
   }
@@ -328,8 +342,7 @@ impl Store {
     &self,
     host: HostRecord,
     discovery_group: Option<&tokn_hub_client_core::discovery::DiscoveryGroup>,
-    require_account: bool,
-    claim: Option<(&str, &str)>,
+    admission: HostRegistration<'_>,
   ) -> Result<(HostRecord, Option<AccountMachineClaim>), String> {
     if let Some(group) = discovery_group {
       group.validate()?;
@@ -360,7 +373,7 @@ impl Store {
         return Err("Host UUID registration is revoked or belongs to a different identity".into());
       }
     }
-    if require_account && registration.is_none() && claim.is_none() {
+    if registration.is_none() && matches!(admission, HostRegistration::Reconnect) {
       return Err(ACCOUNT_REQUIRED.into());
     }
     let existing = transaction
@@ -375,7 +388,7 @@ impl Store {
       if registration.is_none() || existing.public_key != host.public_key {
         return Err("Host UUID is registered to a different identity".into());
       }
-      if claim.is_none() {
+      if !matches!(admission, HostRegistration::Claim { .. }) {
         transaction
           .execute(
             "UPDATE hosts SET name = ?2, access = ?3 WHERE host_id = ?1",
@@ -413,9 +426,15 @@ impl Store {
         )
         .map_err(database_error)?;
     }
-    let assignment = claim
-      .map(|(user_id, machine_name)| account_machines::bind(&transaction, &host.host_id, user_id, machine_name))
-      .transpose()?;
+    let assignment = match admission {
+      HostRegistration::Claim { user_id, machine_name } => Some(account_machines::bind(
+        &transaction,
+        &host.host_id,
+        user_id,
+        machine_name,
+      )?),
+      _ => None,
+    };
     // Only valid new identities consume the budget. Existing hosts can
     // reconnect and name conflicts can be corrected without using a slot.
     if registration.is_none() {
@@ -425,19 +444,29 @@ impl Store {
         .map_err(|_| "Hub registration budget lock poisoned")?
         .reserve()?;
     }
-    let account_owned = assignment.is_some() || account_machines::is_owned(&transaction, &host.host_id)?;
-    match discovery_group.filter(|_| !account_owned) {
-      Some(group) => {
-        transaction.execute(
-          "INSERT INTO host_discovery (host_id, namespace, secret_digest) VALUES (?1, ?2, ?3) ON CONFLICT(host_id) DO UPDATE SET namespace = excluded.namespace, secret_digest = excluded.secret_digest",
-          params![host.host_id, group.namespace, group.secret_digest],
-        ).map_err(database_error)?;
-      }
-      None => {
+    match admission {
+      HostRegistration::Claim { .. } => {
         transaction
           .execute("DELETE FROM host_discovery WHERE host_id = ?1", [&host.host_id])
           .map_err(database_error)?;
       }
+      // The signed legacy group remains part of the wire protocol, but a
+      // reconnect cannot publish or change accountless directory membership.
+      HostRegistration::Reconnect => {}
+      #[cfg(test)]
+      HostRegistration::LegacyFixture => match discovery_group {
+        Some(group) => {
+          transaction.execute(
+            "INSERT INTO host_discovery (host_id, namespace, secret_digest) VALUES (?1, ?2, ?3) ON CONFLICT(host_id) DO UPDATE SET namespace = excluded.namespace, secret_digest = excluded.secret_digest",
+            params![host.host_id, group.namespace, group.secret_digest],
+          ).map_err(database_error)?;
+        }
+        None => {
+          transaction
+            .execute("DELETE FROM host_discovery WHERE host_id = ?1", [&host.host_id])
+            .map_err(database_error)?;
+        }
+      },
     }
     transaction.commit().map_err(database_error)?;
     Ok((host, assignment))
@@ -452,7 +481,7 @@ impl Store {
     let connection = self.connection()?;
     let mut statement = connection
       .prepare(
-        "SELECT h.host_id AS machine_id, h.name AS display_name FROM host_discovery d
+        "SELECT h.host_id AS machine_id, h.name AS display_name, NULL AS machine_address FROM host_discovery d
        JOIN hosts h ON d.host_id = h.host_id
        JOIN encrypted_hosts e ON h.host_id = e.host_id AND h.public_key = e.public_key
        WHERE d.namespace = ?1 AND d.secret_digest = ?2 AND e.revoked = 0
@@ -460,7 +489,8 @@ impl Store {
          AND NOT EXISTS (SELECT 1 FROM account_discovery g JOIN hub_accounts a ON a.user_id = g.user_id
                          WHERE a.username = d.namespace AND g.secret_digest = d.secret_digest)
        UNION ALL
-       SELECT h.host_id AS machine_id, m.machine_name AS display_name FROM account_machines m
+       SELECT h.host_id AS machine_id, m.machine_name AS display_name, a.username || ':' || m.machine_name
+       FROM account_machines m
        JOIN hub_accounts a ON a.user_id = m.user_id
        JOIN account_discovery d ON d.user_id = a.user_id
        JOIN hosts h ON h.host_id = m.host_id
@@ -477,6 +507,7 @@ impl Store {
             host_id: row.get(0)?,
             name: row.get(1)?,
             online: false,
+            machine_address: row.get(2)?,
           })
         },
       )

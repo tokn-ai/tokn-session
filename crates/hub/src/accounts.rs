@@ -248,7 +248,7 @@ impl Accounts {
     })
   }
 
-  pub fn enabled(&self) -> bool {
+  fn email_configured(&self) -> bool {
     self.inner.mailer.is_some()
   }
 
@@ -446,7 +446,7 @@ impl Accounts {
 }
 
 async fn capabilities(State(state): State<Accounts>) -> Json<serde_json::Value> {
-  Json(json!({"enabled": state.enabled()}))
+  Json(json!({"enabled": true, "email_configured": state.email_configured()}))
 }
 
 async fn account_headers(State(state): State<Accounts>, request: Request, next: Next) -> Response {
@@ -470,7 +470,12 @@ async fn email_start(
   State(state): State<Accounts>,
   Json(request): Json<EmailRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), AccountError> {
-  let mailer = state.inner.mailer.as_ref().ok_or_else(AccountError::unavailable)?;
+  let mailer = state.inner.mailer.as_ref().ok_or_else(|| {
+    AccountError::new(
+      StatusCode::SERVICE_UNAVAILABLE,
+      "Sign-in email is unavailable. Ask the Hub administrator to configure email delivery.",
+    )
+  })?;
   let email = mail::mailbox(&request.email)
     .ok_or_else(|| AccountError::new(StatusCode::BAD_REQUEST, "Enter a valid email address"))?;
   let (code, hash) = state
@@ -575,9 +580,6 @@ struct DeviceStart {
 }
 
 async fn device_start(State(state): State<Accounts>) -> Result<Json<DeviceStart>, AccountError> {
-  if !state.enabled() {
-    return Err(AccountError::unavailable());
-  }
   let now = Instant::now();
   let mut pending = state.pending()?;
   pending.devices.retain(|_, device| device.expires_at > now);

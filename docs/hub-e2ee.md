@@ -25,12 +25,12 @@ session traffic remains on the app's encrypted host connection. Neither path
 requires a viewing-device proxy. The Hub can deny service.
 
 Sharing is deferred from normal pairing. The remainder of this page documents
-the earlier explicit owner-key and signed-grant interface, retained for
-compatibility. This interface uses the optional installed Rust `client` helper
+the earlier explicit owner-key and signed-grant interface for previously
+enrolled hosts. This interface uses the optional installed Rust `client` helper
 as its encryption endpoint; a locally served browser UI talks to that helper
 using a loopback bearer credential. The host verifies an owner-signed grant
-bound to the recipient's device key. Start the Hub and set up its administrator
-using [hub.md](hub.md) for this legacy enrollment workflow.
+bound to the recipient's device key. New hosts use
+[Hub account registration](hub.md#hub-accounts-and-cli-login).
 
 ## Establish trust
 
@@ -50,11 +50,10 @@ the Hub. Independently transfer and verify its public key on each host and
 recipient (for example through trusted SSH or an in-person comparison).
 Accepting the trust root only from the VPS would permit key substitution.
 
-On each session host, initialize revocations **once**, then run the API and
-connector in separate terminals:
+On each previously enrolled host, use the existing enrollment and Noise keys.
+Run the API and connector in separate terminals.
 
 ```sh
-printf '[]\n' > ./revoked-grants.json
 tokn-viewer-api --api-only
 tokn-session-hub connect --hub https://hub.example.com --name "Workstation" \
   --owner-public-key OWNER_PUBLIC_KEY \
@@ -63,10 +62,8 @@ tokn-session-hub connect --hub https://hub.example.com --name "Workstation" \
 ```
 
 Never replace an existing revocation file with `[]`. A configured missing or
-invalid file fails closed. Compare the printed pairing code in the Hub and
-approve its connection. Separately verify the printed host ID and encryption
-public key on the owner device before signing grants. Hub pairing is relay
-admission, not an independent verification of encryption identity.
+invalid file fails closed. Verify the printed host ID and encryption public key
+on the owner device before signing grants.
 
 The API stays on loopback. Use `--viewer-url` for another numeric loopback HTTP
 address, and provide `TOKN_VIEWER_TOKEN` if the API requires it. That local
@@ -154,7 +151,7 @@ and stopping/reconfiguring the connector withdraw access; keep the file
 configured when sharing. Issuing a replacement does not revoke the old grant.
 Keep endpoint clocks correct.
 
-Hub host removal disconnects the relay and requires reapproval. It is an
+Hub host removal disconnects the relay and revokes that registration. It is an
 availability control; host-local revocation withdraws a recipient's permission.
 Hub login/logout does not control independently authorized encrypted clients.
 
@@ -174,10 +171,10 @@ ends the channel. Disconnection never retries HTTP requests or agent input;
 a lost response can mean delivery is uncertain.
 
 Protected connectors reject plaintext frames even from a malicious Hub.
-There is no downgrade. The explicit `connect --trusted-hub` option preserves
-the original plaintext browser-through-Hub mode; that Hub can read content and
-authorize requests. `--owner-public-key` selects the legacy grant mode; without
-either compatibility option, `connect` uses host-verified machine pairing.
+There is no downgrade. Previously enrolled hosts using `connect --trusted-hub`
+retain plaintext browser-through-Hub access. That Hub can read content and
+authorize requests. `--owner-public-key` selects the legacy grant mode for
+existing hosts. New hosts use host-verified machine pairing.
 Upgrade Hub and connectors together for the new encrypted frame types.
 
 Keep HTTPS termination for remote operation. Proxy WebSocket upgrades on

@@ -4,22 +4,36 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
-Account-enabled Hubs support verified-email self-signup and login, with usernames
-unique per Hub and stable user UUIDs. A renewable 90-day browser account cookie
-restores sign-in across navigation and reloads. Browser device approval powers
+Hubs require account ownership for new machines. Verified email enables signup
+with usernames unique per Hub and stable user UUIDs. A renewable 90-day browser
+account cookie restores sign-in across navigation and reloads. Browser device approval powers
 CLI `auth login`. Issue and revoke scoped automation keys in **Hub account**.
 New machines claim `username:machine` with an account credential and proof of
 their existing host key. They inherit account discovery and reconnect using the
 host key. Legacy registered hosts can claim addresses without changing keys or
 pairing. See [Hub accounts](hub.md#hub-accounts-and-cli-login).
 
-Host-chosen discovery namespaces group machines by a versioned digest derived
-from their shared authenticator seed, Hub origin and namespace. Pairing one host
-provides the encrypted group reference, and authenticated opens refresh it for
-previously paired devices. Machines lists candidates with individual pairing
-actions across desktop, browser and Apell. CLI `connect --namespace` and the
-hosting dialog configure the optional label. Discovery and per-host authorization
-remain independent. See [discovery groups](hub-pairing.md#discovery-groups).
+The Hub username is the namespace for an account's machine addresses and its
+discovery group. Pairing one host provides the encrypted group reference, and
+authenticated opens refresh it for previously paired devices. Existing unclaimed
+hosts retain their saved legacy groups and addresses. Discovery and per-host
+authorization remain independent. See [discovery groups](hub-pairing.md#discovery-groups).
+The gallery combines account machines in the signed-in browser with saved and
+discovered machines. Desktop and Apell combine saved and discovered machines.
+Each Hub host UUID appears once, with its assigned address or display name.
+Opening a paired card preserves the saved host key and alias.
+A plus tile opens the **Add machine** dialog. Closing it cancels pending pairing
+and clears its code.
+Discovery controls remain compact, with **Set up discovery** collapsed below the
+gallery. Group results cache independently across host-list refreshes; removed
+groups and Hub changes cancel requests and exclude stale results. Unknown groups
+never trigger directory requests.
+All gallery cards use batched Hub connector presence, including saved UUID-only
+machines outside discovery groups. Checks refresh every 15 seconds while visible
+and on focus; failures show **Status unavailable**, never an inferred offline
+state. Browser, desktop and Apell share the bounded presence contract. The Hub
+and connector exchange package versions during the WebSocket upgrade. The
+gallery displays the live connector version when the Hub reports one.
 Browser and guest WASM builds share compiler path remapping so local builds can
 be packaged without embedding workstation source paths.
 
@@ -557,8 +571,8 @@ Enrolled host-owned passkeys authorize tab keys on their original Noise
 channel; a new device needs the full machine reference to pin the host first.
 Native passkey prompts use the Hub browser origin and a one-shot loopback form
 callback carrying only the credential. Hub administration lives at `/admin`.
-The administrator manages Hub-local namespaces and permanent `username:host`
-addresses there. Exact public lookup returns routing metadata, never a Noise key;
+Account registration assigns permanent `username:host` addresses.
+Exact public lookup returns routing metadata, never a Noise key;
 UUID/key pins remain authoritative. Addresses survive revocation as reservations
 and cannot move between hosts. Machines separates saved-machine reconnects
 from code/passkey onboarding; its panel shows the machine, Hub, and encryption state.

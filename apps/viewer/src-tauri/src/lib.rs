@@ -54,6 +54,7 @@ pub fn run() {
       commands::host::set_rpc_runtime_access,
       commands::hub::hub_client_status,
       commands::hub::hub_client_resolve,
+      commands::hub::hub_client_presence,
       commands::hub::hub_client_discover,
       commands::hub::hub_client_remember_metadata,
       commands::hub::hub_client_pair,

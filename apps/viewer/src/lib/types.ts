@@ -77,10 +77,26 @@ export interface DiscoveredMachine {
   host_id: string;
   name: string;
   online: boolean;
+  machine_address?: string;
 }
 
 export interface DiscoveryResult extends DiscoveryGroup {
   machines: DiscoveredMachine[];
+}
+
+/** Advisory Hub connector presence; never a saved identity or authorization. */
+export interface PresenceRequest {
+  host_ids: string[];
+}
+
+export interface MachinePresence {
+  host_id: string;
+  online: boolean;
+  connector_version?: string;
+}
+
+export interface PresenceResult {
+  machines: MachinePresence[];
 }
 
 /** Public Hub routing metadata. It deliberately contains no encryption key. */
@@ -89,10 +105,6 @@ export interface ResolvedMachine {
   machine_address: string;
   name: string;
   online: boolean;
-}
-
-export interface HubNamespace {
-  username: string;
 }
 
 /** Availability of the viewer's local translation engine. */
@@ -1049,7 +1061,6 @@ export interface LocalHostStatus {
   error: string | null;
 }
 export interface StartLocalHostRequest {
-  discovery_namespace?: string | null;
   hub_url: string;
   name: string;
   allow_control: boolean;

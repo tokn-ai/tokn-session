@@ -25,8 +25,6 @@ pub struct PreparedHost {
 pub struct HostOptions {
   pub hub: Option<Url>,
   pub name: Option<String>,
-  /// None preserves the saved group, while an empty string disables discovery.
-  pub discovery_namespace: Option<String>,
   pub viewer_url: Option<Url>,
   pub passkey_origin: Option<String>,
   pub state_dir: PathBuf,
@@ -68,17 +66,6 @@ pub fn prepare_host(options: HostOptions) -> Result<PreparedHost, String> {
         .map(|origin| origin.origin().ascii_serialization())
     }
   };
-  let discovery_namespace = match options.discovery_namespace {
-    Some(namespace) if namespace.trim().is_empty() => None,
-    Some(namespace) => {
-      let namespace = namespace.trim().to_owned();
-      tokn_hub_client_core::discovery::validate_namespace(&namespace)?;
-      Some(namespace)
-    }
-    None => previous
-      .as_ref()
-      .and_then(|profile| profile.discovery_namespace.clone()),
-  };
   let profile = HostProfile {
     version: 1,
     host_id: previous
@@ -90,7 +77,9 @@ pub fn prepare_host(options: HostOptions) -> Result<PreparedHost, String> {
       .name
       .or_else(|| previous.as_ref().map(|profile| profile.name.clone()))
       .unwrap_or_else(|| "Session host".into()),
-    discovery_namespace,
+    discovery_namespace: previous
+      .as_ref()
+      .and_then(|profile| profile.discovery_namespace.clone()),
     viewer_url: local_url.to_string(),
     allow_control: options
       .allow_control
@@ -164,12 +153,17 @@ pub fn prepare_host(options: HostOptions) -> Result<PreparedHost, String> {
   }
   profile.save(&profile_path)?;
   let machine_address = crate::account_host::saved_address(&options.state_dir, &profile.hub_url, &profile.host_id)?;
+  let discovery_namespace = machine_address
+    .as_deref()
+    .and_then(|address| address.split_once(':'))
+    .map(|(username, _)| username.to_owned())
+    .or(profile.discovery_namespace);
   Ok(PreparedHost {
     config,
     is_new_secret,
     reference: format!("{}@{}", profile.host_id, noise_identity.public_key()),
     passkey_origin: profile.passkey_origin,
-    discovery_namespace: profile.discovery_namespace,
+    discovery_namespace,
     machine_address,
   })
 }
@@ -257,11 +251,10 @@ mod tests {
   use super::*;
   use axum::{Router, extract::WebSocketUpgrade, http::StatusCode, response::IntoResponse, routing::get};
 
-  fn discovery_options(path: &Path, namespace: Option<&str>) -> HostOptions {
+  fn discovery_options(path: &Path) -> HostOptions {
     HostOptions {
       hub: Some(Url::parse("https://hub.example").unwrap()),
       name: Some("Test host".into()),
-      discovery_namespace: namespace.map(str::to_owned),
       viewer_url: None,
       passkey_origin: None,
       state_dir: path.to_owned(),
@@ -274,35 +267,24 @@ mod tests {
   }
 
   #[test]
-  fn discovery_configuration_preserves_identity_and_trust_across_changes() {
+  fn setup_preserves_legacy_discovery_identity_and_trust() {
     let directory = tempfile::tempdir().unwrap();
-    let first = prepare_host(discovery_options(directory.path(), Some("personal"))).unwrap();
+    let first = prepare_host(discovery_options(directory.path())).unwrap();
+    assert!(first.discovery_namespace.is_none());
     let access = directory.path().join("host-access.json");
     let before = fs::read(&access).unwrap();
-    let profile = directory.path().join("host.json");
-    let host_id = HostProfile::load(&profile).unwrap().unwrap().host_id;
-    assert_eq!(first.discovery_namespace.as_deref(), Some("personal"));
-    let unchanged = prepare_host(discovery_options(directory.path(), None)).unwrap();
+    let profile_path = directory.path().join("host.json");
+    let mut profile = HostProfile::load(&profile_path).unwrap().unwrap();
+    profile.discovery_namespace = Some("personal".into());
+    profile.save(&profile_path).unwrap();
+    let unchanged = prepare_host(discovery_options(directory.path())).unwrap();
     assert_eq!(unchanged.discovery_namespace.as_deref(), Some("personal"));
     assert_eq!(unchanged.reference, first.reference);
-    let changed = prepare_host(discovery_options(directory.path(), Some("work"))).unwrap();
-    assert_eq!(changed.discovery_namespace.as_deref(), Some("work"));
-    let disabled = prepare_host(discovery_options(directory.path(), Some(""))).unwrap();
-    assert!(disabled.discovery_namespace.is_none());
     assert_eq!(fs::read(access).unwrap(), before);
-    assert_eq!(HostProfile::load(&profile).unwrap().unwrap().host_id, host_id);
-  }
-
-  #[test]
-  fn invalid_namespace_does_not_initialize_or_change_host_state() {
-    let directory = tempfile::tempdir().unwrap();
-    assert!(prepare_host(discovery_options(directory.path(), Some("Invalid namespace"))).is_err());
-    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
-    prepare_host(discovery_options(directory.path(), Some("personal"))).unwrap();
-    let profile = directory.path().join("host.json");
-    let before = fs::read(&profile).unwrap();
-    assert!(prepare_host(discovery_options(directory.path(), Some("-invalid"))).is_err());
-    assert_eq!(fs::read(profile).unwrap(), before);
+    assert_eq!(
+      HostProfile::load(&profile_path).unwrap().unwrap().host_id,
+      profile.host_id
+    );
   }
 
   #[test]
@@ -314,7 +296,6 @@ mod tests {
     let result = prepare_host(HostOptions {
       hub: Some(Url::parse("https://hub.example").unwrap()),
       name: None,
-      discovery_namespace: None,
       viewer_url: None,
       passkey_origin: None,
       state_dir: directory.path().to_owned(),

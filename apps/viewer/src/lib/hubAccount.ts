@@ -44,9 +44,11 @@ export function accountSession(identity: AccountIdentity): AccountSession {
 
 export async function hubAccountAvailability(client: HubClient): Promise<HubAccountAvailability> {
   try {
-    const response = await client.request<{ enabled: boolean }>(`${ACCOUNT}/capabilities`);
-    if (typeof response?.enabled !== "boolean") throw new Error("Hub returned invalid account settings.");
-    return response.enabled ? "available" : "email_unconfigured";
+    const response = await client.request<{ enabled: boolean; email_configured?: boolean }>(`${ACCOUNT}/capabilities`);
+    if (typeof response?.enabled !== "boolean" || (response.email_configured !== undefined && typeof response.email_configured !== "boolean")) {
+      throw new Error("Hub returned invalid account settings.");
+    }
+    return (response.email_configured ?? response.enabled) ? "available" : "email_unconfigured";
   } catch (error) {
     if (error instanceof HubError && error.status === 404) return "unsupported";
     throw error;

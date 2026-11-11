@@ -48,6 +48,9 @@ export function validateHost(host: SavedHubHost): SavedHubHost {
 export function machineReference(host: SavedHubHost): string {
   return `${host.machine_address ?? host.host_id}@${host.host_public_key}`;
 }
+export function hubHostLabel(host: SavedHubHost): string {
+  return host.machine_address ?? host.name ?? `Machine ${host.host_id.slice(0, 8)}`;
+}
 export function parseMachineReference(value: string): SavedHubHost {
   const match = /^([^@]+)@([^@]+)$/.exec(value.trim());
   if (!match) throw new Error("Paste the complete machine reference printed by the host connector.");

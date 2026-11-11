@@ -615,19 +615,40 @@ async fn api_keys_are_scoped_revocable_and_visible_only_to_their_owner() {
 
 #[tokio::test]
 async fn signup_without_mail_and_foreign_browser_requests_fail_closed() {
-  let (_directory, state, _) = fixture();
+  let (_directory, state, app) = fixture();
+  let account = signup(&app, &state, EMAIL, "alice").await;
   let disabled = Accounts::with_mailer(state.inner.store.clone(), ORIGIN, None)
     .unwrap()
     .router();
   assert_eq!(
     request(&disabled, "GET", "capabilities", Value::Null, None).await.1,
-    json!({"enabled": false})
+    json!({"enabled": true, "email_configured": false})
   );
   assert_eq!(
     request(&disabled, "POST", "email/start", json!({"email": EMAIL}), None)
       .await
       .0,
     StatusCode::SERVICE_UNAVAILABLE
+  );
+  assert_eq!(
+    request(&disabled, "GET", "me", Value::Null, account["token"].as_str())
+      .await
+      .0,
+    StatusCode::OK
+  );
+  let (status, device) = request(&disabled, "POST", "device/start", json!({}), None).await;
+  assert_eq!(status, StatusCode::OK);
+  assert_eq!(
+    request(
+      &disabled,
+      "POST",
+      "device/approve",
+      json!({"user_code": device["user_code"]}),
+      account["token"].as_str()
+    )
+    .await
+    .0,
+    StatusCode::NO_CONTENT
   );
   let response = disabled
     .oneshot(
@@ -645,4 +666,68 @@ async fn signup_without_mail_and_foreign_browser_requests_fail_closed() {
     mail::mailbox("user+alias@EXAMPLE.TEST").as_deref(),
     Some("user+alias@example.test")
   );
+}
+
+#[tokio::test]
+async fn existing_account_claims_new_machine_and_clients_negotiate_canonical_discovery_addresses() {
+  use crate::{
+    account_host,
+    host_setup::{HostOptions, prepare_host},
+    server::{self, HubState},
+  };
+  use tokn_hub_client_core::discovery::DISCOVERY_ADDRESSES_HEADER;
+
+  let (directory, accounts, account_app) = fixture();
+  let login = signup(&account_app, &accounts, EMAIL, "alice").await;
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let hub_url = format!("http://localhost:{}", listener.local_addr().unwrap().port());
+  let state = HubState::new(accounts.inner.store.clone(), &hub_url).unwrap();
+  let app = server::router(state.clone());
+  let api = app.clone();
+  let server = tokio::spawn(async move { axum::serve(listener, api).await.unwrap() });
+  let host_dir = directory.path().join("host");
+  let host = prepare_host(HostOptions {
+    hub: Some(Url::parse(&hub_url).unwrap()),
+    name: Some("Workstation".into()),
+    viewer_url: None,
+    passkey_origin: None,
+    state_dir: host_dir.clone(),
+    totp_secret_file: None,
+    viewer_token: None,
+    allow_control: Some(false),
+    insecure_loopback: true,
+    ice_servers: None,
+  })
+  .unwrap();
+  let host_id = &host.config.paired.as_ref().unwrap().host_id;
+  assert!(state.store.host(host_id).unwrap().is_none());
+  assert_eq!(
+    account_host::claim(&host.config, "workstation", login["token"].as_str().unwrap())
+      .await
+      .unwrap(),
+    "alice:workstation"
+  );
+  let stored = state.store.host(host_id).unwrap().unwrap();
+  assert_eq!(state.store.register_tunnel_host(stored.clone(), None).unwrap(), stored);
+  let group = account_host::saved_discovery_group(&host_dir, &hub_url, host_id)
+    .unwrap()
+    .unwrap();
+  assert_eq!(group.namespace, "alice");
+  let path = format!("/hub/v1/discovery/{}/{}", group.namespace, group.secret_digest);
+  for negotiated in [false, true] {
+    let mut request = Request::builder().uri(&path);
+    if negotiated {
+      request = request.header(DISCOVERY_ADDRESSES_HEADER, "1");
+    }
+    let response = app.clone().oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["machines"][0]["host_id"], *host_id);
+    assert_eq!(
+      result["machines"][0].get("machine_address").and_then(Value::as_str),
+      negotiated.then_some("alice:workstation")
+    );
+  }
+  server.abort();
 }

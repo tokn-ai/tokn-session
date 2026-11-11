@@ -1,23 +1,10 @@
 # Session Hub
 
-For the default encrypted workflow, use [authenticator pairing](hub-pairing.md).
-Hosts register automatically and verify codes locally; browser content sign-in
-requires a host-owned passkey. Hub administration is optional and uses separate
-passkeys. The earlier [signed-grant workflow](hub-e2ee.md) remains
-available separately.
-The setup below describes the explicit `--trusted-hub` compatibility mode and
-the passkey administration available alongside encrypted access.
-
-`tokn-session-hub` gives a browser one endpoint for multiple hosts. The Hub
-authenticates its owner with passkeys, approves host identities, and forwards
-the existing viewer HTTP/SSE API through outbound host connections.
-
-```text
-Browser → Hub /hosts/<host_id>/api/v1/… → outbound host tunnel → viewer-api
-                                                               ↓
-                                                       local viewer-core
-                                                       and Relay feed
-```
+`tokn-session-hub` gives the browser and app one endpoint for multiple
+machines. A Hub account owns each new machine address. Machines verify
+authenticator codes locally and browsers unlock sessions with a host-owned
+passkey. See [authenticator pairing](hub-pairing.md) for the encrypted workflow.
+The Hub administrator uses a separate passkey to manage host routes.
 
 The existing `tokn-session-relay` remains the local provider event feed.
 The Hub does not index histories or replicate sessions. Each host owns its
@@ -40,27 +27,19 @@ an IP address cannot serve as the WebAuthn relying-party domain.
 Subsequent owner logins use a passkey. An authenticated owner can add another
 passkey from the host screen and keep a second authenticator for recovery.
 
-On each session host, run the existing API and a connector:
+Configure [email delivery](#hub-accounts-and-cli-login) before creating an
+account. Sign in on the session host and register its machine name.
 
 ```sh
-cargo run -p tokn-viewer-api -- --api-only
+cargo run -p tokn-session-hub -- auth login --hub http://localhost:5559
 cargo run -p tokn-session-hub -- connect \
-  --hub http://localhost:5559 --insecure-loopback --trusted-hub --name "My workstation"
+  --hub http://localhost:5559 --insecure-loopback --machine workstation
 ```
 
-The connector prints a pairing code. In the Hub, compare the pending host's
-name and code with that terminal before approving it. The code identifies the
-enrollment; the authenticated owner's approval grants access. Select the
-approved host to open its viewer. Host switching cancels the previous host's
-requests and subscriptions.
-
-Connectors allow viewing by default. To permit agent input, start the connector
-with `--allow-control` and approve that requested access. A previously approved
-view-only identity cannot gain control simply by restarting with this option:
-revoke it and explicitly approve the new enrollment. A connector started
-without `--allow-control` always enforces viewing-only access, even if the Hub
-previously approved control. Viewer bookkeeping, such as read markers and cache
-leases, is included in viewing access.
+Keep `tokn-viewer-api --api-only` running in a separate terminal. Pair the machine
+from the gallery with its authenticator code. A connector defaults to viewing
+access. Start it with `--allow-control` to allow agent input for authorized
+devices.
 
 ## Hub accounts and CLI login
 
@@ -99,13 +78,15 @@ tokn-session-hub connect --hub https://hub.example.com --machine macbook
 For account `alice` this reserves `alice:macbook` on that Hub. Add
 `--register-only` while app hosting is stopped to make the assignment and then
 start hosting from the desktop app. Subsequent connector starts use the saved
-host key. The account lists its machines, and pairing a machine also reveals
-the account's discovery group. Each machine verifies access to its sessions.
-Browser access to a paired machine still uses its passkey.
+host key. The browser gallery combines the signed-in account's machines with
+saved pairings and discovered machines. Pairing also reveals the account's
+discovery group to a viewer who has no account session. Each machine verifies
+access to its own sessions. Browser access uses a machine passkey.
 
-New hosts on an account-enabled Hub require a machine assignment. Previously
-registered hosts can reconnect with their existing keys and explicitly claim an
-account address with `--machine`. Existing assigned addresses remain valid.
+Every new host needs an account machine assignment. Configure email delivery
+to create accounts and sign in by email. Previously registered hosts can
+reconnect with their existing keys and claim an account address with
+`--machine`. Existing addresses remain valid.
 
 ## Remote operation
 
@@ -129,8 +110,8 @@ not provide protection against sustained denial-of-service traffic.
 On a remote host:
 
 ```sh
-cargo run -p tokn-session-hub -- connect \
-  --hub https://hub.example.com --trusted-hub --name "Build server"
+tokn-session-hub auth login --hub https://hub.example.com
+tokn-session-hub connect --hub https://hub.example.com --machine build-server
 ```
 
 Only the connector needs outbound connectivity. The local viewer API stays on
@@ -139,20 +120,18 @@ the local API requires a token, supply `TOKN_VIEWER_TOKEN` to the connector as
 well as the API; this local token is never sent to the Hub or browser.
 Redirects and environment proxies are disabled for local forwarding.
 
-This is a **trusted Hub**: it can read forwarded requests and responses. TLS
-protects the client-to-Hub and host-to-Hub connections; this version does not
-provide end-to-end encryption in this compatibility mode. Use the
-[encrypted client](hub-e2ee.md) for an untrusted Hub. The implementation
-creates no hosting resources or deployments.
+Previously enrolled connectors using `--trusted-hub` or
+`--owner-public-key` can reconnect with their saved identities. In
+`--trusted-hub` mode the Hub can read forwarded content. See
+[encrypted access and sharing](hub-e2ee.md) for compatibility details.
 
 ## Identity and lifecycle
 
-Each Hub has one administrator, who can approve legacy enrollments, revoke
-hosts, and add administration passkeys. On an account-enabled Hub, users
-manage their own machine addresses and automation keys.
+Each Hub has one administrator, who can revoke hosts and add administration
+passkeys. Account holders manage their own machine addresses and automation keys.
 
-The administrator can also reserve legacy namespaces and assign permanent
-`username:host` addresses to registered encrypted machines at `/admin`.
+The Hub account's username supplies the namespace for every new machine
+address. Previously assigned administrator addresses remain valid aliases.
 Public lookup resolves an exact address to a machine UUID and presence.
 Addresses remain reserved to the original UUID after revocation. Clients
 verify Noise keys through machine pairing. See
@@ -168,9 +147,9 @@ these files using the host's normal account/storage controls.
 Each tunnel starts with a fresh Hub challenge. The connector signs the
 challenge and enrollment attributes; the Hub verifies possession of the
 approved key. A host name is a label, not an identity. Revocation closes the
-active tunnel and requires fresh approval for subsequent access.
+active tunnel and removes access through that registration.
 
-Browser bearer sessions last one hour, live only in memory, and disappear on
+Administrator browser sessions last one hour, live only in memory, and disappear on
 reload. Logout or expiry closes active requests and event streams. Restarting
 the Hub invalidates browser sessions and outstanding authentication ceremonies;
 approved hosts reconnect using their persisted keys. Losing all passkeys has
@@ -185,17 +164,25 @@ no remote recovery bypass; preserve an additional passkey before that happens.
 - `GET /hub/v1/hosts` returns approved hosts with connectivity and effective
   `view`/`control` access, durable encrypted-only status, and an optional
   `machine_address`. `DELETE /hub/v1/hosts/<host_id>` revokes one.
-- Authenticated `GET /hub/v1/namespaces` lists namespaces; `POST` with
-  `{"username":"alice"}` creates one. Authenticated
-  `POST /hub/v1/namespaces/alice/machines/macbook` with `{"host_id":"UUID"}`
-  assigns a registered encrypted machine its permanent address.
+- Authenticated `GET /hub/v1/namespaces` lists legacy namespace reservations.
+  New addresses are assigned through account machine registration.
 - Public `GET /hub/v1/resolve/alice/macbook` returns `host_id`, `machine_address`,
   `name`, and `online`. No directory key establishes encryption trust.
-- `GET /hub/v1/enrollments` lists pending connections. Authenticated
-  `POST /hub/v1/enrollments/approve` accepts `{"pairing_code":"…"}`.
+- A discovery request with `X-Tokn-Discovery-Addresses: 1` also receives
+  `machine_address` for entries owned by the account namespace.
+- Public `POST /hub/v1/presence` accepts `{"host_ids":["UUID"]}` for up to 128
+  unique canonical machine IDs and returns `host_id` and `online` for those IDs.
+  A request with `X-Tokn-Presence-Versions: 1` also receives `connector_version`
+  when the active connector reports it. Unknown or revoked hosts are offline.
+  Browser origins are checked and responses are not cached.
+- The legacy enrollment catalog is empty. New connections register through a
+  Hub account.
 - `/hosts/<host_id>/api/v1/<command>` forwards the existing viewer API.
   The browser's Hub bearer credential stays at the Hub.
 - `/hub/v1/tunnel` is the native connector's versioned WebSocket transport.
+  Its upgrade exchanges package versions through `X-Tokn-Connector-Version`
+  on the request and `X-Tokn-Hub-Version` on the response. The Hub retains the
+  connector version with its authenticated live connection.
 
 Forwarding uses an exact viewer-route allowlist, bounded bodies, bounded
 in-flight requests and streaming queues. The connector independently checks

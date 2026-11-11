@@ -3886,7 +3886,6 @@ button:disabled {
 .hub-pairing { margin-top: 40px; padding-top: 24px; border-top: 1px solid var(--border); }
 .hub-pairing > h2, .hub-empty h2 { font-size: 18px; margin-top: 0; }
 .hub-pairing > p, .hub-empty p { font-size: 14px; line-height: 1.6; color: var(--text-soft); }
-.hub-host .hub-pairing-code { font-size: 23px; font-family: ui-monospace, monospace; letter-spacing: 0.1em; color: var(--text); }
 .hub-error, .hub-login [role="alert"] { color: var(--danger); }
 .hub-empty { padding: 28px 0; }
 @media (max-width: 640px) {

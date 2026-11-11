@@ -2,7 +2,7 @@ use axum::{
   Json, Router,
   body::Body,
   extract::State,
-  http::{StatusCode, header},
+  http::{HeaderMap, StatusCode, header},
   response::{IntoResponse, Response},
   routing::get,
 };
@@ -14,7 +14,11 @@ use std::{
     atomic::{AtomicUsize, Ordering},
   },
 };
-use tokn_hub_client_core::{discovery::MAX_DISCOVERY_RESPONSE, protocol, secure::NoiseIdentity};
+use tokn_hub_client_core::{
+  discovery::{DISCOVERY_ADDRESSES_HEADER, MAX_DISCOVERY_RESPONSE},
+  protocol,
+  secure::NoiseIdentity,
+};
 use tokn_hub_remote::{
   ClientStore, DiscoveredMachine, DiscoveryGroup, DiscoveryResult, RemoteManager, ResolvedMachine, SavedHost,
 };
@@ -29,7 +33,8 @@ struct Directory {
   discovery: Arc<Mutex<DiscoveryResult>>,
 }
 
-async fn discover(State(state): State<Directory>) -> Response {
+async fn discover(State(state): State<Directory>, headers: HeaderMap) -> Response {
+  assert_eq!(headers[DISCOVERY_ADDRESSES_HEADER], "1");
   state.lookups.fetch_add(1, Ordering::SeqCst);
   match state.mode.load(Ordering::SeqCst) {
     1 => (
@@ -127,6 +132,7 @@ impl Harness {
           host_id: uuid::Uuid::new_v4().to_string(),
           name: "Another machine".into(),
           online: false,
+          machine_address: Some("personal:another-machine".into()),
         }],
       })),
     };

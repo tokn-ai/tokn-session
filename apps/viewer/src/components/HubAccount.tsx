@@ -2,39 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { HubClient, HubError, hubErrorMessage } from "../lib/hub";
 import {
   accountSession, approveAccountDevice, browserAccountClient, createAccountKey, hubAccountAvailability,
-  loadAccountKeys, loadAccountMachines, logoutAccount, MACHINE_READ, MACHINE_REGISTER,
+  loadAccountKeys, logoutAccount, MACHINE_READ, MACHINE_REGISTER,
   refreshBrowserAccount, requestAccountCode, revokeAccountKey, verifyAccountCode,
   type AccountKey, type AccountKeyScope, type AccountSession, type HubAccountAvailability,
 } from "../lib/hubAccount";
-import type { ResolvedMachine } from "../lib/types";
-import { HubAccess } from "./HubAccess";
 import "./HubAccount.css";
 
 const ACCOUNT_CHANGED = "Your Hub account changed in another tab. Review the active account before continuing.";
 const SESSION_EXPIRED = "Your Hub session expired. Sign in again.";
-
-export function HubAccountLink() {
-  const [supported, setSupported] = useState(false);
-  useEffect(() => {
-    const client = browserAccountClient();
-    let available = false;
-    let refreshing = false;
-    function refresh() {
-      if (!available || refreshing || client.signal.aborted) return;
-      refreshing = true;
-      void refreshBrowserAccount(client).catch(() => {}).finally(() => { refreshing = false; });
-    }
-    window.addEventListener("focus", refresh);
-    void hubAccountAvailability(client).then((availability) => {
-      if (client.signal.aborted) return;
-      available = availability !== "unsupported";
-      setSupported(available);
-      refresh();
-    }).catch(() => {});
-    return () => { window.removeEventListener("focus", refresh); client.close(); };
-  }, []);
-  return supported ? <a href="/account">Hub account</a> : null;
-}
 
 export function HubAccount() {
   const [availability, setAvailability] = useState<HubAccountAvailability>();
@@ -44,7 +19,6 @@ export function HubAccount() {
   const [signing_out, setSigningOut] = useState(false);
   const [sign_out_error, setSignOutError] = useState<string>();
   const [notice, setNotice] = useState<string>();
-  const [selected_machine, setSelectedMachine] = useState<ResolvedMachine>();
   const [user_code, setUserCode] = useState(() => {
     const value = new URLSearchParams(window.location.search).get("user_code");
     return value && /^[A-Za-z0-9-]{1,32}$/.test(value) ? value : "";
@@ -104,7 +78,7 @@ export function HubAccount() {
 
   useEffect(() => {
     const lock = () => { active.current?.client.close(); active.current = undefined; };
-    const hide = () => { lock(); setSession(undefined); setSelectedMachine(undefined); };
+    const hide = () => { lock(); setSession(undefined); };
     const restore = (event: PageTransitionEvent) => { if (event.persisted) window.location.reload(); };
     window.addEventListener("pagehide", hide);
     window.addEventListener("pageshow", restore);
@@ -148,9 +122,6 @@ export function HubAccount() {
     } else report(hubErrorMessage(error));
   }
 
-  if (selected_machine) return <HubAccess initial_machine={selected_machine}
-    account_control={<button type="button" onClick={() => setSelectedMachine(undefined)}>Back to Hub account</button>} />;
-
   if (!session) return <main className="machine-connect hub-login hub-account-login">
     {availability === "available" ? <AccountSignIn user_code={user_code} notice={notice} on_signed_in={signedIn} />
       : <form onSubmit={(event) => { event.preventDefault(); setAttempt((value) => value + 1); }}>
@@ -180,7 +151,6 @@ export function HubAccount() {
     <AccountDeviceApproval client={session.client} initial_code={user_code}
       approved={approved} on_approved={() => { setUserCode(""); setApproved(true); }}
       on_reset={() => setApproved(false)} on_failure={onFailure} />
-    <AccountMachines session={session} on_select={setSelectedMachine} on_failure={onFailure} />
     <AccountKeys client={session.client} on_failure={onFailure} />
   </div></main>;
 }
@@ -313,44 +283,6 @@ function AccountDeviceApproval({ client, initial_code, approved, on_approved, on
       <button type="submit" disabled={busy || !code.trim()}>{busy ? "Approving…" : "Approve CLI login"}</button>
     </form>}
   </details>;
-}
-
-function AccountMachines({ session, on_select, on_failure }: {
-  session: AccountSession;
-  on_select: (machine: ResolvedMachine) => void;
-  on_failure: AccountFailure;
-}) {
-  const [machines, setMachines] = useState<ResolvedMachine[]>();
-  const [error, setError] = useState<string>();
-  const [attempt, setAttempt] = useState(0);
-  useEffect(() => {
-    let current = true;
-    setError(undefined);
-    void loadAccountMachines(session.client, session.username).then((next) => {
-      if (current && !session.client.signal.aborted) setMachines(next);
-    }).catch((error: unknown) => { if (current) on_failure(error, setError); });
-    return () => { current = false; };
-  // The account session owns the request and re-renders do not restart it.
-  }, [session, attempt]);
-
-  return <section className="account-section" aria-labelledby="account-machines-title">
-    <div className="account-section-header">
-      <h2 id="account-machines-title">Your machines</h2>
-      <button type="button" disabled={machines === undefined && !error} onClick={() => {
-        setMachines(undefined); setAttempt((value) => value + 1);
-      }}>Refresh machines</button>
-    </div>
-    <p>Pair with a machine’s authenticator code. Open paired machines with their passkeys.</p>
-    {error ? <p className="hub-error" role="alert">{error}</p> : !machines ? <p role="status">Loading machines…</p>
-      : machines.length === 0 ? <p>No machines registered to this account.</p>
-      : <ul className="hub-hosts" aria-label="Account machines">{machines.map((machine) => <li className="hub-host" key={machine.host_id}>
-        <div className="hub-host-details">
-          <h3>{machine.machine_address}</h3>{machine.name !== machine.machine_address && <p>{machine.name}</p>}
-          <p className={machine.online ? "hub-presence is-online" : "hub-presence"}>{machine.online ? "Online" : "Offline"}</p>
-        </div>
-        <button type="button" disabled={!machine.online} onClick={() => on_select(machine)}>Connect to {machine.machine_address}</button>
-      </li>)}</ul>}
-  </section>;
 }
 
 const SCOPE_LABELS = { [MACHINE_READ]: "Read machines", [MACHINE_REGISTER]: "Register machines" };

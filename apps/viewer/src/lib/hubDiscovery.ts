@@ -32,7 +32,13 @@ export function validateDiscoveryResult(value: unknown, expected: DiscoveryGroup
       throw new Error("Hub returned an invalid machine discovery list.");
     }
     seen.add(machine.host_id);
-    return { host_id: machine.host_id, name: machine.name, online: machine.online };
+    if (machine.machine_address !== undefined && parseMachineAddress(machine.machine_address).username !== group.namespace) {
+      throw new Error("Hub returned an address outside the discovery namespace.");
+    }
+    return {
+      host_id: machine.host_id, name: machine.name, online: machine.online,
+      ...(machine.machine_address ? { machine_address: machine.machine_address } : {}),
+    };
   });
   return { ...group, machines: validated };
 }
@@ -46,7 +52,8 @@ export async function discoverBrowserGroup(hub_url: string, reference: Discovery
   const timeout = setTimeout(abort, 15_000);
   try {
     const response = await fetch(`${hub_url}/hub/v1/discovery/${group.namespace}/${group.secret_digest}`, {
-      signal: controller.signal, credentials: "omit", redirect: "error", cache: "no-store", headers: { Accept: "application/json" },
+      signal: controller.signal, credentials: "omit", redirect: "error", cache: "no-store",
+      headers: { Accept: "application/json", "X-Tokn-Discovery-Addresses": "1" },
     });
     if (!response.ok) throw new Error(`Could not discover group machines (${response.status}).`);
     if (!response.headers.get("content-type")?.includes("application/json")) throw new Error("Hub returned an invalid machine discovery list.");

@@ -17,8 +17,9 @@ use std::{
 use tokio::sync::{Mutex as AsyncMutex, watch};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 use tokn_hub_client_core::{
-  discovery::{DiscoveredMachine, DiscoveryGroup, DiscoveryResult},
+  discovery::{DISCOVERY_ADDRESSES_HEADER, DiscoveredMachine, DiscoveryGroup, DiscoveryResult},
   pairing::{ClientKind, HostPairing, TotpSecret, is_pairing_record},
+  presence::{MachinePresence, PRESENCE_VERSIONS_HEADER, PresenceRequest, PresenceResult},
   protocol,
   secure::{InnerMessage, MAX_CHUNK, NoiseIdentity, NoiseResponder},
 };
@@ -73,6 +74,8 @@ struct Services {
   secrets: Mutex<BTreeMap<String, String>>,
   config: Mutex<BTreeMap<String, Value>>,
   discovery: Mutex<Option<DiscoveryResult>>,
+  presence: Mutex<Option<PresenceResult>>,
+  presence_requests: AtomicUsize,
 }
 impl Services {
   fn socket(&self, handle: &str) -> Result<Arc<Socket>, String> {
@@ -182,6 +185,34 @@ impl Services {
       }
       "http.request" => {
         let url = url::Url::parse(text("url")?).map_err(|_| "Invalid fixture URL")?;
+        if url.path() == "/hub/v1/presence" {
+          assert_eq!(params["method"], "POST");
+          assert_eq!(params["timeout_ms"], 10000);
+          assert_eq!(
+            params["headers"],
+            json!([
+              {"name":"Content-Type","value":"application/json"},
+              {"name":"Accept","value":"application/json"},
+              {"name":PRESENCE_VERSIONS_HEADER,"value":"1"},
+            ])
+          );
+          let body: Vec<u8> = serde_json::from_value(params["body"].clone()).unwrap();
+          let request: PresenceRequest = serde_json::from_slice(&body).unwrap();
+          request.validate().unwrap();
+          self.presence_requests.fetch_add(1, Ordering::SeqCst);
+          let result = self.presence.lock().unwrap().clone().unwrap_or_else(|| PresenceResult {
+            machines: request
+              .host_ids
+              .into_iter()
+              .map(|host_id| MachinePresence {
+                online: host_id == HOST_ID,
+                connector_version: (host_id == HOST_ID).then(|| "0.1.1".into()),
+                host_id,
+              })
+              .collect(),
+          });
+          return Ok(json!({"status":200,"body":serde_json::to_vec(&result).unwrap()}));
+        }
         if url.path() == "/hub/v1/resolve/personal/fixture" {
           return Ok(json!({"status":200,"body":serde_json::to_vec(&json!({
             "host_id":HOST_ID,
@@ -199,6 +230,10 @@ impl Services {
         assert_eq!(
           url.path(),
           format!("/hub/v1/discovery/{}/{}", discovery.namespace, discovery.secret_digest)
+        );
+        assert_eq!(
+          params["headers"],
+          json!([{"name":DISCOVERY_ADDRESSES_HEADER,"value":"1"}])
         );
         Ok(json!({"status":200,"body":serde_json::to_vec(&discovery).unwrap()}))
       }
@@ -446,11 +481,13 @@ async fn interpreted_guest_pairs_streams_reuses_view_connections_and_never_repla
         host_id: HOST_ID.into(),
         name: "Paired machine".into(),
         online: true,
+        machine_address: Some(format!("{}:paired", discovery_group.namespace)),
       },
       DiscoveredMachine {
         host_id: "11111111-2222-4333-8444-666666666666".into(),
         name: "Unpaired machine".into(),
         online: false,
+        machine_address: None,
       },
     ],
   });
@@ -459,6 +496,61 @@ async fn interpreted_guest_pairs_streams_reuses_view_connections_and_never_repla
     .await
     .unwrap();
   invoke(&run, "initialize", json!({})).await.unwrap();
+  // Presence is public, exact routing metadata and must not initialize identity
+  // storage, open a host socket, or depend on an existing pairing.
+  let unpaired_id = "11111111-2222-4333-8444-666666666666";
+  let presence = invoke(
+    &run,
+    "hub_client_presence",
+    json!({"hub_url":peer.hub,"host_ids":[HOST_ID,unpaired_id]}),
+  )
+  .await
+  .unwrap();
+  assert_eq!(
+    presence,
+    json!({"machines":[
+      {"host_id":HOST_ID,"online":true,"connector_version":"0.1.1"},
+      {"host_id":unpaired_id,"online":false},
+    ]})
+  );
+  assert_eq!(services.presence_requests.load(Ordering::SeqCst), 1);
+  assert!(services.secrets.lock().unwrap().is_empty());
+  assert!(services.config.lock().unwrap().is_empty());
+  assert!(services.sockets.lock().unwrap().is_empty());
+  assert!(
+    invoke(
+      &run,
+      "hub_client_presence",
+      json!({"hub_url":peer.hub,"host_ids":["invalid"]})
+    )
+    .await
+    .is_err()
+  );
+  assert_eq!(
+    invoke(&run, "hub_client_presence", json!({"hub_url":peer.hub,"host_ids":[]}))
+      .await
+      .unwrap(),
+    json!({"machines":[]})
+  );
+  assert_eq!(services.presence_requests.load(Ordering::SeqCst), 1);
+  *services.presence.lock().unwrap() = Some(PresenceResult {
+    machines: vec![MachinePresence {
+      host_id: unpaired_id.into(),
+      online: true,
+      connector_version: None,
+    }],
+  });
+  assert!(
+    invoke(
+      &run,
+      "hub_client_presence",
+      json!({"hub_url":peer.hub,"host_ids":[HOST_ID]})
+    )
+    .await
+    .is_err()
+  );
+  assert_eq!(services.presence_requests.load(Ordering::SeqCst), 2);
+  *services.presence.lock().unwrap() = None;
   let before = invoke(&run, "hub_client_status", json!({"hub_url":peer.hub}))
     .await
     .unwrap();
@@ -489,6 +581,10 @@ async fn interpreted_guest_pairs_streams_reuses_view_connections_and_never_repla
   .await
   .unwrap();
   assert_eq!(discovered["machines"].as_array().unwrap().len(), 2);
+  assert_eq!(
+    discovered["machines"][0]["machine_address"],
+    format!("{}:paired", discovery_group.namespace)
+  );
   let status = invoke(&run, "hub_client_status", json!({"hub_url":peer.hub}))
     .await
     .unwrap();

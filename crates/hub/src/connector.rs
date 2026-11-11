@@ -20,9 +20,10 @@ use tokio::{
 };
 use tokio_tungstenite::{
   MaybeTlsStream, WebSocketStream, connect_async_with_config,
-  tungstenite::{Message, protocol::WebSocketConfig},
+  tungstenite::{Message, client::IntoClientRequest, http::HeaderValue, protocol::WebSocketConfig},
 };
 use tokio_util::sync::CancellationToken;
+use tokn_hub_client_core::presence::{CONNECTOR_VERSION_HEADER, HUB_VERSION_HEADER, valid_software_version};
 use url::{Host, Url};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -259,6 +260,23 @@ pub async fn run(config: ConnectorConfig, shutdown: CancellationToken) -> Result
   run_owned(config, shutdown, lease, None).await
 }
 
+#[cfg(test)]
+pub(crate) fn remember_legacy_host(store: &crate::store::Store, config: &ConnectorConfig) -> crate::store::HostRecord {
+  let key = load_key(&config.key_file).unwrap();
+  let record = crate::store::HostRecord {
+    host_id: routing_id(config, &key),
+    name: config.name.clone(),
+    public_key: protocol::encode(key.verifying_key().as_bytes()),
+    access: if config.allow_control { "control" } else { "view" }.into(),
+  };
+  if config.paired.is_some() {
+    store.register_encrypted_host(record.clone()).unwrap();
+  } else {
+    store.approve_host(record.clone()).unwrap();
+  }
+  record
+}
+
 /// Setup callers acquire ownership before changing saved configuration.
 pub async fn run_owned(
   config: ConnectorConfig,
@@ -330,13 +348,26 @@ async fn connect_once(
   let ws_config = WebSocketConfig::default()
     .max_message_size(Some(protocol::MAX_FRAME))
     .max_frame_size(Some(protocol::MAX_FRAME));
-  let (mut socket, _) = tokio::time::timeout(
+  let mut request = endpoint
+    .as_str()
+    .into_client_request()
+    .map_err(|e| format!("Could not build Hub request: {e}"))?;
+  request.headers_mut().insert(
+    CONNECTOR_VERSION_HEADER,
+    HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
+  );
+  let (mut socket, response) = tokio::time::timeout(
     Duration::from_secs(15),
-    connect_async_with_config(endpoint.as_str(), Some(ws_config), false),
+    connect_async_with_config(request, Some(ws_config), false),
   )
   .await
   .map_err(|_| "Hub connection timed out")?
   .map_err(|e| format!("Could not connect to Hub: {e}"))?;
+  let hub_version = response
+    .headers()
+    .get(HUB_VERSION_HEADER)
+    .and_then(|value| value.to_str().ok())
+    .filter(|version| valid_software_version(version));
   tokio::time::timeout(Duration::from_secs(10), authenticate(&mut socket, config, key))
     .await
     .map_err(|_| "Hub authentication timed out")??;
@@ -357,7 +388,7 @@ async fn connect_once(
           Message::Text(text) if text.len() <= protocol::MAX_FRAME => {
             let frame: Frame = serde_json::from_str(&text).map_err(|_| "Invalid Hub tunnel message")?;
             match frame {
-              Frame::RegistrationRejected { message } if !ready && config.paired.is_some() => {
+              Frame::RegistrationRejected { message } if !ready => {
                 return Err(registration_failure(&message));
               }
               Frame::Pending { code, expires_in } if !ready => {
@@ -370,6 +401,9 @@ async fn connect_once(
                 notify(status, ConnectorStatus::Online);
                 if secure.is_some() { enqueue(&outgoing, Frame::SecureOnly {}).await?; }
                 eprintln!("Connected to Hub as {host_id} ({})", if config.allow_control && allow_control { "control enabled" } else { "view access" });
+                if let Some(version) = hub_version {
+                  eprintln!("Hub version: {version}");
+                }
               }
               Frame::Request { request_id, method, path, body } if ready => {
                 if secure.is_some() {

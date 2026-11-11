@@ -5,9 +5,11 @@ import { ViewerPage } from "./pages/ViewerPage";
 import { isDesktop, RemoteClient, selectMachine, type ConnectionState } from "./lib/transport";
 import { PairedConnection } from "./components/PairedConnection";
 import { HubConnection } from "./components/HubConnection";
-import { detectHub, hubErrorMessage, type HubStatus } from "./lib/hub";
+import { detectHub, HubError, hubErrorMessage, type HubClient, type HubStatus } from "./lib/hub";
+import { accountSession, browserAccountClient, hubAccountAvailability, loadAccountMachines, refreshBrowserAccount } from "./lib/hubAccount";
+import type { ResolvedMachine } from "./lib/types";
 import { HubAccess } from "./components/HubAccess";
-import { HubAccount, HubAccountLink } from "./components/HubAccount";
+import { HubAccount } from "./components/HubAccount";
 import { NativePasskey } from "./components/NativePasskey";
 import { DesktopWorkspace } from "./pages/DesktopWorkspace";
 import { RemoteWorkspace } from "./pages/RemoteWorkspace";
@@ -67,6 +69,69 @@ function BrowserViewer({ initial_token }: { initial_token?: string }) {
     </form>
   </main>;
 }
+
+function BrowserHubGallery() {
+  const [supported, setSupported] = useState(false);
+  const [roster, setRoster] = useState<{ machines: ResolvedMachine[]; unavailable?: boolean }>({ machines: [] });
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    const client = browserAccountClient();
+    let roster_client: HubClient | undefined;
+    let user_id: string | undefined;
+    let available = false;
+    let refreshing = false;
+
+    async function refresh() {
+      if (!available || refreshing || client.signal.aborted) return;
+      refreshing = true;
+      try {
+        const identity = await refreshBrowserAccount(client);
+        if (client.signal.aborted) return;
+        if (identity?.user_id !== user_id) {
+          user_id = identity?.user_id;
+          setRoster({ machines: [] });
+        }
+        if (!identity) { setRoster({ machines: [] }); return; }
+        const session = accountSession(identity);
+        roster_client = session.client;
+        const machines = await loadAccountMachines(session.client, session.username);
+        if (!client.signal.aborted) setRoster({ machines });
+      } catch (error) {
+        if (client.signal.aborted) return;
+        const account_changed = error instanceof HubError
+          && (error.status === 401 || (error.status === 409 && error.details?.account_session_changed === true));
+        setRoster({ machines: [], unavailable: !account_changed });
+      } finally {
+        roster_client?.close();
+        roster_client = undefined;
+        refreshing = false;
+      }
+    }
+
+    function cancel() { client.close(); roster_client?.close(); }
+    function hide() { cancel(); setRoster({ machines: [] }); }
+    window.addEventListener("focus", refresh);
+    window.addEventListener("pagehide", hide);
+    void hubAccountAvailability(client).then((availability) => {
+      if (client.signal.aborted) return;
+      available = availability !== "unsupported";
+      setSupported(available);
+      void refresh();
+    }).catch(() => {});
+    return () => {
+      window.removeEventListener("focus", refresh);
+      window.removeEventListener("pagehide", hide);
+      cancel();
+    };
+  }, [attempt]);
+
+  return <HubAccess
+    account_control={supported && <a href="/account">Hub account</a>}
+    account_roster={{ hub_url: window.location.origin, ...roster, on_retry: () => setAttempt((value) => value + 1) }}
+  />;
+}
+
 function BrowserGateway({ bootstrap_token }: { bootstrap_token?: string }) {
   const [status, setStatus] = useState<HubStatus | null>();
   const [error, setError] = useState<string>();
@@ -87,7 +152,7 @@ function BrowserGateway({ bootstrap_token }: { bootstrap_token?: string }) {
   if (status) {
     if (window.location.pathname === "/admin") return <HubConnection initial_status={status} bootstrap_token={bootstrap_token} />;
     if (window.location.pathname === "/account") return <HubAccount />;
-    return <HubAccess account_control={<HubAccountLink />} />;
+    return <BrowserHubGallery />;
   }
   return <main className="machine-connect"><form onSubmit={(event) => { event.preventDefault(); setAttempt((value) => value + 1); }}>
     <h1>Session viewer</h1>

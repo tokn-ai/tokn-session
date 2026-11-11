@@ -64,12 +64,17 @@ pub(crate) fn membership_group(config: &ConnectorConfig) -> Result<Option<Discov
   let Some(path) = paired.state_file.parent() else {
     return Ok(None);
   };
-  Ok(read_membership(path, config.hub_url.as_str(), &paired.host_id)?.map(|claim| claim.group))
+  saved_discovery_group(path, config.hub_url.as_str(), &paired.host_id)
 }
 
 /// Show the Hub-assigned name for a local host's saved identity.
 pub fn saved_address(state_dir: &Path, hub_url: &str, host_id: &str) -> Result<Option<String>, String> {
   Ok(read_membership(state_dir, hub_url, host_id)?.map(|claim| claim.machine_address))
+}
+
+/// Read this host's saved account discovery group.
+pub fn saved_discovery_group(state_dir: &Path, hub_url: &str, host_id: &str) -> Result<Option<DiscoveryGroup>, String> {
+  Ok(read_membership(state_dir, hub_url, host_id)?.map(|claim| claim.group))
 }
 
 fn read_membership(state_dir: &Path, hub_url: &str, host_id: &str) -> Result<Option<AccountMachineClaim>, String> {

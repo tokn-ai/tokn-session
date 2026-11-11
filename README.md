@@ -87,10 +87,10 @@ implementation status.
 
 ## Remote hosts through a Hub
 
-`tokn-session-hub` connects your hosts through one endpoint. Hosts automatically
-register their public identities and verify authenticator codes locally to pair
-your devices. The installed client remembers trusted keys and reconnects with
+`tokn-session-hub` connects your hosts through one endpoint. A Hub account
+registers each new host's machine address. Hosts verify authenticator codes
+locally to pair your devices. The installed client remembers trusted keys and reconnects with
 end-to-end encryption. See [host onboarding](docs/hub-pairing.md) and
 [Hub administration](docs/hub.md). Sharing is deferred from this onboarding flow;
-the earlier grant commands remain available. The older browser-through-Hub mode
-requires an explicit `--trusted-hub` option.
+the earlier grant commands remain available for existing hosts. Previously
+enrolled browser-through-Hub hosts can reconnect with `--trusted-hub`.

@@ -23,26 +23,55 @@ beforeEach(() => {
     pairMachine: vi.fn().mockResolvedValue(host), loginMachine: vi.fn().mockResolvedValue(host), resolve: vi.fn(), rememberMetadata: vi.fn(),
     connect: vi.fn().mockResolvedValue(client), forget: vi.fn().mockResolvedValue(undefined),
     discover: vi.fn().mockImplementation(async (group) => ({ ...group, machines: [] })),
+    presence: vi.fn().mockImplementation(async (host_ids: string[]) => ({ machines: host_ids.map((host_id) => ({ host_id, online: true })) })),
   };
   vi.mocked(openHubAccess).mockResolvedValue(service);
 });
 afterEach(() => { cleanup(); restore_host?.(); restore_host = undefined; selectMachine(); Reflect.deleteProperty(window, "__TAURI_INTERNALS__"); localStorage.clear(); vi.restoreAllMocks(); vi.clearAllMocks(); });
-async function ready() { await screen.findByLabelText("Machine address or reference"); }
+async function ready() { await screen.findByRole("button", { name: "Add machine" }); }
+async function pairingReady() {
+  await ready();
+  fireEvent.click(screen.getByRole("button", { name: "Add machine" }));
+  await screen.findByLabelText("Machine address or reference");
+}
 
 const discovery_group = { namespace: "personal", secret_digest: "A".repeat(43) };
 const discovered_laptop = { host_id: "550e8400-e29b-41d4-a716-446655440001", name: "Laptop", online: true };
 
-it("takes an account machine to its existing passkey flow without opening it automatically", async () => {
-  const remembered = { host_id: host.host_id, host_public_key: host.host_public_key };
+it("merges the account roster, saved pairing and discovery without replacing the saved alias", async () => {
+  const remembered = { ...host, machine_address: "legacy:workstation", discovery_group };
+  const account_machine = { host_id: host.host_id, machine_address: host.machine_address, name: host.name, online: true };
+  const roster_only = { ...discovered_laptop, machine_address: "alice:laptop" };
   vi.mocked(service.status).mockResolvedValue({ hosts: [remembered], selected_host_id: null, device_public_key: "D".repeat(43) });
-  render(<HubAccess initial_hub_url="https://hub.example" initial_machine={{
-    host_id: host.host_id, machine_address: host.machine_address, name: host.name, online: true,
+  vi.mocked(service.discover).mockResolvedValue({ ...discovery_group, machines: [account_machine] });
+  render(<HubAccess initial_hub_url="https://hub.example" account_roster={{
+    hub_url: "https://hub.example", machines: [account_machine, roster_only], on_retry: vi.fn(),
   }} />);
-  expect(await screen.findByLabelText("Machine address or reference")).toHaveValue(host.machine_address);
-  expect(screen.getByRole("radio", { name: "Use machine passkey" })).toBeChecked();
+  const card = (await screen.findByRole("heading", { name: "alice:workstation" })).closest("li")!;
+  expect(within(card).getByText("Account machine")).toBeInTheDocument();
+  expect(within(card).getByText("Paired")).toBeInTheDocument();
+  expect(within(card).getByText(machineReference(remembered))).toBeInTheDocument();
+  expect(screen.getByRole("list", { name: "Machines" }).children).toHaveLength(3);
+  const pair = screen.getByRole("button", { name: "Pair alice:laptop" });
+  expect(within(pair.closest("li")!).getByText("Pairing required")).toBeInTheDocument();
+  fireEvent.click(pair);
+  expect(screen.getByLabelText("Machine address or reference")).toHaveValue(roster_only.host_id);
   expect(service.connect).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: "Sign in with machine passkey" }));
-  await waitFor(() => expect(service.loginMachine).toHaveBeenCalledWith(host.machine_address, expect.any(AbortSignal)));
+  expect(service.pairMachine).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Close Add machine" }));
+  fireEvent.click(within(card).getByRole("button", { name: "Sign in to alice:workstation" }));
+  await screen.findByText("Encrypted sessions");
+  expect(service.connect).toHaveBeenCalledWith(remembered, expect.any(AbortSignal));
+  expect(service.rememberMetadata).not.toHaveBeenCalled();
+});
+
+it("keeps the account roster scoped to the same Hub", async () => {
+  vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: null, device_public_key: "D".repeat(43) });
+  render(<HubAccess initial_hub_url="https://hub.example" account_roster={{
+    hub_url: "https://other.example", machines: [{ ...discovered_laptop, machine_address: "alice:laptop" }], on_retry: vi.fn(),
+  }} />);
+  expect(await screen.findByRole("heading", { name: host.machine_address })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "alice:laptop" })).not.toBeInTheDocument();
 });
 
 it("discovers the first paired machine's group and requires a separate pairing for another machine", async () => {
@@ -51,7 +80,7 @@ it("discovers the first paired machine's group and requires a separate pairing f
   vi.mocked(service.status).mockImplementation(async () => status);
   vi.mocked(service.pairMachine).mockImplementation(async () => { status.hosts = [paired]; return paired; });
   vi.mocked(service.discover).mockResolvedValue({ ...discovery_group, machines: [discovered_laptop] });
-  render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
+  render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await pairingReady();
   expect(service.discover).not.toHaveBeenCalled();
   fireEvent.change(screen.getByLabelText("Machine address or reference"), { target: { value: host.host_id } });
   fireEvent.change(screen.getByLabelText("Authenticator code"), { target: { value: "123456" } });
@@ -65,7 +94,8 @@ it("discovers the first paired machine's group and requires a separate pairing f
   expect(screen.getByLabelText("Machine address or reference")).toHaveValue(discovered_laptop.host_id);
   expect(screen.getByLabelText("Authenticator code")).toHaveValue("");
   expect(screen.getByLabelText("Authenticator code")).toHaveFocus();
-  expect(screen.getByRole("list", { name: "Saved machines" })).not.toHaveTextContent("Laptop");
+  expect(screen.getByRole("list", { name: "Machines" })).toHaveTextContent("Laptop");
+  expect(screen.queryByRole("button", { name: "Sign in to Laptop" })).not.toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("Authenticator code"), { target: { value: "654321" } });
   fireEvent.click(screen.getByRole("button", { name: "Pair and set up passkey" }));
   await waitFor(() => expect(service.pairMachine).toHaveBeenLastCalledWith(discovered_laptop.host_id, "654321", expect.any(AbortSignal)));
@@ -73,14 +103,117 @@ it("discovers the first paired machine's group and requires a separate pairing f
 
 it("keeps equal namespace names with different digests in separate discovery groups", async () => {
   const other_group = { ...discovery_group, secret_digest: `${"B".repeat(42)}A` };
-  vi.mocked(service.status).mockResolvedValue({ hosts: [{ ...host, discovery_group }, { ...host, host_id: discovered_laptop.host_id, machine_address: "alice:laptop", discovery_group: other_group }], selected_host_id: null, device_public_key: "D".repeat(43) });
-  vi.mocked(service.discover).mockImplementation(async (group) => ({ ...group, machines: [{ ...discovered_laptop, name: group.secret_digest === discovery_group.secret_digest ? "First group member" : "Second group member" }] }));
+  vi.mocked(service.status).mockResolvedValue({ hosts: [{ ...host, discovery_group }, { ...host, host_id: "550e8400-e29b-41d4-a716-446655440003", machine_address: "alice:laptop", discovery_group: other_group }], selected_host_id: null, device_public_key: "D".repeat(43) });
+  vi.mocked(service.discover).mockImplementation(async (group) => ({ ...group, machines: [{ ...discovered_laptop, host_id: group.secret_digest === discovery_group.secret_digest ? discovered_laptop.host_id : "550e8400-e29b-41d4-a716-446655440002", name: group.secret_digest === discovery_group.secret_digest ? "First group member" : "Second group member" }] }));
   render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
-  const first = await screen.findByRole("region", { name: "Discovery group personal AAAAAAAA" });
-  const second = screen.getByRole("region", { name: "Discovery group personal BBBBBBBB" });
-  expect(await within(first).findByText("First group member")).toBeInTheDocument();
-  expect(await within(second).findByText("Second group member")).toBeInTheDocument();
-  expect(within(first).queryByText("Second group member")).not.toBeInTheDocument();
+  const first = await screen.findByRole("region", { name: "Discovery group personal · 1" });
+  const second = screen.getByRole("region", { name: "Discovery group personal · 2" });
+  expect(first).toHaveTextContent("personal · 1");
+  expect(second).toHaveTextContent("personal · 2");
+  expect(first.outerHTML).not.toContain(discovery_group.secret_digest.slice(0, 8));
+  expect(second.outerHTML).not.toContain(other_group.secret_digest.slice(0, 8));
+  expect(await screen.findByRole("button", { name: "Pair First group member" })).toBeEnabled();
+  expect(await screen.findByRole("button", { name: "Pair Second group member" })).toBeEnabled();
+  expect(service.pairMachine).not.toHaveBeenCalled();
+});
+
+it("merges saved and discovered machines without replacing saved identity or pairing candidates", async () => {
+  const saved = { ...host, discovery_group };
+  vi.mocked(service.status).mockResolvedValue({ hosts: [saved], selected_host_id: null, device_public_key: "D".repeat(43) });
+  vi.mocked(service.discover).mockResolvedValue({ ...discovery_group, machines: [
+    { host_id: host.host_id, name: "Unverified directory name", online: false },
+    discovered_laptop,
+  ] });
+  vi.mocked(service.presence).mockImplementation(async (host_ids) => ({ machines: host_ids.map((host_id) => ({ host_id, online: host_id !== host.host_id })) }));
+  render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
+  await screen.findByRole("button", { name: "Pair Laptop" });
+  const gallery = screen.getByRole("list", { name: "Machines" });
+  expect(within(gallery).getAllByRole("listitem")).toHaveLength(3);
+  expect(within(gallery).queryByText("Unverified directory name")).not.toBeInTheDocument();
+  const saved_card = within(gallery).getByRole("heading", { name: host.machine_address }).closest("li")!;
+  expect(within(saved_card).getByText("Paired")).toBeInTheDocument();
+  expect(await within(saved_card).findByText("Offline")).toBeInTheDocument();
+  const open = within(saved_card).getByRole("button", { name: `Sign in to ${host.machine_address}` });
+  expect(open).toBeEnabled();
+  expect(screen.getAllByRole("button", { name: "Add machine" })).toHaveLength(1);
+  expect(within(gallery).getByRole("button", { name: "Add machine" }).closest("li")).not.toBeNull();
+  expect(service.pairMachine).not.toHaveBeenCalled();
+  fireEvent.click(open);
+  await screen.findByText("Encrypted sessions");
+  expect(service.connect).toHaveBeenCalledWith(saved, expect.any(AbortSignal));
+});
+
+it("labels UUID-paired cards with a real discovery address or a display name without changing their identity", async () => {
+  const saved = { host_id: host.host_id, host_public_key: host.host_public_key, discovery_group };
+  const other = { ...saved, host_id: discovered_laptop.host_id, name: "Saved laptop" };
+  vi.mocked(service.status).mockResolvedValue({ hosts: [saved, other], selected_host_id: null, device_public_key: "D".repeat(43) });
+  vi.mocked(service.discover).mockResolvedValue({ ...discovery_group, machines: [
+    { host_id: saved.host_id, machine_address: "personal:workstation", name: "Workstation", online: true },
+    discovered_laptop,
+  ] });
+  render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
+  const card = (await screen.findByRole("heading", { name: "personal:workstation" })).closest("li")!;
+  expect(within(card).getByText(machineReference(saved))).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Saved laptop" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "personal:Saved laptop" })).not.toBeInTheDocument();
+  fireEvent.click(within(card).getByRole("button", { name: "Sign in to personal:workstation" }));
+  await screen.findByText("Encrypted sessions");
+  expect(service.connect).toHaveBeenCalledWith(saved, expect.any(AbortSignal));
+});
+
+it("shows offline discoveries as cards without permitting pairing", async () => {
+  vi.mocked(service.status).mockResolvedValue({ hosts: [{ ...host, discovery_group }], selected_host_id: null, device_public_key: "D".repeat(43) });
+  vi.mocked(service.discover).mockResolvedValue({ ...discovery_group, machines: [{ ...discovered_laptop, online: false }] });
+  vi.mocked(service.presence).mockImplementation(async (host_ids) => ({ machines: host_ids.map((host_id) => ({ host_id, online: host_id !== discovered_laptop.host_id })) }));
+  render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
+  const pair = await screen.findByRole("button", { name: "Pair Laptop" });
+  expect(pair).toBeDisabled();
+  expect(await within(pair.closest("li")!).findByText("Offline")).toBeInTheDocument();
+  expect(service.pairMachine).not.toHaveBeenCalled();
+});
+
+it("shows Hub presence for every saved machine without an address or discovery group", async () => {
+  const saved = { host_id: host.host_id, host_public_key: host.host_public_key, name: "Workstation" };
+  const other = { ...saved, host_id: discovered_laptop.host_id, name: "Laptop" };
+  vi.mocked(service.status).mockResolvedValue({ hosts: [saved, other], selected_host_id: null, device_public_key: "D".repeat(43) });
+  vi.mocked(service.presence).mockImplementation(async (host_ids) => ({
+    machines: host_ids.map((host_id) => host_id === saved.host_id
+      ? { host_id, online: true, connector_version: "0.1.1" }
+      : { host_id, online: false }),
+  }));
+  render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
+  const first = screen.getByRole("heading", { name: "Workstation" }).closest("li")!;
+  const second = screen.getByRole("heading", { name: "Laptop" }).closest("li")!;
+  expect(await within(first).findByText("Online")).toBeInTheDocument();
+  expect(within(first).getByTitle("Connector version")).toHaveTextContent("v0.1.1");
+  expect(await within(second).findByText("Offline")).toBeInTheDocument();
+  expect(within(second).queryByTitle("Connector version")).not.toBeInTheDocument();
+  expect(service.presence).toHaveBeenCalledWith([saved.host_id, other.host_id], expect.any(AbortSignal));
+  expect(service.discover).not.toHaveBeenCalled();
+});
+
+it("does not label an unreachable Hub as an offline machine", async () => {
+  vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: null, device_public_key: "D".repeat(43) });
+  vi.mocked(service.presence).mockRejectedValue(new Error("Hub unreachable"));
+  render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
+  expect(await screen.findByText("Status unavailable")).toHaveAttribute("title", "Hub unreachable");
+  expect(screen.queryByText("Offline")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: `Sign in to ${host.machine_address}` })).toBeEnabled();
+});
+
+it("allows verified pairing when another group reports a duplicated candidate online", async () => {
+  const other_group = { ...discovery_group, secret_digest: `${"B".repeat(42)}A` };
+  vi.mocked(service.status).mockResolvedValue({ hosts: [
+    { ...host, discovery_group },
+    { ...host, host_id: "550e8400-e29b-41d4-a716-446655440003", discovery_group: other_group },
+  ], selected_host_id: null, device_public_key: "D".repeat(43) });
+  vi.mocked(service.discover).mockImplementation(async (group) => ({ ...group, machines: [
+    { ...discovered_laptop, online: group.secret_digest === other_group.secret_digest },
+  ] }));
+  render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Pair Laptop" })).toBeEnabled());
+  expect(screen.getAllByRole("heading", { name: "Laptop" })).toHaveLength(1);
+  expect(within(screen.getByRole("list", { name: "Machines" })).getAllByRole("listitem")).toHaveLength(4);
   expect(service.pairMachine).not.toHaveBeenCalled();
 });
 
@@ -102,16 +235,20 @@ it("cancels discovery when switching Hubs and ignores its late machine list", as
   finish({ ...discovery_group, machines: [discovered_laptop] });
   await Promise.resolve();
   expect(screen.queryByRole("button", { name: "Pair Laptop" })).not.toBeInTheDocument();
-  expect(screen.queryByRole("heading", { name: "Discovered groups" })).not.toBeInTheDocument();
+  expect(screen.getByRole("list", { name: "Machines" })).toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Discovery group personal" })).not.toBeInTheDocument();
+  expect(service.discover).toHaveBeenCalledOnce();
 });
 
 it("offers retry for failed group discovery and shows its empty result", async () => {
   vi.mocked(service.status).mockResolvedValue({ hosts: [{ ...host, discovery_group }], selected_host_id: null, device_public_key: "D".repeat(43) });
-  vi.mocked(service.discover).mockRejectedValueOnce(new Error("Group unavailable"));
+  vi.mocked(service.discover).mockRejectedValueOnce(new Error(`Group unavailable: ${discovery_group.secret_digest}`));
   render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
-  expect(await screen.findByRole("alert")).toHaveTextContent("Group unavailable");
-  fireEvent.click(screen.getByRole("button", { name: "Retry discovery group personal AAAAAAAA" }));
-  expect(await screen.findByText("No machines are registered in this group.")).toBeInTheDocument();
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Group unavailable");
+  expect(alert).not.toHaveTextContent(discovery_group.secret_digest);
+  fireEvent.click(screen.getByRole("button", { name: "Retry discovery group personal" }));
+  expect(await screen.findByText("Empty group")).toBeInTheDocument();
   expect(service.discover).toHaveBeenCalledTimes(2);
 });
 
@@ -126,7 +263,7 @@ it("applet first launch waits for a Hub address without trying a placeholder URL
 it("applet pairs through Hub without offering local hosting or an unsupported passkey ceremony", async () => {
   restore_host = installViewerHost(createApellHost({ invoke: vi.fn(), onEvent: () => () => {} }));
   render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />);
-  await ready();
+  await pairingReady();
   expect(screen.queryByRole("heading", { name: "This machine" })).not.toBeInTheDocument();
   expect(screen.queryByText("Host setup")).not.toBeInTheDocument();
   expect(screen.queryByRole("link", { name: "Hub administration" })).not.toBeInTheDocument();
@@ -141,6 +278,7 @@ it("applet pairs through Hub without offering local hosting or an unsupported pa
   fireEvent.click(screen.getByRole("button", { name: /connection settings/i }));
   expect(screen.queryByRole("button", { name: "Add a machine passkey" })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Machines" }));
+  await pairingReady();
   expect(screen.getByLabelText("Authenticator code")).toHaveValue("");
 });
 
@@ -156,7 +294,7 @@ it("applet reopens a remembered machine using its native pairing", async () => {
 it("pairs in browser without a local bearer token and closes the selected machine on switching", async () => {
   const close = vi.spyOn(client, "close");
   render(<StrictMode><HubAccess initial_hub_url="https://hub.example" /></StrictMode>);
-  await ready();
+  await pairingReady();
   expect(screen.getByRole("link", { name: "Hub administration" })).toHaveAttribute("href", "/admin");
   fireEvent.change(screen.getByLabelText("Machine address or reference"), { target: { value: host.machine_address } });
   fireEvent.change(screen.getByLabelText("Authenticator code"), { target: { value: "123456" } });
@@ -169,11 +307,12 @@ it("pairs in browser without a local bearer token and closes the selected machin
   expect(screen.getByRole("dialog")).toHaveTextContent("End-to-end encrypted");
   fireEvent.click(screen.getByRole("button", { name: "Machines" }));
   expect(close).toHaveBeenCalledOnce();
+  await pairingReady();
   expect(screen.getByLabelText("Authenticator code")).toHaveValue("");
 });
 
 it("requires the complete machine reference before passkey first use", async () => {
-  render(<HubAccess initial_hub_url="https://hub.example" />); await ready();
+  render(<HubAccess initial_hub_url="https://hub.example" />); await pairingReady();
   vi.mocked(service.loginMachine).mockRejectedValueOnce(new Error("Paste the complete machine reference."));
   fireEvent.click(screen.getByRole("radio", { name: "Use machine passkey" }));
   expect(screen.queryByLabelText("Authenticator code")).not.toBeInTheDocument();
@@ -274,8 +413,8 @@ it("keeps a long machine address visible beside a concise accessible open action
 it("clears the code and does not open a machine after canceled pairing", async () => {
   let finish_pairing!: (result: typeof host) => void;
   vi.mocked(service.pairMachine).mockImplementation(() => new Promise((resolve) => { finish_pairing = resolve; }));
-  render(<HubAccess initial_hub_url="https://hub.example" />); await ready();
-  expect(screen.getByText("No saved machines")).toBeInTheDocument();
+  render(<HubAccess initial_hub_url="https://hub.example" />); await pairingReady();
+  expect(screen.getByRole("list", { name: "Machines" })).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("Machine address or reference"), { target: { value: host.machine_address } });
   fireEvent.change(screen.getByLabelText("Authenticator code"), { target: { value: "123456" } });
   fireEvent.click(screen.getByRole("button", { name: "Pair and set up passkey" }));
@@ -286,6 +425,27 @@ it("clears the code and does not open a machine after canceled pairing", async (
   finish_pairing(host);
   await waitFor(() => expect(screen.getByRole("button", { name: "Pair and set up passkey" })).toBeDisabled());
   expect(service.connect).not.toHaveBeenCalled();
+});
+
+it("closing the pairing dialog cancels pending pairing and preserves only the address draft", async () => {
+  let finish_pairing!: (result: typeof host) => void;
+  vi.mocked(service.pairMachine).mockImplementation(() => new Promise((resolve) => { finish_pairing = resolve; }));
+  render(<HubAccess initial_hub_url="https://hub.example" />); await ready();
+  expect(screen.queryByRole("dialog", { name: "Add machine" })).not.toBeInTheDocument();
+  await pairingReady();
+  fireEvent.change(screen.getByLabelText("Machine address or reference"), { target: { value: host.machine_address } });
+  fireEvent.change(screen.getByLabelText("Authenticator code"), { target: { value: "123456" } });
+  fireEvent.click(screen.getByRole("button", { name: "Pair and set up passkey" }));
+  const signal = vi.mocked(service.pairMachine).mock.calls[0][2];
+  fireEvent.click(screen.getByRole("button", { name: "Close Add machine" }));
+  expect(signal.aborted).toBe(true);
+  expect(screen.queryByRole("dialog", { name: "Add machine" })).not.toBeInTheDocument();
+  finish_pairing(host);
+  await pairingReady();
+  expect(screen.getByLabelText("Machine address or reference")).toHaveValue(host.machine_address);
+  expect(screen.getByLabelText("Authenticator code")).toHaveValue("");
+  expect(service.connect).not.toHaveBeenCalled();
+  expect(service.pairMachine).toHaveBeenCalledOnce();
 });
 
 it("separates a draft Hub address and removes the previous service after a failed switch", async () => {

@@ -73,7 +73,7 @@ impl Drop for StreamGuard {
 }
 
 #[tokio::test]
-async fn enrollment_streaming_cancellation_reconnect_and_revocation() {
+async fn legacy_host_streaming_cancellation_reconnect_and_revocation() {
   let directory = tempfile::tempdir().unwrap();
   let store = Store::open(directory.path().join("hub.sqlite")).unwrap();
   let tunnels = HubTunnels::new(store.clone());
@@ -117,16 +117,9 @@ async fn enrollment_streaming_cancellation_reconnect_and_revocation() {
     secure: None,
     paired: None,
   };
+  let record = connector::remember_legacy_host(&store, &config);
   let stop = CancellationToken::new();
   let task = tokio::spawn(connector::run(config.clone(), stop.clone()));
-  wait_for(|| !tunnels.pending().is_empty()).await;
-  assert!(store.hosts().unwrap().is_empty());
-  let pending = tunnels.pending().remove(0);
-  let record = tunnels.approve(&pending.pairing_code).unwrap();
-  assert!(
-    tunnels.approve(&pending.pairing_code).is_err(),
-    "pairing codes are single use"
-  );
   wait_for(|| tunnels.online(&record.host_id)).await;
 
   let response = tunnels
@@ -208,7 +201,6 @@ async fn enrollment_streaming_cancellation_reconnect_and_revocation() {
   let stop = CancellationToken::new();
   let task = tokio::spawn(connector::run(config, stop.clone()));
   wait_for(|| tunnels.online(&record.host_id)).await;
-  assert!(tunnels.pending().is_empty());
   assert_eq!(tunnels.access(&record.host_id).as_deref(), Some("view"));
   let response = tunnels
     .proxy(&record.host_id, Method::GET, "/api/v1/events", Bytes::new())
@@ -225,11 +217,7 @@ async fn enrollment_streaming_cancellation_reconnect_and_revocation() {
     "revocation terminates an established stream"
   );
   wait_for(|| !streaming.load(Ordering::SeqCst)).await;
-  wait_for(|| !tunnels.pending().is_empty()).await;
-  assert!(
-    !tunnels.online(&record.host_id),
-    "revocation requires a fresh owner approval"
-  );
+  assert!(!tunnels.online(&record.host_id), "revocation blocks legacy reconnect");
   stop.cancel();
   task.await.unwrap().unwrap();
   tunnels.shutdown();
@@ -285,18 +273,16 @@ async fn signatures_bind_fresh_challenge_identity_name_and_permission() {
     if attempt < 3 {
       assert!(
         !matches!(reply, Some(Ok(ClientMessage::Text(_)))),
-        "invalid proof must not enter enrollment"
+        "invalid proof must not reach account policy"
       );
-      assert!(tunnels.pending().is_empty());
     } else {
       let Some(Ok(ClientMessage::Text(text))) = reply else {
-        panic!("expected pairing")
+        panic!("expected account registration rejection")
       };
       assert!(matches!(
         serde_json::from_str::<Frame>(&text).unwrap(),
-        Frame::Pending { .. }
+        Frame::RegistrationRejected { message } if message == crate::store::ACCOUNT_REQUIRED
       ));
-      assert_eq!(tunnels.pending().len(), 1);
     }
   }
   tunnels.shutdown();
@@ -313,12 +299,13 @@ async fn encrypted_registration_proof_binds_uuid_and_reports_replacement_or_revo
   endpoint.set_path(protocol::TUNNEL_PATH);
   let host_id = uuid::Uuid::new_v4().to_string();
   let key = SigningKey::generate(&mut OsRng);
-  for attempt in 0..5 {
+  let registered_public_key = protocol::encode(key.verifying_key().as_bytes());
+  for attempt in 0..6 {
     let (mut socket, _) = connect_async(endpoint.as_str()).await.unwrap();
     let Some(Frame::Challenge { nonce, .. }) = next_frame(&mut socket).await else {
       panic!("challenge missing")
     };
-    let signing_key = if attempt == 3 {
+    let signing_key = if attempt == 4 {
       SigningKey::generate(&mut OsRng)
     } else {
       key.clone()
@@ -348,12 +335,24 @@ async fn encrypted_registration_proof_binds_uuid_and_reports_replacement_or_revo
       .unwrap();
     let reply = next_frame(&mut socket).await;
     if attempt == 2 {
+      assert!(
+        matches!(reply, Some(Frame::RegistrationRejected { message }) if message == crate::store::ACCOUNT_REQUIRED)
+      );
+      store
+        .register_encrypted_host(HostRecord {
+          host_id: host_id.clone(),
+          name: "Host".into(),
+          public_key: registered_public_key.clone(),
+          access: "view".into(),
+        })
+        .unwrap();
+    } else if attempt == 3 {
       assert!(matches!(reply, Some(Frame::Ready { host_id: registered, .. }) if registered == host_id));
       assert!(
         tunnels.secure_only(&host_id),
         "secure-only is effective before any host advisory"
       );
-    } else if attempt >= 3 {
+    } else if attempt >= 4 {
       assert!(
         matches!(reply, Some(Frame::RegistrationRejected { message }) if message.contains("revoked or belongs to a different identity")),
         "proved registration receives a recovery diagnostic without authorizing the rejected identity"
@@ -364,10 +363,9 @@ async fn encrypted_registration_proof_binds_uuid_and_reports_replacement_or_revo
         "legacy proof and UUID substitution must fail before registration"
       );
     }
-    if attempt == 3 {
+    if attempt == 4 {
       tunnels.revoke(&host_id).unwrap();
     }
-    assert!(tunnels.pending().is_empty());
   }
   assert!(store.hosts().unwrap().is_empty());
   tunnels.shutdown();
@@ -394,6 +392,17 @@ async fn encrypted_registration_proof_binds_discovery_group_and_cannot_be_stripp
     namespace: "personal".into(),
     secret_digest: protocol::encode(&[2; 32]),
   };
+  store
+    .register_encrypted_host_with_discovery(
+      HostRecord {
+        host_id: host_id.clone(),
+        name: "Host".into(),
+        public_key: public_key.clone(),
+        access: "view".into(),
+      },
+      Some(&group),
+    )
+    .unwrap();
   for sent_group in [Some(other), None, Some(group.clone())] {
     let (mut socket, _) = connect_async(endpoint.as_str()).await.unwrap();
     let Some(Frame::Challenge { nonce, .. }) = next_frame(&mut socket).await else {
@@ -485,7 +494,7 @@ async fn next_frame(socket: &mut TestSocket) -> Option<Frame> {
 }
 
 #[tokio::test]
-async fn pending_enrollments_cannot_exhaust_approved_reconnection_capacity() {
+async fn unknown_legacy_hosts_do_not_block_approved_reconnections() {
   let directory = tempfile::tempdir().unwrap();
   let store = Store::open(directory.path().join("hub.sqlite")).unwrap();
   let approved_key = SigningKey::generate(&mut OsRng);
@@ -498,43 +507,34 @@ async fn pending_enrollments_cannot_exhaust_approved_reconnection_capacity() {
       access: "view".into(),
     })
     .unwrap();
-  let tunnels = HubTunnels::with_limits(store, 1, 2, 1);
+  let tunnels = HubTunnels::with_limits(store, 1, 1);
   let (mut endpoint, task) = hub(tunnels.clone()).await;
   endpoint.set_scheme("ws").unwrap();
   endpoint.set_path(protocol::TUNNEL_PATH);
 
-  let mut pending_sockets = Vec::new();
   for _ in 0..2 {
     let mut socket = signed_socket(&endpoint, &SigningKey::generate(&mut OsRng)).await;
-    assert!(matches!(next_frame(&mut socket).await, Some(Frame::Pending { .. })));
-    pending_sockets.push(socket);
+    assert!(matches!(
+      next_frame(&mut socket).await,
+      Some(Frame::RegistrationRejected { message }) if message == crate::store::ACCOUNT_REQUIRED
+    ));
   }
-  assert_eq!(tunnels.pending().len(), 2);
-  assert_eq!(tunnels.enrollments.available_permits(), 0);
   assert_eq!(tunnels.handshakes.available_permits(), 1);
   assert_eq!(tunnels.approved.available_permits(), 1);
-  let mut overflow = signed_socket(&endpoint, &SigningKey::generate(&mut OsRng)).await;
-  assert!(
-    next_frame(&mut overflow).await.is_none(),
-    "unknown hosts cannot exceed the pending budget"
-  );
 
   let mut approved = signed_socket(&endpoint, &approved_key).await;
   assert!(matches!(next_frame(&mut approved).await, Some(Frame::Ready { .. })));
   assert!(tunnels.online(&host_id));
   assert_eq!(tunnels.approved.available_permits(), 0);
-  // All long-lived budgets are full. An approved identity can still replace
+  // Online capacity is full. An approved identity can still replace
   // its own connection, and closing the old socket must not release its slot.
   let mut replacement = signed_socket(&endpoint, &approved_key).await;
   assert!(matches!(next_frame(&mut replacement).await, Some(Frame::Ready { .. })));
   assert!(next_frame(&mut approved).await.is_none());
   assert!(tunnels.online(&host_id));
   assert_eq!(tunnels.approved.available_permits(), 0);
-  assert_eq!(tunnels.pending().len(), 2);
   drop(replacement);
   wait_for(|| !tunnels.online(&host_id) && tunnels.approved.available_permits() == 1).await;
-  drop(pending_sockets);
-  wait_for(|| tunnels.enrollments.available_permits() == 2).await;
   tunnels.shutdown();
   task.abort();
 }
@@ -543,7 +543,7 @@ async fn pending_enrollments_cannot_exhaust_approved_reconnection_capacity() {
 async fn accepted_agent_input_is_not_replayed_after_tunnel_reconnect() {
   let directory = tempfile::tempdir().unwrap();
   let store = Store::open(directory.path().join("hub.sqlite")).unwrap();
-  let tunnels = HubTunnels::new(store);
+  let tunnels = HubTunnels::new(store.clone());
   let (hub_url, hub_task) = hub(tunnels.clone()).await;
   let accepted_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
   let count = accepted_count.clone();
@@ -576,11 +576,9 @@ async fn accepted_agent_input_is_not_replayed_after_tunnel_reconnect() {
     secure: None,
     paired: None,
   };
+  let record = connector::remember_legacy_host(&store, &config);
   let stop = CancellationToken::new();
   let connector_task = tokio::spawn(connector::run(config, stop.clone()));
-  wait_for(|| !tunnels.pending().is_empty()).await;
-  let pending = tunnels.pending().remove(0);
-  let record = tunnels.approve(&pending.pairing_code).unwrap();
   wait_for(|| tunnels.online(&record.host_id)).await;
   let old_connection = tunnels.inner.lock().unwrap().online[&record.host_id].clone();
   let proxy = tunnels.clone();
@@ -613,7 +611,6 @@ async fn accepted_agent_input_is_not_replayed_after_tunnel_reconnect() {
   // Exercise the production reconnect loop with the same approved identity.
   // A fresh successful request proves its new tunnel is usable.
   wait_for(|| tunnels.online(&record.host_id)).await;
-  assert!(tunnels.pending().is_empty());
   let response = tunnels
     .proxy(&record.host_id, Method::GET, "/api/v1/health", Bytes::new())
     .await
@@ -835,10 +832,10 @@ async fn authenticator_pairing_registers_only_encrypted_hosts_and_persists_trust
       state_file: state_file.clone(),
     }),
   };
+  connector::remember_legacy_host(&store, &config);
   let stop = CancellationToken::new();
   let connector_task = tokio::spawn(connector::run(config.clone(), stop.clone()));
   wait_for(|| tunnels.online(&host_id)).await;
-  assert!(tunnels.pending().is_empty());
   assert!(tunnels.secure_only(&host_id));
   assert_eq!(store.hosts().unwrap().len(), 1);
   assert_eq!(
@@ -1023,7 +1020,7 @@ async fn encrypted_transport_authenticates_grants_bounds_streams_and_rejects_pla
   };
   let directory = tempfile::tempdir().unwrap();
   let store = Store::open(directory.path().join("hub.sqlite")).unwrap();
-  let tunnels = HubTunnels::new(store);
+  let tunnels = HubTunnels::new(store.clone());
   let (hub_url, hub_task) = hub(tunnels.clone()).await;
   let owner = OwnerIdentity::generate();
   let recipient = NoiseIdentity::generate().unwrap();
@@ -1083,10 +1080,9 @@ async fn encrypted_transport_authenticates_grants_bounds_streams_and_rejects_pla
     }),
     paired: None,
   };
+  let record = connector::remember_legacy_host(&store, &config);
   let stop = CancellationToken::new();
   let connector = tokio::spawn(connector::run(config, stop.clone()));
-  wait_for(|| !tunnels.pending().is_empty()).await;
-  let record = tunnels.approve(&tunnels.pending()[0].pairing_code).unwrap();
   wait_for(|| tunnels.online(&record.host_id)).await;
   wait_for(|| tunnels.secure_only(&record.host_id)).await;
   let grant = owner
@@ -1373,6 +1369,7 @@ async fn blind_channels_accept_opaque_bytes_and_cancel_only_the_saturated_channe
     next_id: std::sync::atomic::AtomicU64::new(1),
     allow_control: false,
     secure_only: AtomicBool::new(false),
+    connector_version: None,
     shutdown: CancellationToken::new(),
   });
   let (sender, mut received) = mpsc::channel(1);

@@ -21,6 +21,10 @@ your target system before installing the copies.
 - `tokn-hub.service.example`: unprivileged Hub service, including its explicit
   public URL and persistent state path.
 
+Configure a sender and sendmail-compatible mail delivery for Hub account
+signup. New connectors need an account machine assignment. See
+[Hub accounts](../../docs/hub.md#hub-accounts-and-cli-login).
+
 The example layout uses `/opt/tokn-hub/releases/<release>/` for the binary and
 `web/`, `/opt/tokn-hub/current` for the active release symlink, and
 `/var/lib/tokn-hub/state.sqlite` for persistent state. Release files should be

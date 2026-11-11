@@ -2,7 +2,8 @@ use super::*;
 use rand::{RngCore, rngs::OsRng};
 use tokn_hub_client_core::{address::parse_machine_address, discovery::DiscoveryGroup};
 
-pub(crate) const ACCOUNT_REQUIRED: &str = "Sign in to a Hub account and register this machine with --machine";
+pub(crate) const ACCOUNT_REQUIRED: &str =
+  "Sign in with tokn-session-hub auth login, then register this machine with tokn-session-hub connect --machine <name>";
 pub(crate) const ADDRESS_TAKEN: &str = "Machine name is already reserved on this account";
 pub(crate) const HOST_CLAIMED: &str = "This host already has an account machine assignment";
 
@@ -13,6 +14,7 @@ pub(crate) struct AccountMachineClaim {
   pub group: DiscoveryGroup,
 }
 
+#[cfg(test)]
 pub(super) fn is_owned(connection: &Connection, host_id: &str) -> Result<bool, String> {
   connection
     .query_row(
@@ -158,7 +160,7 @@ mod tests {
     let laptop = host();
     let other = host();
     assert_eq!(
-      store.register_tunnel_host(laptop.clone(), None, true).unwrap_err(),
+      store.register_tunnel_host(laptop.clone(), None).unwrap_err(),
       ACCOUNT_REQUIRED
     );
     let assignment = store.claim_account_host(laptop.clone(), &first, "laptop").unwrap();
@@ -184,7 +186,7 @@ mod tests {
     );
     let other_assignment = store.claim_account_host(other.clone(), &second, "laptop").unwrap();
     assert_ne!(other_assignment.group, assignment.group);
-    assert_eq!(store.register_tunnel_host(laptop.clone(), None, true).unwrap(), laptop);
+    assert_eq!(store.register_tunnel_host(laptop.clone(), None).unwrap(), laptop);
     assert_eq!(
       store.resolve_machine("alice", "laptop").unwrap().unwrap().host_id,
       laptop.host_id
@@ -205,10 +207,24 @@ mod tests {
     let store = Store::open(directory.path().join("state.sqlite")).unwrap();
     let owner = user(&store, "alice");
     let laptop = host();
-    store.register_encrypted_host(laptop.clone()).unwrap();
+    let legacy = DiscoveryGroup {
+      namespace: "legacy".into(),
+      secret_digest: crate::protocol::encode(&[4; 32]),
+    };
+    store
+      .register_encrypted_host_with_discovery(laptop.clone(), Some(&legacy))
+      .unwrap();
+    let other_legacy = DiscoveryGroup {
+      namespace: "other".into(),
+      secret_digest: crate::protocol::encode(&[5; 32]),
+    };
+    store.register_tunnel_host(laptop.clone(), Some(&other_legacy)).unwrap();
+    assert_eq!(store.discover_machines(&legacy).unwrap().len(), 1);
+    assert!(store.discover_machines(&other_legacy).unwrap().is_empty());
     store.create_namespace("legacy").unwrap();
     store.bind_machine("legacy", "laptop", &laptop.host_id).unwrap();
     let assignment = store.claim_account_host(laptop.clone(), &owner, "laptop").unwrap();
+    assert!(store.discover_machines(&legacy).unwrap().is_empty());
     let server = host();
     assert_eq!(
       store
@@ -225,6 +241,13 @@ mod tests {
     assert_eq!(
       discovered.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
       ["laptop", "server"]
+    );
+    assert_eq!(
+      discovered
+        .iter()
+        .map(|entry| entry.machine_address.as_deref().unwrap())
+        .collect::<Vec<_>>(),
+      ["alice:laptop", "alice:server"]
     );
     assert_eq!(
       store.resolve_machine("legacy", "laptop").unwrap().unwrap().host_id,
