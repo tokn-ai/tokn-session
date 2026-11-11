@@ -4,8 +4,8 @@
   "version": "0.1.1",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "dev:web": "tsx scripts/dev.ts",
+    "dev": "pnpm run build:hub-wasm && vite",
+    "dev:web": "pnpm run build:hub-wasm && tsx scripts/dev.ts",
     "build": "pnpm run build:hub-wasm && tsc && vite build",
     "check": "tsc -p tsconfig.tools.json && pnpm run build && pnpm run test",
     "preview": "vite preview",
