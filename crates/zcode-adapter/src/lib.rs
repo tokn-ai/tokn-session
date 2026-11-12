@@ -1,4 +1,5 @@
 //! Managed interaction with the native ZCode Protocol app-server.
+mod delivery;
 mod interactions;
 mod transport;
 mod wire;
@@ -92,6 +93,8 @@ impl ZCodeAdapter {
           .with(Operation::State)
           .with(Operation::Models)
           .with(Operation::Message)
+          .with(Operation::Guide)
+          .with(Operation::Queue)
           .with(Operation::CancelTurn)
           .with(Operation::PendingInteractions)
           .with(Operation::Respond),
@@ -156,8 +159,8 @@ impl ZCodeAdapter {
     Ok(Self { inner })
   }
 
-  /// Materialize an empty native session at the durable caller-reserved ID.
-  /// ZCode writes the history row when a first turn starts.
+  /// Create a deferred native session at the durable caller-reserved ID.
+  /// ZCode writes its history row at first V4 input admission.
   pub async fn create_session_with_id(
     &self,
     session_id: &str,
@@ -169,7 +172,9 @@ impl ZCodeAdapter {
     let mut params = json!({
       "sessionId": session_id,
       "workspace": self.inner.workspace(),
-      "persistence": "immediate",
+      // V4 admission materializes deferred sessions before writing its input
+      // ledger; immediate creation is still lazy in native CLI 0.17.1.
+      "persistence": "deferred",
     });
     if let Some(model) = model {
       params["model"] = serde_json::to_value(wire::ModelSelection::from_model(model)?)
@@ -447,8 +452,8 @@ impl Inner {
             self.active_prompts.lock().unwrap().insert(id.into());
             self.publish_state(id, ExecutionState::Running);
           }
-          // Core completion precedes bootstrap releasing its active prompt lock.
-          // Only these native ready notifications allow another session/send.
+          // Core completion precedes bootstrap finalization and native queue
+          // promotion. Preserve the native ready boundary in host state.
           Some("prompt_completed" | "prompt_failed") => {
             self.retire_interactions(id, true);
             self.active_prompts.lock().unwrap().remove(id);
@@ -500,38 +505,12 @@ impl Inner {
     {
       return Err(InteractionError::invalid("Invalid ZCode message text"));
     }
-    if request_id.trim().is_empty() || request_id.len() > 128 {
-      return Err(InteractionError::invalid(
-        "ZCode message request requires a bounded request ID",
-      ));
+    if matches!(delivery, DeliveryMode::Guide | DeliveryMode::Queue) {
+      return self.deliver_followup(id, request_id, input, delivery).await;
     }
-    if delivery != DeliveryMode::Start {
-      return Err(InteractionError::unsupported(
-        "ZCode only supports starting a turn while idle",
-      ));
-    }
-    let mut params = json!({"sessionId": id, "inputId": request_id, "content": input.text});
-    if let Some(revision) = input.expected_revision {
-      let revision = revision
-        .parse::<u64>()
-        .map_err(|_| InteractionError::invalid("Invalid ZCode session revision"))?;
-      params["expectedRevision"] = json!(revision);
-    }
-    if let Some(model) = input.model.clone() {
-      params["modelSelection"] = json!(wire::ModelSelection::from_model(model)?);
-    }
-    let admission: wire::Admission = wire::decode(self.transport.call("session/send", params, true).await?, true)?;
-    if admission.session_id != id || !admission.accepted {
-      return Err(InteractionError::uncertain(
-        "ZCode returned an unverified message admission",
-      ));
-    }
-    Ok(Reply::Admission(InputReceipt {
-      disposition: InputDisposition::Started,
-      model: input.model,
-      model_ignored: false,
-      native_id: Some(request_id.to_owned()),
-    }))
+    Err(InteractionError::unsupported(
+      "ZCode does not guarantee strict idle-only start, active-turn steering, or start-or-steer admission",
+    ))
   }
 }
 
@@ -567,18 +546,7 @@ impl InteractionAdapter for ZCodeAdapter {
         Command::State => Ok(Reply::State(self.inner.session_state(&self.inner.snapshot(id).await?))),
         Command::Models => Ok(Reply::Models(self.inner.snapshot(id).await?.models())),
         Command::Message { input, delivery } => self.inner.message(id, &request.request_id, input, delivery).await,
-        Command::CancelTurn => {
-          let result = self
-            .inner
-            .transport
-            .call("session/stop", json!({"sessionId": id}), true)
-            .await?;
-          if result.as_object().is_none_or(|object| !object.is_empty()) {
-            return Err(InteractionError::uncertain("ZCode did not confirm the stop request"));
-          }
-          self.inner.retire_interactions(id, true);
-          Ok(Reply::Acknowledged)
-        }
+        Command::CancelTurn => self.inner.stop_turn(id, &request.request_id).await,
         Command::PendingInteractions => self.inner.pending_interactions(id).await,
         Command::Respond {
           interaction_id,
@@ -604,8 +572,8 @@ fn decline_callback(id: &Value, method: &str) -> Result<Value, InteractionError>
   if !id.is_string() && !id.is_number() {
     return Err(InteractionError::unavailable("ZCode returned an invalid callback ID"));
   }
-  // The viewer has no ZCode permission or question surface. Deny or decline
-  // these reverse requests so native turns do not wait for an invisible dialog.
+  // Unsupported reverse request shapes must not leave an invisible dialog
+  // waiting in the native process.
   Ok(match method {
     "interaction/requestPermission" => json!({"id": id, "result": {"decision": "deny"}}),
     "interaction/requestUserInput" => json!({"id": id, "result": {"action": "decline"}}),

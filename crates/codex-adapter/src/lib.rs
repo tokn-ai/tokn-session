@@ -521,9 +521,12 @@ impl CodexAdapter {
             "Codex turn/start applies model overrides while steering; atomic model-on-send is unavailable",
           ));
         }
-        if matches!(delivery, DeliveryMode::Start | DeliveryMode::Queue) {
+        if matches!(
+          delivery,
+          DeliveryMode::Start | DeliveryMode::Guide | DeliveryMode::Queue
+        ) {
           return Err(InteractionError::unsupported(
-            "Codex supports start_or_steer and strict steer; strict start and automatic follow-up queue are unavailable",
+            "Codex supports start_or_steer and strict steer; strict start, advisory guide and automatic follow-up queue are unavailable",
           ));
         }
         if input.expected_revision.is_some() && *delivery != DeliveryMode::Steer {

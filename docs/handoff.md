@@ -173,7 +173,17 @@ RPC capability limits remain distinct from the exclusive managed Pi workflow.
 ZCode Viewer control uses a managed, project-scoped `zcode app-server --stdio`
 process and verifies its database path against the historical source. It
 reserves a native session ID for new conversations and resumes verified root
-sessions on the first Send. The composer submits text with idle-only admission.
+sessions on the first Send. Send uses native advisory guidance: it starts idle
+sessions, can join active work at native boundaries, and may become a follow-up.
+An explicit Queue action requests follow-up delivery and starts immediately
+when idle. Capabilities advertise these modes after binding; input receipts bind
+the chosen delivery mode and never replay uncertain writes. ZCode rejects strict
+idle-only/active-only delivery and StartOrSteer because native admission cannot
+guarantee those contracts.
+New sessions use deferred native persistence, allowing the first V4 admission
+to materialize history before its input ledger. Stop cancels native execution
+and holds remaining queued input; queue editing and resuming held input remain
+in ZCode. The adapter does not replay queues after reconnecting.
 Drafts use the runtime default model. Live ZCode questions and approvals appear
 above the composer independently of recorded question cards. AskUserQuestion
 supports single/multiple choices, written answers and option notes. Tool
@@ -184,7 +194,9 @@ resolution; uncertain writes are never replayed. New session-scoped list/respond
 commands fence the exact runtime instance and redact native callback envelopes.
 Viewing grants and shares receive an empty pending list and cannot respond.
 Native CLI 0.17.1 was verified with an isolated loopback model for creation,
-cold resume, context continuity, Stop, questions and per-use permissions.
+cold resume, context continuity, questions, per-use permissions, native guidance,
+follow-up queues and Stop. Guide acknowledgements retain generic acceptance
+when native admission does not identify the eventual consuming turn.
 ZCode soft-deleted rows are excluded from historical catalogs and
 exact reads when the native `time_deleted` column exists.
 CLI `create` and `append` use native headless stream JSON through the configured

@@ -472,9 +472,9 @@ impl OpenCodeAdapter {
     let delivery = match delivery {
       DeliveryMode::StartOrSteer => wire::Delivery::Steer,
       DeliveryMode::Queue => wire::Delivery::Queue,
-      DeliveryMode::Start | DeliveryMode::Steer => {
+      DeliveryMode::Start | DeliveryMode::Steer | DeliveryMode::Guide => {
         return Err(InteractionError::unsupported(
-          "OpenCode V2 offers start-or-steer, not fenced idle-only or active-only admission",
+          "OpenCode V2 offers start-or-steer and queue, without strict start, strict steer or advisory guide admission",
         ));
       }
     };

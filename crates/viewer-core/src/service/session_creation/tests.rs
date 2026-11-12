@@ -293,6 +293,7 @@ async fn codex_creation_indexes_real_history_and_reuses_one_runtime_for_followup
   assert_eq!(peer.count("thread/start"), 1);
   assert_eq!(peer.count("turn/start"), 1);
   let input = SubmitSessionInputRequest {
+    delivery: None,
     request_id: uuid::Uuid::new_v4().to_string(),
     session_key: key.clone(),
     text: "follow up".into(),

@@ -459,6 +459,8 @@ impl RuntimeHost for FakeHost {
         fail_close: AtomicBool::new(self.shared.fail_close.load(Ordering::SeqCst)),
         uncertain_create: AtomicBool::new(false),
         unavailable_state: AtomicBool::new(false),
+        baseline_reads: Mutex::new(Vec::new()),
+        baseline_wait: Mutex::new(None),
         resumes: AtomicUsize::new(0),
         sends: AtomicUsize::new(0),
         closes: AtomicUsize::new(0),
@@ -518,6 +520,8 @@ struct FakeAdapter {
   fail_close: AtomicBool,
   uncertain_create: AtomicBool,
   unavailable_state: AtomicBool,
+  baseline_reads: Mutex<Vec<InteractionRequest>>,
+  baseline_wait: Mutex<Option<(Operation, oneshot::Receiver<()>)>>,
   resumes: AtomicUsize,
   sends: AtomicUsize,
   closes: AtomicUsize,
@@ -530,6 +534,23 @@ impl InteractionAdapter for FakeAdapter {
 
   fn execute(&self, request: InteractionRequest) -> AdapterFuture<'_, Result<Reply, InteractionError>> {
     Box::pin(async move {
+      if matches!(request.command, Command::State | Command::PendingInteractions) {
+        self.baseline_reads.lock().unwrap().push(request.clone());
+        let wait = {
+          let mut wait = self.baseline_wait.lock().unwrap();
+          if wait
+            .as_ref()
+            .is_some_and(|(operation, _)| *operation == request.command.operation())
+          {
+            wait.take()
+          } else {
+            None
+          }
+        };
+        if let Some((_, wait)) = wait {
+          let _ = wait.await;
+        }
+      }
       if matches!(request.command, Command::State) && self.unavailable_state.load(Ordering::SeqCst) {
         return Err(InteractionError::unavailable("Native state recovery failed"));
       }
@@ -618,6 +639,154 @@ async fn wait_until(mut condition: impl FnMut() -> bool) {
   })
   .await
   .unwrap();
+}
+
+#[tokio::test]
+async fn bind_retries_racing_baseline_reads_without_repeating_native_activation() {
+  for operation in [Operation::State, Operation::PendingInteractions] {
+    let (runtime, shared) = fixture();
+    let info = runtime
+      .start(StartRuntimeRequest {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        profile_id: runtime.0.host.profile.profile_id.clone(),
+        expected_revision: 1,
+      })
+      .await
+      .unwrap();
+    let adapter = shared.adapter.lock().unwrap().clone().unwrap();
+    let (release, wait) = oneshot::channel();
+    *adapter.baseline_wait.lock().unwrap() = Some((operation, wait));
+    let bind = tokio::spawn({
+      let runtime = runtime.clone();
+      let info = info.clone();
+      async move {
+        runtime
+          .bind(
+            uuid::Uuid::new_v4().to_string(),
+            "read-race".into(),
+            info.profile_id,
+            info.instance_id,
+            "native-id".into(),
+            Provider::Codex,
+          )
+          .await
+      }
+    });
+    wait_until(|| {
+      adapter
+        .baseline_reads
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|request| request.command.operation() == operation)
+    })
+    .await;
+    adapter
+      .events
+      .send(RuntimeEvent {
+        runtime_id: info.runtime_id.clone(),
+        instance_id: info.instance_id.clone(),
+        session_id: Some("native-id".into()),
+        sequence: 1,
+        kind: RuntimeEventKind::State(SessionState {
+          session_id: Some("native-id".into()),
+          status: ExecutionState::Idle,
+          model: None,
+          pending_inputs: Some(0),
+          revision: None,
+        }),
+      })
+      .unwrap();
+    // Force the native event to win the first read before allowing its reply.
+    wait_until(|| {
+      runtime
+        .0
+        .interactions
+        .snapshot(&info.runtime_id)
+        .is_some_and(|snapshot| snapshot.last_sequence == Some(1))
+    })
+    .await;
+    release.send(()).unwrap();
+    let binding = bind.await.unwrap().unwrap();
+    let snapshot = runtime.binding_snapshot("read-race").unwrap();
+    assert_eq!(binding.target.instance_id, info.instance_id);
+    assert!(snapshot.connected);
+    assert!(!snapshot.recovery_required);
+    assert_eq!(adapter.resumes.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.sends.load(Ordering::SeqCst), 0);
+    let reads = adapter.baseline_reads.lock().unwrap().clone();
+    let repeated = reads
+      .iter()
+      .filter(|request| request.command.operation() == operation)
+      .collect::<Vec<_>>();
+    assert_eq!(repeated.len(), 2);
+    assert_ne!(repeated[0].request_id, repeated[1].request_id);
+    assert_eq!(reads.len(), 3);
+    runtime.shutdown().await;
+  }
+}
+
+#[tokio::test]
+async fn bind_unavailable_baseline_retries_are_bounded_and_require_a_connected_instance() {
+  for connected in [false, true] {
+    let (runtime, shared) = fixture();
+    let info = runtime
+      .start(StartRuntimeRequest {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        profile_id: runtime.0.host.profile.profile_id.clone(),
+        expected_revision: 1,
+      })
+      .await
+      .unwrap();
+    let adapter = shared.adapter.lock().unwrap().clone().unwrap();
+    if connected {
+      adapter
+        .events
+        .send(RuntimeEvent {
+          runtime_id: info.runtime_id.clone(),
+          instance_id: info.instance_id.clone(),
+          session_id: Some("native-id".into()),
+          sequence: 1,
+          kind: RuntimeEventKind::State(SessionState {
+            session_id: Some("native-id".into()),
+            status: ExecutionState::Idle,
+            model: None,
+            pending_inputs: Some(0),
+            revision: None,
+          }),
+        })
+        .unwrap();
+      wait_until(|| {
+        runtime
+          .0
+          .interactions
+          .snapshot(&info.runtime_id)
+          .is_some_and(|snapshot| snapshot.connected)
+      })
+      .await;
+    }
+    adapter.unavailable_state.store(true, Ordering::SeqCst);
+    let error = runtime
+      .bind(
+        uuid::Uuid::new_v4().to_string(),
+        "unavailable-baseline".into(),
+        info.profile_id,
+        info.instance_id,
+        "native-id".into(),
+        Provider::Codex,
+      )
+      .await
+      .unwrap_err();
+    assert_eq!(error, "Could not recover live session state");
+    assert!(runtime.binding("unavailable-baseline").is_none());
+    assert_eq!(
+      adapter.baseline_reads.lock().unwrap().len(),
+      if connected { 3 } else { 1 }
+    );
+    assert_eq!(adapter.resumes.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.sends.load(Ordering::SeqCst), 0);
+    runtime.shutdown().await;
+  }
 }
 
 #[tokio::test]

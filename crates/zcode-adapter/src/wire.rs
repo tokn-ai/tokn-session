@@ -119,13 +119,6 @@ pub(super) struct SlashCommand {
   pub name: String,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct Admission {
-  pub session_id: String,
-  pub accepted: bool,
-}
-
 pub(super) fn decode<T: serde::de::DeserializeOwned>(value: Value, mutation: bool) -> Result<T, InteractionError> {
   serde_json::from_value(value).map_err(|_| {
     if mutation {

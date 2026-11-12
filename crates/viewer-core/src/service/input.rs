@@ -28,11 +28,27 @@ impl ViewerService {
       || (target.input.provider != ViewerProvider::Pi
         && self.sessions.transport(&target).await? == crate::session_supervisor::SessionTransport::Rpc
         && self.sessions.runtimes.binding(&target.session_key).is_none());
-    Ok(input_status_response(
+    let mut response = input_status_response(
       self.sessions.input_status(&target).await,
       resume_required,
       target.input.provider != ViewerProvider::ZCode,
-    ))
+    );
+    if response.available && target.input.provider == ViewerProvider::ZCode {
+      use tokn_interaction_core::{DeliveryMode, Operation};
+      let mut modes = Vec::new();
+      if let Some(binding) = self.sessions.runtimes.binding(&target.session_key) {
+        for (operation, delivery) in [
+          (Operation::Guide, DeliveryMode::Guide),
+          (Operation::Queue, DeliveryMode::Queue),
+        ] {
+          if binding.capabilities.supports(operation) {
+            modes.push(delivery);
+          }
+        }
+      }
+      response.delivery_modes = Some(modes);
+    }
+    Ok(response)
   }
 
   pub async fn submit_session_input(
@@ -341,6 +357,7 @@ mod tests {
       session_file: root.path().join("session.jsonl"),
     };
     let request = SubmitSessionInputRequest {
+      delivery: None,
       model_selection: None,
       session_key: "owned-session".into(),
       request_id: uuid::Uuid::new_v4().to_string(),
@@ -385,6 +402,7 @@ mod tests {
     assert!(!status.available);
     let result = service
       .submit_session_input(SubmitSessionInputRequest {
+        delivery: None,
         model_selection: None,
         session_key: "forged-key".into(),
         request_id: uuid::Uuid::new_v4().to_string(),
@@ -410,6 +428,7 @@ fn input_status_response(
     available,
     message,
     max_length: MAX_INPUT_LENGTH,
+    delivery_modes: None,
     resume_required: available && resume_required,
     images_available,
     images_stageable: available && image_staging_supported,

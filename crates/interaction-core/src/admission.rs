@@ -25,6 +25,8 @@ pub struct SubmitSessionInputRequest {
   pub image_ids: Vec<String>,
   #[serde(default)]
   pub model_selection: Option<crate::managed_sessions::MessageModelSelection>,
+  #[serde(default)]
+  pub delivery: Option<crate::DeliveryMode>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -55,11 +57,19 @@ pub fn message_fingerprint(text: &str, image_ids: &[String]) -> [u8; 32] {
 }
 
 fn input_fingerprint(request: &SubmitSessionInputRequest) -> [u8; 32] {
-  let Some(selection) = &request.model_selection else {
-    return message_fingerprint(&request.text, &request.image_ids);
+  let legacy: [u8; 32] = match &request.model_selection {
+    None => message_fingerprint(&request.text, &request.image_ids),
+    Some(selection) => {
+      Sha256::digest(serde_json::to_vec(&(&request.text, &request.image_ids, selection)).expect("message fingerprint"))
+        .into()
+    }
   };
-  Sha256::digest(serde_json::to_vec(&(&request.text, &request.image_ids, selection)).expect("message fingerprint"))
-    .into()
+  match request.delivery {
+    None => legacy,
+    Some(delivery) => {
+      Sha256::digest(serde_json::to_vec(&("input-delivery-v1", legacy, delivery)).expect("delivery fingerprint")).into()
+    }
+  }
 }
 
 fn request_fingerprint(request: &SubmitSessionInputRequest, control: bool) -> [u8; 32] {

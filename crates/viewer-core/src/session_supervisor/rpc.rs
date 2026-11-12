@@ -39,7 +39,7 @@ impl SessionSupervisor {
       };
       return Ok(input::InputCapability {
         message: if provider == Provider::ZCode {
-          "Connected through ZCode. Send starts a turn when the session is idle."
+          "Connected through ZCode. Send starts idle sessions or guides active work; guidance may become a follow-up. Queue waits for the current turn."
         } else {
           "Connected through agent RPC. Send starts or steers this session."
         }
@@ -117,7 +117,7 @@ impl SessionSupervisor {
             images,
             ..Default::default()
           },
-          delivery: rpc_message_delivery(provider),
+          delivery: request.delivery.unwrap_or_else(|| rpc_message_delivery(provider)),
         },
       )
       .await

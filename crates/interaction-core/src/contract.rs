@@ -31,6 +31,7 @@ pub enum Operation {
   Models,
   Message,
   Steer,
+  Guide,
   Queue,
   CancelTurn,
   Respond,
@@ -161,6 +162,8 @@ pub enum DeliveryMode {
   Steer,
   /// Native admission starts if idle, steers if busy, and reports its outcome.
   StartOrSteer,
+  /// Advisory current-turn guidance; native admission may start idle or queue a follow-up.
+  Guide,
   /// Native follow-up delivery; execution may begin immediately if already idle.
   Queue,
 }
@@ -268,6 +271,10 @@ impl Command {
         ..
       } => Operation::Steer,
       Self::Message {
+        delivery: DeliveryMode::Guide,
+        ..
+      } => Operation::Guide,
+      Self::Message {
         delivery: DeliveryMode::Queue,
         ..
       } => Operation::Queue,
@@ -326,6 +333,8 @@ pub enum ErrorKind {
   InvalidRequest,
   StaleTarget,
   Rejected,
+  /// Input was rejected until the user decides how to handle a held native queue.
+  QueueHeld,
   Conflict,
   Uncertain,
 }

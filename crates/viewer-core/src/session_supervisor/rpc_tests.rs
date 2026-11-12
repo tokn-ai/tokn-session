@@ -43,6 +43,7 @@ fn configure(supervisor: &SessionSupervisor, endpoint: String) {
 
 fn request() -> SubmitSessionInputRequest {
   SubmitSessionInputRequest {
+    delivery: None,
     session_key: "verified-codex-session".into(),
     request_id: uuid::Uuid::new_v4().to_string(),
     text: "one supervisor prompt".into(),
@@ -116,6 +117,41 @@ async fn codex_default_rpc_inspection_does_not_connect_and_first_send_delivers_o
   );
   assert!(supervisor.coordinator.route_owner_count() == 0);
   supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn explicit_delivery_rejects_other_providers_before_activation() {
+  let directory = tempfile::tempdir().unwrap();
+  let supervisor = SessionSupervisor::new(Some(directory.path().to_path_buf()), InteractionService::default()).unwrap();
+  for provider in [
+    ViewerProvider::Codex,
+    ViewerProvider::Pi,
+    ViewerProvider::OpenCode,
+    ViewerProvider::Dsh,
+  ] {
+    for delivery in [DeliveryMode::Start, DeliveryMode::Guide, DeliveryMode::Queue] {
+      let mut target = target(directory.path());
+      target.input.provider = provider;
+      let mut request = request();
+      request.delivery = Some(delivery);
+      let error = supervisor
+        .submit(target, request, Vec::new(), SessionTransport::Rpc)
+        .await
+        .unwrap_err();
+      assert!(error.message.contains("does not support the requested delivery mode"));
+    }
+  }
+  for delivery in [DeliveryMode::Start, DeliveryMode::Steer, DeliveryMode::StartOrSteer] {
+    let mut target = target(directory.path());
+    target.input.provider = ViewerProvider::ZCode;
+    let mut request = request();
+    request.delivery = Some(delivery);
+    let error = supervisor
+      .submit(target, request, Vec::new(), SessionTransport::Rpc)
+      .await
+      .unwrap_err();
+    assert!(error.message.contains("does not support the requested delivery mode"));
+  }
 }
 
 #[tokio::test]

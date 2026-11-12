@@ -480,7 +480,11 @@ export interface SessionInputStatus {
   max_image_bytes?: number;
   max_total_image_bytes?: number;
   image_mime_types?: string[];
+  /** Omitted by older hosts, which keep the existing Send action. */
+  delivery_modes?: SessionInputDeliveryMode[];
 }
+
+export type SessionInputDeliveryMode = "start" | "guide" | "queue";
 
 export interface SubmitSessionInputRequest {
   session_key: string;
@@ -488,6 +492,7 @@ export interface SubmitSessionInputRequest {
   text: string;
   image_ids?: string[];
   model_selection?: MessageModelSelection;
+  delivery?: SessionInputDeliveryMode;
 }
 
 export interface SubmitSessionInputResponse {
@@ -630,7 +635,7 @@ export interface RpcRuntimeProfileValidation {
   executable_exists: boolean | null;
   working_directory_exists: boolean | null;
 }
-export type RpcOperation = "metadata" | "state" | "models" | "message" | "steer" | "queue" | "cancel_turn" | "respond" | "pending_interactions";
+export type RpcOperation = "metadata" | "state" | "models" | "message" | "steer" | "guide" | "queue" | "cancel_turn" | "respond" | "pending_interactions";
 export interface RpcRuntimeInfo {
   runtime_id: string;
   instance_id: string;

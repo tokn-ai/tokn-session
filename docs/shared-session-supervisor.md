@@ -108,7 +108,7 @@ message awaiting native acknowledgement, allowing extension preflight to finish.
 | Codex | Explicit app-server create/resume binding; start-or-steer, turn interruption, model catalogs, and live callback questions. Desktop is an explicit alternative. |
 | Pi | Viewer-owned sessions keep the exclusive Pi workflow driver; independently running bridges keep their existing owner. A Pi profile cannot adopt arbitrary saved history from an ID alone. |
 | OpenCode | Native V2 creation, local history, runtime/profile binding and start-or-steer. V1 and mixed histories remain read-only. |
-| ZCode | Managed native app-server, verified local history, creation/resume, idle text Send, live questions, allow-once/deny tool permissions and plan review. Drafts use the runtime default model. |
+| ZCode | Managed native app-server, verified local history, creation/resume, text Send with advisory guidance, explicit Queue, live questions, allow-once/deny tool permissions and plan review. Drafts use the runtime default model. |
 | DSH | Existing native sessions through a saved or locally discovered ApiProxy runtime. State/model inspection does not activate cold agents. Local project creation uses the native default preset. |
 
 The Pi driver owns model-on-send sequencing, native extension dialogs,
@@ -125,9 +125,15 @@ draft model intent only when an admission starts an idle turn. Their model
 selectors therefore remain read-only with an explanation. Pi's existing owned
 workflow is preserved separately; its host coordination does not strengthen
 generic native capability guarantees. Strict delivery modes also remain
-provider-specific. The composer uses idle-only admission for ZCode and native
-start-or-steer for the other RPC providers. An accepted reply does not identify
-which turn state the runtime chose.
+provider-specific. ZCode Send uses native advisory guidance: it starts when idle,
+can join active work at a native boundary, or becomes a follow-up. Queue explicitly
+requests the next turn and can start immediately when idle. The host advertises
+these actions from bound adapter capabilities; unsupported explicit modes reject
+without fallback. The other RPC providers retain native start-or-steer.
+Message receipts bind delivery intent as well as content; retrying a UUID with
+a different mode cannot resend or reinterpret the original input.
+ZCode Stop holds remaining native queued input. Queue editing and resuming held
+input remain in ZCode; reconnecting does not replay accepted or uncertain input.
 
 Existing question cards can answer only a matching live RPC callback, with exact
 session/request/question IDs and validated complete answer batches. Recorded

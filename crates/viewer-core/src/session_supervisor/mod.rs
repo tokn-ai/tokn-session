@@ -22,7 +22,7 @@ use tokn_interaction_core::{DeliveryMode, InteractionService, Provider};
 
 pub(crate) fn rpc_message_delivery(provider: Provider) -> DeliveryMode {
   match provider {
-    Provider::ZCode => DeliveryMode::Start,
+    Provider::ZCode => DeliveryMode::Guide,
     _ => DeliveryMode::StartOrSteer,
   }
 }
@@ -225,6 +225,15 @@ impl SessionSupervisor {
     images: Vec<ResolvedImage>,
     expected_transport: SessionTransport,
   ) -> Result<Admission, DeliveryError> {
+    if let Some(delivery) = request.delivery {
+      if target.input.provider != ViewerProvider::ZCode
+        || !matches!(delivery, DeliveryMode::Guide | DeliveryMode::Queue)
+      {
+        return Err(DeliveryError::not_sent(
+          "This session does not support the requested delivery mode",
+        ));
+      }
+    }
     let _guard = self.gate(&target).await;
     if self.transport(&target).await.map_err(DeliveryError::not_sent)? != expected_transport {
       return Err(DeliveryError::not_sent(

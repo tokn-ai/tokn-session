@@ -332,6 +332,7 @@ fn answer_message(
     serde_json::to_string(&replies).map_err(|_| "Could not encode answers")?
   );
   let mut message = SubmitSessionInputRequest {
+    delivery: None,
     model_selection: None,
     session_key: request.session_key.clone(),
     request_id: request.request_id.clone(),

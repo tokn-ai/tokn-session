@@ -383,7 +383,7 @@ async fn native_message_modes_preserve_rpc_identity_and_reject_unfenced_model_in
   assert_eq!(calls[0]["rpcId"], expected_id);
   assert_eq!(calls[0]["payload"]["mode"], "steer");
   drop(calls);
-  for delivery in [DeliveryMode::Start, DeliveryMode::Steer] {
+  for delivery in [DeliveryMode::Start, DeliveryMode::Steer, DeliveryMode::Guide] {
     assert_eq!(
       adapter
         .execute(request(

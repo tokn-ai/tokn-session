@@ -48,8 +48,11 @@ commands may update them; ordinary session commands carry only verified runtime
 and session identities. See [viewer RPC runtimes](viewer-rpc-runtimes.md).
 
 ZCode launches a project-scoped Agent CLI over stdio. It verifies the native
-database path, explicitly creates or resumes the selected root session, and
-uses idle-only native admission for the Viewer’s text composer.
+database path and explicitly creates or resumes the selected root session.
+The Viewer sends text through native advisory guidance or explicit follow-up
+queue admission. Guidance starts idle sessions, can join active work at a tool
+boundary, and can fall back to a later turn. Its native acknowledgement does
+not distinguish current-turn consumption from queued fallback.
 Native question and permission callbacks retain their business request identity
 across envelope reannouncements. The adapter normalizes question choices, notes,
 plan approval and per-use permissions. Responses have transport-write receipts;
@@ -69,10 +72,13 @@ keeps that binding reserved until shutdown, preventing accidental replacement.
 Commands cover metadata, current state, model catalogs, messages, cancellation,
 pending questions/permissions/dialogs, and typed replies. Consult capabilities
 instead of treating all providers as equivalent. `StartOrSteer` uses native
-admission to start when idle or steer when running. `Queue` uses native follow-up
-delivery. Strict `Start` and `Steer` require native atomic state enforcement;
+admission to start when idle or steer when running. `Guide` permits native
+advisory guidance with idle start and follow-up fallback. `Queue` uses native
+follow-up delivery and may start immediately when idle.
+Strict `Start` and `Steer` require native atomic state enforcement;
 unsupported modes reject rather than relying on a racing status preflight.
-An `Accepted` admission is distinct from started, steered, or completed work.
+ZCode supports `Guide` and `Queue`, and rejects all strict delivery modes and
+`StartOrSteer`. An `Accepted` admission is distinct from started, steered, or completed work.
 Cancellation ends native turn work and may preserve queued inputs.
 
 `MessageInput.model` is reserved for an adapter that can atomically apply it only
@@ -111,6 +117,9 @@ coverage for previously observed sessions. Recovery scopes are bounded; overflow
 sets `reattach_required` and blocks further mutations until a fresh binding. Inspectors and history readers remain
 separate from this live channel; token payloads need not be forwarded to every
 frontend.
+Binding permits bounded fresh state/pending reads when live events race a
+baseline, while the exact runtime instance remains connected. Native activation
+and mutations are not repeated by that recovery.
 
 OpenCode and DSH do not negotiate an attached server-instance nonce. A lost
 attached stream therefore requires an explicit fresh attachment and refreshed

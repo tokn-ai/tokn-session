@@ -90,6 +90,7 @@ impl ViewerService {
     ))
     .map_err(|_| "Could not encode the interaction response")?;
     let message = SubmitSessionInputRequest {
+      delivery: None,
       session_key: target.session_key.clone(),
       request_id: request.request_id.clone(),
       text: format!("session-control:interaction:{:x}", Sha256::digest(response)),
