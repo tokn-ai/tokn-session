@@ -345,7 +345,7 @@ fn read_snapshot_rows(
     .transaction()
     .map_err(|e| format!("failed to start session snapshot: {e}"))?;
   let capabilities = OpenCodeCapabilities::detect(&transaction)?;
-  let session = load_session_row(&transaction, capabilities, session_id, source.flavor.name())?
+  let session = load_session_row(&transaction, capabilities, session_id, source.flavor)?
     .ok_or_else(|| format!("no {} session found for `{session_id}`", source.flavor.name()))?;
   let mut budget = SourceBudget {
     bytes: 0,

@@ -246,6 +246,10 @@ fn parse_options(args: &[String]) -> Result<ParsedOptions, String> {
         let value = args.get(index).ok_or_else(|| "--scope requires a value".to_string())?;
         scope = Some(parse_show_scope(value)?);
       }
+      "--" => {
+        positionals.extend_from_slice(&args[index + 1..]);
+        break;
+      }
       "--help" | "-h" => return Ok(ParsedOptions::Help),
       value if value.starts_with('-') => return Err(format!("unknown option `{value}`")),
       value => positionals.push(value.to_string()),
@@ -316,8 +320,8 @@ pub fn help() -> String {
   tokn-session list [--source pi|codex|opencode|zcode|workbuddy|dsh] [--limit <n>]
   tokn-session show [--source pi|codex|opencode|zcode|workbuddy|dsh] [--format pretty|jsonl] [--scope self|tree] [--session-dir <dir>] <session-id-or-path>
   tokn-session browse [--source pi|codex|opencode|zcode|workbuddy|dsh] [--session-dir <dir>] [session-id-or-path]
-  tokn-session create [--source pi|codex|opencode] [--executor <command>] [--cwd <dir>] <prompt>
-  tokn-session append [--source pi|codex|opencode] [--executor <command>] [--cwd <dir>] (--continue|--session <id>) <prompt>"
+  tokn-session create [--source pi|codex|opencode|zcode] [--executor <command>] [--cwd <dir>] [--] <prompt>
+  tokn-session append [--source pi|codex|opencode|zcode] [--executor <command>] [--cwd <dir>] (--continue|--session <id>) [--] <prompt>"
     .to_string()
 }
 
@@ -412,6 +416,26 @@ mod tests {
         source: Source::ZCode,
         ..
       }
+    ));
+  }
+
+  #[test]
+  fn zcode_append_accepts_a_flag_shaped_prompt_after_the_options() {
+    let cli = parse(
+      ["append", "--source", "zcode", "--continue", "--", "--help"]
+        .map(str::to_string)
+        .into(),
+    )
+    .expect("append should parse the prompt as a positional argument");
+
+    assert!(matches!(
+      cli.command,
+      Command::Append {
+        source: Source::ZCode,
+        target: AppendTarget::Continue,
+        prompt,
+        ..
+      } if prompt == "--help"
     ));
   }
 

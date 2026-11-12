@@ -6,6 +6,10 @@ pub(super) enum Handle {
   Codex(Arc<tokn_codex_adapter::CodexAdapter>),
   Pi(Arc<tokn_pi_adapter::PiAdapter>),
   OpenCode(Arc<tokn_opencode_adapter::OpenCodeAdapter>),
+  ZCode {
+    adapter: Arc<tokn_zcode_adapter::ZCodeAdapter>,
+    history_path: PathBuf,
+  },
   Dsh(Arc<tokn_dsh_adapter::DshAdapter>),
 }
 impl Handle {
@@ -14,6 +18,7 @@ impl Handle {
       Self::Codex(adapter) => adapter.clone(),
       Self::Pi(adapter) => adapter.clone(),
       Self::OpenCode(adapter) => adapter.clone(),
+      Self::ZCode { adapter, .. } => adapter.clone(),
       Self::Dsh(adapter) => adapter.clone(),
     }
   }
@@ -125,6 +130,25 @@ pub(super) async fn open(id: &str, profile: &RpcResolvedProfile) -> Result<Handl
       };
       adapter.map(|adapter| Handle::OpenCode(Arc::new(adapter)))
     }
+    Provider::ZCode => {
+      if !owned {
+        return Err("ZCode requires a managed stdio runtime".into());
+      }
+      let history_path = tokn_session_zcode::ZCodeSessionSource::new(None).database_path()?;
+      tokn_zcode_adapter::ZCodeAdapter::launch(tokn_zcode_adapter::LaunchOptions {
+        runtime_id: id.into(),
+        executable: path(profile)?,
+        arguments: profile.profile.arguments.clone(),
+        directory: cwd(profile)?,
+        environment: profile.environment.clone(),
+        history_path: history_path.clone(),
+      })
+      .await
+      .map(|adapter| Handle::ZCode {
+        adapter: Arc::new(adapter),
+        history_path,
+      })
+    }
     Provider::Dsh => {
       let adapter = if owned {
         let mut options = tokn_dsh_adapter::ManagedOptions::new(cwd(profile)?);
@@ -198,6 +222,21 @@ impl core_runtime::RuntimeHandle for Handle {
             None,
           )
         }
+        Self::ZCode { adapter, .. } => {
+          let id = request
+            .native_id
+            .as_deref()
+            .ok_or_else(|| InteractionError::invalid("ZCode creation requires a reserved ID"))?;
+          let created = adapter.create_session_with_id(id, request.model.clone()).await?;
+          (
+            created
+              .target
+              .session_id
+              .ok_or_else(|| InteractionError::uncertain("ZCode omitted the created session ID"))?,
+            created.working_directory,
+            None,
+          )
+        }
         Self::Dsh(adapter) => {
           if request.model.is_some() {
             return Err(InteractionError::unsupported(
@@ -240,6 +279,33 @@ impl core_runtime::RuntimeHandle for Handle {
 
   fn bind_native<'a>(&'a self, id: &'a str) -> AdapterFuture<'a, Result<(), String>> {
     Box::pin(Handle::bind_native(self, id))
+  }
+
+  fn bind_history<'a>(&'a self, key: &'a str, id: &'a str) -> AdapterFuture<'a, Result<(), String>> {
+    Box::pin(async move {
+      let Self::ZCode { adapter, history_path } = self else {
+        return Handle::bind_native(self, id).await;
+      };
+      let locator = crate::model::decode_session_key(key)?;
+      if locator.provider != crate::model::ViewerProvider::ZCode || locator.session_id != id {
+        return Err("The selected history does not match the ZCode session".into());
+      }
+      let history_path = history_path.clone();
+      let same_source = tokio::task::spawn_blocking(move || {
+        locator.source_path.canonicalize().is_ok_and(|source| {
+          history_path
+            .canonicalize()
+            .is_ok_and(|runtime_source| source == runtime_source)
+        })
+      })
+      .await
+      .map_err(|_| "Could not verify the ZCode history source")?;
+      if !same_source {
+        return Err("The ZCode runtime uses a different history database".into());
+      }
+      adapter.resume_session(id).await.map_err(|error| error.message)?;
+      Ok(())
+    })
   }
 }
 

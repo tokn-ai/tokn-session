@@ -38,6 +38,11 @@ pub struct ProfileDescriptor {
 pub trait RuntimeHandle: Send + Sync + 'static {
   fn adapter(&self) -> Arc<dyn InteractionAdapter>;
   fn bind_native<'a>(&'a self, native_id: &'a str) -> AdapterFuture<'a, Result<(), String>>;
+  /// Activate an exact host-verified history. Hosts can use their opaque key
+  /// to verify that the selected runtime owns the same history source.
+  fn bind_history<'a>(&'a self, _key: &'a str, native_id: &'a str) -> AdapterFuture<'a, Result<(), String>> {
+    self.bind_native(native_id)
+  }
   /// Explicit native creation. This never sends the first message or resumes an
   /// existing session. Unsupported implementations must reject before writing.
   fn create_native<'a>(
@@ -821,7 +826,7 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
         );
     }
     self.ensure_open()?;
-    handle.bind_native(&native_id).await?;
+    handle.bind_history(&key, &native_id).await?;
     for (id, command) in [("state", Command::State), ("pending", Command::PendingInteractions)] {
       self
         .0

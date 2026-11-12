@@ -30,8 +30,8 @@ The core abstraction is `AgentEvent`: provider-native historical sessions and li
 - The CLI binary is `tokn-session`.
 - Commands are top-level. Do not reintroduce a `sessions` namespace.
 - Historical sources today are `pi`, `codex`, `opencode`, `zcode`, `workbuddy`, and `dsh`.
-- Current implemented commands are `list` and `show`.
-- Future likely commands are `create` and `attach`.
+- Current implemented commands are `list`, `show`, `browse`, `create`, and `append`.
+- `attach` is a future CLI command.
 - Provider-native events are normalized for display first; exact round-trip preservation is not a current goal.
 - Unknown events should stay visible enough to discover new provider shapes.
 
@@ -41,7 +41,7 @@ The core abstraction is `AgentEvent`: provider-native historical sessions and li
 - `crates/interaction-core`: provider-independent live contracts, managed-session and durable multi-provider creation orchestration, runtime lifecycle/bind recovery, native ownership, pending interactions, and bounded admission receipts.
 - `crates/interaction-tests`: private real-agent RPC capture/replay harness and loopback scripted model server.
 - `crates/{codex,pi,opencode,dsh}-rpc-protocol`: native live wire contracts, separate from historical protocol crates.
-- `crates/{codex,pi,opencode,dsh}-adapter`: Rust native transports and managed/attached runtime implementations of the interaction contract.
+- `crates/{codex,pi,opencode,zcode,dsh}-adapter`: Rust native transports and runtime implementations of the interaction contract.
 - `crates/codex-protocol`: tolerant, lossless wire types for persisted Codex rollout JSONL.
 - `crates/pi-protocol`: tolerant, lossless wire types for persisted Pi session JSONL.
 - `crates/opencode-protocol`: tolerant, lossless wire types for OpenCode V1 payloads and run JSONL.

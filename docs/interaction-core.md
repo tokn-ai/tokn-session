@@ -7,13 +7,14 @@ reading. Provider-native protocols flow through adapters into common contracts:
 Pi JSONL ─────────── pi-rpc-protocol ───────── pi-adapter ───────┐
 Codex app-server ── codex-rpc-protocol ────── codex-adapter ────┤
 OpenCode V2 HTTP/SSE ─ opencode-rpc-protocol ─ opencode-adapter ─┼─ InteractionService ─ host API/UI
-DSH HTTP/WebSocket ─ dsh-rpc-protocol ──────── dsh-adapter ─────┘
+DSH HTTP/WebSocket ─ dsh-rpc-protocol ──────── dsh-adapter ─────┤
+ZCode app-server NDJSON ──────────────────── zcode-adapter ────┘
 ```
 
 Dependencies point inward: the core defines `InteractionAdapter`, commands,
 replies, capabilities, model identities, and normalized runtime events. The
 protocol crates contain native wire types without core or viewer dependencies.
-Each adapter depends on its protocol and the core contract. The host composes
+Adapters depend on the core contract. The host composes
 them with `InteractionService::register(Arc<dyn InteractionAdapter>)`.
 Historical `*-protocol` crates and `AgentEvent` keep their existing role.
 
@@ -30,7 +31,7 @@ questions, transport limits, and ownership.
 A runtime has a host-chosen `runtime_id`, a fresh connection/process
 `instance_id`, a provider, and `Managed` or `Attached` ownership. Commands bind
 both identities and an optional native session ID; mutations require an explicit
-session ID. Multiple sessions can share one Codex/OpenCode/DSH runtime. Never identify
+session ID. Multiple sessions can share one Codex/OpenCode/ZCode/DSH runtime. Never identify
 a runtime solely by a saved history path, PID, or listening port.
 
 Pi `spawn` owns a headless `--mode rpc` child; `attach` accepts IO handles
@@ -45,6 +46,10 @@ interaction contract. Endpoint credentials and executable/launch configuration
 remain host-owned profiles. The viewer's separately authorized runtime-settings
 commands may update them; ordinary session commands carry only verified runtime
 and session identities. See [viewer RPC runtimes](viewer-rpc-runtimes.md).
+
+ZCode launches a project-scoped Agent CLI over stdio. It verifies the native
+database path, explicitly creates or resumes the selected root session, and
+uses idle-only native admission for the Viewer’s text composer.
 
 Snapshot inspection does not call a provider, start a process, or resume saved
 work. Initial snapshots require recovery and do not claim a live connection until
@@ -67,7 +72,7 @@ An `Accepted` admission is distinct from started, steered, or completed work.
 Cancellation ends native turn work and may preserve queued inputs.
 
 `MessageInput.model` is reserved for an adapter that can atomically apply it only
-when starting, ignoring it during steering. The four general adapters
+when starting, ignoring it during steering. The general adapters
 advertise this as unsupported: their native APIs cannot guarantee applying it
 only on idle admission. Model catalogs still provide real metadata.
 The viewer's existing Pi bridge can retain its stronger native admission path.
@@ -132,8 +137,8 @@ fields remain compatible. The old viewer `managed_pi` module is removed.
 `ViewerService::interaction_service` remains a host-only composition point,
 unavailable to shares or External reader mode.
 
-Selected-machine runtime profiles compose all four adapters through real
-managed/attached factories, with separately authorized configuration/lifecycle
+Selected-machine runtime profiles compose the adapters through managed and, where
+supported, attached factories, with separately authorized configuration/lifecycle
 commands. A shared Rust session supervisor now routes conversation input,
 bound model metadata, live callback answers, and cancellation through these
 verified bindings. First Send activates a runtime; inspecting historical work

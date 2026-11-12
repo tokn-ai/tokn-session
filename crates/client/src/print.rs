@@ -63,7 +63,7 @@ pub(crate) fn append_session(request: AppendSessionRequest) -> Result<(), String
 }
 
 fn run_print_session(request: PrintSessionRequest) -> Result<(), String> {
-  if matches!(request.source, Source::Dsh | Source::WorkBuddy | Source::ZCode) {
+  if matches!(request.source, Source::Dsh | Source::WorkBuddy) {
     return Err(format!(
       "{} currently supports historical list/show/browse only; create/append are not implemented",
       request.source.as_str()
@@ -105,7 +105,7 @@ fn print_args(source: Source, action: &PrintAction) -> Result<Vec<String>, Strin
     Source::Codex => codex_print_args(action),
     Source::OpenCode => opencode_print_args(action),
     Source::WorkBuddy => return Err("workbuddy create/append are not implemented".into()),
-    Source::ZCode => return Err("zcode create/append are not implemented".into()),
+    Source::ZCode => zcode_print_args(action)?,
   })
 }
 
@@ -124,6 +124,22 @@ fn opencode_print_args(action: &PrintAction) -> Vec<String> {
     }
   }
   args
+}
+
+fn zcode_print_args(action: &PrintAction) -> Result<Vec<String>, String> {
+  let mut args = vec!["--output-format".to_string(), "stream-json".to_string()];
+  match action {
+    PrintAction::Create { .. } => {}
+    PrintAction::Continue { .. } => args.push("--continue".to_string()),
+    PrintAction::Session { session_id, .. } => {
+      if session_id.trim().is_empty() {
+        return Err("zcode requires a nonempty session ID to resume".to_string());
+      }
+      args.push(format!("--resume={session_id}"));
+    }
+  }
+  args.push(format!("--prompt={}", action_prompt(action)));
+  Ok(args)
 }
 
 fn codex_print_args(action: &PrintAction) -> Vec<String> {
@@ -176,6 +192,10 @@ fn executor_from_env(source: Source) -> Option<String> {
 }
 
 fn executor_required_error(source: Source) -> String {
+  if source == Source::ZCode {
+    return "zcode create/append requires --executor or TOKN_SESSION_ZCODE_EXECUTOR, for example: --executor zcode"
+      .to_string();
+  }
   format!(
     "create requires --executor or TOKN_SESSION_{}_EXECUTOR, for example: --executor \"tokn-gateway proxy {} --npx --\"",
     source.as_str().to_ascii_uppercase(),
@@ -380,16 +400,56 @@ mod tests {
   }
 
   #[test]
-  fn zcode_print_mode_is_explicitly_unsupported() {
+  fn zcode_print_argv_creates_or_resumes_with_native_flags() {
+    for (action, expected) in [
+      (
+        PrintAction::Create {
+          prompt: "hello\nfrom ZCode".to_string(),
+        },
+        vec!["zcode", "--output-format", "stream-json", "--prompt=hello\nfrom ZCode"],
+      ),
+      (
+        PrintAction::Continue {
+          prompt: "--help".to_string(),
+        },
+        vec![
+          "zcode",
+          "--output-format",
+          "stream-json",
+          "--continue",
+          "--prompt=--help",
+        ],
+      ),
+      (
+        PrintAction::Session {
+          session_id: "sess_123".to_string(),
+          prompt: "next turn".to_string(),
+        },
+        vec![
+          "zcode",
+          "--output-format",
+          "stream-json",
+          "--resume=sess_123",
+          "--prompt=next turn",
+        ],
+      ),
+    ] {
+      assert_eq!(print_argv(Source::ZCode, "zcode", &action).unwrap(), expected);
+    }
+  }
+
+  #[test]
+  fn zcode_rejects_an_empty_explicit_resume_target() {
     let error = print_args(
       Source::ZCode,
-      &PrintAction::Create {
-        prompt: "create a todo app".to_string(),
+      &PrintAction::Session {
+        session_id: String::new(),
+        prompt: "next turn".to_string(),
       },
     )
-    .expect_err("zcode is historical-only");
+    .expect_err("an empty resume target would create a session");
 
-    assert_eq!(error, "zcode create/append are not implemented");
+    assert_eq!(error, "zcode requires a nonempty session ID to resume");
   }
 
   #[test]

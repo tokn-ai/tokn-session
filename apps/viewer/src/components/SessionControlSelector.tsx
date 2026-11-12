@@ -15,7 +15,7 @@ export function SessionControlSelector({ control, input_busy = false, running = 
         <option value="rpc">RPC</option><option value="desktop">Codex Desktop</option>
       </select>
     </label> : null}
-    {control.status?.transport === "rpc" && control.status.can_cancel && control.status.available && running ? <button type="button" className="text-button"
+    {control.status?.transport === "rpc" && control.status.can_cancel && control.status.available && (control.status.is_running ?? running) ? <button type="button" className="text-button"
       disabled={busy} onClick={() => { void control.cancel(); }}>{control.stopping ? "Stopping…" : "Stop"}</button> : null}
     <span className="session-control__status" role="status">
       {control.checking ? "Checking control…" : control.changing ? "Changing control…" : control.error ?? control.notice ?? (!control.status?.available ? control.status?.message : null)}

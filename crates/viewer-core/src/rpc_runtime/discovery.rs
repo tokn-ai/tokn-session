@@ -17,7 +17,7 @@ impl DiscoveryEnvironment {
   pub(crate) fn current() -> Self {
     Self {
       path: std::env::var_os("PATH"),
-      executables: [Provider::Codex, Provider::OpenCode, Provider::Dsh]
+      executables: [Provider::Codex, Provider::OpenCode, Provider::ZCode, Provider::Dsh]
         .into_iter()
         .filter_map(|provider| {
           let (_, _, key) = provider_command(provider).expect("discovered provider");
@@ -89,6 +89,7 @@ fn provider_command(provider: Provider) -> Result<(&'static str, &'static str, &
   match provider {
     Provider::Codex => Ok(("Codex", "codex", "TOKN_SESSION_CODEX_EXECUTABLE")),
     Provider::OpenCode => Ok(("OpenCode", "opencode", "TOKN_SESSION_OPENCODE_EXECUTABLE")),
+    Provider::ZCode => Ok(("ZCode", "zcode", "TOKN_SESSION_ZCODE_EXECUTABLE")),
     Provider::Dsh => Ok(("DSH", "dsh", "TOKN_SESSION_DSH_EXECUTABLE")),
     Provider::Pi => Err("Pi uses its verified managed-session driver".into()),
   }

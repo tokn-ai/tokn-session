@@ -121,6 +121,7 @@ impl ViewerService {
       ViewerProvider::Codex => tokn_interaction_core::Provider::Codex,
       ViewerProvider::Pi => tokn_interaction_core::Provider::Pi,
       ViewerProvider::Dsh => tokn_interaction_core::Provider::Dsh,
+      ViewerProvider::ZCode => tokn_interaction_core::Provider::ZCode,
       ViewerProvider::OpenCode => {
         self.verify_opencode_control(&locator)?;
         tokn_interaction_core::Provider::OpenCode
@@ -141,6 +142,9 @@ impl ViewerService {
       .map_err(|_| "Session history is unavailable")?;
     if current.id != locator.session_id {
       return Err("Session history identity changed; refresh the catalog".into());
+    }
+    if locator.provider == ViewerProvider::ZCode && current.parent_session_id.is_some() {
+      return Err("Control ZCode subagents through their parent session".into());
     }
     if locator.provider == ViewerProvider::Codex
       && (current.parent_session_id.is_some()

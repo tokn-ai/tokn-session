@@ -10,6 +10,7 @@ pub(crate) struct OpenCodeCapabilities {
   pub(crate) has_session_agent: bool,
   pub(crate) has_session_model: bool,
   pub(crate) has_session_title: bool,
+  pub(crate) has_session_time_deleted: bool,
   pub(crate) has_session_workspace_id: bool,
 }
 
@@ -72,6 +73,7 @@ impl OpenCodeCapabilities {
       has_session_agent: session.contains("agent"),
       has_session_model: session.contains("model"),
       has_session_title: session.contains("title"),
+      has_session_time_deleted: session.contains("time_deleted"),
       has_session_workspace_id: session.contains("workspace_id"),
     })
   }

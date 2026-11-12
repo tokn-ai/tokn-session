@@ -31,6 +31,10 @@ impl ZCodeSessionSource {
     self.inner.list_session_headers()
   }
 
+  pub fn session_header_exact(&self, session_id: &str) -> Result<SessionHeader, String> {
+    self.inner.session_header_exact(session_id)
+  }
+
   pub fn list_session_header_catalog(&self) -> Result<SessionHeaderCatalog, String> {
     self.inner.list_session_header_catalog()
   }

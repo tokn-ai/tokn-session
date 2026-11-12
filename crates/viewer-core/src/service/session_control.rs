@@ -85,9 +85,24 @@ impl ViewerService {
   async fn control_status(&self, target: &VerifiedSession) -> Result<SessionControlStatus, String> {
     let transport = self.sessions.transport(target).await?;
     let binding = self.sessions.runtimes.binding(&target.session_key);
-    let connected = binding
+    let snapshot = self.sessions.runtimes.binding_snapshot(&target.session_key);
+    let connected = binding.is_some() && snapshot.is_some();
+    let is_running = snapshot
       .as_ref()
-      .is_some_and(|_| self.sessions.runtimes.binding_snapshot(&target.session_key).is_some());
+      .filter(|snapshot| {
+        target.input.provider == ViewerProvider::ZCode && snapshot.connected && !snapshot.recovery_required
+      })
+      .and_then(|snapshot| {
+        snapshot
+          .states
+          .iter()
+          .find(|state| state.session_id.as_deref() == Some(target.input.session_id.as_str()))
+      })
+      .and_then(|state| match state.status {
+        tokn_interaction_core::ExecutionState::Running | tokn_interaction_core::ExecutionState::Stopping => Some(true),
+        tokn_interaction_core::ExecutionState::Idle | tokn_interaction_core::ExecutionState::Stopped => Some(false),
+        tokn_interaction_core::ExecutionState::Unknown => None,
+      });
     let readiness = self.sessions.input_status(target).await;
     Ok(SessionControlStatus {
       session_key: target.session_key.clone(),
@@ -95,7 +110,12 @@ impl ViewerService {
       transport,
       can_select: target.input.provider == ViewerProvider::Codex,
       can_cancel: transport == SessionTransport::Rpc
-        && (binding.is_some() || self.sessions.managed.input_status(&target.session_key).is_some()),
+        && (binding.as_ref().is_some_and(|binding| {
+          binding
+            .capabilities
+            .supports(tokn_interaction_core::Operation::CancelTurn)
+        }) || self.sessions.managed.input_status(&target.session_key).is_some()),
+      is_running,
       available: readiness.is_ok(),
       message: if let Err(error) = readiness {
         error.message

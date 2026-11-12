@@ -90,7 +90,7 @@ export function SessionComposer({ session, on_accepted, input_refresh_key, model
               selected_model={input.model_draft} on_select={input.setModel} on_clear={input.clearModel} />
               : <span className="session-composer__provider">{providerLabel(session.provider)}</span>}
             <button
-              aria-label={input.sending ? input.resuming ? "Resuming Pi…" : "Sending…" : "Send"}
+              aria-label={input.sending ? input.resuming ? `Resuming ${providerLabel(session.provider)}…` : "Sending…" : "Send"}
               className="session-composer__send"
               disabled={!input.can_send}
               title="Send message (⌘ / Ctrl + Enter)"
@@ -108,7 +108,7 @@ export function SessionComposer({ session, on_accepted, input_refresh_key, model
           </span>
         </div>
         <div className="session-composer__status" id={`${inputId}-status`} role="status">
-          {input.sending ? <span>{input.resuming ? "Resuming Pi and sending your message…" : "Sending your message…"}</span>
+          {input.sending ? <span>{input.resuming ? `Resuming ${providerLabel(session.provider)} and sending your message…` : "Sending your message…"}</span>
             : input.notice || input.validation_notice ? <span>{input.notice ?? input.validation_notice}</span> : input.checking
             ? <span>Checking message availability…</span>
             : input.availability?.message ? <span>{input.availability.message}</span> : null}

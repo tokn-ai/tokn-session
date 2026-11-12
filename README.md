@@ -52,14 +52,15 @@ cargo run -p tokn-session-cli -- list --source codex --limit 5
 cargo run -p tokn-session-cli -- show --source pi <session-id>
 cargo run -p tokn-session-cli -- browse --source dsh
 cargo run -p tokn-session-cli -- list --source zcode --limit 5
+cargo run -p tokn-session-cli -- create --source zcode --executor zcode "Summarize this project"
 cargo run -p tokn-session-cli -- list --source workbuddy --limit 5
 ```
 
 ## Native interaction libraries
 
-Rust interaction contracts and dedicated Pi, OpenCode V2, and DSH RPC adapters
-support owned runtimes and explicit attachment, metadata/model queries, native
-message/steering admission, cancellation, and live question/permission replies.
+Rust interaction contracts and native Codex, Pi, OpenCode V2, ZCode, and DSH
+adapters support managed runtimes. Attachment, model catalogs, delivery modes,
+cancellation, and live interactions depend on the provider.
 The core owns runtime identity and bounded receipts; native protocols remain
 provider-specific. See [live interaction](docs/interaction-core.md) for usage,
 capabilities, and current viewer integration.
@@ -71,8 +72,9 @@ six providers in one searchable interface. It reuses the Rust session crates
 directly rather than parsing CLI output and safely renders conversational
 Markdown without allowing provider content to navigate the WebView. A local,
 metadata-only index keeps its sidebar current without writing provider data.
-Its message composer can send to a root Codex task in Codex Desktop or a live
-Pi session running the input bridge.
+Its message composer can send through the selected machine’s supported runtime.
+ZCode uses the native Agent CLI for desktop creation and continuation of root
+sessions.
 
 ```sh
 cd apps/viewer

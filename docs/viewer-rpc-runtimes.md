@@ -8,7 +8,7 @@ an agent, resume history, or send a prompt.
 
 ## Profiles and storage
 
-Profiles support managed Codex/Pi/OpenCode/DSH processes, attached Codex WS(S),
+Profiles support managed Codex/Pi/OpenCode/ZCode/DSH processes, attached Codex WS(S),
 OpenCode V2 HTTP/SSE, and DSH HTTP/WebSocket servers. Pi attachment needs explicit
 IO handles and is not available through profiles. Managed profiles require an
 absolute executable and working folder; attached OpenCode also requires its
@@ -27,7 +27,7 @@ repairing the file and choosing Refresh retries the read without restarting.
 Automatic resolution prefers a suitable saved default or sole suitable profile.
 An explicit profile must match its revision/provider and launch requirements;
 invalid or ambiguous saved configuration does not silently fall back. OpenCode
-profiles must match the native session or draft project folder. If no suitable
+and ZCode profiles must match the native session or draft project folder. If no suitable
 profile exists, the host can discover managed local runtimes without saving a
 profile:
 
@@ -35,6 +35,7 @@ profile:
 | --- | --- | --- |
 | Codex | `TOKN_SESSION_CODEX_EXECUTABLE` | `codex` |
 | OpenCode | `TOKN_SESSION_OPENCODE_EXECUTABLE` | `opencode` |
+| ZCode | `TOKN_SESSION_ZCODE_EXECUTABLE` | `zcode` |
 | DSH | `TOKN_SESSION_DSH_EXECUTABLE` | `dsh` |
 
 Overrides are executable paths or names, without shell syntax or arguments. An
@@ -43,6 +44,12 @@ canonical paths and executable metadata without launching agents; native
 compatibility is checked on connection. Discovered configurations are scoped to
 their project and pin executable metadata, so a replaced binary requires fresh
 resolution. The bounded transient inventory is not a saved-profile registry.
+ZCode requires a configured Agent CLI launcher with `app-server --stdio`
+support. The runtime verifies that the app-server uses the Viewer’s ZCode
+history database, normally `~/.zcode/cli/db/db.sqlite` or the database under
+`ZCODE_STORAGE_DIR`. A desktop bundle with no Agent CLI on `PATH` needs an
+explicit launcher or profile. See the [ZCode CLI distribution](https://github.com/zai-org/ZCode/blob/main/README.en.md#zcode-cli-distribution).
+
 Pi creation uses `TOKN_SESSION_PI_EXECUTABLE`/`PATH` through its existing worker,
 represented by the same plan contract; selecting a saved Pi profile for a draft
 is not supported yet.
@@ -117,12 +124,14 @@ session. Codex defaults to RPC; Desktop control must be explicitly selected.
 Bound metadata and live callback answers use the common service. Runtime
 failures do not automatically select another transport or replay a prompt.
 Opening historical work remains view-only. Local desktop projects can create
-Codex/OpenCode/DSH sessions through saved or discovered runtimes; OpenCode V2 local
-history is supported. Arbitrary Pi history adoption and remote-only RPC history
-remain future work. See [shared session supervision](shared-session-supervisor.md).
+Codex/OpenCode/ZCode/DSH sessions through saved or discovered runtimes. ZCode
+Send starts a text turn when idle. Its runtime declines native permission and
+question callbacks in this integration. Stop follows native prompt state,
+including the wait before the first output. Arbitrary Pi history adoption and
+remote-only RPC history remain future work. See [shared session supervision](shared-session-supervisor.md).
 
-Tests exercise profile persistence/redaction/revision rules, all four factory
-paths with scripted native RPC peers, process reaping and leases, binding
+Tests exercise profile persistence/redaction/revision rules, native RPC peers,
+process reaping and leases, binding
 ownership, cancellation, shutdown, transport authorization, and frontend state.
 The separate [native RPC harness](../crates/interaction-tests/README.md) records
 and replays real agents; the supervisor's scripted peers are not native-agent

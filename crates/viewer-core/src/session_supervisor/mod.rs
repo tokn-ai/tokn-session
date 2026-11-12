@@ -18,7 +18,14 @@ use std::{path::PathBuf, sync::Arc};
 use tokio::sync::OwnedMutexGuard;
 pub use tokn_interaction_core::session_supervisor::SessionTransport;
 use tokn_interaction_core::session_supervisor::{SessionCoordinator, SessionIdentity, SessionRouteHost};
-use tokn_interaction_core::{InteractionService, Provider};
+use tokn_interaction_core::{DeliveryMode, InteractionService, Provider};
+
+pub(crate) fn rpc_message_delivery(provider: Provider) -> DeliveryMode {
+  match provider {
+    Provider::ZCode => DeliveryMode::Start,
+    _ => DeliveryMode::StartOrSteer,
+  }
+}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -48,6 +55,8 @@ pub struct SessionControlStatus {
   pub transport: SessionTransport,
   pub can_select: bool,
   pub can_cancel: bool,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub is_running: Option<bool>,
   pub available: bool,
   pub message: String,
   pub runtime_id: Option<String>,
@@ -68,6 +77,7 @@ impl VerifiedSession {
       ViewerProvider::Codex => Ok(Provider::Codex),
       ViewerProvider::Pi => Ok(Provider::Pi),
       ViewerProvider::OpenCode => Ok(Provider::OpenCode),
+      ViewerProvider::ZCode => Ok(Provider::ZCode),
       ViewerProvider::Dsh => Ok(Provider::Dsh),
       _ => Err("This provider has no live RPC adapter".into()),
     }

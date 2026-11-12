@@ -26,14 +26,19 @@ impl ViewerService {
       None
     };
     let runtime_plan_id = Some(plan.fingerprint()?);
-    if request.provider == LiveProvider::Dsh {
+    let runtime_default_reason = match request.provider {
+      LiveProvider::Dsh => Some("DSH uses its runtime default when creating a session."),
+      LiveProvider::ZCode => Some("ZCode uses its runtime default when creating a session."),
+      _ => None,
+    };
+    if let Some(reason) = runtime_default_reason {
       return Ok(SessionCreationModels {
         models: Vec::new(),
         catalog_revision: None,
         runtime_profile_id: runtime.as_ref().map(|runtime| runtime.profile_id.clone()),
         runtime_revision: runtime.as_ref().map(|runtime| runtime.expected_revision),
         runtime_plan_id,
-        reason: Some("DSH uses its runtime default when creating a session.".into()),
+        reason: Some(reason.into()),
       });
     }
     let cwd = PathBuf::from(&project.folder_path);

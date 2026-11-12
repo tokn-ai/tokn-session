@@ -1,8 +1,8 @@
 use super::*;
 use crate::models::{ListSessionModelsResponse, SessionModelState, SessionModelStatus};
 use tokn_interaction_core::{
-  Command, DeliveryMode, ErrorKind, ImageInput, InputDisposition, InteractionError, MessageInput, Operation,
-  PendingInteraction, Reply,
+  Command, ErrorKind, ImageInput, InputDisposition, InteractionError, MessageInput, Operation, PendingInteraction,
+  Reply,
 };
 
 impl SessionSupervisor {
@@ -10,7 +10,7 @@ impl SessionSupervisor {
     &self,
     target: &VerifiedSession,
   ) -> Result<input::InputCapability, DeliveryError> {
-    target.provider().map_err(DeliveryError::not_sent)?;
+    let provider = target.provider().map_err(DeliveryError::not_sent)?;
     if let Some(binding) = self.runtimes.binding(&target.session_key) {
       let snapshot = self
         .runtimes
@@ -38,13 +38,18 @@ impl SessionSupervisor {
         false
       };
       return Ok(input::InputCapability {
-        message: "Connected through agent RPC. Send starts or steers this session.".into(),
+        message: if provider == Provider::ZCode {
+          "Connected through ZCode. Send starts a turn when the session is idle."
+        } else {
+          "Connected through agent RPC. Send starts or steers this session."
+        }
+        .into(),
         images_available,
       });
     }
     self
       .runtimes
-      .activation_ready(target.provider().map_err(DeliveryError::not_sent)?, &target.cwd)
+      .activation_ready(provider, &target.cwd)
       .await
       .map_err(DeliveryError::not_sent)?;
     Ok(input::InputCapability {
@@ -66,13 +71,14 @@ impl SessionSupervisor {
         "This RPC runtime cannot atomically apply a draft model on Send",
       ));
     }
+    let provider = target.provider().map_err(DeliveryError::not_sent)?;
     let binding = if self.runtimes.binding(&target.session_key).is_some() {
       self
         .runtimes
         .ensure_session(
           &request.request_id,
           &target.session_key,
-          target.provider().map_err(DeliveryError::not_sent)?,
+          provider,
           &target.input.session_id,
           &target.cwd,
         )
@@ -111,7 +117,7 @@ impl SessionSupervisor {
             images,
             ..Default::default()
           },
-          delivery: DeliveryMode::StartOrSteer,
+          delivery: rpc_message_delivery(provider),
         },
       )
       .await

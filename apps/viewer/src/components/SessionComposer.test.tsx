@@ -80,6 +80,20 @@ afterEach(() => {
 });
 
 describe("SessionComposer", () => {
+  it("identifies ZCode while resuming its first RPC message", async () => {
+    vi.mocked(getSessionInputStatus).mockResolvedValue({ ...RESUMABLE, message: "ZCode will resume on Send." });
+    const pending = deferred<SubmitSessionInputResponse>();
+    vi.mocked(submitSessionInput).mockReturnValue(pending.promise);
+    render(<SessionComposer session={{ ...SESSION, provider: "zcode" }} />);
+    await ready();
+    draft("Resume this task");
+    send();
+    expect(screen.getByRole("button", { name: "Resuming ZCode…" })).toBeDisabled();
+    expect(screen.getByText("Resuming ZCode and sending your message…")).toBeVisible();
+    const request = vi.mocked(submitSessionInput).mock.calls[0][0];
+    await act(async () => pending.resolve({ request_id: request.request_id, status: "accepted", message: "Message sent." }));
+  });
+
   it("edits saved owned Pi history and resumes through one Send request", async () => {
     vi.mocked(getSessionInputStatus).mockResolvedValue(RESUMABLE);
     const pending = deferred<SubmitSessionInputResponse>();
