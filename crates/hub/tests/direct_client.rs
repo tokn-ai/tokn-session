@@ -9,7 +9,9 @@ use axum::{
   routing::{get, post},
 };
 use futures_util::StreamExt;
+use rand::{RngCore, rngs::OsRng};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::{
   convert::Infallible,
   path::Path,
@@ -22,12 +24,12 @@ use std::{
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tokn_hub_client_core::{
-  discovery::DiscoveryGroup,
   pairing::TotpSecret,
   secure::{HostAuthOperation, InnerMessage, NoiseIdentity, NoiseResponder},
 };
 use tokn_hub_remote::{RemoteManager, ResolvedMachine, SavedHost};
 use tokn_session_hub::{
+  account_host,
   connector::{self, ConnectorConfig, PairedHostConfig},
   onboarding::{self, HostProfile},
   protocol,
@@ -48,6 +50,7 @@ struct Harness {
   event_attempts: Arc<AtomicUsize>,
   pairing_directory: PairingDirectory,
   hub_state: HubState,
+  account_token: String,
 }
 
 #[derive(Clone)]
@@ -77,47 +80,30 @@ impl Drop for Harness {
   }
 }
 
-fn restore_legacy_registration(
-  database: &Path,
-  host_id: &str,
-  config: &ConnectorConfig,
-  group: Option<&DiscoveryGroup>,
-) {
-  connector::initialize_identity(&config.key_file).unwrap();
-  let key: serde_json::Value = serde_json::from_slice(&std::fs::read(&config.key_file).unwrap()).unwrap();
-  let secret = protocol::decode(key["secret_key"].as_str().unwrap(), 32)
-    .unwrap()
-    .try_into()
-    .unwrap();
-  let public_key = protocol::encode(
-    &ed25519_dalek::SigningKey::from_bytes(&secret)
-      .verifying_key()
-      .to_bytes(),
-  );
-  // Model the state of a Hub upgraded after this machine was enrolled.
+fn seed_account(database: &Path, username: &str) -> String {
+  let user_id = uuid::Uuid::new_v4().to_string();
+  let mut secret = [0; 32];
+  OsRng.fill_bytes(&mut secret);
+  let token = format!("tkna_{}", protocol::encode(&secret));
+  let token_hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+  let expires_at = i64::try_from(tokn_session_hub::secure_client::unix_time().unwrap()).unwrap() + 3600;
   let mut connection = rusqlite::Connection::open(database).unwrap();
   let transaction = connection.transaction().unwrap();
   transaction
     .execute(
-      "INSERT INTO encrypted_hosts (host_id, public_key) VALUES (?1, ?2)",
-      (host_id, &public_key),
+      "INSERT INTO hub_accounts (user_id, username, email) VALUES (?1, ?2, ?3)",
+      (&user_id, username, format!("{username}@example.test")),
     )
     .unwrap();
   transaction
     .execute(
-      "INSERT INTO hosts (host_id, name, public_key, access) VALUES (?1, ?2, ?3, 'view')",
-      (host_id, &config.name, &public_key),
+      "INSERT INTO hub_account_credentials (credential_id, token_hash, user_id, kind, scopes, expires_at)
+       VALUES (?1, ?2, ?3, 'cli', 3, ?4)",
+      (uuid::Uuid::new_v4().to_string(), &token_hash, &user_id, expires_at),
     )
     .unwrap();
-  if let Some(group) = group {
-    transaction
-      .execute(
-        "INSERT INTO host_discovery (host_id, namespace, secret_digest) VALUES (?1, ?2, ?3)",
-        (host_id, &group.namespace, &group.secret_digest),
-      )
-      .unwrap();
-  }
   transaction.commit().unwrap();
+  token
 }
 
 impl Harness {
@@ -125,9 +111,6 @@ impl Harness {
     Self::start_with_event_failures(0).await
   }
   async fn start_with_event_failures(event_failures: usize) -> Self {
-    Self::start_with_options(event_failures, None).await
-  }
-  async fn start_with_options(event_failures: usize, namespace: Option<&str>) -> Self {
     let directory = tempfile::tempdir().unwrap();
     let event_attempts = Arc::new(AtomicUsize::new(0));
     let attempts = event_attempts.clone();
@@ -201,7 +184,7 @@ impl Harness {
       allow_control: false,
       insecure_loopback: true,
       ice_servers: Vec::new(),
-      discovery_namespace: namespace.map(str::to_owned),
+      discovery_namespace: None,
       passkey_origin: Some(hub_url.clone()),
     }
     .save(&host_dir.join("host.json"))
@@ -222,8 +205,13 @@ impl Harness {
         state_file: host_dir.join("host-access.json"),
       }),
     };
-    let group = namespace.map(|namespace| secret.discovery_group(&hub_url, namespace).unwrap());
-    restore_legacy_registration(&database, &host_id, &config, group.as_ref());
+    let account_token = seed_account(&database, "alice");
+    assert_eq!(
+      account_host::claim(&config, "workstation", &account_token)
+        .await
+        .unwrap(),
+      "alice:workstation"
+    );
     let stop = CancellationToken::new();
     let connector_stop = stop.clone();
     let connector_task = tokio::spawn(async move {
@@ -247,19 +235,20 @@ impl Harness {
       event_attempts,
       pairing_directory,
       hub_state: state,
+      account_token,
     }
   }
   fn manager(&self, name: &str) -> RemoteManager {
     RemoteManager::new(self.directory.path().join(name))
   }
 
-  async fn add_discovery_host(&mut self, name: &str, shared_seed: bool) -> (String, String, TotpSecret) {
+  async fn add_discovery_host(&mut self, name: &str, same_account: bool) -> (String, String, TotpSecret) {
     let directory = self.directory.path().join(name);
     std::fs::create_dir(&directory).unwrap();
-    let secret = if shared_seed {
-      TotpSecret::from_base32(&self.secret.to_base32()).unwrap()
-    } else {
+    let secret = if same_account {
       TotpSecret::generate()
+    } else {
+      TotpSecret::from_base32(&self.secret.to_base32()).unwrap()
     };
     let original = HostProfile::load(&self.directory.path().join("host/host.json"))
       .unwrap()
@@ -291,15 +280,15 @@ impl Harness {
         state_file: directory.join("host-access.json"),
       }),
     };
-    let group = original
-      .discovery_namespace
-      .as_deref()
-      .map(|namespace| secret.discovery_group(&self.hub_url, namespace).unwrap());
-    restore_legacy_registration(
-      &self.directory.path().join("hub.sqlite"),
-      &host_id,
-      &config,
-      group.as_ref(),
+    let account_token = if same_account {
+      self.account_token.clone()
+    } else {
+      seed_account(&self.directory.path().join("hub.sqlite"), "bob")
+    };
+    let account = if same_account { "alice" } else { "bob" };
+    assert_eq!(
+      account_host::claim(&config, name, &account_token).await.unwrap(),
+      format!("{account}:{name}")
     );
     let stop = self.stop.clone();
     self.tasks.push(tokio::spawn(async move {
@@ -317,8 +306,8 @@ impl Harness {
 }
 
 #[tokio::test]
-async fn discovering_shared_seed_hosts_never_pairs_an_additional_machine() {
-  let mut harness = Harness::start_with_options(0, Some("personal")).await;
+async fn discovering_claimed_account_hosts_never_pairs_an_additional_machine() {
+  let mut harness = Harness::start().await;
   let (second_id, second_key, second_secret) = harness.add_discovery_host("second", true).await;
   let (other_id, _, _) = harness.add_discovery_host("other", false).await;
   let manager = harness.manager("app");
@@ -342,7 +331,12 @@ async fn discovering_shared_seed_hosts_never_pairs_an_additional_machine() {
   let result = manager.discover(&harness.hub_url, &group).await.unwrap();
   assert_eq!(result.machines.len(), 2);
   assert!(result.machines.iter().all(|machine| machine.online));
-  assert!(result.machines.iter().any(|machine| machine.host_id == second_id));
+  assert!(
+    result
+      .machines
+      .iter()
+      .any(|machine| machine.host_id == second_id && machine.machine_address.as_deref() == Some("alice:second"))
+  );
   assert!(!result.machines.iter().any(|machine| machine.host_id == other_id));
   assert_eq!(manager.status(&harness.hub_url).await.unwrap().hosts.len(), 1);
   assert!(

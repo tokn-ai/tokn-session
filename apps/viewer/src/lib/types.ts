@@ -1049,7 +1049,6 @@ export interface BackgroundServiceStatus {
   error: string | null;
 }
 export interface LocalHostStatus {
-  discovery_namespace?: string | null;
   machine_address?: string | null;
   background_services?: { api: BackgroundServiceStatus; connector: BackgroundServiceStatus };
   external_remove_supported?: boolean;

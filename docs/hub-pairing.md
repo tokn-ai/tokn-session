@@ -116,7 +116,7 @@ normal authorization.
 
 ## Host from the desktop app
 
-On a new host, sign in and use `tokn-session-hub connect --machine workstation
+On a host without an account address, sign in and use `tokn-session-hub connect --machine workstation
 --register-only` with the selected Hub while desktop hosting is stopped.
 Under **Machines → This machine → Host this computer**, select the registered
 Hub, choose whether to allow remote agent input, and click **Start hosting**.
@@ -150,7 +150,7 @@ The app and CLI share `~/.tokn/sessions/hub` configuration, keys, and paired-dev
 An existing online connector or an ownership lock held by another updated
 process, or a loaded background API, blocks app hosting with a clear error.
 The app only stops verified services when explicitly requested in the dialog. A saved host needs a reachable saved Hub
-for the legacy-connector check before starting. Stop your background hosting services
+to check for an already connected host before starting. Stop your background hosting services
 first if you want the app to own hosting. The CLI's saved viewer URL remains
 intact; the app uses a separate ephemeral API port and token with its existing
 local reader and event stream.
@@ -172,18 +172,16 @@ own authenticator seed. The Hub can see group membership, and a client with the
 group reference can request its machine list. Pairing and saved key verification
 happen separately on each host.
 
-Previously configured discovery groups remain usable for existing unclaimed
-hosts. Claiming a host under an account moves it to the account group and
-preserves its UUID, keys, and existing pairings.
-Remove `--namespace` from existing connector launch commands when upgrading.
-The connector reads legacy group information from its saved profile.
+Claim an existing encrypted host under an account before starting it. This uses
+the host's saved UUID and keys, so previously paired clients can reconnect after
+the claim. Account discovery then lists the machine in the username's group.
 
 ## Readable machine addresses
 
 The Hub uses the account username as the namespace. When account `alice` registers
 `macbook`, its address on that Hub is `alice:macbook`. Names use 1–63 lowercase
 ASCII letters or digits with internal hyphens. Connector `--name` sets the
-separate display name. Previously assigned legacy addresses remain usable.
+separate display name.
 
 Addresses stay reserved to the original machine UUID, even after revocation.
 Account registration requires an account credential and proof of the machine
@@ -265,9 +263,8 @@ tokn-session-hub runtime-management --disable
 The setting defaults to disabled and lives in `host-access.json`; `--state-dir`
 selects another host bundle. It also requires `--allow-control` and an active
 paired app or passkey-authenticated browser session. Changing it takes effect
-for subsequent requests without restarting the connector. Browser enrollment,
-session shares, legacy signed grants, and trusted-Hub plaintext forwarding never
-gain runtime administration. Remote clients cannot enable their own access.
+for subsequent requests without restarting the connector. An administrator
+must enable this permission on the hosting computer.
 Update the host connector before enabling this setting; older connectors reject
 the new enabled trust field rather than silently ignoring the permission.
 An administrator can edit executable paths, environment variables, and RPC
@@ -358,8 +355,5 @@ Normal requests use fresh `Noise_IK_25519_ChaChaPoly_BLAKE2s` channels and host-
 authorization. There is no plaintext fallback or automatic request retry. The
 SPAKE2 composition is experimental, unaudited, and not RFC 9382 wire-compatible.
 
-The installed `tokn-session-hub client` helper is optional compatibility. In
-paired mode, it terminates encryption in a local Rust process and serves
-`/connect` with a local bearer link. Existing hosts enrolled with the
-[owner-signed grant workflow](hub-e2ee.md) or `connect --trusted-hub` can
-reconnect with their saved identities.
+The optional `tokn-session-hub client` helper terminates encryption in a local
+Rust process and serves `/connect` with a local bearer link.

@@ -1,6 +1,6 @@
 use super::*;
 use ed25519_dalek::{Signer, SigningKey};
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::{
   MaybeTlsStream, WebSocketStream, connect_async,
   tungstenite::{Message, client::IntoClientRequest},
@@ -82,15 +82,22 @@ async fn presence_tracks_connect_disconnect_and_revocation_without_exposing_iden
     matches!(rejected, protocol::Frame::RegistrationRejected { message } if message == crate::store::ACCOUNT_REQUIRED)
   );
   assert!(state.store.host(FIRST).unwrap().is_none());
-  state
-    .store
-    .register_encrypted_host(crate::store::HostRecord {
-      host_id: FIRST.into(),
-      name: "Workstation".into(),
-      public_key: protocol::encode(SigningKey::from_bytes(&[7; 32]).verifying_key().as_bytes()),
-      access: "view".into(),
-    })
-    .unwrap();
+  let existing = crate::store::HostRecord {
+    host_id: FIRST.into(),
+    name: "Workstation".into(),
+    public_key: protocol::encode(SigningKey::from_bytes(&[7; 32]).verifying_key().as_bytes()),
+    access: "view".into(),
+  };
+  state.store.register_encrypted_host(existing.clone()).unwrap();
+  let (_, rejected) = registration_socket(&hub_url, Some("0.2.0-rc.1")).await;
+  assert!(
+    matches!(rejected, protocol::Frame::RegistrationRejected { message } if message == crate::store::ACCOUNT_REQUIRED)
+  );
+  assert_eq!(
+    versioned_presence(app.clone(), &payload).await["machines"][0],
+    json!({"host_id":FIRST,"online":false})
+  );
+  state.store.claim_fixture_host(existing);
   let (mut socket, ready) = registration_socket(&hub_url, Some("0.2.0-rc.1")).await;
   assert!(matches!(ready, protocol::Frame::Ready { .. }));
   assert!(state.tunnels.online(FIRST));

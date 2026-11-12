@@ -46,7 +46,6 @@ pub struct HostStatus {
   pub phase: HostPhase,
   pub hub_url: String,
   pub name: String,
-  pub discovery_namespace: Option<String>,
   pub machine_address: Option<String>,
   pub allow_control: bool,
   pub machine_reference: Option<String>,
@@ -61,7 +60,6 @@ impl Default for HostStatus {
       phase: HostPhase::Stopped,
       hub_url: String::new(),
       name: "This computer".into(),
-      discovery_namespace: None,
       machine_address: None,
       allow_control: false,
       machine_reference: None,
@@ -200,12 +198,15 @@ impl LocalHost {
       return Err("Stop app hosting before changing its settings".into());
     }
     let configuration = request.clone();
+    let hub = url::Url::parse(&request.hub_url).map_err(|_| "Enter a valid HTTPS Hub address")?;
     let state_dir = self.storage_path(true).await?;
     let path = state_dir.clone();
-    let (lease, previous) = tokio::task::spawn_blocking(move || {
+    let requested_hub = hub.clone();
+    let (lease, previous, machine_address) = tokio::task::spawn_blocking(move || {
       let lease = HostLease::acquire(&path.join("host-enrollment.key"))?;
       let previous = HostProfile::load(&path.join("host.json"))?;
-      Ok::<_, String>((lease, previous))
+      let machine_address = host_setup::require_account_assignment(&path, previous.as_ref(), Some(&requested_hub))?;
+      Ok::<_, String>((lease, previous, machine_address))
     })
     .await
     .map_err(|_| "Host ownership task failed")??;
@@ -230,7 +231,7 @@ impl LocalHost {
     let config_token = token.clone();
     let prepared = tokio::task::spawn_blocking(move || {
       host_setup::prepare_host(HostOptions {
-        hub: Some(url::Url::parse(&request.hub_url).map_err(|_| "Enter a valid HTTPS Hub address")?),
+        hub: Some(hub),
         name: Some(request.name),
         viewer_url: None,
         passkey_origin: None,
@@ -255,8 +256,7 @@ impl LocalHost {
       phase: HostPhase::Connecting,
       hub_url: config.hub_url.origin().ascii_serialization(),
       name: config.name.clone(),
-      discovery_namespace: prepared.discovery_namespace,
-      machine_address: prepared.machine_address,
+      machine_address: Some(machine_address),
       allow_control: config.allow_control,
       machine_reference: Some(prepared.reference),
       error: None,
@@ -646,7 +646,9 @@ async fn detected_status(path: PathBuf) -> Result<HostStatus, String> {
     status.phase = HostPhase::External;
   } else if status.background_services.api.loaded {
     status.phase = HostPhase::Background;
-  } else if let Some(profile) = &profile {
+  } else if status.machine_address.is_some()
+    && let Some(profile) = &profile
+  {
     match host_setup::existing_host_online(profile).await {
       Ok(true) => status.phase = HostPhase::External,
       Ok(false) => {}
@@ -684,15 +686,21 @@ fn profile_status(path: &std::path::Path, profile: Option<&HostProfile>) -> Resu
   let Some(profile) = profile else {
     return Ok(HostStatus::default());
   };
-  let identity = NoiseIdentity::load(&path.join("host-noise.key"))?;
+  let machine_address = tokn_session_hub::account_host::saved_address(path, &profile.hub_url, &profile.host_id)?;
+  let machine_reference = machine_address
+    .as_ref()
+    .map(|_| {
+      let identity = NoiseIdentity::load(&path.join("host-noise.key"))?;
+      Ok::<_, String>(format!("{}@{}", profile.host_id, identity.public_key()))
+    })
+    .transpose()?;
   Ok(HostStatus {
     phase: HostPhase::Stopped,
     hub_url: profile.hub_url.clone(),
     name: profile.name.clone(),
-    discovery_namespace: profile.discovery_namespace.clone(),
-    machine_address: tokn_session_hub::account_host::saved_address(path, &profile.hub_url, &profile.host_id)?,
+    machine_address,
     allow_control: profile.allow_control,
-    machine_reference: Some(format!("{}@{}", profile.host_id, identity.public_key())),
+    machine_reference,
     error: None,
     external_stop_supported: false,
     external_remove_supported: false,
@@ -700,18 +708,12 @@ fn profile_status(path: &std::path::Path, profile: Option<&HostProfile>) -> Resu
   })
 }
 fn pairing(path: &std::path::Path) -> Result<HostPairing, String> {
-  let profile = HostProfile::load(&path.join("host.json"))?.ok_or("Start hosting to set up this machine first")?;
+  let profile = HostProfile::load(&path.join("host.json"))?.ok_or(host_setup::ACCOUNT_SETUP_REQUIRED)?;
+  let discovery_group =
+    tokn_session_hub::account_host::saved_discovery_group(path, &profile.hub_url, &profile.host_id)?
+      .ok_or(host_setup::ACCOUNT_SETUP_REQUIRED)?;
   let identity = NoiseIdentity::load(&path.join("host-noise.key"))?;
   let secret = tokn_session_hub::onboarding::read_totp_secret(&path.join("host-access.json"))?;
-  let discovery_group =
-    match tokn_session_hub::account_host::saved_discovery_group(path, &profile.hub_url, &profile.host_id)? {
-      Some(group) => Some(group),
-      None => profile
-        .discovery_namespace
-        .as_deref()
-        .map(|namespace| secret.discovery_group(&profile.hub_url, namespace))
-        .transpose()?,
-    };
   let setup_uri = secret.provisioning_uri(&profile.name)?;
   let svg = qrcode::QrCode::new(setup_uri.as_bytes())
     .map_err(|_| "Could not render authenticator QR")?
@@ -721,7 +723,7 @@ fn pairing(path: &std::path::Path) -> Result<HostPairing, String> {
   let now = tokn_session_hub::secure_client::unix_time()?;
   Ok(HostPairing {
     machine_reference: format!("{}@{}", profile.host_id, identity.public_key()),
-    discovery_group,
+    discovery_group: Some(discovery_group),
     qr_data_url: format!("data:image/svg+xml;base64,{}", STANDARD.encode(svg)),
     setup_uri,
     current_code: secret.code_at(now),
@@ -765,11 +767,30 @@ mod tests {
     })
     .unwrap()
   }
+
+  fn save_account_assignment(path: &std::path::Path, profile: &HostProfile) {
+    let hub_origin = tokn_session_hub::onboarding::canonical_hub(&url::Url::parse(&profile.hub_url).unwrap()).unwrap();
+    tokn_session_hub::onboarding::save_configuration(
+      &path.join("host-account.json"),
+      &serde_json::json!({
+        "hub_origin": hub_origin,
+        "claim": {
+          "host_id": profile.host_id,
+          "machine_address": "alice:workstation",
+          "group": {"namespace": "alice", "secret_digest": "A".repeat(43)}
+        }
+      }),
+    )
+    .unwrap();
+  }
+
   #[test]
   fn pairing_display_reuses_identity_and_sha256_secret_without_changing_trust() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path();
     let prepared = setup(path);
+    let profile = HostProfile::load(&path.join("host.json")).unwrap().unwrap();
+    save_account_assignment(path, &profile);
     let state = path.join("host-access.json");
     let device = NoiseIdentity::generate().unwrap().public_key();
     tokn_session_hub::onboarding::authorize_device(&state, &device, 10, 300).unwrap();
@@ -800,7 +821,7 @@ mod tests {
   }
 
   #[test]
-  fn pairing_display_uses_the_saved_discovery_namespace_and_seed() {
+  fn legacy_profile_cannot_show_pairing_until_the_machine_is_registered() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path();
     setup(path);
@@ -808,15 +829,10 @@ mod tests {
     let mut profile = HostProfile::load(&profile_file).unwrap().unwrap();
     profile.discovery_namespace = Some("personal".into());
     profile.save(&profile_file).unwrap();
-    let secret = tokn_session_hub::onboarding::read_totp_secret(&path.join("host-access.json")).unwrap();
-    assert_eq!(
-      pairing(path).unwrap().discovery_group,
-      Some(secret.discovery_group(&profile.hub_url, "personal").unwrap())
-    );
-    assert_eq!(
-      saved_status(path).unwrap().discovery_namespace.as_deref(),
-      Some("personal")
-    );
+    assert_eq!(pairing(path).err().unwrap(), host_setup::ACCOUNT_SETUP_REQUIRED);
+    let status = saved_status(path).unwrap();
+    assert!(status.machine_address.is_none());
+    assert!(status.machine_reference.is_none());
   }
 
   #[test]
@@ -832,14 +848,7 @@ mod tests {
       namespace: "alice".into(),
       secret_digest: "A".repeat(43),
     };
-    tokn_session_hub::onboarding::save_configuration(
-      &path.join("host-account.json"),
-      &serde_json::json!({
-        "hub_origin": profile.hub_url,
-        "claim": { "host_id": profile.host_id, "machine_address": "alice:workstation", "group": group },
-      }),
-    )
-    .unwrap();
+    save_account_assignment(path, &profile);
     let display = pairing(path).unwrap();
     assert_eq!(display.discovery_group, Some(group));
     assert_eq!(display.machine_reference, prepared.reference);
@@ -883,7 +892,7 @@ mod tests {
     assert_eq!(std::fs::read(&path).unwrap(), before);
   }
   #[tokio::test]
-  async fn legacy_hub_status_distinguishes_external_offline_and_unavailable() {
+  async fn only_claimed_hosts_probe_the_secure_route_for_presence() {
     use axum::{Router, extract::WebSocketUpgrade, http::StatusCode, response::IntoResponse, routing::get};
     use std::sync::atomic::AtomicU8;
     let directory = tempfile::tempdir().unwrap();
@@ -916,10 +925,13 @@ mod tests {
     let task = tokio::spawn(async move {
       axum::serve(listener, router).await.unwrap();
     });
-    assert!(matches!(
-      detected_status(directory.path().to_owned()).await.unwrap().phase,
-      HostPhase::External
-    ));
+    let unclaimed = detected_status(directory.path().to_owned()).await.unwrap();
+    assert!(matches!(unclaimed.phase, HostPhase::Stopped));
+    assert!(unclaimed.machine_address.is_none());
+    save_account_assignment(directory.path(), &profile);
+    let claimed = detected_status(directory.path().to_owned()).await.unwrap();
+    assert_eq!(claimed.machine_address.as_deref(), Some("alice:workstation"));
+    assert!(matches!(claimed.phase, HostPhase::External));
     mode.store(0, Ordering::Release);
     assert!(matches!(
       detected_status(directory.path().to_owned()).await.unwrap().phase,

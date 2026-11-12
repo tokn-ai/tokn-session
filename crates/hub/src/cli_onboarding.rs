@@ -24,9 +24,6 @@ pub fn prepare_host(options: HostOptions) -> Result<ConnectorConfig, String> {
   if let Some(address) = &prepared.machine_address {
     eprintln!("Machine address: {address}");
   }
-  if let Some(namespace) = &prepared.discovery_namespace {
-    eprintln!("Discovery namespace: {namespace}");
-  }
   if let Some(origin) = &prepared.passkey_origin {
     eprintln!("Host passkey browser origin: {origin}");
   }

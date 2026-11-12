@@ -1,15 +1,12 @@
-import { StrictMode, type ReactNode } from "react";
+import { StrictMode } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { HubConnection } from "./HubConnection";
 import { HubClient } from "../lib/hub";
-import { RemoteClient } from "../lib/transport";
-
-vi.mock("../pages/ViewerPage", () => ({ ViewerPage: ({ connection }: { connection?: ReactNode }) => <><div>Remote sessions</div>{connection}</> }));
 
 const hosts = [
-  { host_id: "host/a", name: "Workstation", online: true, access: "control" },
-  { host_id: "host-b", name: "Laptop", online: false, access: "view" },
+  { host_id: "host/a", machine_address: "alice:workstation", name: "Workstation", online: true, access: "control" },
+  { host_id: "host-b", machine_address: "alice:laptop", name: "Laptop", online: false, access: "view" },
 ];
 beforeEach(() => {
   vi.spyOn(HubClient.prototype, "authenticate").mockImplementation(async () => new HubClient("owner-token"));
@@ -24,51 +21,29 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); });
 
 async function signIn() {
   fireEvent.click(screen.getByRole("button", { name: "Sign in with passkey" }));
-  await screen.findByRole("button", { name: "Open Workstation" });
+  await screen.findByRole("heading", { name: "alice:workstation" });
 }
 
 it("sets up the owner with the fragment bootstrap credential and presents online hosts", async () => {
   render(<StrictMode><HubConnection initial_status={{ configured: false, authenticated: false }} bootstrap_token="setup-secret" /></StrictMode>);
   expect(screen.getByLabelText("Setup token")).toHaveValue("setup-secret");
   fireEvent.click(screen.getByRole("button", { name: "Create passkey" }));
-  expect(await screen.findByRole("button", { name: "Open Workstation" })).toBeEnabled();
+  expect(await screen.findByRole("heading", { name: "alice:workstation" })).toBeInTheDocument();
   expect(HubClient.prototype.authenticate).toHaveBeenCalledWith(true, "setup-secret");
-  expect(screen.getByRole("button", { name: "Open Laptop" })).toBeDisabled();
+  expect(screen.getByRole("heading", { name: "alice:laptop" })).toBeInTheDocument();
+  expect(screen.getByText("Online")).toBeInTheDocument();
+  expect(screen.getByText("Offline")).toBeInTheDocument();
   expect(screen.getByText(/View only/)).toBeInTheDocument();
   expect(screen.queryByLabelText("Setup token")).not.toBeInTheDocument();
   expect(fetch).toHaveBeenCalledWith(`${window.location.origin}/hub/v1/hosts`, expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer owner-token" }) }));
 });
 
-it("routes selected hosts through Hub, closes old sessions on switching, and signs out", async () => {
-  const remote = new RemoteClient(`${window.location.origin}/hosts/host%2Fa`, "owner-token");
-  const close = vi.spyOn(remote, "close");
-  vi.spyOn(RemoteClient, "connect").mockResolvedValue(remote);
+it("signs out and revokes the administrator session", async () => {
   render(<HubConnection initial_status={{ configured: true, authenticated: false }} />);
   await signIn();
-  fireEvent.click(screen.getByRole("button", { name: "Open Workstation" }));
-  expect(await screen.findByText("Remote sessions")).toBeInTheDocument();
-  expect(RemoteClient.connect).toHaveBeenCalledWith(`${window.location.origin}/hosts/host%2Fa`, "owner-token", expect.any(AbortSignal));
-  fireEvent.click(screen.getByRole("button", { name: /connection settings/i }));
-  fireEvent.click(screen.getByRole("button", { name: "Change host" }));
-  expect(close).toHaveBeenCalledOnce();
-  expect(screen.queryByText("Remote sessions")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
   expect(screen.getByRole("button", { name: "Sign in with passkey" })).toBeInTheDocument();
   expect(fetch).toHaveBeenCalledWith(`${window.location.origin}/hub/v1/auth/logout`, expect.objectContaining({ method: "POST", headers: expect.objectContaining({ Authorization: "Bearer owner-token" }) }));
-});
-
-it("directs encrypted hosts to machine access without opening a plaintext viewer", async () => {
-  const original = vi.mocked(fetch).getMockImplementation()!;
-  vi.mocked(fetch).mockImplementation(async (input, init) => String(input).endsWith("/hosts")
-    ? Response.json({ hosts: [{ host_id: "protected", name: "Protected host", online: true, access: "view", secure_only: true }] })
-    : original(input, init));
-  vi.spyOn(RemoteClient, "connect");
-  render(<HubConnection initial_status={{ configured: true, authenticated: false }} />);
-  fireEvent.click(screen.getByRole("button", { name: "Sign in with passkey" }));
-  expect(await screen.findByText(/End-to-end encrypted/)).toBeInTheDocument();
-  expect(screen.getByText(/Open your machines to pair/)).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Open Protected host" })).not.toBeInTheDocument();
-  expect(RemoteClient.connect).not.toHaveBeenCalled();
 });
 
 it("requires confirmation before revocation", async () => {
@@ -100,35 +75,4 @@ it("adds another passkey using the current session and confirms the new credenti
   expect(await screen.findByText("Passkey added. You can use it the next time you sign in.")).toBeInTheDocument();
   expect(HubClient.prototype.authenticate).toHaveBeenLastCalledWith(true);
   await waitFor(() => expect(fetch).toHaveBeenCalledWith(`${window.location.origin}/hub/v1/hosts`, expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer replacement-token" }) })));
-});
-
-it("cancels an unfinished host connection when signing out", async () => {
-  let resolve_connection!: (client: RemoteClient) => void;
-  vi.spyOn(RemoteClient, "connect").mockImplementation(() => new Promise((resolve) => { resolve_connection = resolve; }));
-  render(<HubConnection initial_status={{ configured: true, authenticated: false }} />);
-  await signIn();
-  fireEvent.click(screen.getByRole("button", { name: "Open Workstation" }));
-  const signal = vi.mocked(RemoteClient.connect).mock.calls[0][2]!;
-  fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
-  expect(signal.aborted).toBe(true);
-  const stale = new RemoteClient(`${window.location.origin}/hosts/host%2Fa`, "owner-token");
-  const close = vi.spyOn(stale, "close");
-  resolve_connection(stale);
-  await waitFor(() => expect(close).toHaveBeenCalledOnce());
-  expect(screen.queryByText("Remote sessions")).not.toBeInTheDocument();
-});
-
-it("displays the Hub-issued machine address in the host catalog", async () => {
-  const original = vi.mocked(fetch).getMockImplementation()!;
-  const host_id = "550e8400-e29b-41d4-a716-446655440000";
-  vi.mocked(fetch).mockImplementation(async (input, init) => {
-    if (String(input).endsWith("/hosts")) return Response.json({ hosts: [
-      ...hosts, { host_id, name: "Protected host", online: false, access: "view", secure_only: true, machine_address: "alice:laptop" },
-    ] });
-    return original(input, init);
-  });
-  render(<HubConnection initial_status={{ configured: true, authenticated: false }} />);
-  await signIn();
-  expect(screen.getByRole("heading", { name: "alice:laptop" })).toBeInTheDocument();
-  expect(screen.getByText("Protected host")).toBeInTheDocument();
 });

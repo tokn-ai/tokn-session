@@ -32,7 +32,7 @@ function AccountRegistration({ hub_origin, stop_first, initial_setup, busy, on_r
   return <details className="host-registration" open={initial_setup || undefined}>
     <summary>Register this computer with a Hub account</summary>
     <div>
-      <p>Register with your Hub account to give this computer an address under your username.</p>
+      <p>Sign in, then register this computer to give it a machine address and enable hosting.</p>
       {stop_first && <p>Stop hosting on this computer before running the registration command.</p>}
       <ol>
         <li><p>Sign in to your Hub account in the terminal.</p><code>tokn-session-hub auth login --hub {hub_argument}</code></li>
@@ -105,7 +105,7 @@ export function HostQuickControl({ on_open_settings, return_focus }: { on_open_s
       <p role="status">{host.status ? hostLabels[host.status.phase] : "Loading hosting status…"}</p></div>
       <button type="button" className="host-switch" role="switch" aria-label="Host this computer" aria-checked={hosting || external}
         disabled={host.busy || !host.status || external || background || unavailable} onClick={() => {
-          if (!hosting && (!host.status?.hub_url || !host.status.name)) open();
+          if (!hosting && (!host.status?.machine_address || !host.status.name)) open();
           else void host.change();
         }}><span><span /></span></button>
     </div>
@@ -120,52 +120,56 @@ export function HostDialog() {
   const id = useId();
   const [draft, setDraft] = useState<StartLocalHostRequest>();
   const [show_pairing, setShowPairing] = useState(false);
-  const settings = draft ?? host.status ?? { hub_url: "", name: "This computer", allow_control: false };
+  const status = host.status;
+  const hosting = isHosting(status);
+  const external = status?.phase === "external";
+  const background = status?.phase === "background";
+  const unavailable = status?.phase === "unavailable";
+  const showing_saved_host = hosting || external || background;
+  const settings = (showing_saved_host ? status : draft ?? status) ?? { hub_url: "", name: "This computer", allow_control: false };
   const { hub_url, name, allow_control } = settings;
   const hub_origin = validHubOrigin(hub_url);
-  const saved_origin = host.status && validHubOrigin(host.status.hub_url);
-  const machine_address = hub_origin && hub_origin === saved_origin ? host.status?.machine_address : undefined;
+  const saved_origin = status && validHubOrigin(status.hub_url);
+  const machine_address = hub_origin && hub_origin === saved_origin ? status?.machine_address : undefined;
+  const can_start = Boolean(hub_origin && machine_address && name.trim()) && !host.busy && !unavailable;
   useEffect(() => {
     const opener = host.return_focus ?? document.activeElement;
     dialog.current?.showModal();
     return () => { if (opener instanceof HTMLElement && opener.isConnected) opener.focus(); };
   }, []);
-  const hosting = isHosting(host.status);
-  const external = host.status?.phase === "external";
-  const background = host.status?.phase === "background";
-  const unavailable = host.status?.phase === "unavailable";
   return createPortal(<dialog ref={dialog} className="host-dialog" aria-labelledby={`${id}-title`}
     onCancel={(event) => { event.preventDefault(); host.close(); }}>
     <header><div><h2 id={`${id}-title`}>Host this computer</h2><p>{external ? "This computer is hosted by an external connector." : "Share this computer’s sessions while the app is open."}</p></div>
       <button type="button" className="icon-button" aria-label="Close hosting settings" onClick={host.close}><CloseIcon /></button></header>
     <div className="host-dialog__body">
       {host.status && <div className="host-status" data-phase={host.status.phase}><span className="connection-dot" aria-hidden="true" /><span role="status">{hostLabels[host.status.phase]}</span></div>}
-      {hosting || external || background ? <>
+      {showing_saved_host ? <>
         <dl className="host-summary"><div><dt>Computer</dt><dd>{host.status?.name}</dd></div>
           <div><dt>Hub</dt><dd>{host.status?.hub_url}</dd></div>
-          {machine_address ? <div><dt>Machine address</dt><dd>{machine_address}</dd></div>
-            : host.status?.discovery_namespace && <div><dt>Legacy discovery group</dt><dd>{host.status.discovery_namespace}</dd></div>}
+          {machine_address && <div><dt>Machine address</dt><dd>{machine_address}</dd></div>}
           <div><dt>Access</dt><dd>{host.status?.allow_control ? "Viewing and agent input" : "Viewing only"}</dd></div></dl>
         {!external && !background && <button type="button" disabled={host.busy || unavailable} onClick={() => { setShowPairing(false); void host.change(); }}>{host.busy ? "Stopping…" : "Stop hosting"}</button>}
         {hosting && <p className="host-hint">Stop hosting to change these settings.</p>}
       </> : <form onSubmit={(event) => {
-        event.preventDefault(); setShowPairing(false);
+        event.preventDefault();
+        if (!can_start) return;
+        setShowPairing(false);
         void host.change({ hub_url, name, allow_control });
       }}>
         <label htmlFor={`${id}-hub`}>Hosting Hub address</label><input id={`${id}-hub`} type="url" required placeholder="https://hub.example.com" value={hub_url} disabled={host.busy || unavailable} onChange={(event) => setDraft({ ...settings, hub_url: event.target.value })} />
         <label htmlFor={`${id}-name`}>Host name</label><input id={`${id}-name`} required maxLength={128} value={name} disabled={host.busy || unavailable} onChange={(event) => setDraft({ ...settings, name: event.target.value })} />
         {machine_address && <p className="host-hint">Machine address <strong>{machine_address}</strong></p>}
         <label className="host-control"><input type="checkbox" checked={allow_control} disabled={host.busy || unavailable} onChange={(event) => setDraft({ ...settings, allow_control: event.target.checked })} />Allow remote agent input</label>
-        <button disabled={host.busy || unavailable || !host.status || !hub_url.trim() || !name.trim()}>{host.busy ? "Starting…" : "Start hosting"}</button>
+        <button disabled={!can_start}>{host.busy ? "Starting…" : "Start hosting"}</button>
       </form>}
-      {host.status && !machine_address && <AccountRegistration hub_origin={hub_origin}
-        stop_first={hosting || external || background} initial_setup={!host.status.machine_reference}
+      {status && !machine_address && <AccountRegistration hub_origin={hub_origin}
+        stop_first={showing_saved_host} initial_setup={!showing_saved_host}
         busy={host.busy} on_refresh={host.retry} />}
       <BackgroundHostingControls on_action={() => setShowPairing(false)} />
       {(host.error || host.status?.error) && <p className="hub-error" role="alert">{host.error ?? host.status?.error}</p>}
       {unavailable && <button type="button" disabled={host.busy} onClick={host.retry}>Retry host status</button>}
       {!host.status && (host.error ? <button type="button" onClick={host.retry}>Retry host status</button> : <p role="status">Loading host settings…</p>)}
-      {host.status?.machine_reference && <section className="host-pairing-section">
+      {machine_address && host.status?.machine_reference && <section className="host-pairing-section">
         <button type="button" aria-expanded={show_pairing} disabled={host.busy || unavailable} onClick={() => setShowPairing((value) => !value)}>{show_pairing ? "Hide pairing setup" : "Show pairing setup"}</button>
         {show_pairing && <PairingSetup />}
       </section>}

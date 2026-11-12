@@ -14,11 +14,13 @@ pub(crate) struct AccountMachineClaim {
   pub group: DiscoveryGroup,
 }
 
-#[cfg(test)]
 pub(super) fn is_owned(connection: &Connection, host_id: &str) -> Result<bool, String> {
   connection
     .query_row(
-      "SELECT EXISTS (SELECT 1 FROM account_machines WHERE host_id = ?1)",
+      "SELECT EXISTS (
+         SELECT 1 FROM account_machines m JOIN hub_accounts a ON a.user_id = m.user_id
+         WHERE m.host_id = ?1
+       )",
       [host_id],
       |row| row.get(0),
     )
@@ -192,7 +194,6 @@ mod tests {
       laptop.host_id
     );
     assert_eq!(store.account_machines(&second).unwrap()[0].host_id, other.host_id);
-    assert!(store.create_namespace("alice").is_err());
     store.remove_host(&laptop.host_id).unwrap();
     assert!(store.resolve_machine("alice", "laptop").unwrap().is_none());
     assert_eq!(
@@ -202,29 +203,12 @@ mod tests {
   }
 
   #[test]
-  fn discovery_uses_account_membership_and_preserves_existing_machine_aliases() {
+  fn discovery_lists_only_machines_owned_by_the_requested_account() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path().join("state.sqlite")).unwrap();
     let owner = user(&store, "alice");
     let laptop = host();
-    let legacy = DiscoveryGroup {
-      namespace: "legacy".into(),
-      secret_digest: crate::protocol::encode(&[4; 32]),
-    };
-    store
-      .register_encrypted_host_with_discovery(laptop.clone(), Some(&legacy))
-      .unwrap();
-    let other_legacy = DiscoveryGroup {
-      namespace: "other".into(),
-      secret_digest: crate::protocol::encode(&[5; 32]),
-    };
-    store.register_tunnel_host(laptop.clone(), Some(&other_legacy)).unwrap();
-    assert_eq!(store.discover_machines(&legacy).unwrap().len(), 1);
-    assert!(store.discover_machines(&other_legacy).unwrap().is_empty());
-    store.create_namespace("legacy").unwrap();
-    store.bind_machine("legacy", "laptop", &laptop.host_id).unwrap();
     let assignment = store.claim_account_host(laptop.clone(), &owner, "laptop").unwrap();
-    assert!(store.discover_machines(&legacy).unwrap().is_empty());
     let server = host();
     assert_eq!(
       store
@@ -234,8 +218,8 @@ mod tests {
       assignment.group
     );
     let unrelated = host();
-    store
-      .register_encrypted_host_with_discovery(unrelated, Some(&assignment.group))
+    let other_account = store
+      .claim_account_host(unrelated, &user(&store, "bob"), "unrelated")
       .unwrap();
     let discovered = store.discover_machines(&assignment.group).unwrap();
     assert_eq!(
@@ -249,9 +233,10 @@ mod tests {
         .collect::<Vec<_>>(),
       ["alice:laptop", "alice:server"]
     );
-    assert_eq!(
-      store.resolve_machine("legacy", "laptop").unwrap().unwrap().host_id,
-      laptop.host_id
-    );
+    let wrong_namespace = DiscoveryGroup {
+      namespace: other_account.group.namespace,
+      ..assignment.group
+    };
+    assert!(store.discover_machines(&wrong_namespace).unwrap().is_empty());
   }
 }

@@ -260,23 +260,6 @@ pub async fn run(config: ConnectorConfig, shutdown: CancellationToken) -> Result
   run_owned(config, shutdown, lease, None).await
 }
 
-#[cfg(test)]
-pub(crate) fn remember_legacy_host(store: &crate::store::Store, config: &ConnectorConfig) -> crate::store::HostRecord {
-  let key = load_key(&config.key_file).unwrap();
-  let record = crate::store::HostRecord {
-    host_id: routing_id(config, &key),
-    name: config.name.clone(),
-    public_key: protocol::encode(key.verifying_key().as_bytes()),
-    access: if config.allow_control { "control" } else { "view" }.into(),
-  };
-  if config.paired.is_some() {
-    store.register_encrypted_host(record.clone()).unwrap();
-  } else {
-    store.approve_host(record.clone()).unwrap();
-  }
-  record
-}
-
 /// Setup callers acquire ownership before changing saved configuration.
 pub async fn run_owned(
   config: ConnectorConfig,

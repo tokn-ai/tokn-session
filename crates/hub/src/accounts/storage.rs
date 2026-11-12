@@ -233,8 +233,7 @@ pub(super) fn email_login(
     })?;
     let taken: bool = tx
       .query_row(
-        "SELECT EXISTS (SELECT 1 FROM hub_accounts WHERE username = ?1)
-         OR EXISTS (SELECT 1 FROM namespaces WHERE username = ?1)",
+        "SELECT EXISTS (SELECT 1 FROM hub_accounts WHERE username = ?1)",
         [username],
         |row| row.get(0),
       )

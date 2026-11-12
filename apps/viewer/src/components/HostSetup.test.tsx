@@ -7,7 +7,7 @@ import { HostSetup, HostQuickControl } from "./HostSetup";
 import { getLocalHostPairing, getLocalHostStatus, listenForLocalHostStatus, startLocalHost, stopLocalHost, stopExternalLocalHost, removeExternalLocalHost } from "../lib/tauri";
 import type { LocalHostStatus } from "../lib/types";
 vi.mock("../lib/tauri", () => ({ getLocalHostPairing: vi.fn(), getLocalHostStatus: vi.fn(), listenForLocalHostStatus: vi.fn(), startLocalHost: vi.fn(), stopLocalHost: vi.fn(), stopExternalLocalHost: vi.fn(), removeExternalLocalHost: vi.fn() }));
-const stopped: LocalHostStatus = { phase: "stopped", hub_url: "https://hub.example", name: "Workstation", allow_control: false, machine_reference: "machine@key", error: null };
+const stopped: LocalHostStatus = { phase: "stopped", hub_url: "https://hub.example", name: "Workstation", allow_control: false, machine_reference: "machine@key", machine_address: "alice:workstation", error: null };
 const online: LocalHostStatus = { ...stopped, phase: "online" };
 let status_event: (status: LocalHostStatus) => void;
 let unlisten = vi.fn<() => void>();
@@ -48,24 +48,20 @@ it("loads QR and current code on disclosure and clears them when hidden", async 
   expect(screen.queryByAltText("SHA-256 authenticator setup QR")).not.toBeInTheDocument();
 });
 
-it("reconnects a legacy host without changing its saved discovery group", async () => {
-  vi.mocked(getLocalHostStatus).mockResolvedValue({ ...stopped, discovery_namespace: "personal" });
-  vi.mocked(startLocalHost).mockResolvedValue({ ...online, discovery_namespace: "personal" });
-  render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
-  fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
-  await screen.findByText("Hosting off");
-  expect(screen.queryByLabelText(/discovery namespace/i)).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Start hosting", hidden: true }));
-  await waitFor(() => expect(startLocalHost).toHaveBeenCalledWith({
-    hub_url: stopped.hub_url, name: stopped.name, allow_control: false,
-  }));
-  await screen.findByText("Hosting online");
-  expect(screen.getByText("Legacy discovery group")).toBeInTheDocument();
-  expect(screen.getByText("personal")).toBeInTheDocument();
+it("opens registration and disables hosting and pairing for a saved unclaimed host", async () => {
+  vi.mocked(getLocalHostStatus).mockResolvedValue({ ...stopped, machine_address: null });
+  render(<LocalHostProvider><HostQuickControl on_open_settings={() => {}} /></LocalHostProvider>);
+  const toggle = await screen.findByRole("switch");
+  await waitFor(() => expect(toggle).toBeEnabled());
+  fireEvent.click(toggle);
+  expect(await screen.findByText("Register this computer with a Hub account")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Start hosting", hidden: true })).toBeDisabled();
+  expect(screen.queryByRole("button", { name: "Show pairing setup", hidden: true })).not.toBeInTheDocument();
+  expect(startLocalHost).not.toHaveBeenCalled();
 });
 
 it("shows account registration for the chosen Hub and refreshes its assigned address", async () => {
-  vi.mocked(getLocalHostStatus).mockResolvedValue({ ...stopped, hub_url: "", machine_reference: null });
+  vi.mocked(getLocalHostStatus).mockResolvedValue({ ...stopped, hub_url: "", machine_address: null, machine_reference: null });
   render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
   fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
   await screen.findByText("Register this computer with a Hub account");
@@ -76,12 +72,44 @@ it("shows account registration for the chosen Hub and refreshes its assigned add
   vi.mocked(getLocalHostStatus).mockResolvedValue({ ...stopped, machine_address: "alice:workstation" });
   fireEvent.click(screen.getByRole("button", { name: "Refresh hosting status" }));
   expect(await screen.findByText("alice:workstation")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Start hosting", hidden: true })).toBeEnabled();
   expect(screen.queryByText("Register this computer with a Hub account")).not.toBeInTheDocument();
   fireEvent.change(hub_input, { target: { value: "https://another.example" } });
   expect(screen.queryByText("alice:workstation")).not.toBeInTheDocument();
   expect(screen.getByText("tokn-session-hub auth login --hub https://another.example")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Start hosting", hidden: true })).toBeDisabled();
   expect(startLocalHost).not.toHaveBeenCalled();
 });
+
+it.each(["", "https://hub.example/path", "http://hub.example"])("blocks hosting for an invalid Hub address %j", async (hub_url) => {
+  render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
+  await screen.findByText("Hosting off");
+  const start = screen.getByRole<HTMLButtonElement>("button", { name: "Start hosting", hidden: true });
+  expect(start).toBeEnabled();
+  fireEvent.change(screen.getByLabelText("Hosting Hub address"), { target: { value: hub_url } });
+  expect(start).toBeDisabled();
+  fireEvent.submit(start.form!);
+  expect(startLocalHost).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["online", "Hosting online"],
+  ["external", "Hosting externally"],
+] as const)("shows the saved address when hosting becomes %s during a Hub edit", async (phase, label) => {
+  render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
+  await screen.findByText("Hosting off");
+  fireEvent.change(screen.getByLabelText("Hosting Hub address"), { target: { value: "https://another.example" } });
+  expect(screen.getByText("Register this computer with a Hub account")).toBeInTheDocument();
+  act(() => status_event({ ...online, phase }));
+  expect(await screen.findByText(label)).toBeInTheDocument();
+  expect(screen.getByText(stopped.hub_url)).toBeInTheDocument();
+  expect(screen.getByText("alice:workstation")).toBeInTheDocument();
+  expect(screen.queryByText("Register this computer with a Hub account")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Start hosting", hidden: true })).not.toBeInTheDocument();
+});
+
 it("preserves newer connection events over a late start response", async () => {
   let finish!: (status: LocalHostStatus) => void;
   vi.mocked(startLocalHost).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
@@ -148,7 +176,7 @@ it("shares live status with the quick switch and uses saved settings", async () 
   await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "false"));
 });
 it("opens setup from the switch when configuration is missing", async () => {
-  vi.mocked(getLocalHostStatus).mockResolvedValue({ ...stopped, hub_url: "", machine_reference: null });
+  vi.mocked(getLocalHostStatus).mockResolvedValue({ ...stopped, hub_url: "", machine_address: null, machine_reference: null });
   render(<LocalHostProvider><HostQuickControl on_open_settings={() => {}} /></LocalHostProvider>);
   const toggle = await screen.findByRole("switch");
   await waitFor(() => expect(toggle).toBeEnabled());

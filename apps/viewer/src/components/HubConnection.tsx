@@ -1,8 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { HubClient, HubError, hubErrorMessage, type HubHost, type HubStatus } from "../lib/hub";
-import { RemoteClient, selectMachine, type ConnectionState } from "../lib/transport";
-import { RemoteConnection } from "./RemoteConnection";
-import { ViewerPage } from "../pages/ViewerPage";
 import "./HubAccess.css";
 
 interface HubConnectionProps {
@@ -22,7 +19,6 @@ export function HubConnection({ initial_status, bootstrap_token }: HubConnection
     setNotice(message);
   }
   function disconnected(message?: string) {
-    selectMachine();
     session?.close();
     setSession(undefined);
     setNotice(message);
@@ -90,13 +86,10 @@ function HubHosts({ session, initial_notice, on_authenticated, on_disconnected }
 }) {
   const [hosts, setHosts] = useState<HubHost[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const [active, setActive] = useState<{ host: HubHost; client: RemoteClient }>();
-  const [state, setState] = useState<ConnectionState>("connecting");
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState(initial_notice);
   const [revoke_id, setRevokeId] = useState<string>();
-  const selected = useRef<string>(undefined);
   const refresh = useRef<Promise<void>>(undefined);
   const lifetime_generation = useRef(0);
 
@@ -113,10 +106,6 @@ function HubHosts({ session, initial_notice, on_authenticated, on_disconnected }
       if (session.signal.aborted) return;
       setHosts(catalog.hosts);
       setLoaded(true);
-      if (selected.current && !catalog.hosts.some((host) => host.host_id === selected.current)) {
-        disconnectHost();
-        setNotice("This host’s access was revoked.");
-      }
     }).catch(failure).finally(() => { refresh.current = undefined; });
     return refresh.current;
   }
@@ -133,35 +122,12 @@ function HubHosts({ session, initial_notice, on_authenticated, on_disconnected }
     const timer = window.setInterval(() => { void refreshHosts(); }, 5_000);
     return () => {
       clearInterval(timer);
-      selectMachine();
       // StrictMode replays effects immediately; only a real unmount should
       // retire the user-created session and pending WebAuthn/request work.
       queueMicrotask(() => { if (lifetime_generation.current === generation) session.close(); });
     };
   // Session identity owns the lifetime; the keyed parent remounts on login.
   }, [session]);
-
-  function disconnectHost() {
-    selected.current = undefined;
-    selectMachine();
-    setActive(undefined);
-    setState("connecting");
-  }
-
-  async function connectHost(host: HubHost) {
-    if (host.secure_only) return;
-    setBusy(host.host_id);
-    setError(undefined);
-    selected.current = host.host_id;
-    try {
-      const client = await RemoteClient.connect(`${session.endpoint}/hosts/${encodeURIComponent(host.host_id)}`, session.access_token, session.signal);
-      if (session.signal.aborted || selected.current !== host.host_id) { client.close(); return; }
-      client.setStateListener(setState);
-      selectMachine(client);
-      setActive({ host, client });
-    } catch (error) { failure(error); }
-    finally { if (!session.signal.aborted) setBusy(undefined); }
-  }
 
   async function action(id: string, operation: () => Promise<void>) {
     setBusy(id);
@@ -173,8 +139,7 @@ function HubHosts({ session, initial_notice, on_authenticated, on_disconnected }
   }
 
   async function logout() {
-    // Capture the credential for server revocation, then clear the viewer and
-    // original client immediately, even if the network is unavailable.
+    // Keep a short-lived client to revoke the session after clearing it locally.
     const logout_client = new HubClient(session.access_token, session.endpoint);
     on_disconnected();
     const timer = window.setTimeout(() => logout_client.close(), 5_000);
@@ -182,15 +147,6 @@ function HubHosts({ session, initial_notice, on_authenticated, on_disconnected }
     catch { /* The local session has already ended. */ }
     finally { clearTimeout(timer); logout_client.close(); }
   }
-
-  if (active) return <ViewerPage key={active.host.host_id} remote
-    machine_label={active.host.machine_address ?? active.host.name ?? active.host.host_id}
-    machine_key={`${session.endpoint}/${active.host.host_id}`} connection={
-    <RemoteConnection name={`${active.host.machine_address ?? active.host.name}${active.host.access === "view" ? " · View only" : ""}`} hub_url={session.endpoint} state={state}>
-      <button onClick={disconnectHost}>Change host</button>
-      <button onClick={() => { void logout(); }}>Sign out</button>
-    </RemoteConnection>
-  } />;
 
   return <main className="hub-home">
     <div className="hub-content">
@@ -209,14 +165,16 @@ function HubHosts({ session, initial_notice, on_authenticated, on_disconnected }
       {error && <p className="hub-error" role="alert">{error}</p>}
       {notice && <p role="status">{notice}</p>}
       {!loaded && <p role="status">Loading hosts…</p>}
-      {loaded && hosts.length === 0 && <div className="hub-empty"><h2>No hosts connected yet</h2><p>Sign in to a Hub account on the hosting computer and register a machine name.</p></div>}
+      {loaded && hosts.length === 0 && <div className="hub-empty"><h2>No registered machines</h2><p>Register a machine from the hosting computer using a Hub account.</p></div>}
       <ul className="hub-hosts" aria-label="Enrolled hosts">
         {hosts.map((host) => <li key={host.host_id} className="hub-host hub-admin-host">
-          <div className="hub-host-details"><h2>{host.machine_address ?? host.name}</h2>{host.machine_address && <p>{host.name}</p>}<p><span className={`hub-presence ${host.online ? "is-online" : ""}`}>{host.online ? "Online" : "Offline"}</span> · {host.secure_only ? "End-to-end encrypted" : host.access === "view" ? "View only" : "View and control"}</p><code>{host.host_id}</code>
-            {host.secure_only && <p>Open your machines to pair using this host’s authenticator code or sign in with a machine passkey.</p>}
+          <div className="hub-host-details">
+            <h2>{host.machine_address}</h2>
+            {host.name !== host.machine_address && <p>{host.name}</p>}
+            <p><span className={`hub-presence ${host.online ? "is-online" : ""}`}>{host.online ? "Online" : "Offline"}</span> · {host.access === "view" ? "View only" : "View and control"}</p>
+            <code>{host.host_id}</code>
           </div>
           <div className="hub-actions">
-            {!host.secure_only && <button disabled={!host.online || !!busy} onClick={() => { void connectHost(host); }}>{busy === host.host_id ? "Connecting…" : `Open ${host.name}`}</button>}
             {revoke_id === host.host_id
               ? <><span>Remove this host’s access?</span><button disabled={!!busy} onClick={() => { void action(`revoke:${host.host_id}`, async () => {
                 await session.request(`hosts/${encodeURIComponent(host.host_id)}`, "DELETE");
