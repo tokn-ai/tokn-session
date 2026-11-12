@@ -2,8 +2,7 @@ use super::*;
 use rand::{RngCore, rngs::OsRng};
 use tokn_hub_client_core::{address::parse_machine_address, discovery::DiscoveryGroup};
 
-pub(crate) const ACCOUNT_REQUIRED: &str =
-  "Sign in with tokn-session-hub auth login, then register this machine with tokn-session-hub connect --machine <name>";
+pub(crate) const ACCOUNT_REQUIRED: &str = "Sign in with tokn-session-hub auth login, then register this machine with tokn-session-hub register --machine <name>";
 pub(crate) const ADDRESS_TAKEN: &str = "Machine name is already reserved on this account";
 pub(crate) const HOST_CLAIMED: &str = "This host already has an account machine assignment";
 

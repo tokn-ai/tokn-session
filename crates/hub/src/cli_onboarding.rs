@@ -27,7 +27,7 @@ pub fn prepare_host(options: HostOptions) -> Result<ConnectorConfig, String> {
   if let Some(origin) = &prepared.passkey_origin {
     eprintln!("Host passkey browser origin: {origin}");
   }
-  eprintln!("Open the Hub viewer and connect with this host ID and your authenticator code.");
+  eprintln!("After hosting starts, pair this computer in the Hub viewer with your authenticator code.");
   if prepared.is_new_secret {
     if std::io::stderr().is_terminal() {
       display_authenticator(

@@ -9,7 +9,9 @@ with usernames unique per Hub and stable user UUIDs. A renewable 90-day browser
 account cookie restores sign-in across navigation and reloads. Browser device approval powers
 CLI `auth login`. Issue and revoke scoped automation keys in **Hub account**.
 Machines claim `username:machine` with an account credential and proof of their
-host key. They inherit account discovery and reconnect using the host key.
+host key through the dedicated `register` command, which saves the assignment
+and exits. `connect` starts a connector using the saved assignment. Machines
+inherit account discovery and reconnect using the host key.
 Previously registered encrypted hosts must claim an address before reconnecting.
 See [Hub accounts](hub.md#hub-accounts-and-cli-login).
 

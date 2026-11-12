@@ -68,7 +68,7 @@ it("shows account registration for the chosen Hub and refreshes its assigned add
   const hub_input = screen.getByLabelText("Hosting Hub address");
   fireEvent.change(hub_input, { target: { value: "https://hub.example/" } });
   expect(screen.getByText("tokn-session-hub auth login --hub https://hub.example")).toBeInTheDocument();
-  expect(screen.getByText("tokn-session-hub connect --hub https://hub.example --machine my-computer --register-only")).toBeInTheDocument();
+  expect(screen.getByText("tokn-session-hub register --hub https://hub.example --machine my-computer")).toBeInTheDocument();
   vi.mocked(getLocalHostStatus).mockResolvedValue({ ...stopped, machine_address: "alice:workstation" });
   fireEvent.click(screen.getByRole("button", { name: "Refresh hosting status" }));
   expect(await screen.findByText("alice:workstation")).toBeInTheDocument();

@@ -36,7 +36,7 @@ function AccountRegistration({ hub_origin, stop_first, initial_setup, busy, on_r
       {stop_first && <p>Stop hosting on this computer before running the registration command.</p>}
       <ol>
         <li><p>Sign in to your Hub account in the terminal.</p><code>tokn-session-hub auth login --hub {hub_argument}</code></li>
-        <li><p>Choose a machine name in place of <code>my-computer</code> and register it.</p><code>tokn-session-hub connect --hub {hub_argument}{loopback_argument} --machine my-computer --register-only</code></li>
+        <li><p>Choose a machine name in place of <code>my-computer</code> and register it.</p><code>tokn-session-hub register --hub {hub_argument}{loopback_argument} --machine my-computer</code></li>
       </ol>
       <p>Refresh hosting status when registration is complete.</p>
       <button type="button" disabled={busy} onClick={on_refresh}>Refresh hosting status</button>

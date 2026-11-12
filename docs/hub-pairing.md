@@ -52,15 +52,16 @@ register without administrator approval. See [Hub administration](hub.md).
 
 Configure [Hub account email delivery](hub.md#hub-accounts-and-cli-login) to
 enable signup. On each host, run the API in a separate terminal, sign in to
-the Hub, and register a machine name.
+the Hub, register a machine name, and start the connector.
 
 ```sh
 tokn-viewer-api --api-only
 tokn-session-hub auth login --hub https://hub.example.com
-tokn-session-hub connect --hub https://hub.example.com --machine workstation
+tokn-session-hub register --hub https://hub.example.com --machine workstation
+tokn-session-hub connect
 ```
 
-First setup generates a UUID, dedicated keys, and an authenticator seed. Scan
+First registration generates a UUID, dedicated keys, and an authenticator seed. Scan
 the terminal QR or import the full printed `otpauth://` URI into an authenticator
 that supports SHA-256 TOTP, then copy the printed machine ID or full machine
 reference (`UUID@host_public_key`). The QR and URI include all required settings.
@@ -85,7 +86,8 @@ code. The device saves the verified host encryption key only after authenticated
 acknowledgment. Save the full reference from the connector or connection settings
 for passkey sign-in on another device.
 
-The connector saves its configuration, so later starts need only:
+Registration saves the host configuration and account assignment, then exits.
+Starting the connector uses that saved state:
 
 ```sh
 tokn-session-hub connect
@@ -116,8 +118,9 @@ normal authorization.
 
 ## Host from the desktop app
 
-On a host without an account address, sign in and use `tokn-session-hub connect --machine workstation
---register-only` with the selected Hub while desktop hosting is stopped.
+On a host without an account address, sign in and run
+`tokn-session-hub register --hub https://hub.example.com --machine workstation`
+with the selected Hub while desktop hosting is stopped.
 Under **Machines → This machine → Host this computer**, select the registered
 Hub, choose whether to allow remote agent input, and click **Start hosting**.
 The bottom-left connection panel in local
@@ -235,7 +238,8 @@ use `no-referrer`. Ceremony options travel in a URL fragment that the page clear
 
 Host state defaults to `~/.tokn/sessions/hub`; use `--state-dir PATH` consistently for a
 separate installation. Host files include `host.json`, `host-enrollment.key`,
-`host-noise.key`, and `host-access.json` (authenticator, authorized devices,
+`host-noise.key`, `host-account.json` (Hub assignment and discovery group), and
+`host-access.json` (authenticator, authorized devices,
 passkeys, and persisted attempt limits). Back up identity and trust state with
 the device's storage controls. Corrupt, missing, or insecure saved state fails
 closed; Unix private files must have mode 0600 and belong to the current user.
@@ -320,13 +324,14 @@ seed, export it and transfer the private file through a trusted channel:
 ```sh
 tokn-session-hub authenticator --export-file ./authenticator.secret
 # On a new host:
-tokn-session-hub connect --hub https://hub.example.com \
+tokn-session-hub register --hub https://hub.example.com --machine workstation \
   --totp-secret-file ./authenticator.secret
+tokn-session-hub connect
 ```
 
 Exports create a new mode-0600 file and refuse overwrites. Imports require a
 private Base32 file and work only before authenticator setup; alternatively use
-`authenticator --import-file FILE` before the first `connect`. The Hub does not
+`authenticator --import-file FILE` before the first `register`. The Hub does not
 synchronize seeds or trust records. Compromising any seed-holding host threatens
 first pairing across that group; existing host pins remain fixed. Each host
 consumes a successful code once per time step. Keep endpoint clocks correct.

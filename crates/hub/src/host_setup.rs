@@ -21,7 +21,7 @@ pub struct PreparedHost {
   pub machine_address: Option<String>,
 }
 
-pub const ACCOUNT_SETUP_REQUIRED: &str = "Sign in with tokn-session-hub auth login, then register this computer with tokn-session-hub connect --machine <name> --register-only";
+pub const ACCOUNT_SETUP_REQUIRED: &str = "Sign in with tokn-session-hub auth login, then register this computer with tokn-session-hub register --machine <name>";
 
 pub struct HostOptions {
   pub hub: Option<Url>,

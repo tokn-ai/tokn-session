@@ -32,8 +32,9 @@ account. Sign in on the session host and register its machine name.
 
 ```sh
 cargo run -p tokn-session-hub -- auth login --hub http://localhost:5559
-cargo run -p tokn-session-hub -- connect \
+cargo run -p tokn-session-hub -- register \
   --hub http://localhost:5559 --insecure-loopback --machine workstation
+cargo run -p tokn-session-hub -- connect
 ```
 
 Keep `tokn-viewer-api --api-only` running in a separate terminal. Pair the machine
@@ -70,24 +71,26 @@ account page with machine listing or registration scope. Supply it on stdin to
 `auth login --with-token --hub https://hub.example.com`.
 
 Signing in lets you list the account's machines. To add this computer, run the
-registration command on it with a machine name. The connector proves it owns
+`register` command on it with a machine name. Registration proves ownership of
 the machine's enrollment key.
 
 ```sh
-tokn-session-hub connect --hub https://hub.example.com --machine macbook
+tokn-session-hub register --hub https://hub.example.com --machine macbook
 ```
 
-For account `alice` this reserves `alice:macbook` on that Hub. Add
-`--register-only` while app hosting is stopped to make the assignment and then
-start hosting from the desktop app. Subsequent connector starts use the saved
-host key. The browser gallery combines the signed-in account's machines with
+For account `alice` this reserves `alice:macbook` on that Hub. Registration saves
+the host configuration and account assignment, then exits. Run it while hosting
+is stopped, then run `tokn-session-hub connect` or start hosting from the desktop
+app. The connector uses the saved assignment and host key.
+The browser gallery combines the signed-in account's machines with
 saved pairings and discovered machines. Pairing also reveals the account's
 discovery group to a viewer who has no account session. Each machine verifies
 access to its own sessions. Browser access uses a machine passkey.
 
 Every host needs an account machine assignment before it can connect. An
-existing encrypted host can claim an address with `--machine` using its saved
-UUID and key. Configure email delivery to create accounts and sign in by email.
+existing encrypted host can claim an address with `register --machine` using
+its saved UUID and key. Configure email delivery to create accounts and sign
+in by email.
 During rollout, stop any old unclaimed connectors to close their existing direct
 WebRTC connections. The updated Hub rejects their next registration.
 
@@ -114,7 +117,8 @@ On a remote host:
 
 ```sh
 tokn-session-hub auth login --hub https://hub.example.com
-tokn-session-hub connect --hub https://hub.example.com --machine build-server
+tokn-session-hub register --hub https://hub.example.com --machine build-server
+tokn-session-hub connect
 ```
 
 Only the connector needs outbound connectivity. The local viewer API stays on

@@ -217,7 +217,7 @@ pub fn initialize_identity(path: &Path) -> Result<(), String> {
   load_key(path).map(|_| ())
 }
 
-/// Holds one connector's ownership for a saved enrollment key across CLI/app processes.
+/// Holds exclusive ownership of a saved enrollment key during registration or hosting.
 pub struct HostLease {
   key_file: PathBuf,
   _lock: std::fs::File,
@@ -232,7 +232,7 @@ impl HostLease {
     let mut path = key_file.as_os_str().to_owned();
     path.push(".connector");
     let lock = crate::onboarding::lock(Path::new(&path)).map_err(|error| {
-      format!("Could not acquire host ownership: {error}. Stop any other connector before hosting in the app.")
+      format!("Could not acquire host ownership: {error}. Stop hosting on this computer before retrying.")
     })?;
     Ok(Self {
       key_file: key_file.to_owned(),

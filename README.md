@@ -90,7 +90,8 @@ implementation status.
 ## Remote hosts through a Hub
 
 `tokn-session-hub` connects your hosts through one endpoint. Each host must
-register a machine address under a Hub account before connecting. Hosts verify
+use `register` to claim a machine address under a Hub account, then use `connect`
+or desktop hosting to go online. Hosts verify
 authenticator codes locally to pair your devices. The client remembers trusted
 keys and reconnects with end-to-end encryption. See
 [host onboarding](docs/hub-pairing.md) and [Hub administration](docs/hub.md).
