@@ -12,7 +12,13 @@ impl ViewerService {
   ) -> Result<SessionInputStatus, String> {
     let target = match self.control_target(request.session_key).await {
       Ok(target) => target,
-      Err(error) => return Ok(input_status_response(Err(input::DeliveryError::not_sent(error)), false)),
+      Err(error) => {
+        return Ok(input_status_response(
+          Err(input::DeliveryError::not_sent(error)),
+          false,
+          false,
+        ));
+      }
     };
     let resume_required = self
       .sessions
@@ -25,6 +31,7 @@ impl ViewerService {
     Ok(input_status_response(
       self.sessions.input_status(&target).await,
       resume_required,
+      target.input.provider != ViewerProvider::ZCode,
     ))
   }
 
@@ -106,6 +113,9 @@ impl ViewerService {
     if image_ids.is_empty() {
       return Ok(Vec::new());
     }
+    if provider == ViewerProvider::ZCode {
+      return Err("ZCode accepts text only in the Viewer. Remove the images before sending.".into());
+    }
     let store = self.images.clone();
     let target = crate::images::ImageTarget::Session {
       session_key: session_key.into(),
@@ -131,7 +141,11 @@ impl ViewerService {
     let locator = decode_session_key(session_key)?;
     if !matches!(
       locator.provider,
-      ViewerProvider::Codex | ViewerProvider::Pi | ViewerProvider::Dsh | ViewerProvider::OpenCode
+      ViewerProvider::Codex
+        | ViewerProvider::Pi
+        | ViewerProvider::Dsh
+        | ViewerProvider::OpenCode
+        | ViewerProvider::ZCode
     ) {
       return Err("This provider has no compatible live history binding yet.".into());
     }
@@ -158,6 +172,9 @@ impl ViewerService {
     }
     if locator.provider == ViewerProvider::OpenCode {
       self.verify_opencode_control(&locator)?;
+    }
+    if locator.provider == ViewerProvider::ZCode && header.parent_session_id.is_some() {
+      return Err("Control ZCode subagents through their parent session".into());
     }
     if locator.provider == ViewerProvider::Codex
       && (header.parent_session_id.as_deref().is_some_and(|id| !id.is_empty())
@@ -191,6 +208,7 @@ mod tests {
           images_available,
         }),
         resume_required,
+        true,
       );
       let wire = serde_json::to_value(status).unwrap();
       assert_eq!(wire["available"], true);
@@ -206,7 +224,7 @@ mod tests {
       }
       assert!(!wire["image_mime_types"].as_array().unwrap().is_empty());
     }
-    let unavailable = input_status_response(Err(input::DeliveryError::not_sent("Worker unavailable")), true);
+    let unavailable = input_status_response(Err(input::DeliveryError::not_sent("Worker unavailable")), true, true);
     assert!(!unavailable.available);
     assert!(!unavailable.images_available);
     assert!(!unavailable.images_stageable);
@@ -382,6 +400,7 @@ mod tests {
 fn input_status_response(
   status: Result<input::InputCapability, input::DeliveryError>,
   resume_required: bool,
+  image_staging_supported: bool,
 ) -> SessionInputStatus {
   let (available, message, images_available) = match status {
     Ok(capability) => (true, capability.message, capability.images_available),
@@ -393,7 +412,7 @@ fn input_status_response(
     max_length: MAX_INPUT_LENGTH,
     resume_required: available && resume_required,
     images_available,
-    images_stageable: available,
+    images_stageable: available && image_staging_supported,
     max_images: crate::images::MAX_IMAGES,
     max_image_bytes: crate::images::MAX_IMAGE_BYTES,
     max_total_image_bytes: crate::images::MAX_TOTAL_IMAGE_BYTES,

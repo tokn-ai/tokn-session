@@ -766,6 +766,7 @@ async fn all_provider_options_share_typed_plans_without_launching_agents() {
       executables: [
         "TOKN_SESSION_CODEX_EXECUTABLE",
         "TOKN_SESSION_OPENCODE_EXECUTABLE",
+        "TOKN_SESSION_ZCODE_EXECUTABLE",
         "TOKN_SESSION_DSH_EXECUTABLE",
       ]
       .into_iter()
@@ -780,6 +781,9 @@ async fn all_provider_options_share_typed_plans_without_launching_agents() {
     .unwrap();
   for entry in options.providers {
     assert!(entry.available, "{:?}: {:?}", entry.provider, entry.reason);
+    if entry.provider == LiveProvider::ZCode {
+      assert!(!entry.supports_images);
+    }
     let plan = service
       .sessions
       .resolve_creation_plan(entry.provider, Path::new(&project.folder_path), None)
@@ -908,15 +912,27 @@ async fn dsh_publication_requires_matching_native_header_before_indexing() {
 }
 
 #[tokio::test]
-async fn opencode_publication_preserves_other_sessions_in_the_shared_v2_database() {
+async fn publication_preserves_other_sessions_in_shared_sqlite_sources() {
+  for (provider, session_tables) in [
+    (LiveProvider::OpenCode,
+     "create table session_message (id text primary key, session_id text not null, type text not null, seq integer not null, time_created integer not null, data text not null);"),
+    (LiveProvider::ZCode,
+     "create table message (id text primary key, session_id text not null, time_created integer not null, data text not null);
+      create table part (id text primary key, session_id text not null, message_id text not null, time_created integer not null, data text not null);"),
+  ] {
+    verify_shared_database_publication(provider, session_tables).await;
+  }
+}
+
+async fn verify_shared_database_publication(provider: LiveProvider, session_tables: &str) {
   let directory = tempfile::tempdir().unwrap();
-  let database = directory.path().join("opencode.db");
+  let database = directory.path().join("sessions.db");
   let connection = rusqlite::Connection::open(&database).unwrap();
-  connection.execute_batch(
+  connection.execute_batch(&format!(
     "create table session (id text primary key, parent_id text, directory text not null, time_created integer not null, time_updated integer not null);
-     create table session_message (id text primary key, session_id text not null, type text not null, seq integer not null, time_created integer not null, data text not null);"
-  ).unwrap();
-  let service = service(ViewerProvider::OpenCode, database.clone());
+     {session_tables}"
+  )).unwrap();
+  let service = service(viewer_provider(provider), database);
   let project = project(&service, &directory.path().join("project"));
   connection
     .execute(
@@ -924,7 +940,7 @@ async fn opencode_publication_preserves_other_sessions_in_the_shared_v2_database
       [&project.folder_path],
     )
     .unwrap();
-  let first = receipt(&project, LiveProvider::OpenCode, "ses_existing");
+  let first = receipt(&project, provider, "ses_existing");
   let old_key = publisher(&service).publish(&first).unwrap().unwrap();
   connection
     .execute(
@@ -932,7 +948,7 @@ async fn opencode_publication_preserves_other_sessions_in_the_shared_v2_database
       [&project.folder_path],
     )
     .unwrap();
-  let mut created = receipt(&project, LiveProvider::OpenCode, "ses_created");
+  let mut created = receipt(&project, provider, "ses_created");
   created.created = None;
   created.phase = CreationPhase::NativeCreateUncertain;
   created.first_input = FirstInputState::NotAttempted;

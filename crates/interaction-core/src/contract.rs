@@ -11,6 +11,8 @@ pub enum Provider {
   Codex,
   Pi,
   OpenCode,
+  #[serde(rename = "zcode")]
+  ZCode,
   Dsh,
 }
 

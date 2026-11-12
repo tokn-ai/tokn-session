@@ -38,6 +38,10 @@ impl SessionDatabaseFlavor {
       Self::ZCode => Provider::ZCode,
     }
   }
+
+  fn supports_soft_delete(self, capabilities: OpenCodeCapabilities) -> bool {
+    matches!(self, Self::ZCode) && capabilities.has_session_time_deleted
+  }
 }
 
 pub struct OpenCodeSessionSource {
@@ -118,7 +122,7 @@ impl OpenCodeSessionSource {
   /// Read one exact metadata row from the configured local database.
   pub fn session_header_exact(&self, session_id: &str) -> Result<SessionHeader, String> {
     let (connection, capabilities) = self.connect()?;
-    let row = load_session_row(&connection, capabilities, session_id, self.flavor.name())?
+    let row = load_session_row(&connection, capabilities, session_id, self.flavor)?
       .ok_or_else(|| format!("no {} session found for `{session_id}`", self.flavor.name()))?;
     let updated_at_ms = row.time_updated.or(row.time_created);
     Ok(SessionHeader {
@@ -139,7 +143,7 @@ impl OpenCodeSessionSource {
 
   pub fn history_format_exact(&self, session_id: &str) -> Result<OpenCodeHistoryFormat, String> {
     let (connection, capabilities) = self.connect()?;
-    load_session_row(&connection, capabilities, session_id, self.flavor.name())?
+    load_session_row(&connection, capabilities, session_id, self.flavor)?
       .ok_or_else(|| format!("no {} session found for `{session_id}`", self.flavor.name()))?;
     history_format(&connection, capabilities, session_id)
   }
@@ -168,7 +172,7 @@ impl OpenCodeSessionSource {
   pub fn list_session_headers(&self) -> Result<Vec<SessionHeader>, String> {
     let (connection, capabilities) = self.connect()?;
     let database_path = self.database_path()?;
-    list_session_catalog(&connection, capabilities, self.flavor.name())?
+    list_session_catalog(&connection, capabilities, self.flavor)?
       .into_iter()
       .map(|row| Ok(catalog_header(row, &database_path)))
       .collect()
@@ -185,7 +189,7 @@ impl OpenCodeSessionSource {
       }
       Err(error) => return Err(error),
     };
-    let (rows, complete) = read_session_catalog(&connection, capabilities, self.flavor.name(), true)?;
+    let (rows, complete) = read_session_catalog(&connection, capabilities, self.flavor, true)?;
     Ok(SessionHeaderCatalog {
       headers: rows
         .into_iter()
@@ -202,7 +206,7 @@ impl OpenCodeSessionSource {
   pub fn hydrate_session_header(&self, mut header: SessionHeader) -> Result<SessionHeader, String> {
     let connection = connect_database(&header.path)?;
     let capabilities = OpenCodeCapabilities::detect(&connection)?;
-    let session = load_session_row(&connection, capabilities, &header.id, self.flavor.name())?
+    let session = load_session_row(&connection, capabilities, &header.id, self.flavor)?
       .ok_or_else(|| format!("no {} session found for `{}`", self.flavor.name(), header.id))?;
     header.title = native_title(session.title);
     header.preview = if header.title.is_none() {
@@ -238,7 +242,7 @@ impl OpenCodeSessionSource {
       .then(|| message_counts(connection, capabilities, self.flavor))
       .transpose()?;
     let mut sessions = Vec::new();
-    for row in list_session_catalog(connection, capabilities, self.flavor.name())? {
+    for row in list_session_catalog(connection, capabilities, self.flavor)? {
       let message_count = message_counts
         .as_ref()
         .and_then(|counts| counts.get(&row.id))
@@ -334,7 +338,7 @@ impl OpenCodeSessionSource {
     session_id: &str,
     include_native: bool,
   ) -> Result<LoadedSessionRecords, String> {
-    let session = load_session_row(&connection, capabilities, session_id, self.flavor.name())?
+    let session = load_session_row(&connection, capabilities, session_id, self.flavor)?
       .ok_or_else(|| format!("no {} session found for `{session_id}`", self.flavor.name()))?;
     if self.v2_history(connection, capabilities, session_id)? {
       return load_v2_records(connection, session, database_path, include_native);
@@ -516,21 +520,27 @@ struct SessionCatalogRow {
 fn list_session_catalog(
   connection: &Connection,
   capabilities: OpenCodeCapabilities,
-  source_name: &str,
+  flavor: SessionDatabaseFlavor,
 ) -> Result<Vec<SessionCatalogRow>, String> {
-  read_session_catalog(connection, capabilities, source_name, false).map(|(rows, _)| rows)
+  read_session_catalog(connection, capabilities, flavor, false).map(|(rows, _)| rows)
 }
 
 fn read_session_catalog(
   connection: &Connection,
   capabilities: OpenCodeCapabilities,
-  source_name: &str,
+  flavor: SessionDatabaseFlavor,
   allow_partial: bool,
 ) -> Result<(Vec<SessionCatalogRow>, bool), String> {
+  let source_name = flavor.name();
+  let condition = if flavor.supports_soft_delete(capabilities) {
+    "where time_deleted is null"
+  } else {
+    ""
+  };
   let mut statement = connection
     .prepare(&format!(
       "select {}
-       from session
+       from session {condition}
        order by time_created desc, id desc",
       capabilities.session_catalog_projection()
     ))
@@ -686,12 +696,18 @@ fn load_session_row(
   connection: &Connection,
   capabilities: OpenCodeCapabilities,
   session_id: &str,
-  source_name: &str,
+  flavor: SessionDatabaseFlavor,
 ) -> Result<Option<OpenCodeSessionRow>, String> {
+  let source_name = flavor.name();
+  let condition = if flavor.supports_soft_delete(capabilities) {
+    " and time_deleted is null"
+  } else {
+    ""
+  };
   connection
     .query_row(
       &format!(
-        "select {} from session where id = ?1",
+        "select {} from session where id = ?1{condition}",
         capabilities.session_projection()
       ),
       params![session_id],
@@ -1074,7 +1090,9 @@ mod tests {
 
   use crate::schema::OpenCodeCapabilities;
 
-  use super::{OpenCodeSessionSource, load_messages, load_session_row, native_title, resolve_database_path};
+  use super::{
+    OpenCodeSessionSource, SessionDatabaseFlavor, load_messages, load_session_row, native_title, resolve_database_path,
+  };
 
   #[test]
   fn resolves_persisted_database_paths_with_opencode_precedence() {
@@ -1368,9 +1386,14 @@ mod tests {
       .expect("fixture schema with model should be created");
 
     let capabilities = OpenCodeCapabilities::detect(&connection).expect("schema with model should be detected");
-    let session = load_session_row(&connection, capabilities, "ses_with_model", "opencode")
-      .expect("schema with model should remain loadable")
-      .expect("fixture session should exist");
+    let session = load_session_row(
+      &connection,
+      capabilities,
+      "ses_with_model",
+      SessionDatabaseFlavor::OpenCode,
+    )
+    .expect("schema with model should remain loadable")
+    .expect("fixture session should exist");
     let model = session.model.expect("session model should be preserved");
 
     assert_eq!(model.id.as_deref(), Some("gpt-5"));

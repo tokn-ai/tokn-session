@@ -11,7 +11,7 @@ use tokn_interaction_core::creation::{
 use tokn_interaction_core::runtime::{CreatedNativeSession, RuntimeSelection};
 use tokn_interaction_core::runtime_plan::RuntimePlan;
 use tokn_interaction_core::{
-  AdapterFuture, Command, DeliveryMode, ErrorKind, InteractionError, MessageInput, Provider as LiveProvider, Reply,
+  AdapterFuture, Command, ErrorKind, InteractionError, MessageInput, Provider as LiveProvider, Reply,
 };
 
 #[derive(Clone)]
@@ -73,6 +73,7 @@ impl ViewerService {
       LiveProvider::Pi,
       LiveProvider::Codex,
       LiveProvider::OpenCode,
+      LiveProvider::ZCode,
       LiveProvider::Dsh,
     ] {
       let mut runtimes = Vec::new();
@@ -108,7 +109,7 @@ impl ViewerService {
         provider,
         available,
         reason,
-        supports_images: provider != LiveProvider::Dsh,
+        supports_images: supports_creation_images(provider),
         default_profile_id,
         runtimes,
         runtime_plan_id,
@@ -312,8 +313,8 @@ impl ViewerService {
     request: &crate::workspace::CreateProjectSessionRequest,
     project: &crate::workspace::RegisteredProject,
   ) -> Result<RuntimePlan, String> {
-    if request.provider == LiveProvider::Dsh && !request.image_ids.is_empty() {
-      return Err("DSH does not advertise image support for new sessions. Remove the images before starting.".into());
+    if !supports_creation_images(request.provider) && !request.image_ids.is_empty() {
+      return Err("This runtime does not accept images for new sessions. Remove the images before starting.".into());
     }
     let supervisor = self.sessions.clone();
     let provider = request.provider;
@@ -411,15 +412,23 @@ fn viewer_provider(provider: LiveProvider) -> ViewerProvider {
     LiveProvider::Pi => ViewerProvider::Pi,
     LiveProvider::Codex => ViewerProvider::Codex,
     LiveProvider::OpenCode => ViewerProvider::OpenCode,
+    LiveProvider::ZCode => ViewerProvider::ZCode,
     LiveProvider::Dsh => ViewerProvider::Dsh,
   }
+}
+
+fn supports_creation_images(provider: LiveProvider) -> bool {
+  matches!(
+    provider,
+    LiveProvider::Pi | LiveProvider::Codex | LiveProvider::OpenCode
+  )
 }
 
 pub(crate) fn validate_creation_profile(
   profile: &crate::rpc_profiles::RpcResolvedProfile,
   cwd: &Path,
 ) -> Result<(), String> {
-  if profile.profile.provider == LiveProvider::OpenCode {
+  if matches!(profile.profile.provider, LiveProvider::OpenCode | LiveProvider::ZCode) {
     let configured = profile
       .profile
       .working_directory
@@ -427,7 +436,10 @@ pub(crate) fn validate_creation_profile(
       .and_then(|path| std::fs::canonicalize(path).ok());
     let project = std::fs::canonicalize(cwd).map_err(|_| "The project folder is unavailable")?;
     if configured.as_deref() != Some(project.as_path()) {
-      return Err("This OpenCode runtime uses another project folder. Configure a runtime for this folder.".into());
+      return Err(format!(
+        "This {:?} runtime uses another project folder. Configure a runtime for this folder.",
+        profile.profile.provider,
+      ));
     }
   }
   if profile.profile.mode == RpcRuntimeMode::Attached {
@@ -450,6 +462,7 @@ impl CreationHost for Host {
   fn plan_native_id(&self, provider: LiveProvider, _: &str) -> Result<Option<String>, String> {
     match provider {
       LiveProvider::OpenCode => Ok(Some(tokn_opencode_adapter::new_session_id())),
+      LiveProvider::ZCode => Ok(Some(tokn_zcode_adapter::new_session_id())),
       LiveProvider::Dsh => Ok(Some(tokn_dsh_adapter::new_session_id())),
       LiveProvider::Codex => Ok(None),
       LiveProvider::Pi => Err("Pi creation uses its managed-session driver".into()),
@@ -549,7 +562,7 @@ impl CreationHost for Host {
           request_id.to_owned(),
           Command::Message {
             input: input.clone(),
-            delivery: DeliveryMode::StartOrSteer,
+            delivery: crate::session_supervisor::rpc_message_delivery(created.provider),
           },
         )
         .await?
@@ -635,9 +648,12 @@ impl HistoryPublisher {
       .as_ref()
       .map(|created| &created.native.native_id)
       .or_else(|| {
-        matches!(receipt.provider, LiveProvider::OpenCode | LiveProvider::Dsh)
-          .then_some(receipt.planned_native_id.as_ref())
-          .flatten()
+        matches!(
+          receipt.provider,
+          LiveProvider::OpenCode | LiveProvider::ZCode | LiveProvider::Dsh
+        )
+        .then_some(receipt.planned_native_id.as_ref())
+        .flatten()
       })
     else {
       return Ok(None);
@@ -766,7 +782,8 @@ impl HistoryPublisher {
     {
       return Err("Another local source already claims the created session's native identity".into());
     }
-    if provider != ViewerProvider::OpenCode
+    let shared_database = matches!(provider, ViewerProvider::OpenCode | ViewerProvider::ZCode);
+    if !shared_database
       && previous
         .as_ref()
         .is_some_and(|state| state.cursor != INDEX_MISSING_SOURCE_CURSOR)
@@ -781,12 +798,16 @@ impl HistoryPublisher {
         return Err("The new history path already belongs to another indexed session identity".into());
       }
     }
-    let headers = if provider == ViewerProvider::OpenCode {
-      // SQLite is shared by many sessions. Replace one complete source catalog,
-      // never a one-row inventory that would retire unrelated conversations.
-      tokn_session_opencode::OpenCodeSessionSource::new(Some(path.clone())).list_session_headers()?
-    } else {
-      vec![header]
+    // SQLite is shared by many sessions. Replace one complete source catalog,
+    // never a one-row inventory that would retire unrelated conversations.
+    let headers = match provider {
+      ViewerProvider::OpenCode => {
+        tokn_session_opencode::OpenCodeSessionSource::new(Some(path.clone())).list_session_headers()?
+      }
+      ViewerProvider::ZCode => {
+        tokn_session_zcode::ZCodeSessionSource::new(Some(path.clone())).list_session_headers()?
+      }
+      _ => vec![header],
     };
     let ready = self
       .index
@@ -832,7 +853,7 @@ impl HistoryPublisher {
       .map_err(|_| "Session scheduler is unavailable")?
       .as_ref()
     {
-      let wake = if provider == ViewerProvider::OpenCode {
+      let wake = if shared_database {
         SessionIndexWake::ProviderCatalog(BTreeSet::from([provider]))
       } else {
         SessionIndexWake::ChangedFiles(BTreeMap::from([(provider, BTreeSet::from([path]))]))

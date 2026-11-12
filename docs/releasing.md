@@ -2,7 +2,7 @@
 
 ## Version 0.1.1
 
-The 33 publishable workspace crates share version `0.1.1`; the desktop viewer,
+The publishable workspace crates share version `0.1.1`. The desktop viewer,
 Apell guest and native RPC test harness have `publish = false`. Before this release,
 only the Codex, Pi, and OpenCode
 protocol crates shipped as `0.1.0`. Use the publish script's `--list` mode below
@@ -34,7 +34,7 @@ cargo +1.95.0 check --workspace --exclude tokn-session-viewer --all-targets --lo
 cargo package --workspace --exclude tokn-session-viewer --exclude tokn-interaction-tests --exclude tokn-session-apell --locked
 ```
 
-Packaging verifies all 33 crates without uploading. Cargo orders
+Packaging verifies the publishable crates without uploading. Cargo orders
 the dependency graph and resolves the unpublished workspace versions from a
 temporary local registry. Inspect `target/package/*.crate` before publication.
 The release-check workflow repeats archive verification and the Rust 1.95 check

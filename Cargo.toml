@@ -19,6 +19,7 @@ members = [
   "crates/opencode-protocol",
   "crates/opencode",
   "crates/zcode",
+  "crates/zcode-adapter",
   "crates/workbuddy-protocol",
   "crates/workbuddy",
   "crates/dsh-protocol",
@@ -56,6 +57,7 @@ tokn-opencode-rpc-protocol = { version = "0.1.1", path = "crates/opencode-rpc-pr
 tokn-opencode-adapter = { version = "0.1.1", path = "crates/opencode-adapter" }
 tokn-dsh-rpc-protocol = { version = "0.1.1", path = "crates/dsh-rpc-protocol" }
 tokn-dsh-adapter = { version = "0.1.1", path = "crates/dsh-adapter" }
+tokn-zcode-adapter = { version = "0.1.1", path = "crates/zcode-adapter" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 crossterm = "0.28"
 dirs = "6"

@@ -36,10 +36,11 @@ async function ready() { await waitFor(() => expect(screen.queryByText("Checking
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; }
 
 describe("draft conversation", () => {
-  it.each(["pi", "codex", "open_code", "dsh"] as RpcProvider[])("pins %s automatic availability before first Send without loading models", async (provider) => {
+  it.each(["pi", "codex", "open_code", "zcode", "dsh"] as RpcProvider[])("pins %s automatic availability before first Send without loading models", async (provider) => {
     const available: SessionCreationOptions = { project_id: "repo", providers: [{ provider, available: true, reason: null,
       supports_images: false, default_profile_id: null, runtimes: [], runtime_plan_id: `${provider}-plan` }] };
-    const input = props({ on_load_options: vi.fn(async () => available) });
+    const loading = deferred<SessionCreationOptions>();
+    const input = props({ on_load_options: vi.fn(() => loading.promise) });
     const send = vi.fn();
     function Stateful() {
       const [value, setValue] = useState(draft({ selection: { provider }, prompt: "First task" }));
@@ -47,8 +48,11 @@ describe("draft conversation", () => {
         on_send={() => send(value.selection)} />;
     }
     render(<Stateful />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeEnabled());
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    const button = screen.getByRole("button", { name: "Send" });
+    expect(button).toBeDisabled();
+    await act(async () => loading.resolve(available));
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
     expect(send).toHaveBeenCalledExactlyOnceWith({ provider, runtime_plan_id: `${provider}-plan` });
     expect(input.on_load_models).not.toHaveBeenCalled();
     expect(screen.queryByRole("combobox", { name: "Runtime" })).not.toBeInTheDocument();

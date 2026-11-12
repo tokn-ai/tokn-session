@@ -200,57 +200,58 @@ async fn forged_and_unregistered_session_keys_never_authorize_delivery() {
 }
 
 #[tokio::test]
-async fn unsupported_providers_return_read_only_status_and_no_admission() {
+async fn workbuddy_returns_read_only_status_and_no_admission() {
   let fixture = Fixture::new();
-  for provider in ["zcode", "workbuddy"] {
-    let key = session_key(provider, &fixture.directory.path().join("provider-session"));
-    let (status, body) = fixture
-      .authorized("get_session_input_status", json!({"request": {"session_key": key}}))
-      .await;
-    assert_eq!(status, StatusCode::OK, "{provider}");
-    assert_eq!(body["available"], false, "{provider}");
-    assert!(
-      body["message"]
-        .as_str()
-        .unwrap()
-        .contains("no compatible live history binding")
-    );
-    let (status, body) = fixture
-      .authorized("submit_session_input", submission(&key, "hello"))
-      .await;
-    assert_eq!(status, StatusCode::OK, "{provider}");
-    assert_eq!(body["status"], "not_sent", "{provider}");
-    assert_eq!(body["request_id"], REQUEST_ID);
-    assert!(
-      body["message"]
-        .as_str()
-        .unwrap()
-        .contains("no compatible live history binding")
-    );
-  }
+  let key = session_key("workbuddy", &fixture.directory.path().join("provider-session"));
+  let (status, body) = fixture
+    .authorized("get_session_input_status", json!({"request": {"session_key": key}}))
+    .await;
+  assert_eq!(status, StatusCode::OK);
+  assert_eq!(body["available"], false);
+  assert!(
+    body["message"]
+      .as_str()
+      .unwrap()
+      .contains("no compatible live history binding")
+  );
+  let (status, body) = fixture
+    .authorized("submit_session_input", submission(&key, "hello"))
+    .await;
+  assert_eq!(status, StatusCode::OK);
+  assert_eq!(body["status"], "not_sent");
+  assert_eq!(body["request_id"], REQUEST_ID);
+  assert!(
+    body["message"]
+      .as_str()
+      .unwrap()
+      .contains("no compatible live history binding")
+  );
 }
 
 #[tokio::test]
-async fn opencode_unreadable_and_unregistered_keys_never_authorize_delivery() {
+async fn sqlite_unreadable_and_unregistered_keys_never_authorize_delivery() {
   let fixture = Fixture::new();
-  let private_file = fixture.directory.path().join("private-opencode.db");
-  std::fs::write(&private_file, "private-opencode-content-must-not-be-read").unwrap();
-  for path in [private_file, fixture.directory.path().join("missing-opencode.db")] {
-    let key = session_key("opencode", &path);
-    let (status, body) = fixture
-      .authorized("get_session_input_status", json!({"request":{"session_key":key}}))
-      .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["available"], false);
-    assert!(!body.to_string().contains("private-opencode"));
-    assert!(!body.to_string().contains("missing-opencode"));
-    let (status, body) = fixture
-      .authorized("submit_session_input", submission(&key, "hello"))
-      .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["status"], "not_sent");
-    assert_eq!(body["request_id"], REQUEST_ID);
-    assert!(!body.to_string().contains("private-opencode"));
-    assert!(!body.to_string().contains("missing-opencode"));
+  let private_file = fixture.directory.path().join("private-sqlite.db");
+  std::fs::write(&private_file, "private-sqlite-content-must-not-be-read").unwrap();
+  let missing_file = fixture.directory.path().join("missing-sqlite.db");
+  for provider in ["opencode", "zcode"] {
+    for path in [&private_file, &missing_file] {
+      let key = session_key(provider, path);
+      let (status, body) = fixture
+        .authorized("get_session_input_status", json!({"request":{"session_key":key}}))
+        .await;
+      assert_eq!(status, StatusCode::OK);
+      assert_eq!(body["available"], false);
+      assert!(!body.to_string().contains("private-sqlite"));
+      assert!(!body.to_string().contains("missing-sqlite"));
+      let (status, body) = fixture
+        .authorized("submit_session_input", submission(&key, "hello"))
+        .await;
+      assert_eq!(status, StatusCode::OK);
+      assert_eq!(body["status"], "not_sent");
+      assert_eq!(body["request_id"], REQUEST_ID);
+      assert!(!body.to_string().contains("private-sqlite"));
+      assert!(!body.to_string().contains("missing-sqlite"));
+    }
   }
 }

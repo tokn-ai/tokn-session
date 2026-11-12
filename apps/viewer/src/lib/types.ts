@@ -384,6 +384,7 @@ export interface SessionControlStatus {
   transport: SessionTransport;
   can_select: boolean;
   can_cancel: boolean;
+  is_running?: boolean;
   available: boolean;
   message: string;
   runtime_id: string | null;
@@ -553,7 +554,7 @@ export interface RuntimeInventory { version: 1; runtimes: RuntimeInfo[]; }
 export interface RuntimeRestartRequest { request_id: string; runtime_id: string; expected_instance_id: string; }
 export interface RuntimeRestartResponse { request_id: string; runtime_id: string; message: string; }
 
-export type RpcProvider = "codex" | "pi" | "open_code" | "dsh";
+export type RpcProvider = "codex" | "pi" | "open_code" | "zcode" | "dsh";
 export type RpcRuntimeMode = "managed" | "attached";
 export interface RpcRuntimeProfile {
   profile_id: string;

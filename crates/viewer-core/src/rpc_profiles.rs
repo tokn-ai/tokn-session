@@ -553,6 +553,9 @@ fn schema_issues(profile: &StoredProfile) -> Vec<RpcProfileValidationIssue> {
           "Pi attachment requires supplied process pipes and cannot use a saved endpoint",
         );
       }
+      if profile.provider == Provider::ZCode {
+        issue(&mut issues, "mode", "ZCode requires a managed stdio process");
+      }
       if profile.executable.is_some() || !profile.arguments.is_empty() {
         issue(
           &mut issues,
@@ -594,7 +597,7 @@ fn schema_issues(profile: &StoredProfile) -> Vec<RpcProfileValidationIssue> {
         let scheme_ok = match profile.provider {
           Provider::Codex => matches!(url.scheme(), "ws" | "wss"),
           Provider::OpenCode | Provider::Dsh => matches!(url.scheme(), "http" | "https") && url.path() == "/",
-          Provider::Pi => false,
+          Provider::Pi | Provider::ZCode => false,
         };
         scheme_ok
           && url.host_str().is_some()
@@ -1004,6 +1007,22 @@ mod tests {
     let mut input = attached();
     input.provider = Provider::Pi;
     assert!(!store.validate(input.clone()).unwrap().valid);
+    input.provider = Provider::ZCode;
+    input.credentials = Some(RpcCredentials::None);
+    assert!(
+      store
+        .validate(input)
+        .unwrap()
+        .issues
+        .iter()
+        .any(|issue| issue.field == "mode")
+    );
+    let mut input = managed(directory.path());
+    input.provider = Provider::ZCode;
+    input.arguments.push("--fixture-argument".into());
+    assert!(store.validate(input).unwrap().valid);
+
+    let mut input = attached();
     input.provider = Provider::OpenCode;
     input.endpoint = Some("https://opencode.example".into());
     input.working_directory = Some(directory.path().to_string_lossy().into_owned());

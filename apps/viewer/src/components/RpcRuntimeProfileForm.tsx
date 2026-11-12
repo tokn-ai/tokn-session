@@ -1,5 +1,5 @@
 import { useId, useRef, useState } from "react";
-import { rpcRuntimeDraft, rpcRuntimeInput, RPC_PROVIDER_LABELS, type RpcRuntimeDraft } from "../lib/rpcRuntimeDraft";
+import { rpcRuntimeDraft, rpcRuntimeInput, RPC_PROVIDER_LABELS, supportsRpcAttachment, supportsRpcLaunchArguments, type RpcRuntimeDraft } from "../lib/rpcRuntimeDraft";
 import type { RpcProvider, RpcRuntimeProfile, RpcRuntimeProfileInput, RpcRuntimeProfileValidation } from "../lib/types";
 
 export function RpcRuntimeProfileForm({ profile, revision, busy, on_save, on_validate, on_cancel }: {
@@ -41,16 +41,17 @@ export function RpcRuntimeProfileForm({ profile, revision, busy, on_save, on_val
       <div className="rpc-profile-form__columns">
         <div className="rpc-profile-form__field"><label htmlFor={`${id}-provider`}>Agent</label><select id={`${id}-provider`} value={draft.provider} onChange={(event) => {
           const provider = event.currentTarget.value as RpcProvider;
-          change({ provider, credential_action: "none", token: "", username: "", password: "", ...(provider === "pi" ? { mode: "managed" as const } : {}) });
+          change({ provider, credential_action: "none", token: "", username: "", password: "", mode: supportsRpcAttachment(provider) ? draft.mode : "managed" });
         }}>{Object.entries(RPC_PROVIDER_LABELS).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></div>
         <div className="rpc-profile-form__field"><label htmlFor={`${id}-mode`}>Connection</label><select id={`${id}-mode`} value={draft.mode} onChange={(event) => change({ mode: event.currentTarget.value as RpcRuntimeDraft["mode"] })}>
-          <option value="managed">Launch on this machine</option><option value="attached" disabled={draft.provider === "pi"}>Connect to an endpoint</option>
+          <option value="managed">Launch on this machine</option><option value="attached" disabled={!supportsRpcAttachment(draft.provider)}>Connect to an endpoint</option>
         </select></div>
       </div>
       {draft.provider === "pi" && <p className="settings-page__hint">Pi requires a managed process; existing Pi process pipes cannot be attached through an endpoint.</p>}
+      {draft.provider === "zcode" && <p className="settings-page__hint">ZCode requires a managed process for the selected project folder.</p>}
       {draft.mode === "managed" ? <>
         {textField("executable", "Executable", "Absolute executable path on the selected machine.")}
-        {(draft.provider === "codex" || draft.provider === "pi") && <div className="rpc-profile-form__field"><label htmlFor={`${id}-arguments`}>Arguments</label><textarea id={`${id}-arguments`} value={draft.arguments} rows={3} spellCheck={false} onChange={(event) => change({ arguments: event.currentTarget.value })} /><p>JSON array of arguments. The host adds the provider’s RPC launch options.</p></div>}
+        {supportsRpcLaunchArguments(draft.provider) && <div className="rpc-profile-form__field"><label htmlFor={`${id}-arguments`}>Arguments</label><textarea id={`${id}-arguments`} value={draft.arguments} rows={3} spellCheck={false} onChange={(event) => change({ arguments: event.currentTarget.value })} /><p>JSON array of arguments. The host adds the provider’s RPC launch options.</p></div>}
       </> : textField("endpoint", "RPC endpoint", draft.provider === "codex" ? "A Codex app-server ws:// or wss:// address." : "The agent’s HTTP or HTTPS API address.")}
       {(draft.mode === "managed" || draft.provider === "open_code") && textField("working_directory", "Working directory", "Required absolute project folder path on the selected machine.")}
       {draft.mode === "managed" ? <>

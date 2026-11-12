@@ -49,8 +49,8 @@ impl RuntimeResolver {
       return Err("The chosen runtime belongs to another agent".into());
     }
     profile.validate_launch_ready()?;
-    let discovered = self.is_discovered(&profile.profile.profile_id);
-    if discovered || provider == Provider::OpenCode {
+    let project_scoped = self.is_discovered(&profile.profile.profile_id) || requires_project_scope(provider);
+    if project_scoped {
       let configured = profile
         .profile
         .working_directory
@@ -71,7 +71,7 @@ impl RuntimeResolver {
         RpcRuntimeMode::Managed => Ownership::Managed,
         RpcRuntimeMode::Attached => Ownership::Attached,
       },
-      reuse_scope: if discovered || provider == Provider::OpenCode {
+      reuse_scope: if project_scoped {
         RuntimeReuseScope::Project
       } else {
         RuntimeReuseScope::Runtime
@@ -138,7 +138,7 @@ fn select_profile<'a>(
     .iter()
     .filter(|profile| {
       profile.provider == provider
-        && (provider != Provider::OpenCode
+        && (!requires_project_scope(provider)
           || profile
             .working_directory
             .as_ref()
@@ -153,4 +153,8 @@ fn select_profile<'a>(
     [profile] => Ok(Some(*profile)),
     _ => Err("Choose a default RPC runtime profile for this provider before sending".into()),
   }
+}
+
+fn requires_project_scope(provider: Provider) -> bool {
+  matches!(provider, Provider::OpenCode | Provider::ZCode)
 }

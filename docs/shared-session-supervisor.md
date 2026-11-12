@@ -17,10 +17,10 @@ The first Send verifies the host's historical identity and working directory,
 resolves a runtime plan, starts/connects it if necessary, and binds the native
 session before delivering input. An explicit profile is checked at its exact
 revision and never falls back. Automatic prefers a suitable provider default or
-sole suitable saved profile; ambiguous profiles require a default. OpenCode
+sole suitable saved profile; ambiguous profiles require a default. OpenCode and ZCode
 profiles must match the session's native directory. With no suitable saved
-profile, the host can discover local Codex/OpenCode/DSH executables through
-`TOKN_SESSION_CODEX_EXECUTABLE`, `TOKN_SESSION_OPENCODE_EXECUTABLE`, or
+profile, the host can discover local Codex/OpenCode/ZCode/DSH executables through
+`TOKN_SESSION_CODEX_EXECUTABLE`, `TOKN_SESSION_OPENCODE_EXECUTABLE`, `TOKN_SESSION_ZCODE_EXECUTABLE`, or
 `TOKN_SESSION_DSH_EXECUTABLE`, then `PATH`. These project-scoped managed
 configurations do not write saved profiles. An invalid explicit executable
 override does not fall back to another binary.
@@ -108,6 +108,7 @@ message awaiting native acknowledgement, allowing extension preflight to finish.
 | Codex | Explicit app-server create/resume binding; start-or-steer, turn interruption, model catalogs, and live callback questions. Desktop is an explicit alternative. |
 | Pi | Viewer-owned sessions keep the exclusive Pi workflow driver; independently running bridges keep their existing owner. A Pi profile cannot adopt arbitrary saved history from an ID alone. |
 | OpenCode | Native V2 creation, local history, runtime/profile binding and start-or-steer. V1 and mixed histories remain read-only. |
+| ZCode | Managed native app-server, verified local SQLite history, root session creation and resume, and text Send while idle. Drafts use the runtime default model. |
 | DSH | Existing native sessions through a saved or locally discovered ApiProxy runtime. State/model inspection does not activate cold agents. Local project creation uses the native default preset. |
 
 The Pi driver owns model-on-send sequencing, native extension dialogs,
@@ -124,8 +125,9 @@ draft model intent only when an admission starts an idle turn. Their model
 selectors therefore remain read-only with an explanation. Pi's existing owned
 workflow is preserved separately; its host coordination does not strengthen
 generic native capability guarantees. Strict delivery modes also remain
-provider-specific; the composer uses native start-or-steer admission and does
-not guess a started/steered outcome when the native reply only says accepted.
+provider-specific. The composer uses idle-only admission for ZCode and native
+start-or-steer for the other RPC providers. An accepted reply does not identify
+which turn state the runtime chose.
 
 Existing question cards can answer only a matching live RPC callback, with exact
 session/request/question IDs and validated complete answer batches. Recorded
@@ -133,7 +135,7 @@ history alone cannot authorize a reply. Native callback envelopes and credential
 remain host-side. The separate Codex `request_user_input_async` tool emits
 assistant-item metadata without a callback and is unavailable through RPC;
 answering it through Desktop requires explicitly selecting Desktop control.
-The desktop New session flow uses the same supervisor for Codex/OpenCode/DSH
+The desktop New session flow uses the same supervisor for Codex/OpenCode/ZCode/DSH
 creation, while preserving Pi’s specialized worker. Remote-only history and a
 general permission-approval UI remain follow-ups.
 
@@ -164,6 +166,6 @@ normal callback controls can answer it. Live binding recovery failures remain
 visible/retryable; history-only publication is allowed when that exact prior
 runtime no longer exists after a host restart. Cancellation fences first input
 and drains the admitted workflow while keeping shared servers alive.
-Lost OpenCode/DSH create acknowledgements can reconcile through their planned
+Lost OpenCode/ZCode/DSH create acknowledgements can reconcile through their planned
 native IDs, verified local history and an existing exact runtime owner. This
 does not retry native creation or first input, and preserves the uncertainty.

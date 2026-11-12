@@ -74,7 +74,7 @@ native session or upload starts until the first Send. Opening a draft model
 picker can briefly start a metadata RPC process; it never creates or resumes a
 saved conversation. Pi, Codex and OpenCode choices remain local to each draft,
 reset with project/provider/runtime changes, and are revalidated and applied
-before its first prompt. DSH retains its runtime default. Availability, catalogs
+before its first prompt. ZCode and DSH use their runtime defaults. Availability, catalogs
 and first Send share a host-resolved `RuntimePlan`; an opaque `runtime_plan_id`
 pins configuration and project scope without exposing launch configuration.
 Stale plans reject before admission. Creation receipts include model identity
@@ -86,12 +86,12 @@ without replay. Managed Pi now persists its explicit first-input acknowledgement
 independently of history readiness; legacy receipts remain unknown. New session
 can add a project with an empty registry. See [projects and creation](viewer-projects.md).
 
-Pi, Codex, OpenCode and DSH creation remains local desktop only.
+Pi, Codex, OpenCode, ZCode and DSH Viewer creation remains local desktop only.
 Provider/runtime options are checked without starting agents; lazy model catalogs
 reuse connected runtimes or close temporary metadata processes after querying.
 Automatic prefers a suitable saved default or sole suitable profile, then
-discovers local Codex/OpenCode/DSH executables through provider overrides or
-`PATH`. Explicit profiles never fall back; OpenCode profiles must match the
+discovers local Codex/OpenCode/ZCode/DSH executables through provider overrides or
+`PATH`. Explicit profiles never fall back; OpenCode and ZCode profiles must match the
 project folder. Creation currently requires host-readable
 native history; HTTP/Hub/browser creation remains out of scope.
 Drafts link unavailable RPC runtimes to Settings → Agent runtimes and refresh
@@ -131,7 +131,7 @@ Existing commands, Pi behavior and exclusive supervised transport remain.
 Managed receipt storage migrates legacy version-one Pi catalogs to version two
 with explicit provider identity; the Pi lease namespace is preserved.
 
-Settings → Agent runtimes now manages selected-machine Codex/Pi/OpenCode/DSH
+Settings → Agent runtimes now manages selected-machine Codex/Pi/OpenCode/ZCode/DSH
 RPC profiles and real managed/attached adapters through the shared Rust registry.
 Private versioned profiles live under `viewer/rpc-runtimes.json`; public reads
 redact environment/credential values. Explicit lifecycle actions use instance
@@ -154,14 +154,14 @@ Prepare upstream snapshots outside vendor with `scripts/rpc/prepare-*.sh` and ru
 covered scenarios, and replay ordering. The private harness is excluded from
 published crate archives.
 
-Live interaction now has nine Rust crates: a provider-independent
-`interaction-core`, dedicated Codex/Pi/OpenCode/DSH RPC protocol crates, and native
-adapters. The core owns instance-bound dispatch, capabilities, live pending
+Live interaction has a provider-independent `interaction-core`, dedicated
+Codex/Pi/OpenCode/DSH RPC protocol crates, and native adapters including ZCode.
+The core owns instance-bound dispatch, capabilities, live pending
 interactions, cancellation-safe admissions, and bounded receipts; protocol and
 core crates do not import providers. Codex uses app-server stdio/WS(S), Pi uses
-stdio, OpenCode V2 HTTP/SSE, and DSH ApiProxy HTTP with two WebSocket downlinks.
-Each adapter supports owned
-launch and explicit attachment (Pi requires supplied IO); attached close never
+stdio, OpenCode V2 HTTP/SSE, DSH ApiProxy HTTP with two WebSocket downlinks,
+and ZCode app-server NDJSON. Adapters support owned launch. Where supported,
+explicit attachment never
 stops an external process. Native start-or-steer/queue admission is separate
 from completion, and unsupported atomic model/strict delivery operations reject
 honestly. Inspection never starts or resumes a session. See
@@ -169,6 +169,19 @@ honestly. Inspection never starts or resumes a session. See
 The viewer composes the shared core managers with native adapter factories and
 host verification; provider wire workflows stay in their adapters. The common
 RPC capability limits remain distinct from the exclusive managed Pi workflow.
+
+ZCode Viewer control uses a managed, project-scoped `zcode app-server --stdio`
+process and verifies its database path against the historical source. It
+reserves a native session ID for new conversations and resumes verified root
+sessions on the first Send. The composer submits text with idle-only admission.
+Drafts use the runtime default model. Permission and question callbacks are
+declined until the Viewer has matching controls. Native CLI 0.17.1 was verified
+with an isolated loopback model for creation, cold resume, context continuity
+and Stop. ZCode soft-deleted rows are excluded from historical catalogs and
+exact reads when the native `time_deleted` column exists.
+CLI `create` and `append` use native headless stream JSON through the configured
+executor. See [runtime configuration](viewer-rpc-runtimes.md) and the
+[CLI examples](../crates/cli/README.md).
 
 Codex app-server control requires explicit thread create/resume; reads never
 activate saved work. Its ordered response/event pump and epoch guards preserve
@@ -1596,8 +1609,9 @@ normalization into `AgentEvent`.
 ZCode 3.7.3 persists the same tolerant V1 message/part payload family with
 additional envelope fields, so `tokn-session-zcode` deliberately shares that
 wire decoder while assigning the distinct `zcode` provider identity. The
-ZCode application itself is closed source; compatibility is based on its
-read-only local schema and retained native records rather than an upstream API.
+historical reader is based on the local schema and retained native records.
+ZCode now publishes its [Agent CLI source](https://github.com/zai-org/ZCode/tree/main/apps/zcode-cli),
+including the app-server protocol and session store.
 
 Persisted WorkBuddy JSONL wire types live in `tokn-workbuddy-protocol`.
 Messages, reasoning, function calls/results, file-history snapshots, and AI
@@ -1801,8 +1815,8 @@ OpenCode has the first live-output normalizer: `OpenCodeLiveNormalizer` parses `
 ## Known Gaps
 
 - No `attach` command yet.
-- ZCode, WorkBuddy, and DSH support historical reads and Relay watching;
-  create/append and live input are not implemented.
+- WorkBuddy supports historical reads and Relay watching. WorkBuddy and DSH
+  have no CLI create/append. DSH Viewer input uses the native ApiProxy runtime.
 - Codex and Pi have normalization fixtures. OpenCode now has wire-format
   fixtures plus adapter/source regression tests; full SQLite-backed CLI golden
   tests are still missing.
@@ -1810,13 +1824,10 @@ OpenCode has the first live-output normalizer: `OpenCodeLiveNormalizer` parses `
   delivery acknowledgement; subscribers that are disconnected can miss events.
 - The terminal pet cannot distinguish every runtime state authoritatively until
   provider task lifecycle and interaction events are represented in `AgentEvent`.
-- Viewer message input requires a live Codex Desktop owner, Pi bridge, or a
-  locally created viewer-owned Pi runtime. Only viewer-owned Pi histories offer
-  automatic or explicit resume; arbitrary historical sessions have no fallback
-  process. Without a Relay connection, selected
-  timelines refresh from the durable index and historical source reads. Relay
-  snapshot/follow supports all six providers; it is not an agent-control
-  transport, and its unread tracking is not persisted yet.
+- Arbitrary Pi history adoption still requires a compatible live bridge or
+  viewer-owned Pi runtime. Without Relay, selected timelines refresh from the
+  durable index and historical source reads. Relay snapshot/follow supports
+  all six providers. Relay unread tracking is not persisted yet.
 - Viewer session-file relocation is deliberately conservative. Repeated or
   overlapping moves can make the retired source ambiguous, in which case the
   later path is treated as a new row instead of transferring prior attention.

@@ -6523,6 +6523,8 @@ dependencies = [
  "tokn-session-render",
  "tokn-session-storage",
  "tokn-session-workbuddy",
+ "tokn-session-zcode",
+ "tokn-zcode-adapter",
  "url",
  "uuid",
  "zstd",
@@ -6534,6 +6536,18 @@ version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "tokn-zcode-adapter"
+version = "0.1.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokn-interaction-core",
+ "uuid",
 ]
 
 [[package]]

@@ -169,6 +169,9 @@ impl ViewerRepository for NativeRepository {
     if provider == ViewerProvider::OpenCode {
       return tokn_session_opencode::OpenCodeSessionSource::new(Some(path.to_owned())).session_header_exact(session_id);
     }
+    if provider == ViewerProvider::ZCode {
+      return tokn_session_zcode::ZCodeSessionSource::new(Some(path.to_owned())).session_header_exact(session_id);
+    }
     let header = self.session_header_at_path(provider, path)?;
     if header.id != session_id {
       return Err("Session history identity changed".into());

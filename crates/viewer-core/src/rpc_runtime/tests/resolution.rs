@@ -29,14 +29,14 @@ async fn all_shared_providers_discover_the_same_plan_for_availability_catalog_an
   let bin = tempfile::tempdir().unwrap();
   let project = tempfile::tempdir().unwrap();
   let cwd = std::fs::canonicalize(project.path()).unwrap();
-  for command in ["codex", "opencode", "dsh"] {
+  for command in ["codex", "opencode", "zcode", "dsh"] {
     executable(bin.path(), command);
   }
   install_environment(&manager, bin.path());
   let host = Host {
     resolver: manager.0.resolver.clone(),
   };
-  for provider in [Provider::Codex, Provider::OpenCode, Provider::Dsh] {
+  for provider in [Provider::Codex, Provider::OpenCode, Provider::ZCode, Provider::Dsh] {
     let plan = manager.resolve_plan(provider, &cwd, None).unwrap();
     assert_eq!(plan.provider, provider);
     assert_eq!(plan.ownership, Ownership::Managed);
@@ -78,6 +78,7 @@ fn discovered_identity_fences_provider_project_executable_and_replacement() {
     executables: [
       "TOKN_SESSION_CODEX_EXECUTABLE",
       "TOKN_SESSION_OPENCODE_EXECUTABLE",
+      "TOKN_SESSION_ZCODE_EXECUTABLE",
       "TOKN_SESSION_DSH_EXECUTABLE",
     ]
     .into_iter()
@@ -94,6 +95,13 @@ fn discovered_identity_fences_provider_project_executable_and_replacement() {
     first.configuration,
     manager
       .resolve_plan(Provider::Dsh, project.path(), None)
+      .unwrap()
+      .configuration
+  );
+  assert_ne!(
+    first.configuration,
+    manager
+      .resolve_plan(Provider::ZCode, project.path(), None)
       .unwrap()
       .configuration
   );
@@ -184,45 +192,48 @@ fn explicit_or_invalid_saved_profiles_never_fall_back_to_discovery() {
 }
 
 #[test]
-fn opencode_scope_allows_another_projects_local_default_but_rejects_explicit_mismatch() {
+fn project_scoped_profiles_allow_another_projects_local_default_but_reject_explicit_mismatch() {
   let manager = manager();
   let bin = tempfile::tempdir().unwrap();
   executable(bin.path(), "opencode");
+  let zcode = executable(bin.path(), "zcode");
   install_environment(&manager, bin.path());
   let project = tempfile::tempdir().unwrap();
   let other = tempfile::tempdir().unwrap();
-  let saved = save_profile(
-    &manager,
+  let directory = project.path().to_string_lossy().into_owned();
+  for profile in [
     RpcRuntimeProfileInput {
       provider: Provider::OpenCode,
-      working_directory: Some(project.path().to_string_lossy().into_owned()),
-      endpoint: Some("http://127.0.0.1:1".into()),
+      working_directory: Some(directory.clone()),
+      ..attached_profile("http://127.0.0.1:1".into())
+    },
+    RpcRuntimeProfileInput {
+      provider: Provider::ZCode,
+      mode: RpcRuntimeMode::Managed,
+      executable: Some(zcode.to_string_lossy().into_owned()),
+      working_directory: Some(directory),
+      endpoint: None,
       ..attached_profile("unused".into())
     },
-  );
-  let explicit = core_runtime::RuntimeSelection {
-    profile_id: saved.profile_id,
-    expected_revision: saved.expected_revision,
-  };
-  assert_eq!(
-    manager
-      .resolve_plan(Provider::OpenCode, project.path(), Some(&explicit))
-      .unwrap()
-      .reuse_scope,
-    RuntimeReuseScope::Project
-  );
-  assert!(
-    manager
-      .resolve_plan(Provider::OpenCode, other.path(), Some(&explicit))
-      .is_err()
-  );
-  assert_eq!(
-    manager
-      .resolve_plan(Provider::OpenCode, other.path(), None)
-      .unwrap()
-      .ownership,
-    Ownership::Managed
-  );
+  ] {
+    let provider = profile.provider;
+    let saved = save_profile(&manager, profile);
+    let explicit = core_runtime::RuntimeSelection {
+      profile_id: saved.profile_id,
+      expected_revision: saved.expected_revision,
+    };
+    assert_eq!(
+      manager
+        .resolve_plan(provider, project.path(), Some(&explicit))
+        .unwrap()
+        .reuse_scope,
+      RuntimeReuseScope::Project
+    );
+    assert!(manager.resolve_plan(provider, other.path(), Some(&explicit)).is_err());
+    let discovered = manager.resolve_plan(provider, other.path(), None).unwrap();
+    assert_eq!(discovered.ownership, Ownership::Managed);
+    assert_ne!(discovered.configuration.id, explicit.profile_id);
+  }
   assert!(manager.inventory().runtimes.is_empty());
 }
 
@@ -244,7 +255,13 @@ fn invalid_explicit_executable_override_does_not_search_for_a_different_binary()
 fn windows_bare_commands_find_native_binaries_and_package_manager_shims() {
   let bin = tempfile::tempdir().unwrap();
   let path = std::env::join_paths([bin.path()]).unwrap();
-  for (command, extension) in [("pi", "exe"), ("codex", "cmd"), ("opencode", "bat"), ("dsh", "com")] {
+  for (command, extension) in [
+    ("pi", "exe"),
+    ("codex", "cmd"),
+    ("opencode", "bat"),
+    ("zcode", "exe"),
+    ("dsh", "com"),
+  ] {
     let executable = bin.path().join(command).with_extension(extension);
     std::fs::write(&executable, b"metadata fixture; never launch").unwrap();
     let canonical = std::fs::canonicalize(&executable).unwrap();

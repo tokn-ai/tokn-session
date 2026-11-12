@@ -5,9 +5,11 @@ import { useSessionControl } from "./useSessionControl";
 import { SessionControlSelector } from "../components/SessionControlSelector";
 import type { SessionControlStatus, SessionSummary } from "./types";
 
-const machine = vi.hoisted(() => ({ scope: "machine-one", invoke: vi.fn(), closed: new Set<() => void>() }));
+const machine = vi.hoisted(() => ({ scope: "machine-one", invoke: vi.fn(), closed: new Set<() => void>(), changes: new Set<() => void>() }));
 vi.mock("./transport", () => ({ viewerStorageScope: () => machine.scope,
-  captureTransport: () => ({ invoke: machine.invoke, on_close: (callback: () => void) => {
+  captureTransport: () => ({ invoke: machine.invoke, listen: async (_event: string, callback: () => void) => {
+    machine.changes.add(callback); return () => machine.changes.delete(callback);
+  }, on_close: (callback: () => void) => {
     machine.closed.add(callback); return () => machine.closed.delete(callback);
   } }),
 }));
@@ -32,7 +34,7 @@ function Controls({ selected = session }: { selected?: SessionSummary }) {
   return <SessionControlSelector control={control} running={selected.is_running} />;
 }
 beforeEach(() => {
-  vi.resetAllMocks(); machine.scope = "machine-one"; machine.closed.clear();
+  vi.resetAllMocks(); machine.scope = "machine-one"; machine.closed.clear(); machine.changes.clear();
   vi.mocked(getSessionControl).mockResolvedValue(status());
   vi.mocked(setSessionControl).mockImplementation(async (request) => status({ transport: request.transport }));
 });
@@ -120,11 +122,38 @@ it("clears live routing proof on disconnect and exposes Stop only for active RPC
   expect(screen.getByText(/Machine disconnected/)).toBeVisible();
 });
 
-it("offers native DSH cancellation without a Codex transport selector", async () => {
-  vi.mocked(getSessionControl).mockResolvedValue(status({ provider: "dsh", can_select: false, can_cancel: true }));
-  render(<Controls selected={{ ...session, provider: "dsh", is_running: true }} />);
+it.each(["dsh", "zcode"] as const)("offers native %s cancellation using the host capability", async (provider) => {
+  vi.mocked(getSessionControl).mockResolvedValue(status({ provider, can_select: false, can_cancel: true }));
+  vi.mocked(cancelSessionTurn).mockImplementation(async (request) => ({ request_id: request.request_id, status: "accepted", message: "Stop requested" }));
+  render(<Controls selected={{ ...session, provider, is_running: true }} />);
   expect(await screen.findByRole("button", { name: "Stop" })).toBeEnabled();
   expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+  await screen.findByText("Stop requested");
+  expect(cancelSessionTurn).toHaveBeenCalledWith({ session_key: "one", request_id: expect.any(String) }, machine.invoke);
+});
+
+it("keeps ZCode composer availability independent of its Stop lookup", async () => {
+  vi.mocked(getSessionControl).mockRejectedValue(new Error("Control status unavailable"));
+  const { result } = renderHook(() => useSessionControl({ ...session, provider: "zcode" }));
+  expect(result.current.blocked).toBe(false);
+  await waitFor(() => expect(result.current.error).toBe("Control status unavailable"));
+  expect(result.current.blocked).toBe(false);
+});
+
+it("shows Stop from native ZCode activity before any historical output and clears it on completion", async () => {
+  vi.mocked(getSessionControl).mockResolvedValue(status({ provider: "zcode", can_select: false, is_running: false }));
+  const view = render(<Controls selected={{ ...session, provider: "zcode", is_running: false }} />);
+  await waitFor(() => expect(machine.changes.size).toBe(1));
+  expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
+  vi.mocked(getSessionControl).mockResolvedValue(status({ provider: "zcode", can_select: false, is_running: true }));
+  act(() => { for (const changed of machine.changes) changed(); });
+  expect(await screen.findByRole("button", { name: "Stop" })).toBeEnabled();
+  vi.mocked(getSessionControl).mockResolvedValue(status({ provider: "zcode", can_select: false, is_running: false }));
+  act(() => { for (const changed of machine.changes) changed(); });
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument());
+  view.unmount();
+  expect(machine.changes.size).toBe(0);
 });
 
 it("keeps cancellation available while input is awaiting acknowledgement", async () => {

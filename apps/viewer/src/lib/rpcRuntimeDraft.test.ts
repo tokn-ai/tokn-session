@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { rpcRuntimeDraft, rpcRuntimeInput } from "./rpcRuntimeDraft";
+import { rpcRuntimeDraft, rpcRuntimeInput, supportsRpcAttachment } from "./rpcRuntimeDraft";
 it("clears incompatible secret configuration when changing runtime modes", () => {
   const draft = rpcRuntimeDraft();
   expect(rpcRuntimeInput({ ...draft, mode: "attached", endpoint: "ws://localhost:9876", arguments: "invalid unused JSON", environment_action: "replace", environment: "invalid unused JSON" }))
@@ -20,4 +20,9 @@ it("retains the required project directory only for runtimes that use it", () =>
   expect(rpcRuntimeInput({ ...draft, mode: "attached", provider: "open_code" }).working_directory).toBe("/project/path");
   expect(rpcRuntimeInput({ ...draft, mode: "attached", provider: "codex" }).working_directory).toBeNull();
   expect(rpcRuntimeInput({ ...draft, mode: "attached", provider: "dsh" }).working_directory).toBeNull();
+});
+it("keeps launch arguments and the project folder for managed ZCode profiles", () => {
+  const draft = { ...rpcRuntimeDraft(), provider: "zcode" as const, working_directory: " /project/path ", arguments: '["--fixture-argument"]' };
+  expect(supportsRpcAttachment(draft.provider)).toBe(false);
+  expect(rpcRuntimeInput(draft)).toMatchObject({ mode: "managed", provider: "zcode", working_directory: "/project/path", arguments: ["--fixture-argument"] });
 });

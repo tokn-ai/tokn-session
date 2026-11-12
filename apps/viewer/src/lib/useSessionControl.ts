@@ -24,7 +24,9 @@ export const SessionControlContext = createContext<{ session_key: string | null;
 
 /** Host-owned routing is explicit. A failed RPC never chooses Desktop locally. */
 export function useSessionControl(session: SessionSummary | null, refresh_key = 0) {
-  const enabled = !!session && ["codex", "dsh"].includes(session.provider) && !session.is_subagent;
+  const provider = session?.provider;
+  const gated_input = provider === "codex" || provider === "dsh";
+  const enabled = !!session && (gated_input || provider === "zcode") && !session.is_subagent;
   const session_key = enabled ? session.session_key : null;
   const scope = viewerStorageScope();
   const transport = useMemo(captureTransport, [scope]);
@@ -68,6 +70,21 @@ export function useSessionControl(session: SessionSummary | null, refresh_key = 
   }, [owner, transport, update]);
   useEffect(() => { void refresh(); }, [refresh, session?.is_running, refresh_key]);
 
+  useEffect(() => {
+    if (!session_key || provider !== "zcode") return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void transport.listen("rpc-runtimes-changed", () => {
+      if (!cancelled) void refresh();
+    }).then((stop) => {
+      if (cancelled) stop();
+      else { unlisten = stop; void refresh(); }
+    }).catch(() => {
+      if (!cancelled) update(owner, (old) => ({ ...old, error: "Live control updates are unavailable. Retry control to check this session." }));
+    });
+    return () => { cancelled = true; unlisten?.(); };
+  }, [owner, provider, refresh, session_key, transport, update]);
+
   async function choose(next: SessionTransport) {
     if (!session_key || !value.status?.can_select || busy.current || value.checking || next === value.status.transport) return;
     busy.current = true;
@@ -99,10 +116,14 @@ export function useSessionControl(session: SessionSummary | null, refresh_key = 
     } catch (error) {
       if (sequence.current === request) update(owner, (old) => ({ ...old, stopping: false, error: errorMessage(error) }));
     } finally {
-      if (sequence.current === request) busy.current = false;
+      if (sequence.current === request) {
+        busy.current = false;
+        if (provider === "zcode") void refresh();
+      }
     }
   }
-  const blocked = !!session_key && (value.checking || value.changing || !value.status);
+  // ZCode has one control transport. Its optional Stop lookup does not gate the composer.
+  const blocked = gated_input && !!session_key && (value.checking || value.changing || !value.status);
   const revision = JSON.stringify([owner, value.revision]);
   return { ...value, provider: session?.provider, enabled, blocked, revision, choose, cancel, refresh };
 }

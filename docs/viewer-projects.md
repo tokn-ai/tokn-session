@@ -1,9 +1,9 @@
 # Viewer projects and session creation
 
 The desktop viewer discovers or manually registers folders and creates Pi, Codex, OpenCode,
-and DSH sessions on the viewing computer’s local connection. The project registry
+ZCode, and DSH sessions on the viewing computer’s local connection. The project registry
 and creation commands remain unavailable to browser, HTTP/Hub remote, session-share
-and External reader connections. There is no new CLI `create` or `attach` command.
+and External reader connections. ZCode also supports CLI `create` and `append`.
 
 ## Create a session
 
@@ -22,7 +22,7 @@ window closes or reloads. **Discard draft** removes an editable draft immediatel
 
 **Automatic** uses a suitable
 provider default or a single suitable saved profile. Ambiguous profiles require
-an explicit choice. If no suitable saved profile exists, Codex/OpenCode/DSH can
+an explicit choice. If no suitable saved profile exists, Codex/OpenCode/ZCode/DSH can
 use a local executable discovered through their `TOKN_SESSION_*_EXECUTABLE`
 override or `PATH`; see [runtime configuration](viewer-rpc-runtimes.md).
 An explicit profile or executable override never silently falls back. Missing
@@ -31,7 +31,7 @@ configuration without starting a runtime.
 Unavailable RPC agents offer **Configure agent runtime**, opening Settings at
 **Agent runtimes**. Returning to the draft or saving a runtime profile refreshes
 its configuration without discarding text, images or the selected project.
-OpenCode's saved runtime folder must match the draft's project folder;
+OpenCode and ZCode saved runtime folders must match the draft's project folder;
 discovered runtimes are scoped to that folder.
 New session remains accessible when no folder is available. Choose **Add project**
 inside the conversation to register an existing directory and return to the same
@@ -42,7 +42,8 @@ The draft model picker offers verified Pi, Codex and OpenCode choices, or
 **Use runtime default**. Choosing stays local; Send revalidates the catalog and
 applies the model before the first prompt. Changing project, agent or runtime
 clears the choice while retaining text/images. An incompatible model keeps image
-attachments visible and blocks Send until corrected. DSH remains default-only.
+attachments visible and blocks Send until corrected. ZCode and DSH use their
+runtime defaults.
 Codex uses app-server RPC. DSH passes the project directory to native session
 creation and retains the deployment’s default agent preset.
 
@@ -54,22 +55,24 @@ keeps text/images. Pi uses this same plan boundary while retaining its existing
 worker execution and receipts. Checking availability never launches an agent.
 
 Initial images are supported for Pi, Codex and OpenCode, with host-side validation
-against the effective model before delivery. DSH currently advertises no verified
-image support. Switching agents keeps drafts and previews; unsupported images
+against the effective model before delivery. ZCode and DSH accept text in drafts.
+Switching agents keeps drafts and previews; unsupported images
 must be removed or used with another supported agent.
 
 The host publishes a conversation only after verifying the native identity and
-canonical project folder and indexing its local history. Codex/DSH can defer file
-creation until the first input, so initial delivery precedes history readiness.
+canonical project folder and indexing its local history. Codex, ZCode and DSH
+can defer history writes until the first input, so initial delivery precedes
+history readiness.
 OpenCode V2 `session_message` history is now decoded locally with native sequence
-ordering; V1/ZCode display is preserved, and V1/mixed histories remain read-only.
+ordering. OpenCode V1/mixed histories remain read-only. ZCode uses its native
+app-server and the same local SQLite catalog as the ZCode history reader.
 Remote-only endpoints and histories outside configured local sources cannot be
 opened through this flow. Configure readable sources, then check the existing
 creation rather than creating another native session.
 
 ## Creation recovery and ownership
 
-The shared core durably admits one UUID before native effects. OpenCode/DSH use
+The shared core durably admits one UUID before native effects. OpenCode/ZCode/DSH use
 reserved native IDs; Codex returns its native thread ID. First-prompt admission
 has its own state, and a disconnect or timeout never automatically recreates a
 session or replays that prompt. **Check session start** observes the same original
@@ -84,7 +87,7 @@ including its attachments; retry checks the original receipt instead of sending
 again. Managed Pi persists acknowledgement separately from its file identity, so
 a header-only history cannot incorrectly clear an unaccepted first message.
 Older Pi receipts with no acknowledgement field remain unknown.
-If an OpenCode/DSH create acknowledgement is lost, the host can find history by
+If an OpenCode/ZCode/DSH create acknowledgement is lost, the host can find history by
 its reserved native ID and adopt the exact existing runtime owner. The first
 prompt is still marked unsent and is never replayed during this reconciliation.
 Codex cannot recover an unacknowledged server-assigned ID through this receipt.

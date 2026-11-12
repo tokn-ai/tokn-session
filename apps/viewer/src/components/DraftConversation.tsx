@@ -1,5 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { DEFAULT_IMAGE_LIMITS } from "../lib/imageDrafts";
+import { DRAFT_AGENT_NAMES } from "../lib/sidebarDrafts";
 import { errorMessage } from "../lib/state";
 import type { ListSessionCreationModelsRequest, RegisteredProject, RpcProvider, SessionCreationModels, SessionCreationOptions } from "../lib/types";
 import type { SessionDraft, SessionDraftPatch } from "../lib/useSessionDrafts";
@@ -9,7 +10,6 @@ import { PanelIcon, SendIcon } from "./Icons";
 import { SessionModelPicker } from "./SessionModelPicker";
 import "./DraftConversation.css";
 
-const AGENT_NAMES: Record<RpcProvider, string> = { pi: "Pi", codex: "Codex", open_code: "OpenCode", dsh: "DSH" };
 const MAX_MESSAGE_LENGTH = 16_384;
 
 export interface DraftConversationProps {
@@ -44,7 +44,7 @@ export function DraftConversation({ draft, projects, workspace_available, worksp
   const [options_retry, setOptionsRetry] = useState(0);
   const project = projects.find((entry) => entry.project_id === draft.project_id);
   const provider = draft.selection.provider;
-  const agent_name = AGENT_NAMES[provider];
+  const agent_name = DRAFT_AGENT_NAMES[provider];
   const runtime_id = draft.selection.runtime_profile_id ?? "";
   const agent = options?.project_id === draft.project_id ? options.providers.find((entry) => entry.provider === provider) : undefined;
   const runtime = agent?.runtimes.find((entry) => entry.profile_id === runtime_id);
@@ -139,7 +139,7 @@ export function DraftConversation({ draft, projects, workspace_available, worksp
           </label>
           <label>Agent
             <select value={provider} disabled={draft.locked || draft.sending} onChange={(event) => on_change({ selection: { provider: event.target.value as RpcProvider } })}>
-              {(Object.keys(AGENT_NAMES) as RpcProvider[]).map((value) => <option key={value} value={value}>{AGENT_NAMES[value]}</option>)}
+              {Object.entries(DRAFT_AGENT_NAMES).map(([value, name]) => <option key={value} value={value}>{name}</option>)}
             </select>
           </label>
           {!!agent?.runtimes.length || runtime_id ? <label>Runtime

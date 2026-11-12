@@ -1,5 +1,6 @@
 use rusqlite::Connection;
 use tokn_session_core::{AgentEvent, Provider, ToolKind};
+use tokn_session_opencode::{OpenCodeSessionCache, OpenCodeSessionSource};
 use tokn_session_zcode::ZCodeSessionSource;
 
 fn fixture_database() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -38,6 +39,48 @@ fn observed_zcode_catalog_retains_existing_database_errors() {
   assert_eq!(
     source.list_session_header_catalog().unwrap_err(),
     source.list_session_headers().unwrap_err()
+  );
+}
+
+#[test]
+fn soft_deleted_sessions_disappear_from_zcode_catalog_and_exact_reads() {
+  let (_directory, database) = fixture_database();
+  let source = ZCodeSessionSource::new(Some(database.clone()));
+  let stale_header = source.session_header_exact("sess_zcode").unwrap();
+  let shared_source = OpenCodeSessionSource::for_zcode(Some(database.clone()));
+  let mut cache = OpenCodeSessionCache::default();
+  assert!(
+    shared_source
+      .load_session_records_cached_exact("sess_zcode", false, &mut cache)
+      .is_ok()
+  );
+  let connection = Connection::open(&database).unwrap();
+  connection
+    .execute_batch(
+      "alter table session add column time_deleted integer;
+       update session set time_deleted = 4000 where id = 'sess_zcode';",
+    )
+    .unwrap();
+  let catalog = source.list_session_header_catalog().unwrap();
+  assert!(catalog.complete);
+  assert_eq!(catalog.headers.len(), 1);
+  assert_eq!(catalog.headers[0].id, "sess_child");
+  assert_eq!(source.list_session_headers().unwrap(), catalog.headers);
+  assert_eq!(source.list_sessions().unwrap().len(), 1);
+  assert_eq!(source.list_session_relations().unwrap().len(), 1);
+  assert!(source.session_header_exact("sess_zcode").is_err());
+  assert!(source.hydrate_session_header(stale_header).is_err());
+  assert!(source.load_session_exact("sess_zcode").is_err());
+  assert!(source.load_session("sess_z").is_err());
+  assert!(
+    shared_source
+      .load_session_records_cached_exact("sess_zcode", false, &mut cache)
+      .is_err()
+  );
+  assert!(
+    OpenCodeSessionSource::new(Some(database))
+      .session_header_exact("sess_zcode")
+      .is_ok()
   );
 }
 
