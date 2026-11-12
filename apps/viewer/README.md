@@ -55,6 +55,7 @@ pnpm tauri dev
 ```
 
 The WASM bindings CLI version must match `wasm-bindgen` in `Cargo.lock`.
+The development commands generate the Hub WASM bindings before starting Vite.
 
 `pnpm run dev:web` builds and starts the API, starts Vite with HMR, and prints
 a `#token=…` login link. Open it to connect automatically; the browser removes
