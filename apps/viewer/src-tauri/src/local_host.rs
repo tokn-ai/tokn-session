@@ -13,9 +13,11 @@ use std::{
   time::Duration,
 };
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_opener::OpenerExt;
 use tokio::{sync::Mutex as AsyncMutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tokn_session_hub::{
+  account_client::{AccountClient, LoginChallenge},
   connector::{self, ConnectorStatus, HostLease},
   host_setup::{self, HostOptions},
   onboarding::HostProfile,
@@ -36,6 +38,9 @@ pub enum HostPhase {
   External,
   Background,
   Unavailable,
+  SigningIn,
+  Registering,
+  Renaming,
   Connecting,
   Online,
   Reconnecting,
@@ -47,6 +52,9 @@ pub struct HostStatus {
   pub hub_url: String,
   pub name: String,
   pub machine_address: Option<String>,
+  pub machine_name: Option<String>,
+  pub account_username: Option<String>,
+  pub login: Option<LoginChallenge>,
   pub allow_control: bool,
   pub machine_reference: Option<String>,
   pub error: Option<String>,
@@ -61,6 +69,9 @@ impl Default for HostStatus {
       hub_url: String::new(),
       name: "This computer".into(),
       machine_address: None,
+      machine_name: None,
+      account_username: None,
+      login: None,
       allow_control: false,
       machine_reference: None,
       error: None,
@@ -76,6 +87,13 @@ pub struct StartHostRequest {
   pub hub_url: String,
   pub name: String,
   pub allow_control: bool,
+  #[serde(default)]
+  pub machine_name: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenameHostRequest {
+  pub machine_name: String,
 }
 #[derive(Serialize)]
 pub struct HostPairing {
@@ -113,6 +131,7 @@ struct RunningHost {
   instance_id: String,
   started_at_ms: i64,
   configuration: Option<StartHostRequest>,
+  connection: Arc<Mutex<(HostPhase, Option<String>)>>,
 }
 impl RunningHost {
   async fn stop(mut self) {
@@ -140,7 +159,20 @@ pub struct LocalHost {
   status: Arc<Mutex<HostStatus>>,
   closed: AtomicBool,
   closing: CancellationToken,
+  pending_setup: Mutex<Option<CancellationToken>>,
 }
+
+struct SetupOperation<'a> {
+  pending: &'a Mutex<Option<CancellationToken>>,
+  cancellation: CancellationToken,
+}
+impl Drop for SetupOperation<'_> {
+  fn drop(&mut self) {
+    self.cancellation.cancel();
+    self.pending.lock().unwrap().take();
+  }
+}
+
 impl LocalHost {
   pub fn new(state_dir: PathBuf) -> Self {
     Self {
@@ -150,6 +182,7 @@ impl LocalHost {
       status: Arc::new(Mutex::new(HostStatus::default())),
       closed: AtomicBool::new(false),
       closing: CancellationToken::new(),
+      pending_setup: Mutex::new(None),
     }
   }
   pub fn unified(paths: tokn_session_storage::SessionPaths) -> Self {
@@ -173,16 +206,89 @@ impl LocalHost {
     .map_err(|_| "Host storage resolution task failed")?
   }
   pub async fn status(&self) -> Result<HostStatus, String> {
-    let running = self.operation.lock().await;
-    if running.is_some() {
+    let Ok(running) = self.operation.try_lock() else {
+      return Ok(self.status.lock().unwrap().clone());
+    };
+    let owned = running.is_some();
+    drop(running);
+    if owned {
       return Ok(self.status.lock().unwrap().clone());
     }
     detected_status(self.storage_path(false).await?).await
   }
 
   pub async fn start(&self, app: AppHandle, request: StartHostRequest) -> Result<HostStatus, String> {
-    let mut running = self.operation.lock().await;
-    self.start_locked(app, request, &mut running).await
+    let mut running = self
+      .operation
+      .try_lock()
+      .map_err(|_| "A hosting operation is already in progress")?;
+    let result = self.start_locked(app.clone(), request, &mut running).await;
+    if let Err(error) = &result
+      && running.is_none()
+    {
+      let mut status = self.status.lock().unwrap().clone();
+      status.phase = HostPhase::Stopped;
+      status.login = None;
+      status.error = Some(error.clone());
+      publish(&app, &self.status, status);
+    }
+    result
+  }
+
+  fn begin_setup(&self) -> Result<SetupOperation<'_>, String> {
+    let mut pending = self.pending_setup.lock().unwrap();
+    if pending.is_some() {
+      return Err("A hosting operation is already in progress".into());
+    }
+    let cancellation = self.closing.child_token();
+    *pending = Some(cancellation.clone());
+    Ok(SetupOperation {
+      pending: &self.pending_setup,
+      cancellation,
+    })
+  }
+
+  async fn sign_in(
+    &self,
+    app: &AppHandle,
+    state_dir: PathBuf,
+    hub: &url::Url,
+    cancellation: &CancellationToken,
+  ) -> Result<tokn_session_hub::account_client::SignedInAccount, String> {
+    let callback_app = app.clone();
+    let callback_state = self.status.clone();
+    let callback_cancellation = cancellation.clone();
+    AccountClient::new(state_dir)?
+      .ensure_signed_in(hub, cancellation, move |challenge| {
+        if callback_cancellation.is_cancelled() {
+          return;
+        }
+        update_status(&callback_app, &callback_state, |status| {
+          status.phase = HostPhase::SigningIn;
+          status.login = Some(challenge.clone());
+        });
+        let _ = callback_app
+          .opener()
+          .open_url(&challenge.verification_url, None::<&str>);
+      })
+      .await
+  }
+
+  pub async fn open_login(&self, app: &AppHandle) -> Result<(), String> {
+    let challenge = self
+      .status
+      .lock()
+      .unwrap()
+      .login
+      .clone()
+      .ok_or("There is no pending Hub sign-in")?;
+    if self.pending_setup.lock().unwrap().is_none() {
+      return Err("There is no pending Hub sign-in".into());
+    }
+    app
+      .opener()
+      .open_url(challenge.verification_url, None::<&str>)
+      .map_err(|_| "Could not open the Hub sign-in page".into())
   }
 
   async fn start_locked(
@@ -197,16 +303,16 @@ impl LocalHost {
     if running.is_some() {
       return Err("Stop app hosting before changing its settings".into());
     }
+    let setup = self.begin_setup()?;
+    let cancellation = &setup.cancellation;
     let configuration = request.clone();
-    let hub = url::Url::parse(&request.hub_url).map_err(|_| "Enter a valid HTTPS Hub address")?;
+    let hub = tokn_hub_remote::canonical_hub(&request.hub_url)?;
     let state_dir = self.storage_path(true).await?;
     let path = state_dir.clone();
-    let requested_hub = hub.clone();
-    let (lease, previous, machine_address) = tokio::task::spawn_blocking(move || {
+    let (lease, previous) = tokio::task::spawn_blocking(move || {
       let lease = HostLease::acquire(&path.join("host-enrollment.key"))?;
       let previous = HostProfile::load(&path.join("host.json"))?;
-      let machine_address = host_setup::require_account_assignment(&path, previous.as_ref(), Some(&requested_hub))?;
-      Ok::<_, String>((lease, previous, machine_address))
+      Ok::<_, String>((lease, previous))
     })
     .await
     .map_err(|_| "Host ownership task failed")??;
@@ -219,19 +325,19 @@ impl LocalHost {
         return Err("Another connector is already hosting this machine through its saved Hub. Stop that connector before hosting in the app.".into());
       }
     }
-    let (service, events) = app.state::<LocalViewer>().api(&app).await?;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-      .await
-      .map_err(|e| e.to_string())?;
-    let address = listener.local_addr().map_err(|e| e.to_string())?;
+    if cancellation.is_cancelled() {
+      return Err("Hosting setup canceled".into());
+    }
     let mut random = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut random);
     let token = STANDARD.encode(random);
-    let path = state_dir;
+    let path = state_dir.clone();
     let config_token = token.clone();
+    let configured_hub = hub.clone();
+    let insecure_loopback = hub.scheme() == "http";
     let prepared = tokio::task::spawn_blocking(move || {
       host_setup::prepare_host(HostOptions {
-        hub: Some(hub),
+        hub: Some(configured_hub),
         name: Some(request.name),
         viewer_url: None,
         passkey_origin: None,
@@ -239,14 +345,64 @@ impl LocalHost {
         totp_secret_file: None,
         viewer_token: Some(config_token),
         allow_control: Some(request.allow_control),
-        insecure_loopback: false,
+        insecure_loopback,
         ice_servers: None,
       })
     })
     .await
     .map_err(|_| "Host setup task failed")??;
-    if self.closed.load(Ordering::Acquire) {
-      return Err("App hosting is shutting down".into());
+    let host_id = &prepared
+      .config
+      .paired
+      .as_ref()
+      .ok_or("Host identity is unavailable")?
+      .host_id;
+    let machine_name = configuration.machine_name.as_deref().filter(|name| !name.is_empty());
+    let machine_address = if let Some(address) = &prepared.machine_address {
+      let (_, saved_name) = tokn_hub_client_core::address::parse_machine_address(address)?;
+      if machine_name.is_some_and(|requested| requested != saved_name) {
+        return Err("Use Rename to change this computer's registered machine name".into());
+      }
+      address.clone()
+    } else {
+      let machine_name = machine_name
+        .map(str::to_owned)
+        .unwrap_or_else(|| host_setup::suggest_machine_name(&prepared.config.name, host_id));
+      tokn_hub_client_core::address::parse_machine_address(&format!("account:{machine_name}"))?;
+      publish(
+        &app,
+        &self.status,
+        HostStatus {
+          phase: HostPhase::Registering,
+          hub_url: hub.origin().ascii_serialization(),
+          name: prepared.config.name.clone(),
+          machine_name: Some(machine_name.clone()),
+          allow_control: prepared.config.allow_control,
+          ..Default::default()
+        },
+      );
+      let account = self.sign_in(&app, state_dir.clone(), &hub, cancellation).await?;
+      let mut status = self.status.lock().unwrap().clone();
+      status.phase = HostPhase::Registering;
+      status.account_username = Some(account.username);
+      status.login = None;
+      publish(&app, &self.status, status);
+      if cancellation.is_cancelled() {
+        return Err("Hosting setup canceled".into());
+      }
+      tokn_session_hub::account_host::claim(&prepared.config, &machine_name, &account.token).await?
+    };
+    if cancellation.is_cancelled() {
+      return Err("Hosting setup canceled".into());
+    }
+    let (account_username, machine_name) = tokn_hub_client_core::address::parse_machine_address(&machine_address)?;
+    let (service, events) = app.state::<LocalViewer>().api(&app).await?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+      .await
+      .map_err(|error| error.to_string())?;
+    let address = listener.local_addr().map_err(|error| error.to_string())?;
+    if cancellation.is_cancelled() {
+      return Err("Hosting setup canceled".into());
     }
     let mut config = prepared.config;
     // The persisted CLI target stays intact. The app serves its own existing
@@ -257,6 +413,9 @@ impl LocalHost {
       hub_url: config.hub_url.origin().ascii_serialization(),
       name: config.name.clone(),
       machine_address: Some(machine_address),
+      machine_name: Some(machine_name),
+      account_username: Some(account_username),
+      login: None,
       allow_control: config.allow_control,
       machine_reference: Some(prepared.reference),
       error: None,
@@ -270,21 +429,31 @@ impl LocalHost {
     let callback_app = app.clone();
     let callback_state = self.status.clone();
     let callback_shutdown = shutdown.clone();
+    let connection = Arc::new(Mutex::new((HostPhase::Connecting, None)));
+    let callback_connection = connection.clone();
     let sink = Arc::new(move |connection| {
       if callback_shutdown.is_cancelled() {
         return;
       }
-      let mut status = callback_state.lock().unwrap().clone();
-      (status.phase, status.error) = match connection {
+      let current = match connection {
         ConnectorStatus::Connecting => (HostPhase::Connecting, None),
         ConnectorStatus::Online => (HostPhase::Online, None),
         ConnectorStatus::Reconnecting { error } => (HostPhase::Reconnecting, Some(error)),
       };
-      publish(&callback_app, &callback_state, status);
+      *callback_connection.lock().unwrap() = current.clone();
+      update_status(&callback_app, &callback_state, |status| {
+        if !matches!(
+          status.phase,
+          HostPhase::SigningIn | HostPhase::Registering | HostPhase::Renaming
+        ) {
+          (status.phase, status.error) = current;
+        }
+      });
     });
     let task_shutdown = shutdown.clone();
     let state = self.status.clone();
     let task_app = app.clone();
+    let task_connection = connection.clone();
     let task = tokio::spawn(async move {
       let stop = task_shutdown.clone();
       let api = axum::serve(listener, router).with_graceful_shutdown(async move { stop.cancelled().await });
@@ -295,14 +464,16 @@ impl LocalHost {
       let stopped = task_shutdown.is_cancelled();
       task_shutdown.cancel();
       if !stopped {
-        let mut status = state.lock().unwrap().clone();
-        status.phase = HostPhase::Error;
-        status.error = Some(
-          result
-            .err()
-            .unwrap_or_else(|| "Host service stopped unexpectedly".into()),
-        );
-        publish(&task_app, &state, status);
+        let error = result
+          .err()
+          .unwrap_or_else(|| "Host service stopped unexpectedly".into());
+        *task_connection.lock().unwrap() = (HostPhase::Error, Some(error.clone()));
+        update_status(&task_app, &state, |status| {
+          if !matches!(status.phase, HostPhase::SigningIn | HostPhase::Renaming) {
+            status.phase = HostPhase::Error;
+            status.error = Some(error);
+          }
+        });
       }
     });
     *running = Some(RunningHost {
@@ -311,9 +482,123 @@ impl LocalHost {
       instance_id: uuid::Uuid::new_v4().to_string(),
       started_at_ms: crate::runtime_management::now_ms(),
       configuration: Some(configuration),
+      connection,
     });
     crate::runtime_management::changed(&app);
     Ok(self.status.lock().unwrap().clone())
+  }
+
+  pub async fn rename(&self, app: AppHandle, request: RenameHostRequest) -> Result<HostStatus, String> {
+    tokn_hub_client_core::address::parse_machine_address(&format!("account:{}", request.machine_name))?;
+    let mut running = self
+      .operation
+      .try_lock()
+      .map_err(|_| "A hosting operation is already in progress")?;
+    if self.closed.load(Ordering::Acquire) {
+      return Err("App hosting is shutting down".into());
+    }
+    let setup = self.begin_setup()?;
+    let state_dir = self.storage_path(true).await?;
+    let path = state_dir.clone();
+    let app_owned = running.is_some();
+    let (lease, profile) = tokio::task::spawn_blocking(move || {
+      let lease = if app_owned {
+        None
+      } else {
+        Some(HostLease::acquire(&path.join("host-enrollment.key"))?)
+      };
+      let profile = HostProfile::load(&path.join("host.json"))?.ok_or("Start hosting to set up this computer first")?;
+      host_setup::require_account_assignment(&path, Some(&profile), None)?;
+      Ok::<_, String>((lease, profile))
+    })
+    .await
+    .map_err(|_| "Host ownership task failed")??;
+    let _lease = lease;
+    if !app_owned {
+      let background = crate::external_host::inspect(&state_dir, Some(&profile)).await?;
+      if background.has_loaded()
+        || background.api.error.is_some()
+        || background.connector.error.is_some()
+        || host_setup::existing_host_online(&profile).await?
+      {
+        return Err("Stop external hosting before renaming this computer".into());
+      }
+    }
+    let path = state_dir.clone();
+    let prepared = tokio::task::spawn_blocking(move || {
+      host_setup::prepare_host(HostOptions {
+        hub: None,
+        name: None,
+        viewer_url: None,
+        passkey_origin: None,
+        state_dir: path,
+        totp_secret_file: None,
+        viewer_token: None,
+        allow_control: None,
+        insecure_loopback: false,
+        ice_servers: None,
+      })
+    })
+    .await
+    .map_err(|_| "Host configuration task failed")??;
+    let initial = if !app_owned {
+      let status_path = state_dir.clone();
+      Some(
+        tokio::task::spawn_blocking(move || profile_status(&status_path, Some(&profile)))
+          .await
+          .map_err(|_| "Host status task failed")??,
+      )
+    } else {
+      None
+    };
+    update_status(&app, &self.status, |status| {
+      if let Some(initial) = initial {
+        *status = initial;
+      }
+      status.phase = HostPhase::Renaming;
+      status.error = None;
+    });
+    let result = async {
+      let account = self
+        .sign_in(&app, state_dir, &prepared.config.hub_url, &setup.cancellation)
+        .await?;
+      if setup.cancellation.is_cancelled() {
+        return Err("Machine rename canceled".into());
+      }
+      update_status(&app, &self.status, |status| {
+        status.phase = HostPhase::Renaming;
+        status.login = None;
+      });
+      tokn_session_hub::account_host::rename(&prepared.config, &request.machine_name, &account.token).await
+    }
+    .await;
+    let renamed = result
+      .as_ref()
+      .ok()
+      .map(|address| tokn_hub_client_core::address::parse_machine_address(address))
+      .transpose()?;
+    if let Some((_, machine_name)) = &renamed
+      && let Some(configuration) = running.as_mut().and_then(|host| host.configuration.as_mut())
+    {
+      configuration.machine_name = Some(machine_name.clone());
+    }
+    let status = update_status(&app, &self.status, |status| {
+      status.login = None;
+      if let Some(host) = running.as_ref() {
+        (status.phase, status.error) = host.connection.lock().unwrap().clone();
+      } else {
+        status.phase = HostPhase::Stopped;
+      }
+      if let Some((username, machine_name)) = renamed {
+        status.machine_address = result.as_ref().ok().cloned();
+        status.account_username = Some(username);
+        status.machine_name = Some(machine_name);
+      }
+      if let Err(error) = &result {
+        status.error = Some(error.clone());
+      }
+    });
+    result.map(|_| status)
   }
 
   /// Restart only this app's exact current instance. The saved enrollment,
@@ -354,7 +639,9 @@ impl LocalHost {
   }
 
   pub async fn runtime_inventory(&self) -> Vec<RuntimeInfo> {
-    let running = self.operation.lock().await;
+    let Ok(running) = self.operation.try_lock() else {
+      return vec![hosting_runtime(self.status.lock().unwrap().clone(), None)];
+    };
     if let Some(host) = running.as_ref() {
       return vec![hosting_runtime(self.status.lock().unwrap().clone(), Some(host))];
     }
@@ -424,6 +711,9 @@ impl LocalHost {
     runtimes
   }
   pub async fn stop(&self, app: &AppHandle) -> Result<HostStatus, String> {
+    if let Some(pending) = self.pending_setup.lock().unwrap().as_ref() {
+      pending.cancel();
+    }
     let mut running = self.operation.lock().await;
     if let Some(host) = running.take() {
       host.stop().await;
@@ -431,6 +721,7 @@ impl LocalHost {
     let mut status = self.status.lock().unwrap().clone();
     status.phase = HostPhase::Stopped;
     status.error = None;
+    status.login = None;
     publish(app, &self.status, status.clone());
     Ok(status)
   }
@@ -535,10 +826,16 @@ fn runtime_access(directory: &std::path::Path) -> Result<RpcRuntimeAccess, Strin
   })
 }
 
-fn publish(app: &AppHandle, state: &Mutex<HostStatus>, status: HostStatus) {
-  *state.lock().unwrap() = status.clone();
-  let _ = app.emit("local-host-status", status);
+fn update_status(app: &AppHandle, state: &Mutex<HostStatus>, change: impl FnOnce(&mut HostStatus)) -> HostStatus {
+  let mut status = state.lock().unwrap();
+  change(&mut status);
+  let _ = app.emit("local-host-status", &*status);
   crate::runtime_management::changed(app);
+  status.clone()
+}
+
+fn publish(app: &AppHandle, state: &Mutex<HostStatus>, status: HostStatus) {
+  update_status(app, state, |current| *current = status);
 }
 
 fn hosting_runtime(status: HostStatus, owned: Option<&RunningHost>) -> RuntimeInfo {
@@ -687,6 +984,16 @@ fn profile_status(path: &std::path::Path, profile: Option<&HostProfile>) -> Resu
     return Ok(HostStatus::default());
   };
   let machine_address = tokn_session_hub::account_host::saved_address(path, &profile.hub_url, &profile.host_id)?;
+  let (account_username, machine_name) = match &machine_address {
+    Some(address) => {
+      let (username, machine_name) = tokn_hub_client_core::address::parse_machine_address(address)?;
+      (Some(username), Some(machine_name))
+    }
+    None => (
+      None,
+      Some(host_setup::suggest_machine_name(&profile.name, &profile.host_id)),
+    ),
+  };
   let machine_reference = machine_address
     .as_ref()
     .map(|_| {
@@ -699,6 +1006,9 @@ fn profile_status(path: &std::path::Path, profile: Option<&HostProfile>) -> Resu
     hub_url: profile.hub_url.clone(),
     name: profile.name.clone(),
     machine_address,
+    machine_name,
+    account_username,
+    login: None,
     allow_control: profile.allow_control,
     machine_reference,
     error: None,
@@ -735,6 +1045,28 @@ fn pairing(path: &std::path::Path) -> Result<HostPairing, String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn setup_cancellation_keeps_status_responsive_and_releases_admission() {
+    let directory = tempfile::tempdir().unwrap();
+    let host = LocalHost::new(directory.path().to_owned());
+    let _operation = host.operation.lock().await;
+    let setup = host.begin_setup().unwrap();
+    assert!(host.begin_setup().is_err());
+    host.status.lock().unwrap().phase = HostPhase::SigningIn;
+    let status = tokio::time::timeout(Duration::from_millis(100), host.status())
+      .await
+      .unwrap()
+      .unwrap();
+    assert!(matches!(status.phase, HostPhase::SigningIn));
+    let cancellation = setup.cancellation.clone();
+    host.pending_setup.lock().unwrap().as_ref().unwrap().cancel();
+    assert!(cancellation.is_cancelled());
+    drop(setup);
+    assert!(host.pending_setup.lock().unwrap().is_none());
+    assert!(host.begin_setup().is_ok());
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+  }
 
   #[tokio::test]
   async fn runtime_access_inspection_requires_existing_host_setup() {
@@ -974,7 +1306,9 @@ mod tests {
         hub_url: "https://hub.example".into(),
         name: "Existing host".into(),
         allow_control: false,
+        machine_name: None,
       }),
+      connection: Arc::new(Mutex::new((HostPhase::Online, None))),
     };
     assert!(
       restart_configuration(&host, "stale-instance")
@@ -1100,6 +1434,7 @@ mod tests {
       instance_id: "test".into(),
       started_at_ms: 0,
       configuration: None,
+      connection: Arc::new(Mutex::new((HostPhase::Online, None))),
     }
     .stop()
     .await;

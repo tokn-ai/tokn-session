@@ -8,6 +8,7 @@ use tower::ServiceExt;
 const ORIGIN: &str = "http://localhost:5559";
 
 mod presence;
+mod rename;
 
 #[tokio::test]
 async fn discovery_lists_claimed_machines_only_for_the_correct_account_group() {

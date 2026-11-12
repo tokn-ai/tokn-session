@@ -28,13 +28,11 @@ Subsequent owner logins use a passkey. An authenticated owner can add another
 passkey from the host screen and keep a second authenticator for recovery.
 
 Configure [email delivery](#hub-accounts-and-cli-login) before creating an
-account. Sign in on the session host and register its machine name.
+account. Start the connector on the session host.
 
 ```sh
-cargo run -p tokn-session-hub -- auth login --hub http://localhost:5559
-cargo run -p tokn-session-hub -- register \
+cargo run -p tokn-session-hub -- connect \
   --hub http://localhost:5559 --insecure-loopback --machine workstation
-cargo run -p tokn-session-hub -- connect
 ```
 
 Keep `tokn-viewer-api --api-only` running in a separate terminal. Pair the machine
@@ -64,33 +62,42 @@ when you return to the Hub, at most once per day. Sign out to end that account
 session early. Each machine still requires its own passkey unlock in every new
 or reloaded tab.
 
-The CLI prints a device code and opens the Hub's account page. Sign in if prompted,
-then approve that code. The CLI saves its revocable credential in private local
-storage for the selected Hub. For automation, create a named API key in the
+The app and CLI open the Hub's account page for browser approval. Sign in if
+prompted, then approve the displayed code. Native clients share their Rust
+account client and revocable credentials under `~/.tokn/sessions/hub`. Credentials
+stay in private native storage. A valid saved login is reused; an expired login
+opens approval again. Account-service outages preserve the saved credential.
+For automation, create a named API key in the
 account page with machine listing or registration scope. Supply it on stdin to
 `auth login --with-token --hub https://hub.example.com`.
 
-Signing in lets you list the account's machines. To add this computer, run the
-`register` command on it with a machine name. Registration proves ownership of
-the machine's enrollment key.
+Start hosting from the desktop app, or use the CLI:
 
 ```sh
-tokn-session-hub register --hub https://hub.example.com --machine macbook
+tokn-session-hub connect --hub https://hub.example.com --machine macbook
 ```
 
-For account `alice` this reserves `alice:macbook` on that Hub. Registration saves
-the host configuration and account assignment, then exits. Run it while hosting
-is stopped, then run `tokn-session-hub connect` or start hosting from the desktop
-app. The connector uses the saved assignment and host key.
+For account `alice` this reserves `alice:macbook` on that Hub. The first start
+signs in when needed, proves ownership of the machine's enrollment key, saves
+the assignment, and starts hosting. `--machine` chooses the initial name; omitting
+it suggests one from the display name. Use `--no-browser` to print an approval
+URL for another device on a headless host. Later starts reuse the saved
+assignment and host key.
+
+Scripts can use `register --hub https://hub.example.com --machine macbook` to
+save an assignment and exit before hosting starts. It also signs in when needed.
+Use `tokn-session-hub rename --machine studio` to change the address suffix
+while retaining the machine UUID, keys, and pairings. Rename requires the owning
+account and a signed proof from the machine. The old address stops resolving.
 The browser gallery combines the signed-in account's machines with
 saved pairings and discovered machines. Pairing also reveals the account's
 discovery group to a viewer who has no account session. Each machine verifies
 access to its own sessions. Browser access uses a machine passkey.
 
 Every host needs an account machine assignment before it can connect. An
-existing encrypted host can claim an address with `register --machine` using
-its saved UUID and key. Configure email delivery to create accounts and sign
-in by email.
+existing encrypted host automatically claims an address using its saved UUID
+and key on first start. Configure email delivery to create accounts and sign in
+by email.
 During rollout, stop any old unclaimed connectors to close their existing direct
 WebRTC connections. The updated Hub rejects their next registration.
 
@@ -116,9 +123,7 @@ not provide protection against sustained denial-of-service traffic.
 On a remote host:
 
 ```sh
-tokn-session-hub auth login --hub https://hub.example.com
-tokn-session-hub register --hub https://hub.example.com --machine build-server
-tokn-session-hub connect
+tokn-session-hub connect --hub https://hub.example.com --machine build-server --no-browser
 ```
 
 Only the connector needs outbound connectivity. The local viewer API stays on

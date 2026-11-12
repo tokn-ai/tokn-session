@@ -77,7 +77,7 @@ function mergeHost(hosts: SavedHubHost[], host: SavedHubHost, require_existing =
   if (host.machine_address && hosts.some((entry) => entry.host_id !== host.host_id && entry.machine_address === host.machine_address)) {
     throw new Error("This address belongs to another remembered machine. Its saved identity was preserved.");
   }
-  if (previous?.machine_address && host.machine_address && previous.machine_address !== host.machine_address) {
+  if (!require_existing && previous?.machine_address && host.machine_address && previous.machine_address !== host.machine_address) {
     throw new Error("This machine's saved address changed. Its saved identity was preserved.");
   }
   if (!previous && hosts.length >= 64) throw new Error("Remove a saved machine before adding another.");

@@ -418,6 +418,12 @@ export function startLocalHost(request: import("./types").StartLocalHostRequest)
 export function stopLocalHost(): Promise<import("./types").LocalHostStatus> {
   return localHostCommand("local_host_stop");
 }
+export function renameLocalHost(request: import("./types").RenameLocalHostRequest): Promise<import("./types").LocalHostStatus> {
+  return localHostCommand("local_host_rename", { request });
+}
+export function openLocalHostLogin(): Promise<void> {
+  return localHostCommand("local_host_open_login");
+}
 export function stopExternalLocalHost(): Promise<import("./types").LocalHostStatus> {
   return localHostCommand("local_host_stop_external");
 }

@@ -177,22 +177,37 @@ impl RemoteManager {
     validate_host(host_id)?;
     tokn_hub_client_core::address::parse_machine_address(machine_address)?;
     tokn_hub_client_core::address::validate_machine_name(name)?;
-    let (_, store, _) = self.stored(hub_url).await?;
-    if !store.hosts()?.iter().any(|host| host.host_id == host_id) {
-      return Err("Pair this machine before remembering its address".into());
-    }
+    let (hub, store, identity) = self.stored(hub_url).await?;
+    let host = store
+      .hosts()?
+      .into_iter()
+      .find(|host| host.host_id == host_id)
+      .ok_or("Pair this machine before remembering its address")?;
     let resolved = self.resolve(hub_url, machine_address).await?;
     if resolved.host_id != host_id {
       return Err(
         "Machine address does not resolve to the remembered UUID; its original identity was preserved".into(),
       );
     }
+    let renamed = host
+      .machine_address
+      .as_deref()
+      .is_some_and(|address| address != machine_address);
+    if renamed {
+      discovery_group(&hub, &identity, &host).await?;
+    }
     let host_id = host_id.to_owned();
     let machine_address = resolved.machine_address;
     let name = resolved.name;
-    tokio::task::spawn_blocking(move || store.remember_metadata(&host_id, &machine_address, &name))
-      .await
-      .map_err(|error| error.to_string())?
+    tokio::task::spawn_blocking(move || {
+      if renamed {
+        store.remember_authenticated_metadata(&host_id, &host.host_public_key, &machine_address, &name)
+      } else {
+        store.remember_metadata(&host_id, &machine_address, &name)
+      }
+    })
+    .await
+    .map_err(|error| error.to_string())?
   }
 
   pub async fn pair(

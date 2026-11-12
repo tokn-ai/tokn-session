@@ -140,7 +140,7 @@ it("uses only open modal surfaces and falls back through the remaining dialog st
   const hosting: LocalHostControls = {
     status: { phase: "stopped", hub_url: "", name: "This computer", allow_control: false, machine_reference: null, error: null },
     busy: false, is_open: true, open: vi.fn(), close: vi.fn(), retry: vi.fn(),
-    change: vi.fn(), stop_external: vi.fn(), remove_external: vi.fn(),
+    change: vi.fn(), cancel: vi.fn(), rename: vi.fn(), stop_external: vi.fn(), remove_external: vi.fn(),
   };
   const surface = ({ settings = true, project = false, host = false, drawer = true } = {}) =>
     <ActionNotificationsProvider><Actions />

@@ -1,6 +1,6 @@
 //! The public Hub boundary for accounts, machine discovery, and encrypted tunnels.
 use crate::{
-  account_host::ClaimRequest,
+  account_host::{ClaimRequest, RenameRequest},
   accounts::{Accounts, MACHINES_REGISTER},
   auth::AuthState,
   protocol,
@@ -72,6 +72,10 @@ pub fn router(state: HubState) -> Router {
     .route(
       "/hub/v1/account/machines/claim",
       post(claim_account_machine).layer(DefaultBodyLimit::max(4096)),
+    )
+    .route(
+      "/hub/v1/account/machines/rename",
+      post(rename_account_machine).layer(DefaultBodyLimit::max(4096)),
     )
     .route("/hub/v1/discovery/{namespace}/{secret_digest}", get(discover_machines))
     .route(
@@ -166,6 +170,55 @@ async fn claim_account_machine(
     )
     .into_response(),
     _ => error(StatusCode::INTERNAL_SERVER_ERROR, "Could not register account machine").into_response(),
+  }
+}
+
+async fn rename_account_machine(
+  State(state): State<HubState>,
+  headers: HeaderMap,
+  Json(rename): Json<RenameRequest>,
+) -> Response {
+  if let Err(error) = state.auth.check_optional_origin(&headers) {
+    return error.into_response();
+  }
+  let principal = match state.accounts.authenticate(&headers, MACHINES_REGISTER).await {
+    Ok(principal) => principal,
+    Err(error) => return error.into_response(),
+  };
+  if !protocol::valid_host_uuid(&rename.host_id)
+    || tokn_hub_client_core::address::parse_machine_address(&rename.expected_machine_address).is_err()
+    || tokn_hub_client_core::address::parse_machine_address(&format!("{}:{}", principal.username, rename.machine_name))
+      .is_err()
+  {
+    return error(StatusCode::BAD_REQUEST, "Invalid machine identity or name").into_response();
+  }
+  if let Err(message) = rename.verify(&state.public_origin, &principal.user_id) {
+    return error(StatusCode::FORBIDDEN, message).into_response();
+  }
+  let result = tokio::task::spawn_blocking(move || {
+    state.store.rename_account_host(
+      &principal.user_id,
+      &rename.host_id,
+      &rename.public_key,
+      &rename.expected_machine_address,
+      &rename.machine_name,
+    )
+  })
+  .await;
+  match result {
+    Ok(Ok(claim)) => Json(claim).into_response(),
+    Ok(Err(message)) if message == crate::store::MACHINE_NOT_OWNED => {
+      error(StatusCode::FORBIDDEN, message).into_response()
+    }
+    Ok(Err(message))
+      if matches!(
+        message.as_str(),
+        crate::store::ADDRESS_TAKEN | crate::store::STALE_MACHINE_ADDRESS
+      ) =>
+    {
+      error(StatusCode::CONFLICT, message).into_response()
+    }
+    _ => error(StatusCode::INTERNAL_SERVER_ERROR, "Could not rename the machine").into_response(),
   }
 }
 

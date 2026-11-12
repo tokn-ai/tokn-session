@@ -24,8 +24,9 @@ uses the trusted Hub browser origin and a one-shot loopback form callback;
 session traffic remains on the app's encrypted host connection. Neither path
 requires a viewing-device proxy. The Hub can deny service.
 
-Use `tokn-session-hub register` to claim a machine address under a Hub account,
-then `connect` to open its tunnel. See
+Desktop hosting and CLI `connect` automatically obtain browser account approval
+and claim a machine address before opening the tunnel. Native credentials stay
+in shared private Rust storage. See
 [Hub account registration](hub.md#hub-accounts-and-cli-login).
 
 ## Protocol boundaries

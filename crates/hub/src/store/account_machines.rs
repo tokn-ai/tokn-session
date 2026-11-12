@@ -5,6 +5,8 @@ use tokn_hub_client_core::{address::parse_machine_address, discovery::DiscoveryG
 pub(crate) const ACCOUNT_REQUIRED: &str = "Sign in with tokn-session-hub auth login, then register this machine with tokn-session-hub register --machine <name>";
 pub(crate) const ADDRESS_TAKEN: &str = "Machine name is already reserved on this account";
 pub(crate) const HOST_CLAIMED: &str = "This host already has an account machine assignment";
+pub(crate) const MACHINE_NOT_OWNED: &str = "This machine is not registered to this account";
+pub(crate) const STALE_MACHINE_ADDRESS: &str = "The machine address changed; refresh it before renaming";
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct AccountMachineClaim {
@@ -97,6 +99,62 @@ pub(super) fn bind(
 }
 
 impl Store {
+  pub(crate) fn rename_account_host(
+    &self,
+    user_id: &str,
+    host_id: &str,
+    public_key: &str,
+    expected_machine_address: &str,
+    machine_name: &str,
+  ) -> Result<AccountMachineClaim, String> {
+    let mut connection = self.connection()?;
+    let transaction = connection
+      .transaction_with_behavior(TransactionBehavior::Immediate)
+      .map_err(database_error)?;
+    let owned: Option<(String, String)> = transaction
+      .query_row(
+        "SELECT a.username, m.machine_name FROM account_machines m
+         JOIN hub_accounts a ON a.user_id = m.user_id
+         JOIN encrypted_hosts e ON e.host_id = m.host_id
+         JOIN hosts h ON h.host_id = m.host_id AND h.public_key = e.public_key
+         WHERE m.host_id = ?1 AND m.user_id = ?2 AND e.public_key = ?3 AND e.revoked = 0",
+        params![host_id, user_id, public_key],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+      )
+      .optional()
+      .map_err(database_error)?;
+    let (username, current_name) = owned.ok_or(MACHINE_NOT_OWNED)?;
+    let (expected_username, _) = parse_machine_address(expected_machine_address)?;
+    let machine_address = format!("{username}:{machine_name}");
+    parse_machine_address(&machine_address)?;
+    if expected_username != username
+      || (format!("{username}:{current_name}") != expected_machine_address && current_name != machine_name)
+    {
+      return Err(STALE_MACHINE_ADDRESS.into());
+    }
+    if current_name != machine_name {
+      let taken: bool = transaction
+        .query_row(
+          "SELECT EXISTS (SELECT 1 FROM account_machines WHERE user_id = ?1 AND machine_name = ?2)",
+          params![user_id, machine_name],
+          |row| row.get(0),
+        )
+        .map_err(database_error)?;
+      if taken {
+        return Err(ADDRESS_TAKEN.into());
+      }
+      transaction
+        .execute(
+          "UPDATE account_machines SET machine_name = ?2 WHERE host_id = ?1",
+          params![host_id, machine_name],
+        )
+        .map_err(database_error)?;
+    }
+    let claim = bind(&transaction, host_id, user_id, machine_name)?;
+    transaction.commit().map_err(database_error)?;
+    Ok(claim)
+  }
+
   pub(crate) fn account_machines(&self, user_id: &str) -> Result<Vec<MachineRecord>, String> {
     let connection = self.connection()?;
     let mut statement = connection
@@ -199,6 +257,57 @@ mod tests {
       store.claim_account_host(host(), &first, "laptop").err().unwrap(),
       ADDRESS_TAKEN
     );
+  }
+
+  #[test]
+  fn renaming_requires_the_current_owner_key_and_address_and_has_one_concurrent_winner() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().join("state.sqlite")).unwrap();
+    let owner = user(&store, "alice");
+    let machine = host();
+    store.claim_account_host(machine.clone(), &owner, "laptop").unwrap();
+    store.claim_account_host(host(), &owner, "reserved").unwrap();
+    assert_eq!(
+      store
+        .rename_account_host(
+          &owner,
+          &machine.host_id,
+          &machine.public_key,
+          "alice:laptop",
+          "reserved"
+        )
+        .err()
+        .unwrap(),
+      ADDRESS_TAKEN
+    );
+    assert_eq!(
+      store
+        .rename_account_host(&owner, &machine.host_id, &host().public_key, "alice:laptop", "other")
+        .err()
+        .unwrap(),
+      MACHINE_NOT_OWNED
+    );
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let tasks = ["studio", "office"].map(|name| {
+      let store = store.clone();
+      let machine = machine.clone();
+      let owner = owner.clone();
+      let barrier = barrier.clone();
+      std::thread::spawn(move || {
+        barrier.wait();
+        store.rename_account_host(&owner, &machine.host_id, &machine.public_key, "alice:laptop", name)
+      })
+    });
+    let results = tasks.map(|task| task.join().unwrap());
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert!(results.iter().any(|result| {
+      result
+        .as_ref()
+        .err()
+        .is_some_and(|error| error == STALE_MACHINE_ADDRESS)
+    }));
+    assert_eq!(store.host(&machine.host_id).unwrap(), Some(machine));
+    assert!(store.resolve_machine("alice", "laptop").unwrap().is_none());
   }
 
   #[test]

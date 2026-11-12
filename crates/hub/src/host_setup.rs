@@ -23,6 +23,27 @@ pub struct PreparedHost {
 
 pub const ACCOUNT_SETUP_REQUIRED: &str = "Sign in with tokn-session-hub auth login, then register this computer with tokn-session-hub register --machine <name>";
 
+/// Suggest a canonical address suffix from a display name and saved machine identity.
+pub fn suggest_machine_name(name: &str, host_id: &str) -> String {
+  let mut slug = String::new();
+  for character in name.chars() {
+    if slug.len() == 63 {
+      break;
+    }
+    if character.is_ascii_alphanumeric() {
+      slug.push(character.to_ascii_lowercase());
+    } else if !slug.is_empty() && !slug.ends_with('-') {
+      slug.push('-');
+    }
+  }
+  let slug = slug.trim_end_matches('-');
+  if !slug.is_empty() {
+    return slug.into();
+  }
+  let suffix: String = host_id.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
+  format!("computer-{suffix}").trim_end_matches('-').into()
+}
+
 pub struct HostOptions {
   pub hub: Option<Url>,
   pub name: Option<String>,
@@ -254,6 +275,19 @@ pub async fn existing_host_online(profile: &HostProfile) -> Result<bool, String>
 mod tests {
   use super::*;
   use axum::{Router, extract::WebSocketUpgrade, http::StatusCode, response::IntoResponse, routing::get};
+
+  #[test]
+  fn suggested_names_are_canonical_for_display_labels_and_empty_transliterations() {
+    for display in ["Workstation", "  My Computer!  ", "电脑", "---", &"A".repeat(200)] {
+      let suggested = suggest_machine_name(display, "11111111-1111-4111-8111-111111111111");
+      tokn_hub_client_core::address::parse_machine_address(&format!("account:{suggested}")).unwrap();
+    }
+    assert_eq!(suggest_machine_name(" My Computer ", ""), "my-computer");
+    assert_eq!(
+      suggest_machine_name("电脑", "11111111-1111-4111-8111-111111111111"),
+      "computer-11111111"
+    );
+  }
 
   fn discovery_options(path: &Path) -> HostOptions {
     HostOptions {

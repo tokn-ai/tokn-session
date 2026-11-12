@@ -8,11 +8,14 @@ Hubs require account ownership for all machines. Verified email enables signup
 with usernames unique per Hub and stable user UUIDs. A renewable 90-day browser
 account cookie restores sign-in across navigation and reloads. Browser device approval powers
 CLI `auth login`. Issue and revoke scoped automation keys in **Hub account**.
-Machines claim `username:machine` with an account credential and proof of their
-host key through the dedicated `register` command, which saves the assignment
-and exits. `connect` starts a connector using the saved assignment. Machines
-inherit account discovery and reconnect using the host key.
-Previously registered encrypted hosts must claim an address before reconnecting.
+Desktop **Start hosting** and CLI `connect` automatically sign in through browser
+approval and claim `username:machine` when an account assignment is missing.
+The shared Rust account client keeps credentials private and reuses valid saved
+logins. Registration proves the host key; `register` remains an explicit script
+command. Rename works from the app or CLI, retaining the UUID, keys, and pairings
+while retiring the old address. Machines inherit account discovery and reconnect
+using the host key. Previously unclaimed encrypted hosts reuse their identities
+during automatic registration.
 See [Hub accounts](hub.md#hub-accounts-and-cli-login).
 
 The Hub username is the namespace for an account's machine addresses and its

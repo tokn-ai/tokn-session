@@ -51,14 +51,13 @@ passkeys; it does not grant access to encrypted machine content. Paired hosts
 register without administrator approval. See [Hub administration](hub.md).
 
 Configure [Hub account email delivery](hub.md#hub-accounts-and-cli-login) to
-enable signup. On each host, run the API in a separate terminal, sign in to
-the Hub, register a machine name, and start the connector.
+enable signup. On each host, run the API in a separate terminal and start the
+connector. The first start opens browser sign-in and approval when needed, then
+automatically registers the machine.
 
 ```sh
 tokn-viewer-api --api-only
-tokn-session-hub auth login --hub https://hub.example.com
-tokn-session-hub register --hub https://hub.example.com --machine workstation
-tokn-session-hub connect
+tokn-session-hub connect --hub https://hub.example.com --machine workstation
 ```
 
 First registration generates a UUID, dedicated keys, and an authenticator seed. Scan
@@ -86,8 +85,7 @@ code. The device saves the verified host encryption key only after authenticated
 acknowledgment. Save the full reference from the connector or connection settings
 for passkey sign-in on another device.
 
-Registration saves the host configuration and account assignment, then exits.
-Starting the connector uses that saved state:
+Later starts reuse the saved host configuration and account assignment:
 
 ```sh
 tokn-session-hub connect
@@ -118,11 +116,12 @@ normal authorization.
 
 ## Host from the desktop app
 
-On a host without an account address, sign in and run
-`tokn-session-hub register --hub https://hub.example.com --machine workstation`
-with the selected Hub while desktop hosting is stopped.
-Under **Machines → This machine → Host this computer**, select the registered
-Hub, choose whether to allow remote agent input, and click **Start hosting**.
+Under **Machines → This machine → Host this computer**, enter the Hub and display
+name, choose a machine name or use the suggestion, and set whether to allow
+remote agent input. **Start hosting** reuses the saved account credential or opens
+the Hub account page for browser approval, automatically registers this computer,
+and starts hosting. The dialog shows approval, registration, and connection
+progress and lets you cancel setup. No terminal setup is required.
 The bottom-left connection panel in local
 and remote views also shows this computer’s hosting status and an on/off switch.
 The switch uses saved settings; without a configured Hub it opens the same
@@ -150,6 +149,7 @@ the display; it is never saved to browser storage or sent through the Hub.
 The QR and URI contain a secret and belong only on the hosting device.
 
 The app and CLI share `~/.tokn/sessions/hub` configuration, keys, and paired-device trust.
+Their account credentials are read and written by the shared Rust client.
 An existing online connector or an ownership lock held by another updated
 process, or a loaded background API, blocks app hosting with a clear error.
 The app only stops verified services when explicitly requested in the dialog. A saved host needs a reachable saved Hub
@@ -175,8 +175,8 @@ own authenticator seed. The Hub can see group membership, and a client with the
 group reference can request its machine list. Pairing and saved key verification
 happen separately on each host.
 
-Claim an existing encrypted host under an account before starting it. This uses
-the host's saved UUID and keys, so previously paired clients can reconnect after
+Starting an existing unclaimed host automatically claims an account address
+using its saved UUID and keys. Previously paired clients can reconnect after
 the claim. Account discovery then lists the machine in the username's group.
 
 ## Readable machine addresses
@@ -185,6 +185,20 @@ The Hub uses the account username as the namespace. When account `alice` registe
 `macbook`, its address on that Hub is `alice:macbook`. Names use 1–63 lowercase
 ASCII letters or digits with internal hyphens. Connector `--name` sets the
 separate display name.
+
+The hosting dialog's **Rename** action changes the registered address suffix for
+an app-owned online or stopped host. Stop an external connector before renaming
+from the app. The CLI equivalent is:
+
+```sh
+tokn-session-hub rename --machine studio
+```
+
+For `alice:macbook`, this changes the address to `alice:studio`. The owning
+account authorizes the signed request, and the Hub rejects a name held by
+another machine. UUID, encryption keys, paired-device trust, and sessions stay
+with the same machine. Saved clients refresh address metadata for their pinned
+identity. The old address stops resolving and has no alias.
 
 Addresses stay reserved to the original machine UUID, even after revocation.
 Account registration requires an account credential and proof of the machine
@@ -331,7 +345,7 @@ tokn-session-hub connect
 
 Exports create a new mode-0600 file and refuse overwrites. Imports require a
 private Base32 file and work only before authenticator setup; alternatively use
-`authenticator --import-file FILE` before the first `register`. The Hub does not
+`authenticator --import-file FILE` before the first `connect` or `register`. The Hub does not
 synchronize seeds or trust records. Compromising any seed-holding host threatens
 first pairing across that group; existing host pins remain fixed. Each host
 consumes a successful code once per time step. Keep endpoint clocks correct.

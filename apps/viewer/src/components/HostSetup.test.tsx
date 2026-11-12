@@ -4,9 +4,9 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { RemoteConnection } from "./RemoteConnection";
 import { LocalHostProvider } from "./LocalHostProvider";
 import { HostSetup, HostQuickControl } from "./HostSetup";
-import { getLocalHostPairing, getLocalHostStatus, listenForLocalHostStatus, startLocalHost, stopLocalHost, stopExternalLocalHost, removeExternalLocalHost } from "../lib/tauri";
+import { getLocalHostPairing, getLocalHostStatus, listenForLocalHostStatus, startLocalHost, stopLocalHost, stopExternalLocalHost, removeExternalLocalHost, renameLocalHost, openLocalHostLogin } from "../lib/tauri";
 import type { LocalHostStatus } from "../lib/types";
-vi.mock("../lib/tauri", () => ({ getLocalHostPairing: vi.fn(), getLocalHostStatus: vi.fn(), listenForLocalHostStatus: vi.fn(), startLocalHost: vi.fn(), stopLocalHost: vi.fn(), stopExternalLocalHost: vi.fn(), removeExternalLocalHost: vi.fn() }));
+vi.mock("../lib/tauri", () => ({ getLocalHostPairing: vi.fn(), getLocalHostStatus: vi.fn(), listenForLocalHostStatus: vi.fn(), startLocalHost: vi.fn(), stopLocalHost: vi.fn(), stopExternalLocalHost: vi.fn(), removeExternalLocalHost: vi.fn(), renameLocalHost: vi.fn(), openLocalHostLogin: vi.fn() }));
 const stopped: LocalHostStatus = { phase: "stopped", hub_url: "https://hub.example", name: "Workstation", allow_control: false, machine_reference: "machine@key", machine_address: "alice:workstation", error: null };
 const online: LocalHostStatus = { ...stopped, phase: "online" };
 let status_event: (status: LocalHostStatus) => void;
@@ -19,6 +19,8 @@ beforeEach(() => {
   vi.mocked(stopLocalHost).mockResolvedValue(stopped);
   vi.mocked(stopExternalLocalHost).mockResolvedValue(stopped);
   vi.mocked(removeExternalLocalHost).mockResolvedValue(stopped);
+  vi.mocked(renameLocalHost).mockResolvedValue({ ...stopped, machine_address: "alice:studio", machine_name: "studio" });
+  vi.mocked(openLocalHostLogin).mockResolvedValue();
   vi.mocked(getLocalHostPairing).mockResolvedValue({ machine_reference: "machine@key", qr_data_url: "data:image/svg+xml;base64,test", setup_uri: "otpauth://totp/test?secret=PRIVATE&algorithm=SHA256", current_code: "123456", host_time: 100, expires_at: 130 });
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.clearAllMocks(); localStorage.clear(); });
@@ -48,37 +50,30 @@ it("loads QR and current code on disclosure and clears them when hidden", async 
   expect(screen.queryByAltText("SHA-256 authenticator setup QR")).not.toBeInTheDocument();
 });
 
-it("opens registration and disables hosting and pairing for a saved unclaimed host", async () => {
+it("opens hosting setup for an unclaimed machine without requiring a registration command", async () => {
   vi.mocked(getLocalHostStatus).mockResolvedValue({ ...stopped, machine_address: null });
   render(<LocalHostProvider><HostQuickControl on_open_settings={() => {}} /></LocalHostProvider>);
   const toggle = await screen.findByRole("switch");
   await waitFor(() => expect(toggle).toBeEnabled());
   fireEvent.click(toggle);
-  expect(await screen.findByText("Register this computer with a Hub account")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Start hosting", hidden: true })).toBeDisabled();
+  expect(await screen.findByLabelText("Machine name")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Start hosting", hidden: true })).toBeEnabled();
+  expect(screen.queryByText(/tokn-session-hub/)).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Show pairing setup", hidden: true })).not.toBeInTheDocument();
   expect(startLocalHost).not.toHaveBeenCalled();
 });
 
-it("shows account registration for the chosen Hub and refreshes its assigned address", async () => {
+it("automatically signs in and registers the chosen Hub and machine name on Start", async () => {
   vi.mocked(getLocalHostStatus).mockResolvedValue({ ...stopped, hub_url: "", machine_address: null, machine_reference: null });
   render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
   fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
-  await screen.findByText("Register this computer with a Hub account");
+  await screen.findByLabelText("Machine name");
   const hub_input = screen.getByLabelText("Hosting Hub address");
   fireEvent.change(hub_input, { target: { value: "https://hub.example/" } });
-  expect(screen.getByText("tokn-session-hub auth login --hub https://hub.example")).toBeInTheDocument();
-  expect(screen.getByText("tokn-session-hub register --hub https://hub.example --machine my-computer")).toBeInTheDocument();
-  vi.mocked(getLocalHostStatus).mockResolvedValue({ ...stopped, machine_address: "alice:workstation" });
-  fireEvent.click(screen.getByRole("button", { name: "Refresh hosting status" }));
-  expect(await screen.findByText("alice:workstation")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Start hosting", hidden: true })).toBeEnabled();
-  expect(screen.queryByText("Register this computer with a Hub account")).not.toBeInTheDocument();
-  fireEvent.change(hub_input, { target: { value: "https://another.example" } });
-  expect(screen.queryByText("alice:workstation")).not.toBeInTheDocument();
-  expect(screen.getByText("tokn-session-hub auth login --hub https://another.example")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Start hosting", hidden: true })).toBeDisabled();
-  expect(startLocalHost).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText("Machine name"), { target: { value: "studio" } });
+  fireEvent.click(screen.getByRole("button", { name: "Start hosting", hidden: true }));
+  await waitFor(() => expect(startLocalHost).toHaveBeenCalledWith({ hub_url: "https://hub.example/", name: "Workstation", machine_name: "studio", allow_control: false }));
+  expect(await screen.findByText("Hosting online")).toBeInTheDocument();
 });
 
 it.each(["", "https://hub.example/path", "http://hub.example"])("blocks hosting for an invalid Hub address %j", async (hub_url) => {
@@ -101,12 +96,12 @@ it.each([
   fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
   await screen.findByText("Hosting off");
   fireEvent.change(screen.getByLabelText("Hosting Hub address"), { target: { value: "https://another.example" } });
-  expect(screen.getByText("Register this computer with a Hub account")).toBeInTheDocument();
+  expect(screen.getByLabelText("Machine name")).toBeInTheDocument();
   act(() => status_event({ ...online, phase }));
   expect(await screen.findByText(label)).toBeInTheDocument();
   expect(screen.getByText(stopped.hub_url)).toBeInTheDocument();
   expect(screen.getByText("alice:workstation")).toBeInTheDocument();
-  expect(screen.queryByText("Register this computer with a Hub account")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Machine name")).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Start hosting", hidden: true })).not.toBeInTheDocument();
 });
 
@@ -120,6 +115,79 @@ it("preserves newer connection events over a late start response", async () => {
   status_event(online); finish({ ...stopped, phase: "connecting" });
   await screen.findByText("Hosting online");
   expect(screen.queryByText("Connecting to Hub…")).not.toBeInTheDocument();
+});
+it("shows browser approval and lets cancellation supersede a pending start", async () => {
+  let reject_start!: (error: Error) => void;
+  const unclaimed = { ...stopped, machine_address: null, machine_reference: null };
+  vi.mocked(getLocalHostStatus).mockResolvedValue(unclaimed);
+  vi.mocked(stopLocalHost).mockResolvedValue(unclaimed);
+  vi.mocked(startLocalHost).mockImplementation(() => new Promise((_, reject) => { reject_start = reject; }));
+  render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Start hosting" }));
+  await waitFor(() => expect(startLocalHost).toHaveBeenCalledOnce());
+  act(() => status_event({ ...unclaimed, phase: "signing_in", login: { verification_url: "https://hub.example/account?user_code=ABCD-1234", user_code: "ABCD-1234", expires_at: 1234567890 } }));
+  expect(await screen.findByText("ABCD-1234")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Open sign-in page" }));
+  await waitFor(() => expect(openLocalHostLogin).toHaveBeenCalledOnce());
+  expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  await screen.findByText("Hosting off");
+  expect(stopLocalHost).toHaveBeenCalledOnce();
+  await act(async () => reject_start(new Error("Sign-in canceled")));
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.queryByText("ABCD-1234")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Start hosting" })).toBeEnabled();
+});
+it("clears browser approval when registration starts and preserves the final live status", async () => {
+  let finish!: (status: LocalHostStatus) => void;
+  vi.mocked(startLocalHost).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+  render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Start hosting" }));
+  await waitFor(() => expect(startLocalHost).toHaveBeenCalledOnce());
+  act(() => status_event({ ...stopped, phase: "signing_in", login: { verification_url: "https://hub.example/account?user_code=ABCD-1234", user_code: "ABCD-1234", expires_at: 1234567890 } }));
+  await screen.findByText("ABCD-1234");
+  act(() => status_event({ ...stopped, phase: "registering", login: null }));
+  expect(await screen.findByText("Registering this computer…")).toBeInTheDocument();
+  expect(screen.queryByText("ABCD-1234")).not.toBeInTheDocument();
+  await act(async () => { status_event(online); finish({ ...stopped, phase: "connecting" }); });
+  expect(await screen.findByText("Hosting online")).toBeInTheDocument();
+});
+it("renames the account address while preserving the paired machine", async () => {
+  vi.mocked(getLocalHostStatus).mockResolvedValue(online);
+  vi.mocked(renameLocalHost).mockResolvedValue({ ...online, machine_address: "alice:studio", machine_name: "studio" });
+  render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Rename" }));
+  const name = screen.getByLabelText("New machine name");
+  expect(name).toHaveValue("workstation");
+  fireEvent.change(name, { target: { value: "studio" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+  expect(await screen.findByText("alice:studio")).toBeInTheDocument();
+  expect(renameLocalHost).toHaveBeenCalledWith({ machine_name: "studio" });
+  expect(startLocalHost).not.toHaveBeenCalled();
+  expect(stopLocalHost).not.toHaveBeenCalled();
+  expect(getLocalHostPairing).not.toHaveBeenCalled();
+});
+it("keeps the rename draft and existing address when the requested name is taken", async () => {
+  vi.mocked(renameLocalHost).mockRejectedValue(new Error("Machine name is already reserved"));
+  render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Rename" }));
+  fireEvent.change(screen.getByLabelText("New machine name"), { target: { value: "studio" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Machine name is already reserved");
+  expect(screen.getByLabelText("New machine name")).toHaveValue("studio");
+  expect(screen.getByText("alice:workstation")).toBeInTheDocument();
+});
+it("disables rename for an externally owned connector", async () => {
+  vi.mocked(getLocalHostStatus).mockResolvedValue({ ...online, phase: "external" });
+  render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
+  expect(await screen.findByRole("button", { name: "Rename" })).toBeDisabled();
+  expect(screen.getByText("Stop external hosting before renaming this computer.")).toBeInTheDocument();
+  expect(renameLocalHost).not.toHaveBeenCalled();
 });
 it("reports external-connector conflicts without starting another flow", async () => {
   vi.mocked(startLocalHost).mockRejectedValue(new Error("Another connector is already hosting this machine"));

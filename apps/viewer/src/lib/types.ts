@@ -1050,20 +1050,32 @@ export interface BackgroundServiceStatus {
 }
 export interface LocalHostStatus {
   machine_address?: string | null;
+  machine_name?: string | null;
+  account_username?: string | null;
+  login?: LocalHostLogin | null;
   background_services?: { api: BackgroundServiceStatus; connector: BackgroundServiceStatus };
   external_remove_supported?: boolean;
   external_stop_supported?: boolean;
-  phase: "stopped" | "external" | "background" | "unavailable" | "connecting" | "online" | "reconnecting" | "error";
+  phase: "stopped" | "external" | "background" | "unavailable" | "signing_in" | "registering" | "renaming" | "connecting" | "online" | "reconnecting" | "error";
   hub_url: string;
   name: string;
   allow_control: boolean;
   machine_reference: string | null;
   error: string | null;
 }
+export interface LocalHostLogin {
+  verification_url: string;
+  user_code: string;
+  expires_at: number;
+}
 export interface StartLocalHostRequest {
   hub_url: string;
   name: string;
+  machine_name?: string;
   allow_control: boolean;
+}
+export interface RenameLocalHostRequest {
+  machine_name: string;
 }
 export interface LocalHostPairing {
   discovery_group?: DiscoveryGroup | null;

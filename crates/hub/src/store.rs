@@ -15,7 +15,9 @@ use webauthn_rs::prelude::{AuthenticationResult, Passkey};
 
 mod account_machines;
 mod namespaces;
-pub(crate) use account_machines::{ACCOUNT_REQUIRED, ADDRESS_TAKEN, AccountMachineClaim, HOST_CLAIMED};
+pub(crate) use account_machines::{
+  ACCOUNT_REQUIRED, ADDRESS_TAKEN, AccountMachineClaim, HOST_CLAIMED, MACHINE_NOT_OWNED, STALE_MACHINE_ADDRESS,
+};
 pub use namespaces::{HostCatalogEntry, MachineRecord, NamespaceError};
 
 const MAX_PASSKEYS: u32 = 32;

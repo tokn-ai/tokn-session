@@ -36,7 +36,7 @@ enum KeyKind {
   Device,
 }
 
-#[derive(clap::Args)]
+#[derive(Default, clap::Args)]
 struct HostArguments {
   #[arg(long)]
   hub: Option<Url>,
@@ -117,13 +117,32 @@ enum Command {
     /// Import an existing Base32 authenticator secret from a private local file on first setup.
     #[arg(long)]
     totp_secret_file: Option<PathBuf>,
+    /// Print the browser approval URL for use on another device.
+    #[arg(long)]
+    no_browser: bool,
     #[command(flatten)]
     host: HostArguments,
   },
-  /// Start hosting a previously registered machine until this command stops.
+  /// Start hosting, signing in and registering this computer when needed.
   Connect {
+    /// Initial machine name. Existing machines keep their registered name.
+    #[arg(long, value_parser = machine_name)]
+    machine: Option<String>,
+    /// Print the browser approval URL for use on another device.
+    #[arg(long)]
+    no_browser: bool,
     #[command(flatten)]
     host: HostArguments,
+  },
+  /// Change this computer's account address while keeping its identity and pairing.
+  Rename {
+    #[arg(long, value_parser = machine_name)]
+    machine: String,
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
+    /// Print the browser approval URL for use on another device.
+    #[arg(long)]
+    no_browser: bool,
   },
   /// Open an E2EE host through a locally installed viewer on loopback.
   Client {
@@ -313,27 +332,90 @@ async fn run(args: Args) -> Result<(), String> {
     Command::Register {
       machine,
       totp_secret_file,
+      no_browser,
       host,
     } => {
       let mut options = host.into_options()?;
       let _lease = connector::HostLease::acquire(&options.state_dir.join("host-enrollment.key"))?;
       options.totp_secret_file = totp_secret_file;
       let config = cli_onboarding::prepare_host(options)?;
-      let token = account_cli::saved_token(&config.hub_url)
-        .await?
-        .ok_or("Sign in to this Hub with tokn-session-hub auth login before registering a machine")?;
-      let address = tokn_session_hub::account_host::claim(&config, &machine, token.as_str()).await?;
-      eprintln!("Registered machine {address}");
-      Ok(())
+      let signal = shutdown_signal(shutdown.clone());
+      let result = async {
+        let account = account_cli::ensure_signed_in(&config.hub_url, &shutdown, no_browser).await?;
+        if shutdown.is_cancelled() {
+          return Err("Machine registration canceled".into());
+        }
+        let address = tokn_session_hub::account_host::claim(&config, &machine, &account.token).await?;
+        eprintln!("Registered machine {address}");
+        if shutdown.is_cancelled() {
+          return Err("Machine registration canceled".into());
+        }
+        Ok(())
+      }
+      .await;
+      signal.abort();
+      result
     }
-    Command::Connect { host } => {
+    Command::Connect {
+      machine,
+      no_browser,
+      host,
+    } => {
       let options = host.into_options()?;
       let lease = connector::HostLease::acquire(&options.state_dir.join("host-enrollment.key"))?;
-      let profile = onboarding::HostProfile::load(&options.state_dir.join("host.json"))?;
-      host_setup::require_account_assignment(&options.state_dir, profile.as_ref(), options.hub.as_ref())?;
+      let state_dir = options.state_dir.clone();
       let config = cli_onboarding::prepare_host(options)?;
       let signal = shutdown_signal(shutdown.clone());
-      let result = connector::run_owned(config, shutdown, lease, None).await;
+      let result = async {
+        let host_id = &config.paired.as_ref().expect("paired host setup").host_id;
+        match tokn_session_hub::account_host::saved_address(&state_dir, config.hub_url.as_str(), host_id)? {
+          Some(address) => {
+            if machine.as_ref().is_some_and(|name| address.split_once(':').map(|(_, saved)| saved) != Some(name.as_str())) {
+              return Err("This computer already has a machine address. Use tokn-session-hub rename --machine <name> to change it".into());
+            }
+          }
+          None => {
+            let name = machine.unwrap_or_else(|| host_setup::suggest_machine_name(&config.name, host_id));
+            let account = account_cli::ensure_signed_in(&config.hub_url, &shutdown, no_browser).await?;
+            if shutdown.is_cancelled() { return Err("Machine registration canceled".into()); }
+            let address = tokn_session_hub::account_host::claim(&config, &name, &account.token).await?;
+            eprintln!("Registered machine {address}");
+          }
+        }
+        if shutdown.is_cancelled() { return Err("Hosting canceled".into()); }
+        connector::run_owned(config, shutdown.clone(), lease, None).await
+      }.await;
+      signal.abort();
+      result
+    }
+    Command::Rename {
+      machine,
+      state_dir,
+      no_browser,
+    } => {
+      let options = HostArguments {
+        state_dir,
+        ..Default::default()
+      }
+      .into_options()?;
+      let _lease = connector::HostLease::acquire(&options.state_dir.join("host-enrollment.key"))?;
+      let profile = onboarding::HostProfile::load(&options.state_dir.join("host.json"))?;
+      host_setup::require_account_assignment(&options.state_dir, profile.as_ref(), None)?;
+      let config = cli_onboarding::prepare_host(options)?;
+      let signal = shutdown_signal(shutdown.clone());
+      let result = async {
+        let account = account_cli::ensure_signed_in(&config.hub_url, &shutdown, no_browser).await?;
+        if shutdown.is_cancelled() {
+          return Err("Machine rename canceled".into());
+        }
+        let address = tokn_session_hub::account_host::rename(&config, &machine, &account.token).await?;
+        eprintln!("Renamed machine {address}");
+        if shutdown.is_cancelled() {
+          return Err("Machine rename canceled".into());
+        }
+        Ok(())
+      }
+      .await;
       signal.abort();
       result
     }
@@ -635,6 +717,7 @@ mod tests {
       machine,
       totp_secret_file,
       host,
+      ..
     } = registered.command
     else {
       panic!("Expected the registration command");
@@ -643,27 +726,22 @@ mod tests {
     assert_eq!(totp_secret_file, Some(PathBuf::from("seed.txt")));
     assert_eq!(host.allow_control, Some(true));
     assert!(Args::try_parse_from(register.into_iter().chain(["--machine", "invalid:name"])).is_err());
-    assert!(Args::try_parse_from(connect.into_iter().chain(["--machine", "workstation"])).is_err());
+    assert!(Args::try_parse_from(connect.into_iter().chain(["--machine", "workstation"])).is_ok());
     assert!(Args::try_parse_from(connect.into_iter().chain(["--register-only"])).is_err());
     assert!(Args::try_parse_from(connect.into_iter().chain(["--totp-secret-file", "seed.txt"])).is_err());
     assert!(Args::try_parse_from(connect.into_iter().chain(["--trusted-hub"])).is_err());
     assert!(Args::try_parse_from(connect.into_iter().chain(["--namespace", "personal"])).is_err());
     assert!(Args::try_parse_from(connect.into_iter().chain(["--owner-public-key", "owner"])).is_err());
+    assert!(Args::try_parse_from(["hub", "rename"]).is_err());
+    assert!(Args::try_parse_from(["hub", "rename", "--machine", "studio"]).is_ok());
+    assert!(Args::try_parse_from(["hub", "rename", "--machine", "invalid:name"]).is_err());
   }
 
   #[tokio::test]
-  async fn connect_requires_registration_before_creating_a_host() {
+  async fn connect_without_a_hub_does_not_create_identity_or_start_sign_in() {
     let directory = tempfile::tempdir().unwrap();
-    let args = Args::try_parse_from([
-      "hub",
-      "connect",
-      "--hub",
-      "https://hub.example",
-      "--state-dir",
-      directory.path().to_str().unwrap(),
-    ])
-    .unwrap();
-    assert_eq!(run(args).await.unwrap_err(), host_setup::ACCOUNT_SETUP_REQUIRED);
+    let args = Args::try_parse_from(["hub", "connect", "--state-dir", directory.path().to_str().unwrap()]).unwrap();
+    assert!(run(args).await.unwrap_err().contains("First setup requires --hub"));
     for name in [
       "host.json",
       "host-account.json",

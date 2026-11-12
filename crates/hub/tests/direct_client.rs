@@ -51,6 +51,7 @@ struct Harness {
   pairing_directory: PairingDirectory,
   hub_state: HubState,
   account_token: String,
+  config: ConnectorConfig,
 }
 
 #[derive(Clone)]
@@ -214,8 +215,9 @@ impl Harness {
     );
     let stop = CancellationToken::new();
     let connector_stop = stop.clone();
+    let connector_config = config.clone();
     let connector_task = tokio::spawn(async move {
-      connector::run(config, connector_stop).await.unwrap();
+      connector::run(connector_config, connector_stop).await.unwrap();
     });
     tokio::time::timeout(Duration::from_secs(5), async {
       while !state.tunnels.online(&host_id) {
@@ -236,6 +238,7 @@ impl Harness {
       pairing_directory,
       hub_state: state,
       account_token,
+      config,
     }
   }
   fn manager(&self, name: &str) -> RemoteManager {
@@ -303,6 +306,65 @@ impl Harness {
     .unwrap();
     (host_id, host_key, secret)
   }
+}
+
+#[tokio::test]
+async fn renaming_a_live_machine_refreshes_saved_metadata_without_repairing() {
+  let harness = Harness::start().await;
+  let manager = harness.manager("rename-app");
+  let current = tokn_session_hub::secure_client::unix_time().unwrap();
+  let paired = manager
+    .pair_with_address(
+      &harness.hub_url,
+      &harness.host_id,
+      harness.secret.code_at(current),
+      Some(&harness.host_key),
+      Some("alice:workstation"),
+    )
+    .await
+    .unwrap();
+  let identity_before = std::fs::read(&harness.config.key_file).unwrap();
+  let noise_before = std::fs::read(&harness.config.paired.as_ref().unwrap().noise_key_file).unwrap();
+  assert_eq!(
+    account_host::rename(&harness.config, "studio", &harness.account_token)
+      .await
+      .unwrap(),
+    "alice:studio"
+  );
+  assert_eq!(
+    account_host::rename(&harness.config, "studio", &harness.account_token)
+      .await
+      .unwrap(),
+    "alice:studio"
+  );
+  let updated = manager
+    .remember_metadata(
+      &harness.hub_url,
+      &harness.host_id,
+      "alice:studio",
+      "Ignored directory hint",
+    )
+    .await
+    .unwrap();
+  assert_eq!(updated.machine_address.as_deref(), Some("alice:studio"));
+  assert_eq!(updated.host_public_key, paired.host_public_key);
+  assert_eq!(updated.discovery_group, paired.discovery_group);
+  assert_eq!(std::fs::read(&harness.config.key_file).unwrap(), identity_before);
+  assert_eq!(
+    std::fs::read(&harness.config.paired.as_ref().unwrap().noise_key_file).unwrap(),
+    noise_before
+  );
+  let info = manager
+    .open(&harness.hub_url, &harness.host_id, None, Arc::new(|_, _| {}))
+    .await
+    .unwrap();
+  assert!(
+    manager
+      .request(&info.connection_id, "list_sessions", json!({}))
+      .await
+      .is_ok()
+  );
+  manager.close_all().await;
 }
 
 #[tokio::test]
