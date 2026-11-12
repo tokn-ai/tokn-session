@@ -297,6 +297,39 @@ impl<R: AsyncRead + Unpin> FrameReader<R> {
 mod tests {
   use super::*;
 
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn a_partial_response_write_is_uncertain_and_permanently_closes_the_pipe() {
+    let options = LaunchOptions {
+      runtime_id: "blocked-fixture".into(),
+      executable: "/bin/sh".into(),
+      arguments: vec!["-c".into(), "kill -STOP $$".into()],
+      directory: std::env::current_dir().unwrap(),
+      history_path: "/fixture/db.sqlite".into(),
+      environment: Default::default(),
+    };
+    let (transport, _stdout) = Transport::launch(&options).unwrap();
+    let error = transport
+      .send(
+        json!({"id":"server-1","result":{
+          "action":"accept", "content":{"answer":"x".repeat(OUTBOUND_LIMIT / 2)}
+        }}),
+        true,
+      )
+      .await
+      .unwrap_err();
+    assert_eq!(error.kind, tokn_interaction_core::ErrorKind::Uncertain);
+    assert!(!transport.is_live());
+    assert!(transport.writer.lock().await.is_none());
+    assert!(
+      transport
+        .send(json!({"id":"server-2","result":{"action":"accept"}}), true)
+        .await
+        .is_err()
+    );
+    transport.close().await.unwrap();
+  }
+
   #[tokio::test]
   async fn reads_adjacent_native_ndjson_frames_and_preserves_request_id_types() {
     let frames = b"\n{\"id\":1,\"result\":{}}\r\n{\"id\":\"callback\",\"method\":\"interaction/requestPermission\"}\n";

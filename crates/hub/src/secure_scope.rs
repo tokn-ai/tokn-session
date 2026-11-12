@@ -63,6 +63,7 @@ pub async fn forward(
         "select_session_model"
           | "submit_session_input"
           | "submit_session_question_answers"
+          | "respond_session_interaction"
           | "set_session_control"
           | "cancel_session_turn"
           | "retry_session_index"

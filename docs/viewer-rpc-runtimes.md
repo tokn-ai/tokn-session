@@ -125,8 +125,13 @@ Bound metadata and live callback answers use the common service. Runtime
 failures do not automatically select another transport or replay a prompt.
 Opening historical work remains view-only. Local desktop projects can create
 Codex/OpenCode/ZCode/DSH sessions through saved or discovered runtimes. ZCode
-Send starts a text turn when idle. Its runtime declines native permission and
-question callbacks in this integration. Stop follows native prompt state,
+Send starts a text turn when idle. Its live panel shows questions, per-use tool
+permissions and plan review without requiring a recorded question card. Options,
+written answers and notes retain their native meaning. Permission controls expose
+allow-once and deny. The operation or plan appears with the request. A response
+is tied to its runtime instance and remains pending until native resolution.
+Native callback reannouncements update correlation without duplicating the card.
+Viewing clients receive an empty pending list. Stop follows native prompt state,
 including the wait before the first output. Arbitrary Pi history adoption and
 remote-only RPC history remain future work. See [shared session supervision](shared-session-supervisor.md).
 

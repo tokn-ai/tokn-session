@@ -391,6 +391,44 @@ export interface SessionControlStatus {
   instance_id: string | null;
 }
 
+export interface SessionInteractionQuestion {
+  question_id: string;
+  prompt: string;
+  options: { label: string; description: string | null }[];
+  allows_free_text: boolean;
+  allows_option_notes: boolean;
+  is_secret: boolean;
+  multiple: boolean;
+}
+export type SessionPermissionDecision = "allow_once" | "deny";
+export interface SessionInteraction {
+  interaction_id: string;
+  kind: "question" | "permission" | "confirm" | "select" | "input" | "editor";
+  title: string;
+  details: string | null;
+  response_pending: boolean;
+  questions: SessionInteractionQuestion[];
+  permission_decisions: SessionPermissionDecision[];
+}
+export interface SessionInteractionsResponse {
+  session_key: string;
+  runtime_id: string | null;
+  instance_id: string | null;
+  interactions: SessionInteraction[];
+}
+export type SessionInteractionResponse =
+  | { type: "answers"; answers: { question_id: string; answers: string[]; custom?: string }[] }
+  | { type: "permission"; decision: SessionPermissionDecision }
+  | { type: "reject" };
+export interface RespondSessionInteractionRequest {
+  session_key: string;
+  request_id: string;
+  runtime_id: string;
+  instance_id: string;
+  interaction_id: string;
+  response: SessionInteractionResponse;
+}
+
 export interface ModelIdentity {
   model_provider: string | null;
   model_id: string;

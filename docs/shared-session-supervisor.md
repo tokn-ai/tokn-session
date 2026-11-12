@@ -108,7 +108,7 @@ message awaiting native acknowledgement, allowing extension preflight to finish.
 | Codex | Explicit app-server create/resume binding; start-or-steer, turn interruption, model catalogs, and live callback questions. Desktop is an explicit alternative. |
 | Pi | Viewer-owned sessions keep the exclusive Pi workflow driver; independently running bridges keep their existing owner. A Pi profile cannot adopt arbitrary saved history from an ID alone. |
 | OpenCode | Native V2 creation, local history, runtime/profile binding and start-or-steer. V1 and mixed histories remain read-only. |
-| ZCode | Managed native app-server, verified local SQLite history, root session creation and resume, and text Send while idle. Drafts use the runtime default model. |
+| ZCode | Managed native app-server, verified local history, creation/resume, idle text Send, live questions, allow-once/deny tool permissions and plan review. Drafts use the runtime default model. |
 | DSH | Existing native sessions through a saved or locally discovered ApiProxy runtime. State/model inspection does not activate cold agents. Local project creation uses the native default preset. |
 
 The Pi driver owns model-on-send sequencing, native extension dialogs,
@@ -135,9 +135,17 @@ history alone cannot authorize a reply. Native callback envelopes and credential
 remain host-side. The separate Codex `request_user_input_async` tool emits
 assistant-item metadata without a callback and is unavailable through RPC;
 answering it through Desktop requires explicitly selecting Desktop control.
+ZCode uses a live pending panel above the composer. Its list/respond commands
+verify the saved session and fence the exact runtime instance without activating
+a new runtime. Native callback IDs stay host-side. Repeated announcements retain
+one card; native resolution, cancellation and disconnect retire it. Responses
+use control receipts, and an uncertain write stays unreplayed. Questions support
+multiple selections and notes, while permission buttons follow the native
+per-use decisions. Viewing grants and shares cannot discover or answer live
+requests. Existing recorded question cards retain their current flow.
 The desktop New session flow uses the same supervisor for Codex/OpenCode/ZCode/DSH
-creation, while preserving Pi’s specialized worker. Remote-only history and a
-general permission-approval UI remain follow-ups.
+creation, while preserving Pi’s specialized worker. Remote-only history and
+additional provider coverage for the live interaction panel remain follow-ups.
 
 Session commands retain existing agent-control authorization and read-only share
 rules. Editing executable/environment profiles or administering runtimes remains

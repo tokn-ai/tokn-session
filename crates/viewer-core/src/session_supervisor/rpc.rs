@@ -180,14 +180,37 @@ impl SessionSupervisor {
       .runtimes
       .binding(&target.session_key)
       .ok_or("No connected RPC session owns this request")?;
-    match self
+    let reply = self
       .runtimes
       .execute_binding(&binding, uuid::Uuid::new_v4().to_string(), Command::PendingInteractions)
-      .await
-    {
+      .await;
+    match reply {
       Ok(Reply::Interactions(interactions)) => Ok(interactions),
       Ok(_) => Err("RPC runtime returned unexpected pending input".into()),
-      Err(error) => Err(error.message),
+      Err(error) => {
+        if error.kind != ErrorKind::Unavailable {
+          return Err(error.message);
+        }
+        let Some(snapshot) = self.runtimes.binding_snapshot(&target.session_key).filter(|snapshot| {
+          snapshot.connected
+            && !snapshot.recovery_required
+            && !snapshot.reattach_required
+            && snapshot.descriptor.instance_id == binding.target.instance_id
+        }) else {
+          return Err(error.message);
+        };
+        // Reconciliation may publish a newer resolution before its read reply
+        // arrives. The core rejects that older baseline; its validated event
+        // cache retains the current requests. Responses still recheck native
+        // pending state and cannot be authorized by a stale display entry.
+        Ok(
+          snapshot
+            .pending_interactions
+            .into_iter()
+            .filter(|pending| pending.session_id.as_deref() == Some(target.input.session_id.as_str()))
+            .collect(),
+        )
+      }
     }
   }
 
@@ -205,10 +228,26 @@ impl SessionSupervisor {
       .runtimes
       .binding(&target.session_key)
       .ok_or_else(|| DeliveryError::not_sent("The live request no longer has an RPC owner"))?;
+    self
+      .respond_rpc_binding(target, &binding, request_id, interaction_id, response)
+      .await
+  }
+
+  pub(crate) async fn respond_rpc_binding(
+    &self,
+    target: &VerifiedSession,
+    binding: &crate::rpc_runtime::RpcSessionBinding,
+    request_id: String,
+    interaction_id: String,
+    response: tokn_interaction_core::InteractionResponse,
+  ) -> Result<Admission, DeliveryError> {
+    if self.transport(target).await.map_err(DeliveryError::not_sent)? != SessionTransport::Rpc {
+      return Err(DeliveryError::not_sent("This session's control transport changed"));
+    }
     match self
       .runtimes
       .execute_binding(
-        &binding,
+        binding,
         request_id,
         Command::Respond {
           interaction_id,

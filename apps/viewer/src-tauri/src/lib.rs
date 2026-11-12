@@ -103,6 +103,8 @@ pub fn run() {
       commands::input::get_session_question_status,
       commands::input::submit_session_question_answers,
       commands::session_control::get_session_control,
+      commands::session_control::list_session_interactions,
+      commands::session_control::respond_session_interaction,
       commands::session_control::set_session_control,
       commands::session_control::cancel_session_turn,
       commands::relay::get_relay_status,

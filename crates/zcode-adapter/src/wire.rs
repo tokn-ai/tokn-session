@@ -75,6 +75,7 @@ pub(super) struct Protocol {
 pub(super) struct Runtime {
   pub active_turn_id: Option<String>,
   pub state_revision: u64,
+  pub pending_request_ids: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]

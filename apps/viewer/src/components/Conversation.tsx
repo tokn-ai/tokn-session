@@ -28,6 +28,7 @@ import { ChevronIcon, FilterIcon, InspectorIcon, PanelIcon, SendIcon } from "./I
 import { EventCard } from "./EventCard";
 import { LoadingRows, StateView } from "./StateView";
 import { SessionComposer } from "./SessionComposer";
+import { SessionInteractions } from "./SessionInteractions";
 
 interface ConversationProps {
   current_model?: SessionModelState;
@@ -465,6 +466,7 @@ export function Conversation({
           </button>
         ) : null}
       </div>
+      <SessionInteractions session={session} refresh_key={input_refresh_key} on_accepted={on_input_accepted} />
       <SessionComposer session={session} on_accepted={on_input_accepted} model={model}
         control={control.enabled ? control : undefined}
         input_refresh_key={(input_refresh_key ?? 0) + model.input_revision} />

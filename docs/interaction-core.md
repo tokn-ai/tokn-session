@@ -50,6 +50,10 @@ and session identities. See [viewer RPC runtimes](viewer-rpc-runtimes.md).
 ZCode launches a project-scoped Agent CLI over stdio. It verifies the native
 database path, explicitly creates or resumes the selected root session, and
 uses idle-only native admission for the Viewer’s text composer.
+Native question and permission callbacks retain their business request identity
+across envelope reannouncements. The adapter normalizes question choices, notes,
+plan approval and per-use permissions. Responses have transport-write receipts;
+native resolution or the pending snapshot retires a dispatched request.
 
 Snapshot inspection does not call a provider, start a process, or resume saved
 work. Initial snapshots require recovery and do not claim a live connection until

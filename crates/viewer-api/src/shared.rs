@@ -85,6 +85,10 @@ pub(super) async fn command(State(state): State<ApiState>, Json(mut share): Json
         "transport":"rpc", "available":false, "can_select":false, "can_cancel":false,
         "message":"This session share is read-only", "runtime_id":null, "instance_id":null
       })),
+      "list_session_interactions" => Ok(json!({
+        "session_key":share.payload["request"]["session_key"],
+        "runtime_id":null, "instance_id":null, "interactions":[]
+      })),
       "get_session_model_status" | "list_session_models" => {
         let status = json!({
           "state": {"model":null,"source":"unknown","revision":"read_only"},
@@ -189,6 +193,7 @@ fn prepare(share: &mut SharedRequest) -> Result<(), &'static str> {
     | "get_session_question_status"
     | "get_session_model_status"
     | "get_session_control"
+    | "list_session_interactions"
     | "list_session_models"
     | "load_session_image" => {
       let field = if share.command == "list_session_children" {
@@ -506,6 +511,7 @@ mod tests {
       "get_session_question_status",
       "get_session_model_status",
       "get_session_control",
+      "list_session_interactions",
       "list_session_models",
       "load_session_image",
     ] {
@@ -523,6 +529,7 @@ mod tests {
       "select_session_model",
       "submit_session_input",
       "submit_session_question_answers",
+      "respond_session_interaction",
       "set_session_control",
       "cancel_session_turn",
       "upload_image_chunk",

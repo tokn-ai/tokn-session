@@ -1,4 +1,5 @@
 //! Managed interaction with the native ZCode Protocol app-server.
+mod interactions;
 mod transport;
 mod wire;
 
@@ -56,6 +57,7 @@ struct Inner {
   binding: AsyncMutex<()>,
   sessions: Mutex<HashSet<String>>,
   active_prompts: Mutex<HashSet<String>>,
+  interactions: Mutex<interactions::Interactions>,
 }
 
 #[derive(Clone)]
@@ -91,7 +93,8 @@ impl ZCodeAdapter {
           .with(Operation::Models)
           .with(Operation::Message)
           .with(Operation::CancelTurn)
-          .with(Operation::PendingInteractions),
+          .with(Operation::PendingInteractions)
+          .with(Operation::Respond),
       },
       directory: options.directory,
       history_path: options.history_path,
@@ -103,6 +106,7 @@ impl ZCodeAdapter {
       binding: AsyncMutex::new(()),
       sessions: Mutex::new(HashSet::new()),
       active_prompts: Mutex::new(HashSet::new()),
+      interactions: Mutex::new(interactions::Interactions::default()),
     });
     inner.transport.start_reader(stdout, Arc::downgrade(&inner));
     let startup = tokio::time::timeout(STARTUP_TIMEOUT, async {
@@ -386,6 +390,7 @@ impl Inner {
   fn disconnect(&self, reason: &str) {
     self.transport.terminate();
     self.active_prompts.lock().unwrap().clear();
+    *self.interactions.lock().unwrap() = interactions::Interactions::default();
     self.storage.send_if_modified(|storage| {
       if storage.is_none() {
         *storage = Some(false);
@@ -411,7 +416,7 @@ impl Inner {
     };
     let params = &frame["params"];
     if let Some(id) = frame.get("id") {
-      return self.transport.send(decline_callback(id, method)?, false).await;
+      return self.receive_callback(id, method, params).await;
     }
     if method == "startup/storageState" && params["databaseKind"] == "session" {
       if params["phase"] == "ready" {
@@ -432,6 +437,9 @@ impl Inner {
       .as_str()
       .filter(|id| self.sessions.lock().unwrap().contains(*id))
     {
+      if method == "session/event" {
+        self.native_interaction_event(id, params);
+      }
       match (method, params["type"].as_str()) {
         ("session/event", Some("turn.started")) => self.publish_state(id, ExecutionState::Running),
         ("state.updated", _) => match params["reason"].as_str() {
@@ -442,12 +450,14 @@ impl Inner {
           // Core completion precedes bootstrap releasing its active prompt lock.
           // Only these native ready notifications allow another session/send.
           Some("prompt_completed" | "prompt_failed") => {
+            self.retire_interactions(id, true);
             self.active_prompts.lock().unwrap().remove(id);
             self.publish_state(id, ExecutionState::Idle);
           }
           _ => {}
         },
         ("session/event", Some("session.closed")) => {
+          self.retire_interactions(id, false);
           self.sessions.lock().unwrap().remove(id);
           self.active_prompts.lock().unwrap().remove(id);
           self.publish_state(id, ExecutionState::Stopped);
@@ -566,12 +576,14 @@ impl InteractionAdapter for ZCodeAdapter {
           if result.as_object().is_none_or(|object| !object.is_empty()) {
             return Err(InteractionError::uncertain("ZCode did not confirm the stop request"));
           }
+          self.inner.retire_interactions(id, true);
           Ok(Reply::Acknowledged)
         }
-        Command::PendingInteractions => Ok(Reply::Interactions(Vec::new())),
-        Command::Respond { .. } => Err(InteractionError::unsupported(
-          "ZCode interaction responses are unavailable",
-        )),
+        Command::PendingInteractions => self.inner.pending_interactions(id).await,
+        Command::Respond {
+          interaction_id,
+          response,
+        } => self.inner.respond_interaction(id, &interaction_id, response).await,
       }
     })
   }
