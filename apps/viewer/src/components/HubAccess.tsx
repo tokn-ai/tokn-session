@@ -73,13 +73,14 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
     setConnectionState("connecting"); setTransport({ kind: "relay" });
     const client = await current.connect(host, signal);
     if (signal.aborted) { client.close(); return; }
-    try { await refreshHosts(current, signal); }
+    let saved: SavedHubHost[];
+    try { saved = await refreshHosts(current, signal); }
     catch (error) { client.close(); throw error; }
     if (signal.aborted) { client.close(); return; }
     active_client.current = client;
     client.setStateListener((state) => { if (active_client.current === client) setConnectionState(state); });
     client.setTransportListener?.((next) => { if (active_client.current === client) setTransport(next); });
-    setPairingOpen(false); selectMachine(client); setActive({ host, client });
+    setPairingOpen(false); selectMachine(client); setActive({ host: saved.find((entry) => entry.host_id === host.host_id) ?? host, client });
     callbacks.current.on_machine_open?.({ kind: "hub", hub_url: current.hub_url, host_id: host.host_id });
   }
   async function loadService(url: string, signal: AbortSignal, requested_host_id: string | null | undefined) {
@@ -150,6 +151,7 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
 
   async function refreshHosts(current: HubAccessService, signal: AbortSignal) {
     const status = await current.status(); if (!signal.aborted) setHosts(status.hosts);
+    return status.hosts;
   }
   async function addMachine(signal: AbortSignal) {
     if (!service) return;

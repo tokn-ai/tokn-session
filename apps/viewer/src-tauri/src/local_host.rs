@@ -13,9 +13,11 @@ use std::{
   time::Duration,
 };
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_opener::OpenerExt;
 use tokio::{sync::Mutex as AsyncMutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tokn_session_hub::{
+  account_client::{AccountClient, LoginChallenge},
   connector::{self, ConnectorStatus, HostLease},
   host_setup::{self, HostOptions},
   onboarding::HostProfile,
@@ -36,6 +38,9 @@ pub enum HostPhase {
   External,
   Background,
   Unavailable,
+  SigningIn,
+  Registering,
+  Renaming,
   Connecting,
   Online,
   Reconnecting,
@@ -46,8 +51,10 @@ pub struct HostStatus {
   pub phase: HostPhase,
   pub hub_url: String,
   pub name: String,
-  pub discovery_namespace: Option<String>,
   pub machine_address: Option<String>,
+  pub machine_name: Option<String>,
+  pub account_username: Option<String>,
+  pub login: Option<LoginChallenge>,
   pub allow_control: bool,
   pub machine_reference: Option<String>,
   pub error: Option<String>,
@@ -61,8 +68,10 @@ impl Default for HostStatus {
       phase: HostPhase::Stopped,
       hub_url: String::new(),
       name: "This computer".into(),
-      discovery_namespace: None,
       machine_address: None,
+      machine_name: None,
+      account_username: None,
+      login: None,
       allow_control: false,
       machine_reference: None,
       error: None,
@@ -78,6 +87,13 @@ pub struct StartHostRequest {
   pub hub_url: String,
   pub name: String,
   pub allow_control: bool,
+  #[serde(default)]
+  pub machine_name: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenameHostRequest {
+  pub machine_name: String,
 }
 #[derive(Serialize)]
 pub struct HostPairing {
@@ -115,6 +131,7 @@ struct RunningHost {
   instance_id: String,
   started_at_ms: i64,
   configuration: Option<StartHostRequest>,
+  connection: Arc<Mutex<(HostPhase, Option<String>)>>,
 }
 impl RunningHost {
   async fn stop(mut self) {
@@ -142,7 +159,20 @@ pub struct LocalHost {
   status: Arc<Mutex<HostStatus>>,
   closed: AtomicBool,
   closing: CancellationToken,
+  pending_setup: Mutex<Option<CancellationToken>>,
 }
+
+struct SetupOperation<'a> {
+  pending: &'a Mutex<Option<CancellationToken>>,
+  cancellation: CancellationToken,
+}
+impl Drop for SetupOperation<'_> {
+  fn drop(&mut self) {
+    self.cancellation.cancel();
+    self.pending.lock().unwrap().take();
+  }
+}
+
 impl LocalHost {
   pub fn new(state_dir: PathBuf) -> Self {
     Self {
@@ -152,6 +182,7 @@ impl LocalHost {
       status: Arc::new(Mutex::new(HostStatus::default())),
       closed: AtomicBool::new(false),
       closing: CancellationToken::new(),
+      pending_setup: Mutex::new(None),
     }
   }
   pub fn unified(paths: tokn_session_storage::SessionPaths) -> Self {
@@ -175,16 +206,89 @@ impl LocalHost {
     .map_err(|_| "Host storage resolution task failed")?
   }
   pub async fn status(&self) -> Result<HostStatus, String> {
-    let running = self.operation.lock().await;
-    if running.is_some() {
+    let Ok(running) = self.operation.try_lock() else {
+      return Ok(self.status.lock().unwrap().clone());
+    };
+    let owned = running.is_some();
+    drop(running);
+    if owned {
       return Ok(self.status.lock().unwrap().clone());
     }
     detected_status(self.storage_path(false).await?).await
   }
 
   pub async fn start(&self, app: AppHandle, request: StartHostRequest) -> Result<HostStatus, String> {
-    let mut running = self.operation.lock().await;
-    self.start_locked(app, request, &mut running).await
+    let mut running = self
+      .operation
+      .try_lock()
+      .map_err(|_| "A hosting operation is already in progress")?;
+    let result = self.start_locked(app.clone(), request, &mut running).await;
+    if let Err(error) = &result
+      && running.is_none()
+    {
+      let mut status = self.status.lock().unwrap().clone();
+      status.phase = HostPhase::Stopped;
+      status.login = None;
+      status.error = Some(error.clone());
+      publish(&app, &self.status, status);
+    }
+    result
+  }
+
+  fn begin_setup(&self) -> Result<SetupOperation<'_>, String> {
+    let mut pending = self.pending_setup.lock().unwrap();
+    if pending.is_some() {
+      return Err("A hosting operation is already in progress".into());
+    }
+    let cancellation = self.closing.child_token();
+    *pending = Some(cancellation.clone());
+    Ok(SetupOperation {
+      pending: &self.pending_setup,
+      cancellation,
+    })
+  }
+
+  async fn sign_in(
+    &self,
+    app: &AppHandle,
+    state_dir: PathBuf,
+    hub: &url::Url,
+    cancellation: &CancellationToken,
+  ) -> Result<tokn_session_hub::account_client::SignedInAccount, String> {
+    let callback_app = app.clone();
+    let callback_state = self.status.clone();
+    let callback_cancellation = cancellation.clone();
+    AccountClient::new(state_dir)?
+      .ensure_signed_in(hub, cancellation, move |challenge| {
+        if callback_cancellation.is_cancelled() {
+          return;
+        }
+        update_status(&callback_app, &callback_state, |status| {
+          status.phase = HostPhase::SigningIn;
+          status.login = Some(challenge.clone());
+        });
+        let _ = callback_app
+          .opener()
+          .open_url(&challenge.verification_url, None::<&str>);
+      })
+      .await
+  }
+
+  pub async fn open_login(&self, app: &AppHandle) -> Result<(), String> {
+    let challenge = self
+      .status
+      .lock()
+      .unwrap()
+      .login
+      .clone()
+      .ok_or("There is no pending Hub sign-in")?;
+    if self.pending_setup.lock().unwrap().is_none() {
+      return Err("There is no pending Hub sign-in".into());
+    }
+    app
+      .opener()
+      .open_url(challenge.verification_url, None::<&str>)
+      .map_err(|_| "Could not open the Hub sign-in page".into())
   }
 
   async fn start_locked(
@@ -199,7 +303,10 @@ impl LocalHost {
     if running.is_some() {
       return Err("Stop app hosting before changing its settings".into());
     }
+    let setup = self.begin_setup()?;
+    let cancellation = &setup.cancellation;
     let configuration = request.clone();
+    let hub = tokn_hub_remote::canonical_hub(&request.hub_url)?;
     let state_dir = self.storage_path(true).await?;
     let path = state_dir.clone();
     let (lease, previous) = tokio::task::spawn_blocking(move || {
@@ -218,19 +325,19 @@ impl LocalHost {
         return Err("Another connector is already hosting this machine through its saved Hub. Stop that connector before hosting in the app.".into());
       }
     }
-    let (service, events) = app.state::<LocalViewer>().api(&app).await?;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-      .await
-      .map_err(|e| e.to_string())?;
-    let address = listener.local_addr().map_err(|e| e.to_string())?;
+    if cancellation.is_cancelled() {
+      return Err("Hosting setup canceled".into());
+    }
     let mut random = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut random);
     let token = STANDARD.encode(random);
-    let path = state_dir;
+    let path = state_dir.clone();
     let config_token = token.clone();
+    let configured_hub = hub.clone();
+    let insecure_loopback = hub.scheme() == "http";
     let prepared = tokio::task::spawn_blocking(move || {
       host_setup::prepare_host(HostOptions {
-        hub: Some(url::Url::parse(&request.hub_url).map_err(|_| "Enter a valid HTTPS Hub address")?),
+        hub: Some(configured_hub),
         name: Some(request.name),
         viewer_url: None,
         passkey_origin: None,
@@ -238,14 +345,64 @@ impl LocalHost {
         totp_secret_file: None,
         viewer_token: Some(config_token),
         allow_control: Some(request.allow_control),
-        insecure_loopback: false,
+        insecure_loopback,
         ice_servers: None,
       })
     })
     .await
     .map_err(|_| "Host setup task failed")??;
-    if self.closed.load(Ordering::Acquire) {
-      return Err("App hosting is shutting down".into());
+    let host_id = &prepared
+      .config
+      .paired
+      .as_ref()
+      .ok_or("Host identity is unavailable")?
+      .host_id;
+    let machine_name = configuration.machine_name.as_deref().filter(|name| !name.is_empty());
+    let machine_address = if let Some(address) = &prepared.machine_address {
+      let (_, saved_name) = tokn_hub_client_core::address::parse_machine_address(address)?;
+      if machine_name.is_some_and(|requested| requested != saved_name) {
+        return Err("Use Rename to change this computer's registered machine name".into());
+      }
+      address.clone()
+    } else {
+      let machine_name = machine_name
+        .map(str::to_owned)
+        .unwrap_or_else(|| host_setup::suggest_machine_name(&prepared.config.name, host_id));
+      tokn_hub_client_core::address::parse_machine_address(&format!("account:{machine_name}"))?;
+      publish(
+        &app,
+        &self.status,
+        HostStatus {
+          phase: HostPhase::Registering,
+          hub_url: hub.origin().ascii_serialization(),
+          name: prepared.config.name.clone(),
+          machine_name: Some(machine_name.clone()),
+          allow_control: prepared.config.allow_control,
+          ..Default::default()
+        },
+      );
+      let account = self.sign_in(&app, state_dir.clone(), &hub, cancellation).await?;
+      let mut status = self.status.lock().unwrap().clone();
+      status.phase = HostPhase::Registering;
+      status.account_username = Some(account.username);
+      status.login = None;
+      publish(&app, &self.status, status);
+      if cancellation.is_cancelled() {
+        return Err("Hosting setup canceled".into());
+      }
+      tokn_session_hub::account_host::claim(&prepared.config, &machine_name, &account.token).await?
+    };
+    if cancellation.is_cancelled() {
+      return Err("Hosting setup canceled".into());
+    }
+    let (account_username, machine_name) = tokn_hub_client_core::address::parse_machine_address(&machine_address)?;
+    let (service, events) = app.state::<LocalViewer>().api(&app).await?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+      .await
+      .map_err(|error| error.to_string())?;
+    let address = listener.local_addr().map_err(|error| error.to_string())?;
+    if cancellation.is_cancelled() {
+      return Err("Hosting setup canceled".into());
     }
     let mut config = prepared.config;
     // The persisted CLI target stays intact. The app serves its own existing
@@ -255,8 +412,10 @@ impl LocalHost {
       phase: HostPhase::Connecting,
       hub_url: config.hub_url.origin().ascii_serialization(),
       name: config.name.clone(),
-      discovery_namespace: prepared.discovery_namespace,
-      machine_address: prepared.machine_address,
+      machine_address: Some(machine_address),
+      machine_name: Some(machine_name),
+      account_username: Some(account_username),
+      login: None,
       allow_control: config.allow_control,
       machine_reference: Some(prepared.reference),
       error: None,
@@ -270,21 +429,31 @@ impl LocalHost {
     let callback_app = app.clone();
     let callback_state = self.status.clone();
     let callback_shutdown = shutdown.clone();
+    let connection = Arc::new(Mutex::new((HostPhase::Connecting, None)));
+    let callback_connection = connection.clone();
     let sink = Arc::new(move |connection| {
       if callback_shutdown.is_cancelled() {
         return;
       }
-      let mut status = callback_state.lock().unwrap().clone();
-      (status.phase, status.error) = match connection {
+      let current = match connection {
         ConnectorStatus::Connecting => (HostPhase::Connecting, None),
         ConnectorStatus::Online => (HostPhase::Online, None),
         ConnectorStatus::Reconnecting { error } => (HostPhase::Reconnecting, Some(error)),
       };
-      publish(&callback_app, &callback_state, status);
+      *callback_connection.lock().unwrap() = current.clone();
+      update_status(&callback_app, &callback_state, |status| {
+        if !matches!(
+          status.phase,
+          HostPhase::SigningIn | HostPhase::Registering | HostPhase::Renaming
+        ) {
+          (status.phase, status.error) = current;
+        }
+      });
     });
     let task_shutdown = shutdown.clone();
     let state = self.status.clone();
     let task_app = app.clone();
+    let task_connection = connection.clone();
     let task = tokio::spawn(async move {
       let stop = task_shutdown.clone();
       let api = axum::serve(listener, router).with_graceful_shutdown(async move { stop.cancelled().await });
@@ -295,14 +464,16 @@ impl LocalHost {
       let stopped = task_shutdown.is_cancelled();
       task_shutdown.cancel();
       if !stopped {
-        let mut status = state.lock().unwrap().clone();
-        status.phase = HostPhase::Error;
-        status.error = Some(
-          result
-            .err()
-            .unwrap_or_else(|| "Host service stopped unexpectedly".into()),
-        );
-        publish(&task_app, &state, status);
+        let error = result
+          .err()
+          .unwrap_or_else(|| "Host service stopped unexpectedly".into());
+        *task_connection.lock().unwrap() = (HostPhase::Error, Some(error.clone()));
+        update_status(&task_app, &state, |status| {
+          if !matches!(status.phase, HostPhase::SigningIn | HostPhase::Renaming) {
+            status.phase = HostPhase::Error;
+            status.error = Some(error);
+          }
+        });
       }
     });
     *running = Some(RunningHost {
@@ -311,9 +482,123 @@ impl LocalHost {
       instance_id: uuid::Uuid::new_v4().to_string(),
       started_at_ms: crate::runtime_management::now_ms(),
       configuration: Some(configuration),
+      connection,
     });
     crate::runtime_management::changed(&app);
     Ok(self.status.lock().unwrap().clone())
+  }
+
+  pub async fn rename(&self, app: AppHandle, request: RenameHostRequest) -> Result<HostStatus, String> {
+    tokn_hub_client_core::address::parse_machine_address(&format!("account:{}", request.machine_name))?;
+    let mut running = self
+      .operation
+      .try_lock()
+      .map_err(|_| "A hosting operation is already in progress")?;
+    if self.closed.load(Ordering::Acquire) {
+      return Err("App hosting is shutting down".into());
+    }
+    let setup = self.begin_setup()?;
+    let state_dir = self.storage_path(true).await?;
+    let path = state_dir.clone();
+    let app_owned = running.is_some();
+    let (lease, profile) = tokio::task::spawn_blocking(move || {
+      let lease = if app_owned {
+        None
+      } else {
+        Some(HostLease::acquire(&path.join("host-enrollment.key"))?)
+      };
+      let profile = HostProfile::load(&path.join("host.json"))?.ok_or("Start hosting to set up this computer first")?;
+      host_setup::require_account_assignment(&path, Some(&profile), None)?;
+      Ok::<_, String>((lease, profile))
+    })
+    .await
+    .map_err(|_| "Host ownership task failed")??;
+    let _lease = lease;
+    if !app_owned {
+      let background = crate::external_host::inspect(&state_dir, Some(&profile)).await?;
+      if background.has_loaded()
+        || background.api.error.is_some()
+        || background.connector.error.is_some()
+        || host_setup::existing_host_online(&profile).await?
+      {
+        return Err("Stop external hosting before renaming this computer".into());
+      }
+    }
+    let path = state_dir.clone();
+    let prepared = tokio::task::spawn_blocking(move || {
+      host_setup::prepare_host(HostOptions {
+        hub: None,
+        name: None,
+        viewer_url: None,
+        passkey_origin: None,
+        state_dir: path,
+        totp_secret_file: None,
+        viewer_token: None,
+        allow_control: None,
+        insecure_loopback: false,
+        ice_servers: None,
+      })
+    })
+    .await
+    .map_err(|_| "Host configuration task failed")??;
+    let initial = if !app_owned {
+      let status_path = state_dir.clone();
+      Some(
+        tokio::task::spawn_blocking(move || profile_status(&status_path, Some(&profile)))
+          .await
+          .map_err(|_| "Host status task failed")??,
+      )
+    } else {
+      None
+    };
+    update_status(&app, &self.status, |status| {
+      if let Some(initial) = initial {
+        *status = initial;
+      }
+      status.phase = HostPhase::Renaming;
+      status.error = None;
+    });
+    let result = async {
+      let account = self
+        .sign_in(&app, state_dir, &prepared.config.hub_url, &setup.cancellation)
+        .await?;
+      if setup.cancellation.is_cancelled() {
+        return Err("Machine rename canceled".into());
+      }
+      update_status(&app, &self.status, |status| {
+        status.phase = HostPhase::Renaming;
+        status.login = None;
+      });
+      tokn_session_hub::account_host::rename(&prepared.config, &request.machine_name, &account.token).await
+    }
+    .await;
+    let renamed = result
+      .as_ref()
+      .ok()
+      .map(|address| tokn_hub_client_core::address::parse_machine_address(address))
+      .transpose()?;
+    if let Some((_, machine_name)) = &renamed
+      && let Some(configuration) = running.as_mut().and_then(|host| host.configuration.as_mut())
+    {
+      configuration.machine_name = Some(machine_name.clone());
+    }
+    let status = update_status(&app, &self.status, |status| {
+      status.login = None;
+      if let Some(host) = running.as_ref() {
+        (status.phase, status.error) = host.connection.lock().unwrap().clone();
+      } else {
+        status.phase = HostPhase::Stopped;
+      }
+      if let Some((username, machine_name)) = renamed {
+        status.machine_address = result.as_ref().ok().cloned();
+        status.account_username = Some(username);
+        status.machine_name = Some(machine_name);
+      }
+      if let Err(error) = &result {
+        status.error = Some(error.clone());
+      }
+    });
+    result.map(|_| status)
   }
 
   /// Restart only this app's exact current instance. The saved enrollment,
@@ -354,7 +639,9 @@ impl LocalHost {
   }
 
   pub async fn runtime_inventory(&self) -> Vec<RuntimeInfo> {
-    let running = self.operation.lock().await;
+    let Ok(running) = self.operation.try_lock() else {
+      return vec![hosting_runtime(self.status.lock().unwrap().clone(), None)];
+    };
     if let Some(host) = running.as_ref() {
       return vec![hosting_runtime(self.status.lock().unwrap().clone(), Some(host))];
     }
@@ -424,6 +711,9 @@ impl LocalHost {
     runtimes
   }
   pub async fn stop(&self, app: &AppHandle) -> Result<HostStatus, String> {
+    if let Some(pending) = self.pending_setup.lock().unwrap().as_ref() {
+      pending.cancel();
+    }
     let mut running = self.operation.lock().await;
     if let Some(host) = running.take() {
       host.stop().await;
@@ -431,6 +721,7 @@ impl LocalHost {
     let mut status = self.status.lock().unwrap().clone();
     status.phase = HostPhase::Stopped;
     status.error = None;
+    status.login = None;
     publish(app, &self.status, status.clone());
     Ok(status)
   }
@@ -535,10 +826,16 @@ fn runtime_access(directory: &std::path::Path) -> Result<RpcRuntimeAccess, Strin
   })
 }
 
-fn publish(app: &AppHandle, state: &Mutex<HostStatus>, status: HostStatus) {
-  *state.lock().unwrap() = status.clone();
-  let _ = app.emit("local-host-status", status);
+fn update_status(app: &AppHandle, state: &Mutex<HostStatus>, change: impl FnOnce(&mut HostStatus)) -> HostStatus {
+  let mut status = state.lock().unwrap();
+  change(&mut status);
+  let _ = app.emit("local-host-status", &*status);
   crate::runtime_management::changed(app);
+  status.clone()
+}
+
+fn publish(app: &AppHandle, state: &Mutex<HostStatus>, status: HostStatus) {
+  update_status(app, state, |current| *current = status);
 }
 
 fn hosting_runtime(status: HostStatus, owned: Option<&RunningHost>) -> RuntimeInfo {
@@ -646,7 +943,9 @@ async fn detected_status(path: PathBuf) -> Result<HostStatus, String> {
     status.phase = HostPhase::External;
   } else if status.background_services.api.loaded {
     status.phase = HostPhase::Background;
-  } else if let Some(profile) = &profile {
+  } else if status.machine_address.is_some()
+    && let Some(profile) = &profile
+  {
     match host_setup::existing_host_online(profile).await {
       Ok(true) => status.phase = HostPhase::External,
       Ok(false) => {}
@@ -684,15 +983,34 @@ fn profile_status(path: &std::path::Path, profile: Option<&HostProfile>) -> Resu
   let Some(profile) = profile else {
     return Ok(HostStatus::default());
   };
-  let identity = NoiseIdentity::load(&path.join("host-noise.key"))?;
+  let machine_address = tokn_session_hub::account_host::saved_address(path, &profile.hub_url, &profile.host_id)?;
+  let (account_username, machine_name) = match &machine_address {
+    Some(address) => {
+      let (username, machine_name) = tokn_hub_client_core::address::parse_machine_address(address)?;
+      (Some(username), Some(machine_name))
+    }
+    None => (
+      None,
+      Some(host_setup::suggest_machine_name(&profile.name, &profile.host_id)),
+    ),
+  };
+  let machine_reference = machine_address
+    .as_ref()
+    .map(|_| {
+      let identity = NoiseIdentity::load(&path.join("host-noise.key"))?;
+      Ok::<_, String>(format!("{}@{}", profile.host_id, identity.public_key()))
+    })
+    .transpose()?;
   Ok(HostStatus {
     phase: HostPhase::Stopped,
     hub_url: profile.hub_url.clone(),
     name: profile.name.clone(),
-    discovery_namespace: profile.discovery_namespace.clone(),
-    machine_address: tokn_session_hub::account_host::saved_address(path, &profile.hub_url, &profile.host_id)?,
+    machine_address,
+    machine_name,
+    account_username,
+    login: None,
     allow_control: profile.allow_control,
-    machine_reference: Some(format!("{}@{}", profile.host_id, identity.public_key())),
+    machine_reference,
     error: None,
     external_stop_supported: false,
     external_remove_supported: false,
@@ -700,18 +1018,12 @@ fn profile_status(path: &std::path::Path, profile: Option<&HostProfile>) -> Resu
   })
 }
 fn pairing(path: &std::path::Path) -> Result<HostPairing, String> {
-  let profile = HostProfile::load(&path.join("host.json"))?.ok_or("Start hosting to set up this machine first")?;
+  let profile = HostProfile::load(&path.join("host.json"))?.ok_or(host_setup::ACCOUNT_SETUP_REQUIRED)?;
+  let discovery_group =
+    tokn_session_hub::account_host::saved_discovery_group(path, &profile.hub_url, &profile.host_id)?
+      .ok_or(host_setup::ACCOUNT_SETUP_REQUIRED)?;
   let identity = NoiseIdentity::load(&path.join("host-noise.key"))?;
   let secret = tokn_session_hub::onboarding::read_totp_secret(&path.join("host-access.json"))?;
-  let discovery_group =
-    match tokn_session_hub::account_host::saved_discovery_group(path, &profile.hub_url, &profile.host_id)? {
-      Some(group) => Some(group),
-      None => profile
-        .discovery_namespace
-        .as_deref()
-        .map(|namespace| secret.discovery_group(&profile.hub_url, namespace))
-        .transpose()?,
-    };
   let setup_uri = secret.provisioning_uri(&profile.name)?;
   let svg = qrcode::QrCode::new(setup_uri.as_bytes())
     .map_err(|_| "Could not render authenticator QR")?
@@ -721,7 +1033,7 @@ fn pairing(path: &std::path::Path) -> Result<HostPairing, String> {
   let now = tokn_session_hub::secure_client::unix_time()?;
   Ok(HostPairing {
     machine_reference: format!("{}@{}", profile.host_id, identity.public_key()),
-    discovery_group,
+    discovery_group: Some(discovery_group),
     qr_data_url: format!("data:image/svg+xml;base64,{}", STANDARD.encode(svg)),
     setup_uri,
     current_code: secret.code_at(now),
@@ -733,6 +1045,28 @@ fn pairing(path: &std::path::Path) -> Result<HostPairing, String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn setup_cancellation_keeps_status_responsive_and_releases_admission() {
+    let directory = tempfile::tempdir().unwrap();
+    let host = LocalHost::new(directory.path().to_owned());
+    let _operation = host.operation.lock().await;
+    let setup = host.begin_setup().unwrap();
+    assert!(host.begin_setup().is_err());
+    host.status.lock().unwrap().phase = HostPhase::SigningIn;
+    let status = tokio::time::timeout(Duration::from_millis(100), host.status())
+      .await
+      .unwrap()
+      .unwrap();
+    assert!(matches!(status.phase, HostPhase::SigningIn));
+    let cancellation = setup.cancellation.clone();
+    host.pending_setup.lock().unwrap().as_ref().unwrap().cancel();
+    assert!(cancellation.is_cancelled());
+    drop(setup);
+    assert!(host.pending_setup.lock().unwrap().is_none());
+    assert!(host.begin_setup().is_ok());
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+  }
 
   #[tokio::test]
   async fn runtime_access_inspection_requires_existing_host_setup() {
@@ -765,11 +1099,30 @@ mod tests {
     })
     .unwrap()
   }
+
+  fn save_account_assignment(path: &std::path::Path, profile: &HostProfile) {
+    let hub_origin = tokn_session_hub::onboarding::canonical_hub(&url::Url::parse(&profile.hub_url).unwrap()).unwrap();
+    tokn_session_hub::onboarding::save_configuration(
+      &path.join("host-account.json"),
+      &serde_json::json!({
+        "hub_origin": hub_origin,
+        "claim": {
+          "host_id": profile.host_id,
+          "machine_address": "alice:workstation",
+          "group": {"namespace": "alice", "secret_digest": "A".repeat(43)}
+        }
+      }),
+    )
+    .unwrap();
+  }
+
   #[test]
   fn pairing_display_reuses_identity_and_sha256_secret_without_changing_trust() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path();
     let prepared = setup(path);
+    let profile = HostProfile::load(&path.join("host.json")).unwrap().unwrap();
+    save_account_assignment(path, &profile);
     let state = path.join("host-access.json");
     let device = NoiseIdentity::generate().unwrap().public_key();
     tokn_session_hub::onboarding::authorize_device(&state, &device, 10, 300).unwrap();
@@ -800,7 +1153,7 @@ mod tests {
   }
 
   #[test]
-  fn pairing_display_uses_the_saved_discovery_namespace_and_seed() {
+  fn legacy_profile_cannot_show_pairing_until_the_machine_is_registered() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path();
     setup(path);
@@ -808,15 +1161,10 @@ mod tests {
     let mut profile = HostProfile::load(&profile_file).unwrap().unwrap();
     profile.discovery_namespace = Some("personal".into());
     profile.save(&profile_file).unwrap();
-    let secret = tokn_session_hub::onboarding::read_totp_secret(&path.join("host-access.json")).unwrap();
-    assert_eq!(
-      pairing(path).unwrap().discovery_group,
-      Some(secret.discovery_group(&profile.hub_url, "personal").unwrap())
-    );
-    assert_eq!(
-      saved_status(path).unwrap().discovery_namespace.as_deref(),
-      Some("personal")
-    );
+    assert_eq!(pairing(path).err().unwrap(), host_setup::ACCOUNT_SETUP_REQUIRED);
+    let status = saved_status(path).unwrap();
+    assert!(status.machine_address.is_none());
+    assert!(status.machine_reference.is_none());
   }
 
   #[test]
@@ -832,14 +1180,7 @@ mod tests {
       namespace: "alice".into(),
       secret_digest: "A".repeat(43),
     };
-    tokn_session_hub::onboarding::save_configuration(
-      &path.join("host-account.json"),
-      &serde_json::json!({
-        "hub_origin": profile.hub_url,
-        "claim": { "host_id": profile.host_id, "machine_address": "alice:workstation", "group": group },
-      }),
-    )
-    .unwrap();
+    save_account_assignment(path, &profile);
     let display = pairing(path).unwrap();
     assert_eq!(display.discovery_group, Some(group));
     assert_eq!(display.machine_reference, prepared.reference);
@@ -883,7 +1224,7 @@ mod tests {
     assert_eq!(std::fs::read(&path).unwrap(), before);
   }
   #[tokio::test]
-  async fn legacy_hub_status_distinguishes_external_offline_and_unavailable() {
+  async fn only_claimed_hosts_probe_the_secure_route_for_presence() {
     use axum::{Router, extract::WebSocketUpgrade, http::StatusCode, response::IntoResponse, routing::get};
     use std::sync::atomic::AtomicU8;
     let directory = tempfile::tempdir().unwrap();
@@ -916,10 +1257,13 @@ mod tests {
     let task = tokio::spawn(async move {
       axum::serve(listener, router).await.unwrap();
     });
-    assert!(matches!(
-      detected_status(directory.path().to_owned()).await.unwrap().phase,
-      HostPhase::External
-    ));
+    let unclaimed = detected_status(directory.path().to_owned()).await.unwrap();
+    assert!(matches!(unclaimed.phase, HostPhase::Stopped));
+    assert!(unclaimed.machine_address.is_none());
+    save_account_assignment(directory.path(), &profile);
+    let claimed = detected_status(directory.path().to_owned()).await.unwrap();
+    assert_eq!(claimed.machine_address.as_deref(), Some("alice:workstation"));
+    assert!(matches!(claimed.phase, HostPhase::External));
     mode.store(0, Ordering::Release);
     assert!(matches!(
       detected_status(directory.path().to_owned()).await.unwrap().phase,
@@ -962,7 +1306,9 @@ mod tests {
         hub_url: "https://hub.example".into(),
         name: "Existing host".into(),
         allow_control: false,
+        machine_name: None,
       }),
+      connection: Arc::new(Mutex::new((HostPhase::Online, None))),
     };
     assert!(
       restart_configuration(&host, "stale-instance")
@@ -1088,6 +1434,7 @@ mod tests {
       instance_id: "test".into(),
       started_at_ms: 0,
       configuration: None,
+      connection: Arc::new(Mutex::new((HostPhase::Online, None))),
     }
     .stop()
     .await;

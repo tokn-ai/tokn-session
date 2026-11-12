@@ -1,7 +1,7 @@
 # Session Hub
 
 `tokn-session-hub` gives the browser and app one endpoint for multiple
-machines. A Hub account owns each new machine address. Machines verify
+machines. Every connected machine has an address owned by a Hub account. Machines verify
 authenticator codes locally and browsers unlock sessions with a host-owned
 passkey. See [authenticator pairing](hub-pairing.md) for the encrypted workflow.
 The Hub administrator uses a separate passkey to manage host routes.
@@ -28,10 +28,9 @@ Subsequent owner logins use a passkey. An authenticated owner can add another
 passkey from the host screen and keep a second authenticator for recovery.
 
 Configure [email delivery](#hub-accounts-and-cli-login) before creating an
-account. Sign in on the session host and register its machine name.
+account. Start the connector on the session host.
 
 ```sh
-cargo run -p tokn-session-hub -- auth login --hub http://localhost:5559
 cargo run -p tokn-session-hub -- connect \
   --hub http://localhost:5559 --insecure-loopback --machine workstation
 ```
@@ -63,30 +62,44 @@ when you return to the Hub, at most once per day. Sign out to end that account
 session early. Each machine still requires its own passkey unlock in every new
 or reloaded tab.
 
-The CLI prints a device code and opens the Hub's account page. Verify your email
-and approve that code. The CLI saves its revocable credential in private local
-storage for the selected Hub. For automation, create a named API key in the
+The app and CLI open the Hub's account page for browser approval. Sign in if
+prompted, then approve the displayed code. Native clients share their Rust
+account client and revocable credentials under `~/.tokn/sessions/hub`. Credentials
+stay in private native storage. A valid saved login is reused; an expired login
+opens approval again. Account-service outages preserve the saved credential.
+For automation, create a named API key in the
 account page with machine listing or registration scope. Supply it on stdin to
 `auth login --with-token --hub https://hub.example.com`.
 
-Register a machine with its stable local host identity and a machine name:
+Start hosting from the desktop app, or use the CLI:
 
 ```sh
 tokn-session-hub connect --hub https://hub.example.com --machine macbook
 ```
 
-For account `alice` this reserves `alice:macbook` on that Hub. Add
-`--register-only` while app hosting is stopped to make the assignment and then
-start hosting from the desktop app. Subsequent connector starts use the saved
-host key. The browser gallery combines the signed-in account's machines with
+For account `alice` this reserves `alice:macbook` on that Hub. The first start
+signs in when needed, proves ownership of the machine's enrollment key, saves
+the assignment, and starts hosting. `--machine` chooses the initial name; omitting
+it suggests one from the display name. Use `--no-browser` to print an approval
+URL for another device on a headless host. Later starts reuse the saved
+assignment and host key.
+
+Scripts can use `register --hub https://hub.example.com --machine macbook` to
+save an assignment and exit before hosting starts. It also signs in when needed.
+Use `tokn-session-hub rename --machine studio` to change the address suffix
+while retaining the machine UUID, keys, and pairings. Rename requires the owning
+account and a signed proof from the machine. The old address stops resolving.
+The browser gallery combines the signed-in account's machines with
 saved pairings and discovered machines. Pairing also reveals the account's
 discovery group to a viewer who has no account session. Each machine verifies
 access to its own sessions. Browser access uses a machine passkey.
 
-Every new host needs an account machine assignment. Configure email delivery
-to create accounts and sign in by email. Previously registered hosts can
-reconnect with their existing keys and claim an account address with
-`--machine`. Existing addresses remain valid.
+Every host needs an account machine assignment before it can connect. An
+existing encrypted host automatically claims an address using its saved UUID
+and key on first start. Configure email delivery to create accounts and sign in
+by email.
+During rollout, stop any old unclaimed connectors to close their existing direct
+WebRTC connections. The updated Hub rejects their next registration.
 
 ## Remote operation
 
@@ -110,8 +123,7 @@ not provide protection against sustained denial-of-service traffic.
 On a remote host:
 
 ```sh
-tokn-session-hub auth login --hub https://hub.example.com
-tokn-session-hub connect --hub https://hub.example.com --machine build-server
+tokn-session-hub connect --hub https://hub.example.com --machine build-server --no-browser
 ```
 
 Only the connector needs outbound connectivity. The local viewer API stays on
@@ -120,18 +132,12 @@ the local API requires a token, supply `TOKN_VIEWER_TOKEN` to the connector as
 well as the API; this local token is never sent to the Hub or browser.
 Redirects and environment proxies are disabled for local forwarding.
 
-Previously enrolled connectors using `--trusted-hub` or
-`--owner-public-key` can reconnect with their saved identities. In
-`--trusted-hub` mode the Hub can read forwarded content. See
-[encrypted access and sharing](hub-e2ee.md) for compatibility details.
-
 ## Identity and lifecycle
 
 Each Hub has one administrator, who can revoke hosts and add administration
 passkeys. Account holders manage their own machine addresses and automation keys.
 
-The Hub account's username supplies the namespace for every new machine
-address. Previously assigned administrator addresses remain valid aliases.
+The Hub account's username supplies the namespace for every machine address.
 Public lookup resolves an exact address to a machine UUID and presence.
 Addresses remain reserved to the original UUID after revocation. Clients
 verify Noise keys through machine pairing. See
@@ -139,8 +145,8 @@ verify Noise keys through machine pairing. See
 
 The Hub persists public passkey credentials and approved hosts in
 `~/.tokn/sessions/hub/state.sqlite` (`--state-path` overrides it). The connector generates
-and persists its Ed25519 private key in `~/.tokn/sessions/hub/host.key`
-(`--identity-file` overrides it). Use a separate identity file for each Hub.
+and persists its Ed25519 private key in `~/.tokn/sessions/hub/host-enrollment.key`.
+Use a separate state directory for each Hub.
 On Unix, state/key files are restricted to their owner. Protect and back up
 these files using the host's normal account/storage controls.
 
@@ -149,11 +155,9 @@ challenge and enrollment attributes; the Hub verifies possession of the
 approved key. A host name is a label, not an identity. Revocation closes the
 active tunnel and removes access through that registration.
 
-Administrator browser sessions last one hour, live only in memory, and disappear on
-reload. Logout or expiry closes active requests and event streams. Restarting
-the Hub invalidates browser sessions and outstanding authentication ceremonies;
-approved hosts reconnect using their persisted keys. Losing all passkeys has
-no remote recovery bypass; preserve an additional passkey before that happens.
+Administrator browser sessions last one hour and live in memory until reload.
+Restarting the Hub invalidates those sessions and outstanding authentication
+ceremonies. Claimed hosts reconnect using their saved keys.
 
 ## Forwarding contract
 
@@ -161,11 +165,9 @@ no remote recovery bypass; preserve an additional passkey before that happens.
 - `/hub/v1/auth/register/{start,finish}` and `/login/{start,finish}` implement
   server-held, expiring WebAuthn ceremonies. Auth POSTs require the configured
   browser `Origin`; `/hub/v1/auth/logout` revokes the bearer session.
-- `GET /hub/v1/hosts` returns approved hosts with connectivity and effective
-  `view`/`control` access, durable encrypted-only status, and an optional
-  `machine_address`. `DELETE /hub/v1/hosts/<host_id>` revokes one.
-- Authenticated `GET /hub/v1/namespaces` lists legacy namespace reservations.
-  New addresses are assigned through account machine registration.
+- `GET /hub/v1/hosts` returns claimed machines with their addresses,
+  connectivity, and effective `view` or `control` access.
+  `DELETE /hub/v1/hosts/<host_id>` revokes one.
 - Public `GET /hub/v1/resolve/alice/macbook` returns `host_id`, `machine_address`,
   `name`, and `online`. No directory key establishes encryption trust.
 - A discovery request with `X-Tokn-Discovery-Addresses: 1` also receives
@@ -173,16 +175,13 @@ no remote recovery bypass; preserve an additional passkey before that happens.
 - Public `POST /hub/v1/presence` accepts `{"host_ids":["UUID"]}` for up to 128
   unique canonical machine IDs and returns `host_id` and `online` for those IDs.
   A request with `X-Tokn-Presence-Versions: 1` also receives `connector_version`
-  when the active connector reports it. Unknown or revoked hosts are offline.
+  when the active connector reports it. Unknown, unclaimed, and revoked hosts are offline.
   Browser origins are checked and responses are not cached.
-- The legacy enrollment catalog is empty. New connections register through a
-  Hub account.
-- `/hosts/<host_id>/api/v1/<command>` forwards the existing viewer API.
-  The browser's Hub bearer credential stays at the Hub.
 - `/hub/v1/tunnel` is the native connector's versioned WebSocket transport.
   Its upgrade exchanges package versions through `X-Tokn-Connector-Version`
   on the request and `X-Tokn-Hub-Version` on the response. The Hub retains the
   connector version with its authenticated live connection.
+- `/hub/v1/secure/<host_id>` relays encrypted records to a connected machine.
 
 Forwarding uses an exact viewer-route allowlist, bounded bodies, bounded
 in-flight requests and streaming queues. The connector independently checks

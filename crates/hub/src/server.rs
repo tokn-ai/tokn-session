@@ -1,6 +1,6 @@
-//! The public Hub boundary: owner authentication, host selection, and forwarding.
+//! The public Hub boundary for accounts, machine discovery, and encrypted tunnels.
 use crate::{
-  account_host::ClaimRequest,
+  account_host::{ClaimRequest, RenameRequest},
   accounts::{Accounts, MACHINES_REGISTER},
   auth::AuthState,
   protocol,
@@ -9,14 +9,12 @@ use crate::{
 };
 use axum::{
   Json, Router,
-  body::{Body, Bytes},
   extract::{DefaultBodyLimit, Path, Request, State, WebSocketUpgrade, rejection::JsonRejection},
-  http::{HeaderMap, HeaderValue, Method, StatusCode, header},
+  http::{HeaderMap, HeaderValue, StatusCode, header},
   middleware::{self, Next},
   response::{IntoResponse, Response},
   routing::{any, get, post},
 };
-use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use tokn_hub_client_core::address::ResolvedMachine;
@@ -62,14 +60,6 @@ pub fn router(state: HubState) -> Router {
   let protected = Router::new()
     .route("/hub/v1/hosts", get(hosts))
     .route("/hub/v1/hosts/{host_id}", axum::routing::delete(revoke_host))
-    .route("/hub/v1/namespaces", get(namespaces).post(legacy_registration_retired))
-    .route(
-      "/hub/v1/namespaces/{username}/machines/{machine_name}",
-      post(legacy_registration_retired),
-    )
-    .route("/hub/v1/enrollments", get(enrollments))
-    .route("/hub/v1/enrollments/approve", post(legacy_registration_retired))
-    .route("/hosts/{host_id}/api/v1/{command}", any(proxy))
     .layer(middleware::from_fn_with_state(state.clone(), authorize));
   let auth = state.auth.router();
   let accounts = state.accounts.router();
@@ -82,6 +72,10 @@ pub fn router(state: HubState) -> Router {
     .route(
       "/hub/v1/account/machines/claim",
       post(claim_account_machine).layer(DefaultBodyLimit::max(4096)),
+    )
+    .route(
+      "/hub/v1/account/machines/rename",
+      post(rename_account_machine).layer(DefaultBodyLimit::max(4096)),
     )
     .route("/hub/v1/discovery/{namespace}/{secret_digest}", get(discover_machines))
     .route(
@@ -179,6 +173,55 @@ async fn claim_account_machine(
   }
 }
 
+async fn rename_account_machine(
+  State(state): State<HubState>,
+  headers: HeaderMap,
+  Json(rename): Json<RenameRequest>,
+) -> Response {
+  if let Err(error) = state.auth.check_optional_origin(&headers) {
+    return error.into_response();
+  }
+  let principal = match state.accounts.authenticate(&headers, MACHINES_REGISTER).await {
+    Ok(principal) => principal,
+    Err(error) => return error.into_response(),
+  };
+  if !protocol::valid_host_uuid(&rename.host_id)
+    || tokn_hub_client_core::address::parse_machine_address(&rename.expected_machine_address).is_err()
+    || tokn_hub_client_core::address::parse_machine_address(&format!("{}:{}", principal.username, rename.machine_name))
+      .is_err()
+  {
+    return error(StatusCode::BAD_REQUEST, "Invalid machine identity or name").into_response();
+  }
+  if let Err(message) = rename.verify(&state.public_origin, &principal.user_id) {
+    return error(StatusCode::FORBIDDEN, message).into_response();
+  }
+  let result = tokio::task::spawn_blocking(move || {
+    state.store.rename_account_host(
+      &principal.user_id,
+      &rename.host_id,
+      &rename.public_key,
+      &rename.expected_machine_address,
+      &rename.machine_name,
+    )
+  })
+  .await;
+  match result {
+    Ok(Ok(claim)) => Json(claim).into_response(),
+    Ok(Err(message)) if message == crate::store::MACHINE_NOT_OWNED => {
+      error(StatusCode::FORBIDDEN, message).into_response()
+    }
+    Ok(Err(message))
+      if matches!(
+        message.as_str(),
+        crate::store::ADDRESS_TAKEN | crate::store::STALE_MACHINE_ADDRESS
+      ) =>
+    {
+      error(StatusCode::CONFLICT, message).into_response()
+    }
+    _ => error(StatusCode::INTERNAL_SERVER_ERROR, "Could not rename the machine").into_response(),
+  }
+}
+
 pub fn with_web_ui(app: Router, web_root: PathBuf) -> Result<Router, String> {
   let index = web_root.join("index.html");
   if !index.is_file() {
@@ -251,45 +294,24 @@ async fn authorize(State(state): State<HubState>, request: Request, next: Next) 
     Err(error) => return error.into_response(),
   };
   let cancellation = principal.cancellation;
-  let response = tokio::select! {
+  tokio::select! {
     biased;
-    _ = cancellation.cancelled() => return error(StatusCode::UNAUTHORIZED, "Hub session expired").into_response(),
+    _ = cancellation.cancelled() => error(StatusCode::UNAUTHORIZED, "Hub session expired").into_response(),
     response = next.run(request) => response,
-  };
-  // Logout and session expiry also terminate an already-open SSE subscription.
-  let (parts, body) = response.into_parts();
-  let mut incoming = body.into_data_stream();
-  let stream = async_stream::stream! {
-    loop {
-      let chunk = tokio::select! {
-        biased;
-        _ = cancellation.cancelled() => break,
-        chunk = incoming.next() => chunk,
-      };
-      match chunk {
-        Some(chunk) => yield chunk,
-        None => break,
-      }
-    }
-  };
-  Response::from_parts(parts, Body::from_stream(stream))
+  }
 }
 
 async fn hosts(State(state): State<HubState>) -> Result<Json<Value>, ApiError> {
   let hosts = state.store.host_catalog().map_err(internal)?;
   Ok(Json(json!({
     "hosts": hosts.into_iter().map(|host| {
-      let mut entry = json!({
+      json!({
         "online": state.tunnels.online(&host.host_id),
-        "secure_only": host.secure_only || state.tunnels.secure_only(&host.host_id),
         "access": state.tunnels.access(&host.host_id).unwrap_or(host.access),
         "host_id": host.host_id,
         "name": host.name,
-      });
-      if let Some(address) = host.machine_address {
-        entry["machine_address"] = json!(address);
-      }
-      entry
+        "machine_address": host.machine_address,
+      })
     }).collect::<Vec<_>>()
   })))
 }
@@ -297,20 +319,8 @@ async fn hosts(State(state): State<HubState>) -> Result<Json<Value>, ApiError> {
 fn namespace_error(failure: NamespaceError) -> ApiError {
   match failure {
     NamespaceError::Invalid(message) => error(StatusCode::BAD_REQUEST, message),
-    NamespaceError::Conflict(message) => error(StatusCode::CONFLICT, message),
-    NamespaceError::NotFound(message) => error(StatusCode::NOT_FOUND, message),
     NamespaceError::Internal(detail) => internal(detail),
   }
-}
-
-async fn namespaces(State(state): State<HubState>) -> Result<Json<Value>, ApiError> {
-  Ok(Json(
-    json!({"namespaces": state.store.namespaces().map_err(namespace_error)?}),
-  ))
-}
-
-async fn legacy_registration_retired() -> ApiError {
-  error(StatusCode::GONE, crate::store::ACCOUNT_REQUIRED)
 }
 
 fn resolved_machine(state: &HubState, machine: MachineRecord) -> ResolvedMachine {
@@ -405,10 +415,6 @@ async fn machine_presence(
   }))
 }
 
-async fn enrollments() -> Json<Value> {
-  Json(json!({ "enrollments": [] }))
-}
-
 async fn revoke_host(State(state): State<HubState>, Path(host_id): Path<String>) -> Result<StatusCode, ApiError> {
   state.tunnels.revoke(&host_id).map_err(internal)?;
   Ok(StatusCode::NO_CONTENT)
@@ -464,58 +470,6 @@ async fn secure_tunnel(
     .max_message_size(crate::protocol::MAX_SECURE_RECORD)
     .max_frame_size(crate::protocol::MAX_SECURE_RECORD)
     .on_upgrade(move |socket| async move { state.tunnels.handle_secure_socket(&host_id, socket, permit).await })
-}
-
-async fn proxy(
-  State(state): State<HubState>,
-  Path((host_id, command)): Path<(String, String)>,
-  method: Method,
-  body: Bytes,
-) -> Response {
-  // The connector independently enforces its local maximum permission.
-  if state.tunnels.secure_only(&host_id) {
-    return error(
-      StatusCode::FORBIDDEN,
-      "This host requires the installed encrypted client",
-    )
-    .into_response();
-  }
-  if method == Method::POST
-    && state.tunnels.online(&host_id)
-    && state.tunnels.access(&host_id).as_deref() != Some("control")
-    && let Some(value) =
-      protocol::read_only_model_response(&format!("/api/v1/{command}"), "This host allows viewing only")
-  {
-    return Json(value).into_response();
-  }
-  // Advertising unavailable input also keeps the viewer's composer disabled.
-  if method == Method::POST
-    && matches!(
-      command.as_str(),
-      "get_session_input_status" | "get_session_question_status"
-    )
-    && state.tunnels.online(&host_id)
-    && state.tunnels.access(&host_id).as_deref() != Some("control")
-  {
-    return Json(json!({
-      "available": false,
-      "message": "This host allows viewing only",
-      "max_length": 0,
-      "images_available": false,
-            "images_stageable": false,
-      "max_images": 0,
-      "max_image_bytes": 0,
-      "max_total_image_bytes": 0,
-      "image_mime_types": [],
-      "question_ids": [],
-    }))
-    .into_response();
-  }
-  let path = format!("/api/v1/{command}");
-  match state.tunnels.proxy(&host_id, method, &path, body).await {
-    Ok(response) => response,
-    Err(failure) => error(failure.status, failure.message).into_response(),
-  }
 }
 
 fn internal(_detail: String) -> ApiError {

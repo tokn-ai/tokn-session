@@ -33,6 +33,7 @@ function checkCancelled(signal: AbortSignal) {
 
 /** Directory names select a UUID; only pairing or a known pin establishes trust. */
 export function withMachineAddressing(backend: HubAccessBackend): HubAccessService {
+  const connect = backend.connect.bind(backend);
   async function target(input: string, signal: AbortSignal) {
     checkCancelled(signal);
     const parsed = parseMachineTarget(input);
@@ -44,10 +45,29 @@ export function withMachineAddressing(backend: HubAccessBackend): HubAccessServi
     if (alias_pin && alias_pin.host_id !== host_id) throw new Error("This address now points to another machine. Its saved identity was preserved.");
     const remembered = status.hosts.find((host) => host.host_id === host_id);
     if (remembered && parsed.host_public_key && remembered.host_public_key !== parsed.host_public_key) throw new Error("Machine key differs from its remembered identity. Its saved key was preserved.");
-    const metadata = remembered?.machine_address && remembered.machine_address !== resolved?.machine_address ? undefined : resolved;
-    return { host_id, host_public_key: parsed.host_public_key ?? remembered?.host_public_key, metadata, remembered };
+    return { host_id, host_public_key: parsed.host_public_key ?? remembered?.host_public_key, metadata: resolved, remembered };
   }
   return Object.assign(backend, {
+    async connect(host: SavedHubHost, signal: AbortSignal) {
+      const client = await connect(host, signal);
+      try {
+        const status = await backend.status();
+        checkCancelled(signal);
+        const saved = status.hosts.find((entry) => entry.host_id === host.host_id);
+        if (saved?.discovery_group) {
+          const result = await backend.discover(saved.discovery_group, signal);
+          const current = result.machines.find((entry) => entry.host_id === saved.host_id);
+          if (current?.machine_address && current.machine_address !== saved.machine_address) {
+            await backend.rememberMetadata({ ...current, machine_address: current.machine_address }, signal);
+          }
+        }
+      } catch {
+        if (signal.aborted) { client.close(); checkCancelled(signal); }
+        // Discovery is advisory. A working pinned connection can continue
+        // while the Hub is unavailable or its name metadata cannot refresh.
+      }
+      return client;
+    },
     async pairMachine(input: string, code: string, signal: AbortSignal) {
       const selected = await target(input, signal);
       const host = await backend.pair(selected.host_id, code, signal, selected.host_public_key, selected.metadata);
@@ -90,7 +110,9 @@ export class BrowserHubAccess implements HubAccessBackend {
     checkCancelled(signal);
     if (resolved && resolved.host_id !== host.host_id) throw new Error("Machine address changed during pairing. Its saved identity was preserved.");
     const named = resolved ? { ...host, machine_address: resolved.machine_address, name: resolved.name } : host;
-    await this.store.saveHost(named);
+    const previous = this.store.hosts.find((saved) => saved.host_id === host.host_id);
+    if (previous && previous.host_public_key !== host.host_public_key) throw new Error("Paired machine key differs from its remembered identity.");
+    await this.store.saveHost(previous ?? named);
     this.checkActive(signal);
     this.enrollment_hosts.add(host.host_id);
     return named;
@@ -150,6 +172,13 @@ export class BrowserHubAccess implements HubAccessBackend {
     if (resolved.host_id !== machine.host_id) throw new Error("Machine address changed during pairing. Its saved identity was preserved.");
     const host = this.store.hosts.find((host) => host.host_id === resolved.host_id);
     if (!host) throw new Error("Pair this machine before saving its address.");
+    if (host.machine_address && host.machine_address !== resolved.machine_address) {
+      if (!this.enrollment_hosts.has(host.host_id) && (this.unlocked_hosts.get(host.host_id) ?? 0) <= Date.now()) {
+        throw new Error("Unlock this machine before refreshing its address.");
+      }
+      await readHubDiscoveryGroup(this.hub_url, host, this.store.identity, this.crypto, signal);
+      this.checkActive(signal);
+    }
     const updated = { ...host, machine_address: resolved.machine_address, name: resolved.name };
     await this.store.rememberMetadata(updated);
     return updated;

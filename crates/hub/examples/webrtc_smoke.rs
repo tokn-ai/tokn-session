@@ -11,14 +11,14 @@ use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::{
   convert::Infallible,
-  path::PathBuf,
+  path::{Path, PathBuf},
   time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio_util::sync::CancellationToken;
 use tokn_hub_client_core::{pairing::TotpSecret, secure::NoiseIdentity};
 use tokn_session_hub::{
   connector::{self, ConnectorConfig, PairedHostConfig},
-  onboarding,
+  onboarding, protocol,
   server::{self, HubState},
   store::Store,
 };
@@ -30,6 +30,38 @@ struct Smoke {
   host_state: PathBuf,
   config: Value,
   hub: HubState,
+}
+
+const HOST_NAME: &str = "WebRTC smoke fixture";
+
+fn seed_machine(database: &Path, key_file: &Path, host_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+  let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+  let public_key = protocol::encode(key.verifying_key().as_bytes());
+  onboarding::save_configuration(
+    key_file,
+    &json!({"version": protocol::VERSION, "secret_key": protocol::encode(&key.to_bytes())}),
+  )?;
+  let mut connection = rusqlite::Connection::open(database)?;
+  let transaction = connection.transaction()?;
+  let user_id = uuid::Uuid::new_v4().to_string();
+  transaction.execute(
+    "INSERT INTO hub_accounts (user_id, username, email) VALUES (?1, 'fixture', 'fixture@example.invalid')",
+    [&user_id],
+  )?;
+  transaction.execute(
+    "INSERT INTO hosts (host_id, name, public_key, access) VALUES (?1, ?2, ?3, 'view')",
+    (host_id, HOST_NAME, &public_key),
+  )?;
+  transaction.execute(
+    "INSERT INTO encrypted_hosts (host_id, public_key) VALUES (?1, ?2)",
+    (host_id, &public_key),
+  )?;
+  transaction.execute(
+    "INSERT INTO account_machines (host_id, user_id, machine_name) VALUES (?1, ?2, 'webrtc')",
+    (host_id, &user_id),
+  )?;
+  transaction.commit()?;
+  Ok(())
 }
 
 #[tokio::main]
@@ -51,11 +83,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let hub_listener = tokio::net::TcpListener::bind("127.0.0.1:15579").await?;
   let hub_url = "http://localhost:15579";
   // Vite is only a local source-code server for the synthetic smoke page.
-  let hub = HubState::new(
-    Store::open(directory.path().join("hub.sqlite"))?,
-    "http://localhost:1447",
-  )?;
+  let database = directory.path().join("hub.sqlite");
+  let hub = HubState::new(Store::open(&database)?, "http://localhost:1447")?;
   let host_id = uuid::Uuid::new_v4().to_string();
+  let key_file = directory.path().join("host-enrollment.key");
+  seed_machine(&database, &key_file, &host_id)?;
   let noise_key = directory.path().join("host-noise.key");
   let host_key = NoiseIdentity::load_or_create(&noise_key)?.public_key();
   let host_state = directory.path().join("host-access.json");
@@ -103,8 +135,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let config = ConnectorConfig {
     hub_url: Url::parse(hub_url)?,
     local_url: Url::parse("http://127.0.0.1:15578")?,
-    key_file: directory.path().join("host-enrollment.key"),
-    name: "WebRTC smoke fixture".into(),
+    key_file,
+    name: HOST_NAME.into(),
     local_token: None,
     allow_control: false,
     insecure_loopback: true,

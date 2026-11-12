@@ -65,6 +65,11 @@ it("metadata commits preserve selection and cannot resurrect a pin forgotten in 
   const named = { ...first_host, machine_address: "alice:macbook", name: "MacBook" };
   await first_tab.rememberMetadata(named);
   expect(first_tab.selected_host_id).toBe(second_host.host_id);
+  const renamed = { ...named, machine_address: "alice:studio" };
+  await first_tab.rememberMetadata(renamed);
+  expect(first_tab.hosts[0]).toEqual(renamed);
+  expect(first_tab.selected_host_id).toBe(second_host.host_id);
+  await expect(first_tab.rememberMetadata({ ...renamed, host_public_key: "Z".repeat(43) })).rejects.toThrow("encryption key changed");
   await second_tab.forgetHost(first_host.host_id);
   await expect(first_tab.rememberMetadata(named)).rejects.toThrow("forgotten");
   const reopened = await HubDeviceStore.open("https://hub.example", crypto, storage);

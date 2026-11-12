@@ -20,22 +20,7 @@ use tokn_hub_client_core::discovery::DiscoveryGroup;
 use tokn_hub_transport::{BoxTransport, WebRtcPeer};
 
 pub(super) fn discovery_group(config: &ConnectorConfig) -> Result<Option<DiscoveryGroup>, String> {
-  if let Some(group) = crate::account_host::membership_group(config)? {
-    return Ok(Some(group));
-  }
-  let Some(paired) = &config.paired else { return Ok(None) };
-  let profile = paired
-    .state_file
-    .parent()
-    .map(|directory| crate::onboarding::HostProfile::load(&directory.join("host.json")))
-    .transpose()?
-    .flatten();
-  let Some(namespace) = profile.and_then(|profile| profile.discovery_namespace) else {
-    return Ok(None);
-  };
-  crate::onboarding::read_totp_secret(&paired.state_file)?
-    .discovery_group(config.hub_url.as_str(), &namespace)
-    .map(Some)
+  crate::account_host::membership_group(config)
 }
 
 #[derive(Clone)]
@@ -1015,11 +1000,11 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn discovery_metadata_requires_independent_device_authorization_and_tracks_group_opt_out() {
+  async fn discovery_metadata_requires_independent_device_authorization_and_account_membership() {
     let directory = tempfile::tempdir().unwrap();
     let config = paired_host(directory.path());
     let profile_path = directory.path().join("host.json");
-    let mut profile = crate::onboarding::HostProfile {
+    let profile = crate::onboarding::HostProfile {
       version: 1,
       host_id: config.paired.as_ref().unwrap().host_id.clone(),
       hub_url: config.hub_url.to_string(),
@@ -1044,16 +1029,27 @@ mod tests {
     let current = now().unwrap();
     let state_file = &config.paired.as_ref().unwrap().state_file;
     crate::onboarding::authorize_device(state_file, &device.public_key(), current / 30, current).unwrap();
-    for namespace in [Some("personal"), None] {
-      profile.discovery_namespace = namespace.map(str::to_owned);
-      profile.save(&profile_path).unwrap();
+    let account_group = DiscoveryGroup {
+      namespace: "alice".into(),
+      secret_digest: "A".repeat(43),
+    };
+    let membership_path = directory.path().join("host-account.json");
+    for group in [None, Some(account_group)] {
+      if let Some(group) = &group {
+        crate::onboarding::save_configuration(
+          &membership_path,
+          &json!({
+            "hub_origin": profile.hub_url,
+            "claim": { "host_id": profile.host_id, "machine_address": "alice:workstation", "group": group },
+          }),
+        )
+        .unwrap();
+      }
       let (task, incoming, mut frames, mut channel) = open_host(&config, &device).await;
       incoming.send(request(&mut channel)).await.unwrap();
       assert_eq!(
         read_inner(&mut frames, &mut channel).await,
-        InnerMessage::DiscoveryResponse {
-          group: discovery_group(&config).unwrap()
-        }
+        InnerMessage::DiscoveryResponse { group }
       );
       task.await.unwrap().unwrap();
     }

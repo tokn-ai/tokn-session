@@ -47,6 +47,8 @@ pub fn run() {
       commands::host::local_host_status,
       commands::host::local_host_start,
       commands::host::local_host_stop,
+      commands::host::local_host_rename,
+      commands::host::local_host_open_login,
       commands::host::local_host_stop_external,
       commands::host::local_host_remove_external,
       commands::host::local_host_pairing,

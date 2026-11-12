@@ -10,7 +10,7 @@ use tokn_hub_client_core::{
   pairing::ClientPairing,
   presence::{MAX_PRESENCE_RESPONSE, PRESENCE_VERSIONS_HEADER, PresenceRequest, PresenceResult},
   protocol,
-  secure::{NoiseIdentity, decode_public_key},
+  secure::{InnerMessage, NoiseIdentity, NoiseInitiator, decode_public_key},
 };
 use url::Url;
 use zeroize::Zeroizing;
@@ -349,6 +349,40 @@ pub async fn remember(params: Value) -> Result<Value, String> {
     serde_json::from_value(resolve(store.hub.as_str(), address).await?).map_err(|_| "Invalid resolved machine")?;
   if resolved.host_id != id {
     return Err("Machine address now identifies another machine".into());
+  }
+  let pinned = store
+    .hosts()
+    .into_iter()
+    .find(|host| host.host_id == id)
+    .ok_or("Pair this machine before saving its address")?;
+  if pinned
+    .machine_address
+    .as_deref()
+    .is_some_and(|previous| previous != address)
+  {
+    let socket = host::Socket::open(&endpoint(&store.hub, id)?).await?;
+    let verified = async {
+      let mut initiator =
+        NoiseInitiator::new_with_entropy(&store.identity, &pinned.host_public_key, host::entropy().await?)?;
+      socket.send(initiator.start()?).await?;
+      let mut channel = initiator.finish(&socket.receive().await?)?;
+      socket
+        .send(channel.encrypt(&InnerMessage::DiscoveryRequest {})?)
+        .await?;
+      match channel.decrypt(&socket.receive().await?)? {
+        InnerMessage::DiscoveryResponse { group } => {
+          if let Some(group) = group {
+            group.validate()?;
+          }
+          Ok::<_, String>(())
+        }
+        InnerMessage::Error { message } => Err(message),
+        _ => Err("Machine returned invalid discovery metadata".into()),
+      }
+    }
+    .await;
+    socket.close().await;
+    verified?;
   }
   Ok(json!(store.remember_metadata(resolved).await?))
 }

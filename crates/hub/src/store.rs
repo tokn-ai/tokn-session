@@ -15,8 +15,10 @@ use webauthn_rs::prelude::{AuthenticationResult, Passkey};
 
 mod account_machines;
 mod namespaces;
-pub(crate) use account_machines::{ACCOUNT_REQUIRED, ADDRESS_TAKEN, AccountMachineClaim, HOST_CLAIMED};
-pub use namespaces::{HostCatalogEntry, MachineRecord, Namespace, NamespaceError};
+pub(crate) use account_machines::{
+  ACCOUNT_REQUIRED, ADDRESS_TAKEN, AccountMachineClaim, HOST_CLAIMED, MACHINE_NOT_OWNED, STALE_MACHINE_ADDRESS,
+};
+pub use namespaces::{HostCatalogEntry, MachineRecord, NamespaceError};
 
 const MAX_PASSKEYS: u32 = 32;
 const MAX_REGISTERED_HOSTS: u32 = 64;
@@ -41,12 +43,7 @@ pub struct Store {
 
 enum HostRegistration<'a> {
   Reconnect,
-  Claim {
-    user_id: &'a str,
-    machine_name: &'a str,
-  },
-  #[cfg(test)]
-  LegacyFixture,
+  Claim { user_id: &'a str, machine_name: &'a str },
 }
 
 struct RegistrationBudget {
@@ -100,27 +97,11 @@ impl Store {
            public_key TEXT NOT NULL UNIQUE,
            revoked INTEGER NOT NULL DEFAULT 0 CHECK (revoked IN (0, 1))
          );
-         CREATE TABLE IF NOT EXISTS namespaces (
-           username TEXT PRIMARY KEY,
-           owner_id TEXT NOT NULL
-         );
          CREATE TABLE IF NOT EXISTS hub_accounts (
            user_id TEXT PRIMARY KEY,
            username TEXT NOT NULL UNIQUE,
            email TEXT NOT NULL UNIQUE
          );
-         CREATE TABLE IF NOT EXISTS host_addresses (
-           username TEXT NOT NULL REFERENCES namespaces(username),
-           machine_name TEXT NOT NULL,
-           host_id TEXT NOT NULL UNIQUE REFERENCES encrypted_hosts(host_id),
-           PRIMARY KEY (username, machine_name)
-         );
-         CREATE TABLE IF NOT EXISTS host_discovery (
-           host_id TEXT PRIMARY KEY REFERENCES encrypted_hosts(host_id),
-           namespace TEXT NOT NULL,
-           secret_digest TEXT NOT NULL
-         );
-         CREATE INDEX IF NOT EXISTS host_discovery_group ON host_discovery(namespace, secret_digest);
          CREATE TABLE IF NOT EXISTS account_discovery (
            user_id TEXT PRIMARY KEY REFERENCES hub_accounts(user_id),
            secret_digest TEXT NOT NULL UNIQUE
@@ -234,10 +215,17 @@ impl Store {
     transaction.commit().map_err(database_error)
   }
 
-  pub fn hosts(&self) -> Result<Vec<HostRecord>, String> {
+  #[cfg(test)]
+  pub(crate) fn hosts(&self) -> Result<Vec<HostRecord>, String> {
     let connection = self.connection()?;
     let mut statement = connection
-      .prepare("SELECT host_id, name, public_key, access FROM hosts ORDER BY name, host_id")
+      .prepare(
+        "SELECT h.host_id, h.name, h.public_key, h.access FROM hosts h
+         JOIN encrypted_hosts e ON e.host_id = h.host_id AND e.public_key = h.public_key
+         JOIN account_machines m ON m.host_id = h.host_id
+         JOIN hub_accounts a ON a.user_id = m.user_id
+         WHERE e.revoked = 0 ORDER BY h.name, h.host_id",
+      )
       .map_err(database_error)?;
     statement
       .query_map([], host_from_row)
@@ -250,38 +238,16 @@ impl Store {
     self
       .connection()?
       .query_row(
-        "SELECT host_id, name, public_key, access FROM hosts WHERE host_id = ?1",
+        "SELECT h.host_id, h.name, h.public_key, h.access FROM hosts h
+         JOIN encrypted_hosts e ON e.host_id = h.host_id AND e.public_key = h.public_key
+         JOIN account_machines m ON m.host_id = h.host_id
+         JOIN hub_accounts a ON a.user_id = m.user_id
+         WHERE h.host_id = ?1 AND e.revoked = 0",
         [host_id],
         host_from_row,
       )
       .optional()
       .map_err(database_error)
-  }
-
-  #[cfg(test)]
-  pub(crate) fn approve_host(&self, host: HostRecord) -> Result<(), String> {
-    if host.host_id.is_empty()
-      || host.host_id.len() > 128
-      || !host
-        .host_id
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-      || host.name.trim().is_empty()
-      || host.name.len() > 256
-      || host.public_key.is_empty()
-      || host.public_key.len() > 1024
-      || !matches!(host.access.as_str(), "view" | "control")
-    {
-      return Err("Invalid host approval".to_owned());
-    }
-    self
-      .connection()?
-      .execute(
-        "INSERT INTO hosts (host_id, name, public_key, access) VALUES (?1, ?2, ?3, ?4)",
-        params![host.host_id, host.name, host.public_key, host.access],
-      )
-      .map_err(database_error)?;
-    Ok(())
   }
 
   pub fn remove_host(&self, host_id: &str) -> Result<(), String> {
@@ -298,22 +264,33 @@ impl Store {
     transaction.commit().map_err(database_error)
   }
 
-  /// Register only an encrypted routing identity. The host owns authorization;
-  /// no Hub passkey or administrative approval can authorize one of its clients.
+  /// Seed an older, unclaimed encrypted registration for rejection tests.
   #[cfg(test)]
   pub(crate) fn register_encrypted_host(&self, host: HostRecord) -> Result<HostRecord, String> {
-    self.register_encrypted_host_with_discovery(host, None)
+    let mut connection = self.connection()?;
+    let transaction = connection.transaction().map_err(database_error)?;
+    transaction
+      .execute(
+        "INSERT INTO hosts (host_id, name, public_key, access) VALUES (?1, ?2, ?3, ?4)",
+        params![host.host_id, host.name, host.public_key, host.access],
+      )
+      .map_err(database_error)?;
+    transaction
+      .execute(
+        "INSERT INTO encrypted_hosts (host_id, public_key) VALUES (?1, ?2)",
+        params![host.host_id, host.public_key],
+      )
+      .map_err(database_error)?;
+    transaction.commit().map_err(database_error)?;
+    Ok(host)
   }
 
   #[cfg(test)]
-  pub(crate) fn register_encrypted_host_with_discovery(
-    &self,
-    host: HostRecord,
-    discovery_group: Option<&tokn_hub_client_core::discovery::DiscoveryGroup>,
-  ) -> Result<HostRecord, String> {
+  pub(crate) fn claim_fixture_host(&self, host: HostRecord) -> AccountMachineClaim {
+    let machine_name = host.host_id.clone();
     self
-      .register_host_inner(host, discovery_group, HostRegistration::LegacyFixture)
-      .map(|(host, _)| host)
+      .claim_account_host(host, fixture_account(self), &machine_name)
+      .unwrap()
   }
 
   pub(crate) fn register_tunnel_host(
@@ -321,8 +298,11 @@ impl Store {
     host: HostRecord,
     discovery_group: Option<&tokn_hub_client_core::discovery::DiscoveryGroup>,
   ) -> Result<HostRecord, String> {
+    if let Some(group) = discovery_group {
+      group.validate()?;
+    }
     self
-      .register_host_inner(host, discovery_group, HostRegistration::Reconnect)
+      .register_host_inner(host, HostRegistration::Reconnect)
       .map(|(host, _)| host)
   }
 
@@ -333,7 +313,7 @@ impl Store {
     machine_name: &str,
   ) -> Result<AccountMachineClaim, String> {
     self
-      .register_host_inner(host, None, HostRegistration::Claim { user_id, machine_name })?
+      .register_host_inner(host, HostRegistration::Claim { user_id, machine_name })?
       .1
       .ok_or_else(|| "Missing account machine assignment".into())
   }
@@ -341,12 +321,8 @@ impl Store {
   fn register_host_inner(
     &self,
     host: HostRecord,
-    discovery_group: Option<&tokn_hub_client_core::discovery::DiscoveryGroup>,
     admission: HostRegistration<'_>,
   ) -> Result<(HostRecord, Option<AccountMachineClaim>), String> {
-    if let Some(group) = discovery_group {
-      group.validate()?;
-    }
     if !crate::protocol::valid_host_uuid(&host.host_id)
       || host.name.trim().is_empty()
       || host.name.len() > 128
@@ -373,8 +349,23 @@ impl Store {
         return Err("Host UUID registration is revoked or belongs to a different identity".into());
       }
     }
-    if registration.is_none() && matches!(admission, HostRegistration::Reconnect) {
+    let claimed = registration.is_some() && account_machines::is_owned(&transaction, &host.host_id)?;
+    if !claimed && matches!(admission, HostRegistration::Reconnect) {
       return Err(ACCOUNT_REQUIRED.into());
+    }
+    if !claimed {
+      let active: u32 = transaction
+        .query_row(
+          "SELECT COUNT(*) FROM account_machines m
+           JOIN encrypted_hosts e ON e.host_id = m.host_id
+           WHERE e.revoked = 0",
+          [],
+          |row| row.get(0),
+        )
+        .map_err(database_error)?;
+      if active >= MAX_REGISTERED_HOSTS {
+        return Err("Encrypted host registration capacity reached; a Hub administrator can revoke unused hosts".into());
+      }
     }
     let existing = transaction
       .query_row(
@@ -397,16 +388,9 @@ impl Store {
           .map_err(database_error)?;
       }
     } else {
-      let (active, total): (u32, u32) = transaction
-        .query_row(
-          "SELECT COUNT(CASE WHEN revoked = 0 THEN 1 END), COUNT(*) FROM encrypted_hosts",
-          [],
-          |row| Ok((row.get(0)?, row.get(1)?)),
-        )
+      let total: u32 = transaction
+        .query_row("SELECT COUNT(*) FROM encrypted_hosts", [], |row| row.get(0))
         .map_err(database_error)?;
-      if active >= MAX_REGISTERED_HOSTS {
-        return Err("Encrypted host registration capacity reached; a Hub administrator can revoke unused hosts".into());
-      }
       // Tombstones prevent revoked UUIDs from reclaiming their routes. Keep a
       // separate finite ledger so ordinary revocation reclaims active capacity
       // without erasing that protection or allowing unbounded database growth.
@@ -444,30 +428,6 @@ impl Store {
         .map_err(|_| "Hub registration budget lock poisoned")?
         .reserve()?;
     }
-    match admission {
-      HostRegistration::Claim { .. } => {
-        transaction
-          .execute("DELETE FROM host_discovery WHERE host_id = ?1", [&host.host_id])
-          .map_err(database_error)?;
-      }
-      // The signed legacy group remains part of the wire protocol, but a
-      // reconnect cannot publish or change accountless directory membership.
-      HostRegistration::Reconnect => {}
-      #[cfg(test)]
-      HostRegistration::LegacyFixture => match discovery_group {
-        Some(group) => {
-          transaction.execute(
-            "INSERT INTO host_discovery (host_id, namespace, secret_digest) VALUES (?1, ?2, ?3) ON CONFLICT(host_id) DO UPDATE SET namespace = excluded.namespace, secret_digest = excluded.secret_digest",
-            params![host.host_id, group.namespace, group.secret_digest],
-          ).map_err(database_error)?;
-        }
-        None => {
-          transaction
-            .execute("DELETE FROM host_discovery WHERE host_id = ?1", [&host.host_id])
-            .map_err(database_error)?;
-        }
-      },
-    }
     transaction.commit().map_err(database_error)?;
     Ok((host, assignment))
   }
@@ -481,15 +441,7 @@ impl Store {
     let connection = self.connection()?;
     let mut statement = connection
       .prepare(
-        "SELECT h.host_id AS machine_id, h.name AS display_name, NULL AS machine_address FROM host_discovery d
-       JOIN hosts h ON d.host_id = h.host_id
-       JOIN encrypted_hosts e ON h.host_id = e.host_id AND h.public_key = e.public_key
-       WHERE d.namespace = ?1 AND d.secret_digest = ?2 AND e.revoked = 0
-         AND NOT EXISTS (SELECT 1 FROM account_machines m WHERE m.host_id = h.host_id)
-         AND NOT EXISTS (SELECT 1 FROM account_discovery g JOIN hub_accounts a ON a.user_id = g.user_id
-                         WHERE a.username = d.namespace AND g.secret_digest = d.secret_digest)
-       UNION ALL
-       SELECT h.host_id AS machine_id, m.machine_name AS display_name, a.username || ':' || m.machine_name
+        "SELECT h.host_id AS machine_id, m.machine_name AS display_name, a.username || ':' || m.machine_name
        FROM account_machines m
        JOIN hub_accounts a ON a.user_id = m.user_id
        JOIN account_discovery d ON d.user_id = a.user_id
@@ -515,6 +467,20 @@ impl Store {
       .collect::<Result<Vec<_>, _>>()
       .map_err(database_error)
   }
+}
+
+#[cfg(test)]
+fn fixture_account(store: &Store) -> &'static str {
+  const USER_ID: &str = "00000000-0000-4000-8000-000000000001";
+  store
+    .connection()
+    .unwrap()
+    .execute(
+      "INSERT OR IGNORE INTO hub_accounts (user_id, username, email) VALUES (?1, 'fixture', 'fixture@example.invalid')",
+      [USER_ID],
+    )
+    .unwrap();
+  USER_ID
 }
 
 fn host_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRecord> {
@@ -592,38 +558,6 @@ mod tests {
   use super::*;
 
   #[test]
-  fn host_approval_survives_restart_and_cannot_silently_escalate() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("hub.sqlite3");
-    let host = HostRecord {
-      host_id: "host-1".to_owned(),
-      name: "Office".to_owned(),
-      public_key: "public-key".to_owned(),
-      access: "view".to_owned(),
-    };
-    let owner_id;
-    {
-      let store = Store::open(&path).unwrap();
-      owner_id = store.owner_id().unwrap();
-      store.approve_host(host.clone()).unwrap();
-      assert!(
-        store
-          .approve_host(HostRecord {
-            access: "control".to_owned(),
-            ..host.clone()
-          })
-          .is_err()
-      );
-    }
-    let store = Store::open(&path).unwrap();
-    assert_eq!(store.owner_id().unwrap(), owner_id);
-    assert_eq!(store.hosts().unwrap(), vec![host.clone()]);
-    assert_eq!(store.host("host-1").unwrap(), Some(host));
-    store.remove_host("host-1").unwrap();
-    assert!(store.host("host-1").unwrap().is_none());
-  }
-
-  #[test]
   fn encrypted_uuid_registration_persists_and_rejects_identity_replacement() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("hub.sqlite3");
@@ -634,53 +568,54 @@ mod tests {
       access: "view".into(),
     };
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.register_encrypted_host(host.clone()).unwrap(), host);
+    store.claim_fixture_host(host.clone());
     assert!(
       store
-        .register_encrypted_host(HostRecord {
-          public_key: crate::protocol::encode(&[8; 32]),
-          ..host.clone()
-        })
+        .register_tunnel_host(
+          HostRecord {
+            public_key: crate::protocol::encode(&[8; 32]),
+            ..host.clone()
+          },
+          None
+        )
         .is_err()
     );
     assert!(
       store
-        .register_encrypted_host(HostRecord {
-          host_id: Uuid::new_v4().to_string(),
-          ..host.clone()
-        })
+        .claim_account_host(
+          HostRecord {
+            host_id: Uuid::new_v4().to_string(),
+            ..host.clone()
+          },
+          fixture_account(&store),
+          "duplicate-key"
+        )
         .is_err()
     );
     let mut reconnected = host.clone();
     reconnected.name = "Renamed".into();
     reconnected.access = "control".into();
-    store.register_encrypted_host(reconnected.clone()).unwrap();
+    store.register_tunnel_host(reconnected.clone(), None).unwrap();
     drop(store);
     let store = Store::open(&path).unwrap();
     assert_eq!(store.host(&host.host_id).unwrap(), Some(reconnected.clone()));
     store.remove_host(&host.host_id).unwrap();
     assert!(
-      store.register_encrypted_host(reconnected).is_err(),
+      store.register_tunnel_host(reconnected, None).is_err(),
       "revocation survives a proved reconnect"
     );
     assert!(
       store
-        .register_encrypted_host(HostRecord {
-          public_key: crate::protocol::encode(&[8; 32]),
-          ..host.clone()
-        })
+        .claim_account_host(
+          HostRecord {
+            public_key: crate::protocol::encode(&[8; 32]),
+            ..host.clone()
+          },
+          fixture_account(&store),
+          "replacement"
+        )
         .is_err(),
       "revoked UUID remains reserved to its original identity"
-    );
-    let legacy = HostRecord {
-      host_id: Uuid::new_v4().to_string(),
-      public_key: crate::protocol::encode(&[9; 32]),
-      ..host
-    };
-    store.approve_host(legacy.clone()).unwrap();
-    assert!(
-      store.register_encrypted_host(legacy).is_err(),
-      "legacy approvals cannot become auto-enrolled"
     );
   }
 
@@ -688,11 +623,13 @@ mod tests {
   fn encrypted_registration_storage_has_a_hard_capacity() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path().join("hub.sqlite3")).unwrap();
+    let user_id = fixture_account(&store);
     let mut first = None;
+    let mut unclaimed = None;
     {
       let mut connection = store.connection().unwrap();
       let transaction = connection.transaction().unwrap();
-      for _ in 0..MAX_REGISTERED_HOSTS {
+      for index in 0..MAX_REGISTERED_HOSTS {
         let host_id = Uuid::new_v4().to_string();
         let public_key = crate::secure::NoiseIdentity::generate().unwrap().public_key();
         transaction
@@ -707,12 +644,23 @@ mod tests {
             params![host_id, public_key],
           )
           .unwrap();
-        first.get_or_insert(HostRecord {
+        let record = HostRecord {
           host_id,
           name: "test".into(),
           public_key,
           access: "view".into(),
-        });
+        };
+        if index == 0 {
+          unclaimed = Some(record);
+        } else {
+          transaction
+            .execute(
+              "INSERT INTO account_machines (host_id, user_id, machine_name) VALUES (?1, ?2, ?1)",
+              params![record.host_id, user_id],
+            )
+            .unwrap();
+          first.get_or_insert(record);
+        }
       }
       transaction.commit().unwrap();
     }
@@ -722,19 +670,25 @@ mod tests {
       public_key: crate::secure::NoiseIdentity::generate().unwrap().public_key(),
       access: "view".into(),
     };
+    store.claim_fixture_host(replacement);
+    let unclaimed = unclaimed.unwrap();
     assert!(
       store
-        .register_encrypted_host(replacement.clone())
-        .unwrap_err()
+        .claim_account_host(unclaimed.clone(), user_id, "older-host")
+        .err()
+        .unwrap()
         .contains("capacity")
     );
     let removed = first.unwrap();
     store.remove_host(&removed.host_id).unwrap();
     assert!(store.host(&removed.host_id).unwrap().is_none());
-    assert_eq!(store.register_encrypted_host(replacement.clone()).unwrap(), replacement);
+    store.claim_account_host(unclaimed, user_id, "older-host").unwrap();
     assert_eq!(store.hosts().unwrap().len(), MAX_REGISTERED_HOSTS as usize);
     assert!(
-      store.register_encrypted_host(removed).unwrap_err().contains("revoked"),
+      store
+        .register_tunnel_host(removed, None)
+        .unwrap_err()
+        .contains("revoked"),
       "reclaiming active capacity must preserve the revoked routing identity"
     );
   }
@@ -746,14 +700,13 @@ mod tests {
     let clone = store.clone();
     let mut first = None;
     for _ in 0..NEW_REGISTRATIONS_PER_WINDOW {
-      let registered = store
-        .register_encrypted_host(HostRecord {
-          host_id: Uuid::new_v4().to_string(),
-          name: "Host".into(),
-          public_key: crate::secure::NoiseIdentity::generate().unwrap().public_key(),
-          access: "view".into(),
-        })
-        .unwrap();
+      let registered = HostRecord {
+        host_id: Uuid::new_v4().to_string(),
+        name: "Host".into(),
+        public_key: crate::secure::NoiseIdentity::generate().unwrap().public_key(),
+        access: "view".into(),
+      };
+      store.claim_fixture_host(registered.clone());
       first.get_or_insert(registered);
     }
     let next = HostRecord {
@@ -764,16 +717,17 @@ mod tests {
     };
     assert!(
       clone
-        .register_encrypted_host(next.clone())
-        .unwrap_err()
+        .claim_account_host(next.clone(), fixture_account(&store), "next")
+        .err()
+        .unwrap()
         .contains("rate limit")
     );
     assert!(store.host(&next.host_id).unwrap().is_none());
     let mut reconnect = first.unwrap();
     reconnect.name = "Renamed while registration is limited".into();
-    assert_eq!(clone.register_encrypted_host(reconnect.clone()).unwrap(), reconnect);
+    assert_eq!(clone.register_tunnel_host(reconnect.clone(), None).unwrap(), reconnect);
     clone.registrations.lock().unwrap().window_start = Instant::now() - REGISTRATION_WINDOW;
-    assert_eq!(store.register_encrypted_host(next.clone()).unwrap(), next);
+    store.claim_fixture_host(next);
     assert_eq!(
       store.hosts().unwrap().len(),
       (NEW_REGISTRATIONS_PER_WINDOW + 1) as usize
@@ -806,8 +760,9 @@ mod tests {
     };
     assert!(
       store
-        .register_encrypted_host(host.clone())
-        .unwrap_err()
+        .claim_account_host(host.clone(), fixture_account(&store), "new-host")
+        .err()
+        .unwrap()
         .contains("revocation ledger is full")
     );
     assert!(store.host(&host.host_id).unwrap().is_none());

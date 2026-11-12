@@ -8,8 +8,7 @@ export interface HubHost {
   name: string;
   online: boolean;
   access: "view" | "control";
-  secure_only?: boolean;
-  machine_address?: string;
+  machine_address: string;
 }
 
 interface Ceremony<T> {

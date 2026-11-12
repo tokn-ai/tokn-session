@@ -388,7 +388,17 @@ fn new_cookie_session_evicts_oldest_cookie_without_affecting_bearer() {
 #[tokio::test]
 async fn email_code_creates_one_identity_and_can_only_be_used_once() {
   let (_directory, state, app) = fixture();
-  state.inner.store.create_namespace("reserved").unwrap();
+  state
+    .inner
+    .store
+    .connection()
+    .unwrap()
+    .execute_batch(
+      "CREATE TABLE namespaces (username TEXT PRIMARY KEY, owner_id TEXT NOT NULL);
+       INSERT INTO namespaces VALUES ('legacy', 'legacy-owner');
+       INSERT INTO hub_accounts VALUES ('existing-account', 'reserved', 'reserved@example.invalid');",
+    )
+    .unwrap();
   let (code, _) = state.issue_email_code(EMAIL).unwrap();
   let request_body = json!({"email": EMAIL, "code": code});
   let (status, body) = request(&app, "POST", "email/verify", request_body.clone(), None).await;
@@ -407,12 +417,12 @@ async fn email_code_creates_one_identity_and_can_only_be_used_once() {
     &app,
     "POST",
     "email/verify",
-    json!({"email": EMAIL, "code": code, "username": "alice"}),
+    json!({"email": EMAIL, "code": code, "username": "legacy"}),
     None,
   )
   .await;
   assert_eq!(status, StatusCode::OK);
-  assert_eq!(first["username"], "alice");
+  assert_eq!(first["username"], "legacy");
   assert!(Uuid::parse_str(first["user_id"].as_str().unwrap()).is_ok());
 
   assert_eq!(

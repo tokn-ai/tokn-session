@@ -19,7 +19,7 @@ including its authenticated body and bounded response credits. A peer is bound
 to the device key that authenticated negotiation. Host pins, browser session
 expiry, per-request authorization, periodic revocation checks, route and control
 restrictions apply on both carriers. Pairing/authentication stays on the Hub
-carrier. Legacy signed-grant and trusted-Hub flows retain their previous routes.
+carrier.
 
 Rust `hub-transport::RecordTransport` and the browser `RecordTransport` interface
 carry bounded ordered byte records. Relay and WebRTC adapters implement that

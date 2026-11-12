@@ -9,8 +9,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tokn_session_hub::{
   client_onboarding::{self, PairedClientConfig},
-  connector::{self, ConnectorConfig, SecureHostConfig},
-  onboarding,
+  connector, host_setup, onboarding,
   secure::{Grant, GrantScope, NoiseIdentity, OwnerIdentity},
   secure_client::{self, ClientConfig},
   server::{self, HubState},
@@ -35,6 +34,51 @@ enum KeyKind {
   Owner,
   /// Encryption identity for a host or recipient client.
   Device,
+}
+
+#[derive(Default, clap::Args)]
+struct HostArguments {
+  #[arg(long)]
+  hub: Option<Url>,
+  #[arg(long)]
+  name: Option<String>,
+  #[arg(long)]
+  viewer_url: Option<Url>,
+  /// Stable Hub browser origin for host passkeys; defaults to --hub when it uses a hostname.
+  #[arg(long)]
+  passkey_origin: Option<String>,
+  /// STUN URLs for direct WebRTC (comma-separated). Omit to keep saved settings;
+  /// specify the flag without URLs to clear them. No public service is enabled by default.
+  #[arg(long = "stun-server", value_delimiter = ',', num_args = 0..)]
+  ice_servers: Option<Vec<String>>,
+  /// Local configuration, keys, authenticator, and trusted-device state.
+  #[arg(long)]
+  state_dir: Option<PathBuf>,
+  #[arg(long, env = "TOKN_VIEWER_TOKEN", hide_env_values = true)]
+  viewer_token: Option<String>,
+  /// Allow sending input to live agents. Use --allow-control=false to disable it again.
+  #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+  allow_control: Option<bool>,
+  /// Allow an unencrypted Hub URL only on loopback, for local development.
+  #[arg(long)]
+  insecure_loopback: bool,
+}
+
+impl HostArguments {
+  fn into_options(self) -> Result<host_setup::HostOptions, String> {
+    Ok(host_setup::HostOptions {
+      hub: self.hub,
+      name: self.name,
+      viewer_url: self.viewer_url,
+      passkey_origin: self.passkey_origin,
+      ice_servers: self.ice_servers,
+      state_dir: state_dir_or_default(self.state_dir)?,
+      totp_secret_file: None,
+      viewer_token: self.viewer_token,
+      allow_control: self.allow_control,
+      insecure_loopback: self.insecure_loopback,
+    })
+  }
 }
 
 #[derive(Subcommand)]
@@ -65,56 +109,40 @@ enum Command {
     #[arg(long)]
     api_only: bool,
   },
-  /// Register a machine in your Hub account or reconnect an existing host.
-  Connect {
-    #[arg(long)]
-    hub: Option<Url>,
-    #[arg(long)]
-    name: Option<String>,
+  /// Register this computer with your Hub account, save its configuration, and exit.
+  Register {
     /// Register this host under this machine name in your signed-in Hub account.
-    #[arg(long, conflicts_with_all = ["trusted_hub", "owner_public_key"], value_parser = machine_name)]
-    machine: Option<String>,
-    /// Register the machine, then exit so another local launcher can host it.
-    #[arg(long, requires = "machine")]
-    register_only: bool,
+    #[arg(long, value_parser = machine_name)]
+    machine: String,
+    /// Import an existing Base32 authenticator secret from a private local file on first setup.
     #[arg(long)]
-    viewer_url: Option<Url>,
-    /// Stable Hub browser origin for host passkeys; defaults to --hub when it uses a hostname.
-    #[arg(long, conflicts_with_all = ["trusted_hub", "owner_public_key"])]
-    passkey_origin: Option<String>,
-    /// STUN URLs for direct WebRTC (comma-separated). Omit to keep saved settings;
-    /// specify the flag without URLs to clear them. No public service is enabled by default.
-    #[arg(long = "stun-server", value_delimiter = ',', num_args = 0.., conflicts_with_all = ["trusted_hub", "owner_public_key"])]
-    ice_servers: Option<Vec<String>>,
-    /// Local configuration, keys, authenticator, and trusted-device state.
+    totp_secret_file: Option<PathBuf>,
+    /// Print the browser approval URL for use on another device.
+    #[arg(long)]
+    no_browser: bool,
+    #[command(flatten)]
+    host: HostArguments,
+  },
+  /// Start hosting, signing in and registering this computer when needed.
+  Connect {
+    /// Initial machine name. Existing machines keep their registered name.
+    #[arg(long, value_parser = machine_name)]
+    machine: Option<String>,
+    /// Print the browser approval URL for use on another device.
+    #[arg(long)]
+    no_browser: bool,
+    #[command(flatten)]
+    host: HostArguments,
+  },
+  /// Change this computer's account address while keeping its identity and pairing.
+  Rename {
+    #[arg(long, value_parser = machine_name)]
+    machine: String,
     #[arg(long)]
     state_dir: Option<PathBuf>,
-    /// Import an existing Base32 authenticator secret from a private local file on first setup.
-    #[arg(long, conflicts_with_all = ["trusted_hub", "owner_public_key"])]
-    totp_secret_file: Option<PathBuf>,
-    #[arg(long, env = "TOKN_VIEWER_TOKEN", hide_env_values = true)]
-    viewer_token: Option<String>,
-    /// Generated enrollment identity. Reuse it when reconnecting to the same Hub.
+    /// Print the browser approval URL for use on another device.
     #[arg(long)]
-    identity_file: Option<PathBuf>,
-    /// Reconnect a legacy host using its owner signing public key and signed grants.
-    #[arg(long, conflicts_with = "trusted_hub")]
-    owner_public_key: Option<String>,
-    /// Private host encryption identity, separate from its enrollment identity.
-    #[arg(long, requires = "owner_public_key", conflicts_with = "trusted_hub")]
-    noise_key_file: Option<PathBuf>,
-    /// Local JSON array of revoked grant IDs; reloaded while serving requests.
-    #[arg(long, requires = "owner_public_key", conflicts_with = "trusted_hub")]
-    revocations_file: Option<PathBuf>,
-    /// Reconnect a legacy trusted host. The Hub can read content and authorize clients.
-    #[arg(long)]
-    trusted_hub: bool,
-    /// Allow sending input to live agents. Use --allow-control=false to disable it again.
-    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
-    allow_control: Option<bool>,
-    /// Allow an unencrypted Hub URL only on loopback, for local development.
-    #[arg(long)]
-    insecure_loopback: bool,
+    no_browser: bool,
   },
   /// Open an E2EE host through a locally installed viewer on loopback.
   Client {
@@ -301,97 +329,93 @@ async fn run(args: Args) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())
     }
-    Command::Connect {
-      hub,
-      name,
+    Command::Register {
       machine,
-      register_only,
-      viewer_url,
-      passkey_origin,
-      ice_servers,
-      state_dir,
       totp_secret_file,
-      viewer_token,
-      identity_file,
-      owner_public_key,
-      noise_key_file,
-      revocations_file,
-      trusted_hub,
-      allow_control,
-      insecure_loopback,
+      no_browser,
+      host,
     } => {
-      if owner_public_key.is_none() && !trusted_hub {
-        if identity_file.is_some() {
-          return Err("Paired mode manages its own keys; use --state-dir to choose their location".into());
+      let mut options = host.into_options()?;
+      let _lease = connector::HostLease::acquire(&options.state_dir.join("host-enrollment.key"))?;
+      options.totp_secret_file = totp_secret_file;
+      let config = cli_onboarding::prepare_host(options)?;
+      let signal = shutdown_signal(shutdown.clone());
+      let result = async {
+        let account = account_cli::ensure_signed_in(&config.hub_url, &shutdown, no_browser).await?;
+        if shutdown.is_cancelled() {
+          return Err("Machine registration canceled".into());
         }
-        let state_dir = state_dir_or_default(state_dir)?;
-        let lease = connector::HostLease::acquire(&state_dir.join("host-enrollment.key"))?;
-        if machine.is_none() && onboarding::HostProfile::load(&state_dir.join("host.json"))?.is_none() {
-          return Err(
-            "Sign in with tokn-session-hub auth login, then register this machine with connect --machine <name>".into(),
-          );
+        let address = tokn_session_hub::account_host::claim(&config, &machine, &account.token).await?;
+        eprintln!("Registered machine {address}");
+        if shutdown.is_cancelled() {
+          return Err("Machine registration canceled".into());
         }
-        let config = cli_onboarding::prepare_host(cli_onboarding::HostOptions {
-          hub,
-          name,
-          viewer_url,
-          passkey_origin,
-          ice_servers,
-          state_dir,
-          totp_secret_file,
-          viewer_token,
-          allow_control,
-          insecure_loopback,
-        })?;
-        if let Some(machine_name) = machine {
-          let token = account_cli::saved_token(&config.hub_url)
-            .await?
-            .ok_or("Sign in to this Hub with tokn-session-hub auth login before registering a machine")?;
-          let address = tokn_session_hub::account_host::claim(&config, &machine_name, token.as_str()).await?;
-          eprintln!("Registered machine {address}");
-          if register_only {
-            return Ok(());
+        Ok(())
+      }
+      .await;
+      signal.abort();
+      result
+    }
+    Command::Connect {
+      machine,
+      no_browser,
+      host,
+    } => {
+      let options = host.into_options()?;
+      let lease = connector::HostLease::acquire(&options.state_dir.join("host-enrollment.key"))?;
+      let state_dir = options.state_dir.clone();
+      let config = cli_onboarding::prepare_host(options)?;
+      let signal = shutdown_signal(shutdown.clone());
+      let result = async {
+        let host_id = &config.paired.as_ref().expect("paired host setup").host_id;
+        match tokn_session_hub::account_host::saved_address(&state_dir, config.hub_url.as_str(), host_id)? {
+          Some(address) => {
+            if machine.as_ref().is_some_and(|name| address.split_once(':').map(|(_, saved)| saved) != Some(name.as_str())) {
+              return Err("This computer already has a machine address. Use tokn-session-hub rename --machine <name> to change it".into());
+            }
+          }
+          None => {
+            let name = machine.unwrap_or_else(|| host_setup::suggest_machine_name(&config.name, host_id));
+            let account = account_cli::ensure_signed_in(&config.hub_url, &shutdown, no_browser).await?;
+            if shutdown.is_cancelled() { return Err("Machine registration canceled".into()); }
+            let address = tokn_session_hub::account_host::claim(&config, &name, &account.token).await?;
+            eprintln!("Registered machine {address}");
           }
         }
-        let signal = shutdown_signal(shutdown.clone());
-        let result = connector::run_owned(config, shutdown, lease, None).await;
-        signal.abort();
-        return result;
+        if shutdown.is_cancelled() { return Err("Hosting canceled".into()); }
+        connector::run_owned(config, shutdown.clone(), lease, None).await
+      }.await;
+      signal.abort();
+      result
+    }
+    Command::Rename {
+      machine,
+      state_dir,
+      no_browser,
+    } => {
+      let options = HostArguments {
+        state_dir,
+        ..Default::default()
       }
-      let key_file = match identity_file {
-        Some(path) => path,
-        None => state_file_or_default(state_dir.as_deref(), "host.key")?,
-      };
-      connector::validate_existing_identity(&key_file)?;
-      let secure = match owner_public_key {
-        Some(owner_public_key) => Some(SecureHostConfig {
-          noise_key_file: match noise_key_file {
-            Some(path) => path,
-            None => state_file_or_default(state_dir.as_deref(), "host-noise.key")?,
-          },
-          owner_public_key,
-          revocations_file,
-        }),
-        None if trusted_hub => {
-          eprintln!("Trusted Hub mode: the Hub can read session content and authorize access.");
-          None
-        }
-        None => return Err("Specify --owner-public-key for E2EE or explicitly choose --trusted-hub".into()),
-      };
-      let config = ConnectorConfig {
-        hub_url: hub.ok_or("Legacy Hub mode requires --hub")?,
-        local_url: viewer_url.unwrap_or_else(|| Url::parse("http://127.0.0.1:5558").unwrap()),
-        key_file,
-        name: name.unwrap_or_else(|| "Session host".into()),
-        local_token: viewer_token,
-        allow_control: allow_control.unwrap_or(false),
-        insecure_loopback,
-        ice_servers: Vec::new(),
-        secure,
-        paired: None,
-      };
+      .into_options()?;
+      let _lease = connector::HostLease::acquire(&options.state_dir.join("host-enrollment.key"))?;
+      let profile = onboarding::HostProfile::load(&options.state_dir.join("host.json"))?;
+      host_setup::require_account_assignment(&options.state_dir, profile.as_ref(), None)?;
+      let config = cli_onboarding::prepare_host(options)?;
       let signal = shutdown_signal(shutdown.clone());
-      let result = connector::run(config, shutdown).await;
+      let result = async {
+        let account = account_cli::ensure_signed_in(&config.hub_url, &shutdown, no_browser).await?;
+        if shutdown.is_cancelled() {
+          return Err("Machine rename canceled".into());
+        }
+        let address = tokn_session_hub::account_host::rename(&config, &machine, &account.token).await?;
+        eprintln!("Renamed machine {address}");
+        if shutdown.is_cancelled() {
+          return Err("Machine rename canceled".into());
+        }
+        Ok(())
+      }
+      .await;
       signal.abort();
       result
     }
@@ -674,22 +698,63 @@ mod tests {
   }
 
   #[test]
-  fn connect_defaults_to_pairing_and_legacy_control_requires_full_scope() {
+  fn registration_and_hosting_are_distinct_commands() {
     let connect = ["hub", "connect", "--hub", "https://hub.example", "--name", "host"];
     assert!(Args::try_parse_from(connect).is_ok());
     assert!(Args::try_parse_from(["hub", "connect"]).is_ok());
     assert!(Args::try_parse_from(["hub", "client", "--hub", "https://hub.example"]).is_ok());
-    assert!(Args::try_parse_from(connect.into_iter().chain(["--trusted-hub"])).is_ok());
+    let register = ["hub", "register", "--hub", "https://hub.example"];
+    assert!(Args::try_parse_from(register).is_err());
+    let registered = Args::try_parse_from(register.into_iter().chain([
+      "--machine",
+      "workstation",
+      "--totp-secret-file",
+      "seed.txt",
+      "--allow-control",
+    ]))
+    .unwrap();
+    let Command::Register {
+      machine,
+      totp_secret_file,
+      host,
+      ..
+    } = registered.command
+    else {
+      panic!("Expected the registration command");
+    };
+    assert_eq!(machine, "workstation");
+    assert_eq!(totp_secret_file, Some(PathBuf::from("seed.txt")));
+    assert_eq!(host.allow_control, Some(true));
+    assert!(Args::try_parse_from(register.into_iter().chain(["--machine", "invalid:name"])).is_err());
+    assert!(Args::try_parse_from(connect.into_iter().chain(["--machine", "workstation"])).is_ok());
+    assert!(Args::try_parse_from(connect.into_iter().chain(["--register-only"])).is_err());
+    assert!(Args::try_parse_from(connect.into_iter().chain(["--totp-secret-file", "seed.txt"])).is_err());
+    assert!(Args::try_parse_from(connect.into_iter().chain(["--trusted-hub"])).is_err());
     assert!(Args::try_parse_from(connect.into_iter().chain(["--namespace", "personal"])).is_err());
-    assert!(Args::try_parse_from(connect.into_iter().chain(["--owner-public-key", "owner"])).is_ok());
-    assert!(
-      Args::try_parse_from(
-        connect
-          .into_iter()
-          .chain(["--trusted-hub", "--owner-public-key", "owner"])
-      )
-      .is_err()
-    );
+    assert!(Args::try_parse_from(connect.into_iter().chain(["--owner-public-key", "owner"])).is_err());
+    assert!(Args::try_parse_from(["hub", "rename"]).is_err());
+    assert!(Args::try_parse_from(["hub", "rename", "--machine", "studio"]).is_ok());
+    assert!(Args::try_parse_from(["hub", "rename", "--machine", "invalid:name"]).is_err());
+  }
+
+  #[tokio::test]
+  async fn connect_without_a_hub_does_not_create_identity_or_start_sign_in() {
+    let directory = tempfile::tempdir().unwrap();
+    let args = Args::try_parse_from(["hub", "connect", "--state-dir", directory.path().to_str().unwrap()]).unwrap();
+    assert!(run(args).await.unwrap_err().contains("First setup requires --hub"));
+    for name in [
+      "host.json",
+      "host-account.json",
+      "host-enrollment.key",
+      "host-noise.key",
+      "host-access.json",
+    ] {
+      assert!(!directory.path().join(name).exists());
+    }
+  }
+
+  #[test]
+  fn legacy_control_requires_full_scope() {
     let grant = [
       "hub",
       "grant",

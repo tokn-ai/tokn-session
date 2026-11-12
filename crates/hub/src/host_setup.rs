@@ -18,8 +18,30 @@ pub struct PreparedHost {
   pub is_new_secret: bool,
   pub reference: String,
   pub passkey_origin: Option<String>,
-  pub discovery_namespace: Option<String>,
   pub machine_address: Option<String>,
+}
+
+pub const ACCOUNT_SETUP_REQUIRED: &str = "Sign in with tokn-session-hub auth login, then register this computer with tokn-session-hub register --machine <name>";
+
+/// Suggest a canonical address suffix from a display name and saved machine identity.
+pub fn suggest_machine_name(name: &str, host_id: &str) -> String {
+  let mut slug = String::new();
+  for character in name.chars() {
+    if slug.len() == 63 {
+      break;
+    }
+    if character.is_ascii_alphanumeric() {
+      slug.push(character.to_ascii_lowercase());
+    } else if !slug.is_empty() && !slug.ends_with('-') {
+      slug.push('-');
+    }
+  }
+  let slug = slug.trim_end_matches('-');
+  if !slug.is_empty() {
+    return slug.into();
+  }
+  let suffix: String = host_id.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
+  format!("computer-{suffix}").trim_end_matches('-').into()
 }
 
 pub struct HostOptions {
@@ -33,6 +55,17 @@ pub struct HostOptions {
   pub allow_control: Option<bool>,
   pub insecure_loopback: bool,
   pub ice_servers: Option<Vec<String>>,
+}
+
+/// Check the saved assignment before opening a local API or a remote tunnel.
+pub fn require_account_assignment(
+  state_dir: &Path,
+  profile: Option<&HostProfile>,
+  hub: Option<&Url>,
+) -> Result<String, String> {
+  let profile = profile.ok_or(ACCOUNT_SETUP_REQUIRED)?;
+  let hub_url = hub.map_or(profile.hub_url.as_str(), Url::as_str);
+  crate::account_host::saved_address(state_dir, hub_url, &profile.host_id)?.ok_or_else(|| ACCOUNT_SETUP_REQUIRED.into())
 }
 
 pub fn prepare_host(options: HostOptions) -> Result<PreparedHost, String> {
@@ -77,9 +110,7 @@ pub fn prepare_host(options: HostOptions) -> Result<PreparedHost, String> {
       .name
       .or_else(|| previous.as_ref().map(|profile| profile.name.clone()))
       .unwrap_or_else(|| "Session host".into()),
-    discovery_namespace: previous
-      .as_ref()
-      .and_then(|profile| profile.discovery_namespace.clone()),
+    discovery_namespace: None,
     viewer_url: local_url.to_string(),
     allow_control: options
       .allow_control
@@ -153,17 +184,11 @@ pub fn prepare_host(options: HostOptions) -> Result<PreparedHost, String> {
   }
   profile.save(&profile_path)?;
   let machine_address = crate::account_host::saved_address(&options.state_dir, &profile.hub_url, &profile.host_id)?;
-  let discovery_namespace = machine_address
-    .as_deref()
-    .and_then(|address| address.split_once(':'))
-    .map(|(username, _)| username.to_owned())
-    .or(profile.discovery_namespace);
   Ok(PreparedHost {
     config,
     is_new_secret,
     reference: format!("{}@{}", profile.host_id, noise_identity.public_key()),
     passkey_origin: profile.passkey_origin,
-    discovery_namespace,
     machine_address,
   })
 }
@@ -251,6 +276,19 @@ mod tests {
   use super::*;
   use axum::{Router, extract::WebSocketUpgrade, http::StatusCode, response::IntoResponse, routing::get};
 
+  #[test]
+  fn suggested_names_are_canonical_for_display_labels_and_empty_transliterations() {
+    for display in ["Workstation", "  My Computer!  ", "电脑", "---", &"A".repeat(200)] {
+      let suggested = suggest_machine_name(display, "11111111-1111-4111-8111-111111111111");
+      tokn_hub_client_core::address::parse_machine_address(&format!("account:{suggested}")).unwrap();
+    }
+    assert_eq!(suggest_machine_name(" My Computer ", ""), "my-computer");
+    assert_eq!(
+      suggest_machine_name("电脑", "11111111-1111-4111-8111-111111111111"),
+      "computer-11111111"
+    );
+  }
+
   fn discovery_options(path: &Path) -> HostOptions {
     HostOptions {
       hub: Some(Url::parse("https://hub.example").unwrap()),
@@ -267,10 +305,10 @@ mod tests {
   }
 
   #[test]
-  fn setup_preserves_legacy_discovery_identity_and_trust() {
+  fn setup_drops_legacy_discovery_and_preserves_identity_and_trust() {
     let directory = tempfile::tempdir().unwrap();
     let first = prepare_host(discovery_options(directory.path())).unwrap();
-    assert!(first.discovery_namespace.is_none());
+    assert!(first.machine_address.is_none());
     let access = directory.path().join("host-access.json");
     let before = fs::read(&access).unwrap();
     let profile_path = directory.path().join("host.json");
@@ -278,12 +316,44 @@ mod tests {
     profile.discovery_namespace = Some("personal".into());
     profile.save(&profile_path).unwrap();
     let unchanged = prepare_host(discovery_options(directory.path())).unwrap();
-    assert_eq!(unchanged.discovery_namespace.as_deref(), Some("personal"));
+    assert!(unchanged.machine_address.is_none());
     assert_eq!(unchanged.reference, first.reference);
     assert_eq!(fs::read(access).unwrap(), before);
+    let saved = HostProfile::load(&profile_path).unwrap().unwrap();
+    assert_eq!(saved.host_id, profile.host_id);
+    assert!(saved.discovery_namespace.is_none());
+  }
+
+  #[test]
+  fn hosting_requires_an_account_assignment_for_the_selected_hub() {
+    let directory = tempfile::tempdir().unwrap();
+    let state_dir = directory.path();
+    prepare_host(discovery_options(state_dir)).unwrap();
+    let profile = HostProfile::load(&state_dir.join("host.json")).unwrap().unwrap();
     assert_eq!(
-      HostProfile::load(&profile_path).unwrap().unwrap().host_id,
-      profile.host_id
+      require_account_assignment(state_dir, Some(&profile), None).unwrap_err(),
+      ACCOUNT_SETUP_REQUIRED
+    );
+    onboarding::save_configuration(
+      &state_dir.join("host-account.json"),
+      &serde_json::json!({
+        "hub_origin": profile.hub_url,
+        "claim": {
+          "host_id": profile.host_id,
+          "machine_address": "alice:workstation",
+          "group": {"namespace": "alice", "secret_digest": "A".repeat(43)}
+        }
+      }),
+    )
+    .unwrap();
+    assert_eq!(
+      require_account_assignment(state_dir, Some(&profile), None).unwrap(),
+      "alice:workstation"
+    );
+    let another_hub = Url::parse("https://another-hub.example").unwrap();
+    assert_eq!(
+      require_account_assignment(state_dir, Some(&profile), Some(&another_hub)).unwrap_err(),
+      ACCOUNT_SETUP_REQUIRED
     );
   }
 

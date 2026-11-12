@@ -52,6 +52,41 @@ impl ClaimRequest {
   }
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RenameRequest {
+  pub host_id: String,
+  pub public_key: String,
+  pub expected_machine_address: String,
+  pub machine_name: String,
+  signature: String,
+}
+
+impl RenameRequest {
+  fn proof(&self, hub: &str, user_id: &str) -> Vec<u8> {
+    serde_json::to_vec(&(
+      "tokn-hub-account-host-rename-v1",
+      hub,
+      user_id,
+      &self.host_id,
+      &self.public_key,
+      &self.expected_machine_address,
+      &self.machine_name,
+    ))
+    .expect("serialize machine rename")
+  }
+
+  pub(crate) fn verify(&self, hub: &str, user_id: &str) -> Result<(), String> {
+    let key = VerifyingKey::from_bytes(&crate::secure::decode_public_key(&self.public_key)?)
+      .map_err(|_| "Invalid machine enrollment key")?;
+    let signature =
+      Signature::from_slice(&protocol::decode(&self.signature, 64)?).map_err(|_| "Invalid machine rename signature")?;
+    key
+      .verify_strict(&self.proof(hub, user_id), &signature)
+      .map_err(|_| "Machine rename did not prove ownership of its enrollment key".into())
+  }
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct HostAccount {
@@ -175,6 +210,88 @@ pub async fn claim(config: &ConnectorConfig, machine_name: &str, token: &str) ->
   tokio::task::spawn_blocking(move || save_membership(&path, hub_origin, claim))
     .await
     .map_err(|_| "Could not save machine account assignment")??;
+  Ok(address)
+}
+
+/// Rename this machine's account address while preserving its enrollment and
+/// device identities. The old address fences concurrent or stale requests.
+pub async fn rename(config: &ConnectorConfig, machine_name: &str, token: &str) -> Result<String, String> {
+  config.validate()?;
+  parse_machine_address(&format!("account:{machine_name}"))?;
+  let paired = config
+    .paired
+    .as_ref()
+    .ok_or("Machine rename needs paired-device hosting")?;
+  let path = membership_path(config).ok_or("Could not resolve machine account storage")?;
+  let directory = path
+    .parent()
+    .ok_or("Could not resolve machine account storage")?
+    .to_owned();
+  let hub_url = config.hub_url.to_string();
+  let host_id = paired.host_id.clone();
+  let old = tokio::task::spawn_blocking(move || read_membership(&directory, &hub_url, &host_id))
+    .await
+    .map_err(|_| "Could not read machine account assignment")??
+    .ok_or("Register this computer before renaming it")?;
+  let hub_origin = canonical_hub(&config.hub_url)?;
+  let hub = Url::parse(&hub_origin).map_err(|_| "Invalid Hub URL")?;
+  let client = reqwest::Client::builder()
+    .no_proxy()
+    .redirect(reqwest::redirect::Policy::none())
+    .retry(reqwest::retry::never())
+    .connect_timeout(Duration::from_secs(5))
+    .timeout(Duration::from_secs(12))
+    .build()
+    .map_err(|_| "Could not prepare Hub account request")?;
+  let account: Account = bounded_json(
+    client
+      .get(hub.join("/hub/v1/account/me").map_err(|_| "Invalid Hub URL")?)
+      .bearer_auth(token)
+      .send()
+      .await
+      .map_err(|_| "Could not contact the Hub account service")?,
+  )
+  .await?;
+  validate_uuid(&account.user_id)?;
+  if parse_machine_address(&old.machine_address)?.0 != account.username {
+    return Err("This machine is registered to a different account".into());
+  }
+  let address = format!("{}:{machine_name}", account.username);
+  parse_machine_address(&address)?;
+  let key_file = config.key_file.clone();
+  let key = tokio::task::spawn_blocking(move || load_key(&key_file))
+    .await
+    .map_err(|_| "Could not load machine enrollment key")??;
+  let mut request = RenameRequest {
+    host_id: paired.host_id.clone(),
+    public_key: protocol::encode(key.verifying_key().as_bytes()),
+    expected_machine_address: old.machine_address,
+    machine_name: machine_name.into(),
+    signature: String::new(),
+  };
+  request.signature = protocol::encode(&key.sign(&request.proof(&hub_origin, &account.user_id)).to_bytes());
+  let claim: AccountMachineClaim = bounded_json(
+    client
+      .post(
+        hub
+          .join("/hub/v1/account/machines/rename")
+          .map_err(|_| "Invalid Hub URL")?,
+      )
+      .bearer_auth(token)
+      .header(reqwest::header::CONTENT_TYPE, "application/json")
+      .body(serde_json::to_vec(&request).map_err(|_| "Could not encode machine rename")?)
+      .send()
+      .await
+      .map_err(|_| "Could not rename the machine; retry the same name to confirm its result")?,
+  )
+  .await?;
+  validate_claim(&claim, &paired.host_id)?;
+  if claim.machine_address != address || claim.group != old.group {
+    return Err("Hub returned a different machine assignment".into());
+  }
+  tokio::task::spawn_blocking(move || save_membership(&path, hub_origin, claim))
+    .await
+    .map_err(|_| "Could not save renamed machine assignment")??;
   Ok(address)
 }
 

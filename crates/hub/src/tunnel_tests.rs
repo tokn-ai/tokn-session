@@ -2,12 +2,15 @@ use super::*;
 use crate::connector::{self, ConnectorConfig};
 use axum::{
   Router,
+  body::Body,
   extract::{Path, State, WebSocketUpgrade},
+  http::StatusCode,
+  response::Response,
   routing::{get, post},
 };
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
-use http_body_util::BodyExt;
+use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
@@ -29,6 +32,21 @@ async fn wait_for(mut predicate: impl FnMut() -> bool) {
   })
   .await
   .expect("condition timed out");
+}
+
+fn claim_fixture_connector(store: &Store, config: &ConnectorConfig) {
+  let paired = config.paired.as_ref().unwrap();
+  let key = connector::load_key(&config.key_file).unwrap();
+  let claim = store.claim_fixture_host(HostRecord {
+    host_id: paired.host_id.clone(),
+    name: config.name.clone(),
+    public_key: protocol::encode(key.verifying_key().as_bytes()),
+    access: if config.allow_control { "control" } else { "view" }.into(),
+  });
+  let hub_origin = crate::onboarding::canonical_hub(&config.hub_url).unwrap();
+  let receipt = paired.state_file.with_file_name("host-account.json");
+  crate::onboarding::save_configuration(&receipt, &serde_json::json!({"hub_origin": hub_origin, "claim": claim}))
+    .unwrap();
 }
 
 async fn hub(tunnels: HubTunnels) -> (url::Url, JoinHandle<()>) {
@@ -73,159 +91,6 @@ impl Drop for StreamGuard {
 }
 
 #[tokio::test]
-async fn legacy_host_streaming_cancellation_reconnect_and_revocation() {
-  let directory = tempfile::tempdir().unwrap();
-  let store = Store::open(directory.path().join("hub.sqlite")).unwrap();
-  let tunnels = HubTunnels::new(store.clone());
-  let (hub_url, hub_task) = hub(tunnels.clone()).await;
-  let streaming = Arc::new(AtomicBool::new(false));
-  let stream_state = streaming.clone();
-  let local = Router::new()
-    .route(
-      "/api/v1/health",
-      get(|| async { ([("content-type", "text/html")], "<script>bad()</script>") }),
-    )
-    .route("/api/v1/list_sessions", post(|| async { "x".repeat(2 * 1024 * 1024) }))
-    .route(
-      "/api/v1/events",
-      get(move || {
-        let streaming = stream_state.clone();
-        async move {
-          let stream = async_stream::stream! {
-            let _guard = StreamGuard(streaming.clone());
-            streaming.store(true, Ordering::SeqCst);
-            yield Ok::<_, io::Error>(Bytes::from_static(b"event: ready\ndata: {}\n\n"));
-            std::future::pending::<()>().await;
-          };
-          Response::builder()
-            .header("content-type", "text/event-stream")
-            .body(Body::from_stream(stream))
-            .unwrap()
-        }
-      }),
-    );
-  let (local_url, local_task) = serve(local).await;
-  let mut config = ConnectorConfig {
-    hub_url,
-    local_url,
-    key_file: directory.path().join("host.json"),
-    name: "test host".into(),
-    local_token: None,
-    allow_control: false,
-    insecure_loopback: true,
-    ice_servers: Vec::new(),
-    secure: None,
-    paired: None,
-  };
-  let record = connector::remember_legacy_host(&store, &config);
-  let stop = CancellationToken::new();
-  let task = tokio::spawn(connector::run(config.clone(), stop.clone()));
-  wait_for(|| tunnels.online(&record.host_id)).await;
-
-  let response = tunnels
-    .proxy(&record.host_id, Method::GET, "/api/v1/health", Bytes::new())
-    .await
-    .ok()
-    .unwrap();
-  assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
-  assert_eq!(response.headers()["x-content-type-options"], "nosniff");
-  let body = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
-  assert_eq!(&body[..], b"<script>bad()</script>");
-  let response = tunnels
-    .proxy(
-      &record.host_id,
-      Method::POST,
-      "/api/v1/list_sessions",
-      Bytes::from_static(b"{}"),
-    )
-    .await
-    .ok()
-    .unwrap();
-  // More than one flow-control window must arrive intact, without spooling the
-  // entire body in either process or starving heartbeat/cancellation traffic.
-  let body = axum::body::to_bytes(response.into_body(), 3 * 1024 * 1024)
-    .await
-    .unwrap();
-  assert_eq!(body.len(), 2 * 1024 * 1024);
-  // A client that stops reading must not block requests on other streams.
-  let stalled = tunnels
-    .proxy(
-      &record.host_id,
-      Method::POST,
-      "/api/v1/list_sessions",
-      Bytes::from_static(b"{}"),
-    )
-    .await
-    .ok()
-    .unwrap();
-  let other = tokio::time::timeout(
-    Duration::from_secs(2),
-    tunnels.proxy(&record.host_id, Method::GET, "/api/v1/health", Bytes::new()),
-  )
-  .await
-  .unwrap()
-  .ok()
-  .unwrap();
-  axum::body::to_bytes(other.into_body(), 1024).await.unwrap();
-  drop(stalled);
-  let denied = tunnels
-    .proxy(
-      &record.host_id,
-      Method::POST,
-      "/api/v1/submit_session_input",
-      Bytes::new(),
-    )
-    .await
-    .err()
-    .unwrap();
-  assert_eq!(denied.status, StatusCode::FORBIDDEN);
-
-  let response = tunnels
-    .proxy(&record.host_id, Method::GET, "/api/v1/events", Bytes::new())
-    .await
-    .ok()
-    .unwrap();
-  let mut body = response.into_body();
-  let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
-  assert!(String::from_utf8_lossy(&frame).contains("ready"));
-  assert!(streaming.load(Ordering::SeqCst));
-  drop(body);
-  wait_for(|| !streaming.load(Ordering::SeqCst)).await;
-
-  stop.cancel();
-  task.await.unwrap().unwrap();
-  wait_for(|| !tunnels.online(&record.host_id)).await;
-  // The same host key reconnects without pairing, but changing its local flag
-  // cannot exceed the access approved during the original enrollment.
-  config.allow_control = true;
-  let stop = CancellationToken::new();
-  let task = tokio::spawn(connector::run(config, stop.clone()));
-  wait_for(|| tunnels.online(&record.host_id)).await;
-  assert_eq!(tunnels.access(&record.host_id).as_deref(), Some("view"));
-  let response = tunnels
-    .proxy(&record.host_id, Method::GET, "/api/v1/events", Bytes::new())
-    .await
-    .ok()
-    .unwrap();
-  let mut body = response.into_body();
-  body.frame().await.unwrap().unwrap();
-  tunnels.revoke(&record.host_id).unwrap();
-  assert!(!tunnels.online(&record.host_id));
-  assert!(store.host(&record.host_id).unwrap().is_none());
-  assert!(
-    body.frame().await.unwrap().is_err(),
-    "revocation terminates an established stream"
-  );
-  wait_for(|| !streaming.load(Ordering::SeqCst)).await;
-  assert!(!tunnels.online(&record.host_id), "revocation blocks legacy reconnect");
-  stop.cancel();
-  task.await.unwrap().unwrap();
-  tunnels.shutdown();
-  hub_task.abort();
-  local_task.abort();
-}
-
-#[tokio::test]
 async fn signatures_bind_fresh_challenge_identity_name_and_permission() {
   let directory = tempfile::tempdir().unwrap();
   let store = Store::open(directory.path().join("hub.sqlite")).unwrap();
@@ -235,8 +100,9 @@ async fn signatures_bind_fresh_challenge_identity_name_and_permission() {
   endpoint.set_path(protocol::TUNNEL_PATH);
   let key = SigningKey::generate(&mut OsRng);
   let public_key = protocol::encode(key.verifying_key().as_bytes());
+  let host_id = uuid::Uuid::new_v4().to_string();
   let mut previous_nonce = None;
-  for attempt in 0..4 {
+  for attempt in 0..5 {
     let (mut socket, _) = connect_async(endpoint.as_str()).await.unwrap();
     let ClientMessage::Text(text) = socket.next().await.unwrap().unwrap() else {
       panic!("expected challenge")
@@ -254,13 +120,21 @@ async fn signatures_bind_fresh_challenge_identity_name_and_permission() {
     } else {
       key.clone()
     };
-    let signature = signing_key.sign(&protocol::proof(signed_nonce, &public_key, "Host", false));
+    let signature = signing_key.sign(&protocol::registration_proof(
+      signed_nonce,
+      &host_id,
+      &public_key,
+      "Host",
+      false,
+    ));
     previous_nonce = Some(nonce);
-    let frame = Frame::Authenticate {
+    let frame = Frame::Register {
       version: protocol::VERSION,
+      host_id: host_id.clone(),
       public_key: public_key.clone(),
-      name: "Host".into(),
+      name: if attempt == 3 { "Different name" } else { "Host" }.into(),
       allow_control: attempt == 2,
+      discovery_group: None,
       signature: protocol::encode(&signature.to_bytes()),
     };
     socket
@@ -270,7 +144,7 @@ async fn signatures_bind_fresh_challenge_identity_name_and_permission() {
     let reply = tokio::time::timeout(Duration::from_secs(2), socket.next())
       .await
       .unwrap();
-    if attempt < 3 {
+    if attempt < 4 {
       assert!(
         !matches!(reply, Some(Ok(ClientMessage::Text(_)))),
         "invalid proof must not reach account policy"
@@ -300,12 +174,12 @@ async fn encrypted_registration_proof_binds_uuid_and_reports_replacement_or_revo
   let host_id = uuid::Uuid::new_v4().to_string();
   let key = SigningKey::generate(&mut OsRng);
   let registered_public_key = protocol::encode(key.verifying_key().as_bytes());
-  for attempt in 0..6 {
+  for attempt in 0..7 {
     let (mut socket, _) = connect_async(endpoint.as_str()).await.unwrap();
     let Some(Frame::Challenge { nonce, .. }) = next_frame(&mut socket).await else {
       panic!("challenge missing")
     };
-    let signing_key = if attempt == 4 {
+    let signing_key = if attempt == 5 {
       SigningKey::generate(&mut OsRng)
     } else {
       key.clone()
@@ -347,12 +221,22 @@ async fn encrypted_registration_proof_binds_uuid_and_reports_replacement_or_revo
         })
         .unwrap();
     } else if attempt == 3 {
-      assert!(matches!(reply, Some(Frame::Ready { host_id: registered, .. }) if registered == host_id));
       assert!(
-        tunnels.secure_only(&host_id),
-        "secure-only is effective before any host advisory"
+        matches!(reply, Some(Frame::RegistrationRejected { message }) if message == crate::store::ACCOUNT_REQUIRED)
       );
-    } else if attempt >= 4 {
+      assert!(
+        !tunnels.online(&host_id),
+        "a preexisting registration does not grant access"
+      );
+      store.claim_fixture_host(HostRecord {
+        host_id: host_id.clone(),
+        name: "Host".into(),
+        public_key: registered_public_key.clone(),
+        access: "view".into(),
+      });
+    } else if attempt == 4 {
+      assert!(matches!(reply, Some(Frame::Ready { host_id: registered, .. }) if registered == host_id));
+    } else if attempt >= 5 {
       assert!(
         matches!(reply, Some(Frame::RegistrationRejected { message }) if message.contains("revoked or belongs to a different identity")),
         "proved registration receives a recovery diagnostic without authorizing the rejected identity"
@@ -363,7 +247,7 @@ async fn encrypted_registration_proof_binds_uuid_and_reports_replacement_or_revo
         "legacy proof and UUID substitution must fail before registration"
       );
     }
-    if attempt == 4 {
+    if attempt == 5 {
       tunnels.revoke(&host_id).unwrap();
     }
   }
@@ -384,25 +268,18 @@ async fn encrypted_registration_proof_binds_discovery_group_and_cannot_be_stripp
   let host_id = uuid::Uuid::new_v4().to_string();
   let key = SigningKey::generate(&mut OsRng);
   let public_key = protocol::encode(key.verifying_key().as_bytes());
-  let group = DiscoveryGroup {
-    namespace: "personal".into(),
-    secret_digest: protocol::encode(&[1; 32]),
-  };
+  let group = store
+    .claim_fixture_host(HostRecord {
+      host_id: host_id.clone(),
+      name: "Host".into(),
+      public_key: public_key.clone(),
+      access: "view".into(),
+    })
+    .group;
   let other = DiscoveryGroup {
-    namespace: "personal".into(),
+    namespace: group.namespace.clone(),
     secret_digest: protocol::encode(&[2; 32]),
   };
-  store
-    .register_encrypted_host_with_discovery(
-      HostRecord {
-        host_id: host_id.clone(),
-        name: "Host".into(),
-        public_key: public_key.clone(),
-        access: "view".into(),
-      },
-      Some(&group),
-    )
-    .unwrap();
   for sent_group in [Some(other), None, Some(group.clone())] {
     let (mut socket, _) = connect_async(endpoint.as_str()).await.unwrap();
     let Some(Frame::Challenge { nonce, .. }) = next_frame(&mut socket).await else {
@@ -450,30 +327,9 @@ fn registration_diagnostics_never_expose_database_details() {
     "Hub could not register this host; contact its administrator"
   );
   assert_eq!(
-    registration_diagnostic("New host registration rate limit reached; retry in one minute"),
-    "New host registration rate limit reached; retry in one minute"
+    registration_diagnostic(crate::store::ACCOUNT_REQUIRED),
+    crate::store::ACCOUNT_REQUIRED
   );
-}
-
-async fn signed_socket(endpoint: &url::Url, key: &SigningKey) -> TestSocket {
-  let (mut socket, _) = connect_async(endpoint.as_str()).await.unwrap();
-  let Some(Frame::Challenge { nonce, .. }) = next_frame(&mut socket).await else {
-    panic!("expected challenge")
-  };
-  let public_key = protocol::encode(key.verifying_key().as_bytes());
-  let signature = key.sign(&protocol::proof(&nonce, &public_key, "Host", false));
-  let frame = Frame::Authenticate {
-    version: protocol::VERSION,
-    public_key,
-    name: "Host".into(),
-    allow_control: false,
-    signature: protocol::encode(&signature.to_bytes()),
-  };
-  socket
-    .send(ClientMessage::Text(serde_json::to_string(&frame).unwrap().into()))
-    .await
-    .unwrap();
-  socket
 }
 
 async fn next_frame(socket: &mut TestSocket) -> Option<Frame> {
@@ -493,44 +349,84 @@ async fn next_frame(socket: &mut TestSocket) -> Option<Frame> {
   .expect("tunnel frame timed out")
 }
 
+async fn signed_socket(endpoint: &url::Url, key: &SigningKey, host_id: Option<&str>) -> TestSocket {
+  let (mut socket, _) = connect_async(endpoint.as_str()).await.unwrap();
+  let Some(Frame::Challenge { nonce, .. }) = next_frame(&mut socket).await else {
+    panic!("expected challenge");
+  };
+  let public_key = protocol::encode(key.verifying_key().as_bytes());
+  let frame = if let Some(host_id) = host_id {
+    let proof = protocol::registration_proof(&nonce, host_id, &public_key, "Host", false);
+    Frame::Register {
+      version: protocol::VERSION,
+      host_id: host_id.into(),
+      public_key,
+      name: "Host".into(),
+      allow_control: false,
+      discovery_group: None,
+      signature: protocol::encode(&key.sign(&proof).to_bytes()),
+    }
+  } else {
+    let proof = protocol::proof(&nonce, &public_key, "Host", false);
+    Frame::Authenticate {
+      version: protocol::VERSION,
+      public_key,
+      name: "Host".into(),
+      allow_control: false,
+      signature: protocol::encode(&key.sign(&proof).to_bytes()),
+    }
+  };
+  socket
+    .send(ClientMessage::Text(serde_json::to_string(&frame).unwrap().into()))
+    .await
+    .unwrap();
+  socket
+}
+
 #[tokio::test]
-async fn unknown_legacy_hosts_do_not_block_approved_reconnections() {
+async fn legacy_authentication_is_rejected_without_taking_claimed_host_capacity() {
   let directory = tempfile::tempdir().unwrap();
   let store = Store::open(directory.path().join("hub.sqlite")).unwrap();
-  let approved_key = SigningKey::generate(&mut OsRng);
-  let host_id = protocol::host_id(approved_key.verifying_key().as_bytes());
+  let legacy_key = SigningKey::generate(&mut OsRng);
+  let legacy_id = protocol::host_id(legacy_key.verifying_key().as_bytes());
   store
-    .approve_host(HostRecord {
-      host_id: host_id.clone(),
-      name: "Approved".into(),
-      public_key: protocol::encode(approved_key.verifying_key().as_bytes()),
-      access: "view".into(),
-    })
+    .connection()
+    .unwrap()
+    .execute(
+      "INSERT INTO hosts (host_id, name, public_key, access) VALUES (?1, 'Legacy', ?2, 'view')",
+      (&legacy_id, protocol::encode(legacy_key.verifying_key().as_bytes())),
+    )
     .unwrap();
+  let claimed_key = SigningKey::generate(&mut OsRng);
+  let host_id = uuid::Uuid::new_v4().to_string();
+  store.claim_fixture_host(HostRecord {
+    host_id: host_id.clone(),
+    name: "Claimed".into(),
+    public_key: protocol::encode(claimed_key.verifying_key().as_bytes()),
+    access: "view".into(),
+  });
   let tunnels = HubTunnels::with_limits(store, 1, 1);
   let (mut endpoint, task) = hub(tunnels.clone()).await;
   endpoint.set_scheme("ws").unwrap();
   endpoint.set_path(protocol::TUNNEL_PATH);
 
-  for _ in 0..2 {
-    let mut socket = signed_socket(&endpoint, &SigningKey::generate(&mut OsRng)).await;
-    assert!(matches!(
-      next_frame(&mut socket).await,
-      Some(Frame::RegistrationRejected { message }) if message == crate::store::ACCOUNT_REQUIRED
-    ));
-  }
+  let mut legacy = signed_socket(&endpoint, &legacy_key, None).await;
+  assert!(matches!(
+    next_frame(&mut legacy).await,
+    Some(Frame::RegistrationRejected { message }) if message == crate::store::ACCOUNT_REQUIRED
+  ));
+  assert!(!tunnels.online(&legacy_id));
   assert_eq!(tunnels.handshakes.available_permits(), 1);
   assert_eq!(tunnels.approved.available_permits(), 1);
 
-  let mut approved = signed_socket(&endpoint, &approved_key).await;
-  assert!(matches!(next_frame(&mut approved).await, Some(Frame::Ready { .. })));
+  let mut claimed = signed_socket(&endpoint, &claimed_key, Some(&host_id)).await;
+  assert!(matches!(next_frame(&mut claimed).await, Some(Frame::Ready { .. })));
   assert!(tunnels.online(&host_id));
   assert_eq!(tunnels.approved.available_permits(), 0);
-  // Online capacity is full. An approved identity can still replace
-  // its own connection, and closing the old socket must not release its slot.
-  let mut replacement = signed_socket(&endpoint, &approved_key).await;
+  // The same account-owned identity can replace its connection while full.
+  let mut replacement = signed_socket(&endpoint, &claimed_key, Some(&host_id)).await;
   assert!(matches!(next_frame(&mut replacement).await, Some(Frame::Ready { .. })));
-  assert!(next_frame(&mut approved).await.is_none());
+  assert!(next_frame(&mut claimed).await.is_none());
   assert!(tunnels.online(&host_id));
   assert_eq!(tunnels.approved.available_permits(), 0);
   drop(replacement);
@@ -541,6 +437,12 @@ async fn unknown_legacy_hosts_do_not_block_approved_reconnections() {
 
 #[tokio::test]
 async fn accepted_agent_input_is_not_replayed_after_tunnel_reconnect() {
+  use crate::{
+    connector::PairedHostConfig,
+    onboarding::{authorize_device, initialize_host_access},
+    pairing::TotpSecret,
+    secure::{InnerMessage, NoiseIdentity},
+  };
   let directory = tempfile::tempdir().unwrap();
   let store = Store::open(directory.path().join("hub.sqlite")).unwrap();
   let tunnels = HubTunnels::new(store.clone());
@@ -564,59 +466,63 @@ async fn accepted_agent_input_is_not_replayed_after_tunnel_reconnect() {
     }),
   );
   let (local_url, local_task) = serve(local).await;
+  let host_id = uuid::Uuid::new_v4().to_string();
+  let noise_key_file = directory.path().join("noise.json");
+  let host_key = NoiseIdentity::load_or_create(&noise_key_file).unwrap().public_key();
+  let recipient = NoiseIdentity::generate().unwrap();
+  let state_file = directory.path().join("access.json");
+  initialize_host_access(&state_file, &TotpSecret::generate()).unwrap();
+  let now = crate::secure_client::unix_time().unwrap();
+  authorize_device(&state_file, &recipient.public_key(), now / 30, now).unwrap();
+  let mut endpoint = hub_url.clone();
+  endpoint.set_scheme("ws").unwrap();
+  endpoint.set_path(&format!("/hub/v1/secure/{host_id}"));
   let config = ConnectorConfig {
     hub_url,
     local_url,
-    key_file: directory.path().join("host.json"),
+    key_file: directory.path().join("enrollment.json"),
     name: "Input host".into(),
     local_token: None,
     allow_control: true,
     insecure_loopback: true,
     ice_servers: Vec::new(),
     secure: None,
-    paired: None,
+    paired: Some(PairedHostConfig {
+      host_id: host_id.clone(),
+      noise_key_file,
+      state_file,
+    }),
   };
-  let record = connector::remember_legacy_host(&store, &config);
+  claim_fixture_connector(&store, &config);
   let stop = CancellationToken::new();
   let connector_task = tokio::spawn(connector::run(config, stop.clone()));
-  wait_for(|| tunnels.online(&record.host_id)).await;
-  let old_connection = tunnels.inner.lock().unwrap().online[&record.host_id].clone();
-  let proxy = tunnels.clone();
-  let host_id = record.host_id.clone();
-  let request = tokio::spawn(async move {
-    proxy
-      .proxy(
-        &host_id,
-        Method::POST,
-        "/api/v1/submit_session_input",
-        Bytes::from_static(br#"{"request":{"text":"execute once"}}"#),
-      )
-      .await
-  });
+  wait_for(|| tunnels.online(&host_id)).await;
+  let old_connection = tunnels.inner.lock().unwrap().online[&host_id].clone();
+  let (mut request, _) = device_request(
+    &endpoint,
+    &recipient,
+    &host_key,
+    "POST",
+    "/api/v1/submit_session_input",
+    br#"{"request":{"text":"execute once"}}"#,
+  )
+  .await;
   tokio::time::timeout(Duration::from_secs(2), acceptances.recv())
     .await
     .unwrap()
     .unwrap();
   assert_eq!(accepted_count.load(Ordering::SeqCst), 1);
   old_connection.shutdown.cancel();
-  let failure = tokio::time::timeout(Duration::from_secs(2), request)
-    .await
-    .unwrap()
-    .unwrap()
-    .err()
-    .unwrap();
-  assert_eq!(failure.status, StatusCode::BAD_GATEWAY);
-  assert!(failure.message.contains("never replayed"));
+  assert!(next_binary(&mut request).await.is_none());
 
   // Exercise the production reconnect loop with the same approved identity.
   // A fresh successful request proves its new tunnel is usable.
-  wait_for(|| tunnels.online(&record.host_id)).await;
-  let response = tunnels
-    .proxy(&record.host_id, Method::GET, "/api/v1/health", Bytes::new())
-    .await
-    .ok()
-    .unwrap();
-  assert_eq!(axum::body::to_bytes(response.into_body(), 1024).await.unwrap(), "{}");
+  wait_for(|| tunnels.online(&host_id)).await;
+  let (mut socket, mut channel) = device_request(&endpoint, &recipient, &host_key, "GET", "/api/v1/health", &[]).await;
+  assert!(matches!(
+    channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
+    InnerMessage::Response { status: 200, .. }
+  ));
   assert!(
     tokio::time::timeout(Duration::from_millis(200), acceptances.recv())
       .await
@@ -672,40 +578,6 @@ async fn send_inner(
     .send(ClientMessage::Binary(channel.encrypt(message).unwrap().into()))
     .await
     .unwrap();
-}
-
-async fn secure_request(
-  endpoint: &url::Url,
-  identity: &crate::secure::NoiseIdentity,
-  grant: &crate::secure::SignedGrant,
-  method: &str,
-  path: &str,
-  body: &[u8],
-) -> (TestSocket, crate::secure::SecureChannel) {
-  use crate::secure::InnerMessage;
-  let (mut socket, mut channel) = encrypted_socket(endpoint, identity, &grant.grant.host_public_key).await;
-  send_inner(
-    &mut socket,
-    &mut channel,
-    &InnerMessage::Request {
-      method: method.into(),
-      path: path.into(),
-      grant: grant.clone(),
-    },
-  )
-  .await;
-  for part in body.chunks(protocol::CHUNK_SIZE) {
-    send_inner(
-      &mut socket,
-      &mut channel,
-      &InnerMessage::RequestBody {
-        data: protocol::encode(part),
-      },
-    )
-    .await;
-  }
-  send_inner(&mut socket, &mut channel, &InnerMessage::RequestEnd {}).await;
-  (socket, channel)
 }
 
 async fn device_request(
@@ -832,21 +704,11 @@ async fn authenticator_pairing_registers_only_encrypted_hosts_and_persists_trust
       state_file: state_file.clone(),
     }),
   };
-  connector::remember_legacy_host(&store, &config);
+  claim_fixture_connector(&store, &config);
   let stop = CancellationToken::new();
   let connector_task = tokio::spawn(connector::run(config.clone(), stop.clone()));
   wait_for(|| tunnels.online(&host_id)).await;
-  assert!(tunnels.secure_only(&host_id));
   assert_eq!(store.hosts().unwrap().len(), 1);
-  assert_eq!(
-    tunnels
-      .proxy(&host_id, Method::GET, "/api/v1/health", Bytes::new())
-      .await
-      .err()
-      .unwrap()
-      .status,
-    StatusCode::FORBIDDEN
-  );
   let mut endpoint = hub_url;
   endpoint.set_scheme("ws").unwrap();
   endpoint.set_path(&format!("/hub/v1/secure/{host_id}"));
@@ -1013,362 +875,14 @@ async fn authenticator_pairing_registers_only_encrypted_hosts_and_persists_trust
 }
 
 #[tokio::test]
-async fn encrypted_transport_authenticates_grants_bounds_streams_and_rejects_plaintext() {
-  use crate::{
-    connector::SecureHostConfig,
-    secure::{GRANT_VERSION, Grant, GrantScope, InnerMessage, NoiseIdentity, OwnerIdentity},
-  };
-  let directory = tempfile::tempdir().unwrap();
-  let store = Store::open(directory.path().join("hub.sqlite")).unwrap();
-  let tunnels = HubTunnels::new(store.clone());
-  let (hub_url, hub_task) = hub(tunnels.clone()).await;
-  let owner = OwnerIdentity::generate();
-  let recipient = NoiseIdentity::generate().unwrap();
-  let noise_file = directory.path().join("noise.json");
-  let host_identity = NoiseIdentity::load_or_create(&noise_file).unwrap();
-  let revoked_file = directory.path().join("revoked.json");
-  std::fs::write(&revoked_file, "[]").unwrap();
-  let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-  let health_calls = calls.clone();
-  let streaming = Arc::new(AtomicBool::new(false));
-  let stream_state = streaming.clone();
-  let local = Router::new()
-    .route(
-      "/api/v1/health",
-      get(move || {
-        health_calls.fetch_add(1, Ordering::SeqCst);
-        async { "{}" }
-      }),
-    )
-    .route("/api/v1/list_sessions", post(|body: Bytes| async { body }))
-    .route(
-      "/api/v1/shared",
-      post(|axum::Json(envelope): axum::Json<serde_json::Value>| async { axum::Json(envelope) }),
-    )
-    .route(
-      "/api/v1/events",
-      get(move || {
-        let streaming = stream_state.clone();
-        async move {
-          let stream = async_stream::stream! {
-            let _guard = StreamGuard(streaming.clone());
-            streaming.store(true, Ordering::SeqCst);
-            yield Ok::<_, io::Error>(Bytes::from_static(b"event: ready\ndata: {}\n\n"));
-            std::future::pending::<()>().await;
-          };
-          Response::builder()
-            .header("content-type", "text/event-stream")
-            .body(Body::from_stream(stream))
-            .unwrap()
-        }
-      }),
-    );
-  let (local_url, local_task) = serve(local).await;
-  let config = ConnectorConfig {
-    hub_url: hub_url.clone(),
-    local_url,
-    key_file: directory.path().join("host.json"),
-    name: "Encrypted host".into(),
-    local_token: None,
-    allow_control: false,
-    insecure_loopback: true,
-    ice_servers: Vec::new(),
-    secure: Some(SecureHostConfig {
-      noise_key_file: noise_file,
-      owner_public_key: owner.public_key(),
-      revocations_file: Some(revoked_file.clone()),
-    }),
-    paired: None,
-  };
-  let record = connector::remember_legacy_host(&store, &config);
-  let stop = CancellationToken::new();
-  let connector = tokio::spawn(connector::run(config, stop.clone()));
-  wait_for(|| tunnels.online(&record.host_id)).await;
-  wait_for(|| tunnels.secure_only(&record.host_id)).await;
-  let grant = owner
-    .sign_grant(Grant {
-      version: GRANT_VERSION,
-      grant_id: "integration_grant".into(),
-      host_id: record.host_id.clone(),
-      host_public_key: host_identity.public_key(),
-      recipient_public_key: recipient.public_key(),
-      scope: GrantScope::All {},
-      allow_control: false,
-      expires_at: std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 300,
-    })
-    .unwrap();
-  let mut endpoint = hub_url;
-  endpoint.set_scheme("ws").unwrap();
-  endpoint.set_path(&format!("/hub/v1/secure/{}", record.host_id));
-
-  let error = tunnels
-    .proxy(&record.host_id, Method::GET, "/api/v1/health", Bytes::new())
-    .await
-    .err()
-    .unwrap();
-  assert_eq!(error.status, StatusCode::FORBIDDEN);
-  assert!(error.message.contains("encrypted client"));
-  assert_eq!(
-    calls.load(Ordering::SeqCst),
-    0,
-    "a malicious Hub cannot downgrade this host to plaintext"
-  );
-  // Bypass the Hub's advisory secure-only check: the host must still reject a
-  // plaintext request injected directly onto its authenticated tunnel.
-  let connection = tunnels.inner.lock().unwrap().online[&record.host_id].clone();
-  let (headers, ready) = oneshot::channel();
-  let (chunks, _) = mpsc::channel(1);
-  connection.requests.lock().unwrap().insert(
-    900,
-    InFlight {
-      headers: Some(headers),
-      chunks,
-      failure: Arc::new(Mutex::new(None)),
-    },
-  );
-  connection
-    .outgoing
-    .send(Frame::Request {
-      request_id: 900,
-      method: "GET".into(),
-      path: "/api/v1/health".into(),
-      body: String::new(),
-    })
-    .await
-    .unwrap();
-  let rejected = tokio::time::timeout(Duration::from_secs(2), ready)
-    .await
-    .unwrap()
-    .unwrap();
-  assert!(rejected.unwrap_err().contains("end-to-end"));
-  assert_eq!(calls.load(Ordering::SeqCst), 0);
-
-  let attacker = NoiseIdentity::generate().unwrap();
-  let (mut socket, mut channel) = encrypted_socket(&endpoint, &attacker, &host_identity.public_key()).await;
-  send_inner(
-    &mut socket,
-    &mut channel,
-    &InnerMessage::Request {
-      method: "GET".into(),
-      path: "/api/v1/health".into(),
-      grant: grant.clone(),
-    },
-  )
-  .await;
-  assert!(matches!(
-    channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
-    InnerMessage::Error { .. }
-  ));
-  assert!(
-    next_binary(&mut socket).await.is_none(),
-    "a stolen grant needs its recipient's private key"
-  );
-  assert_eq!(calls.load(Ordering::SeqCst), 0);
-
-  let data = vec![b'x'; protocol::MAX_BODY];
-  let (mut socket, mut channel) =
-    secure_request(&endpoint, &recipient, &grant, "POST", "/api/v1/list_sessions", &data).await;
-  assert!(matches!(
-    channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
-    InnerMessage::Response { status: 200, .. }
-  ));
-  let mut response = Vec::new();
-  for _ in 0..protocol::RESPONSE_WINDOW {
-    let record = next_binary(&mut socket).await.unwrap();
-    assert!(
-      !record.windows(32).any(|chunk| chunk == &[b'x'; 32]),
-      "Hub records never contain response plaintext"
-    );
-    let InnerMessage::Chunk { data } = channel.decrypt(&record).unwrap() else {
-      panic!("expected encrypted chunk")
-    };
-    response.extend(protocol::decode(&data, protocol::CHUNK_SIZE).unwrap());
-  }
-  assert!(
-    tokio::time::timeout(Duration::from_millis(100), socket.next())
-      .await
-      .is_err(),
-    "host stops when the encrypted downstream window is exhausted"
-  );
-  send_inner(
-    &mut socket,
-    &mut channel,
-    &InnerMessage::Window {
-      credits: protocol::RESPONSE_WINDOW,
-    },
-  )
-  .await;
-  loop {
-    match channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap() {
-      InnerMessage::Chunk { data } => {
-        response.extend(protocol::decode(&data, protocol::CHUNK_SIZE).unwrap());
-        send_inner(&mut socket, &mut channel, &InnerMessage::Window { credits: 1 }).await;
-      }
-      InnerMessage::End {} => break,
-      message => panic!("unexpected {message:?}"),
-    }
-  }
-  assert_eq!(
-    response, data,
-    "a full request and response span multiple Noise records intact"
-  );
-  drop(socket);
-
-  let mut selected = grant.grant.clone();
-  selected.grant_id = "selected_grant".into();
-  selected.scope = GrantScope::Sessions {
-    session_keys: vec!["approved_session".into()],
-  };
-  let selected = owner.sign_grant(selected).unwrap();
-  let (mut socket, mut channel) = secure_request(
-    &endpoint,
-    &recipient,
-    &selected,
-    "POST",
-    "/api/v1/list_sessions",
-    br#"{"session_keys":["private_session"],"principal":"attacker"}"#,
-  )
-  .await;
-  assert!(matches!(
-    channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
-    InnerMessage::Response { status: 200, .. }
-  ));
-  let mut body = Vec::new();
-  loop {
-    match channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap() {
-      InnerMessage::Chunk { data } => {
-        body.extend(protocol::decode(&data, protocol::CHUNK_SIZE).unwrap());
-        send_inner(&mut socket, &mut channel, &InnerMessage::Window { credits: 1 }).await;
-      }
-      InnerMessage::End {} => break,
-      message => panic!("unexpected {message:?}"),
-    }
-  }
-  let envelope: serde_json::Value = serde_json::from_slice(&body).unwrap();
-  assert_eq!(envelope["session_keys"], serde_json::json!(["approved_session"]));
-  assert_eq!(envelope["principal"], recipient.public_key());
-  assert_eq!(envelope["command"], "list_sessions");
-  drop(socket);
-  let (mut socket, mut channel) = secure_request(
-    &endpoint,
-    &recipient,
-    &selected,
-    "POST",
-    "/api/v1/submit_session_input",
-    b"{}",
-  )
-  .await;
-  assert!(
-    matches!(
-      channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
-      InnerMessage::Error { .. }
-    ),
-    "selected-session sharing never authorizes input"
-  );
-  drop(socket);
-
-  let mut expiring = grant.grant.clone();
-  expiring.grant_id = "expiring_grant".into();
-  expiring.expires_at = std::time::SystemTime::now()
-    .duration_since(std::time::UNIX_EPOCH)
-    .unwrap()
-    .as_secs()
-    + 3;
-  let expiring = owner.sign_grant(expiring).unwrap();
-  let (mut socket, mut channel) = secure_request(&endpoint, &recipient, &expiring, "GET", "/api/v1/events", &[]).await;
-  assert!(matches!(
-    channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
-    InnerMessage::Response { .. }
-  ));
-  assert!(matches!(
-    channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
-    InnerMessage::Chunk { .. }
-  ));
-  let message = channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap();
-  assert!(matches!(message, InnerMessage::Error { message } if message.contains("expired")));
-  wait_for(|| !streaming.load(Ordering::SeqCst)).await;
-  drop(socket);
-
-  let (mut socket, mut channel) = secure_request(&endpoint, &recipient, &grant, "GET", "/api/v1/events", &[]).await;
-  assert!(matches!(
-    channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
-    InnerMessage::Response { .. }
-  ));
-  assert!(matches!(
-    channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
-    InnerMessage::Chunk { .. }
-  ));
-  assert!(streaming.load(Ordering::SeqCst));
-  drop(socket);
-  wait_for(|| !streaming.load(Ordering::SeqCst)).await;
-
-  let (mut socket, mut channel) = secure_request(&endpoint, &recipient, &grant, "GET", "/api/v1/events", &[]).await;
-  assert!(matches!(
-    channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
-    InnerMessage::Response { .. }
-  ));
-  assert!(matches!(
-    channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
-    InnerMessage::Chunk { .. }
-  ));
-  std::fs::write(&revoked_file, serde_json::to_vec(&vec![&grant.grant.grant_id]).unwrap()).unwrap();
-  let message = channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap();
-  assert!(matches!(message, InnerMessage::Error { message } if message.contains("revoked")));
-  wait_for(|| !streaming.load(Ordering::SeqCst)).await;
-
-  let (mut socket, mut channel) = encrypted_socket(&endpoint, &recipient, &host_identity.public_key()).await;
-  send_inner(
-    &mut socket,
-    &mut channel,
-    &InnerMessage::Request {
-      method: "GET".into(),
-      path: "/api/v1/health".into(),
-      grant,
-    },
-  )
-  .await;
-  assert!(matches!(
-    channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
-    InnerMessage::Error { message } if message.contains("revoked")
-  ));
-  assert!(next_binary(&mut socket).await.is_none());
-  assert_eq!(calls.load(Ordering::SeqCst), 0);
-
-  let mut waiting = Vec::new();
-  for _ in 0..protocol::MAX_REQUESTS {
-    waiting.push(connect_async(endpoint.as_str()).await.unwrap().0);
-  }
-  let connection = tunnels.inner.lock().unwrap().online[&record.host_id].clone();
-  wait_for(|| connection.secure_channels.lock().unwrap().len() == protocol::MAX_REQUESTS).await;
-  let mut overflow = connect_async(endpoint.as_str()).await.unwrap().0;
-  assert!(
-    next_binary(&mut overflow).await.is_none(),
-    "anonymous channels cannot exceed the host capacity"
-  );
-  drop(waiting);
-  wait_for(|| connection.secure_channels.lock().unwrap().is_empty()).await;
-  stop.cancel();
-  connector.await.unwrap().unwrap();
-  tunnels.shutdown();
-  hub_task.abort();
-  local_task.abort();
-}
-
-#[tokio::test]
 async fn blind_channels_accept_opaque_bytes_and_cancel_only_the_saturated_channel() {
   let (outgoing, mut commands) = mpsc::channel(8);
   let connection = Arc::new(Connection {
     capacity: Weak::new(),
     outgoing,
-    requests: Mutex::new(HashMap::new()),
     secure_channels: Mutex::new(HashMap::new()),
     next_id: std::sync::atomic::AtomicU64::new(1),
     allow_control: false,
-    secure_only: AtomicBool::new(false),
     connector_version: None,
     shutdown: CancellationToken::new(),
   });

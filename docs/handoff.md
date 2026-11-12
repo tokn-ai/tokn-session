@@ -4,24 +4,28 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
-Hubs require account ownership for new machines. Verified email enables signup
+Hubs require account ownership for all machines. Verified email enables signup
 with usernames unique per Hub and stable user UUIDs. A renewable 90-day browser
 account cookie restores sign-in across navigation and reloads. Browser device approval powers
 CLI `auth login`. Issue and revoke scoped automation keys in **Hub account**.
-New machines claim `username:machine` with an account credential and proof of
-their existing host key. They inherit account discovery and reconnect using the
-host key. Legacy registered hosts can claim addresses without changing keys or
-pairing. See [Hub accounts](hub.md#hub-accounts-and-cli-login).
+Desktop **Start hosting** and CLI `connect` automatically sign in through browser
+approval and claim `username:machine` when an account assignment is missing.
+The shared Rust account client keeps credentials private and reuses valid saved
+logins. Registration proves the host key; `register` remains an explicit script
+command. Rename works from the app or CLI, retaining the UUID, keys, and pairings
+while retiring the old address. Machines inherit account discovery and reconnect
+using the host key. Previously unclaimed encrypted hosts reuse their identities
+during automatic registration.
+See [Hub accounts](hub.md#hub-accounts-and-cli-login).
 
 The Hub username is the namespace for an account's machine addresses and its
 discovery group. Pairing one host provides the encrypted group reference, and
-authenticated opens refresh it for previously paired devices. Existing unclaimed
-hosts retain their saved legacy groups and addresses. Discovery and per-host
+authenticated opens refresh it for previously paired devices. Discovery and per-host
 authorization remain independent. See [discovery groups](hub-pairing.md#discovery-groups).
 The gallery combines account machines in the signed-in browser with saved and
 discovered machines. Desktop and Apell combine saved and discovered machines.
 Each Hub host UUID appears once, with its assigned address or display name.
-Opening a paired card preserves the saved host key and alias.
+Opening a paired card uses the saved host key.
 A plus tile opens the **Add machine** dialog. Closing it cancels pending pairing
 and clears its code.
 Discovery controls remain compact, with **Set up discovery** collapsed below the
@@ -432,8 +436,8 @@ catalog ownership, async item IDs, unanswered state, choices, and envelope limit
 Delivery steers the owning Desktop turn through the observed version-1 IPC
 method; no fallback starts a new turn. In-memory per-question claims cover
 pending/accepted/uncertain delivery and clear only for definite non-delivery or
-resolved source state. Desktop, HTTP, direct encrypted clients, and legacy Hub
-relays share commands and control gates. Session shares remain read-only.
+resolved source state. Desktop, HTTP, and encrypted Hub clients share commands
+and control gates. Session shares remain read-only.
 Viewer-scoped drafts survive card closure/session switching within 128 recent
 requests, without browser persistence. Acceptance waits for recorded live replies;
 uncertain delivery never retries automatically. Blocking questions and historical
@@ -601,17 +605,14 @@ user-managed synchronization; replay and five-attempt/five-minute limits persist
 per host. Same-seed hosts share enrollment trust, not asymmetric identities.
 SPAKE2/HKDF/HMAC pairing is experimental and unaudited; normal traffic uses Noise
 IK. Hub registrations have bounded capacity/rate and persistent UUID tombstones.
-The default flow defers sharing; earlier owner-signed grants and selected-session
-scoping remain behind explicit CLI options. `connect --trusted-hub` retains the
-older plaintext browser-through-Hub mode. See [onboarding](hub-pairing.md),
-[legacy grants](hub-e2ee.md), and [Hub administration](hub.md). Remote connections
+Hub machine access uses host-verified pairing. See [onboarding](hub-pairing.md)
+and [Hub administration](hub.md). Remote connections
 require HTTPS termination; the host API stays on loopback. Browser builds need
 the `wasm32-unknown-unknown` Rust target and pinned `wasm-bindgen-cli` 0.2.126;
 `pnpm build` generates bindings before bundling them.
 The shared Hub viewer-route allowlist includes subscription, backward loading,
 resource details, independent inspection, lease renewal, and legacy session
-updates. These HTTP commands reach hosts through paired, signed-grant, and
-trusted-Hub connections. Encrypted tunnel tests cover forwarding request bodies.
+updates. Encrypted tunnel tests cover forwarding request bodies.
 
 ## Viewer core and remote API
 

@@ -217,7 +217,7 @@ pub fn initialize_identity(path: &Path) -> Result<(), String> {
   load_key(path).map(|_| ())
 }
 
-/// Holds one connector's ownership for a saved enrollment key across CLI/app processes.
+/// Holds exclusive ownership of a saved enrollment key during registration or hosting.
 pub struct HostLease {
   key_file: PathBuf,
   _lock: std::fs::File,
@@ -232,7 +232,7 @@ impl HostLease {
     let mut path = key_file.as_os_str().to_owned();
     path.push(".connector");
     let lock = crate::onboarding::lock(Path::new(&path)).map_err(|error| {
-      format!("Could not acquire host ownership: {error}. Stop any other connector before hosting in the app.")
+      format!("Could not acquire host ownership: {error}. Stop hosting on this computer before retrying.")
     })?;
     Ok(Self {
       key_file: key_file.to_owned(),
@@ -258,23 +258,6 @@ fn notify(sink: &Option<StatusSink>, status: ConnectorStatus) {
 pub async fn run(config: ConnectorConfig, shutdown: CancellationToken) -> Result<(), String> {
   let lease = HostLease::acquire(&config.key_file)?;
   run_owned(config, shutdown, lease, None).await
-}
-
-#[cfg(test)]
-pub(crate) fn remember_legacy_host(store: &crate::store::Store, config: &ConnectorConfig) -> crate::store::HostRecord {
-  let key = load_key(&config.key_file).unwrap();
-  let record = crate::store::HostRecord {
-    host_id: routing_id(config, &key),
-    name: config.name.clone(),
-    public_key: protocol::encode(key.verifying_key().as_bytes()),
-    access: if config.allow_control { "control" } else { "view" }.into(),
-  };
-  if config.paired.is_some() {
-    store.register_encrypted_host(record.clone()).unwrap();
-  } else {
-    store.approve_host(record.clone()).unwrap();
-  }
-  record
 }
 
 /// Setup callers acquire ownership before changing saved configuration.

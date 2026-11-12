@@ -51,16 +51,16 @@ passkeys; it does not grant access to encrypted machine content. Paired hosts
 register without administrator approval. See [Hub administration](hub.md).
 
 Configure [Hub account email delivery](hub.md#hub-accounts-and-cli-login) to
-enable signup. On each host, run the API in a separate terminal, sign in to
-the Hub, and register a machine name.
+enable signup. On each host, run the API in a separate terminal and start the
+connector. The first start opens browser sign-in and approval when needed, then
+automatically registers the machine.
 
 ```sh
 tokn-viewer-api --api-only
-tokn-session-hub auth login --hub https://hub.example.com
 tokn-session-hub connect --hub https://hub.example.com --machine workstation
 ```
 
-First setup generates a UUID, dedicated keys, and an authenticator seed. Scan
+First registration generates a UUID, dedicated keys, and an authenticator seed. Scan
 the terminal QR or import the full printed `otpauth://` URI into an authenticator
 that supports SHA-256 TOTP, then copy the printed machine ID or full machine
 reference (`UUID@host_public_key`). The QR and URI include all required settings.
@@ -85,7 +85,7 @@ code. The device saves the verified host encryption key only after authenticated
 acknowledgment. Save the full reference from the connector or connection settings
 for passkey sign-in on another device.
 
-The connector saves its configuration, so later starts need only:
+Later starts reuse the saved host configuration and account assignment:
 
 ```sh
 tokn-session-hub connect
@@ -116,10 +116,12 @@ normal authorization.
 
 ## Host from the desktop app
 
-On a new host, sign in and use `tokn-session-hub connect --machine workstation
---register-only` with the selected Hub while desktop hosting is stopped.
-Under **Machines → This machine → Host this computer**, select the registered
-Hub, choose whether to allow remote agent input, and click **Start hosting**.
+Under **Machines → This machine → Host this computer**, enter the Hub and display
+name, choose a machine name or use the suggestion, and set whether to allow
+remote agent input. **Start hosting** reuses the saved account credential or opens
+the Hub account page for browser approval, automatically registers this computer,
+and starts hosting. The dialog shows approval, registration, and connection
+progress and lets you cancel setup. No terminal setup is required.
 The bottom-left connection panel in local
 and remote views also shows this computer’s hosting status and an on/off switch.
 The switch uses saved settings; without a configured Hub it opens the same
@@ -147,10 +149,11 @@ the display; it is never saved to browser storage or sent through the Hub.
 The QR and URI contain a secret and belong only on the hosting device.
 
 The app and CLI share `~/.tokn/sessions/hub` configuration, keys, and paired-device trust.
+Their account credentials are read and written by the shared Rust client.
 An existing online connector or an ownership lock held by another updated
 process, or a loaded background API, blocks app hosting with a clear error.
 The app only stops verified services when explicitly requested in the dialog. A saved host needs a reachable saved Hub
-for the legacy-connector check before starting. Stop your background hosting services
+to check for an already connected host before starting. Stop your background hosting services
 first if you want the app to own hosting. The CLI's saved viewer URL remains
 intact; the app uses a separate ephemeral API port and token with its existing
 local reader and event stream.
@@ -172,18 +175,30 @@ own authenticator seed. The Hub can see group membership, and a client with the
 group reference can request its machine list. Pairing and saved key verification
 happen separately on each host.
 
-Previously configured discovery groups remain usable for existing unclaimed
-hosts. Claiming a host under an account moves it to the account group and
-preserves its UUID, keys, and existing pairings.
-Remove `--namespace` from existing connector launch commands when upgrading.
-The connector reads legacy group information from its saved profile.
+Starting an existing unclaimed host automatically claims an account address
+using its saved UUID and keys. Previously paired clients can reconnect after
+the claim. Account discovery then lists the machine in the username's group.
 
 ## Readable machine addresses
 
 The Hub uses the account username as the namespace. When account `alice` registers
 `macbook`, its address on that Hub is `alice:macbook`. Names use 1–63 lowercase
 ASCII letters or digits with internal hyphens. Connector `--name` sets the
-separate display name. Previously assigned legacy addresses remain usable.
+separate display name.
+
+The hosting dialog's **Rename** action changes the registered address suffix for
+an app-owned online or stopped host. Stop an external connector before renaming
+from the app. The CLI equivalent is:
+
+```sh
+tokn-session-hub rename --machine studio
+```
+
+For `alice:macbook`, this changes the address to `alice:studio`. The owning
+account authorizes the signed request, and the Hub rejects a name held by
+another machine. UUID, encryption keys, paired-device trust, and sessions stay
+with the same machine. Saved clients refresh address metadata for their pinned
+identity. The old address stops resolving and has no alias.
 
 Addresses stay reserved to the original machine UUID, even after revocation.
 Account registration requires an account credential and proof of the machine
@@ -237,7 +252,8 @@ use `no-referrer`. Ceremony options travel in a URL fragment that the page clear
 
 Host state defaults to `~/.tokn/sessions/hub`; use `--state-dir PATH` consistently for a
 separate installation. Host files include `host.json`, `host-enrollment.key`,
-`host-noise.key`, and `host-access.json` (authenticator, authorized devices,
+`host-noise.key`, `host-account.json` (Hub assignment and discovery group), and
+`host-access.json` (authenticator, authorized devices,
 passkeys, and persisted attempt limits). Back up identity and trust state with
 the device's storage controls. Corrupt, missing, or insecure saved state fails
 closed; Unix private files must have mode 0600 and belong to the current user.
@@ -265,9 +281,8 @@ tokn-session-hub runtime-management --disable
 The setting defaults to disabled and lives in `host-access.json`; `--state-dir`
 selects another host bundle. It also requires `--allow-control` and an active
 paired app or passkey-authenticated browser session. Changing it takes effect
-for subsequent requests without restarting the connector. Browser enrollment,
-session shares, legacy signed grants, and trusted-Hub plaintext forwarding never
-gain runtime administration. Remote clients cannot enable their own access.
+for subsequent requests without restarting the connector. An administrator
+must enable this permission on the hosting computer.
 Update the host connector before enabling this setting; older connectors reject
 the new enabled trust field rather than silently ignoring the permission.
 An administrator can edit executable paths, environment variables, and RPC
@@ -323,13 +338,14 @@ seed, export it and transfer the private file through a trusted channel:
 ```sh
 tokn-session-hub authenticator --export-file ./authenticator.secret
 # On a new host:
-tokn-session-hub connect --hub https://hub.example.com \
+tokn-session-hub register --hub https://hub.example.com --machine workstation \
   --totp-secret-file ./authenticator.secret
+tokn-session-hub connect
 ```
 
 Exports create a new mode-0600 file and refuse overwrites. Imports require a
 private Base32 file and work only before authenticator setup; alternatively use
-`authenticator --import-file FILE` before the first `connect`. The Hub does not
+`authenticator --import-file FILE` before the first `connect` or `register`. The Hub does not
 synchronize seeds or trust records. Compromising any seed-holding host threatens
 first pairing across that group; existing host pins remain fixed. Each host
 consumes a successful code once per time step. Keep endpoint clocks correct.
@@ -358,8 +374,5 @@ Normal requests use fresh `Noise_IK_25519_ChaChaPoly_BLAKE2s` channels and host-
 authorization. There is no plaintext fallback or automatic request retry. The
 SPAKE2 composition is experimental, unaudited, and not RFC 9382 wire-compatible.
 
-The installed `tokn-session-hub client` helper is optional compatibility. In
-paired mode, it terminates encryption in a local Rust process and serves
-`/connect` with a local bearer link. Existing hosts enrolled with the
-[owner-signed grant workflow](hub-e2ee.md) or `connect --trusted-hub` can
-reconnect with their saved identities.
+The optional `tokn-session-hub client` helper terminates encryption in a local
+Rust process and serves `/connect` with a local bearer link.
