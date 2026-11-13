@@ -72,9 +72,10 @@ worktree groups); changing its folder moves the row. Time view retains project
 labels, and drafts awaiting a folder remain separately accessible. No
 native session or upload starts until the first Send. Opening a draft model
 picker can briefly start a metadata RPC process; it never creates or resumes a
-saved conversation. Pi, Codex and OpenCode choices remain local to each draft,
+saved conversation. Pi, Codex, OpenCode and advertised ZCode choices remain local to each draft,
 reset with project/provider/runtime changes, and are revalidated and applied
-before its first prompt. ZCode and DSH use their runtime defaults. Availability, catalogs
+before its first prompt. DSH uses its runtime default; ZCode defaults remain
+available when its runtime has not advertised other choices. Availability, catalogs
 and first Send share a host-resolved `RuntimePlan`; an opaque `runtime_plan_id`
 pins configuration and project scope without exposing launch configuration.
 Stale plans reject before admission. Creation receipts include model identity
