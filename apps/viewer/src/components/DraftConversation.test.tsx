@@ -55,6 +55,7 @@ describe("draft conversation", () => {
     fireEvent.click(button);
     expect(send).toHaveBeenCalledExactlyOnceWith({ provider, runtime_plan_id: `${provider}-plan` });
     expect(input.on_load_models).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Attach images" })).not.toBeInTheDocument();
     expect(screen.queryByRole("combobox", { name: "Runtime" })).not.toBeInTheDocument();
   });
 
@@ -91,13 +92,15 @@ describe("draft conversation", () => {
     expect(screen.queryByRole("button", { name: "Configure agent runtime" })).not.toBeInTheDocument();
   });
 
-  it("loads models on opening the picker, keeps selection local, and gates images by the selected model", async () => {
+  it.each(["pi", "codex", "open_code", "zcode"] as RpcProvider[])("loads %s models lazily and gates images by host capability and selected model", async (provider) => {
     const file = new File(["png"], "draft.png", { type: "image/png" });
     const chosen = { model: { model_provider: "provider", model_id: "text-only", display_name: "Text model" }, supports_images: false };
-    const input = props({ on_load_models: vi.fn(async () => ({ models: [chosen], catalog_revision: "verified",
+    const input = props({ on_load_options: vi.fn(async () => ({ project_id: "repo", providers: [
+      { provider, available: true, reason: null, supports_images: true, default_profile_id: null, runtimes: [] },
+    ] })), on_load_models: vi.fn(async () => ({ models: [chosen], catalog_revision: "verified",
       runtime_profile_id: null, runtime_revision: null, reason: null })) });
     function Stateful() {
-      const [value, setValue] = useState(draft({ prompt: "Inspect", images: [{ draft_id: "image", file, url: "blob:screen" }] }));
+      const [value, setValue] = useState(draft({ selection: { provider }, prompt: "Inspect", images: [{ draft_id: "image", file, url: "blob:screen" }] }));
       return <DraftConversation {...input} draft={value} on_change={(patch) => setValue((previous) => ({ ...previous, ...patch }))} />;
     }
     render(<Stateful />); await ready();
@@ -105,7 +108,7 @@ describe("draft conversation", () => {
     expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: /Model: Runtime default/ }));
     fireEvent.click(await screen.findByRole("button", { name: /Text model provider/ }));
-    expect(input.on_load_models).toHaveBeenCalledExactlyOnceWith({ project_id: "repo", provider: "pi" });
+    expect(input.on_load_models).toHaveBeenCalledExactlyOnceWith({ project_id: "repo", provider });
     expect(input.on_send).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
     expect(screen.getByText(/This model cannot accept these images/)).toBeInTheDocument();

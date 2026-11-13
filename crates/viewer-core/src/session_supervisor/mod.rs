@@ -225,6 +225,16 @@ impl SessionSupervisor {
     images: Vec<ResolvedImage>,
     expected_transport: SessionTransport,
   ) -> Result<Admission, DeliveryError> {
+    if target.input.provider != ViewerProvider::ZCode
+      && request
+        .model_selection
+        .as_ref()
+        .is_some_and(|selection| selection.model_input_mode.is_some())
+    {
+      return Err(DeliveryError::not_sent(
+        "This session does not support per-input model selection",
+      ));
+    }
     if let Some(delivery) = request.delivery {
       if target.input.provider != ViewerProvider::ZCode
         || !matches!(delivery, DeliveryMode::Guide | DeliveryMode::Queue)

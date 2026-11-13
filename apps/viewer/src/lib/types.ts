@@ -451,6 +451,8 @@ export interface SessionModelStatus {
   updates_pi_default: boolean;
   /** Omitted by older hosts; draft model selection then remains read-only. */
   supports_model_input?: boolean;
+  /** A choice stays with its message, including active guidance and queued input. */
+  model_input_mode?: "per_input";
 }
 export interface ModelChoice { model: ModelIdentity; supports_images: boolean }
 export interface ListSessionModelsResponse { status: SessionModelStatus; models: ModelChoice[] }
@@ -459,6 +461,7 @@ export interface MessageModelSelection {
   model_id: string;
   expected_revision: string;
   runtime_generation: string | null;
+  model_input_mode?: "per_input";
 }
 export interface MessageModelResult {
   outcome: "unchanged" | "applied" | "ignored_while_running";
@@ -645,7 +648,11 @@ export interface RpcRuntimeInfo {
   provider: RpcProvider;
   ownership: "managed" | "attached";
   status: "connected" | "disconnected" | "recovery_required" | "closing" | "cleanup_failed";
-  capabilities: { operations: Partial<Record<RpcOperation, { supported: boolean; reason: string | null }>>; atomic_model_on_send: boolean };
+  capabilities: {
+    operations: Partial<Record<RpcOperation, { supported: boolean; reason: string | null }>>;
+    atomic_model_on_send: boolean;
+    per_input_model?: boolean;
+  };
   session_count: number;
   last_error: string | null;
 }

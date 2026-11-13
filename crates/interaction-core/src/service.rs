@@ -336,9 +336,12 @@ impl InteractionService {
       if input.text.trim().is_empty() && input.images.is_empty() {
         return Err(InteractionError::invalid("Message cannot be empty"));
       }
-      if input.model.is_some() && !descriptor.capabilities.atomic_model_on_send {
+      if input.model.is_some()
+        && !descriptor.capabilities.atomic_model_on_send
+        && !descriptor.capabilities.per_input_model
+      {
         return Err(InteractionError::unsupported(
-          "This runtime cannot atomically apply model intent only when starting a turn",
+          "This runtime cannot bind model intent to input admission",
         ));
       }
     }

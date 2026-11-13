@@ -64,6 +64,10 @@ pub struct Capabilities {
   /// True only if the runtime can atomically apply model intent on a new turn
   /// while ignoring it when the same admission steers an existing turn.
   pub atomic_model_on_send: bool,
+  /// Native input admission captures explicit model intent for this input,
+  /// including guidance and queued work; an in-flight model call is unchanged.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub per_input_model: bool,
 }
 impl Capabilities {
   pub fn supports(&self, operation: Operation) -> bool {

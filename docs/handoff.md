@@ -184,7 +184,19 @@ New sessions use deferred native persistence, allowing the first V4 admission
 to materialize history before its input ledger. Stop cancels native execution
 and holds remaining queued input; queue editing and resuming held input remain
 in ZCode. The adapter does not replay queues after reconnecting.
-Drafts use the runtime default model. Live ZCode questions and approvals appear
+ZCode advertises separate per-input model intent, leaving the strict idle-only
+model capability unchanged. Send/Queue capture the selected model; active calls
+continue unchanged and guidance can use it at the next model boundary. Clients
+echo the model-input mode, runtime instance and model revision; old or stale
+intents reject without dispatch. Image-only and mixed inputs use native chunked
+artifact staging after vision-model verification. Busy guidance with images
+queues natively; artifact failure never sends the prompt. Full model catalogs
+are captured from authorized native creation and refreshed with current-model
+facts. Cold resumes initially expose only their current model; bounded resume
+does not load a full image transcript just for catalog discovery. Drafts can use
+the runtime default or an already advertised choice. Historical native artifacts
+load lazily from the standard `cli/db` + `cli/artifacts` layout without hydrating
+bytes in timeline/index reads. Live ZCode questions and approvals appear
 above the composer independently of recorded question cards. AskUserQuestion
 supports single/multiple choices, written answers and option notes. Tool
 permissions offer native allow-once/deny, and ExitPlanMode displays its plan for
@@ -195,7 +207,9 @@ commands fence the exact runtime instance and redact native callback envelopes.
 Viewing grants and shares receive an empty pending list and cannot respond.
 Native CLI 0.17.1 was verified with an isolated loopback model for creation,
 cold resume, context continuity, questions, per-use permissions, native guidance,
-follow-up queues and Stop. Guide acknowledgements retain generic acceptance
+follow-up queues, model-bound text/images, lazy warm/cold image reads and Stop.
+Selected native creation preserves reasoning in both its model selection and
+thought-level parameters. Guide acknowledgements retain generic acceptance
 when native admission does not identify the eventual consuming turn.
 ZCode soft-deleted rows are excluded from historical catalogs and
 exact reads when the native `time_deleted` column exists.
@@ -228,9 +242,9 @@ Image staging does not change models, and delivery checks the effective model.
 Codex RPC model reads use an already bound app-server; an unbound session keeps
 recorded context without activation. Explicit Desktop model reads discover the
 local owner and retain recorded context when the bounded lookup is unavailable.
-The common RPC adapters expose verified catalogs while model-on-send remains
-unsupported; Desktop supplies no verifiable catalog through follower IPC.
-These pickers remain read-only with a reason. Shares and viewing grants never
+ZCode binds model choices per input through native V4; the other generic RPC
+adapters retain read-only selection. Desktop supplies no verifiable catalog
+through follower IPC. Unsupported pickers show a reason. Shares and viewing grants never
 expose live catalogs or model mutation. See [session models](viewer-models.md).
 
 Recorded images from Codex, Pi, OpenCode, and ZCode now render through lazy

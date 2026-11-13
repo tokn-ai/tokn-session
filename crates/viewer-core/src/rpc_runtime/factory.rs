@@ -340,6 +340,10 @@ impl core_runtime::RuntimeHost for Host {
       Provider::OpenCode => Err(InteractionError::invalid(
         "OpenCode model selection requires its provider identity",
       )),
+      Provider::ZCode if model.model_provider.is_some() => Ok(()),
+      Provider::ZCode => Err(InteractionError::invalid(
+        "ZCode model selection requires its provider identity",
+      )),
       _ => Err(InteractionError::unsupported(
         "This runtime uses its default model for new sessions",
       )),

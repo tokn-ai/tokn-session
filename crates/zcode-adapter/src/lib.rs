@@ -1,5 +1,6 @@
 //! Managed interaction with the native ZCode Protocol app-server.
 mod delivery;
+mod images;
 mod interactions;
 mod transport;
 mod wire;
@@ -57,6 +58,7 @@ struct Inner {
   // Serialize residency transitions while allowing independent controls.
   binding: AsyncMutex<()>,
   sessions: Mutex<HashSet<String>>,
+  model_catalog: Mutex<Option<wire::CapturedCatalog>>,
   active_prompts: Mutex<HashSet<String>>,
   interactions: Mutex<interactions::Interactions>,
 }
@@ -88,16 +90,19 @@ impl ZCodeAdapter {
         instance_id: uuid::Uuid::new_v4().to_string(),
         provider: Provider::ZCode,
         ownership: Ownership::Managed,
-        capabilities: Capabilities::default()
-          .with(Operation::Metadata)
-          .with(Operation::State)
-          .with(Operation::Models)
-          .with(Operation::Message)
-          .with(Operation::Guide)
-          .with(Operation::Queue)
-          .with(Operation::CancelTurn)
-          .with(Operation::PendingInteractions)
-          .with(Operation::Respond),
+        capabilities: Capabilities {
+          per_input_model: true,
+          ..Capabilities::default()
+            .with(Operation::Metadata)
+            .with(Operation::State)
+            .with(Operation::Models)
+            .with(Operation::Message)
+            .with(Operation::Guide)
+            .with(Operation::Queue)
+            .with(Operation::CancelTurn)
+            .with(Operation::PendingInteractions)
+            .with(Operation::Respond)
+        },
       },
       directory: options.directory,
       history_path: options.history_path,
@@ -108,6 +113,7 @@ impl ZCodeAdapter {
       disconnected: AtomicBool::new(false),
       binding: AsyncMutex::new(()),
       sessions: Mutex::new(HashSet::new()),
+      model_catalog: Mutex::new(None),
       active_prompts: Mutex::new(HashSet::new()),
       interactions: Mutex::new(interactions::Interactions::default()),
     });
@@ -177,15 +183,30 @@ impl ZCodeAdapter {
       "persistence": "deferred",
     });
     if let Some(model) = model {
-      params["model"] = serde_json::to_value(wire::ModelSelection::from_model(model)?)
-        .map_err(|_| InteractionError::invalid("Invalid ZCode model selection"))?;
+      let (selection, _) = self.inner.catalog_snapshot().await?.input_model(Some(&model), false)?;
+      if let Some(level) = selection
+        .options
+        .as_ref()
+        .and_then(|options| options.reasoning_level.as_ref())
+      {
+        // Initial app construction needs the full selection. Native create's
+        // later legacy setter drops options, so preserve reasoning in both slots.
+        params["thoughtLevel"] = json!(level);
+      }
+      params["model"] =
+        serde_json::to_value(selection).map_err(|_| InteractionError::invalid("Invalid ZCode model selection"))?;
     }
     let snapshot: wire::Snapshot =
       wire::decode(self.inner.transport.call("session/create", params, true).await?, true)?;
     self.inner.verify_snapshot(&snapshot, session_id, true)?;
-    self.inner.bind(session_id).await.map_err(|_| {
+    let created = self.inner.bind(session_id).await.map_err(|_| {
       InteractionError::uncertain("ZCode created a session but its live event subscription could not be verified")
-    })
+    })?;
+    self.inner.model_catalog.lock().unwrap().replace(wire::CapturedCatalog {
+      source_session: session_id.into(),
+      models: snapshot.settings.model.available,
+    });
+    Ok(created)
   }
 
   pub async fn resume_session(&self, session_id: &str) -> Result<CreatedSession, InteractionError> {
@@ -299,7 +320,7 @@ impl Inner {
   }
 
   async fn snapshot(&self, id: &str) -> Result<wire::Snapshot, InteractionError> {
-    let snapshot: wire::Snapshot = wire::decode(
+    let mut snapshot: wire::Snapshot = wire::decode(
       self
         .transport
         .call(
@@ -313,7 +334,43 @@ impl Inner {
       false,
     )?;
     self.verify_snapshot(&snapshot, id, false)?;
+    self.merge_model_catalog(&mut snapshot);
     Ok(snapshot)
+  }
+
+  fn merge_model_catalog(&self, snapshot: &mut wire::Snapshot) {
+    let mut cache = self.model_catalog.lock().unwrap();
+    let Some(captured) = cache.as_ref() else { return };
+    if snapshot.settings.model.available.iter().any(|fresh| {
+      captured
+        .models
+        .iter()
+        .find(|known| known.same_identity(fresh))
+        .is_some_and(|known| !known.same_configuration(fresh))
+    }) {
+      // A new active choice or reasoning level does not change the catalog.
+      // Changed capability facts for the same identity invalidate older peers.
+      cache.take();
+      return;
+    }
+    let mut merged = captured.models.clone();
+    for fresh in std::mem::take(&mut snapshot.settings.model.available) {
+      if let Some(known) = merged.iter_mut().find(|known| known.same_identity(&fresh)) {
+        *known = fresh;
+      } else {
+        merged.push(fresh);
+      }
+    }
+    snapshot.settings.model.available = merged;
+  }
+
+  async fn catalog_snapshot(&self) -> Result<wire::Snapshot, InteractionError> {
+    // App-server has no sessionless catalog RPC. Reuse only an already bound
+    // resident session in this verified project; inspection never activates one.
+    let id = self.sessions.lock().unwrap().iter().min().cloned().ok_or_else(|| {
+      InteractionError::unsupported("Connect a ZCode session first to read this runtime's model catalog")
+    })?;
+    self.snapshot(&id).await
   }
 
   fn session_state(&self, snapshot: &wire::Snapshot) -> SessionState {
@@ -395,6 +452,7 @@ impl Inner {
   fn disconnect(&self, reason: &str) {
     self.transport.terminate();
     self.active_prompts.lock().unwrap().clear();
+    self.model_catalog.lock().unwrap().take();
     *self.interactions.lock().unwrap() = interactions::Interactions::default();
     self.storage.send_if_modified(|storage| {
       if storage.is_none() {
@@ -422,6 +480,14 @@ impl Inner {
     let params = &frame["params"];
     if let Some(id) = frame.get("id") {
       return self.receive_callback(id, method, params).await;
+    }
+    if method == "state.updated"
+      && matches!(
+        params["reason"].as_str(),
+        Some("model_changed" | "thought_level_changed" | "mode_changed")
+      )
+    {
+      self.model_catalog.lock().unwrap().take();
     }
     if method == "startup/storageState" && params["databaseKind"] == "session" {
       if params["phase"] == "ready" {
@@ -465,6 +531,10 @@ impl Inner {
           self.retire_interactions(id, false);
           self.sessions.lock().unwrap().remove(id);
           self.active_prompts.lock().unwrap().remove(id);
+          let mut catalog = self.model_catalog.lock().unwrap();
+          if catalog.as_ref().is_some_and(|catalog| catalog.source_session == id) {
+            catalog.take();
+          }
           self.publish_state(id, ExecutionState::Stopped);
         }
         _ => {}
@@ -493,10 +563,7 @@ impl Inner {
     input: MessageInput,
     delivery: DeliveryMode,
   ) -> Result<Reply, InteractionError> {
-    if !input.images.is_empty() {
-      return Err(InteractionError::unsupported("ZCode image upload is unavailable"));
-    }
-    if input.text.trim().is_empty()
+    if (input.text.trim().is_empty() && input.images.is_empty())
       || input.text.chars().count() > tokn_interaction_core::admission::MAX_INPUT_LENGTH
       || input
         .text
@@ -525,12 +592,17 @@ impl InteractionAdapter for ZCodeAdapter {
         && request.target.runtime_id == self.inner.descriptor.runtime_id
         && request.target.instance_id == self.inner.descriptor.instance_id
         && self.inner.transport.is_live()
-        && matches!(request.command, Command::Metadata)
       {
-        return Ok(Reply::Metadata(Metadata {
-          name: Some("ZCode".into()),
-          ..Metadata::default()
-        }));
+        match request.command {
+          Command::Metadata => {
+            return Ok(Reply::Metadata(Metadata {
+              name: Some("ZCode".into()),
+              ..Metadata::default()
+            }));
+          }
+          Command::Models => return Ok(Reply::Models(self.inner.catalog_snapshot().await?.models())),
+          _ => {}
+        }
       }
       let id = self.inner.check_target(&request.target)?;
       match request.command {

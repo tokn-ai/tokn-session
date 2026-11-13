@@ -1,5 +1,5 @@
 use super::*;
-use crate::models::{ListSessionModelsResponse, SessionModelState, SessionModelStatus};
+use crate::models::{ListSessionModelsResponse, ModelInputMode, SessionModelState, SessionModelStatus};
 use tokn_interaction_core::{
   Command, ErrorKind, ImageInput, InputDisposition, InteractionError, MessageInput, Operation, PendingInteraction,
   Reply,
@@ -24,7 +24,10 @@ impl SessionSupervisor {
       if !binding.capabilities.supports(Operation::Message) {
         return Err(DeliveryError::not_sent("This runtime does not support message input"));
       }
-      let images_available = if matches!(target.input.provider, ViewerProvider::Codex | ViewerProvider::OpenCode) {
+      let images_available = if matches!(
+        target.input.provider,
+        ViewerProvider::Codex | ViewerProvider::OpenCode | ViewerProvider::ZCode
+      ) {
         self.rpc_models(target, true).await.ok().is_some_and(|catalog| {
           catalog.status.state.model.as_ref().is_some_and(|current| {
             catalog.models.iter().any(|choice| {
@@ -66,10 +69,25 @@ impl SessionSupervisor {
   ) -> Result<Admission, DeliveryError> {
     // Model intent is never simulated by a racing metadata/read/set sequence.
     // Pi's exclusive driver retains its existing admission workflow separately.
-    if request.model_selection.is_some() {
+    if request.model_selection.is_some() && target.input.provider != ViewerProvider::ZCode {
       return Err(DeliveryError::not_sent(
         "This RPC runtime cannot atomically apply a draft model on Send",
       ));
+    }
+    if let Some(selection) = &request.model_selection {
+      if selection.model_input_mode != Some(ModelInputMode::PerInput) {
+        return Err(DeliveryError::not_sent(
+          "Update the Viewer to select a model for each ZCode input, then choose the model again.",
+        ));
+      }
+      let current = self.runtimes.binding(&target.session_key).ok_or_else(|| {
+        DeliveryError::not_sent("The model runtime disconnected. Reconnect and choose the model again.")
+      })?;
+      if selection.runtime_generation.as_deref() != Some(current.target.instance_id.as_str()) {
+        return Err(DeliveryError::not_sent(
+          "The model runtime changed. Refresh the model picker and choose again.",
+        ));
+      }
     }
     let provider = target.provider().map_err(DeliveryError::not_sent)?;
     let binding = if self.runtimes.binding(&target.session_key).is_some() {
@@ -98,6 +116,22 @@ impl SessionSupervisor {
         .await
     }
     .map_err(DeliveryError::not_sent)?;
+    let model = if let Some(selection) = &request.model_selection {
+      if !binding.capabilities.per_input_model {
+        return Err(DeliveryError::not_sent(
+          "This RPC runtime cannot bind model intent to each input",
+        ));
+      }
+      let catalog = self.rpc_models(target, true).await.map_err(DeliveryError::not_sent)?;
+      Some(selected_rpc_model(
+        selection,
+        &binding.target.instance_id,
+        &catalog.status.state,
+        &catalog.models,
+      )?)
+    } else {
+      None
+    };
     use base64::Engine;
     let images = images
       .into_iter()
@@ -115,6 +149,7 @@ impl SessionSupervisor {
           input: MessageInput {
             text: request.text,
             images,
+            model,
             ..Default::default()
           },
           delivery: request.delivery.unwrap_or_else(|| rpc_message_delivery(provider)),
@@ -159,17 +194,19 @@ impl SessionSupervisor {
     } else {
       Vec::new()
     };
+    let supports_model_input = binding.capabilities.atomic_model_on_send || binding.capabilities.per_input_model;
     Ok(ListSessionModelsResponse {
       status: SessionModelStatus {
         state: SessionModelState::live(state.model, &binding.target.instance_id),
-        can_select: binding.capabilities.atomic_model_on_send,
+        can_select: supports_model_input,
         can_list: binding.capabilities.supports(Operation::Models),
-        reason: (!binding.capabilities.atomic_model_on_send).then(|| {
+        reason: (!supports_model_input).then(|| {
           "This RPC runtime exposes its model catalog but cannot atomically apply a draft model on Send".into()
         }),
         runtime_generation: Some(binding.target.instance_id),
         updates_default: false,
-        supports_model_input: binding.capabilities.atomic_model_on_send,
+        supports_model_input,
+        model_input_mode: binding.capabilities.per_input_model.then_some(ModelInputMode::PerInput),
       },
       models,
     })
@@ -296,6 +333,32 @@ impl SessionSupervisor {
       _ => Err(DeliveryError::uncertain("Cancellation is awaiting native confirmation")),
     }
   }
+}
+
+pub(super) fn selected_rpc_model(
+  selection: &crate::models::MessageModelSelection,
+  instance: &str,
+  state: &SessionModelState,
+  models: &[crate::models::ModelChoice],
+) -> Result<crate::models::ModelIdentity, DeliveryError> {
+  if selection.model_input_mode != Some(ModelInputMode::PerInput) {
+    return Err(DeliveryError::not_sent(
+      "Update the Viewer to select a model for each ZCode input, then choose the model again.",
+    ));
+  }
+  tokn_interaction_core::managed_sessions::validate_message_selection(selection).map_err(DeliveryError::not_sent)?;
+  if selection.runtime_generation.as_deref() != Some(instance) || selection.expected_revision != state.revision {
+    return Err(DeliveryError::not_sent(
+      "The session model or runtime changed. Refresh the model picker and choose again.",
+    ));
+  }
+  models
+    .iter()
+    .find(|choice| {
+      choice.model.model_provider == selection.model_provider && choice.model.model_id == selection.model_id
+    })
+    .map(|choice| choice.model.clone())
+    .ok_or_else(|| DeliveryError::not_sent("The selected model is no longer available. Choose a model again."))
 }
 
 pub(super) fn delivery_error(error: InteractionError) -> DeliveryError {

@@ -58,11 +58,18 @@ fn omitted_delivery_preserves_legacy_fingerprints() {
     message_fingerprint(&request.text, &request.image_ids)
   );
   request.model_selection = Some(crate::managed_sessions::MessageModelSelection {
+    model_input_mode: None,
     model_provider: Some("provider".into()),
     model_id: "model".into(),
     expected_revision: "revision".into(),
     runtime_generation: None,
   });
+  assert!(
+    serde_json::to_value(request.model_selection.as_ref().unwrap())
+      .unwrap()
+      .get("model_input_mode")
+      .is_none()
+  );
   let legacy: [u8; 32] = Sha256::digest(
     serde_json::to_vec(&(
       &request.text,
@@ -276,6 +283,7 @@ async fn message_receipts_bind_model_intent_and_retain_confirmed_reset_on_failur
   let broker = InputBroker::default();
   let mut original = request("steer");
   original.model_selection = Some(MessageModelSelection {
+    model_input_mode: None,
     model_provider: Some("synthetic".into()),
     model_id: "vision".into(),
     expected_revision: "old".into(),

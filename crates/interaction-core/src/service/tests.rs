@@ -144,6 +144,59 @@ fn question(id: &str) -> PendingInteraction {
   }
 }
 
+#[tokio::test]
+async fn per_input_model_intent_has_a_distinct_capability_from_idle_only_selection() {
+  for supported in [false, true] {
+    let service = InteractionService::default();
+    let mut adapter = FakeAdapter::new();
+    let descriptor = &mut Arc::get_mut(&mut adapter).unwrap().descriptor;
+    descriptor.capabilities = descriptor.capabilities.clone().with(Operation::Guide);
+    descriptor.capabilities.per_input_model = supported;
+    assert!(!descriptor.capabilities.atomic_model_on_send);
+    service.register(adapter.clone()).unwrap();
+    let result = service
+      .execute(request(
+        "model-intent",
+        Command::Message {
+          input: MessageInput {
+            text: "Use this model for this input".into(),
+            model: Some(ModelIdentity {
+              model_provider: Some("fixture-provider".into()),
+              model_id: "fixture-model".into(),
+              display_name: None,
+            }),
+            ..Default::default()
+          },
+          delivery: DeliveryMode::Guide,
+        },
+      ))
+      .await;
+    if supported {
+      assert!(matches!(result, Ok(Reply::Admission(_))));
+      assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+    } else {
+      assert_eq!(result.unwrap_err().kind, ErrorKind::Unsupported);
+      assert_eq!(adapter.calls.load(Ordering::SeqCst), 0);
+    }
+    service.shutdown().await;
+  }
+}
+
+#[test]
+fn old_runtime_descriptors_do_not_gain_per_input_model_support() {
+  let capabilities: Capabilities = serde_json::from_value(serde_json::json!({
+    "operations":{}, "atomic_model_on_send":false,
+  }))
+  .unwrap();
+  assert!(!capabilities.per_input_model);
+  assert!(
+    serde_json::to_value(capabilities)
+      .unwrap()
+      .get("per_input_model")
+      .is_none()
+  );
+}
+
 #[test]
 fn selected_option_notes_require_the_explicit_native_capability() {
   let mut pending = question("notes");

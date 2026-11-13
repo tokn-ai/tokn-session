@@ -24,9 +24,9 @@ Source ranges use UTF-16 offsets to match the displayed Markdown without giving
 the client file-read authority. Images outside a truncated preview, or in a
 translated message, remain available in the attachment tray.
 
-The session composer and local **New Pi Session** dialog accept file picking,
+The session composer and local **New session** drafts accept file picking,
 clipboard images, and drag/drop, with removable previews and image-only submission.
-Existing Codex Desktop and Pi input transports handle sending. Codex uses validated
+Codex, Pi, OpenCode and ZCode transports handle supported image sending. Codex uses validated
 host-local image paths; Pi uses native image content with base64 bytes and MIME
 type. Pi advertises image support from the current model and rechecks the
 effective model inside Send. `images_stageable` allows bounded uploads before an
@@ -35,6 +35,14 @@ check the active model even if the draft chose another one. Older bridges
 without the capability field remain text-only. New managed
 Pi sessions check the actual model after startup. Unsupported images produce an
 explicit failure rather than silently sending only their caption.
+
+ZCode advertises image support from native model properties. Explicit model
+intent and images share one input admission; absent an override, the adapter
+pins the verified current vision model before uploading. Native V4 attachment
+begin/chunk/commit copies bytes into session-owned artifacts. Busy Guide with
+attachments becomes native queued work, retaining its model and images. Upload
+failure leaves an editable draft and never dispatches the prompt. Only the
+verified CLI 0.17.1 attachment schema is supported; unknown schemas fail closed.
 
 Stopped viewer-owned Pi sessions expose no image capability until Resume verifies
 the current model; status inspection never starts a worker. Image-bearing requests
@@ -96,6 +104,13 @@ asset garbage collection is not implemented. Pi and managed Pi receive embedded
 bytes owned by detached delivery work, so their staged files remain eligible for
 normal expiry/release and are not permanently retained. Upload identifiers are
 process-local, so an unsent draft must upload again after a host restart.
+ZCode retains committed native artifacts independently, so Viewer upload files
+can expire normally. Historical `zcode-artifact` references are resolved only
+for their exact owning ZCode session through the lazy image API. The standard
+`cli/db/db.sqlite` and sibling `cli/artifacts` layout is supported; an unrelated
+database override cannot identify an artifact root. Reads are bounded and
+ambiguous or escaped paths remain unavailable. Timeline and index reads do not
+hydrate those image files.
 
 Message receipts include ordered image identities; managed Pi and its bridge also
 bind image content hashes. Lost acknowledgments remain uncertain and are never

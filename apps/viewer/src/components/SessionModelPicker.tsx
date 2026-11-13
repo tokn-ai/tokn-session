@@ -2,13 +2,13 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useFloatingPanel } from "../lib/useFloatingPanel";
 import { modelLabel, sameModel } from "../lib/sessionModels";
-import type { ModelChoice, SessionModelState } from "../lib/types";
+import type { ModelChoice, SessionModelState, SessionModelStatus } from "../lib/types";
 import { ChevronIcon, CloseIcon } from "./Icons";
 import "./SessionModelPicker.css";
 
 interface ModelPickerController {
   state: SessionModelState | null;
-  status?: { updates_pi_default: boolean } | null;
+  status?: Pick<SessionModelStatus, "updates_pi_default" | "model_input_mode"> | null;
   reason?: string | null;
   error: string | null;
   checking: boolean;
@@ -103,7 +103,9 @@ export function SessionModelPicker({ model, provider, input_busy = false, select
         })}
       </div> : model.choices && !model.loading ? <p className="session-model__notice">No verified models are available.</p> : null}
       {!model.can_select && !model.checking && !model.loading && !model.error ? <p className="session-model__notice">{reason}</p> : null}
-      <p className="session-model__footnote">{mode === "creation" ? "Your model choice is applied when you send the first message." : model.running
+      <p className="session-model__footnote">{mode === "creation" ? "Your model choice is applied when you send the first message."
+        : model.status?.model_input_mode === "per_input" ? "Your model choice stays with this message. Guidance can use it in ongoing work; queued follow-ups keep their choice."
+        : model.running
         ? "While this session is responding, Send steers the current model and ignores this choice."
         : "Your model choice is applied when you send the next message."}</p>
       {model.status?.updates_pi_default ? <p className="session-model__footnote">When applied on Send, this choice also updates Pi’s default for new sessions on this machine.</p> : null}

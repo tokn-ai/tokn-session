@@ -81,11 +81,20 @@ ZCode supports `Guide` and `Queue`, and rejects all strict delivery modes and
 `StartOrSteer`. An `Accepted` admission is distinct from started, steered, or completed work.
 Cancellation ends native turn work and may preserve queued inputs.
 
-`MessageInput.model` is reserved for an adapter that can atomically apply it only
-when starting, ignoring it during steering. The general adapters
-advertise this as unsupported: their native APIs cannot guarantee applying it
-only on idle admission. Model catalogs still provide real metadata.
-The viewer's existing Pi bridge can retain its stronger native admission path.
+`MessageInput.model` requires an explicit native capability. The established
+`atomic_model_on_send` contract applies the choice only when starting and ignores
+it during steering. ZCode instead advertises `per_input_model`: native admission
+captures the model with each Guide/Queue input. An in-flight model request is
+unchanged; guidance can apply the choice at its next model boundary, and queued
+work retains its own model. These contracts are separate. Other general adapters
+remain read-only for model selection; the Viewer Pi workflow keeps its existing
+idle selection behavior.
+
+ZCode image inputs use native chunked attachment transactions followed by one
+V4 input command. The adapter validates all images and pins an advertised vision
+model before staging. Attachment failure means no prompt was dispatched, even
+if an uncertain commit leaves an orphan native artifact. Once input dispatch
+begins, uncertain admission is retained without replay.
 
 The core permits one awaiting message admission per session while allowing
 cancellation and question replies to proceed independently. A request receipt binds

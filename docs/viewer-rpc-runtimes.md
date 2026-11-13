@@ -128,7 +128,11 @@ Codex/OpenCode/ZCode/DSH sessions through saved or discovered runtimes. ZCode
 Send starts idle sessions or guides active work at native boundaries;
 guidance may become a follow-up. Queue explicitly requests a follow-up and
 starts immediately when idle. Strict idle-only or turn-fenced steering is
-unavailable, and neither mode applies a draft model or accepts images.
+unavailable. Model choices are captured per input, including guidance and queued
+work; the current model call remains unchanged. Vision models accept images
+through native artifact staging, including image-only sends. Busy guidance with
+images queues natively. Catalogs remain instance-bound: cold-resumed sessions
+initially expose their current model until native creation advertises full choices.
 Its live panel shows questions, per-use tool
 permissions and plan review without requiring a recorded question card. Options,
 written answers and notes retain their native meaning. Permission controls expose

@@ -128,9 +128,11 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
     const text = current.draft;
     const images = current.images;
     const model_draft = current.model_draft;
+    const per_input_model = model?.status?.model_input_mode === "per_input";
     const model_selection = model_draft && model?.status ? {
       model_provider: model_draft.model.model_provider, model_id: model_draft.model.model_id,
       expected_revision: model.status.state.revision, runtime_generation: model.status.runtime_generation,
+      ...(model.status.model_input_mode ? { model_input_mode: model.status.model_input_mode } : {}),
     } : undefined;
     const source_scope = scope;
     update(key, (value) => ({ ...value, sending: true, resuming: current.availability?.resume_required === true, notice: null }));
@@ -167,7 +169,7 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
         ...(image_ids.length ? { image_ids } : {}), ...(model_selection ? { model_selection } : {}), ...(delivery ? { delivery } : {}) };
       const result = transport ? await submitSessionInput(request, transport.invoke) : await submitSessionInput(request);
       const matchingResponse = result.request_id === requestId;
-      if (matchingResponse && result.model_result) {
+      if (matchingResponse && result.model_result && !per_input_model) {
         const reset_model = result.status === "accepted" || result.model_result.outcome === "ignored_while_running";
         if (reset_model) update(key, (value) => ({ ...value, model_draft: value.model_draft === model_draft ? null : value.model_draft }));
         if (model?.acceptState(result.model_result.state, reset_model)) {
@@ -212,6 +214,9 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
     }
     // A refresh failure cannot change the provider's delivery acknowledgement.
     if (accepted && mounted.current && current_scope.current === source_scope) {
+      // A queued model choice belongs to its input. Read native state rather
+      // than displaying that choice as the session's current model.
+      if (per_input_model || supports_delivery_modes) void model?.refresh();
       if (supports_delivery_modes) void checkAvailability(key, source_session, transport?.invoke);
       try {
         await acceptedHandler.current?.(source_session);
@@ -232,7 +237,7 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
       : state.model_draft && (model?.status?.supports_model_input !== true || !model.status.can_list)
       ? "This connection cannot send your model choice. Use the current model or retry availability."
       : state.images.length && !draftImageLimits(state.availability, state.model_draft, model)
-        ? model?.running ? "The running model cannot use these images. Remove them or wait for it to finish."
+        ? model?.running && model.status?.model_input_mode !== "per_input" ? "The running model cannot use these images. Remove them or wait for it to finish."
           : "This model cannot use the attached images. Choose an image model or remove the images." : null,
     max_length: maxLength,
     length,

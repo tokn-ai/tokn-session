@@ -85,21 +85,6 @@ async fn creates_deferred_sessions_and_dispatches_only_honest_v4_modes() {
         .kind,
       ErrorKind::Unsupported
     );
-    let mut input = message_input();
-    input.model = Some(ModelIdentity {
-      model_provider: Some("fixture".into()),
-      model_id: "fixture-model".into(),
-      display_name: None,
-    });
-    assert_eq!(
-      adapter
-        .inner
-        .message("sess_fixture", "rejected-model", input, mode)
-        .await
-        .unwrap_err()
-        .kind,
-      ErrorKind::Unsupported
-    );
   }
   for (request_id, mode, disposition) in [
     ("guide-1", DeliveryMode::Guide, InputDisposition::Started),

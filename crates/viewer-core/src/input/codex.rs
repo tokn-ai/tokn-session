@@ -151,6 +151,7 @@ impl DesktopClient {
       can_select: false, can_list: false,
       reason: Some("Codex Desktop does not expose a verified model catalog through its input connection. Change models in Codex Desktop.".into()),
       runtime_generation: Some(generation), updates_default: false, supports_model_input: false,
+      model_input_mode: None,
     })
   }
 

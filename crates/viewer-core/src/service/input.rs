@@ -28,11 +28,7 @@ impl ViewerService {
       || (target.input.provider != ViewerProvider::Pi
         && self.sessions.transport(&target).await? == crate::session_supervisor::SessionTransport::Rpc
         && self.sessions.runtimes.binding(&target.session_key).is_none());
-    let mut response = input_status_response(
-      self.sessions.input_status(&target).await,
-      resume_required,
-      target.input.provider != ViewerProvider::ZCode,
-    );
+    let mut response = input_status_response(self.sessions.input_status(&target).await, resume_required, true);
     if response.available && target.input.provider == ViewerProvider::ZCode {
       use tokn_interaction_core::{DeliveryMode, Operation};
       let mut modes = Vec::new();
@@ -129,9 +125,6 @@ impl ViewerService {
     if image_ids.is_empty() {
       return Ok(Vec::new());
     }
-    if provider == ViewerProvider::ZCode {
-      return Err("ZCode accepts text only in the Viewer. Remove the images before sending.".into());
-    }
     let store = self.images.clone();
     let target = crate::images::ImageTarget::Session {
       session_key: session_key.into(),
@@ -140,7 +133,8 @@ impl ViewerService {
     tokio::task::spawn_blocking(move || {
       let images = store.resolve(&target, &ids)?;
       // Codex reads these paths after IPC admission. Pi receives embedded
-      // bytes owned by detached delivery work, so its staging can expire.
+      // bytes owned by detached delivery work. ZCode copies them into native
+      // session artifacts before admission, so its host staging can expire too.
       if provider == ViewerProvider::Codex {
         store.retain(&ids)?;
       }

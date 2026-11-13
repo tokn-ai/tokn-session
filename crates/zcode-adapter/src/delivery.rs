@@ -44,20 +44,30 @@ impl Inner {
         "ZCode guide and queue do not support a revision or turn fence",
       ));
     }
-    if input.model.is_some() {
-      return Err(InteractionError::unsupported(
-        "ZCode guide and queue use the session's current model",
-      ));
-    }
-    let ack = self
-      .native_command(
-        session_id,
-        request_id,
-        "sendText",
-        json!({"text":input.text,"requestedDelivery":requested_delivery}),
+    validate_command_id(request_id)?;
+    let images = images::prepare(input.images)?;
+    let selected = if input.model.is_some() || !images.is_empty() {
+      Some(
+        self
+          .snapshot(session_id)
+          .await?
+          .input_model(input.model.as_ref(), !images.is_empty())?,
       )
-      .await?;
-    let receipt = input_receipt(ack, request_id, delivery)?;
+    } else {
+      None
+    };
+    let mut payload = json!({"text":input.text,"requestedDelivery":requested_delivery});
+    if let Some((selection, _)) = &selected {
+      // Never submit modelSelectionBasis: native basis mismatch would silently
+      // replace the user's explicit intent with a newer session default.
+      payload["modelSelection"] = json!(selection);
+    }
+    if !images.is_empty() {
+      payload["attachments"] = json!(self.stage_images(session_id, images).await?);
+    }
+    let ack = self.native_command(session_id, request_id, "sendText", payload).await?;
+    let mut receipt = input_receipt(ack, request_id, delivery)?;
+    receipt.model = selected.map(|(_, model)| model);
     Ok(Reply::Admission(receipt))
   }
 
