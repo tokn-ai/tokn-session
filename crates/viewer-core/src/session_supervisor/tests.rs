@@ -99,6 +99,7 @@ async fn transport_transition_excludes_both_message_and_control_admission() {
   let broker = input::InputBroker::default();
   let transition = broker.begin_transition(&target).unwrap();
   let request = SubmitSessionInputRequest {
+    delivery: None,
     request_id: uuid::Uuid::new_v4().to_string(),
     session_key: "key".into(),
     text: "input".into(),
@@ -115,6 +116,7 @@ async fn transport_transition_excludes_both_message_and_control_admission() {
     crate::model::InputDeliveryStatus::NotSent
   );
   let control = SubmitSessionInputRequest {
+    delivery: None,
     request_id: uuid::Uuid::new_v4().to_string(),
     ..request
   };

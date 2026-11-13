@@ -50,12 +50,15 @@ fn image_message(source: MessageImageSource) -> AgentEvent {
 }
 
 fn fixture(events: Vec<AgentEvent>) -> (ViewerService, String, String, Arc<AtomicUsize>) {
-  let session = loaded_session(events);
+  fixture_for(ViewerProvider::Codex, loaded_session(events))
+}
+
+fn fixture_for(provider: ViewerProvider, session: LoadedSession) -> (ViewerService, String, String, Arc<AtomicUsize>) {
   let mut other = session.clone();
   other.reference.id = "unshared".into();
   other.reference.path = "/fixtures/unshared.jsonl".into();
-  let session_key = encode_session_key(&locator_for_reference(&session)).unwrap();
-  let other_key = encode_session_key(&locator_for_reference(&other)).unwrap();
+  let session_key = encode_session_key(&locator_for_reference(&session, provider)).unwrap();
+  let other_key = encode_session_key(&locator_for_reference(&other, provider)).unwrap();
   let loads = Arc::new(AtomicUsize::new(0));
   let service = ViewerService::new(Arc::new(ImageRepository {
     sessions: HashMap::from([
@@ -66,7 +69,7 @@ fn fixture(events: Vec<AgentEvent>) -> (ViewerService, String, String, Arc<Atomi
   }));
   for loaded in [session, other] {
     let reference = loaded.reference;
-    let source = index_source_key_for_path(ViewerProvider::Codex, &reference.path).unwrap();
+    let source = index_source_key_for_path(provider, &reference.path).unwrap();
     let header = SessionHeader {
       id: reference.id,
       path: reference.path,
@@ -93,17 +96,17 @@ fn fixture(events: Vec<AgentEvent>) -> (ViewerService, String, String, Arc<Atomi
   service
     .session_index
     .replace_sources(&[SourceReplacement::new(
-      SourceState::new(index_catalog_source_key(ViewerProvider::Codex), "fixture-catalog", 0),
+      SourceState::new(index_catalog_source_key(provider), "fixture-catalog", 0),
       Vec::new(),
     )])
     .unwrap();
   (service, session_key, other_key, loads)
 }
 
-fn locator_for_reference(session: &LoadedSession) -> SessionLocator {
+fn locator_for_reference(session: &LoadedSession, provider: ViewerProvider) -> SessionLocator {
   SessionLocator {
     version: 1,
-    provider: ViewerProvider::Codex,
+    provider,
     session_id: session.reference.id.clone(),
     source_path: session.reference.path.clone(),
   }
@@ -159,6 +162,126 @@ fn recorded_image_reads_are_bound_to_catalog_event_and_attachment_identity() {
   .unwrap();
   assert!(service.load_session_image(outside).is_err());
   assert_eq!(loads.load(Ordering::SeqCst), before);
+}
+
+#[test]
+fn zcode_artifact_images_are_lazy_owner_scoped_resources_in_messages_and_tools() {
+  let directory = tempfile::tempdir().unwrap();
+  let cli = directory.path().join("storage/cli");
+  std::fs::create_dir_all(cli.join("db")).unwrap();
+  let database = cli.join("db/db.sqlite");
+  std::fs::write(&database, []).unwrap();
+  let source = MessageImageSource::Unavailable {
+    reference: Some("zcode-artifact://sess_fixture/tool-result-image".into()),
+  };
+  let mut message = image_message(source.clone());
+  if let AgentEvent::Message(message) = &mut message {
+    message.provider = Provider::ZCode;
+    message.session_id = Some("sess_fixture".into());
+  }
+  let mut tool = output_tool(ToolRecordKind::Result, recorded_images(&message).to_vec(), None);
+  if let AgentEvent::ToolCall(tool) = &mut tool {
+    tool.provider = Provider::ZCode;
+    tool.session_id = Some("sess_fixture".into());
+  }
+  let operation = assemble_tool_operations(std::slice::from_ref(&tool)).pop().unwrap();
+  let summary = operation_images(&operation).pop().unwrap();
+  assert!(matches!(summary.availability, ImageAvailability::Available));
+  assert_eq!(summary.source_event_key, Some(encode_event_key(0)));
+  // No artifact directory exists: projections only expose a lazy capability.
+  assert!(matches!(
+    event_images(&message)[0].availability,
+    ImageAvailability::Available
+  ));
+  let mut loaded = loaded_session(vec![message, tool]);
+  loaded.reference.id = "sess_fixture".into();
+  loaded.reference.path = database;
+  let (service, key, other, _) = fixture_for(ViewerProvider::ZCode, loaded);
+  let detail = service
+    .load_event_detail(LoadEventDetailRequest {
+      session_key: key.clone(),
+      event_key: encode_event_key(0),
+    })
+    .unwrap();
+  assert_eq!(detail.event["images"][0]["availability"], "available");
+  assert!(service.load_session_image(read_request(&key)).is_err());
+  let artifacts = cli.join("artifacts/sess_fixture");
+  std::fs::create_dir_all(&artifacts).unwrap();
+  let bytes = png();
+  let encoded = STANDARD.encode(&bytes);
+  std::fs::write(
+    artifacts.join("prompt-attachment-upload-fixture-tool-result-image.txt"),
+    format!("data:image/png;base64,{encoded}"),
+  )
+  .unwrap();
+  let shared = service.scoped_to_sessions(std::slice::from_ref(&key)).unwrap();
+  for index in [0, 1] {
+    let mut request = read_request(&key);
+    request.event_key = encode_event_key(index);
+    let image = shared.load_session_image(request).unwrap();
+    assert_eq!(STANDARD.decode(image.data_base64).unwrap(), bytes);
+  }
+  assert!(service.load_session_image(read_request(&other)).is_err());
+  assert!(shared.load_session_image(read_request(&other)).is_err());
+  assert_eq!(
+    recorded_images(
+      &service
+        .load_verified(&decode_session_key(&key).unwrap())
+        .unwrap()
+        .events[0]
+    )[0]
+      .source,
+    source
+  );
+  let details = serde_json::to_string(&detail).unwrap();
+  assert!(!details.contains(&encoded));
+  assert!(!details.contains("zcode-artifact://"));
+}
+
+#[test]
+fn zcode_lazy_availability_requires_exact_provider_and_source_event_owner() {
+  for (provider, owner, reference) in [
+    (
+      Provider::Codex,
+      Some("fixture"),
+      "zcode-artifact://fixture/tool-result-image",
+    ),
+    (
+      Provider::ZCode,
+      Some("fixture"),
+      "zcode-artifact://other/tool-result-image",
+    ),
+    (Provider::ZCode, None, "zcode-artifact://fixture/tool-result-image"),
+    (
+      Provider::ZCode,
+      Some("fixture"),
+      "zcode-artifact://fixture/../tool-result-image",
+    ),
+  ] {
+    let mut event = image_message(MessageImageSource::Unavailable {
+      reference: Some(reference.into()),
+    });
+    if let AgentEvent::Message(message) = &mut event {
+      message.provider = provider;
+      message.session_id = owner.map(str::to_owned);
+    }
+    assert!(matches!(
+      event_images(&event)[0].availability,
+      ImageAvailability::Unavailable
+    ));
+    let mut tool = output_tool(ToolRecordKind::Result, recorded_images(&event).to_vec(), None);
+    if let AgentEvent::ToolCall(tool) = &mut tool {
+      tool.provider = provider;
+      tool.session_id = owner.map(str::to_owned);
+    }
+    let operation = assemble_tool_operations(&[tool]).pop().unwrap();
+    assert!(matches!(
+      operation_images(&operation)[0].availability,
+      ImageAvailability::Unavailable
+    ));
+    let (service, key, _, _) = fixture(vec![event]);
+    assert!(service.load_session_image(read_request(&key)).is_err());
+  }
 }
 
 #[tokio::test]

@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn request(text: &str) -> SubmitSessionInputRequest {
   SubmitSessionInputRequest {
+    delivery: None,
     model_selection: None,
     session_key: "session-a".into(),
     request_id: uuid::Uuid::new_v4().to_string(),
@@ -45,6 +46,84 @@ async fn repeated_requests_deliver_once_and_reject_conflicting_payloads() {
       .status,
     InputDeliveryStatus::NotSent
   );
+}
+
+#[test]
+fn omitted_delivery_preserves_legacy_fingerprints() {
+  let mut request = request("hello");
+  assert_eq!(input_fingerprint(&request), Sha256::digest(b"hello").as_slice());
+  request.image_ids = vec!["upload-a".into()];
+  assert_eq!(
+    input_fingerprint(&request),
+    message_fingerprint(&request.text, &request.image_ids)
+  );
+  request.model_selection = Some(crate::managed_sessions::MessageModelSelection {
+    model_input_mode: None,
+    model_provider: Some("provider".into()),
+    model_id: "model".into(),
+    expected_revision: "revision".into(),
+    runtime_generation: None,
+  });
+  assert!(
+    serde_json::to_value(request.model_selection.as_ref().unwrap())
+      .unwrap()
+      .get("model_input_mode")
+      .is_none()
+  );
+  let legacy: [u8; 32] = Sha256::digest(
+    serde_json::to_vec(&(
+      &request.text,
+      &request.image_ids,
+      request.model_selection.as_ref().unwrap(),
+    ))
+    .unwrap(),
+  )
+  .into();
+  assert_eq!(input_fingerprint(&request), legacy);
+}
+
+#[tokio::test]
+async fn delivery_intent_is_bound_to_receipts_without_replay() {
+  for uncertain in [false, true] {
+    let broker = InputBroker::default();
+    let mut request = request("same input");
+    request.delivery = Some(crate::DeliveryMode::Guide);
+    let expected_status = if uncertain {
+      InputDeliveryStatus::Unknown
+    } else {
+      InputDeliveryStatus::Accepted
+    };
+    assert_eq!(
+      broker
+        .submit_with(request.clone(), async move {
+          if uncertain {
+            Err(DeliveryError::uncertain("lost native ACK"))
+          } else {
+            Ok(Admission::Accepted)
+          }
+        })
+        .await
+        .status,
+      expected_status
+    );
+    assert_eq!(
+      broker
+        .submit_with(request.clone(), async { panic!("must return receipt") })
+        .await
+        .status,
+      expected_status
+    );
+    for delivery in [None, Some(crate::DeliveryMode::Start), Some(crate::DeliveryMode::Queue)] {
+      request.delivery = delivery;
+      assert_eq!(
+        broker
+          .submit_with(request.clone(), async { panic!("changed delivery must not send") })
+          .await
+          .status,
+        InputDeliveryStatus::NotSent
+      );
+    }
+  }
 }
 
 #[tokio::test]
@@ -204,6 +283,7 @@ async fn message_receipts_bind_model_intent_and_retain_confirmed_reset_on_failur
   let broker = InputBroker::default();
   let mut original = request("steer");
   original.model_selection = Some(MessageModelSelection {
+    model_input_mode: None,
     model_provider: Some("synthetic".into()),
     model_id: "vision".into(),
     expected_revision: "old".into(),

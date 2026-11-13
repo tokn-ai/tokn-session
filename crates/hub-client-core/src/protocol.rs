@@ -167,6 +167,7 @@ pub fn allowed_route(method: &str, path: &str, allow_control: bool) -> bool {
       "POST",
       "/api/v1/submit_session_input"
       | "/api/v1/submit_session_question_answers"
+      | "/api/v1/respond_session_interaction"
       | "/api/v1/set_session_control"
       | "/api/v1/cancel_session_turn"
       | "/api/v1/upload_image_chunk"
@@ -198,6 +199,7 @@ pub fn allowed_route(method: &str, path: &str, allow_control: bool) -> bool {
       | "/api/v1/get_session_question_status"
       | "/api/v1/get_session_model_status"
       | "/api/v1/get_session_control"
+      | "/api/v1/list_session_interactions"
       | "/api/v1/list_session_models",
     ) => true,
     _ => false,
@@ -241,11 +243,19 @@ pub fn read_only_model_response(path: &str, reason: &str) -> Option<serde_json::
 
 /// A viewing client cannot discover the selected live route or runtime IDs.
 pub fn read_only_session_control_response(path: &str, body: &[u8], reason: &str) -> Option<serde_json::Value> {
-  if path != "/api/v1/get_session_control" {
+  if !matches!(
+    path,
+    "/api/v1/get_session_control" | "/api/v1/list_session_interactions"
+  ) {
     return None;
   }
   let payload: serde_json::Value = serde_json::from_slice(body).ok()?;
   let session_key = payload.get("request")?.get("session_key")?.as_str()?;
+  if path == "/api/v1/list_session_interactions" {
+    return Some(serde_json::json!({
+      "session_key":session_key, "runtime_id":null, "instance_id":null, "interactions":[]
+    }));
+  }
   Some(serde_json::json!({
     "session_key":session_key,"provider":"codex","transport":"rpc",
     "available":false,"can_select":false,"can_cancel":false,"message":reason,
@@ -270,7 +280,17 @@ mod tests {
     assert_eq!(response["can_cancel"], false);
     assert!(response["runtime_id"].is_null());
     assert!(response["instance_id"].is_null());
-    for path in ["/api/v1/set_session_control", "/api/v1/cancel_session_turn"] {
+    let interactions = "/api/v1/list_session_interactions";
+    assert!(allowed_route("POST", interactions, false));
+    assert_eq!(
+      read_only_session_control_response(interactions, br#"{"request":{"session_key":"one"}}"#, "Viewing only"),
+      Some(serde_json::json!({"session_key":"one", "runtime_id":null, "instance_id":null, "interactions":[]}))
+    );
+    for path in [
+      "/api/v1/set_session_control",
+      "/api/v1/cancel_session_turn",
+      "/api/v1/respond_session_interaction",
+    ] {
       assert!(allowed_route("POST", path, true));
       assert!(!allowed_route("POST", path, false));
       assert!(!allowed_route("GET", path, true));

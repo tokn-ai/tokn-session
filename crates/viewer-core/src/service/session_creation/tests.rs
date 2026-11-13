@@ -119,6 +119,69 @@ async fn save_profile(
   snapshot.profiles.last().unwrap().profile_id.clone()
 }
 
+#[cfg(unix)]
+async fn save_zcode_fixture(
+  service: &ViewerService,
+  project: &crate::workspace::RegisteredProject,
+  requests: &Path,
+  capabilities: Value,
+  snapshot: Option<Value>,
+) {
+  use sha2::{Digest, Sha256};
+  let history = tokn_session_zcode::ZCodeSessionSource::new(None)
+    .database_path()
+    .unwrap();
+  let database_id = format!("{:x}", Sha256::digest(history.to_str().unwrap().as_bytes()));
+  let script = r#"
+    printf '{"method":"startup/storageState","params":{"databaseKind":"session","phase":"ready","databaseId":"%s"}}\n' "$FIXTURE_DATABASE_ID"
+    while IFS= read -r request; do
+      printf '%s\n' "$request" >> "$FIXTURE_REQUESTS"
+      request_id=$(printf '%s' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+      session_id=$(printf '%s' "$request" | sed -n 's/.*"sessionId":"\([^"]*\)".*/\1/p')
+      case "$request" in
+        *'"method":"runtime/capabilities"'*) result=$FIXTURE_CAPABILITIES ;;
+        *'"method":"session/create"'*|*'"method":"session/read"'*)
+          [ -n "$FIXTURE_SNAPSHOT" ] || exit 2
+          result=$(printf '%s' "$FIXTURE_SNAPSHOT" | sed "s/\"sessionId\":\"sess_fixture\"/\"sessionId\":\"$session_id\"/g") ;;
+        *'"method":"session/subscribe"'*) result=$(printf '{"sessionId":"%s"}' "$session_id") ;;
+        *'"method":"v4/command"'*)
+          command_id=$(printf '%s' "$request" | sed -n 's/.*"commandId":"\([^"]*\)".*/\1/p')
+          result=$(printf '{"commandId":"%s","status":"accepted","revisionAtDecision":1,"result":{"type":"inputAccepted","delivery":"startNow","inputId":"%s"}}' "$command_id" "$command_id") ;;
+        *) exit 2 ;;
+      esac
+      printf '{"id":%s,"result":%s}\n' "$request_id" "$result"
+    done
+  "#;
+  let current = service.get_rpc_runtime_profiles().await.unwrap();
+  service
+    .save_rpc_runtime_profile(RpcSaveProfileRequest {
+      expected_revision: current.revision,
+      profile: RpcRuntimeProfileInput {
+        profile_id: None,
+        name: "ZCode creation fixture".into(),
+        provider: LiveProvider::ZCode,
+        mode: RpcRuntimeMode::Managed,
+        executable: Some("/bin/sh".into()),
+        arguments: vec!["-c".into(), script.into()],
+        working_directory: Some(project.folder_path.clone()),
+        endpoint: None,
+        environment: Some(BTreeMap::from([
+          ("FIXTURE_DATABASE_ID".into(), database_id),
+          ("FIXTURE_REQUESTS".into(), requests.to_string_lossy().into_owned()),
+          ("FIXTURE_CAPABILITIES".into(), capabilities.to_string()),
+          (
+            "FIXTURE_SNAPSHOT".into(),
+            snapshot.map(|value| value.to_string()).unwrap_or_default(),
+          ),
+        ])),
+        credentials: Some(RpcCredentials::None),
+        is_default: true,
+      },
+    })
+    .await
+    .unwrap();
+}
+
 struct CodexPeer {
   endpoint: String,
   requests: Arc<Mutex<Vec<Value>>>,
@@ -293,6 +356,7 @@ async fn codex_creation_indexes_real_history_and_reuses_one_runtime_for_followup
   assert_eq!(peer.count("thread/start"), 1);
   assert_eq!(peer.count("turn/start"), 1);
   let input = SubmitSessionInputRequest {
+    delivery: None,
     request_id: uuid::Uuid::new_v4().to_string(),
     session_key: key.clone(),
     text: "follow up".into(),
@@ -782,7 +846,7 @@ async fn all_provider_options_share_typed_plans_without_launching_agents() {
   for entry in options.providers {
     assert!(entry.available, "{:?}: {:?}", entry.provider, entry.reason);
     if entry.provider == LiveProvider::ZCode {
-      assert!(!entry.supports_images);
+      assert!(entry.supports_images);
     }
     let plan = service
       .sessions
@@ -798,6 +862,235 @@ async fn all_provider_options_share_typed_plans_without_launching_agents() {
   assert!(service.list_rpc_runtimes().await.unwrap().runtimes.is_empty());
   assert!(service.sessions.managed.list_runtimes().await.is_empty());
   service.sessions.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn zcode_draft_catalog_requires_a_resident_session_and_preserves_native_failures() {
+  use crate::workspace::ListSessionCreationModelsRequest;
+  for supported in [true, false] {
+    let directory = tempfile::tempdir().unwrap();
+    let service = service(ViewerProvider::ZCode, directory.path().join("history.db"));
+    let project = project(&service, &directory.path().join("project"));
+    let requests = directory.path().join("requests.jsonl");
+    save_zcode_fixture(
+      &service,
+      &project,
+      &requests,
+      json!({"sessionLifecycleWorkspace":supported,"sessionWorkspaceRouting":supported}),
+      None,
+    )
+    .await;
+    let plan = service
+      .sessions
+      .resolve_creation_plan(LiveProvider::ZCode, Path::new(&project.folder_path), None)
+      .unwrap();
+    let result = service
+      .list_session_creation_models(ListSessionCreationModelsRequest {
+        project_id: project.project_id.clone(),
+        provider: LiveProvider::ZCode,
+        runtime_profile_id: None,
+        runtime_revision: None,
+        runtime_plan_id: Some(plan.fingerprint().unwrap()),
+      })
+      .await;
+    if supported {
+      let catalog = result.unwrap();
+      assert!(catalog.models.is_empty());
+      assert!(catalog.catalog_revision.is_none());
+      assert_eq!(
+        catalog.reason.as_deref(),
+        Some("Connect a ZCode session with this runtime to discover its models")
+      );
+      assert_eq!(catalog.runtime_plan_id, Some(plan.fingerprint().unwrap()));
+      assert_eq!(
+        catalog.runtime_profile_id.as_deref(),
+        Some(plan.configuration.id.as_str())
+      );
+    } else {
+      assert!(
+        result.is_err(),
+        "native startup errors must not become an empty catalog"
+      );
+    }
+    let native: Vec<Value> = std::fs::read_to_string(&requests)
+      .unwrap()
+      .lines()
+      .map(|line| serde_json::from_str(line).unwrap())
+      .collect();
+    assert_eq!(
+      native.len(),
+      1,
+      "catalog inspection must not create or resume a session"
+    );
+    assert_eq!(native[0]["method"], "runtime/capabilities");
+    if supported {
+      assert!(service.sessions.runtimes.inventory().runtimes.is_empty());
+    }
+    service.sessions.shutdown().await;
+  }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn zcode_creation_rejects_unqualified_model_identity_before_starting_native_runtime() {
+  let directory = tempfile::tempdir().unwrap();
+  let service = service(ViewerProvider::ZCode, directory.path().join("history.db"));
+  let project = project(&service, &directory.path().join("project"));
+  let requests = directory.path().join("requests.jsonl");
+  save_zcode_fixture(&service, &project, &requests, json!({}), None).await;
+  let error = service
+    .sessions
+    .runtimes
+    .create_native_session(
+      LiveProvider::ZCode,
+      project.folder_path.into(),
+      None,
+      Some("sess_fixture".into()),
+      Some(tokn_interaction_core::ModelIdentity {
+        model_provider: None,
+        model_id: "vision".into(),
+        display_name: None,
+      }),
+    )
+    .await
+    .unwrap_err();
+  assert_eq!(error.kind, ErrorKind::InvalidRequest);
+  assert!(error.message.contains("provider identity"));
+  assert!(!requests.exists());
+  assert!(service.sessions.runtimes.inventory().runtimes.is_empty());
+  service.sessions.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn zcode_resident_catalog_verifies_creation_images_and_pins_initial_model_intent() {
+  use crate::workspace::{ListSessionCreationModelsRequest, SessionCreationModelSelection};
+  for supports_images in [false, true] {
+    let directory = tempfile::tempdir().unwrap();
+    let service = service(ViewerProvider::ZCode, directory.path().join("history.db"));
+    let project = project(&service, &directory.path().join("project"));
+    let requests = directory.path().join("requests.jsonl");
+    let selection = json!({"providerId":"fixture","modelId":"vision","options":{"reasoningLevel":"low"}});
+    let snapshot = json!({
+      "protocol":{"name":"ZCode Protocol","version":1},
+      "session":{
+        "sessionId":"sess_fixture", "sessionKind":"interactive", "model":selection,
+        "workspace":{"workspaceKey":project.folder_path,"workspacePath":project.folder_path}
+      },
+      "projection":{"sessionId":"unknown","status":"idle","turnCount":0},
+      "runtime":{"stateRevision":0,"pendingRequestIds":[]},
+      "settings":{"model":{"current":selection,"available":[{
+        "ref":{"providerId":"fixture","modelId":"vision"}, "label":"Vision",
+        "properties":{"inputFormat":{"supportsImage":supports_images}},
+        "reasoning":{"levels":[{"value":"low"},{"value":"high"}],"defaultLevel":"high"}
+      }]}}
+    });
+    save_zcode_fixture(
+      &service,
+      &project,
+      &requests,
+      json!({"sessionLifecycleWorkspace":true,"sessionWorkspaceRouting":true}),
+      Some(snapshot),
+    )
+    .await;
+    // Explicit setup supplies an existing resident; discovery must reuse it.
+    let _resident = service
+      .sessions
+      .runtimes
+      .create_native_session(
+        LiveProvider::ZCode,
+        project.folder_path.clone().into(),
+        None,
+        Some("sess_fixture".into()),
+        None,
+      )
+      .await
+      .unwrap();
+    let catalog = service
+      .list_session_creation_models(ListSessionCreationModelsRequest {
+        project_id: project.project_id.clone(),
+        provider: LiveProvider::ZCode,
+        runtime_profile_id: None,
+        runtime_revision: None,
+        runtime_plan_id: None,
+      })
+      .await
+      .unwrap();
+    assert_eq!(catalog.models.len(), 1);
+    assert_eq!(catalog.models[0].supports_images, supports_images);
+    let mut request = request(&project);
+    request.provider = LiveProvider::ZCode;
+    request.image_ids.push(uuid::Uuid::new_v4().to_string());
+    request.model = Some(SessionCreationModelSelection {
+      model_provider: Some("fixture".into()),
+      model_id: "vision".into(),
+      catalog_revision: catalog.catalog_revision.unwrap(),
+      runtime_profile_id: catalog.runtime_profile_id,
+      runtime_revision: catalog.runtime_revision,
+      runtime_plan_id: catalog.runtime_plan_id,
+    });
+    let plan = service
+      .sessions
+      .resolve_creation_plan(LiveProvider::ZCode, Path::new(&project.folder_path), None)
+      .unwrap();
+    let preflight = service.preflight_creation_model(&request, &plan).await;
+    if supports_images {
+      preflight.unwrap();
+    } else {
+      assert!(preflight.unwrap_err().contains("images"));
+    }
+    let model = request.model.unwrap().identity();
+    let created = service
+      .sessions
+      .runtimes
+      .create_native_session(
+        LiveProvider::ZCode,
+        project.folder_path.clone().into(),
+        None,
+        Some("sess_selected".into()),
+        Some(model.clone()),
+      )
+      .await
+      .unwrap();
+    let host = Host {
+      runtimes: service.sessions.runtimes.clone(),
+      history: publisher(&service),
+    };
+    host
+      .send_initial(
+        &created,
+        &uuid::Uuid::new_v4().to_string(),
+        &MessageInput {
+          text: "first input".into(),
+          ..Default::default()
+        },
+        Some(&model),
+      )
+      .await
+      .unwrap();
+    let native: Vec<Value> = std::fs::read_to_string(&requests)
+      .unwrap()
+      .lines()
+      .map(|line| serde_json::from_str(line).unwrap())
+      .collect();
+    let creates = native
+      .iter()
+      .filter(|request| request["method"] == "session/create")
+      .collect::<Vec<_>>();
+    assert_eq!(creates.len(), 2);
+    assert_eq!(creates[1]["params"]["sessionId"], "sess_selected");
+    assert_eq!(creates[1]["params"]["model"], selection);
+    assert_eq!(creates[1]["params"]["thoughtLevel"], "low");
+    assert!(
+      !native
+        .iter()
+        .any(|request| request["method"] == "session/lifecycle/ensureReady")
+    );
+    let send = native.iter().find(|request| request["method"] == "v4/command").unwrap();
+    assert_eq!(send["params"]["payload"]["modelSelection"], selection);
+    service.sessions.shutdown().await;
+  }
 }
 
 #[tokio::test]

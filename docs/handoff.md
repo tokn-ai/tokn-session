@@ -76,9 +76,10 @@ worktree groups); changing its folder moves the row. Time view retains project
 labels, and drafts awaiting a folder remain separately accessible. No
 native session or upload starts until the first Send. Opening a draft model
 picker can briefly start a metadata RPC process; it never creates or resumes a
-saved conversation. Pi, Codex and OpenCode choices remain local to each draft,
+saved conversation. Pi, Codex, OpenCode and advertised ZCode choices remain local to each draft,
 reset with project/provider/runtime changes, and are revalidated and applied
-before its first prompt. ZCode and DSH use their runtime defaults. Availability, catalogs
+before its first prompt. DSH uses its runtime default; ZCode defaults remain
+available when its runtime has not advertised other choices. Availability, catalogs
 and first Send share a host-resolved `RuntimePlan`; an opaque `runtime_plan_id`
 pins configuration and project scope without exposing launch configuration.
 Stale plans reject before admission. Creation receipts include model identity
@@ -177,11 +178,45 @@ RPC capability limits remain distinct from the exclusive managed Pi workflow.
 ZCode Viewer control uses a managed, project-scoped `zcode app-server --stdio`
 process and verifies its database path against the historical source. It
 reserves a native session ID for new conversations and resumes verified root
-sessions on the first Send. The composer submits text with idle-only admission.
-Drafts use the runtime default model. Permission and question callbacks are
-declined until the Viewer has matching controls. Native CLI 0.17.1 was verified
-with an isolated loopback model for creation, cold resume, context continuity
-and Stop. ZCode soft-deleted rows are excluded from historical catalogs and
+sessions on the first Send. Send uses native advisory guidance: it starts idle
+sessions, can join active work at native boundaries, and may become a follow-up.
+An explicit Queue action requests follow-up delivery and starts immediately
+when idle. Capabilities advertise these modes after binding; input receipts bind
+the chosen delivery mode and never replay uncertain writes. ZCode rejects strict
+idle-only/active-only delivery and StartOrSteer because native admission cannot
+guarantee those contracts.
+New sessions use deferred native persistence, allowing the first V4 admission
+to materialize history before its input ledger. Stop cancels native execution
+and holds remaining queued input; queue editing and resuming held input remain
+in ZCode. The adapter does not replay queues after reconnecting.
+ZCode advertises separate per-input model intent, leaving the strict idle-only
+model capability unchanged. Send/Queue capture the selected model; active calls
+continue unchanged and guidance can use it at the next model boundary. Clients
+echo the model-input mode, runtime instance and model revision; old or stale
+intents reject without dispatch. Image-only and mixed inputs use native chunked
+artifact staging after vision-model verification. Busy guidance with images
+queues natively; artifact failure never sends the prompt. Full model catalogs
+are captured from authorized native creation and refreshed with current-model
+facts. Cold resumes initially expose only their current model; bounded resume
+does not load a full image transcript just for catalog discovery. Drafts can use
+the runtime default or an already advertised choice. Historical native artifacts
+load lazily from the standard `cli/db` + `cli/artifacts` layout without hydrating
+bytes in timeline/index reads. Live ZCode questions and approvals appear
+above the composer independently of recorded question cards. AskUserQuestion
+supports single/multiple choices, written answers and option notes. Tool
+permissions offer native allow-once/deny, and ExitPlanMode displays its plan for
+approval or feedback. Callback reannouncements share one business identity while
+retaining native envelope IDs. Sent responses stay disabled until native
+resolution; uncertain writes are never replayed. New session-scoped list/respond
+commands fence the exact runtime instance and redact native callback envelopes.
+Viewing grants and shares receive an empty pending list and cannot respond.
+Native CLI 0.17.1 was verified with an isolated loopback model for creation,
+cold resume, context continuity, questions, per-use permissions, native guidance,
+follow-up queues, model-bound text/images, lazy warm/cold image reads and Stop.
+Selected native creation preserves reasoning in both its model selection and
+thought-level parameters. Guide acknowledgements retain generic acceptance
+when native admission does not identify the eventual consuming turn.
+ZCode soft-deleted rows are excluded from historical catalogs and
 exact reads when the native `time_deleted` column exists.
 CLI `create` and `append` use native headless stream JSON through the configured
 executor. See [runtime configuration](viewer-rpc-runtimes.md) and the
@@ -212,9 +247,9 @@ Image staging does not change models, and delivery checks the effective model.
 Codex RPC model reads use an already bound app-server; an unbound session keeps
 recorded context without activation. Explicit Desktop model reads discover the
 local owner and retain recorded context when the bounded lookup is unavailable.
-The common RPC adapters expose verified catalogs while model-on-send remains
-unsupported; Desktop supplies no verifiable catalog through follower IPC.
-These pickers remain read-only with a reason. Shares and viewing grants never
+ZCode binds model choices per input through native V4; the other generic RPC
+adapters retain read-only selection. Desktop supplies no verifiable catalog
+through follower IPC. Unsupported pickers show a reason. Shares and viewing grants never
 expose live catalogs or model mutation. See [session models](viewer-models.md).
 
 Recorded images from Codex, Pi, OpenCode, and ZCode now render through lazy

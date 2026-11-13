@@ -78,6 +78,8 @@ async fn input_routes_require_authentication_before_parsing_or_target_validation
     "get_session_input_status",
     "submit_session_input",
     "get_session_control",
+    "list_session_interactions",
+    "respond_session_interaction",
     "set_session_control",
     "cancel_session_turn",
   ] {
@@ -254,4 +256,34 @@ async fn sqlite_unreadable_and_unregistered_keys_never_authorize_delivery() {
       assert!(!body.to_string().contains("missing-sqlite"));
     }
   }
+}
+
+#[tokio::test]
+async fn live_interactions_require_a_verified_session_before_reading_or_responding() {
+  let fixture = Fixture::new();
+  let path = fixture.directory.path().join("private-zcode.db");
+  std::fs::write(&path, "private-content-must-not-be-read").unwrap();
+  let key = session_key("zcode", &path);
+  let (status, body) = fixture
+    .authorized("list_session_interactions", json!({"request":{"session_key":key}}))
+    .await;
+  assert_eq!(status, StatusCode::BAD_REQUEST);
+  assert!(!body.to_string().contains("private-zcode"));
+  let (status, body) = fixture
+    .authorized(
+      "respond_session_interaction",
+      json!({"request":{
+        "session_key":key, "request_id":REQUEST_ID,
+        "runtime_id":"untrusted", "instance_id":"untrusted", "interaction_id":"perm_one",
+        "response":{"type":"permission","decision":"allow_once"}
+      }}),
+    )
+    .await;
+  assert_eq!(status, StatusCode::OK);
+  assert_eq!(body["status"], "not_sent");
+  assert!(!body.to_string().contains("private-zcode"));
+  assert_eq!(
+    std::fs::read_to_string(path).unwrap(),
+    "private-content-must-not-be-read"
+  );
 }

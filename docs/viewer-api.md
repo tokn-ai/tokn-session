@@ -197,15 +197,19 @@ residency/preloading only and never marks messages read. See
 [session cache](viewer-session-cache.md) for the eviction and retention policy.
 
 `get_session_input_status` takes `{"request":{"session_key":"…"}}` and returns
-`available`, `message`, and `max_length`. `submit_session_input` additionally
-takes a UUID `request_id` and the exact `text`. Its receipt contains
+`available`, `message`, and `max_length`. ZCode additionally returns
+`delivery_modes`: empty before binding, then supported `guide` and `queue`
+actions. `submit_session_input` additionally takes a UUID `request_id` and the
+exact `text`, with optional `delivery` for these explicit ZCode actions.
+Omitting delivery uses native guidance for ZCode and preserves other providers'
+existing behavior. Its receipt contains
 `request_id`, `status` (`accepted`, `not_sent`, `unknown`, or `pending`), and
 `message`. Acceptance means the owning app admitted the input; history/SSE
 remains authoritative for the resulting conversation. The backend resolves
 the catalog key and rechecks its source header before contacting the runtime.
 It caches up to 1,024 recent receipts in memory and rejects concurrent sends
 to the same owner. Repeating an identical request returns its cached receipt;
-changing its target or text is rejected. A disconnected caller does not cancel
+changing its target, text or delivery mode is rejected. A disconnected caller does not cancel
 delivery already in progress. Never automatically retry an unknown outcome.
 
 `GET /api/v1/events` is SSE with a `ready` handshake and 15-second heartbeats.

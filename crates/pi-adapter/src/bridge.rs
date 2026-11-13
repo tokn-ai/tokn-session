@@ -129,6 +129,7 @@ mod unix {
         runtime_generation: Some(descriptor.instance_id.clone()),
         updates_default: true,
         supports_model_input: response["model_input_version"] == 1,
+        model_input_mode: None,
         reason: (!can_select).then(|| {
           if !idle {
             "Wait for Pi and queued messages to finish before changing models".into()
@@ -188,6 +189,13 @@ mod unix {
     request: &BridgeInput,
     images: &[ResolvedImage],
   ) -> Result<Admission, DeliveryError> {
+    if request
+      .model_selection
+      .as_ref()
+      .is_some_and(|selection| selection.model_input_mode.is_some())
+    {
+      return Err(DeliveryError::not_sent("Pi does not support per-input model selection"));
+    }
     let descriptor = load_descriptor(target).await?;
     let selection = if let Some(selection) = request.model_selection.as_ref() {
       let (status, token) = query_model_status(&descriptor).await?;
@@ -945,6 +953,7 @@ mod unix {
         frame(response)
       });
       let selection = MessageModelSelection {
+        model_input_mode: None,
         model_provider: Some("other".into()),
         model_id: "draft".into(),
         expected_revision: "viewer-revision".into(),
@@ -1000,6 +1009,7 @@ mod unix {
           frame(response)
         });
         let selection = MessageModelSelection {
+          model_input_mode: None,
           model_provider: Some("test".into()),
           model_id: "other".into(),
           expected_revision: "revision".into(),

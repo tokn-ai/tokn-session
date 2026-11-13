@@ -391,6 +391,44 @@ export interface SessionControlStatus {
   instance_id: string | null;
 }
 
+export interface SessionInteractionQuestion {
+  question_id: string;
+  prompt: string;
+  options: { label: string; description: string | null }[];
+  allows_free_text: boolean;
+  allows_option_notes: boolean;
+  is_secret: boolean;
+  multiple: boolean;
+}
+export type SessionPermissionDecision = "allow_once" | "deny";
+export interface SessionInteraction {
+  interaction_id: string;
+  kind: "question" | "permission" | "confirm" | "select" | "input" | "editor";
+  title: string;
+  details: string | null;
+  response_pending: boolean;
+  questions: SessionInteractionQuestion[];
+  permission_decisions: SessionPermissionDecision[];
+}
+export interface SessionInteractionsResponse {
+  session_key: string;
+  runtime_id: string | null;
+  instance_id: string | null;
+  interactions: SessionInteraction[];
+}
+export type SessionInteractionResponse =
+  | { type: "answers"; answers: { question_id: string; answers: string[]; custom?: string }[] }
+  | { type: "permission"; decision: SessionPermissionDecision }
+  | { type: "reject" };
+export interface RespondSessionInteractionRequest {
+  session_key: string;
+  request_id: string;
+  runtime_id: string;
+  instance_id: string;
+  interaction_id: string;
+  response: SessionInteractionResponse;
+}
+
 export interface ModelIdentity {
   model_provider: string | null;
   model_id: string;
@@ -413,6 +451,8 @@ export interface SessionModelStatus {
   updates_pi_default: boolean;
   /** Omitted by older hosts; draft model selection then remains read-only. */
   supports_model_input?: boolean;
+  /** A choice stays with its message, including active guidance and queued input. */
+  model_input_mode?: "per_input";
 }
 export interface ModelChoice { model: ModelIdentity; supports_images: boolean }
 export interface ListSessionModelsResponse { status: SessionModelStatus; models: ModelChoice[] }
@@ -421,6 +461,7 @@ export interface MessageModelSelection {
   model_id: string;
   expected_revision: string;
   runtime_generation: string | null;
+  model_input_mode?: "per_input";
 }
 export interface MessageModelResult {
   outcome: "unchanged" | "applied" | "ignored_while_running";
@@ -442,7 +483,11 @@ export interface SessionInputStatus {
   max_image_bytes?: number;
   max_total_image_bytes?: number;
   image_mime_types?: string[];
+  /** Omitted by older hosts, which keep the existing Send action. */
+  delivery_modes?: SessionInputDeliveryMode[];
 }
+
+export type SessionInputDeliveryMode = "start" | "guide" | "queue";
 
 export interface SubmitSessionInputRequest {
   session_key: string;
@@ -450,6 +495,7 @@ export interface SubmitSessionInputRequest {
   text: string;
   image_ids?: string[];
   model_selection?: MessageModelSelection;
+  delivery?: SessionInputDeliveryMode;
 }
 
 export interface SubmitSessionInputResponse {
@@ -592,7 +638,7 @@ export interface RpcRuntimeProfileValidation {
   executable_exists: boolean | null;
   working_directory_exists: boolean | null;
 }
-export type RpcOperation = "metadata" | "state" | "models" | "message" | "steer" | "queue" | "cancel_turn" | "respond" | "pending_interactions";
+export type RpcOperation = "metadata" | "state" | "models" | "message" | "steer" | "guide" | "queue" | "cancel_turn" | "respond" | "pending_interactions";
 export interface RpcRuntimeInfo {
   runtime_id: string;
   instance_id: string;
@@ -602,7 +648,11 @@ export interface RpcRuntimeInfo {
   provider: RpcProvider;
   ownership: "managed" | "attached";
   status: "connected" | "disconnected" | "recovery_required" | "closing" | "cleanup_failed";
-  capabilities: { operations: Partial<Record<RpcOperation, { supported: boolean; reason: string | null }>>; atomic_model_on_send: boolean };
+  capabilities: {
+    operations: Partial<Record<RpcOperation, { supported: boolean; reason: string | null }>>;
+    atomic_model_on_send: boolean;
+    per_input_model?: boolean;
+  };
   session_count: number;
   last_error: string | null;
 }

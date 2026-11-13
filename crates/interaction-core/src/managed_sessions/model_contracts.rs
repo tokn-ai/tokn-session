@@ -60,6 +60,15 @@ pub struct SessionModelStatus {
   /// The host can bind a composer model choice to the input admission.
   #[serde(default)]
   pub supports_model_input: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub model_input_mode: Option<ModelInputMode>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelInputMode {
+  /// Each input captures its selected model, including guidance and queued work.
+  PerInput,
 }
 
 impl SessionModelStatus {
@@ -72,6 +81,7 @@ impl SessionModelStatus {
       runtime_generation: None,
       updates_default: false,
       supports_model_input: false,
+      model_input_mode: None,
     }
   }
 }
@@ -88,9 +98,12 @@ pub struct ListSessionModelsResponse {
 }
 
 /// A draft choice captured with one message. It is never applied by opening
-/// the picker, and a busy runtime discards it before steering the active turn.
+/// the picker. The host's advertised model-input mode determines busy delivery:
+/// legacy start-only selection is ignored while steering; per-input intent is captured.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MessageModelSelection {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub model_input_mode: Option<ModelInputMode>,
   pub model_provider: Option<String>,
   pub model_id: String,
   pub expected_revision: String,

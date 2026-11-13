@@ -177,6 +177,7 @@ impl ViewerService {
       session_file: target.input.session_file.clone(),
     };
     let message = crate::model::SubmitSessionInputRequest {
+      delivery: None,
       request_id: request.request_id.clone(),
       session_key: target.session_key.clone(),
       text: "session-control:cancel-turn".into(),

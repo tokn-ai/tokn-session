@@ -47,7 +47,13 @@ pub(super) async fn query_models(adapter: &dyn InteractionAdapter) -> Result<Vec
   )
   .await
   .map_err(|_| InteractionError::unavailable("Model catalog request timed out"))?
-  .map_err(|_| InteractionError::unavailable("Could not read the runtime model catalog"))?;
+  .map_err(|error| {
+    if error.kind == ErrorKind::Unsupported {
+      InteractionError::unsupported("This runtime needs a connected session to list models")
+    } else {
+      InteractionError::unavailable("Could not read the runtime model catalog")
+    }
+  })?;
   let Reply::Models(models) = reply else {
     return Err(InteractionError::unavailable(
       "Runtime returned an invalid model catalog",

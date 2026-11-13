@@ -53,6 +53,7 @@ mod rpc_questions;
 mod rpc_runtimes;
 mod runtimes;
 mod session_control;
+mod session_interactions;
 mod session_models;
 mod trajectory_state;
 mod usage_filter;

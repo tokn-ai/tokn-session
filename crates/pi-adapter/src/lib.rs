@@ -208,11 +208,11 @@ impl PiAdapter {
         ));
       }
       Command::Message {
-        delivery: DeliveryMode::Steer,
+        delivery: DeliveryMode::Steer | DeliveryMode::Guide,
         ..
       } => {
         return Err(InteractionError::unsupported(
-          "Pi RPC cannot atomically reject strict steering after a turn settles; use start_or_steer",
+          "Pi RPC supports start_or_steer, without strict steering or advisory guide admission",
         ));
       }
       _ => {}
@@ -282,7 +282,7 @@ impl PiAdapter {
             images,
             streaming_behavior: Some(wire::StreamingBehavior::Steer),
           },
-          DeliveryMode::Steer => unreachable!("unsupported strict steering was rejected"),
+          DeliveryMode::Steer | DeliveryMode::Guide => unreachable!("unsupported delivery was rejected"),
         };
         self.inner.rpc(command, true).await?;
         // Pi acknowledges acceptance without reporting which side of an idle
