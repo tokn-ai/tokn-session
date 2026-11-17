@@ -1,0 +1,39 @@
+.hub-access .hub-machine-card__gear {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 36px;
+  min-height: 36px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: var(--text-muted);
+  background: transparent;
+}
+.hub-access .hub-machine-card__gear:hover:not(:disabled),
+.hub-access .hub-machine-card__gear:focus-visible {
+  border-color: var(--border);
+  color: var(--text);
+  background: var(--surface-hover);
+}
+.hub-access .hub-machine-card__gear:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.hub-machine-card__gear svg { width: 18px; height: 18px; }
+.machine-settings-reference { display: grid; gap: 10px; min-width: 0; }
+.machine-settings-reference h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.machine-settings-reference code {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-soft);
+  background: var(--surface);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.machine-settings-action, .machine-settings-forget button { justify-self: start; }
+.machine-settings-forget { display: grid; gap: 12px; padding-top: 18px; border-top: 1px solid var(--border); }
+.account-dialog .machine-settings-forget button { color: var(--danger); }
+@media (pointer: coarse) {
+  .hub-access .hub-machine-card__gear { width: 44px; min-height: 44px; }
+}

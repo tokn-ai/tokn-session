@@ -10,6 +10,7 @@ export interface HubDiscoveryGroupState {
   machines: DiscoveredMachine[];
   loading: boolean;
   error?: string;
+  retired?: boolean;
 }
 
 interface GroupEntry {
@@ -45,7 +46,7 @@ export function useHubDiscovery(service: HubAccessService, hosts: SavedHubHost[]
 
   const load = useCallback((current: DiscoveryOwner, group_key: string, group: DiscoveryGroup) => {
     const previous = current.entries.get(group_key);
-    if (previous?.request) return;
+    if (previous?.request || previous?.state.retired) return;
     const request = new AbortController();
     const state = { group_key, group, machines: previous?.state.machines ?? [], loading: true };
     current.entries.set(group_key, { state, request });
@@ -57,7 +58,7 @@ export function useHubDiscovery(service: HubAccessService, hosts: SavedHubHost[]
       if (!active()) return;
       const result = validateDiscoveryResult(await current.service.discover(group, request.signal), group);
       if (!active()) return;
-      current.entries.set(group_key, { state: { group_key, group, machines: result.machines, loading: false } });
+      current.entries.set(group_key, { state: { group_key, group, machines: result.machines, loading: false, retired: result.retired } });
       publish(current);
     }).catch((error: unknown) => {
       if (!active()) return;
@@ -98,9 +99,9 @@ export function useHubDiscovery(service: HubAccessService, hosts: SavedHubHost[]
     if (current && current.service === context.current.service && group) load(current, group_key, group);
   }, [load]);
 
-  const groups: HubDiscoveryGroupState[] = group_keys.map((group_key) => {
+  const groups: HubDiscoveryGroupState[] = group_keys.flatMap((group_key) => {
     const state = snapshot.service === service ? snapshot.groups.get(group_key) : undefined;
-    return state ?? { group_key, group: known.get(group_key)!, machines: [], loading: true };
+    return state?.retired ? [] : [state ?? { group_key, group: known.get(group_key)!, machines: [], loading: true }];
   });
   return { groups, refresh_group };
 }

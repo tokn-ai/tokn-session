@@ -164,6 +164,8 @@ export class BrowserHubAccess implements HubAccessBackend {
     }
     const result = await discoverBrowserGroup(this.hub_url, reference, signal);
     this.checkActive(signal);
+    if (result.retired) await this.store.retireDiscoveryGroup(reference);
+    this.checkActive(signal);
     return result;
   }
   async rememberMetadata(machine: ResolvedMachine, signal: AbortSignal) {

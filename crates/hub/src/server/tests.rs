@@ -32,6 +32,7 @@ async fn discovery_lists_claimed_machines_only_for_the_correct_account_group() {
   let result: DiscoveryResult = serde_json::from_value(json_body(response).await).unwrap();
   result.validate_for(&group).unwrap();
   assert_eq!(result.machines.len(), 1);
+  assert!(!result.retired);
   assert_eq!(result.machines[0].host_id, host.host_id);
   assert!(!result.machines[0].online);
   let wrong_namespace = DiscoveryGroup {
@@ -44,10 +45,10 @@ async fn discovery_lists_claimed_machines_only_for_the_correct_account_group() {
   };
   for other in [wrong_namespace, wrong_digest] {
     let path = format!("/hub/v1/discovery/{}/{}", other.namespace, other.secret_digest);
-    assert_eq!(
-      json_body(get(app.clone(), &path, None).await).await["machines"],
-      json!([])
-    );
+    let result: DiscoveryResult = serde_json::from_value(json_body(get(app.clone(), &path, None).await).await).unwrap();
+    result.validate_for(&other).unwrap();
+    assert!(result.retired);
+    assert!(result.machines.is_empty());
   }
   assert_eq!(
     get(app.clone(), "/hub/v1/discovery/fixture/invalid", None)
@@ -56,7 +57,10 @@ async fn discovery_lists_claimed_machines_only_for_the_correct_account_group() {
     StatusCode::BAD_REQUEST
   );
   state.store.remove_host(&host.host_id).unwrap();
-  assert_eq!(json_body(get(app, &path, None).await).await["machines"], json!([]));
+  let result: DiscoveryResult = serde_json::from_value(json_body(get(app, &path, None).await).await).unwrap();
+  result.validate_for(&group).unwrap();
+  assert!(!result.retired);
+  assert!(result.machines.is_empty());
 }
 
 fn state(directory: &std::path::Path) -> HubState {

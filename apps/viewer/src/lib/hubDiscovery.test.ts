@@ -20,6 +20,13 @@ it("keeps directory candidates separate from trusted machine pins and rejects du
   }
 });
 
+it("accepts retirement only for the exact requested capability with an empty result", () => {
+  expect(validateDiscoveryResult({ ...group, machines: [], retired: true }, group)).toEqual({ ...group, machines: [], retired: true });
+  expect(() => validateDiscoveryResult({ ...group, machines: [machine], retired: true }, group)).toThrow("retired discovery group");
+  expect(() => validateDiscoveryResult({ ...group, machines: [], retired: "true" }, group)).toThrow("invalid discovery status");
+  expect(() => validateDiscoveryResult({ ...group, secret_digest: `${"B".repeat(42)}A`, machines: [], retired: true }, group)).toThrow("different discovery group");
+});
+
 it("retains a negotiated canonical address without accepting an invalid address", () => {
   const registered = { ...machine, machine_address: "personal:laptop" };
   expect(validateDiscoveryResult({ ...group, machines: [registered] }, group).machines).toEqual([registered]);

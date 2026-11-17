@@ -329,7 +329,7 @@ mod tests {
     let other_account = store
       .claim_account_host(unrelated, &user(&store, "bob"), "unrelated")
       .unwrap();
-    let discovered = store.discover_machines(&assignment.group).unwrap();
+    let discovered = store.discover_machines(&assignment.group).unwrap().unwrap();
     assert_eq!(
       discovered.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
       ["laptop", "server"]
@@ -345,6 +345,6 @@ mod tests {
       namespace: other_account.group.namespace,
       ..assignment.group
     };
-    assert!(store.discover_machines(&wrong_namespace).unwrap().is_empty());
+    assert!(store.discover_machines(&wrong_namespace).unwrap().is_none());
   }
 }

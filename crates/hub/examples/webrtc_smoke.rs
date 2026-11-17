@@ -141,12 +141,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     allow_control: false,
     insecure_loopback: true,
     ice_servers: Vec::new(),
-    secure: None,
-    paired: Some(PairedHostConfig {
+    paired: PairedHostConfig {
       host_id: host_id.clone(),
       noise_key_file: noise_key,
       state_file: host_state,
-    }),
+    },
   };
   let stop = shutdown.clone();
   tokio::spawn(async move {

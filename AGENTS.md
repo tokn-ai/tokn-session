@@ -57,7 +57,7 @@ The core abstraction is `AgentEvent`: provider-native historical sessions and li
   OpenCode V1 wire decoder with ZCode-specific provider semantics.
 - `crates/workbuddy`: read-only WorkBuddy SQLite catalog and JSONL session source.
 - `crates/relay`: provider live feeds and stdout/ZeroMQ/managed-stdio transports.
-- `crates/hub`: host-verified authenticator pairing, saved device trust, encrypted client/host tunnels, and optional passkey administration; legacy signed grants remain available.
+- `crates/hub`: account-owned machines, host-verified authenticator pairing, saved device trust, encrypted client/host tunnels, and optional passkey administration.
 - `crates/hub-client-core`: shared native/WASM pairing and Noise encryption without networking.
 - `crates/hub-transport`: bounded ordered record interface and native WebRTC carrier.
 - `crates/hub-remote`: native direct-to-Hub client, remembered identities, requests, and live events.

@@ -170,6 +170,12 @@ opening a machine delivers its group reference through the authenticated
 connection. If a machine was paired before joining its account group, open it
 again and return to Machines to learn the group.
 
+Only account-issued discovery references are supported. The Hub marks retired
+references explicitly, and clients remove that exact reference from saved
+metadata while keeping machine pins and authorization. Empty current groups and
+network failures do not clear references. Opening a saved machine learns its
+current account group over the authenticated connection.
+
 The Hub issues an opaque account discovery capability. Each host can use its
 own authenticator seed. The Hub can see group membership, and a client with the
 group reference can request its machine list. Pairing and saved key verification
@@ -310,23 +316,21 @@ Native keys already paired with TOTP retain persistent access after passkey use.
 Passkey-only sign-in on an unpaired app issues an expiring grant too; use
 authenticator pairing to establish persistent app authorization.
 
-## Upgrading existing hosts
+## Supported access
 
-Pairing protocol v2 uses HMAC-SHA-256 and explicit authorization purposes. Upgrade
-both host and clients together. Legacy host state fails closed because its
-unclassified keys could belong to a browser. From a trusted local terminal:
+Pairing requires protocol v2, HMAC-SHA-256, and explicit authorization purposes.
+Version-one host access files are rejected; the SHA-1 upgrade command has been
+removed. Such installations need fresh current host setup and device pairing.
+Current host identities, passkeys, paired app devices, and saved machine pins
+remain supported.
 
-```sh
-tokn-session-hub authenticator --upgrade-sha256
-```
+Owner-signed invitations and plaintext Hub tunnels are no longer supported.
+The `grant` and `revoke` commands, owner-key generation, and `client --grant-file`
+mode have been removed. Use account registration and authenticator or machine
+passkey pairing. The optional local `client` helper uses the same current pairing
+and encrypted access as other clients.
 
-Use the same `--state-dir` as the connector. This rotates the authenticator seed
-and removes all legacy device grants. Rescan the new SHA-256 QR and pair app
-devices again. Host UUID/keys, enrolled passkeys, their origin, and attempt limits
-are preserved; existing passkeys can sign in browsers. Repeating the upgrade on
-v2 state does not rotate it again. For noninteractive setup, supply
-`--export-file NEW_PRIVATE_FILE`, then import it with SHA-256 explicitly selected.
-Browser storage migration deletes old persisted private keys but retains host
+Browser storage cleanup deletes old persisted private keys while retaining host
 pins and machine names. Bare Base32 seeds do not encode the algorithm; setup QR
 URIs include `algorithm=SHA256`.
 

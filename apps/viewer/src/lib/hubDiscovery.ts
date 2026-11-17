@@ -23,7 +23,10 @@ export function validateDiscoveryResult(value: unknown, expected: DiscoveryGroup
   const group = validateDiscoveryGroup(value);
   if (discoveryGroupKey(group) !== discoveryGroupKey(expected)) throw new Error("Hub returned a different discovery group.");
   const machines = (value as DiscoveryResult).machines;
+  const retired = (value as DiscoveryResult).retired;
+  if (retired !== undefined && typeof retired !== "boolean") throw new Error("Hub returned invalid discovery status.");
   if (!Array.isArray(machines) || machines.length > 64) throw new Error("Hub returned an invalid machine discovery list.");
+  if (retired && machines.length > 0) throw new Error("Hub returned machines for a retired discovery group.");
   const seen = new Set<string>();
   const validated = machines.map((machine: DiscoveredMachine) => {
     if (!machine || typeof machine !== "object" || typeof machine.host_id !== "string" || !UUID.test(machine.host_id)
@@ -40,7 +43,7 @@ export function validateDiscoveryResult(value: unknown, expected: DiscoveryGroup
       ...(machine.machine_address ? { machine_address: machine.machine_address } : {}),
     };
   });
-  return { ...group, machines: validated };
+  return { ...group, machines: validated, ...(retired ? { retired: true } : {}) };
 }
 
 export async function discoverBrowserGroup(hub_url: string, reference: DiscoveryGroup, signal: AbortSignal): Promise<DiscoveryResult> {

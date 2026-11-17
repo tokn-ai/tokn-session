@@ -96,7 +96,7 @@ fn upgraded_registry_hides_old_addresses_and_groups_until_the_host_is_claimed() 
   assert!(store.host(&registered.host_id).unwrap().is_none());
   assert!(store.host_catalog().unwrap().is_empty());
   assert!(store.resolve_machine("legacy", "workstation").unwrap().is_none());
-  assert!(store.discover_machines(&group).unwrap().is_empty());
+  assert!(store.discover_machines(&group).unwrap().is_none());
   assert_eq!(
     store
       .register_tunnel_host(registered.clone(), Some(&group))
@@ -115,6 +115,6 @@ fn upgraded_registry_hides_old_addresses_and_groups_until_the_host_is_claimed() 
     claimed.machine_address
   );
   assert!(store.resolve_machine("legacy", "workstation").unwrap().is_none());
-  assert!(store.discover_machines(&group).unwrap().is_empty());
-  assert_eq!(store.discover_machines(&claimed.group).unwrap().len(), 1);
+  assert!(store.discover_machines(&group).unwrap().is_none());
+  assert_eq!(store.discover_machines(&claimed.group).unwrap().unwrap().len(), 1);
 }

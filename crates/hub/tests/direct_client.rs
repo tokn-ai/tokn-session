@@ -185,7 +185,6 @@ impl Harness {
       allow_control: false,
       insecure_loopback: true,
       ice_servers: Vec::new(),
-      discovery_namespace: None,
       passkey_origin: Some(hub_url.clone()),
     }
     .save(&host_dir.join("host.json"))
@@ -199,12 +198,11 @@ impl Harness {
       allow_control: false,
       insecure_loopback: true,
       ice_servers: Vec::new(),
-      secure: None,
-      paired: Some(PairedHostConfig {
+      paired: PairedHostConfig {
         host_id: host_id.clone(),
         noise_key_file: noise_key,
         state_file: host_dir.join("host-access.json"),
-      }),
+      },
     };
     let account_token = seed_account(&database, "alice");
     assert_eq!(
@@ -276,12 +274,11 @@ impl Harness {
       allow_control: false,
       insecure_loopback: true,
       ice_servers: Vec::new(),
-      secure: None,
-      paired: Some(PairedHostConfig {
+      paired: PairedHostConfig {
         host_id: host_id.clone(),
         noise_key_file: noise_key,
         state_file: directory.join("host-access.json"),
-      }),
+      },
     };
     let account_token = if same_account {
       self.account_token.clone()
@@ -324,7 +321,7 @@ async fn renaming_a_live_machine_refreshes_saved_metadata_without_repairing() {
     .await
     .unwrap();
   let identity_before = std::fs::read(&harness.config.key_file).unwrap();
-  let noise_before = std::fs::read(&harness.config.paired.as_ref().unwrap().noise_key_file).unwrap();
+  let noise_before = std::fs::read(&harness.config.paired.noise_key_file).unwrap();
   assert_eq!(
     account_host::rename(&harness.config, "studio", &harness.account_token)
       .await
@@ -351,7 +348,7 @@ async fn renaming_a_live_machine_refreshes_saved_metadata_without_repairing() {
   assert_eq!(updated.discovery_group, paired.discovery_group);
   assert_eq!(std::fs::read(&harness.config.key_file).unwrap(), identity_before);
   assert_eq!(
-    std::fs::read(&harness.config.paired.as_ref().unwrap().noise_key_file).unwrap(),
+    std::fs::read(&harness.config.paired.noise_key_file).unwrap(),
     noise_before
   );
   let info = manager

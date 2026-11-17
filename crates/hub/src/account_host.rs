@@ -95,7 +95,7 @@ struct HostAccount {
 }
 
 pub(crate) fn membership_group(config: &ConnectorConfig) -> Result<Option<DiscoveryGroup>, String> {
-  let Some(paired) = &config.paired else { return Ok(None) };
+  let paired = &config.paired;
   let Some(path) = paired.state_file.parent() else {
     return Ok(None);
   };
@@ -125,7 +125,7 @@ fn read_membership(state_dir: &Path, hub_url: &str, host_id: &str) -> Result<Opt
 }
 
 fn membership_path(config: &ConnectorConfig) -> Option<PathBuf> {
-  Some(config.paired.as_ref()?.state_file.parent()?.join("host-account.json"))
+  Some(config.paired.state_file.parent()?.join("host-account.json"))
 }
 
 fn validate_claim(claim: &AccountMachineClaim, host_id: &str) -> Result<(), String> {
@@ -148,10 +148,7 @@ struct Account {
 pub async fn claim(config: &ConnectorConfig, machine_name: &str, token: &str) -> Result<String, String> {
   config.validate()?;
   parse_machine_address(&format!("account:{machine_name}"))?;
-  let paired = config
-    .paired
-    .as_ref()
-    .ok_or("Account registration needs paired-device hosting")?;
+  let paired = &config.paired;
   let path = membership_path(config).ok_or("Could not resolve machine account storage")?;
   let hub_origin = canonical_hub(&config.hub_url)?;
   let hub = Url::parse(&hub_origin).map_err(|_| "Invalid Hub URL")?;
@@ -218,10 +215,7 @@ pub async fn claim(config: &ConnectorConfig, machine_name: &str, token: &str) ->
 pub async fn rename(config: &ConnectorConfig, machine_name: &str, token: &str) -> Result<String, String> {
   config.validate()?;
   parse_machine_address(&format!("account:{machine_name}"))?;
-  let paired = config
-    .paired
-    .as_ref()
-    .ok_or("Machine rename needs paired-device hosting")?;
+  let paired = &config.paired;
   let path = membership_path(config).ok_or("Could not resolve machine account storage")?;
   let directory = path
     .parent()

@@ -290,7 +290,10 @@ impl Peer {
     let identity = Arc::new(NoiseIdentity::generate().unwrap());
     let key = identity.public_key();
     let secret = Arc::new(TotpSecret::generate());
-    let discovery = Arc::new(Mutex::new(Some(secret.discovery_group(&hub, "personal").unwrap())));
+    let discovery = Arc::new(Mutex::new(Some(DiscoveryGroup {
+      namespace: "personal".into(),
+      secret_digest: protocol::encode(&[1; 32]),
+    })));
     let paired = Arc::new(Mutex::new(None::<String>));
     let mutations = Arc::new(AtomicUsize::new(0));
     let drop_ack = Arc::new(AtomicBool::new(false));
@@ -474,6 +477,7 @@ async fn interpreted_guest_pairs_streams_reuses_view_connections_and_never_repla
   let services = Arc::new(Services::default());
   let discovery_group = peer.discovery.lock().unwrap().clone().unwrap();
   *services.discovery.lock().unwrap() = Some(DiscoveryResult {
+    retired: false,
     namespace: discovery_group.namespace.clone(),
     secret_digest: discovery_group.secret_digest.clone(),
     machines: vec![
@@ -664,6 +668,58 @@ async fn interpreted_guest_pairs_streams_reuses_view_connections_and_never_repla
   .unwrap();
   assert_eq!(named["discovery_group"], json!(discovery_group));
   assert_eq!(named["host_public_key"], peer.key);
+  let before_retirement = invoke(&run, "hub_client_status", json!({"hub_url":peer.hub}))
+    .await
+    .unwrap();
+  let current_directory = services.discovery.lock().unwrap().clone();
+  services.discovery.lock().unwrap().as_mut().unwrap().machines.clear();
+  let discovery_params = json!({
+    "hub_url":peer.hub,"namespace":discovery_group.namespace,"secret_digest":discovery_group.secret_digest,
+  });
+  invoke(&run, "hub_client_discover", discovery_params.clone())
+    .await
+    .unwrap();
+  assert_eq!(
+    invoke(&run, "hub_client_status", json!({"hub_url":peer.hub}))
+      .await
+      .unwrap(),
+    before_retirement,
+    "an empty current group must retain saved metadata"
+  );
+  services.discovery.lock().unwrap().as_mut().unwrap().retired = true;
+  let retired = invoke(&run, "hub_client_discover", discovery_params.clone())
+    .await
+    .unwrap();
+  assert_eq!(retired["retired"], true);
+  let after_retirement = invoke(&run, "hub_client_status", json!({"hub_url":peer.hub}))
+    .await
+    .unwrap();
+  assert!(after_retirement["hosts"][0]["discovery_group"].is_null());
+  let mut expected_retirement = before_retirement.clone();
+  expected_retirement["hosts"][0]
+    .as_object_mut()
+    .unwrap()
+    .remove("discovery_group");
+  assert_eq!(
+    after_retirement, expected_retirement,
+    "retirement changes only the cached group"
+  );
+  assert!(invoke(&run, "hub_client_discover", discovery_params).await.is_err());
+  *services.discovery.lock().unwrap() = current_directory;
+  // Existing authorization and pins still open the host and relearn its current group.
+  invoke(
+    &run,
+    "hub_client_open",
+    json!({"hub_url":peer.hub,"host_id":HOST_ID,"host_public_key":peer.key}),
+  )
+  .await
+  .unwrap();
+  assert_eq!(
+    invoke(&run, "hub_client_status", json!({"hub_url":peer.hub}))
+      .await
+      .unwrap(),
+    before_retirement
+  );
   let mut events = run.subscribe();
   let reader = run.clone();
   let connection_id = id.clone();

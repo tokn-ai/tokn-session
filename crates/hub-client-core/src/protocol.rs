@@ -21,13 +21,6 @@ pub enum Frame {
     version: u32,
     nonce: String,
   },
-  Authenticate {
-    version: u32,
-    public_key: String,
-    name: String,
-    allow_control: bool,
-    signature: String,
-  },
   /// Public routing registration for a host that enforces device authorization
   /// and encryption itself. Possession of this identity grants no viewer access.
   Register {
@@ -44,42 +37,9 @@ pub enum Frame {
   RegistrationRejected {
     message: String,
   },
-  Pending {
-    code: String,
-    expires_in: u64,
-  },
   Ready {
     host_id: String,
     allow_control: bool,
-  },
-  Request {
-    request_id: u64,
-    method: String,
-    path: String,
-    body: String,
-  },
-  Response {
-    request_id: u64,
-    status: u16,
-    content_type: Option<String>,
-  },
-  Chunk {
-    request_id: u64,
-    data: String,
-  },
-  End {
-    request_id: u64,
-  },
-  Error {
-    request_id: u64,
-    message: String,
-  },
-  Cancel {
-    request_id: u64,
-  },
-  Window {
-    request_id: u64,
-    credits: usize,
   },
   /// Opaque, end-to-end authenticated channels. The Hub never parses records.
   SecureOpen {
@@ -107,15 +67,6 @@ pub fn decode(value: &str, maximum: usize) -> Result<Vec<u8>, String> {
     return Err("Tunnel payload is too large".into());
   }
   Ok(bytes)
-}
-
-/// Bind the proof to all enrollment fields, with a protocol-specific domain.
-pub fn proof(nonce: &str, public_key: &str, name: &str, allow_control: bool) -> Vec<u8> {
-  serde_json::to_vec(&("tokn-hub-host-v1", nonce, public_key, name, allow_control)).expect("string tuple")
-}
-
-pub fn host_id(public_key: &[u8; 32]) -> String {
-  format!("host_{}", encode(public_key))
 }
 
 pub fn registration_proof(nonce: &str, host_id: &str, public_key: &str, name: &str, allow_control: bool) -> Vec<u8> {
@@ -205,8 +156,8 @@ pub fn allowed_route(method: &str, path: &str, allow_control: bool) -> bool {
 }
 
 /// Runtime configuration/lifecycle is a separate host administration capability.
-/// Keep it out of `allowed_route`: legacy grants and plaintext tunnels must
-/// never inherit process administration from their agent-input permission.
+/// Keep it out of `allowed_route`: paired devices must never inherit process
+/// administration from their agent-input permission.
 pub fn runtime_management_route(method: &str, path: &str) -> bool {
   method == "POST"
     && matches!(
@@ -221,8 +172,8 @@ pub fn runtime_management_route(method: &str, path: &str) -> bool {
     )
 }
 
-/// Viewing grants keep recorded model context but cannot discover a live
-/// runtime's catalog or advertise controls that the grant cannot use.
+/// View-only hosts keep recorded model context but cannot discover a live
+/// runtime's catalog or advertise controls that the client cannot use.
 pub fn read_only_model_response(path: &str, reason: &str) -> Option<serde_json::Value> {
   if !matches!(path, "/api/v1/get_session_model_status" | "/api/v1/list_session_models") {
     return None;
@@ -256,6 +207,23 @@ pub fn read_only_session_control_response(path: &str, body: &[u8], reason: &str)
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn legacy_authentication_and_plaintext_frames_are_rejected() {
+    for frame in [
+      serde_json::json!({"type":"authenticate","version":1,"public_key":"key","name":"Host","allow_control":false,"signature":"signature"}),
+      serde_json::json!({"type":"pending","code":"123456","expires_in":60}),
+      serde_json::json!({"type":"request","request_id":1,"method":"GET","path":"/api/v1/health","body":""}),
+      serde_json::json!({"type":"response","request_id":1,"status":200,"content_type":"application/json"}),
+      serde_json::json!({"type":"chunk","request_id":1,"data":"e30"}),
+      serde_json::json!({"type":"end","request_id":1}),
+      serde_json::json!({"type":"error","request_id":1,"message":"failed"}),
+      serde_json::json!({"type":"cancel","request_id":1}),
+      serde_json::json!({"type":"window","request_id":1,"credits":1}),
+    ] {
+      assert!(serde_json::from_value::<Frame>(frame.clone()).is_err(), "{frame}");
+    }
+  }
 
   #[test]
   fn session_control_uses_agent_permission_and_viewing_never_discloses_the_live_route() {

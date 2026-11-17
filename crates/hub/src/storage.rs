@@ -235,7 +235,23 @@ mod tests {
   }
 
   #[test]
-  fn paired_bundle_and_legacy_authenticator_move_without_rotating_trust() {
+  fn current_pairing_bundle_moves_without_rotating_trust() {
+    let (_home, paths) = fixture();
+    crate::host_setup::prepare_host(host_options(paths.legacy_hub_dir())).unwrap();
+    let access = paths.legacy_hub_dir().join("host-access.json");
+    let device = NoiseIdentity::generate().unwrap().public_key();
+    onboarding::authorize_device(&access, &device, 30, 900).unwrap();
+    let original_access = fs::read(&access).unwrap();
+    let key = paths.legacy_hub_dir().join("host-enrollment.key");
+    let original_key = fs::read(&key).unwrap();
+    migrate_legacy_storage(&paths, true).unwrap();
+    assert_eq!(fs::read(&access).unwrap(), original_access);
+    assert_eq!(fs::read(&key).unwrap(), original_key);
+    assert!(onboarding::is_authorized_at(&access, &device, 930).unwrap());
+  }
+
+  #[test]
+  fn unsupported_authenticator_never_moves_or_rewrites_the_bundle() {
     let (_home, paths) = fixture();
     crate::host_setup::prepare_host(host_options(paths.legacy_hub_dir())).unwrap();
     let access = paths.legacy_hub_dir().join("host-access.json");
@@ -250,15 +266,14 @@ mod tests {
     let original_access = fs::read(&access).unwrap();
     let key = paths.legacy_hub_dir().join("host-enrollment.key");
     let original_key = fs::read(&key).unwrap();
-    migrate_legacy_storage(&paths, true).unwrap();
+    assert!(
+      migrate_legacy_storage(&paths, true)
+        .unwrap_err()
+        .contains("Unsupported host pairing state version")
+    );
+    assert!(!paths.hub_dir().exists());
     assert_eq!(fs::read(&access).unwrap(), original_access);
     assert_eq!(fs::read(&key).unwrap(), original_key);
-    assert!(
-      onboarding::read_totp_secret(&access)
-        .err()
-        .unwrap()
-        .contains("upgrade-sha256")
-    );
   }
 
   #[test]

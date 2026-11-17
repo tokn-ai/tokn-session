@@ -291,7 +291,7 @@ fn browser_bootstrap_requires_passkey_assertion_and_never_becomes_persistent() {
 }
 
 #[test]
-fn sha256_migration_preserves_registered_passkeys_for_new_browser_login() {
+fn unsupported_pairing_state_blocks_passkey_login_without_rewriting_trust() {
   let directory = tempfile::tempdir().unwrap();
   let path = directory.path().join("host-access.json");
   let (host, paired) = setup(&path);
@@ -301,13 +301,14 @@ fn sha256_migration_preserves_registered_passkeys_for_new_browser_login() {
   legacy["version"] = json!(1);
   legacy["devices"] = json!({ paired.clone(): 900 });
   onboarding::save_configuration(&path, &legacy).unwrap();
-  onboarding::upgrade_authenticator(&path).unwrap();
-  assert_eq!(onboarding::host_passkeys(&path, ORIGIN).unwrap().len(), 1);
-  assert!(!onboarding::is_authorized_at(&path, &paired, 904).unwrap());
+  let before = std::fs::read(&path).unwrap();
+  assert!(onboarding::host_passkeys(&path, ORIGIN).is_err());
+  assert!(onboarding::is_authorized_at(&path, &paired, 904).is_err());
   let browser = NoiseIdentity::generate().unwrap().public_key();
-  let (pending, payload) = assertion(&host, &browser, BINDING, &mut authenticator);
-  host
-    .finish(pending, HostAuthOperation::LoginFinish, payload, &browser, BINDING, 903)
+  let error = host
+    .start(HostAuthOperation::LoginStart, json!({}), &browser, BINDING, 903)
+    .err()
     .unwrap();
-  assert!(onboarding::is_authorized_at(&path, &browser, 904).unwrap());
+  assert!(error.contains("Unsupported host pairing state version"));
+  assert_eq!(std::fs::read(&path).unwrap(), before);
 }

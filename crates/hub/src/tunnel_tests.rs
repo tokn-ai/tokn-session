@@ -35,7 +35,7 @@ async fn wait_for(mut predicate: impl FnMut() -> bool) {
 }
 
 fn claim_fixture_connector(store: &Store, config: &ConnectorConfig) {
-  let paired = config.paired.as_ref().unwrap();
+  let paired = &config.paired;
   let key = connector::load_key(&config.key_file).unwrap();
   let claim = store.claim_fixture_host(HostRecord {
     host_id: paired.host_id.clone(),
@@ -186,7 +186,7 @@ async fn encrypted_registration_proof_binds_uuid_and_reports_replacement_or_revo
     };
     let public_key = protocol::encode(signing_key.verifying_key().as_bytes());
     let proof = if attempt == 0 {
-      protocol::proof(&nonce, &public_key, "Host", false)
+      serde_json::to_vec(&("tokn-hub-host-v1", &nonce, &public_key, "Host", false)).unwrap()
     } else {
       protocol::registration_proof(&nonce, &host_id, &public_key, "Host", false)
     };
@@ -312,7 +312,7 @@ async fn encrypted_registration_proof_binds_discovery_group_and_cannot_be_stripp
       expected
     );
   }
-  assert_eq!(store.discover_machines(&group).unwrap().len(), 1);
+  assert_eq!(store.discover_machines(&group).unwrap().unwrap().len(), 1);
   tunnels.shutdown();
   task.abort();
 }
@@ -357,7 +357,7 @@ async fn signed_socket(endpoint: &url::Url, key: &SigningKey, host_id: Option<&s
   let public_key = protocol::encode(key.verifying_key().as_bytes());
   let frame = if let Some(host_id) = host_id {
     let proof = protocol::registration_proof(&nonce, host_id, &public_key, "Host", false);
-    Frame::Register {
+    serde_json::to_value(Frame::Register {
       version: protocol::VERSION,
       host_id: host_id.into(),
       public_key,
@@ -365,16 +365,18 @@ async fn signed_socket(endpoint: &url::Url, key: &SigningKey, host_id: Option<&s
       allow_control: false,
       discovery_group: None,
       signature: protocol::encode(&key.sign(&proof).to_bytes()),
-    }
+    })
+    .unwrap()
   } else {
-    let proof = protocol::proof(&nonce, &public_key, "Host", false);
-    Frame::Authenticate {
-      version: protocol::VERSION,
-      public_key,
-      name: "Host".into(),
-      allow_control: false,
-      signature: protocol::encode(&key.sign(&proof).to_bytes()),
-    }
+    let proof = serde_json::to_vec(&("tokn-hub-host-v1", &nonce, &public_key, "Host", false)).unwrap();
+    serde_json::json!({
+      "type": "authenticate",
+      "version": protocol::VERSION,
+      "public_key": public_key,
+      "name": "Host",
+      "allow_control": false,
+      "signature": protocol::encode(&key.sign(&proof).to_bytes()),
+    })
   };
   socket
     .send(ClientMessage::Text(serde_json::to_string(&frame).unwrap().into()))
@@ -388,7 +390,7 @@ async fn legacy_authentication_is_rejected_without_taking_claimed_host_capacity(
   let directory = tempfile::tempdir().unwrap();
   let store = Store::open(directory.path().join("hub.sqlite")).unwrap();
   let legacy_key = SigningKey::generate(&mut OsRng);
-  let legacy_id = protocol::host_id(legacy_key.verifying_key().as_bytes());
+  let legacy_id = format!("host_{}", protocol::encode(legacy_key.verifying_key().as_bytes()));
   store
     .connection()
     .unwrap()
@@ -411,10 +413,7 @@ async fn legacy_authentication_is_rejected_without_taking_claimed_host_capacity(
   endpoint.set_path(protocol::TUNNEL_PATH);
 
   let mut legacy = signed_socket(&endpoint, &legacy_key, None).await;
-  assert!(matches!(
-    next_frame(&mut legacy).await,
-    Some(Frame::RegistrationRejected { message }) if message == crate::store::ACCOUNT_REQUIRED
-  ));
+  assert!(next_frame(&mut legacy).await.is_none());
   assert!(!tunnels.online(&legacy_id));
   assert_eq!(tunnels.handshakes.available_permits(), 1);
   assert_eq!(tunnels.approved.available_permits(), 1);
@@ -486,12 +485,11 @@ async fn accepted_agent_input_is_not_replayed_after_tunnel_reconnect() {
     allow_control: true,
     insecure_loopback: true,
     ice_servers: Vec::new(),
-    secure: None,
-    paired: Some(PairedHostConfig {
+    paired: PairedHostConfig {
       host_id: host_id.clone(),
       noise_key_file,
       state_file,
-    }),
+    },
   };
   claim_fixture_connector(&store, &config);
   let stop = CancellationToken::new();
@@ -697,12 +695,11 @@ async fn authenticator_pairing_registers_only_encrypted_hosts_and_persists_trust
     allow_control: false,
     insecure_loopback: true,
     ice_servers: Vec::new(),
-    secure: None,
-    paired: Some(PairedHostConfig {
+    paired: PairedHostConfig {
       host_id: host_id.clone(),
       noise_key_file: noise_file,
       state_file: state_file.clone(),
-    }),
+    },
   };
   claim_fixture_connector(&store, &config);
   let stop = CancellationToken::new();

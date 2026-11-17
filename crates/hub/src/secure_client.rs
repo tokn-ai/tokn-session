@@ -3,27 +3,20 @@
 //! The Hub never supplies executable code or a trusted public key to this client.
 use crate::{
   protocol,
-  secure::{
-    InnerMessage, MAX_CHUNK, MAX_GRANT_BYTES, MAX_RECORD, MAX_REQUEST_BODY, NoiseIdentity, NoiseInitiator, SignedGrant,
-  },
-  server,
+  secure::{InnerMessage, MAX_CHUNK, MAX_RECORD, MAX_REQUEST_BODY, NoiseIdentity, NoiseInitiator},
 };
 use axum::{
-  Json, Router,
+  Json,
   body::{Body, Bytes},
-  extract::{DefaultBodyLimit, Request, State},
+  extract::{Request, State},
   http::{HeaderValue, StatusCode, header},
-  middleware::{self, Next},
+  middleware::Next,
   response::{IntoResponse, Response},
-  routing::any,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::{
-  collections::HashSet,
-  io::Read,
   net::{IpAddr, SocketAddr},
-  path::{Path, PathBuf},
   sync::Arc,
   time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -40,34 +33,13 @@ pub(crate) type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const IO_TIMEOUT: Duration = Duration::from_secs(90);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
-pub struct ClientConfig {
-  pub hub_url: Url,
-  pub grant_file: PathBuf,
-  pub owner_public_key: String,
-  pub identity_file: PathBuf,
-  pub bind: SocketAddr,
-  pub web_root: PathBuf,
-  pub insecure_loopback: bool,
-}
-
 #[derive(Clone)]
 struct ClientState {
   endpoint: Url,
-  authorization: Authorization,
+  host_public_key: String,
   identity: Arc<NoiseIdentity>,
   requests: Arc<Semaphore>,
   shutdown: CancellationToken,
-}
-
-#[derive(Clone)]
-enum Authorization {
-  Grant {
-    grant: Arc<SignedGrant>,
-    owner_public_key: String,
-  },
-  Device {
-    host_public_key: String,
-  },
 }
 
 #[derive(Clone)]
@@ -99,9 +71,7 @@ pub(crate) async fn proxy_paired(target: PairedRequest, request: Request) -> Res
   proxy(
     State(ClientState {
       endpoint: target.endpoint,
-      authorization: Authorization::Device {
-        host_public_key: target.host_public_key,
-      },
+      host_public_key: target.host_public_key,
       identity: target.identity,
       requests: target.requests,
       shutdown: target.shutdown,
@@ -118,31 +88,6 @@ pub fn unix_time() -> Result<u64, String> {
     .map_err(|_| "System clock is before the Unix epoch".into())
 }
 
-/// Local files pin identity before any communication with the untrusted Hub.
-pub fn read_grant(path: &Path) -> Result<SignedGrant, String> {
-  let metadata = std::fs::symlink_metadata(path).map_err(|e| format!("Could not inspect grant: {e}"))?;
-  if !metadata.is_file() || metadata.len() > MAX_GRANT_BYTES as u64 {
-    return Err("Grant must be a bounded regular file, not a symlink".into());
-  }
-  let mut file = std::fs::OpenOptions::new();
-  file.read(true);
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::OpenOptionsExt;
-    file.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-  }
-  let file = file.open(path).map_err(|e| format!("Could not read grant: {e}"))?;
-  if !file.metadata().map_err(|e| e.to_string())?.is_file() {
-    return Err("Grant must be a regular file".into());
-  }
-  let mut bytes = Vec::new();
-  file
-    .take(MAX_GRANT_BYTES as u64 + 1)
-    .read_to_end(&mut bytes)
-    .map_err(|e| e.to_string())?;
-  SignedGrant::from_json(&bytes)
-}
-
 pub(crate) fn secure_endpoint(hub: &Url, host_id: &str, insecure_loopback: bool) -> Result<Url, String> {
   if !hub.username().is_empty()
     || hub.password().is_some()
@@ -152,12 +97,7 @@ pub(crate) fn secure_endpoint(hub: &Url, host_id: &str, insecure_loopback: bool)
   {
     return Err("Hub URL must be an origin without credentials, paths, queries, or fragments".into());
   }
-  if host_id.is_empty()
-    || host_id.len() > 128
-    || !host_id
-      .bytes()
-      .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'_' | b'-'))
-  {
+  if !protocol::valid_host_uuid(host_id) {
     return Err("Invalid host ID".into());
   }
   let loopback = matches!(hub.host(), Some(Host::Ipv4(ip)) if IpAddr::V4(ip).is_loopback())
@@ -177,105 +117,8 @@ pub(crate) fn secure_endpoint(hub: &Url, host_id: &str, insecure_loopback: bool)
   Ok(endpoint)
 }
 
-impl ClientState {
-  fn verify_grant(&self) -> Result<(), String> {
-    match &self.authorization {
-      Authorization::Grant {
-        grant,
-        owner_public_key,
-      } => grant.verify(
-        owner_public_key,
-        &grant.grant.host_id,
-        &grant.grant.host_public_key,
-        &self.identity.public_key(),
-        unix_time()?,
-        &HashSet::new(),
-      ),
-      Authorization::Device { .. } => Ok(()),
-    }
-  }
-
-  fn host_public_key(&self) -> &str {
-    match &self.authorization {
-      Authorization::Grant { grant, .. } => &grant.grant.host_public_key,
-      Authorization::Device { host_public_key } => host_public_key,
-    }
-  }
-
-  fn allow_control(&self) -> bool {
-    match &self.authorization {
-      Authorization::Grant { grant, .. } => grant.grant.allow_control,
-      // Paired devices trust the host to enforce its explicit control setting.
-      Authorization::Device { .. } => true,
-    }
-  }
-
-  fn expires_at(&self) -> Option<Instant> {
-    match &self.authorization {
-      Authorization::Grant { grant, .. } => {
-        let seconds = grant.grant.expires_at.saturating_sub(unix_time().unwrap_or(u64::MAX));
-        Some(
-          Instant::now()
-            .checked_add(Duration::from_secs(seconds))
-            .unwrap_or_else(Instant::now),
-        )
-      }
-      Authorization::Device { .. } => None,
-    }
-  }
-}
-
-pub async fn run(config: ClientConfig, shutdown: CancellationToken) -> Result<(), String> {
-  if !config.bind.ip().is_loopback() {
-    return Err("The secure viewer client must bind to a numeric loopback address".into());
-  }
-  let identity = Arc::new(NoiseIdentity::load_or_create(&config.identity_file)?);
-  let grant = Arc::new(read_grant(&config.grant_file)?);
-  let endpoint = secure_endpoint(&config.hub_url, &grant.grant.host_id, config.insecure_loopback)?;
-  let listener = tokio::net::TcpListener::bind(config.bind)
-    .await
-    .map_err(|e| e.to_string())?;
-  let address = listener.local_addr().map_err(|e| e.to_string())?;
-  let boundary = LocalBoundary::new(address);
-  let state = ClientState {
-    endpoint,
-    authorization: Authorization::Grant {
-      grant: grant.clone(),
-      owner_public_key: config.owner_public_key,
-    },
-    identity,
-    requests: Arc::new(Semaphore::new(protocol::MAX_REQUESTS)),
-    shutdown: shutdown.clone(),
-  };
-  state.verify_grant()?;
-  let app = router(state, boundary.clone(), config.web_root)?;
-  eprintln!("Encrypted host: {}", grant.grant.host_id);
-  eprintln!(
-    "Open the locally installed viewer: {}/#token={}",
-    boundary.origin, boundary.token
-  );
-  axum::serve(listener, app)
-    .with_graceful_shutdown(shutdown.cancelled_owned())
-    .await
-    .map_err(|e| e.to_string())
-}
-
-fn router(state: ClientState, boundary: LocalBoundary, web_root: PathBuf) -> Result<Router, String> {
-  let app = Router::new()
-    .route("/api/v1/{command}", any(proxy))
-    .route("/api", any(not_found))
-    .route("/api/{*path}", any(not_found))
-    .with_state(state.clone())
-    .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY));
-  Ok(server::with_web_ui(app, web_root)?.layer(middleware::from_fn_with_state(boundary, protect_origin)))
-}
-
 pub(crate) fn error(status: StatusCode, message: impl Into<String>) -> Response {
   (status, Json(json!({ "error": message.into() }))).into_response()
-}
-
-async fn not_found() -> Response {
-  error(StatusCode::NOT_FOUND, "Unknown local viewer route")
 }
 
 pub(crate) async fn protect_origin(State(state): State<LocalBoundary>, request: Request, next: Next) -> Response {
@@ -327,13 +170,9 @@ async fn proxy(State(state): State<ClientState>, request: Request) -> Response {
     .map(|path| path.as_str())
     .unwrap_or_default()
     .to_owned();
-  let runtime_route =
-    matches!(&state.authorization, Authorization::Device { .. }) && protocol::runtime_management_route(&method, &path);
-  if !protocol::allowed_route(&method, &path, state.allow_control()) && !runtime_route {
+  // The paired host enforces its explicit control and runtime permissions.
+  if !protocol::allowed_route(&method, &path, true) && !protocol::runtime_management_route(&method, &path) {
     return error(StatusCode::FORBIDDEN, "This viewer route is unavailable");
-  }
-  if let Err(message) = state.verify_grant() {
-    return error(StatusCode::FORBIDDEN, message);
   }
   let permit = match state.requests.clone().try_acquire_owned() {
     Ok(permit) => permit,
@@ -357,7 +196,6 @@ async fn proxy(State(state): State<ClientState>, request: Request) -> Response {
     Err(message) => return error(StatusCode::BAD_GATEWAY, message),
   };
   let shutdown = state.shutdown.clone();
-  let expires = state.expires_at();
   let request_deadline = if path == "/api/v1/events" {
     None
   } else {
@@ -367,7 +205,7 @@ async fn proxy(State(state): State<ClientState>, request: Request) -> Response {
     Box::pin(async_stream::try_stream! {
       let _permit = permit;
       loop {
-        let deadline = [request_deadline, expires, Some(Instant::now() + IO_TIMEOUT)]
+        let deadline = [request_deadline, Some(Instant::now() + IO_TIMEOUT)]
           .into_iter().flatten().min().expect("I/O timeout is always present");
         let record = tokio::select! {
           _ = shutdown.cancelled() => Err("Secure client stopped".to_owned()),
@@ -404,18 +242,11 @@ async fn open_request(
   body: &[u8],
 ) -> Result<(Socket, crate::secure::SecureChannel, StatusCode, Option<HeaderValue>), String> {
   let mut socket = connect_endpoint(&state.endpoint).await?;
-  let mut initiator = NoiseInitiator::new(&state.identity, state.host_public_key())?;
+  let mut initiator = NoiseInitiator::new(&state.identity, &state.host_public_key)?;
   send_record(&mut socket, initiator.start()?).await?;
   let reply = receive_record(&mut socket, Instant::now() + Duration::from_secs(10)).await?;
   let mut channel = initiator.finish(&reply)?;
-  let request = match &state.authorization {
-    Authorization::Grant { grant, .. } => InnerMessage::Request {
-      method,
-      path,
-      grant: (**grant).clone(),
-    },
-    Authorization::Device { .. } => InnerMessage::DeviceRequest { method, path },
-  };
+  let request = InnerMessage::DeviceRequest { method, path };
   send_record(&mut socket, channel.encrypt(&request)?).await?;
   for chunk in body.chunks(MAX_CHUNK) {
     send_record(
@@ -500,36 +331,34 @@ pub(crate) async fn receive_record(socket: &mut Socket, deadline: Instant) -> Re
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::secure::{Grant, GrantScope, NoiseResponder, OwnerIdentity};
-  use axum::extract::WebSocketUpgrade;
+  use crate::{secure::NoiseResponder, server};
+  use axum::{
+    Router,
+    extract::{DefaultBodyLimit, WebSocketUpgrade},
+    middleware,
+    routing::any,
+  };
   use http_body_util::BodyExt;
+  use std::path::PathBuf;
   use tower::ServiceExt;
 
   fn state(host: &NoiseIdentity) -> ClientState {
     let identity = Arc::new(NoiseIdentity::generate().unwrap());
-    let owner = OwnerIdentity::generate();
-    let grant = owner
-      .sign_grant(Grant {
-        version: 1,
-        grant_id: "grant_test".into(),
-        host_id: "host_test".into(),
-        host_public_key: host.public_key(),
-        recipient_public_key: identity.public_key(),
-        scope: GrantScope::All {},
-        allow_control: false,
-        expires_at: unix_time().unwrap() + 3600,
-      })
-      .unwrap();
     ClientState {
-      endpoint: Url::parse("ws://127.0.0.1:9/hub/v1/secure/host_test").unwrap(),
-      authorization: Authorization::Grant {
-        grant: Arc::new(grant),
-        owner_public_key: owner.public_key(),
-      },
+      endpoint: Url::parse("ws://127.0.0.1:9/hub/v1/secure/11111111-1111-4111-8111-111111111111").unwrap(),
+      host_public_key: host.public_key(),
       identity,
       requests: Arc::new(Semaphore::new(2)),
       shutdown: CancellationToken::new(),
     }
+  }
+
+  fn router(state: ClientState, boundary: LocalBoundary, web_root: PathBuf) -> Result<Router, String> {
+    let app = Router::new()
+      .route("/api/v1/{command}", any(proxy))
+      .with_state(state)
+      .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY));
+    Ok(server::with_web_ui(app, web_root)?.layer(middleware::from_fn_with_state(boundary, protect_origin)))
   }
 
   fn request(path: &str, host: &str, origin: Option<&str>, token: Option<&str>) -> Request {
@@ -619,31 +448,30 @@ mod tests {
       "https://example.com/?token=secret",
     ] {
       assert!(
-        secure_endpoint(&Url::parse(url).unwrap(), "host_test", true).is_err(),
+        secure_endpoint(&Url::parse(url).unwrap(), "11111111-1111-4111-8111-111111111111", true).is_err(),
         "{url}"
       );
     }
-    assert!(secure_endpoint(&Url::parse("http://127.0.0.1:5559").unwrap(), "host_test", false).is_err());
+    assert!(
+      secure_endpoint(
+        &Url::parse("http://127.0.0.1:5559").unwrap(),
+        "11111111-1111-4111-8111-111111111111",
+        false
+      )
+      .is_err()
+    );
     assert_eq!(
-      secure_endpoint(&Url::parse("https://example.com").unwrap(), "host_test", false)
-        .unwrap()
-        .as_str(),
-      "wss://example.com/hub/v1/secure/host_test"
+      secure_endpoint(
+        &Url::parse("https://example.com").unwrap(),
+        "11111111-1111-4111-8111-111111111111",
+        false
+      )
+      .unwrap()
+      .as_str(),
+      "wss://example.com/hub/v1/secure/11111111-1111-4111-8111-111111111111"
     );
     assert!(secure_endpoint(&Url::parse("https://example.com").unwrap(), "../../evil", false).is_err());
-  }
-
-  #[test]
-  fn grant_must_match_independently_pinned_owner_and_local_recipient() {
-    let mut state = state(&NoiseIdentity::generate().unwrap());
-    assert!(state.verify_grant().is_ok());
-    if let Authorization::Grant { owner_public_key, .. } = &mut state.authorization {
-      *owner_public_key = OwnerIdentity::generate().public_key();
-    }
-    assert!(state.verify_grant().is_err());
-    let mut state = self::state(&NoiseIdentity::generate().unwrap());
-    state.identity = Arc::new(NoiseIdentity::generate().unwrap());
-    assert!(state.verify_grant().is_err());
+    assert!(secure_endpoint(&Url::parse("https://example.com").unwrap(), "host_retired", false).is_err());
   }
 
   #[tokio::test]
@@ -651,26 +479,16 @@ mod tests {
     let host = NoiseIdentity::generate().unwrap();
     let mut state = state(&host);
     let expected_recipient = state.identity.public_key();
-    let Authorization::Grant {
-      owner_public_key: expected_owner,
-      ..
-    } = state.authorization.clone()
-    else {
-      panic!("Expected legacy grant authorization")
-    };
-    let expected_host = host.public_key();
     let expected_body = vec![b's'; MAX_CHUNK * 3 + 27];
     let expected = expected_body.clone();
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let sender = Arc::new(std::sync::Mutex::new(Some(sender)));
     let app = Router::new().route(
-      "/hub/v1/secure/host_test",
+      "/hub/v1/secure/11111111-1111-4111-8111-111111111111",
       axum::routing::get(move |upgrade: WebSocketUpgrade| {
         let host = host.clone();
         let sender = sender.clone();
         let expected_recipient = expected_recipient.clone();
-        let expected_owner = expected_owner.clone();
-        let expected_host = expected_host.clone();
         let expected = expected.clone();
         async move {
           upgrade.on_upgrade(move |mut socket| async move {
@@ -684,24 +502,14 @@ mod tests {
             let record = socket.recv().await.unwrap().unwrap().into_data();
             assert!(
               !record
-                .windows(b"grant_test".len())
-                .any(|window| window == b"grant_test")
+                .windows(b"list_sessions".len())
+                .any(|window| window == b"list_sessions")
             );
-            let InnerMessage::Request { method, path, grant } = channel.decrypt(&record).unwrap() else {
+            let InnerMessage::DeviceRequest { method, path } = channel.decrypt(&record).unwrap() else {
               panic!("Expected request")
             };
             assert_eq!(method, "POST");
             assert_eq!(path, "/api/v1/list_sessions");
-            grant
-              .verify(
-                &expected_owner,
-                "host_test",
-                &expected_host,
-                &expected_recipient,
-                unix_time().unwrap(),
-                &HashSet::new(),
-              )
-              .unwrap();
             let mut body = Vec::new();
             loop {
               let record = socket.recv().await.unwrap().unwrap().into_data();
@@ -758,7 +566,7 @@ mod tests {
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     state.endpoint = Url::parse(&format!(
-      "ws://{}/hub/v1/secure/host_test",
+      "ws://{}/hub/v1/secure/11111111-1111-4111-8111-111111111111",
       listener.local_addr().unwrap()
     ))
     .unwrap();

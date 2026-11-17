@@ -1,5 +1,5 @@
 use super::{
-  NoiseIdentity, SignedGrant,
+  NoiseIdentity,
   identity::{NOISE_PROTOCOL, decode_noise_public_key},
 };
 use crate::protocol::{decode, encode};
@@ -63,11 +63,6 @@ pub enum InnerMessage {
   DirectAnswer {
     sdp: String,
   },
-  Request {
-    method: String,
-    path: String,
-    grant: SignedGrant,
-  },
   /// Full-host access authenticated against the host's paired-device registry.
   DeviceRequest {
     method: String,
@@ -125,15 +120,12 @@ impl InnerMessage {
           return Err("Direct negotiation requires bounded SDP".into());
         }
       }
-      Self::Request { method, path, .. } | Self::DeviceRequest { method, path } => {
+      Self::DeviceRequest { method, path } => {
         if !matches!(method.as_str(), "GET" | "POST") {
           return Err("Unsupported secure request method".into());
         }
         if path.len() > 512 || !path.starts_with("/api/v1/") || path.chars().any(char::is_control) {
           return Err("Invalid secure request path".into());
-        }
-        if let Self::Request { grant, .. } = self {
-          grant.validate()?;
         }
       }
       Self::RequestBody { data } | Self::Chunk { data } => {
@@ -199,9 +191,8 @@ pub fn validate_ice_servers(servers: &[String]) -> Result<(), String> {
   Ok(())
 }
 
-/// An IK initiator must already know the authentic host public key. Obtain it
-/// through host-verified pairing or a legacy owner-signed invitation checked
-/// with an independent owner key.
+/// An IK initiator must already know the authentic host public key obtained
+/// through host-verified pairing.
 pub struct NoiseInitiator {
   state: snow::HandshakeState,
   pinned_host: String,
@@ -262,8 +253,7 @@ impl NoiseInitiator {
 }
 
 /// Completing the responder handshake authenticates the client's static key;
-/// it does not authorize access. Check the host's device registry or a legacy
-/// grant bound to that key next.
+/// it does not authorize access. Check the host's device registry next.
 pub struct NoiseResponder(snow::HandshakeState);
 
 impl NoiseResponder {
@@ -457,6 +447,27 @@ fn noise_error(error: snow::Error) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn signed_grant_requests_and_grant_fields_are_rejected() {
+    let legacy = serde_json::json!({
+      "type": "request", "method": "GET", "path": "/api/v1/health",
+      "grant": {
+        "grant": {
+          "version": 1, "grant_id": "retired", "host_id": "host_retired",
+          "host_public_key": "host_key", "recipient_public_key": "device_key",
+          "scope": {"type": "all"}, "allow_control": false, "expires_at": 2_000_000_000
+        },
+        "signature": "retired_signature"
+      }
+    });
+    assert!(serde_json::from_value::<InnerMessage>(legacy.clone()).is_err());
+    let mut paired = legacy;
+    paired["type"] = "device_request".into();
+    assert!(serde_json::from_value::<InnerMessage>(paired.clone()).is_err());
+    paired.as_object_mut().unwrap().remove("grant");
+    assert!(serde_json::from_value::<InnerMessage>(paired).is_ok());
+  }
 
   #[test]
   fn injected_entropy_handshake_interoperates_and_preserves_host_pin() {

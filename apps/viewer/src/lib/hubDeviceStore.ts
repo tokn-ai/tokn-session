@@ -1,7 +1,7 @@
 import type { DeviceIdentity, CryptoApi } from "./hubCrypto";
 import type { DiscoveryGroup, SavedHubHost } from "./types";
 import { parseMachineAddress } from "./hubAddress";
-import { validateDiscoveryGroup } from "./hubDiscovery";
+import { discoveryGroupKey, validateDiscoveryGroup } from "./hubDiscovery";
 export type { SavedHubHost } from "./types";
 export interface HubDeviceRecord {
   version: 2;
@@ -165,6 +165,18 @@ export class HubDeviceStore {
       if (!previous) throw new Error("This machine was forgotten. Pair it again before saving its group.");
       if (previous.host_public_key !== host.host_public_key) throw new Error("This machine's saved encryption key changed.");
       return { ...current, hosts: current.hosts.map((entry) => entry.host_id === host.host_id ? { ...entry, discovery_group: verified } : entry) };
+    });
+  }
+  async retireDiscoveryGroup(group: DiscoveryGroup): Promise<void> {
+    const key = discoveryGroupKey(validateDiscoveryGroup(group));
+    this.record = await this.storage.update(this.hub_url, (stored) => {
+      const current = validateRecord(stored!, this.hub_url);
+      return { ...current, hosts: current.hosts.map((host) => {
+        if (!host.discovery_group || discoveryGroupKey(host.discovery_group) !== key) return host;
+        const retained = { ...host };
+        delete retained.discovery_group;
+        return retained;
+      }) };
     });
   }
   async selectHost(host_id: string | null): Promise<void> {
