@@ -41,7 +41,9 @@ authenticated opens refresh it for previously paired devices. Discovery and per-
 authorization remain independent. See [discovery groups](hub-pairing.md#discovery-groups).
 The gallery combines account machines in the signed-in browser with saved and
 discovered machines. Desktop and Apell combine saved and discovered machines.
-Each Hub host UUID appears once, with its assigned address or display name.
+Each Hub host UUID appears once. Cards lead with the display name and show the
+assigned address, connector status and pairing action. The gear on a paired card
+opens a dialog with its saved reference, passkey setup where supported, and Forget.
 Opening a paired card uses the saved host key.
 A plus tile opens the **Add machine** dialog. Closing it cancels pending pairing
 and clears its code.

@@ -47,12 +47,20 @@ it("merges the account roster, saved pairing and discovery without replacing the
   render(<HubAccess initial_hub_url="https://hub.example" account_roster={{
     hub_url: "https://hub.example", machines: [account_machine, roster_only], on_retry: vi.fn(),
   }} />);
-  const card = (await screen.findByRole("heading", { name: "alice:workstation" })).closest("li")!;
-  expect(within(card).getByText("Account machine")).toBeInTheDocument();
+  const card = (await screen.findByRole("heading", { name: "Workstation" })).closest("li")!;
+  expect(within(card).getByText("alice:workstation")).toBeVisible();
+  expect(screen.queryByText("Account machine")).not.toBeInTheDocument();
   expect(within(card).getByText("Paired")).toBeInTheDocument();
-  expect(within(card).getByText(machineReference(remembered))).toBeInTheDocument();
+  const gear = within(card).getByRole("button", { name: "Settings for alice:workstation" });
+  expect(within(card).queryByText(machineReference(remembered))).not.toBeInTheDocument();
+  fireEvent.click(gear);
+  const settings = screen.getByRole("dialog", { name: "Machine settings" });
+  expect(within(settings).getByText(machineReference(remembered))).toBeVisible();
+  fireEvent.click(within(settings).getByRole("button", { name: "Close Machine settings" }));
+  expect(gear).toHaveFocus();
   expect(screen.getByRole("list", { name: "Machines" }).children).toHaveLength(3);
   const pair = screen.getByRole("button", { name: "Pair alice:laptop" });
+  expect(within(pair.closest("li")!).queryByRole("button", { name: /Settings for/ })).not.toBeInTheDocument();
   expect(within(pair.closest("li")!).getByText("Pairing required")).toBeInTheDocument();
   fireEvent.click(pair);
   expect(screen.getByLabelText("Machine address or reference")).toHaveValue(roster_only.host_id);
@@ -70,8 +78,30 @@ it("keeps the account roster scoped to the same Hub", async () => {
   render(<HubAccess initial_hub_url="https://hub.example" account_roster={{
     hub_url: "https://other.example", machines: [{ ...discovered_laptop, machine_address: "alice:laptop" }], on_retry: vi.fn(),
   }} />);
-  expect(await screen.findByRole("heading", { name: host.machine_address })).toBeInTheDocument();
-  expect(screen.queryByRole("heading", { name: "alice:laptop" })).not.toBeInTheDocument();
+  expect(await screen.findByText(host.machine_address)).toBeInTheDocument();
+  expect(screen.queryByText("alice:laptop")).not.toBeInTheDocument();
+});
+
+it("runs settings actions on the selected pairing and shows the result in the gallery", async () => {
+  const other = { ...host, host_id: discovered_laptop.host_id, machine_address: "alice:laptop" };
+  const status = { hosts: [host, other], selected_host_id: null, device_public_key: "D".repeat(43) };
+  vi.mocked(service.status).mockResolvedValue(status);
+  vi.mocked(service.authenticate).mockRejectedValueOnce(new Error("Passkey canceled"));
+  vi.mocked(service.forget).mockImplementation(async (host_id) => {
+    status.hosts = status.hosts.filter((saved) => saved.host_id !== host_id);
+  });
+  render(<HubAccess initial_hub_url="https://hub.example" />);
+  const gear = await screen.findByRole("button", { name: "Settings for alice:laptop" });
+  fireEvent.click(gear);
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Add a passkey" }));
+  expect(service.authenticate).toHaveBeenCalledWith(other, true, expect.any(AbortSignal));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Passkey canceled");
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  fireEvent.click(gear);
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Forget machine" }));
+  expect(service.forget).toHaveBeenCalledWith(other.host_id);
+  await waitFor(() => expect(gear).not.toBeInTheDocument());
+  expect(screen.getByRole("button", { name: "Settings for alice:workstation" })).toBeEnabled();
 });
 
 it("discovers the first paired machine's group and requires a separate pairing for another machine", async () => {
@@ -164,7 +194,7 @@ it("merges saved and discovered machines without replacing saved identity or pai
   const gallery = screen.getByRole("list", { name: "Machines" });
   expect(within(gallery).getAllByRole("listitem")).toHaveLength(3);
   expect(within(gallery).queryByText("Unverified directory name")).not.toBeInTheDocument();
-  const saved_card = within(gallery).getByRole("heading", { name: host.machine_address }).closest("li")!;
+  const saved_card = within(gallery).getByText(host.machine_address).closest("li")!;
   expect(within(saved_card).getByText("Paired")).toBeInTheDocument();
   expect(await within(saved_card).findByText("Offline")).toBeInTheDocument();
   const open = within(saved_card).getByRole("button", { name: `Sign in to ${host.machine_address}` });
@@ -186,8 +216,13 @@ it("labels UUID-paired cards with a real discovery address or a display name wit
     discovered_laptop,
   ] });
   render(<HubAccess initial_hub_url="https://hub.example" startup_host_id={null} />); await ready();
-  const card = (await screen.findByRole("heading", { name: "personal:workstation" })).closest("li")!;
-  expect(within(card).getByText(machineReference(saved))).toBeInTheDocument();
+  const card = (await screen.findByText("personal:workstation")).closest("li")!;
+  const gear = within(card).getByRole("button", { name: "Settings for personal:workstation" });
+  fireEvent.click(gear);
+  const settings = screen.getByRole("dialog", { name: "Machine settings" });
+  expect(within(settings).getByText(machineReference(saved))).toBeVisible();
+  fireEvent(settings, new Event("cancel", { cancelable: true }));
+  expect(gear).toHaveFocus();
   expect(screen.getByRole("heading", { name: "Saved laptop" })).toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: "personal:Saved laptop" })).not.toBeInTheDocument();
   fireEvent.click(within(card).getByRole("button", { name: "Sign in to personal:workstation" }));
@@ -422,6 +457,12 @@ it("applet reopens a remembered machine using its native pairing", async () => {
   expect(await screen.findByText("Encrypted sessions")).toBeInTheDocument();
   expect(service.connect).toHaveBeenCalledWith(host, expect.any(AbortSignal));
   expect(service.pairMachine).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: /connection settings/i }));
+  fireEvent.click(screen.getByRole("button", { name: "Machines" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Settings for alice:workstation" }));
+  const settings = within(screen.getByRole("dialog", { name: "Machine settings" }));
+  expect(settings.getByText(machineReference(host))).toBeVisible();
+  expect(settings.queryByRole("button", { name: "Add a passkey" })).not.toBeInTheDocument();
 });
 
 it("pairs in browser without a local bearer token and closes the selected machine on switching", async () => {
@@ -539,7 +580,7 @@ it("keeps a long machine address visible beside a concise accessible open action
   const machine_address = `${"a".repeat(63)}:${"b".repeat(63)}`;
   vi.mocked(service.status).mockResolvedValue({ hosts: [{ ...host, machine_address }], selected_host_id: null, device_public_key: "D".repeat(43) });
   render(<HubAccess initial_hub_url="https://hub.example" />); await ready();
-  expect(screen.getByRole("heading", { name: machine_address })).toBeInTheDocument();
+  expect(screen.getByText(machine_address)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: `Sign in to ${machine_address}` })).toHaveTextContent(/^Sign in$/);
 });
 

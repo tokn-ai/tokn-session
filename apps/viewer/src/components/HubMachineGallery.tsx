@@ -1,36 +1,30 @@
 import { useId } from "react";
 import type { HubAccessService } from "../lib/hubAccess";
-import { hubHostLabel, machineReference } from "../lib/hubDeviceStore";
 import { discoveryGroupKey } from "../lib/hubDiscovery";
 import { viewerCapabilities } from "../lib/platform";
 import type { DiscoveredMachine, ResolvedMachine, SavedHubHost } from "../lib/types";
 import { useHubDiscovery, type HubDiscoveryGroupState } from "../lib/useHubDiscovery";
 import { useHubPresence } from "../lib/useHubPresence";
-import { ConnectionIcon, RefreshIcon, ServerIcon } from "./Icons";
+import { ConnectionIcon, RefreshIcon } from "./Icons";
+import { HubMachineCard, type GalleryMachine } from "./HubMachineCard";
 import "./HubMachineGallery.css";
-
-interface GalleryMachine {
-  host_id: string;
-  saved?: SavedHubHost;
-  account?: ResolvedMachine;
-  discovery?: DiscoveredMachine;
-  online?: boolean;
-  groups: Set<string>;
-}
 
 function galleryMachines(hosts: SavedHubHost[], account_machines: ResolvedMachine[], groups: HubDiscoveryGroupState[]): GalleryMachine[] {
   const machines = new Map<string, GalleryMachine>();
   function entry(host_id: string): GalleryMachine {
     const previous = machines.get(host_id);
     if (previous) return previous;
-    const machine = { host_id, groups: new Set<string>() };
+    const machine = { host_id, namespaces: new Set<string>() };
     machines.set(host_id, machine);
     return machine;
   }
+  const active_groups = new Set(groups.map((state) => state.group_key));
   for (const saved of hosts) {
     const machine = entry(saved.host_id);
     machine.saved = saved;
-    if (saved.discovery_group) machine.groups.add(discoveryGroupKey(saved.discovery_group));
+    if (saved.discovery_group && active_groups.has(discoveryGroupKey(saved.discovery_group))) {
+      machine.namespaces.add(saved.discovery_group.namespace);
+    }
   }
   for (const account of account_machines) {
     const machine = entry(account.host_id);
@@ -46,7 +40,7 @@ function galleryMachines(hosts: SavedHubHost[], account_machines: ResolvedMachin
         machine.discovery = candidate;
       }
       machine.online = machine.online === true || candidate.online;
-      machine.groups.add(state.group_key);
+      machine.namespaces.add(state.group.namespace);
     }
   }
   return [...machines.values()];
@@ -92,7 +86,6 @@ export function HubMachineGallery({ service, hosts, account_roster, busy, openin
   // Namespace grouping is presentation only. Each capability keeps its own
   // request, cached results and host trust checks.
   const discovery = discoveryByNamespace(groups);
-  const group_namespaces = new Map(groups.map((state) => [state.group_key, state.group.namespace]));
 
   return <section className="hub-gallery" aria-labelledby={heading_id}>
     <header className="hub-gallery__heading"><h2 id={heading_id}>Your machines</h2><span aria-label={`${machines.length} machines`}>{machines.length}</span></header>
@@ -101,48 +94,12 @@ export function HubMachineGallery({ service, hosts, account_roster, busy, openin
       <button type="button" onClick={account_roster.on_retry}>Retry account machines</button>
     </p>}
     <ul className="hub-machine-grid" aria-label="Machines">
-      {machines.map((machine) => {
-        const host = machine.saved;
-        const candidate = machine.account ?? machine.discovery;
-        const address = machine.account?.machine_address ?? machine.discovery?.machine_address ?? host?.machine_address;
-        const name = machine.account?.name ?? host?.name ?? machine.discovery?.name;
-        const label = address ?? name ?? (host ? hubHostLabel(host) : `Machine ${machine.host_id.slice(0, 8)}`);
-        const status = presence.get(machine.host_id)!;
-        const online = status.state === "online" || (status.state !== "offline" && machine.online === true);
-        const namespaces = [...new Set([...machine.groups].map((key) => group_namespaces.get(key))
-          .filter((namespace): namespace is string => namespace !== undefined))];
-        return <li className="hub-machine-card" key={machine.host_id}>
-          <div className="hub-machine-card__top"><span className="hub-machine-card__icon"><ServerIcon /></span>
-            <span className="hub-machine-card__trust">{host ? "Paired" : "Pairing required"}</span></div>
-          <div className="hub-machine-card__identity"><h3>{label}</h3>
-            {name && name !== label && <p>{name}</p>}
-            <span className={`hub-machine-card__presence${status.state === "online" ? " is-online" : ""}`}>
-              <span title={status.error ?? "Connector status reported by the Hub"}>
-                {status.state === "checking" ? "Checking…" : status.state === "unavailable" ? "Status unavailable" : status.state === "online" ? "Online" : "Offline"}
-              </span>
-              {status.connector_version && <span className="hub-machine-card__version" title="Connector version">· v{status.connector_version}</span>}
-            </span>
-          </div>
-          {(machine.account || namespaces.length > 0) && <div className="hub-machine-card__groups" aria-label="Machine groups">
-            {machine.account && <span>Account machine</span>}
-            {namespaces.map((namespace) => <span key={namespace}>{namespace}</span>)}
-          </div>}
-          <div className="hub-machine-card__actions">
-            {host ? <button className="hub-machine-card__primary" type="button" disabled={busy}
-              aria-label={`${capabilities.native_hub ? "Open" : "Sign in to"} ${label}`} onClick={() => on_open(host)}>
-              {opening_host_id === host.host_id ? "Connecting…" : capabilities.native_hub ? "Open" : "Sign in"}
-            </button> : candidate && <button className="hub-machine-card__primary" type="button" disabled={busy || !online}
-              aria-label={`Pair ${label}`} onClick={() => on_pair({ ...candidate, online })}>Pair</button>}
-            {host && <details className="hub-machine-card__settings"><summary>Machine settings</summary><div>
-              {capabilities.passkeys && <button type="button" disabled={busy} onClick={() => on_passkey(host)}>Add a passkey</button>}
-              <span className="hub-field-label">Machine reference</span><code className="hub-machine-reference">{machineReference(host)}</code>
-              <button type="button" className="hub-secondary" disabled={busy} onClick={() => on_forget(host)}>Forget {label}</button>
-              <p>Forgetting removes this device’s reference. Authorization on the machine is unchanged.</p>
-            </div></details>}
-          </div>
-        </li>;
-      })}
-      <li className="hub-machine-add"><button type="button" aria-label="Add machine" title="Add machine" disabled={busy} onClick={on_add}><span aria-hidden="true">+</span></button></li>
+      {machines.map((machine) => <HubMachineCard key={machine.host_id} machine={machine}
+        status={presence.get(machine.host_id)!} busy={busy} opening={opening_host_id === machine.host_id}
+        on_open={on_open} on_pair={on_pair} on_passkey={on_passkey} on_forget={on_forget} />)}
+      <li className="hub-machine-add"><button type="button" disabled={busy} onClick={on_add}>
+        <span aria-hidden="true">+</span>Add machine
+      </button></li>
     </ul>
     <div className="hub-gallery-discovery" aria-label="Machine discovery"><div className="hub-gallery-discovery__label"><ConnectionIcon /><span>Discovery</span></div>
       {groups.length === 0 && <span className="hub-gallery-discovery__hint">{hosts.length === 0 ? "Pair a machine to discover more machines." : "Open a saved machine to discover more machines."}</span>}
