@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import { RemoteConnection } from "./components/RemoteConnection";
 import { ViewerPage } from "./pages/ViewerPage";
@@ -6,16 +6,18 @@ import { isDesktop, RemoteClient, selectMachine, type ConnectionState } from "./
 import { PairedConnection } from "./components/PairedConnection";
 import { HubConnection } from "./components/HubConnection";
 import { detectHub, HubError, hubErrorMessage, type HubClient, type HubStatus } from "./lib/hub";
-import { accountSession, browserAccountClient, hubAccountAvailability, loadAccountMachines, refreshBrowserAccount } from "./lib/hubAccount";
+import { accountSession, browserAccountClient, hubAccountAvailability, loadAccountMachines, logoutAccount, refreshBrowserAccount, type AccountIdentity } from "./lib/hubAccount";
 import type { ResolvedMachine } from "./lib/types";
 import { HubAccess } from "./components/HubAccess";
 import { HubAccount } from "./components/HubAccount";
+import { HubAccountMenu } from "./components/HubAccountMenu";
 import { NativePasskey } from "./components/NativePasskey";
 import { DesktopWorkspace } from "./pages/DesktopWorkspace";
 import { RemoteWorkspace } from "./pages/RemoteWorkspace";
 import { viewerHost } from "./lib/platform";
 import { SettingsEntry } from "./components/SettingsEntry";
 import { ActionNotificationsProvider } from "./components/ActionNotifications";
+import { AuthLayout } from "./components/AuthLayout";
 
 function BrowserViewer({ initial_token }: { initial_token?: string }) {
   const [endpoint, setEndpoint] = useState(() => window.location.origin);
@@ -54,53 +56,72 @@ function BrowserViewer({ initial_token }: { initial_token?: string }) {
       <button onClick={() => { selectMachine(); setClient(undefined); setState("connecting"); }}>Change machine</button>
     </RemoteConnection>
   } />;
-  return <main className="machine-connect">
-    <form onSubmit={(event) => { event.preventDefault(); void connect(); }}>
-      <h1>Session viewer</h1>
-      <p>Connect to the viewer server on the machine whose sessions you want to read.</p>
-      <label htmlFor="machine-url">Viewer address</label>
-      <input id="machine-url" type="url" value={endpoint} disabled={busy} required onChange={(event) => setEndpoint(event.target.value)} />
-      <label htmlFor="machine-token">Access token</label>
-      <input id="machine-token" type="password" value={token} disabled={busy} autoComplete="off" onChange={(event) => setToken(event.target.value)} />
-      <p className="machine-hint">The token is kept only for this connection.</p>
-      {error && <p role="alert">{error}</p>}
-      <button disabled={busy}>{busy ? "Connecting…" : "Connect"}</button>
-      <SettingsEntry />
+  return <AuthLayout navigation={<SettingsEntry />} footer="Your sessions, wherever you work.">
+    <form className="auth-form" aria-busy={busy} onSubmit={(event) => { event.preventDefault(); void connect(); }}>
+      <header className="auth-heading">
+        <p className="auth-eyebrow">Session viewer</p>
+        <h1>Connect to your viewer</h1>
+        <p className="auth-description">Pick up your agent sessions on another machine.</p>
+      </header>
+      <div className="auth-field">
+        <label htmlFor="machine-url">Viewer address</label>
+        <input id="machine-url" type="url" autoComplete="url" spellCheck={false} value={endpoint} disabled={busy} required
+          aria-describedby="machine-url-hint" onChange={(event) => setEndpoint(event.target.value)} />
+        <p className="auth-hint" id="machine-url-hint">The address of the viewer server on your machine.</p>
+      </div>
+      <div className="auth-field">
+        <label htmlFor="machine-token">Access token</label>
+        <input id="machine-token" type="password" value={token} disabled={busy} autoComplete="off"
+          aria-describedby="machine-token-hint" onChange={(event) => setToken(event.target.value)} />
+        <p className="auth-hint" id="machine-token-hint">The token is kept only for this connection.</p>
+      </div>
+      {error && <p className="auth-feedback" role="alert">{error}</p>}
+      <button className="auth-primary" disabled={busy}>{busy ? "Connecting…" : "Connect"}</button>
     </form>
-  </main>;
+  </AuthLayout>;
 }
 
 function BrowserHubGallery() {
   const [supported, setSupported] = useState(false);
+  const [identity, setIdentity] = useState<AccountIdentity>();
+  const [signing_out, setSigningOut] = useState(false);
+  const [sign_out_error, setSignOutError] = useState<string>();
+  const sign_out_client = useRef<HubClient>(undefined);
+  const account_user_id = useRef<string>(undefined);
+  const generation = useRef(0);
   const [roster, setRoster] = useState<{ machines: ResolvedMachine[]; unavailable?: boolean }>({ machines: [] });
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     const client = browserAccountClient();
     let roster_client: HubClient | undefined;
-    let user_id: string | undefined;
     let available = false;
     let refreshing = false;
 
     async function refresh() {
-      if (!available || refreshing || client.signal.aborted) return;
+      if (!available || refreshing || client.signal.aborted || sign_out_client.current) return;
+      const current_generation = generation.current;
+      const stale = () => client.signal.aborted || generation.current !== current_generation;
       refreshing = true;
       try {
         const identity = await refreshBrowserAccount(client);
-        if (client.signal.aborted) return;
-        if (identity?.user_id !== user_id) {
-          user_id = identity?.user_id;
+        if (stale()) return;
+        if (identity?.user_id !== account_user_id.current) {
+          account_user_id.current = identity?.user_id;
+          setSignOutError(undefined);
           setRoster({ machines: [] });
         }
+        setIdentity(identity);
         if (!identity) { setRoster({ machines: [] }); return; }
         const session = accountSession(identity);
         roster_client = session.client;
         const machines = await loadAccountMachines(session.client, session.username);
-        if (!client.signal.aborted) setRoster({ machines });
+        if (!stale()) setRoster({ machines });
       } catch (error) {
-        if (client.signal.aborted) return;
+        if (stale()) return;
         const account_changed = error instanceof HubError
           && (error.status === 401 || (error.status === 409 && error.details?.account_session_changed === true));
+        if (account_changed) { account_user_id.current = undefined; setIdentity(undefined); }
         setRoster({ machines: [], unavailable: !account_changed });
       } finally {
         roster_client?.close();
@@ -109,8 +130,8 @@ function BrowserHubGallery() {
       }
     }
 
-    function cancel() { client.close(); roster_client?.close(); }
-    function hide() { cancel(); setRoster({ machines: [] }); }
+    function cancel() { client.close(); roster_client?.close(); sign_out_client.current?.close(); }
+    function hide() { cancel(); account_user_id.current = undefined; setIdentity(undefined); setRoster({ machines: [] }); }
     window.addEventListener("focus", refresh);
     window.addEventListener("pagehide", hide);
     void hubAccountAvailability(client).then((availability) => {
@@ -126,8 +147,42 @@ function BrowserHubGallery() {
     };
   }, [attempt]);
 
+  async function logout() {
+    if (!identity || sign_out_client.current) return;
+    const client = browserAccountClient(identity.user_id);
+    sign_out_client.current = client;
+    generation.current += 1;
+    setSigningOut(true);
+    setSignOutError(undefined);
+    try {
+      await logoutAccount(client);
+      if (client.signal.aborted) return;
+      account_user_id.current = undefined;
+      setIdentity(undefined);
+      setRoster({ machines: [] });
+    } catch (error) {
+      if (client.signal.aborted) return;
+      const account_changed = error instanceof HubError
+        && (error.status === 401 || (error.status === 409 && error.details?.account_session_changed === true));
+      if (account_changed) {
+        account_user_id.current = undefined;
+        setIdentity(undefined);
+        setRoster({ machines: [] });
+      } else setSignOutError(hubErrorMessage(error));
+      // Restart any roster refresh discarded when sign-out began.
+      setAttempt((value) => value + 1);
+    } finally {
+      client.close();
+      sign_out_client.current = undefined;
+      setSigningOut(false);
+    }
+  }
+
   return <HubAccess
-    account_control={supported && <a href="/account">Hub account</a>}
+    account_control={supported && (identity
+      ? <HubAccountMenu key={identity.user_id} username={identity.username} signing_out={signing_out}
+        sign_out_error={sign_out_error} on_sign_out={() => { void logout(); }} />
+      : <><SettingsEntry /><a className="hub-sign-in" href="/account">Sign in</a></>)}
     account_roster={{ hub_url: window.location.origin, ...roster, on_retry: () => setAttempt((value) => value + 1) }}
   />;
 }
@@ -154,10 +209,17 @@ function BrowserGateway({ bootstrap_token }: { bootstrap_token?: string }) {
     if (window.location.pathname === "/account") return <HubAccount />;
     return <BrowserHubGallery />;
   }
-  return <main className="machine-connect"><form onSubmit={(event) => { event.preventDefault(); setAttempt((value) => value + 1); }}>
-    <h1>Session viewer</h1>
-    {error ? <><p role="alert">{error}</p><button>Retry connection</button></> : <p role="status">Connecting…</p>}
-  </form></main>;
+  return <AuthLayout footer="Your sessions, wherever you work.">
+    <form className="auth-form" onSubmit={(event) => { event.preventDefault(); setAttempt((value) => value + 1); }}>
+      <header className="auth-heading">
+        <p className="auth-eyebrow">Tokn</p>
+        <h1>Session viewer</h1>
+        <p className="auth-description">Your agent sessions are one connection away.</p>
+      </header>
+      {error ? <><p className="auth-feedback" role="alert">{error}</p><button className="auth-primary">Retry connection</button></>
+        : <p className="auth-feedback" role="status">Connecting…</p>}
+    </form>
+  </AuthLayout>;
 }
 
 interface AppProps { initial_token?: string; bootstrap_token?: string; }

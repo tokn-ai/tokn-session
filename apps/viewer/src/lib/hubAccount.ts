@@ -15,7 +15,7 @@ export interface AccountKey {
   expires_at: number;
 }
 
-interface AccountIdentity {
+export interface AccountIdentity {
   user_id: string;
   username: string;
 }

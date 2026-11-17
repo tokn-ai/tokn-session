@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "./App";
 import { RemoteClient } from "./lib/transport";
@@ -87,14 +87,15 @@ it("opens account sign-in for a CLI request on the Hub", async () => {
   } finally { window.history.replaceState(null, "", "/"); }
 });
 
-it("links to the Hub account page from Machines when email delivery needs setup", async () => {
+it("offers sign-in from Machines when signed out, including when email delivery needs setup", async () => {
   vi.mocked(fetch).mockImplementation(async (input) => {
     if (String(input).endsWith("/account/capabilities")) return Response.json({ enabled: false });
     if (String(input).endsWith("/account/browser/refresh")) return Response.json({ error: "Sign in required" }, { status: 401 });
     return Response.json({ configured: true, authenticated: false });
   });
   render(<App />);
-  expect(await screen.findByRole("link", { name: "Hub account" })).toHaveAttribute("href", "/account");
+  expect(await screen.findByRole("link", { name: "Sign in" })).toHaveAttribute("href", "/account");
+  expect(screen.queryByRole("button", { name: /Account menu/ })).not.toBeInTheDocument();
 });
 
 it("loads the same-origin account roster and clears it when the account signs out in another tab", async () => {
@@ -111,14 +112,74 @@ it("loads the same-origin account roster and clears it when the account signs ou
   });
   render(<App />);
   expect(await screen.findByText(machine.machine_address)).toBeInTheDocument();
+  const account_menu = screen.getByRole("button", { name: "Account menu for alice" });
+  fireEvent.click(account_menu);
+  expect(screen.getByRole("menuitem", { name: "Profile" })).toHaveAttribute("href", "/account");
   expect(request).toHaveBeenCalledWith(`${window.location.origin}/hub/v1/account/machines`, expect.objectContaining({
     credentials: "same-origin", headers: expect.objectContaining({ "X-Tokn-Account-Id": identity.user_id }),
   }));
   signed_in = false;
   fireEvent.focus(window);
   await waitFor(() => expect(screen.queryByText(machine.machine_address)).not.toBeInTheDocument());
+  expect(account_menu).not.toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Sign in" })).toHaveAttribute("href", "/account");
   expect(screen.getByText("Machine access")).toBeInTheDocument();
   expect(request.mock.calls.filter(([url]) => String(url).endsWith("/account/browser/refresh"))).toHaveLength(2);
+});
+
+it("signs out through the account menu and discards a pending machine refresh", async () => {
+  const identity = { user_id: "550e8400-e29b-41d4-a716-446655440000", username: "alice" };
+  const machine = { host_id: "550e8400-e29b-41d4-a716-446655440001", machine_address: "alice:laptop", name: "Laptop", online: true };
+  let finish_roster!: (response: Response) => void;
+  const pending_roster = new Promise<Response>((resolve) => { finish_roster = resolve; });
+  const request = vi.mocked(fetch).mockImplementation(async (input) => {
+    if (String(input).endsWith("/account/capabilities")) return Response.json({ enabled: true });
+    if (String(input).endsWith("/account/browser/refresh")) return Response.json(identity);
+    if (String(input).endsWith("/account/machines")) return pending_roster;
+    if (String(input).endsWith("/account/logout")) return new Response(null, { status: 204 });
+    return Response.json({ configured: true, authenticated: false });
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Account menu for alice" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Sign out" }));
+  expect(await screen.findByRole("link", { name: "Sign in" })).toBeInTheDocument();
+  expect(request).toHaveBeenCalledWith(`${window.location.origin}/hub/v1/account/logout`, expect.objectContaining({
+    method: "POST", credentials: "same-origin", headers: expect.objectContaining({ "X-Tokn-Account-Id": identity.user_id }),
+  }));
+  await act(async () => { finish_roster(Response.json({ machines: [machine] })); });
+  expect(screen.queryByText(machine.machine_address)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Account menu for alice" })).not.toBeInTheDocument();
+});
+
+it("restores a pending roster and allows retry after a failed sign-out", async () => {
+  let fail_logout = true;
+  let roster_requests = 0;
+  let finish_stale_roster!: (response: Response) => void;
+  const stale_roster = new Promise<Response>((resolve) => { finish_stale_roster = resolve; });
+  const machine = { host_id: "550e8400-e29b-41d4-a716-446655440001", machine_address: "alice:laptop", name: "Laptop", online: true };
+  vi.mocked(fetch).mockImplementation(async (input) => {
+    if (String(input).endsWith("/account/capabilities")) return Response.json({ enabled: true });
+    if (String(input).endsWith("/account/browser/refresh")) return Response.json({ user_id: "550e8400-e29b-41d4-a716-446655440000", username: "alice" });
+    if (String(input).endsWith("/account/machines")) {
+      return ++roster_requests === 1 ? stale_roster : Response.json({ machines: [machine] });
+    }
+    if (String(input).endsWith("/account/logout")) {
+      return fail_logout ? Response.json({ error: "Could not sign out" }, { status: 503 }) : new Response(null, { status: 204 });
+    }
+    return Response.json({ configured: true, authenticated: false });
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Account menu for alice" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Sign out" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Could not sign out");
+  expect(await screen.findByText(machine.machine_address)).toBeInTheDocument();
+  await act(async () => { finish_stale_roster(Response.json({ machines: [] })); });
+  expect(screen.getByText(machine.machine_address)).toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent("Could not sign out");
+  expect(screen.getByRole("button", { name: "Account menu for alice" })).toBeInTheDocument();
+  fail_logout = false;
+  fireEvent.click(screen.getByRole("menuitem", { name: "Sign out" }));
+  expect(await screen.findByRole("link", { name: "Sign in" })).toBeInTheDocument();
 });
 
 it("keeps machine access available and retries a failed account roster request", async () => {
