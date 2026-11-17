@@ -1,40 +1,20 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { HubClient } from "../lib/hub";
 import {
-  createAccountKey, loadAccountKeys, MACHINE_READ, MACHINE_REGISTER, revokeAccountKey,
+  createAccountKey, MACHINE_READ, MACHINE_REGISTER, revokeAccountKey,
   type AccountKey, type AccountKeyScope,
 } from "../lib/hubAccount";
+import type { AccountKeyList } from "../lib/useAccountKeys";
 import { AccountDialog, type AccountFailure } from "./AccountDialog";
 
 const SCOPE_LABELS = { [MACHINE_READ]: "Read machines", [MACHINE_REGISTER]: "Register machines" };
 type KeyDialog = { kind: "create" } | { kind: "revoke"; key: AccountKey };
 
-export function AccountKeys({ client, on_failure }: { client: HubClient; on_failure: AccountFailure }) {
-  const [keys, setKeys] = useState<AccountKey[]>();
-  const [error, setError] = useState<string>();
-  const [attempt, setAttempt] = useState(0);
+export function AccountKeys({ client, key_list, on_failure }: { client: HubClient; key_list: AccountKeyList; on_failure: AccountFailure }) {
+  const { keys, error, refresh } = key_list;
   const [dialog, setDialog] = useState<KeyDialog>();
   const create_trigger = useRef<HTMLButtonElement>(null);
   const revoke_trigger = useRef<HTMLElement | null>(null);
-  const read_generation = useRef(0);
-
-  useEffect(() => {
-    let current = true;
-    const generation = ++read_generation.current;
-    void loadAccountKeys(client).then((next) => {
-      if (current && generation === read_generation.current && !client.signal.aborted) setKeys(next);
-    }).catch((error: unknown) => {
-      if (current && generation === read_generation.current && !client.signal.aborted) on_failure(error, setError);
-    });
-    return () => { current = false; };
-  }, [client, attempt]);
-
-  function refresh() {
-    // Retire old reads immediately, before React cleans up their effects.
-    read_generation.current++;
-    setError(undefined);
-    setAttempt((value) => value + 1);
-  }
 
   return <section className="account-section" aria-labelledby="account-keys-title">
     <div className="account-section-heading">
@@ -63,17 +43,12 @@ export function AccountKeys({ client, on_failure }: { client: HubClient; on_fail
           }}>Revoke</button>
         </li>)}</ul>}
     {dialog?.kind === "create" && <CreateKeyDialog client={client} return_focus={create_trigger}
-      on_close={() => setDialog(undefined)} on_failure={on_failure} on_created={(key) => {
-        // Only metadata reaches the overview; the one-time secret stays in the dialog.
-        setKeys((previous) => [key, ...(previous ?? []).filter((entry) => entry.key_id !== key.key_id)]);
-        refresh();
-      }} />}
+      on_close={() => setDialog(undefined)} on_failure={on_failure} on_created={key_list.created} />}
     {dialog?.kind === "revoke" && <RevokeKeyDialog client={client} account_key={dialog.key} return_focus={revoke_trigger}
       on_close={() => setDialog(undefined)} on_failure={on_failure} on_revoked={() => {
         revoke_trigger.current = create_trigger.current;
-        setKeys((previous) => previous?.filter((key) => key.key_id !== dialog.key.key_id));
+        key_list.revoked(dialog.key.key_id);
         setDialog(undefined);
-        refresh();
       }} />}
   </section>;
 }

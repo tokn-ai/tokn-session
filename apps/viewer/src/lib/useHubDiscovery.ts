@@ -25,7 +25,7 @@ interface DiscoveryOwner {
 }
 
 /** Directory metadata never promotes a candidate to a paired machine. */
-export function useHubDiscovery(service: HubAccessService, hosts: SavedHubHost[]) {
+export function useHubDiscovery(service: HubAccessService, hosts: SavedHubHost[], gallery_visible = true) {
   const known = new Map<string, DiscoveryGroup>();
   for (const host of hosts) {
     if (!host.discovery_group) continue;
@@ -88,10 +88,10 @@ export function useHubDiscovery(service: HubAccessService, hosts: SavedHubHost[]
       current.entries.delete(key);
     }
     for (const [key, group] of groups) {
-      if (!current.entries.has(key)) load(current, key, group);
+      if (gallery_visible && !current.entries.has(key)) load(current, key, group);
     }
     publish(current);
-  }, [service, membership, load, publish]);
+  }, [service, membership, gallery_visible, load, publish]);
 
   const refresh_group = useCallback((group_key: string) => {
     const current = owner.current;

@@ -160,3 +160,22 @@ it("starts one initial presence request under StrictMode effect replay", async (
   await waitFor(() => expect(result.current.get(first)?.state).toBe("online"));
   expect(presence).toHaveBeenCalledOnce();
 });
+
+it("pauses polling while browsing Profile and revalidates the last known status on return", async () => {
+  const next = deferred<PresenceResult>();
+  const presence = vi.fn<HubAccessService["presence"]>()
+    .mockImplementationOnce(async (ids) => reply(ids))
+    .mockImplementationOnce(() => next.promise);
+  const current = service(presence);
+  const { result, rerender } = renderHook(({ gallery }) => useHubPresence(current, [first], gallery),
+    { initialProps: { gallery: true } });
+  await waitFor(() => expect(result.current.get(first)?.state).toBe("online"));
+  rerender({ gallery: false });
+  fireEvent.focus(window);
+  expect(presence).toHaveBeenCalledOnce();
+  rerender({ gallery: true });
+  await waitFor(() => expect(presence).toHaveBeenCalledTimes(2));
+  expect(result.current.get(first)?.state).toBe("online");
+  await act(async () => { next.resolve(reply([first], false)); });
+  expect(result.current.get(first)?.state).toBe("offline");
+});

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { hubErrorMessage } from "../lib/hub";
 import { openHubAccess, type HubAccessService } from "../lib/hubAccess";
 import { canonicalHubUrl, hubHostLabel as hostLabel, machineReference, type SavedHubHost } from "../lib/hubDeviceStore";
@@ -8,6 +8,7 @@ import { ViewerPage } from "../pages/ViewerPage";
 import { RemoteConnection } from "./RemoteConnection";
 import { HostSetup } from "./HostSetup";
 import { HubMachineGallery, type HubGalleryAccountRoster } from "./HubMachineGallery";
+import { HubPageLink } from "./HubNavigation";
 import { HubPairingDialog } from "./HubPairingDialog";
 import { HubConnectPanel } from "./HubConnectPanel";
 import { ConnectionIcon, ServerIcon } from "./Icons";
@@ -25,6 +26,8 @@ function validHubUrl(value: string): string | undefined {
 }
 
 export interface HubAccessProps {
+  visible?: boolean;
+  browser_view?: { host_id: string | null; on_change: (host_id: string | null) => void };
   initial_hub_url?: string;
   startup_host_id?: string | null;
   on_local?: () => void;
@@ -36,7 +39,7 @@ export interface HubAccessProps {
   account_control?: ReactNode;
 }
 
-export function HubAccess({ initial_hub_url = window.location.origin, startup_host_id, on_local, local_error, on_machine_open, on_hub_ready, known_hub_urls = [], account_roster, account_control }: HubAccessProps) {
+export function HubAccess({ visible = true, browser_view, initial_hub_url = window.location.origin, startup_host_id, on_local, local_error, on_machine_open, on_hub_ready, known_hub_urls = [], account_roster, account_control }: HubAccessProps) {
   const [draft_hub_url, setDraftHubUrl] = useState(initial_hub_url);
   const [service, setService] = useState<HubAccessService>();
   const [hosts, setHosts] = useState<SavedHubHost[]>([]);
@@ -49,6 +52,10 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
   const code_input = useRef<HTMLInputElement>(null);
   const [editing_hub, setEditingHub] = useState(false);
   const [active, setActive] = useState<{ host: SavedHubHost; client: ViewerClient }>();
+  const [pin_verified, setPinVerified] = useState(false);
+  const [local_view_id, setLocalViewId] = useState<string | null>(null);
+  const current_view_id = browser_view ? browser_view.host_id : local_view_id;
+  const showHost = browser_view?.on_change ?? setLocalViewId;
   const [connection_state, setConnectionState] = useState<ConnectionState>("connecting");
   const [transport, setTransport] = useState<TransportState>({ kind: "relay" });
   const [pending, setPending] = useState<{ kind: Operation; host_id?: string } | undefined>(() =>
@@ -71,8 +78,26 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
     const canonical = validHubUrl(url); return canonical ? [canonical] : [];
   }))];
 
+  const viewer_requested = visible && !!active && (native || active.host.host_id === current_view_id);
+  const viewer_visible = viewer_requested && (native || pin_verified);
+  const gallery_visible = visible && !viewer_requested;
+
+  function releaseHost() {
+    const owned = active_client.current;
+    active_client.current = undefined;
+    if (owned) deselectMachine(owned);
+    setActive(undefined);
+  }
+
+  function canResume(host: SavedHubHost) {
+    return !native && active?.client === active_client.current && active?.host.host_id === host.host_id
+      && active.host.host_public_key === host.host_public_key
+      && (service?.authorizationDeadline?.(host) ?? Infinity) > Date.now();
+  }
+
   async function openHost(current: HubAccessService, host: SavedHubHost, signal: AbortSignal) {
     if (signal.aborted) return;
+    releaseHost();
     setConnectionState("connecting"); setTransport({ kind: "relay" });
     const client = await current.connect(host, signal);
     if (signal.aborted) { client.close(); return; }
@@ -80,15 +105,37 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
     try { saved = await refreshHosts(current, signal); }
     catch (error) { client.close(); throw error; }
     if (signal.aborted) { client.close(); return; }
+    const saved_host = saved.find((entry) => entry.host_id === host.host_id);
+    if (!native && saved_host?.host_public_key !== host.host_public_key) {
+      current.lock?.(host.host_id);
+      client.close();
+      throw new Error("The saved pairing changed. Choose a machine to continue.");
+    }
     active_client.current = client;
+    setPinVerified(true);
+    client.onClose(() => {
+      if (active_client.current !== client) return;
+      active_client.current = undefined;
+      setActive(undefined);
+      // The closing client can be in the middle of handing selection to its successor.
+      queueMicrotask(() => deselectMachine(client));
+    });
     client.setStateListener((state) => { if (active_client.current === client) setConnectionState(state); });
     client.setTransportListener?.((next) => { if (active_client.current === client) setTransport(next); });
-    setPairingOpen(false); selectMachine(client); setActive({ host: saved.find((entry) => entry.host_id === host.host_id) ?? host, client });
+    // Navigation can synchronously commit through the browser history store.
+    // Retire this completed gesture before its own route change is observed.
+    if (operation.current?.signal === signal) {
+      operation.current = undefined;
+      setPending(undefined);
+    }
+    setPairingOpen(false); selectMachine(client); setActive({ host: saved_host ?? host, client });
+    if (!native) showHost(host.host_id);
     callbacks.current.on_machine_open?.({ kind: "hub", hub_url: current.hub_url, host_id: host.host_id });
   }
   async function loadService(url: string, signal: AbortSignal, requested_host_id: string | null | undefined) {
     requested_host.current = requested_host_id;
     setEditingHub(false);
+    releaseHost();
     service_ref.current?.dispose?.(); service_ref.current = undefined;
     setService(undefined); setHosts([]); setMachine(""); setCode(""); setPairTarget(undefined); setPairingOpen(false);
     const next = await openHubAccess(url);
@@ -141,9 +188,9 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
     if (native) return;
     const lock = () => {
       operation.current?.abort(); operation.current = undefined;
-      selectMachine(); active_client.current = undefined;
+      releaseHost();
       service_ref.current?.dispose?.(); service_ref.current = undefined;
-      setActive(undefined); setService(undefined); setPairingOpen(false); setPending(undefined); setCode("");
+      setService(undefined); setPairingOpen(false); setPending(undefined); setCode("");
     };
     const restore = (event: PageTransitionEvent) => { if (event.persisted) window.location.reload(); };
     window.addEventListener("pagehide", lock);
@@ -153,6 +200,61 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
       window.removeEventListener("pageshow", restore);
     };
   }, []);
+
+  // Revalidate the saved pin locally before showing a parked workspace, including
+  // history navigation. Another tab can forget a machine while this page is open.
+  useLayoutEffect(() => {
+    if (native || !active || !service) return;
+    if (!viewer_requested) { setPinVerified(false); return; }
+    if (pin_verified) return;
+    if (!canResume(active.host)) { releaseHost(); return; }
+    let current = true;
+    void service.status().then((status) => {
+      if (!current || active_client.current !== active.client) return;
+      setHosts(status.hosts);
+      const saved = status.hosts.find((entry) => entry.host_id === active.host.host_id);
+      if (saved?.host_public_key === active.host.host_public_key && canResume(saved)) {
+        setPinVerified(true);
+      } else {
+        service.lock?.(active.host.host_id);
+        releaseHost();
+        setNotice("The saved pairing changed. Choose a machine to continue.");
+      }
+    }).catch((error) => {
+      if (!current || active_client.current !== active.client) return;
+      releaseHost();
+      setError(hubErrorMessage(error));
+    });
+    return () => { current = false; };
+  }, [native, active, service, viewer_requested, pin_verified]);
+
+  useLayoutEffect(() => {
+    if (native) return;
+    // Leaving the page cancels a user gesture. The Hub itself can finish starting
+    // and an already submitted forget operation still updates the saved list.
+    if (operation.current && pending?.kind !== "loading_hub" && pending?.kind !== "forgetting") {
+      cancel();
+    }
+    setPairingOpen(false); setPairTarget(undefined); setCode("");
+  }, [visible, browser_view?.host_id]);
+
+  useEffect(() => {
+    if (!active || !service?.authorizationDeadline) return;
+    const deadline = service.authorizationDeadline(active.host);
+    const expire = () => {
+      if (active_client.current === active.client && Date.now() >= deadline) releaseHost();
+    };
+    expire();
+    const timer = window.setTimeout(expire, Math.max(0, deadline - Date.now()));
+    // Timers can be suspended when a tab sleeps.
+    window.addEventListener("focus", expire);
+    document.addEventListener("visibilitychange", expire);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("focus", expire);
+      document.removeEventListener("visibilitychange", expire);
+    };
+  }, [active, service]);
 
   async function refreshHosts(current: HubAccessService, signal: AbortSignal) {
     const status = await current.status(); if (!signal.aborted) setHosts(status.hosts);
@@ -175,8 +277,8 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
     if (!signal.aborted) setNotice("Passkey added for this machine. Copy its machine reference to sign in on another device.");
   }
   function changeHost() {
-    operation.current?.abort(); operation.current = undefined; active_client.current = undefined;
-    selectMachine(); setActive(undefined); setPairingOpen(false); setCode(""); setConnectionState("connecting"); setPending(undefined); setError(undefined); setNotice(undefined);
+    operation.current?.abort(); operation.current = undefined;
+    releaseHost(); setPairingOpen(false); setCode(""); setConnectionState("connecting"); setPending(undefined); setError(undefined); setNotice(undefined);
   }
   function openPairing() { setPairingOpen(true); setError(undefined); setNotice(undefined); }
   function closePairing() {
@@ -185,13 +287,17 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
   }
   const progress = pending && <div className="hub-progress" role="status"><span>{OPERATION_LABELS[pending.kind]}</span>
     {pending.kind !== "forgetting" && <button type="button" onClick={cancel}>Cancel</button>}</div>;
-  if (active) return <ViewerPage key={`${service?.hub_url}/${active.host.host_id}`} remote
-    machine_label={hostLabel(active.host)} machine_key={`${service?.hub_url}/${active.host.host_id}`} connection={
+  const viewer = active && <ViewerPage visible={viewer_visible} key={`${service?.hub_url}/${active.host.host_id}`} remote
+    machine_label={hostLabel(active.host)} machine_key={`${service?.hub_url}/${active.host.host_id}`} connection={viewer_visible &&
     <RemoteConnection name={hostLabel(active.host)} hub_url={service?.hub_url} encrypted state={connection_state} transport={transport}>
-      <div className="connection-primary-actions"><button className="connection-panel__primary" onClick={changeHost}>Machines</button></div>
+      <div className="connection-primary-actions"><button className="connection-panel__primary" onClick={() => {
+        if (native) changeHost(); else showHost(null);
+      }}>Machines</button></div>
+      {!native && account_control && <HubPageLink href="/account">Hub account</HubPageLink>}
       <div className="connection-secondary-settings">
         {progress}{notice && <p role="status">{notice}</p>}{error && <p className="hub-error" role="alert">{error}</p>}
         {capabilities.passkeys && <button disabled={busy} onClick={() => { void action("adding_passkey", (signal) => addPasskey(active.host, signal), active.host.host_id); }}>Add a machine passkey</button>}
+        {!native && <button type="button" onClick={() => { service?.lock?.(active.host.host_id); changeHost(); showHost(null); }}>Disconnect machine</button>}
         <details><summary>Machine identity</summary><p>Use this reference when signing in from a new device.</p><code className="hub-machine-reference">{machineReference(active.host)}</code></details>
       </div>
     </RemoteConnection>
@@ -199,9 +305,11 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
 
   const loading_hub = pending?.kind === "loading_hub";
   const hub_error = !service && !!error && !editing_hub;
-  return <main className="hub-home hub-access"><div className="hub-content">
+  if (native && active) return viewer;
+  return <>{viewer}{viewer_requested && !viewer_visible && <main className="hub-home"><p role="status">Checking saved machine…</p></main>}
+    <main className="hub-home hub-access" hidden={!gallery_visible} inert={!gallery_visible}><div className="hub-content">
     <header className="hub-header"><div className="hub-app-title"><span className="hub-app-mark"><ServerIcon /></span><div><span className="hub-app-brand">Tokn Sessions</span><h1>Machines</h1></div></div>
-      <div className="hub-actions">{(!native && account_control) || <SettingsEntry />}</div>
+      <div className="hub-actions">{gallery_visible && ((!native && account_control) || <SettingsEntry />)}</div>
     </header>
     {desktop && <section className="hub-this-machine" aria-labelledby="this-machine-title">
       <div><h2 id="this-machine-title">This machine</h2><p>Open sessions saved on this computer.</p>{local_error && <p className="hub-error" role="alert">{local_error}</p>}</div>
@@ -220,17 +328,22 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
       on_edit={() => { setEditingHub(true); setError(undefined); }}
       on_cancel={loading_hub ? cancel : service ? () => setEditingHub(false) : undefined} />}
     {!pairing_open && <>{!loading_hub && progress}{error && !hub_error && <p className="hub-error hub-feedback" role="alert">{error}</p>}{notice && <p className="hub-feedback" role="status">{notice}</p>}</>}
-    {service && <HubMachineGallery key={service.hub_url} service={service} hosts={hosts} busy={busy}
+    {service && <HubMachineGallery key={service.hub_url} visible={gallery_visible}
+      resumable_host_id={active && canResume(active.host) ? active.host.host_id : undefined} service={service} hosts={hosts} busy={busy}
       account_roster={account_roster?.hub_url === service.hub_url ? account_roster : undefined}
       opening_host_id={pending?.kind === "opening_machine" ? pending.host_id : undefined}
-      on_open={(host) => { void action("opening_machine", (signal) => openHost(service, host, signal), host.host_id); }}
+      on_open={(host) => {
+        if (canResume(host)) { showHost(host.host_id); return; }
+        void action("opening_machine", (signal) => openHost(service, host, signal), host.host_id); }}
       on_pair={(candidate) => {
         setMachine(candidate.host_id); setPairTarget(candidate); setMethod("code"); setCode(""); openPairing();
       }} on_add={openPairing}
       on_passkey={(host) => { void action("adding_passkey", (signal) => addPasskey(host, signal), host.host_id); }}
-      on_forget={(host) => { void action("forgetting", async (signal) => { await service.forget(host.host_id); await refreshHosts(service, signal); }, host.host_id); }} />}
-    {!native && <footer className="hub-app-footer"><a href="/admin">Hub administration</a></footer>}
-    {service && pairing_open && <HubPairingDialog on_close={closePairing}>
+      on_forget={(host) => { void action("forgetting", async (signal) => { await service.forget(host.host_id); if (signal.aborted) return;
+        if (active?.host.host_id === host.host_id) releaseHost();
+        await refreshHosts(service, signal); }, host.host_id); }} />}
+    {!native && <footer className="hub-app-footer"><HubPageLink href="/admin">Hub administration</HubPageLink></footer>}
+    {gallery_visible && service && pairing_open && <HubPairingDialog on_close={closePairing}>
         {progress}{error && <p className="hub-error hub-feedback" role="alert">{error}</p>}{notice && <p className="hub-feedback" role="status">{notice}</p>}
         <form className="hub-machine-form" onSubmit={(event) => { event.preventDefault(); void action(method === "code" ? "pairing" : "signing_in", addMachine); }}>
           {pair_target && <p className="machine-hint">Pairing with <strong>{pair_target.name}</strong>. Enter its current authenticator code to verify this machine.</p>}
@@ -246,5 +359,5 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
           <details className="hub-input-help"><summary>Where do I find the address?</summary><p>Use your Hub machine address, or paste the machine ID or reference printed by the host connector.</p></details>
         </form>
     </HubPairingDialog>}
-  </div></main>;
+  </div></main></>;
 }

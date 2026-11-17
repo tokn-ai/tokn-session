@@ -1,4 +1,5 @@
 import { useEffect, useRef, type RefObject } from "react";
+import { useViewerVisible } from "./viewerVisibility";
 
 /** Shared dismissal and focus behavior for non-modal status panels. */
 export function useFloatingPanel(
@@ -6,9 +7,14 @@ export function useFloatingPanel(
   on_close: () => void,
   trigger_ref: RefObject<HTMLButtonElement | null>,
 ) {
+  const visible = useViewerVisible();
   const panel_ref = useRef<HTMLDivElement>(null);
   const had_focus = useRef(false);
   useEffect(() => {
+    if (!visible) {
+      had_focus.current = false;
+      return;
+    }
     if (is_open) {
       had_focus.current = true;
       panel_ref.current?.focus();
@@ -16,10 +22,11 @@ export function useFloatingPanel(
       had_focus.current = false;
       trigger_ref.current?.focus();
     }
-  }, [is_open, trigger_ref]);
+  }, [is_open, visible, trigger_ref]);
 
   useEffect(() => {
     if (!is_open) return;
+    if (!visible) { on_close(); return; }
     function outside(target: EventTarget | null) {
       return target instanceof Node
         && !panel_ref.current?.contains(target) && !trigger_ref.current?.contains(target);
@@ -48,6 +55,6 @@ export function useFloatingPanel(
       document.removeEventListener("focusin", onFocusIn, true);
       document.removeEventListener("keydown", onKeyDown, true);
     };
-  }, [is_open, on_close, trigger_ref]);
+  }, [visible, is_open, on_close, trigger_ref]);
   return panel_ref;
 }

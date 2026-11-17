@@ -154,7 +154,7 @@ interface AcceptedInitialEventPage {
   attentionRevision: string;
 }
 
-export function useViewerState() {
+export function useViewerState(visible = true) {
   const [transport] = useState(captureTransport);
   const mounted = useRef(true);
   const readerLifetime = useRef(0);
@@ -1564,7 +1564,7 @@ export function useViewerState() {
   const selectedSession = useMemo(() => findKnownSession(displayedSessions.sessions, displayedSessions.children, selectedSessionKey)
     ?? (selectedSessionMetadata?.session_key === selectedSessionKey ? projectSession(selectedSessionMetadata) : null),
     [displayedSessions, selectedSessionKey, selectedSessionMetadata, projectSession]);
-  useSessionView(selectedSessionKey, selectedSession, sessions, sessionChildren);
+  useSessionView(selectedSessionKey, selectedSession, sessions, sessionChildren, visible);
 
   const applySessionOrder = useCallback((order: SessionOrder) => {
     if (order === sessionOrderRef.current) return;
@@ -1921,7 +1921,7 @@ export function useViewerState() {
   ]);
 
   useEffect(() => {
-    if (!acceptedInitialEventPage) {
+    if (!visible || !acceptedInitialEventPage) {
       return;
     }
 
@@ -1957,6 +1957,7 @@ export function useViewerState() {
     ));
     acknowledgeAcceptedAttention(sessionKey, attentionRevision);
   }, [
+    visible,
     acceptedInitialEventPage,
     isFollowingLive,
     acknowledgeAcceptedAttention,
@@ -2111,6 +2112,7 @@ export function useViewerState() {
     expandedEventKey, requestDetail, selectedSessionKey, trajectoryPages, detailSubscriptionKey]);
 
   useEffect(() => {
+    if (!visible) return;
     function onKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape") {
         return;
@@ -2123,7 +2125,7 @@ export function useViewerState() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [closeInspector, inspectorOpen, mobileSidebarOpen]);
+  }, [visible, closeInspector, inspectorOpen, mobileSidebarOpen]);
 
   const eventsAreOwned = selectedSessionKey !== null && eventsOwnerKey === selectedSessionKey;
   const visibleEvents = eventsAreOwned ? events : [];

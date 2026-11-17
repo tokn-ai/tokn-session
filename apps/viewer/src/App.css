@@ -146,6 +146,8 @@ button:disabled {
   transition: grid-template-columns 180ms ease;
 }
 
+.viewer-app[hidden] { display: none; }
+
 .viewer-app {
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;

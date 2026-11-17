@@ -12,6 +12,9 @@ import { discoverBrowserGroup, discoveryGroupKey, validateDiscoveryGroup, valida
 export interface HubAccessBackend {
   readonly hub_url: string;
   dispose?(): void;
+  /** Browser tab unlock deadline in milliseconds, or zero for a locked host. */
+  authorizationDeadline?(host: SavedHubHost): number;
+  lock?(host_id: string): void;
   status(): Promise<{ hosts: SavedHubHost[]; selected_host_id: string | null; device_public_key: string }>;
   pair(host_id: string, code: string, signal: AbortSignal, expected_host_public_key?: string, machine?: ResolvedMachine): Promise<SavedHubHost>;
   authenticate(host: SavedHubHost, register: boolean, signal: AbortSignal): Promise<void>;
@@ -90,8 +93,13 @@ export class BrowserHubAccess implements HubAccessBackend {
   private checkActive(signal?: AbortSignal): void {
     if (this.disposed || signal?.aborted) throw new Error("Machine disconnected");
   }
-  private enrollment_hosts = new Set<string>();
-  private unlocked_hosts = new Map<string, number>();
+  private enrollment_hosts = new Map<string, string>();
+  private unlocked_hosts = new Map<string, { host_public_key: string; expires_at: number }>();
+  authorizationDeadline(host: SavedHubHost): number {
+    const unlock = this.unlocked_hosts.get(host.host_id);
+    return unlock?.host_public_key === host.host_public_key ? unlock.expires_at : 0;
+  }
+  lock(host_id: string): void { this.unlocked_hosts.delete(host_id); this.enrollment_hosts.delete(host_id); }
   dispose(): void { this.disposed = true; this.enrollment_hosts.clear(); this.unlocked_hosts.clear(); this.store.dispose(); }
   constructor(readonly hub_url: string, private crypto: CryptoApi, private store: HubDeviceStore) {}
   async status() { this.checkActive(); await this.store.refresh(); this.checkActive(); return { hosts: this.store.hosts, selected_host_id: this.store.selected_host_id, device_public_key: this.store.identity.public_key() }; }
@@ -114,13 +122,13 @@ export class BrowserHubAccess implements HubAccessBackend {
     if (previous && previous.host_public_key !== host.host_public_key) throw new Error("Paired machine key differs from its remembered identity.");
     await this.store.saveHost(previous ?? named);
     this.checkActive(signal);
-    this.enrollment_hosts.add(host.host_id);
+    this.enrollment_hosts.set(host.host_id, host.host_public_key);
     return named;
   }
   async authenticate(host: SavedHubHost, register: boolean, signal: AbortSignal) {
     validateHost(host);
     this.checkActive(signal);
-    if (register && !this.enrollment_hosts.has(host.host_id) && (this.unlocked_hosts.get(host.host_id) ?? 0) <= Date.now()) {
+    if (register && this.enrollment_hosts.get(host.host_id) !== host.host_public_key && this.authorizationDeadline(host) <= Date.now()) {
       await this.authenticate(host, false, signal);
     }
     await authenticateHubHost(this.hub_url, host, this.store.identity, this.crypto, register, signal);
@@ -132,12 +140,12 @@ export class BrowserHubAccess implements HubAccessBackend {
     await this.store.saveHost(reference);
     this.checkActive(signal);
     if (register) this.enrollment_hosts.delete(host.host_id);
-    else this.unlocked_hosts.set(host.host_id, Date.now() + 8 * 60 * 60 * 1000);
+    else this.unlocked_hosts.set(host.host_id, { host_public_key: host.host_public_key, expires_at: Date.now() + 8 * 60 * 60 * 1000 });
   }
   async connect(host: SavedHubHost, signal: AbortSignal) {
     this.checkActive(signal);
-    if ((this.unlocked_hosts.get(host.host_id) ?? 0) <= Date.now()) {
-      if (this.enrollment_hosts.has(host.host_id)) await this.authenticate(host, true, signal);
+    if (this.authorizationDeadline(host) <= Date.now()) {
+      if (this.enrollment_hosts.get(host.host_id) === host.host_public_key) await this.authenticate(host, true, signal);
       await this.authenticate(host, false, signal);
     }
     const client = await EncryptedHubClient.connect(this.hub_url, host, this.store.identity, this.crypto, signal);
@@ -152,7 +160,7 @@ export class BrowserHubAccess implements HubAccessBackend {
     }
     catch (error) { client.close(); throw error; }
   }
-  forget(host_id: string) { this.enrollment_hosts.delete(host_id); this.unlocked_hosts.delete(host_id); return this.store.forgetHost(host_id); }
+  forget(host_id: string) { this.lock(host_id); return this.store.forgetHost(host_id); }
   resolve(machine_address: string, signal: AbortSignal) { return resolveBrowserMachine(this.hub_url, machine_address, signal); }
   async discover(group: DiscoveryGroup, signal: AbortSignal) {
     this.checkActive(signal);
@@ -175,7 +183,7 @@ export class BrowserHubAccess implements HubAccessBackend {
     const host = this.store.hosts.find((host) => host.host_id === resolved.host_id);
     if (!host) throw new Error("Pair this machine before saving its address.");
     if (host.machine_address && host.machine_address !== resolved.machine_address) {
-      if (!this.enrollment_hosts.has(host.host_id) && (this.unlocked_hosts.get(host.host_id) ?? 0) <= Date.now()) {
+      if (this.enrollment_hosts.get(host.host_id) !== host.host_public_key && this.authorizationDeadline(host) <= Date.now()) {
         throw new Error("Unlock this machine before refreshing its address.");
       }
       await readHubDiscoveryGroup(this.hub_url, host, this.store.identity, this.crypto, signal);

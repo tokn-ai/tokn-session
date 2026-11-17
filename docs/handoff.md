@@ -26,9 +26,12 @@ Loading and connection failures use the same layout; authentication and explicit
 CLI approval remain separate from presentation.
 Machines is the browser home page. Its top-right account control offers **Sign in**
 when signed out, or a username menu with **Profile**, **Settings** and **Sign out**.
-The account profile is a separate view with **Back to Machines** navigation and
-the same account menu. Sign-out clears the account roster and invalidates pending
-refreshes. The signed-in account page shows profile, CLI access and key metadata by default.
+Profile, Machines and Hub administration share one browser document and support
+Back and Forward. The browser keeps one live machine and its viewer data while
+browsing other pages. **Resume** returns to it. Signing out, switching accounts,
+or leaving the document clears the in-memory machine workspace. Sign-out also
+clears the account roster and invalidates pending refreshes. The signed-in
+account page shows profile, CLI access and key metadata by default.
 CLI approval, key creation and revocation use native floating dialogs; CLI links
 open their review dialog after sign-in but never approve automatically. Dialogs
 restore focus, clear drafts/secrets on dismissal and stay open during mutations.

@@ -1,3 +1,4 @@
+import { HubPageLink } from "./HubNavigation";
 import { useEffect, useRef, useState } from "react";
 import { HubClient, HubError, hubErrorMessage, type HubHost, type HubStatus } from "../lib/hub";
 import "./HubAccess.css";
@@ -5,9 +6,10 @@ import "./HubAccess.css";
 interface HubConnectionProps {
   initial_status: HubStatus;
   bootstrap_token?: string;
+  on_configured?: () => void;
 }
 
-export function HubConnection({ initial_status, bootstrap_token }: HubConnectionProps) {
+export function HubConnection({ initial_status, bootstrap_token, on_configured }: HubConnectionProps) {
   const [configured, setConfigured] = useState(initial_status.configured);
   const [session, setSession] = useState<HubClient>();
   const [notice, setNotice] = useState<string>();
@@ -16,6 +18,7 @@ export function HubConnection({ initial_status, bootstrap_token }: HubConnection
     session?.close();
     setSession(next);
     setConfigured(true);
+    on_configured?.();
     setNotice(message);
   }
   function disconnected(message?: string) {
@@ -63,7 +66,7 @@ function HubLogin({ configured, bootstrap_token, notice, on_authenticated }: {
       <p className="hub-eyebrow">Tokn Hub</p>
       <h1>{configured ? "Hub administration" : "Set up your Hub"}</h1>
       <p>{configured ? "Sign in with an administrator passkey to manage host routes." : "Create your first administrator passkey to manage this Hub."}</p>
-      <a href="/">Open your machines</a>
+      <HubPageLink href="/">Open your machines</HubPageLink>
       {!configured && <>
         <label htmlFor="hub-bootstrap">Setup token</label>
         <input id="hub-bootstrap" type="password" required value={bootstrap} disabled={busy} autoComplete="off"
@@ -153,7 +156,7 @@ function HubHosts({ session, initial_notice, on_authenticated, on_disconnected }
       <header className="hub-header">
         <div><p className="hub-eyebrow">Tokn Hub</p><h1>Hub administration</h1><p>Manage host routes and administrator passkeys.</p></div>
         <div className="hub-actions">
-          <a href="/">Open your machines</a>
+          <HubPageLink href="/">Open your machines</HubPageLink>
           <button disabled={!!busy} onClick={() => { void action("passkey", async () => {
             const next = await session.authenticate(true);
             if (session.signal.aborted) { next.close(); return; }

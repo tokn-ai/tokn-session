@@ -93,13 +93,18 @@ tokn-session-hub connect
 
 The host's viewer API must still be running. Browsers save only machine metadata
 and verified host pins in IndexedDB. A tab holds its private encryption key in
-memory and destroys it on navigation or close; restored back/forward-cache pages
-reload before sign-in. Backgrounding a tab does not lock it. A live tab can
-reconnect without another prompt until its eight-hour authorization expires.
+memory and destroys it when leaving or reloading the document. Moving between
+Machines, Profile, and administration stays in that document. Restoring the
+document from the browser's back/forward cache requires a reload before sign-in.
+Backgrounding a tab does not lock it. A live tab can reconnect without another
+prompt until its eight-hour authorization expires.
 The native app keeps its persistent private key in owner-only files. Clearing
 that storage makes it a new device. **Forget** removes a local
-saved machine; it does not revoke that device on the host. **Machines**
-cancels requests and streams before selecting another machine.
+saved machine; it does not revoke that device on the host. In the browser,
+**Machines** returns to the gallery and keeps the current connection and session
+view in memory. Choose **Resume** to return. Opening a different machine
+replaces the previous connection. **Disconnect machine** closes the connection
+and requires a fresh sign-in to reopen that machine.
 
 The desktop Machines screen also offers **This machine** for local sessions.
 A new installation opens the picker; later starts reopen the last successfully
