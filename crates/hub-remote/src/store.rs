@@ -265,6 +265,29 @@ impl ClientStore {
     Ok(remembered)
   }
 
+  /// Remove only an exact capability explicitly retired by this Hub. Read the
+  /// latest state under the lock so a concurrently refreshed group is retained.
+  pub fn retire_discovery_group(&self, group: &DiscoveryGroup) -> Result<(), String> {
+    group.validate()?;
+    let path = self.path();
+    let _lock = lock(&path)?;
+    let mut state = self.read()?;
+    let Some(hub) = state.hubs.get_mut(&self.hub) else {
+      return Ok(());
+    };
+    let mut changed = false;
+    for host in &mut hub.hosts {
+      if host.discovery_group.as_ref() == Some(group) {
+        host.discovery_group = None;
+        changed = true;
+      }
+    }
+    if changed {
+      write_atomic(&path, &state)?;
+    }
+    Ok(())
+  }
+
   pub fn selected_host(&self) -> Result<Option<String>, String> {
     Ok(
       self

@@ -123,7 +123,7 @@ export function HubMachineGallery({ service, hosts, account_roster, busy, openin
               {status.connector_version && <span className="hub-machine-card__version" title="Connector version">· v{status.connector_version}</span>}
             </span>
           </div>
-          {(machine.account || machine.groups.size > 0) && <div className="hub-machine-card__groups" aria-label="Machine groups">
+          {(machine.account || namespaces.length > 0) && <div className="hub-machine-card__groups" aria-label="Machine groups">
             {machine.account && <span>Account machine</span>}
             {namespaces.map((namespace) => <span key={namespace}>{namespace}</span>)}
           </div>}

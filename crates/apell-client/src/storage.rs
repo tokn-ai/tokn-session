@@ -206,6 +206,25 @@ impl Store {
     Ok(remembered)
   }
 
+  async fn retire_discovery_group(&self, group: &DiscoveryGroup) -> Result<(), String> {
+    group.validate()?;
+    let gate = GATE.with(Clone::clone);
+    let _guard = gate.lock().await;
+    let mut saved = clone_saved(&self.saved.borrow());
+    let mut changed = false;
+    for host in &mut saved.hosts {
+      if host.discovery_group.as_ref() == Some(group) {
+        host.discovery_group = None;
+        changed = true;
+      }
+    }
+    if changed {
+      save(&self.hub, &saved).await?;
+      *self.saved.borrow_mut() = saved;
+    }
+    Ok(())
+  }
+
   pub async fn remember_discovery_group(
     &self,
     host_id: &str,
@@ -290,6 +309,9 @@ pub async fn discover(params: Value) -> Result<Value, String> {
   let bytes = directory_body(response, MAX_DISCOVERY_RESPONSE)?;
   let result: DiscoveryResult = serde_json::from_slice(&bytes).map_err(|_| "Invalid Hub discovery metadata")?;
   result.validate_for(&group)?;
+  if result.retired {
+    store.retire_discovery_group(&group).await?;
+  }
   serde_json::to_value(result).map_err(|_| "Invalid Hub discovery metadata".into())
 }
 

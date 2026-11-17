@@ -351,12 +351,7 @@ impl LocalHost {
     })
     .await
     .map_err(|_| "Host setup task failed")??;
-    let host_id = &prepared
-      .config
-      .paired
-      .as_ref()
-      .ok_or("Host identity is unavailable")?
-      .host_id;
+    let host_id = &prepared.config.paired.host_id;
     let machine_name = configuration.machine_name.as_deref().filter(|name| !name.is_empty());
     let machine_address = if let Some(address) = &prepared.machine_address {
       let (_, saved_name) = tokn_hub_client_core::address::parse_machine_address(address)?;
@@ -1158,9 +1153,9 @@ mod tests {
     let path = directory.path();
     setup(path);
     let profile_file = path.join("host.json");
-    let mut profile = HostProfile::load(&profile_file).unwrap().unwrap();
-    profile.discovery_namespace = Some("personal".into());
-    profile.save(&profile_file).unwrap();
+    let mut profile: serde_json::Value = serde_json::from_slice(&std::fs::read(&profile_file).unwrap()).unwrap();
+    profile["discovery_namespace"] = "personal".into();
+    std::fs::write(&profile_file, serde_json::to_vec(&profile).unwrap()).unwrap();
     assert_eq!(pairing(path).err().unwrap(), host_setup::ACCOUNT_SETUP_REQUIRED);
     let status = saved_status(path).unwrap();
     assert!(status.machine_address.is_none());
@@ -1173,9 +1168,10 @@ mod tests {
     let path = directory.path();
     let prepared = setup(path);
     let profile_file = path.join("host.json");
-    let mut profile = HostProfile::load(&profile_file).unwrap().unwrap();
-    profile.discovery_namespace = Some("legacy".into());
-    profile.save(&profile_file).unwrap();
+    let mut old_profile: serde_json::Value = serde_json::from_slice(&std::fs::read(&profile_file).unwrap()).unwrap();
+    old_profile["discovery_namespace"] = "legacy".into();
+    std::fs::write(&profile_file, serde_json::to_vec(&old_profile).unwrap()).unwrap();
+    let profile = HostProfile::load(&profile_file).unwrap().unwrap();
     let group = tokn_hub_client_core::discovery::DiscoveryGroup {
       namespace: "alice".into(),
       secret_digest: "A".repeat(43),

@@ -126,6 +126,7 @@ impl Harness {
       lookups: Arc::new(AtomicUsize::new(0)),
       redirects: Arc::new(AtomicUsize::new(0)),
       discovery: Arc::new(Mutex::new(DiscoveryResult {
+        retired: false,
         namespace: group().namespace,
         secret_digest: group().secret_digest,
         machines: vec![DiscoveredMachine {
@@ -305,6 +306,7 @@ async fn discovery_rejects_redirects_oversized_bodies_unverified_pins_and_change
     })
     .unwrap();
   let manager = harness.manager();
+  let saved = harness.store().hosts().unwrap();
   for (mode, expected) in [
     (1, "rejected lookup"),
     (2, "size limit"),
@@ -313,11 +315,49 @@ async fn discovery_rejects_redirects_oversized_bodies_unverified_pins_and_change
     harness.state.mode.store(mode, Ordering::SeqCst);
     let error = manager.discover(&harness.hub_url, &group()).await.unwrap_err();
     assert!(error.contains(expected), "mode {mode}: {error}");
+    assert_eq!(harness.store().hosts().unwrap(), saved);
   }
   assert_eq!(harness.state.redirects.load(Ordering::SeqCst), 0);
   harness.state.mode.store(0, Ordering::SeqCst);
   harness.state.discovery.lock().unwrap().namespace = "other".into();
   assert!(manager.discover(&harness.hub_url, &group()).await.is_err());
+  assert_eq!(harness.store().hosts().unwrap(), saved);
+}
+
+#[tokio::test]
+async fn retired_discovery_clears_only_exact_references_and_preserves_trust() {
+  let harness = Harness::start().await;
+  let manager = harness.manager();
+  let store = harness.store();
+  let identity = manager.status(&harness.hub_url).await.unwrap().device_public_key;
+  let mut hosts: Vec<_> = (0..3)
+    .map(|_| SavedHost {
+      host_id: uuid::Uuid::new_v4().to_string(),
+      host_public_key: NoiseIdentity::generate().unwrap().public_key(),
+      machine_address: None,
+      name: Some("Saved machine".into()),
+      discovery_group: Some(group()),
+    })
+    .collect();
+  hosts[2].discovery_group.as_mut().unwrap().secret_digest = protocol::encode(&[2; 32]);
+  for host in &hosts {
+    store.save_host(host.clone()).unwrap();
+  }
+  store.select_host(&hosts[0].host_id).unwrap();
+  harness.state.discovery.lock().unwrap().machines.clear();
+  assert!(!manager.discover(&harness.hub_url, &group()).await.unwrap().retired);
+  assert_eq!(store.hosts().unwrap(), hosts, "empty current groups retain metadata");
+  harness.state.discovery.lock().unwrap().retired = true;
+  assert!(manager.discover(&harness.hub_url, &group()).await.unwrap().retired);
+  hosts[0].discovery_group = None;
+  hosts[1].discovery_group = None;
+  let status = manager.status(&harness.hub_url).await.unwrap();
+  assert_eq!(status.hosts, hosts);
+  assert_eq!(status.device_public_key, identity);
+  assert_eq!(status.selected_host_id.as_deref(), Some(hosts[0].host_id.as_str()));
+  let lookups = harness.state.lookups.load(Ordering::SeqCst);
+  assert!(manager.discover(&harness.hub_url, &group()).await.is_err());
+  assert_eq!(harness.state.lookups.load(Ordering::SeqCst), lookups);
 }
 
 #[tokio::test]

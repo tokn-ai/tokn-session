@@ -84,6 +84,24 @@ it("learns a discovery group only from successful machine pairing and keeps cand
   expect(EncryptedHubClient.connect).not.toHaveBeenCalled();
 });
 
+it("clears discovery only after explicit retirement while retaining the paired machine", async () => {
+  const service = await open();
+  const group = { namespace: "personal", secret_digest: "A".repeat(43) };
+  vi.mocked(pairHubHost).mockResolvedValueOnce({ ...host, discovery_group: group });
+  await service.pair(host.host_id, "123456", signal());
+  const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ...group, machines: [] }), { headers: { "Content-Type": "application/json" } }));
+  vi.stubGlobal("fetch", fetcher);
+  await service.discover(group, signal());
+  expect((await service.status()).hosts[0].discovery_group).toEqual(group);
+  fetcher.mockRejectedValueOnce(new Error("Network unavailable"));
+  await expect(service.discover(group, signal())).rejects.toThrow("Network unavailable");
+  expect((await service.status()).hosts[0].discovery_group).toEqual(group);
+  fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ ...group, machines: [], retired: true }), { headers: { "Content-Type": "application/json" } }));
+  expect(await service.discover(group, signal())).toEqual({ ...group, machines: [], retired: true });
+  expect((await service.status()).hosts).toEqual([host]);
+  expect((await (await open()).status()).hosts).toEqual([host]);
+});
+
 it("refreshes a previously paired machine's group through its authenticated connection and preserves it on lookup errors", async () => {
   const service = await open();
   const group = { namespace: "personal", secret_digest: "A".repeat(43) };

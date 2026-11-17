@@ -124,7 +124,8 @@ it("shows browser approval and lets cancellation supersede a pending start", asy
   vi.mocked(startLocalHost).mockImplementation(() => new Promise((_, reject) => { reject_start = reject; }));
   render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
   fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
-  fireEvent.click(await screen.findByRole("button", { name: "Start hosting" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Start hosting" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "Start hosting" }));
   await waitFor(() => expect(startLocalHost).toHaveBeenCalledOnce());
   act(() => status_event({ ...unclaimed, phase: "signing_in", login: { verification_url: "https://hub.example/account?user_code=ABCD-1234", user_code: "ABCD-1234", expires_at: 1234567890 } }));
   expect(await screen.findByText("ABCD-1234")).toBeInTheDocument();
@@ -144,7 +145,8 @@ it("clears browser approval when registration starts and preserves the final liv
   vi.mocked(startLocalHost).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
   render(<LocalHostProvider><HostSetup /></LocalHostProvider>);
   fireEvent.click(screen.getByRole("button", { name: "Host this computer" }));
-  fireEvent.click(await screen.findByRole("button", { name: "Start hosting" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Start hosting" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "Start hosting" }));
   await waitFor(() => expect(startLocalHost).toHaveBeenCalledOnce());
   act(() => status_event({ ...stopped, phase: "signing_in", login: { verification_url: "https://hub.example/account?user_code=ABCD-1234", user_code: "ABCD-1234", expires_at: 1234567890 } }));
   await screen.findByText("ABCD-1234");

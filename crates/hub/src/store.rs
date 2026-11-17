@@ -435,10 +435,21 @@ impl Store {
   pub fn discover_machines(
     &self,
     group: &tokn_hub_client_core::discovery::DiscoveryGroup,
-  ) -> Result<Vec<tokn_hub_client_core::discovery::DiscoveredMachine>, String> {
+  ) -> Result<Option<Vec<tokn_hub_client_core::discovery::DiscoveredMachine>>, String> {
     use tokn_hub_client_core::discovery::{DiscoveredMachine, MAX_DISCOVERY_MACHINES};
     group.validate()?;
     let connection = self.connection()?;
+    let current: bool = connection
+      .query_row(
+        "SELECT EXISTS (SELECT 1 FROM account_discovery d JOIN hub_accounts a ON a.user_id = d.user_id
+       WHERE a.username = ?1 AND d.secret_digest = ?2)",
+        params![group.namespace, group.secret_digest],
+        |row| row.get(0),
+      )
+      .map_err(database_error)?;
+    if !current {
+      return Ok(None);
+    }
     let mut statement = connection
       .prepare(
         "SELECT h.host_id AS machine_id, m.machine_name AS display_name, a.username || ':' || m.machine_name
@@ -465,6 +476,7 @@ impl Store {
       )
       .map_err(database_error)?
       .collect::<Result<Vec<_>, _>>()
+      .map(Some)
       .map_err(database_error)
   }
 }

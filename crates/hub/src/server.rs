@@ -364,10 +364,12 @@ async fn discover_machines(
   group
     .validate()
     .map_err(|message| error(StatusCode::BAD_REQUEST, message))?;
-  let mut machines = state
+  let discovered = state
     .store
     .discover_machines(&group)
     .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Could not load discovery group"))?;
+  let retired = discovered.is_none();
+  let mut machines = discovered.unwrap_or_default();
   let include_addresses = headers
     .get(DISCOVERY_ADDRESSES_HEADER)
     .is_some_and(|value| value == "1");
@@ -381,6 +383,7 @@ async fn discover_machines(
     namespace: group.namespace,
     secret_digest: group.secret_digest,
     machines,
+    retired,
   }))
 }
 

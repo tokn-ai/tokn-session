@@ -164,7 +164,14 @@ impl RemoteManager {
     {
       return Err("Pair a machine in this discovery group first".into());
     }
-    directory::discover(hub_url, group).await
+    let result = directory::discover(hub_url, group).await?;
+    if result.retired {
+      let group = group.clone();
+      tokio::task::spawn_blocking(move || store.retire_discovery_group(&group))
+        .await
+        .map_err(|error| error.to_string())??;
+    }
+    Ok(result)
   }
 
   pub async fn remember_metadata(

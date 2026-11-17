@@ -1,17 +1,11 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::json;
-use std::{
-  fs::{self, OpenOptions},
-  io::{Read, Write},
-  net::SocketAddr,
-  path::{Path, PathBuf},
-};
+use std::{net::SocketAddr, path::PathBuf};
 use tokio_util::sync::CancellationToken;
 use tokn_session_hub::{
   client_onboarding::{self, PairedClientConfig},
   connector, host_setup, onboarding,
-  secure::{Grant, GrantScope, NoiseIdentity, OwnerIdentity},
-  secure_client::{self, ClientConfig},
+  secure::NoiseIdentity,
   server::{self, HubState},
   storage,
   store::Store,
@@ -30,8 +24,6 @@ struct Args {
 
 #[derive(Clone, Copy, ValueEnum)]
 enum KeyKind {
-  /// Owner signing key, kept on a trusted device rather than the Hub.
-  Owner,
   /// Encryption identity for a host or recipient client.
   Device,
 }
@@ -151,15 +143,8 @@ enum Command {
     #[arg(long)]
     state_dir: Option<PathBuf>,
     /// Select a previously paired host; otherwise reopen the last selection.
-    #[arg(long, conflicts_with = "grant_file")]
+    #[arg(long)]
     host: Option<String>,
-    #[arg(long)]
-    grant_file: Option<PathBuf>,
-    /// Owner public key verified independently of the Hub and grant file.
-    #[arg(long, requires = "grant_file")]
-    owner_public_key: Option<String>,
-    #[arg(long)]
-    identity_file: Option<PathBuf>,
     #[arg(long, default_value = "127.0.0.1:0")]
     bind: SocketAddr,
     #[arg(long, default_value = "apps/viewer/dist")]
@@ -169,9 +154,6 @@ enum Command {
   },
   /// Show local authenticator setup, or import/export its secret for user-managed synchronization.
   Authenticator {
-    /// Rotate a legacy SHA1 authenticator and retire unclassified device grants.
-    #[arg(long, conflicts_with = "import_file")]
-    upgrade_sha256: bool,
     #[arg(long)]
     state_dir: Option<PathBuf>,
     #[arg(long, conflicts_with = "export_file")]
@@ -209,38 +191,6 @@ enum Command {
     #[arg(long)]
     key_file: PathBuf,
   },
-  /// Sign a recipient's host access grant on a trusted owner device.
-  Grant {
-    #[arg(long)]
-    owner_key_file: PathBuf,
-    #[arg(long)]
-    host_id: String,
-    #[arg(long)]
-    host_public_key: String,
-    #[arg(long)]
-    recipient_public_key: String,
-    /// Explicit access to the entire host; required for agent control.
-    #[arg(long, conflicts_with = "session_key")]
-    all_sessions: bool,
-    /// Exact session key to share. Repeat for multiple sessions; view access only.
-    #[arg(long, required_unless_present = "all_sessions", conflicts_with = "all_sessions")]
-    session_key: Vec<String>,
-    #[arg(long, requires = "all_sessions", conflicts_with = "session_key")]
-    allow_control: bool,
-    /// Grant lifetime in seconds, starting now.
-    #[arg(long, default_value_t = 86400)]
-    expires_in: u64,
-    /// New grant file. Existing files are never overwritten.
-    #[arg(long)]
-    out: PathBuf,
-  },
-  /// Add a grant ID to the host's local revocation file atomically.
-  Revoke {
-    #[arg(long)]
-    revocations_file: PathBuf,
-    #[arg(long)]
-    grant_id: String,
-  },
 }
 
 #[tokio::main]
@@ -259,13 +209,6 @@ fn state_dir_or_default(state_dir: Option<PathBuf>) -> Result<PathBuf, String> {
   match state_dir {
     Some(path) => Ok(path),
     None => storage::default_state_dir(),
-  }
-}
-
-fn state_file_or_default(state_dir: Option<&Path>, file: &str) -> Result<PathBuf, String> {
-  match state_dir {
-    Some(path) => Ok(path.join(file)),
-    None => default_path(file),
   }
 }
 
@@ -367,7 +310,7 @@ async fn run(args: Args) -> Result<(), String> {
       let config = cli_onboarding::prepare_host(options)?;
       let signal = shutdown_signal(shutdown.clone());
       let result = async {
-        let host_id = &config.paired.as_ref().expect("paired host setup").host_id;
+        let host_id = &config.paired.host_id;
         match tokn_session_hub::account_host::saved_address(&state_dir, config.hub_url.as_str(), host_id)? {
           Some(address) => {
             if machine.as_ref().is_some_and(|name| address.split_once(':').map(|(_, saved)| saved) != Some(name.as_str())) {
@@ -423,49 +366,21 @@ async fn run(args: Args) -> Result<(), String> {
       hub,
       state_dir,
       host,
-      grant_file,
-      owner_public_key,
-      identity_file,
       bind,
       web_root,
       insecure_loopback,
     } => {
-      if grant_file.is_none() {
-        if identity_file.is_some() {
-          return Err("Paired mode manages its own identity; use --state-dir to choose its location".into());
-        }
-        let state_dir = state_dir_or_default(state_dir)?;
-        let (hub_url, insecure_loopback) = cli_onboarding::prepare_client(&state_dir, hub, insecure_loopback)?;
-        let signal = shutdown_signal(shutdown.clone());
-        let result = client_onboarding::run_paired(
-          PairedClientConfig {
-            hub_url,
-            state_dir,
-            bind,
-            web_root,
-            insecure_loopback,
-            host_id: host,
-          },
-          shutdown,
-        )
-        .await;
-        signal.abort();
-        return result;
-      }
-      let identity_file = match identity_file {
-        Some(path) => path,
-        None => state_file_or_default(state_dir.as_deref(), "client-noise.key")?,
-      };
+      let state_dir = state_dir_or_default(state_dir)?;
+      let (hub_url, insecure_loopback) = cli_onboarding::prepare_client(&state_dir, hub, insecure_loopback)?;
       let signal = shutdown_signal(shutdown.clone());
-      let result = secure_client::run(
-        ClientConfig {
-          hub_url: hub.ok_or("Legacy grant mode requires --hub")?,
-          grant_file: grant_file.unwrap(),
-          owner_public_key: owner_public_key.ok_or("Legacy grant mode requires --owner-public-key")?,
-          identity_file,
+      let result = client_onboarding::run_paired(
+        PairedClientConfig {
+          hub_url,
+          state_dir,
           bind,
           web_root,
           insecure_loopback,
+          host_id: host,
         },
         shutdown,
       )
@@ -474,21 +389,11 @@ async fn run(args: Args) -> Result<(), String> {
       result
     }
     Command::Authenticator {
-      upgrade_sha256,
       state_dir,
       import_file,
       export_file,
     } => {
       let state_dir = state_dir_or_default(state_dir)?;
-      if upgrade_sha256 {
-        use std::io::IsTerminal;
-        if export_file.is_none() && !std::io::stderr().is_terminal() {
-          return Err(
-            "Upgrade requires a local terminal or --export-file so the new authenticator can be saved".into(),
-          );
-        }
-        onboarding::upgrade_authenticator(&state_dir.join("host-access.json"))?;
-      }
       cli_onboarding::authenticator(&state_dir, import_file, export_file)
     }
     Command::Devices { state_dir } => {
@@ -524,61 +429,11 @@ async fn run(args: Args) -> Result<(), String> {
     }
     Command::Keygen { kind, key_file } => {
       let (kind, public_key) = match kind {
-        KeyKind::Owner => ("owner", OwnerIdentity::load_or_create(&key_file)?.public_key()),
         KeyKind::Device => ("device", NoiseIdentity::load_or_create(&key_file)?.public_key()),
       };
       println!("{}", json!({ "kind": kind, "public_key": public_key }));
       Ok(())
     }
-    Command::Grant {
-      owner_key_file,
-      host_id,
-      host_public_key,
-      recipient_public_key,
-      all_sessions,
-      session_key,
-      allow_control,
-      expires_in,
-      out,
-    } => {
-      if !owner_key_file.is_file() {
-        return Err("Owner key does not exist; generate it with `keygen --kind owner` first".into());
-      }
-      if expires_in == 0 {
-        return Err("Grant lifetime must be greater than zero".into());
-      }
-      let expires_at = secure_client::unix_time()?
-        .checked_add(expires_in)
-        .ok_or("Grant expiry overflows")?;
-      let owner = OwnerIdentity::load_or_create(&owner_key_file)?;
-      let grant = owner.sign_grant(Grant {
-        version: 1,
-        grant_id: uuid::Uuid::new_v4().to_string(),
-        host_id,
-        host_public_key,
-        recipient_public_key,
-        scope: if all_sessions {
-          GrantScope::All {}
-        } else {
-          GrantScope::Sessions {
-            session_keys: session_key,
-          }
-        },
-        allow_control,
-        expires_at,
-      })?;
-      let bytes = serde_json::to_vec(&grant).map_err(|e| e.to_string())?;
-      write_new(&out, &bytes)?;
-      println!(
-        "{}",
-        json!({ "grant_id": grant.grant.grant_id, "expires_at": expires_at, "file": out })
-      );
-      Ok(())
-    }
-    Command::Revoke {
-      revocations_file,
-      grant_id,
-    } => revoke(&revocations_file, grant_id),
   }
 }
 
@@ -589,99 +444,6 @@ fn shutdown_signal(shutdown: CancellationToken) -> tokio::task::JoinHandle<()> {
   })
 }
 
-fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
-  if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-  }
-  let mut options = OpenOptions::new();
-  options.write(true).create_new(true);
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::OpenOptionsExt;
-    options.mode(0o600);
-  }
-  let mut file = options
-    .open(path)
-    .map_err(|e| format!("Could not create {}: {e}", path.display()))?;
-  file
-    .write_all(bytes)
-    .and_then(|_| file.sync_all())
-    .map_err(|e| e.to_string())
-}
-
-fn revoke(path: &Path, grant_id: String) -> Result<(), String> {
-  if grant_id.is_empty()
-    || grant_id.len() > 128
-    || !grant_id
-      .bytes()
-      .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'_' | b'-'))
-  {
-    return Err("Invalid grant ID".into());
-  }
-  let mut lock_name = path.as_os_str().to_owned();
-  lock_name.push(".lock");
-  let lock_path = PathBuf::from(lock_name);
-  write_new(&lock_path, b"").map_err(|e| format!("Revocation file is locked or unavailable: {e}"))?;
-  struct RemoveOnDrop(PathBuf);
-  impl Drop for RemoveOnDrop {
-    fn drop(&mut self) {
-      let _ = fs::remove_file(&self.0);
-    }
-  }
-  let _lock = RemoveOnDrop(lock_path);
-  let mut revoked: Vec<String> = match fs::symlink_metadata(path) {
-    Ok(metadata) if metadata.is_file() && metadata.len() <= 1024 * 1024 => {
-      let mut options = OpenOptions::new();
-      options.read(true);
-      #[cfg(unix)]
-      {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-      }
-      let file = options.open(path).map_err(|e| e.to_string())?;
-      if !file.metadata().map_err(|e| e.to_string())?.is_file() {
-        return Err("Revocations must be a regular file".into());
-      }
-      let mut bytes = Vec::new();
-      file
-        .take(1024 * 1024 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-      if bytes.len() > 1024 * 1024 {
-        return Err("Revocations file is too large".into());
-      }
-      serde_json::from_slice(&bytes).map_err(|e| format!("Invalid revocations file: {e}"))?
-    }
-    Ok(_) => return Err("Revocations must be a bounded regular file, not a symlink".into()),
-    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-    Err(error) => return Err(error.to_string()),
-  };
-  if revoked.iter().any(|id| {
-    id.is_empty()
-      || id.len() > 128
-      || !id
-        .bytes()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'_' | b'-'))
-  }) {
-    return Err("Invalid existing revoked grant ID".into());
-  }
-  if !revoked.contains(&grant_id) {
-    revoked.push(grant_id.clone());
-  }
-  let bytes = serde_json::to_vec_pretty(&revoked).map_err(|e| e.to_string())?;
-  if bytes.len() > 1024 * 1024 {
-    return Err("Revocations file is full".into());
-  }
-  let mut temporary_name = path.as_os_str().to_owned();
-  temporary_name.push(format!(".{}.tmp", uuid::Uuid::new_v4()));
-  let temporary = PathBuf::from(temporary_name);
-  write_new(&temporary, &bytes)?;
-  let _temporary = RemoveOnDrop(temporary.clone());
-  fs::rename(&temporary, path).map_err(|e| format!("Could not update revocations: {e}"))?;
-  println!("{}", json!({ "revoked_grant_id": grant_id }));
-  Ok(())
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -690,10 +452,6 @@ mod tests {
   fn explicit_state_paths_are_resolved_without_consulting_defaults() {
     let path = PathBuf::from("explicit/private/state");
     assert_eq!(state_dir_or_default(Some(path.clone())).unwrap(), path);
-    assert_eq!(
-      state_file_or_default(Some(&path), "host.key").unwrap(),
-      path.join("host.key")
-    );
     assert!(Args::try_parse_from(["hub", "migrate-storage", "--offline"]).is_ok());
   }
 
@@ -754,46 +512,26 @@ mod tests {
   }
 
   #[test]
-  fn legacy_control_requires_full_scope() {
-    let grant = [
-      "hub",
-      "grant",
-      "--owner-key-file",
-      "owner.key",
-      "--host-id",
-      "host",
-      "--host-public-key",
-      "host-key",
-      "--recipient-public-key",
-      "recipient",
-      "--out",
-      "grant.json",
-    ];
-    assert!(Args::try_parse_from(grant).is_err());
-    assert!(Args::try_parse_from(grant.into_iter().chain(["--all-sessions", "--allow-control"])).is_ok());
-    assert!(Args::try_parse_from(grant.into_iter().chain(["--session-key", "one", "--allow-control"])).is_err());
-    assert!(Args::try_parse_from(grant.into_iter().chain(["--session-key", "one", "--all-sessions"])).is_err());
-  }
-
-  #[test]
-  fn revocation_preserves_existing_ids_and_rejects_unsafe_files() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("revocations.json");
-    revoke(&path, "first".into()).unwrap();
-    revoke(&path, "second".into()).unwrap();
-    revoke(&path, "first".into()).unwrap();
-    assert_eq!(
-      serde_json::from_slice::<Vec<String>>(&fs::read(&path).unwrap()).unwrap(),
-      ["first", "second"]
-    );
-    assert!(revoke(&path, "invalid/id".into()).is_err());
-    fs::write(&path, "{}").unwrap();
-    assert!(revoke(&path, "third".into()).is_err());
-    #[cfg(unix)]
-    {
-      let link = directory.path().join("linked.json");
-      std::os::unix::fs::symlink(&path, &link).unwrap();
-      assert!(revoke(&link, "third".into()).is_err());
+  fn only_current_pairing_access_commands_are_available() {
+    assert!(Args::try_parse_from(["hub", "client", "--host", "saved-host"]).is_ok());
+    assert!(Args::try_parse_from(["hub", "keygen", "--kind", "device", "--key-file", "device.key"]).is_ok());
+    assert!(Args::try_parse_from(["hub", "authenticator"]).is_ok());
+    for command in ["grant", "revoke"] {
+      let error = Args::try_parse_from(["hub", command]).err().unwrap();
+      assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    }
+    let error = Args::try_parse_from(["hub", "keygen", "--kind", "owner", "--key-file", "owner.key"])
+      .err()
+      .unwrap();
+    assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+    for retired in [
+      vec!["hub", "client", "--grant-file", "grant.json"],
+      vec!["hub", "client", "--owner-public-key", "owner-key"],
+      vec!["hub", "client", "--identity-file", "client.key"],
+      vec!["hub", "authenticator", "--upgrade-sha256"],
+    ] {
+      let error = Args::try_parse_from(retired.clone()).err().unwrap();
+      assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument, "{retired:?}");
     }
   }
 }

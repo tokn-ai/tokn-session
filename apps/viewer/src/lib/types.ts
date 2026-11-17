@@ -82,6 +82,7 @@ export interface DiscoveredMachine {
 
 export interface DiscoveryResult extends DiscoveryGroup {
   machines: DiscoveredMachine[];
+  retired?: boolean;
 }
 
 /** Advisory Hub connector presence; never a saved identity or authorization. */

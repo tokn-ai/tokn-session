@@ -46,8 +46,10 @@ Opening a paired card uses the saved host key.
 A plus tile opens the **Add machine** dialog. Closing it cancels pending pairing
 and clears its code.
 Discovery shows one entry per username while keeping independently learned
-discovery references separate. Opening each saved machine refreshes its reference
-after an account migration; refreshing discovery alone does not replace it.
+discovery references separate. The Hub explicitly marks references absent from
+account discovery as retired; browser, desktop, and Apell remove only that exact
+cached reference while preserving machine pins. Empty current groups and network
+failures retain references. Opening a saved machine learns its current group.
 **Set up discovery** stays collapsed below the gallery.
 Group results cache independently across host-list refreshes; removed
 groups and Hub changes cancel requests and exclude stale results. Unknown groups
@@ -598,10 +600,11 @@ passkey sign-in grants at most eight hours to a fresh in-memory tab key. New tab
 reloads, and reopened windows require sign-in; live-tab network reconnects retain
 authorization. IndexedDB v2 holds metadata/pins only and deletes legacy secrets.
 Pagehide clears active content and keys; BFCache restoration reloads. Host state
-v2 distinguishes native, browser enrollment, and browser session grants. Legacy
-state fails closed; explicit `authenticator --upgrade-sha256` rotates OTP, clears
-unclassified grants, preserves host keys/passkeys/limits, and requires rescanning
-and app re-pairing. Protocol v2 and clients must upgrade together.
+v2 distinguishes native, browser enrollment, and browser session grants. Version-one
+host state fails closed and its SHA-1 upgrade command is removed. Owner-signed
+invitations, owner-key generation, grant/revoke CLI commands, and plaintext Hub
+tunnels are removed. Supported access uses account-owned hosts, pairing v2,
+SHA-256 authenticators, and host-verified device/passkey authorization.
 The authenticator CLI also shows its saved machine reference and current TOTP
 with seconds remaining in trusted-terminal output, plus the full setup URI and
 explicit manual settings/mismatch guidance; exports stay Base32-only.
@@ -618,8 +621,8 @@ from code/passkey onboarding; its panel shows the machine, Hub, and encryption s
 Legacy saved UUID pins remain valid. First-device passkey access still requires a
 trusted `UUID@key` or `username:host@key` reference.
 Browser code delivery trusts Hub; a malicious code publisher can read decrypted
-content even though the relay cannot decrypt traffic. The old installed
-`client` helper remains optional compatibility, not part of the default path.
+content even though the relay cannot decrypt traffic. The optional installed
+`client` helper uses current pairing and encrypted access.
 Switching cancels requests and streams; host-local
 revocation is rechecked every second. Agent input requires saved host
 `--allow-control`; `--allow-control=false` disables it. Seed import/export supports

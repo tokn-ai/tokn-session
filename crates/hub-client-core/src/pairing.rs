@@ -78,10 +78,6 @@ impl TotpSecret {
     BASE32_NOPAD.encode(&self.0)
   }
 
-  pub fn discovery_group(&self, hub_url: &str, namespace: &str) -> Result<DiscoveryGroup, String> {
-    DiscoveryGroup::derive(&self.0, hub_url, namespace)
-  }
-
   /// This URI contains the secret. Never send it through the Hub.
   pub fn provisioning_uri(&self, label: &str) -> Result<String, String> {
     if label.is_empty() || label.len() > 128 || label.chars().any(char::is_control) {

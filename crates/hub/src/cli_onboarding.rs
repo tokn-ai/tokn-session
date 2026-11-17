@@ -18,7 +18,7 @@ use tokn_session_hub::host_setup::read_seed;
 
 pub fn prepare_host(options: HostOptions) -> Result<ConnectorConfig, String> {
   let prepared = tokn_session_hub::host_setup::prepare_host(options)?;
-  let profile = prepared.config.paired.as_ref().expect("paired host setup");
+  let profile = &prepared.config.paired;
   eprintln!("Host ID: {}", profile.host_id);
   eprintln!("Machine reference: {}", prepared.reference);
   if let Some(address) = &prepared.machine_address {
@@ -268,10 +268,7 @@ mod tests {
     };
     let first = prepare_host(setup(Some(Url::parse("https://hub.example").unwrap()))).unwrap();
     let second = prepare_host(setup(None)).unwrap();
-    assert_eq!(
-      first.paired.as_ref().unwrap().host_id,
-      second.paired.as_ref().unwrap().host_id
-    );
+    assert_eq!(first.paired.host_id, second.paired.host_id);
     assert_eq!(first.hub_url, second.hub_url);
     let mut direct = setup(None);
     direct.ice_servers = Some(vec!["stun:stun.example:3478".into()]);
@@ -296,7 +293,7 @@ mod tests {
     disable.allow_control = Some(false);
     assert!(!prepare_host(disable).unwrap().allow_control);
     assert!(!prepare_host(setup(None)).unwrap().allow_control);
-    fs::remove_file(&first.paired.unwrap().noise_key_file).unwrap();
+    fs::remove_file(&first.paired.noise_key_file).unwrap();
     assert!(prepare_host(setup(None)).is_err());
     fs::remove_file(directory.path().join("host-access.json")).unwrap();
     assert!(authenticator(directory.path(), None, Some(directory.path().join("export.txt"))).is_err());

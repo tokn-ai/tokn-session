@@ -709,7 +709,7 @@ async fn existing_account_claims_new_machine_and_clients_negotiate_canonical_dis
     ice_servers: None,
   })
   .unwrap();
-  let host_id = &host.config.paired.as_ref().unwrap().host_id;
+  let host_id = &host.config.paired.host_id;
   assert!(state.store.host(host_id).unwrap().is_none());
   assert_eq!(
     account_host::claim(&host.config, "workstation", login["token"].as_str().unwrap())

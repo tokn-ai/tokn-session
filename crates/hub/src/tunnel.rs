@@ -166,10 +166,8 @@ impl HubTunnels {
       return;
     };
     drop(handshake_permit);
-    let registered = match authenticated {
-      Some((record, group)) => self.store.register_tunnel_host(record, group.as_ref()),
-      None => Err(crate::store::ACCOUNT_REQUIRED.into()),
-    };
+    let (record, group) = authenticated;
+    let registered = self.store.register_tunnel_host(record, group.as_ref());
     let record = match registered {
       Ok(record) => record,
       Err(error) => {
@@ -269,7 +267,7 @@ impl HubTunnels {
     }
   }
 
-  async fn authenticate(&self, socket: &mut WebSocket) -> Result<Option<(HostRecord, Option<DiscoveryGroup>)>, String> {
+  async fn authenticate(&self, socket: &mut WebSocket) -> Result<(HostRecord, Option<DiscoveryGroup>), String> {
     let mut random = [0u8; 32];
     OsRng.fill_bytes(&mut random);
     let nonce = protocol::encode(&random);
@@ -287,34 +285,21 @@ impl HubTunnels {
     if text.len() > 4096 {
       return Err("Host authentication is too large".into());
     }
-    let (version, registered_id, public_key, name, allow_control, signature, discovery_group) =
-      match serde_json::from_str(&text).map_err(|_| "Invalid host authentication")? {
-        Frame::Authenticate {
-          version,
-          public_key,
-          name,
-          allow_control,
-          signature,
-        } => (version, None, public_key, name, allow_control, signature, None),
-        Frame::Register {
-          version,
-          host_id,
-          public_key,
-          name,
-          allow_control,
-          signature,
-          discovery_group,
-        } if protocol::valid_host_uuid(&host_id) => (
-          version,
-          Some(host_id),
-          public_key,
-          name,
-          allow_control,
-          signature,
-          discovery_group,
-        ),
-        _ => return Err("Expected host authentication or encrypted registration".into()),
-      };
+    let Frame::Register {
+      version,
+      host_id,
+      public_key,
+      name,
+      allow_control,
+      signature,
+      discovery_group,
+    } = serde_json::from_str(&text).map_err(|_| "Invalid host registration")?
+    else {
+      return Err("Expected encrypted host registration".into());
+    };
+    if !protocol::valid_host_uuid(&host_id) {
+      return Err("Host registration requires a canonical random UUID".into());
+    }
     if version != protocol::VERSION || name.trim().is_empty() || name.len() > 128 || name.chars().any(char::is_control)
     {
       return Err("Invalid host version or name".into());
@@ -327,30 +312,24 @@ impl HubTunnels {
       .map_err(|_| "Invalid host key")?;
     let key = VerifyingKey::from_bytes(&key_bytes).map_err(|_| "Invalid host key")?;
     let signature = Signature::from_slice(&protocol::decode(&signature, 64)?).map_err(|_| "Invalid host proof")?;
-    let proof = if let Some(host_id) = &registered_id {
-      protocol::discovery_registration_proof(
-        &nonce,
-        host_id,
-        &public_key,
-        &name,
-        allow_control,
-        discovery_group.as_ref(),
-      )
-    } else {
-      protocol::proof(&nonce, &public_key, &name, allow_control)
-    };
+    let proof = protocol::discovery_registration_proof(
+      &nonce,
+      &host_id,
+      &public_key,
+      &name,
+      allow_control,
+      discovery_group.as_ref(),
+    );
     key
       .verify_strict(&proof, &signature)
       .map_err(|_| "Invalid host proof")?;
-    Ok(registered_id.map(|host_id| {
-      let record = HostRecord {
-        host_id,
-        public_key,
-        name,
-        access: if allow_control { "control" } else { "view" }.into(),
-      };
-      (record, discovery_group)
-    }))
+    let record = HostRecord {
+      host_id,
+      public_key,
+      name,
+      access: if allow_control { "control" } else { "view" }.into(),
+    };
+    Ok((record, discovery_group))
   }
 
   /// One native client socket carries one encrypted request or event stream.

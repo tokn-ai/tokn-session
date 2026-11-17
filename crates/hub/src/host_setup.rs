@@ -110,7 +110,6 @@ pub fn prepare_host(options: HostOptions) -> Result<PreparedHost, String> {
       .name
       .or_else(|| previous.as_ref().map(|profile| profile.name.clone()))
       .unwrap_or_else(|| "Session host".into()),
-    discovery_namespace: None,
     viewer_url: local_url.to_string(),
     allow_control: options
       .allow_control
@@ -146,12 +145,11 @@ pub fn prepare_host(options: HostOptions) -> Result<PreparedHost, String> {
     allow_control: profile.allow_control,
     insecure_loopback: profile.insecure_loopback,
     ice_servers: profile.ice_servers.clone(),
-    secure: None,
-    paired: Some(PairedHostConfig {
+    paired: PairedHostConfig {
       host_id: profile.host_id.clone(),
       noise_key_file: noise_key_file.clone(),
       state_file: state_file.clone(),
-    }),
+    },
   };
   config.validate()?;
   if previous.is_some()
@@ -305,23 +303,35 @@ mod tests {
   }
 
   #[test]
-  fn setup_drops_legacy_discovery_and_preserves_identity_and_trust() {
+  fn setup_drops_only_retired_discovery_field_and_preserves_identity_and_trust() {
     let directory = tempfile::tempdir().unwrap();
     let first = prepare_host(discovery_options(directory.path())).unwrap();
     assert!(first.machine_address.is_none());
     let access = directory.path().join("host-access.json");
+    let device = NoiseIdentity::generate().unwrap().public_key();
+    onboarding::authorize_device(&access, &device, 30, 900).unwrap();
     let before = fs::read(&access).unwrap();
     let profile_path = directory.path().join("host.json");
-    let mut profile = HostProfile::load(&profile_path).unwrap().unwrap();
-    profile.discovery_namespace = Some("personal".into());
-    profile.save(&profile_path).unwrap();
+    let profile = HostProfile::load(&profile_path).unwrap().unwrap();
+    let mut old_profile = serde_json::to_value(&profile).unwrap();
+    old_profile["discovery_namespace"] = serde_json::json!("personal");
+    onboarding::save_configuration(&profile_path, &old_profile).unwrap();
     let unchanged = prepare_host(discovery_options(directory.path())).unwrap();
     assert!(unchanged.machine_address.is_none());
     assert_eq!(unchanged.reference, first.reference);
-    assert_eq!(fs::read(access).unwrap(), before);
+    assert_eq!(fs::read(&access).unwrap(), before);
+    assert!(onboarding::is_authorized_at(&access, &device, 930).unwrap());
     let saved = HostProfile::load(&profile_path).unwrap().unwrap();
     assert_eq!(saved.host_id, profile.host_id);
-    assert!(saved.discovery_namespace.is_none());
+    let mut saved_json: serde_json::Value = serde_json::from_slice(&fs::read(&profile_path).unwrap()).unwrap();
+    assert!(saved_json.get("discovery_namespace").is_none());
+    saved_json["unknown_setting"] = serde_json::json!(true);
+    onboarding::save_configuration(&profile_path, &saved_json).unwrap();
+    let invalid_profile = fs::read(&profile_path).unwrap();
+    assert!(HostProfile::load(&profile_path).is_err());
+    assert!(prepare_host(discovery_options(directory.path())).is_err());
+    assert_eq!(fs::read(profile_path).unwrap(), invalid_profile);
+    assert_eq!(fs::read(access).unwrap(), before);
   }
 
   #[test]
@@ -413,7 +423,6 @@ mod tests {
       host_id: "550e8400-e29b-41d4-a716-446655440000".into(),
       hub_url: format!("http://{address}"),
       name: "Test".into(),
-      discovery_namespace: None,
       viewer_url: "http://127.0.0.1:5558".into(),
       allow_control: false,
       insecure_loopback: true,
@@ -445,7 +454,6 @@ mod tests {
       host_id: host_id.into(),
       hub_url: format!("http://{address}"),
       name: "Test".into(),
-      discovery_namespace: None,
       viewer_url: "http://127.0.0.1:5558".into(),
       allow_control: false,
       insecure_loopback: true,
