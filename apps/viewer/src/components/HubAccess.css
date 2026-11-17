@@ -3,7 +3,11 @@
 .hub-access .hub-content { max-width: 1040px; }
 .hub-header .hub-actions a { color: var(--text-soft); text-decoration: none; font-size: 13px; }
 .hub-header .hub-actions a:hover { color: var(--text); text-decoration: underline; }
+.hub-access .hub-actions .hub-sign-in { display: inline-flex; align-items: center; min-height: 40px; padding: 8px 14px; border: 1px solid var(--border-strong); border-radius: 8px; color: var(--text); font-weight: 500; }
+.hub-access .hub-actions .hub-sign-in:hover { background: var(--surface-hover); text-decoration: none; }
+.hub-access .hub-actions .hub-sign-in:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
 .hub-access .hub-header { flex-direction: row; align-items: center; flex-wrap: wrap; gap: 16px; margin-bottom: 24px; }
+.hub-access .hub-header .hub-actions { margin-left: auto; }
 .hub-app-title { display: flex; align-items: center; gap: 12px; }
 .hub-app-mark { display: grid; place-items: center; flex-shrink: 0; color: var(--text-soft); background: var(--surface-raised); border: 1px solid var(--border); border-radius: 12px; }
 .hub-app-mark { width: 44px; height: 44px; }

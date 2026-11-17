@@ -194,7 +194,7 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
 
   return <main className="hub-home hub-access"><div className="hub-content">
     <header className="hub-header"><div className="hub-app-title"><span className="hub-app-mark"><ServerIcon /></span><div><span className="hub-app-brand">Tokn Sessions</span><h1>Machines</h1></div></div>
-      <div className="hub-actions"><SettingsEntry />{!native && account_control}</div>
+      <div className="hub-actions">{(!native && account_control) || <SettingsEntry />}</div>
     </header>
     {desktop && <section className="hub-this-machine" aria-labelledby="this-machine-title">
       <div><h2 id="this-machine-title">This machine</h2><p>Open sessions saved on this computer.</p>{local_error && <p className="hub-error" role="alert">{local_error}</p>}</div>

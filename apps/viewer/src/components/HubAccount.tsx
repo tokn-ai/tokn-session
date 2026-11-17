@@ -10,6 +10,7 @@ import { AuthLayout } from "./AuthLayout";
 import { VerificationCodeInput } from "./VerificationCodeInput";
 import { AccountDeviceApproval } from "./AccountDeviceApproval";
 import { AccountKeys } from "./AccountKeys";
+import { HubAccountMenu } from "./HubAccountMenu";
 
 const ACCOUNT_CHANGED = "Your Hub account changed in another tab. Review the active account before continuing.";
 const SESSION_EXPIRED = "Your Hub session expired. Sign in again.";
@@ -125,7 +126,7 @@ export function HubAccount() {
     } else report(hubErrorMessage(error));
   }
 
-  if (!session) return <AuthLayout navigation={<a href="/">Open your machines <span aria-hidden="true">↗</span></a>}
+  if (!session) return <AuthLayout navigation={<a href="/"><span aria-hidden="true">←</span> Back to Machines</a>}
     footer="Your machines. Your sessions. One place.">
     {availability === "available" ? <AccountSignIn user_code={user_code} notice={notice} on_signed_in={signedIn} />
       : <form className="auth-form" onSubmit={(event) => { event.preventDefault(); setAttempt((value) => value + 1); }}>
@@ -138,11 +139,15 @@ export function HubAccount() {
   </AuthLayout>;
 
   return <main className="hub-home hub-account" key={session.user_id}><div className="hub-content">
-    <header className="hub-header">
-      <div><p className="hub-eyebrow">Tokn Hub</p><h1>Hub account</h1><p>Manage your account and connected tools.</p></div>
-      <div className="hub-actions"><a href="/">Open your machines</a>
-        <button type="button" onClick={() => { void logout(); }} disabled={signing_out}>{signing_out ? "Signing out…" : "Sign out"}</button>
+    <div className="account-navigation">
+      <a className="account-back" href="/"><span aria-hidden="true">←</span> Back to Machines</a>
+      <div className="hub-actions">
+        <HubAccountMenu username={session.username} signing_out={signing_out} sign_out_error={sign_out_error}
+          profile_active on_sign_out={() => { void logout(); }} />
       </div>
+    </div>
+    <header className="hub-header">
+      <div><p className="hub-eyebrow">Tokn Sessions</p><h1>Your account</h1><p>Manage your profile and connected tools.</p></div>
     </header>
     <section className="account-section" aria-labelledby="account-profile-title">
       <h2 id="account-profile-title">Profile</h2>
@@ -154,7 +159,6 @@ export function HubAccount() {
         <dl><dt>Account ID</dt><dd><code>{session.user_id}</code></dd></dl>
       </details>
       {notice && <p role="status">{notice}</p>}
-      {sign_out_error && <p className="hub-error" role="alert">{sign_out_error}</p>}
     </section>
     <AccountDeviceApproval client={session.client} initial_code={user_code}
       approved={approved} on_approved={() => { setUserCode(""); setApproved(true); }}

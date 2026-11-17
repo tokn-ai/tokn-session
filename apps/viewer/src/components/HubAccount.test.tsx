@@ -110,7 +110,7 @@ it("explains the email setup requirement while keeping account details behind si
   mockAccount({ email_configured: false });
   render(<HubAccount />);
   expect(await screen.findByText("Ask your Hub administrator to set up email delivery for account sign-in.")).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "Open your machines" })).toHaveAttribute("href", "/");
+  expect(screen.getByRole("link", { name: "Back to Machines" })).toHaveAttribute("href", "/");
   expect(screen.queryByRole("heading", { name: "Profile" })).not.toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: "API keys" })).not.toBeInTheDocument();
 });
@@ -282,7 +282,7 @@ it("asks for a username only after email verification and requires explicit CLI 
   expect(request).toHaveBeenCalledWith(expect.stringContaining("/device/approve"), expect.objectContaining({
     body: JSON.stringify({ user_code: "ABCD-EFGH" }),
   }));
-  expect(screen.getByRole("link", { name: "Open your machines" })).toHaveAttribute("href", "/");
+  expect(screen.getByRole("link", { name: "Back to Machines" })).toHaveAttribute("href", "/");
   expect(request).not.toHaveBeenCalledWith(expect.stringContaining("/account/machines"), expect.anything());
   fireEvent.click(within(dialog).getByRole("button", { name: "Done" }));
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -493,7 +493,7 @@ it("restores an existing account when email delivery is unavailable", async () =
   mockAccount({ email_configured: false, signed_in: true });
   render(<HubAccount />);
   expect(await screen.findByRole("region", { name: "Profile" })).toHaveTextContent(identity.username);
-  expect(screen.getByRole("link", { name: "Open your machines" })).toHaveAttribute("href", "/");
+  expect(screen.getByRole("link", { name: "Back to Machines" })).toHaveAttribute("href", "/");
 });
 
 it("recovers from a stale account action without replaying it against the active account", async () => {
@@ -505,7 +505,7 @@ it("recovers from a stale account action without replaying it against the active
   current = other_identity;
   fireEvent.click(within(dialog).getByRole("button", { name: "Create API key" }));
 
-  expect(await screen.findByText(other_identity.username)).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("region", { name: "Profile" })).toHaveTextContent(other_identity.username));
   expect(within(screen.getByRole("region", { name: "Profile" })).getByRole("status"))
     .toHaveTextContent("Your Hub account changed in another tab.");
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -526,7 +526,7 @@ it("restores a changed browser account when the account page regains focus", asy
   current = other_identity;
   fireEvent.focus(window);
 
-  expect(await screen.findByText(other_identity.username)).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("region", { name: "Profile" })).toHaveTextContent(other_identity.username));
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   const reopened = await openCreateKeyDialog();
   expect(within(reopened).getByLabelText("Key name")).toHaveValue("");
@@ -538,14 +538,16 @@ it("waits for logout, reports a failure, and clears the session after a successf
   const logout = vi.fn().mockReturnValueOnce(failure).mockResolvedValueOnce(new Response(null, { status: 204 }));
   const request = mockAccount({ signed_in: true, logout });
   const first = render(<HubAccount />);
-  fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
-  expect(screen.getByRole("button", { name: "Signing out…" })).toBeDisabled();
+  fireEvent.click(await screen.findByRole("button", { name: `Account menu for ${identity.username}` }));
+  const menu = screen.getByRole("menu");
+  fireEvent.click(within(menu).getByRole("menuitem", { name: "Sign out" }));
+  expect(within(menu).getByRole("menuitem", { name: "Signing out…" })).toBeDisabled();
   expect(screen.getByRole("region", { name: "Profile" })).toBeInTheDocument();
   resolve_failure(Response.json({ error: "Logout unavailable" }, { status: 503 }));
   expect(await screen.findByRole("alert")).toHaveTextContent("Logout unavailable");
   expect(screen.getByRole("region", { name: "Profile" })).toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+  fireEvent.click(within(menu).getByRole("menuitem", { name: "Sign out" }));
   expect(await screen.findByLabelText("Email address")).toBeInTheDocument();
   expect(request).toHaveBeenCalledWith(expect.stringContaining("/account/logout"), expect.objectContaining({ method: "POST" }));
   expect(logout).toHaveBeenCalledTimes(2);

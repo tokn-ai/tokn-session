@@ -24,7 +24,11 @@ to the active field and announce resends. Email verification uses six digit boxe
 with automatic advance, keyboard navigation, full-code paste and autofill support.
 Loading and connection failures use the same layout; authentication and explicit
 CLI approval remain separate from presentation.
-The signed-in account page shows profile, CLI access and key metadata by default.
+Machines is the browser home page. Its top-right account control offers **Sign in**
+when signed out, or a username menu with **Profile**, **Settings** and **Sign out**.
+The account profile is a separate view with **Back to Machines** navigation and
+the same account menu. Sign-out clears the account roster and invalidates pending
+refreshes. The signed-in account page shows profile, CLI access and key metadata by default.
 CLI approval, key creation and revocation use native floating dialogs; CLI links
 open their review dialog after sign-in but never approve automatically. Dialogs
 restore focus, clear drafts/secrets on dismissal and stay open during mutations.
