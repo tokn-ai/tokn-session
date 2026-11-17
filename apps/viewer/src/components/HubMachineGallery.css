@@ -38,6 +38,7 @@
 .hub-access .hub-gallery-discovery__chip > button { display: grid; place-items: center; min-height: 30px; width: 30px; padding: 5px; border: 0; background: transparent; }
 .hub-gallery-discovery__chip svg { width: 14px; height: 14px; }
 .hub-gallery-discovery__group .hub-error { flex-basis: 100%; margin: 0; max-width: 440px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.hub-gallery-discovery__error { display: grid; gap: 3px; }
 .hub-gallery-help { margin-top: 12px; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
 .hub-gallery-help summary { width: fit-content; cursor: pointer; }
 .hub-gallery-help summary:hover, .hub-machine-card__settings summary:hover { color: var(--text); }

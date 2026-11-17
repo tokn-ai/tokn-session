@@ -45,10 +45,15 @@ Each Hub host UUID appears once, with its assigned address or display name.
 Opening a paired card uses the saved host key.
 A plus tile opens the **Add machine** dialog. Closing it cancels pending pairing
 and clears its code.
-Discovery controls remain compact, with **Set up discovery** collapsed below the
-gallery. Group results cache independently across host-list refreshes; removed
+Discovery shows one entry per username while keeping independently learned
+discovery references separate. Opening each saved machine refreshes its reference
+after an account migration; refreshing discovery alone does not replace it.
+**Set up discovery** stays collapsed below the gallery.
+Group results cache independently across host-list refreshes; removed
 groups and Hub changes cancel requests and exclude stale results. Unknown groups
 never trigger directory requests.
+Initial Hub connections use a focused progress panel. Address entry appears when
+needed or after cancellation; failures offer retry or an editable address.
 All gallery cards use batched Hub connector presence, including saved UUID-only
 machines outside discovery groups. Checks refresh every 15 seconds while visible
 and on focus; failures show **Status unavailable**, never an inferred offline

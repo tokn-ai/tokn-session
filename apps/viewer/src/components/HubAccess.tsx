@@ -9,6 +9,7 @@ import { RemoteConnection } from "./RemoteConnection";
 import { HostSetup } from "./HostSetup";
 import { HubMachineGallery, type HubGalleryAccountRoster } from "./HubMachineGallery";
 import { HubPairingDialog } from "./HubPairingDialog";
+import { HubConnectPanel } from "./HubConnectPanel";
 import { ConnectionIcon, ServerIcon } from "./Icons";
 import { SettingsEntry } from "./SettingsEntry";
 import "./HubAccess.css";
@@ -50,7 +51,8 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
   const [active, setActive] = useState<{ host: SavedHubHost; client: ViewerClient }>();
   const [connection_state, setConnectionState] = useState<ConnectionState>("connecting");
   const [transport, setTransport] = useState<TransportState>({ kind: "relay" });
-  const [pending, setPending] = useState<{ kind: Operation; host_id?: string }>();
+  const [pending, setPending] = useState<{ kind: Operation; host_id?: string } | undefined>(() =>
+    !viewerCapabilities().native_hub || validHubUrl(initial_hub_url) ? { kind: "loading_hub" } : undefined);
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
   const operation = useRef<AbortController>(undefined);
@@ -58,6 +60,7 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
   const service_ref = useRef<HubAccessService>(undefined);
   const active_client = useRef<ViewerClient>(undefined);
   const startup = useRef({ hub_url: initial_hub_url, host_id: startup_host_id });
+  const requested_host = useRef(startup_host_id);
   const callbacks = useRef({ on_machine_open, on_hub_ready });
   callbacks.current = { on_machine_open, on_hub_ready };
   const busy = !!pending;
@@ -84,6 +87,8 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
     callbacks.current.on_machine_open?.({ kind: "hub", hub_url: current.hub_url, host_id: host.host_id });
   }
   async function loadService(url: string, signal: AbortSignal, requested_host_id: string | null | undefined) {
+    requested_host.current = requested_host_id;
+    setEditingHub(false);
     service_ref.current?.dispose?.(); service_ref.current = undefined;
     setService(undefined); setHosts([]); setMachine(""); setCode(""); setPairTarget(undefined); setPairingOpen(false);
     const next = await openHubAccess(url);
@@ -109,7 +114,7 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
   }
   function cancel() {
     operation.current?.abort(); operation.current = undefined; setPending(undefined); setCode("");
-    setNotice("Connection canceled. Choose a machine or try again when you are ready.");
+    setNotice(service_ref.current ? "Connection canceled. Choose a machine or try again when you are ready." : undefined);
   }
   useEffect(() => {
     const generation = ++lifetime.current;
@@ -192,6 +197,8 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
     </RemoteConnection>
   } />;
 
+  const loading_hub = pending?.kind === "loading_hub";
+  const hub_error = !service && !!error && !editing_hub;
   return <main className="hub-home hub-access"><div className="hub-content">
     <header className="hub-header"><div className="hub-app-title"><span className="hub-app-mark"><ServerIcon /></span><div><span className="hub-app-brand">Tokn Sessions</span><h1>Machines</h1></div></div>
       <div className="hub-actions">{(!native && account_control) || <SettingsEntry />}</div>
@@ -206,12 +213,13 @@ export function HubAccess({ initial_hub_url = window.location.origin, startup_ho
     </nav>}
     {service && <section className="hub-origin" aria-label="Current Hub"><div><ConnectionIcon /><strong>{service.hub_url}</strong></div>
       {native && <button disabled={busy} onClick={() => { setDraftHubUrl(service.hub_url); setEditingHub((value) => !value); }}>Change Hub</button>}</section>}
-    {(!service || editing_hub) && <form className="hub-origin-form" onSubmit={(event) => { event.preventDefault(); changeHost(); void action("loading_hub", (signal) => loadService(draft_hub_url, signal, null)); }}>
-      {!service && <><h2>Connect a machine</h2><p className="hub-muted">Enter its Hub address to open saved machines or pair another machine.</p></>}
-      <label htmlFor="encrypted-hub-url">Hub address</label><input id="encrypted-hub-url" type="url" value={draft_hub_url} onChange={(event) => setDraftHubUrl(event.target.value)} required disabled={busy} placeholder="https://hub.example.com" />
-      <div className="hub-actions"><button disabled={busy}>Connect to Hub</button>{service && <button type="button" disabled={busy} onClick={() => setEditingHub(false)}>Keep current Hub</button>}</div>
-    </form>}
-    {!pairing_open && <>{progress}{error && <p className="hub-error hub-feedback" role="alert">{error}</p>}{notice && <p className="hub-feedback" role="status">{notice}</p>}</>}
+    {(!service || editing_hub) && <HubConnectPanel state={loading_hub ? "connecting" : hub_error ? "error" : "form"}
+      hub_url={draft_hub_url} busy={busy} error={error} on_url_change={setDraftHubUrl}
+      on_connect={() => { changeHost(); void action("loading_hub", (signal) => loadService(draft_hub_url, signal, null)); }}
+      on_retry={() => { void action("loading_hub", (signal) => loadService(draft_hub_url, signal, requested_host.current)); }}
+      on_edit={() => { setEditingHub(true); setError(undefined); }}
+      on_cancel={loading_hub ? cancel : service ? () => setEditingHub(false) : undefined} />}
+    {!pairing_open && <>{!loading_hub && progress}{error && !hub_error && <p className="hub-error hub-feedback" role="alert">{error}</p>}{notice && <p className="hub-feedback" role="status">{notice}</p>}</>}
     {service && <HubMachineGallery key={service.hub_url} service={service} hosts={hosts} busy={busy}
       account_roster={account_roster?.hub_url === service.hub_url ? account_roster : undefined}
       opening_host_id={pending?.kind === "opening_machine" ? pending.host_id : undefined}

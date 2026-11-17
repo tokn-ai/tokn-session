@@ -52,15 +52,15 @@ function galleryMachines(hosts: SavedHubHost[], account_machines: ResolvedMachin
   return [...machines.values()];
 }
 
-function groupLabels(groups: HubDiscoveryGroupState[]): Map<string, string> {
-  const totals = new Map<string, number>();
-  const ordinals = new Map<string, number>();
-  for (const { group: { namespace } } of groups) totals.set(namespace, (totals.get(namespace) ?? 0) + 1);
-  return new Map(groups.map(({ group_key, group: { namespace } }) => {
-    const ordinal = (ordinals.get(namespace) ?? 0) + 1;
-    ordinals.set(namespace, ordinal);
-    return [group_key, totals.get(namespace) === 1 ? namespace : `${namespace} · ${ordinal}`];
-  }));
+function discoveryByNamespace(groups: HubDiscoveryGroupState[]): Map<string, HubDiscoveryGroupState[]> {
+  const namespaces = new Map<string, HubDiscoveryGroupState[]>();
+  for (const state of groups) {
+    const namespace = state.group.namespace;
+    const previous = namespaces.get(namespace) ?? [];
+    previous.push(state);
+    namespaces.set(namespace, previous);
+  }
+  return namespaces;
 }
 
 export interface HubGalleryAccountRoster {
@@ -89,7 +89,10 @@ export function HubMachineGallery({ service, hosts, account_roster, busy, openin
   const heading_id = useId();
   const machines = galleryMachines(hosts, account_roster?.machines ?? [], groups);
   const presence = useHubPresence(service, machines.map((machine) => machine.host_id));
-  const group_labels = groupLabels(groups);
+  // Namespace grouping is presentation only. Each capability keeps its own
+  // request, cached results and host trust checks.
+  const discovery = discoveryByNamespace(groups);
+  const group_namespaces = new Map(groups.map((state) => [state.group_key, state.group.namespace]));
 
   return <section className="hub-gallery" aria-labelledby={heading_id}>
     <header className="hub-gallery__heading"><h2 id={heading_id}>Your machines</h2><span aria-label={`${machines.length} machines`}>{machines.length}</span></header>
@@ -106,6 +109,8 @@ export function HubMachineGallery({ service, hosts, account_roster, busy, openin
         const label = address ?? name ?? (host ? hubHostLabel(host) : `Machine ${machine.host_id.slice(0, 8)}`);
         const status = presence.get(machine.host_id)!;
         const online = status.state === "online" || (status.state !== "offline" && machine.online === true);
+        const namespaces = [...new Set([...machine.groups].map((key) => group_namespaces.get(key))
+          .filter((namespace): namespace is string => namespace !== undefined))];
         return <li className="hub-machine-card" key={machine.host_id}>
           <div className="hub-machine-card__top"><span className="hub-machine-card__icon"><ServerIcon /></span>
             <span className="hub-machine-card__trust">{host ? "Paired" : "Pairing required"}</span></div>
@@ -120,7 +125,7 @@ export function HubMachineGallery({ service, hosts, account_roster, busy, openin
           </div>
           {(machine.account || machine.groups.size > 0) && <div className="hub-machine-card__groups" aria-label="Machine groups">
             {machine.account && <span>Account machine</span>}
-            {[...machine.groups].map((key) => <span key={key}>{group_labels.get(key)}</span>)}
+            {namespaces.map((namespace) => <span key={namespace}>{namespace}</span>)}
           </div>}
           <div className="hub-machine-card__actions">
             {host ? <button className="hub-machine-card__primary" type="button" disabled={busy}
@@ -140,17 +145,24 @@ export function HubMachineGallery({ service, hosts, account_roster, busy, openin
       <li className="hub-machine-add"><button type="button" aria-label="Add machine" title="Add machine" disabled={busy} onClick={on_add}><span aria-hidden="true">+</span></button></li>
     </ul>
     <div className="hub-gallery-discovery" aria-label="Machine discovery"><div className="hub-gallery-discovery__label"><ConnectionIcon /><span>Discovery</span></div>
-      {groups.length === 0 && <span className="hub-gallery-discovery__hint">{hosts.length === 0 ? "Pair a machine to find its group." : "Open a saved machine to find its group."}</span>}
-      {groups.map((state) => {
-        const label = group_labels.get(state.group_key)!;
-        return <section className="hub-gallery-discovery__group" key={state.group_key} aria-label={`Discovery group ${label}`}>
-          <div className="hub-gallery-discovery__chip"><span>{label}</span>
-            <button type="button" disabled={busy || state.loading} onClick={() => refresh_group(state.group_key)}
-              aria-label={`${state.error ? "Retry" : "Refresh"} discovery group ${label}`} title={state.error ? "Retry discovery" : "Refresh discovery"}><RefreshIcon /></button>
+      {groups.length === 0 && <span className="hub-gallery-discovery__hint">{hosts.length === 0 ? "Pair a machine to discover more machines." : "Open a saved machine to discover more machines."}</span>}
+      {[...discovery].map(([namespace, states]) => {
+        const loading = states.some((state) => state.loading);
+        const failed = states.filter((state) => state.error);
+        const errors = [...new Set(failed.map((state) => state.error!))];
+        const empty = states.every((state) => state.machines.length === 0);
+        const action = `${errors.length ? "Retry" : "Refresh"} discovery for ${namespace}`;
+        return <section className="hub-gallery-discovery__group" key={namespace} aria-label={`Discovery for ${namespace}`}>
+          <div className="hub-gallery-discovery__chip"><span>{namespace}</span>
+            <button type="button" disabled={busy || loading} onClick={() => { for (const state of states) refresh_group(state.group_key); }}
+              aria-label={action} title={action}><RefreshIcon /></button>
           </div>
-          {state.loading && <span className="hub-gallery-discovery__hint" role="status">Discovering {label}…</span>}
-          {state.error && <p className="hub-error" role="alert">{state.error}</p>}
-          {!state.loading && !state.error && state.machines.length === 0 && <span className="hub-gallery-discovery__hint">Empty group</span>}
+          {loading && <span className="hub-gallery-discovery__hint" role="status">Checking for machines…</span>}
+          {errors.length > 0 && <p className="hub-error hub-gallery-discovery__error" role="alert">
+            <span>{failed.length < states.length ? "Some discovery results are unavailable." : "Discovery is unavailable."}</span>
+            {errors.map((error) => <span key={error}>{error}</span>)}
+          </p>}
+          {!loading && errors.length === 0 && empty && <span className="hub-gallery-discovery__hint">No other machines found.</span>}
         </section>;
       })}
     </div>
