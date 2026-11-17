@@ -80,7 +80,6 @@
 .auth-field input:disabled { opacity: 0.6; }
 .auth-hint, .auth-note { color: var(--text-muted); font-size: 12px; line-height: 1.6; }
 .auth-note { text-align: center; }
-.auth-form .auth-code { font-family: ui-monospace, monospace; font-size: 24px; text-align: center; letter-spacing: 0.35em; padding-left: calc(14px + 0.35em); }
 .auth-form .auth-primary {
   display: flex;
   align-items: center;

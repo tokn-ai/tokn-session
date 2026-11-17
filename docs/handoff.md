@@ -20,7 +20,8 @@ See [Hub accounts](hub.md#hub-accounts-and-cli-login).
 
 Browser account sign-in and direct viewer connection share a responsive,
 theme-aware `AuthLayout`. Account email/code/username steps move keyboard focus
-to the active field, keep one autofill-friendly code input, and announce resends.
+to the active field and announce resends. Email verification uses six digit boxes
+with automatic advance, keyboard navigation, full-code paste and autofill support.
 Loading and connection failures use the same layout; authentication and explicit
 CLI approval remain separate from presentation.
 

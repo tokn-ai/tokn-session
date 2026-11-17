@@ -69,10 +69,27 @@ function mockAccount({
   });
 }
 
-async function submitEmailCode() {
+function codeDigits(): HTMLInputElement[] {
+  return within(screen.getByRole("group", { name: "Email code" })).getAllByRole<HTMLInputElement>("textbox");
+}
+
+function readCode(): string {
+  return codeDigits().map((input) => input.value).join("");
+}
+
+function pasteCode(code: string, input = codeDigits()[0]) {
+  fireEvent.paste(input, { clipboardData: { getData: () => code } });
+}
+
+async function openCodeStep() {
   fireEvent.change(await screen.findByLabelText("Email address"), { target: { value: "alice@example.com" } });
   fireEvent.click(screen.getByRole("button", { name: "Send email code" }));
-  fireEvent.change(await screen.findByLabelText("Email code"), { target: { value: "123456" } });
+  await screen.findByRole("textbox", { name: "Digit 1 of 6" });
+}
+
+async function submitEmailCode() {
+  await openCodeStep();
+  pasteCode("123456");
   fireEvent.click(screen.getByRole("button", { name: "Verify email code" }));
 }
 
@@ -93,7 +110,7 @@ it("moves keyboard focus through sign-in steps and back to the retained email", 
   fireEvent.change(email, { target: { value: "alice@example.com" } });
   fireEvent.submit(email.closest("form")!);
 
-  const code = await screen.findByLabelText("Email code");
+  const code = await screen.findByRole("textbox", { name: "Digit 1 of 6" });
   expect(code).toHaveFocus();
   fireEvent.change(code, { target: { value: "123456" } });
   fireEvent.submit(code.closest("form")!);
@@ -105,8 +122,95 @@ it("moves keyboard focus through sign-in steps and back to the retained email", 
 
   expect(screen.getByLabelText("Email address")).toHaveFocus();
   expect(screen.getByLabelText("Email address")).toHaveValue("alice@example.com");
-  expect(screen.queryByLabelText("Email code")).not.toBeInTheDocument();
+  expect(screen.queryByRole("group", { name: "Email code" })).not.toBeInTheDocument();
   expect(screen.queryByLabelText("Username")).not.toBeInTheDocument();
+});
+
+it("lets the keyboard edit individual digits without shifting the remaining code", async () => {
+  const request = mockAccount();
+  render(<HubAccount />);
+  await openCodeStep();
+  const digits = codeDigits();
+  expect(digits).toHaveLength(6);
+
+  digits.forEach((input, index) => {
+    expect(input).toHaveAccessibleName(`Digit ${index + 1} of 6`);
+    expect(input).toBeRequired();
+    fireEvent.change(input, { target: { value: String(index + 1) } });
+    expect(digits[Math.min(index + 1, 5)]).toHaveFocus();
+  });
+  expect(readCode()).toBe("123456");
+  expect(request).not.toHaveBeenCalledWith(expect.stringContaining("/email/verify"), expect.anything());
+
+  fireEvent.keyDown(digits[5], { key: "ArrowLeft" });
+  expect(digits[4]).toHaveFocus();
+  fireEvent.keyDown(digits[4], { key: "Home" });
+  expect(digits[0]).toHaveFocus();
+  fireEvent.keyDown(digits[0], { key: "End" });
+  expect(digits[5]).toHaveFocus();
+  fireEvent.keyDown(digits[5], { key: "Backspace" });
+  expect(digits[5]).toHaveFocus();
+  expect(digits[5]).toHaveValue("");
+  fireEvent.keyDown(digits[5], { key: "Backspace" });
+  expect(digits[4]).toHaveFocus();
+  expect(digits[4]).toHaveValue("");
+
+  fireEvent.keyDown(digits[4], { key: "ArrowLeft" });
+  fireEvent.keyDown(digits[3], { key: "ArrowLeft" });
+  fireEvent.keyDown(digits[2], { key: "Delete" });
+  expect(digits[2]).toHaveFocus();
+  expect(digits.map((input) => input.value)).toEqual(["1", "2", "", "4", "", ""]);
+  fireEvent.keyDown(digits[2], { key: "ArrowRight" });
+  expect(digits[3]).toHaveFocus();
+});
+
+it("distributes pasted and autofilled codes while preserving partial-paste positions", async () => {
+  mockAccount();
+  render(<HubAccount />);
+  await openCodeStep();
+  const digits = codeDigits();
+  expect(digits[0]).toHaveAttribute("autocomplete", "one-time-code");
+
+  pasteCode("12 3-456", digits[3]);
+  expect(readCode()).toBe("123456");
+  expect(digits[5]).toHaveFocus();
+  expect([digits[5].selectionStart, digits[5].selectionEnd]).toEqual([0, 1]);
+  pasteCode("98", digits[2]);
+  expect(readCode()).toBe("129856");
+  expect(digits[4]).toHaveFocus();
+  fireEvent.change(digits[2], { target: { value: "" } });
+  expect(digits.map((input) => input.value)).toEqual(["1", "2", "", "8", "5", "6"]);
+  fireEvent.change(digits[2], { target: { value: "x" } });
+  expect(digits[2]).toHaveValue("");
+
+  fireEvent.change(digits[0], { target: { value: "654321" } });
+  expect(readCode()).toBe("654321");
+  expect(digits[5]).toHaveFocus();
+  expect([digits[5].selectionStart, digits[5].selectionEnd]).toEqual([0, 1]);
+});
+
+it("requires all six digits and disables every box during verification", async () => {
+  const request = mockAccount();
+  render(<HubAccount />);
+  await openCodeStep();
+  const digits = codeDigits();
+  fireEvent.submit(digits[0].closest("form")!);
+  pasteCode("12345");
+  fireEvent.submit(digits[0].closest("form")!);
+  expect(request).not.toHaveBeenCalledWith(expect.stringContaining("/email/verify"), expect.anything());
+
+  pasteCode("123456");
+  let resolve_verify!: (response: Response) => void;
+  request.mockReturnValueOnce(new Promise<Response>((resolve) => { resolve_verify = resolve; }));
+  fireEvent.click(screen.getByRole("button", { name: "Verify email code" }));
+  digits.forEach((input) => expect(input).toBeDisabled());
+  expect(request).toHaveBeenCalledWith(expect.stringContaining("/account/browser/email/verify"), expect.objectContaining({
+    body: JSON.stringify({ email: "alice@example.com", code: "123456" }),
+  }));
+  resolve_verify(Response.json({ error: "Incorrect email code" }, { status: 400 }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Incorrect email code");
+  digits.forEach((input) => expect(input).toBeEnabled());
+  expect(readCode()).toBe("123456");
 });
 
 it("announces a resent code, clears the previous code, and allows retry after request or verification errors", async () => {
@@ -114,29 +218,30 @@ it("announces a resent code, clears the previous code, and allows retry after re
   render(<HubAccount />);
   fireEvent.change(await screen.findByLabelText("Email address"), { target: { value: "alice@example.com" } });
   fireEvent.click(screen.getByRole("button", { name: "Send email code" }));
-  fireEvent.change(await screen.findByLabelText("Email code"), { target: { value: "123456" } });
+  await screen.findByRole("textbox", { name: "Digit 1 of 6" });
+  pasteCode("123456");
 
   request.mockResolvedValueOnce(Response.json({ error: "Email delivery unavailable" }, { status: 503 }));
   fireEvent.click(screen.getByRole("button", { name: "Send another code" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("Email delivery unavailable");
-  expect(screen.getByLabelText("Email code")).toHaveValue("123456");
+  expect(readCode()).toBe("123456");
   expect(screen.getByRole("button", { name: "Send another code" })).toBeEnabled();
 
   fireEvent.click(screen.getByRole("button", { name: "Send another code" }));
   expect(await screen.findByRole("status")).toHaveTextContent("A new code has been sent. Check your inbox.");
-  expect(screen.getByLabelText("Email code")).toHaveValue("");
+  expect(codeDigits().map((input) => input.value)).toEqual(["", "", "", "", "", ""]);
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   expect(request.mock.calls.filter(([input]) => String(input).endsWith("/email/start"))).toHaveLength(3);
 
-  fireEvent.change(screen.getByLabelText("Email code"), { target: { value: "654321" } });
+  pasteCode("654321");
   request.mockResolvedValueOnce(Response.json({ error: "Incorrect email code" }, { status: 400 }));
   fireEvent.click(screen.getByRole("button", { name: "Verify email code" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("Incorrect email code");
-  expect(screen.getByLabelText("Email code")).toHaveValue("654321");
+  expect(readCode()).toBe("654321");
   expect(screen.queryByRole("status")).not.toBeInTheDocument();
   await waitFor(() => expect(screen.getByRole("button", { name: "Verify email code" })).toBeEnabled());
 
-  fireEvent.change(screen.getByLabelText("Email code"), { target: { value: "111222" } });
+  pasteCode("111222");
   fireEvent.click(screen.getByRole("button", { name: "Verify email code" }));
   expect(await screen.findByRole("region", { name: "Profile" })).toHaveTextContent(identity.username);
   expect(request).toHaveBeenCalledWith(expect.stringContaining("/account/browser/email/verify"), expect.objectContaining({

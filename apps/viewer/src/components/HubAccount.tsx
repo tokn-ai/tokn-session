@@ -8,6 +8,7 @@ import {
 } from "../lib/hubAccount";
 import "./HubAccount.css";
 import { AuthLayout } from "./AuthLayout";
+import { EmailCodeInput } from "./EmailCodeInput";
 
 const ACCOUNT_CHANGED = "Your Hub account changed in another tab. Review the active account before continuing.";
 const SESSION_EXPIRED = "Your Hub session expired. Sign in again.";
@@ -163,7 +164,7 @@ function AccountSignIn({ user_code, notice, on_signed_in }: {
 }) {
   const [step, setStep] = useState<"email" | "code" | "username">("email");
   const [email, setEmail] = useState("");
-  const [code, setCode] = useState("");
+  const [code, setCode] = useState<string[]>([]);
   const [username, setUsername] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -179,6 +180,7 @@ function AccountSignIn({ user_code, notice, on_signed_in }: {
 
   async function submit(send_code: boolean) {
     if (attempt.current) return;
+    if (!send_code && !/^[0-9]{6}$/.test(code.join(""))) return;
     const client = browserAccountClient();
     attempt.current = client;
     setBusy(true);
@@ -188,14 +190,14 @@ function AccountSignIn({ user_code, notice, on_signed_in }: {
       if (send_code) {
         await requestAccountCode(client, email.trim());
         if (client.signal.aborted) return;
-        setCode("");
+        setCode([]);
         if (step !== "email") setSentNotice("A new code has been sent. Check your inbox.");
         setStep("code");
       } else {
-        const result = await verifyAccountCode(client, email.trim(), code.trim(), step === "username" ? username.trim() : undefined);
+        const result = await verifyAccountCode(client, email.trim(), code.join(""), step === "username" ? username.trim() : undefined);
         if (client.signal.aborted) { result?.client.close(); return; }
         if (result) {
-          setCode("");
+          setCode([]);
           on_signed_in(result);
         } else setStep("username");
       }
@@ -211,7 +213,7 @@ function AccountSignIn({ user_code, notice, on_signed_in }: {
   function changeEmail() {
     setStep("email");
     setUsername("");
-    setCode("");
+    setCode([]);
     setError(undefined);
     setSentNotice(undefined);
   }
@@ -232,11 +234,7 @@ function AccountSignIn({ user_code, notice, on_signed_in }: {
       <input ref={input} key="email" id="account-email" type="email" autoComplete="email" autoCapitalize="none" spellCheck={false}
         placeholder="you@example.com" aria-describedby="account-email-hint" required maxLength={254} value={email} disabled={busy} onChange={(event) => setEmail(event.target.value)} />
       <p className="auth-hint" id="account-email-hint">We’ll email you a 6-digit sign-in code.</p>
-    </div> : step === "code" ? <div className="auth-field">
-      <label htmlFor="account-email-code">Email code</label>
-      <input ref={input} key="code" className="auth-code" id="account-email-code" inputMode="numeric" autoComplete="one-time-code" required pattern="[0-9]{6}"
-        aria-describedby="account-description" placeholder="000000" maxLength={6} value={code} disabled={busy} onChange={(event) => setCode(event.target.value)} />
-    </div> : <div className="auth-field">
+    </div> : step === "code" ? <EmailCodeInput value={code} disabled={busy} input_ref={input} on_change={setCode} /> : <div className="auth-field">
       <label htmlFor="account-username">Username</label>
       <input ref={input} key="username" id="account-username" autoComplete="username" autoCapitalize="none" spellCheck={false} required maxLength={63}
         aria-describedby="account-username-hint" pattern="[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?" value={username} disabled={busy} onChange={(event) => setUsername(event.target.value)} />
