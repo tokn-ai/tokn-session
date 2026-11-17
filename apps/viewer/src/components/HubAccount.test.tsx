@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { HubAccount } from "./HubAccount";
 
@@ -83,6 +83,65 @@ it("explains the email setup requirement while keeping account details behind si
   expect(screen.getByRole("link", { name: "Open your machines" })).toHaveAttribute("href", "/");
   expect(screen.queryByRole("heading", { name: "Profile" })).not.toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: "API keys" })).not.toBeInTheDocument();
+});
+
+it("moves keyboard focus through sign-in steps and back to the retained email", async () => {
+  mockAccount({ signup: true });
+  render(<HubAccount />);
+  const email = await screen.findByLabelText("Email address");
+  expect(email).toHaveFocus();
+  fireEvent.change(email, { target: { value: "alice@example.com" } });
+  fireEvent.submit(email.closest("form")!);
+
+  const code = await screen.findByLabelText("Email code");
+  expect(code).toHaveFocus();
+  fireEvent.change(code, { target: { value: "123456" } });
+  fireEvent.submit(code.closest("form")!);
+
+  const username = await screen.findByLabelText("Username");
+  expect(username).toHaveFocus();
+  fireEvent.change(username, { target: { value: "alice" } });
+  fireEvent.click(screen.getByRole("button", { name: "Change email" }));
+
+  expect(screen.getByLabelText("Email address")).toHaveFocus();
+  expect(screen.getByLabelText("Email address")).toHaveValue("alice@example.com");
+  expect(screen.queryByLabelText("Email code")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Username")).not.toBeInTheDocument();
+});
+
+it("announces a resent code, clears the previous code, and allows retry after request or verification errors", async () => {
+  const request = mockAccount();
+  render(<HubAccount />);
+  fireEvent.change(await screen.findByLabelText("Email address"), { target: { value: "alice@example.com" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send email code" }));
+  fireEvent.change(await screen.findByLabelText("Email code"), { target: { value: "123456" } });
+
+  request.mockResolvedValueOnce(Response.json({ error: "Email delivery unavailable" }, { status: 503 }));
+  fireEvent.click(screen.getByRole("button", { name: "Send another code" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Email delivery unavailable");
+  expect(screen.getByLabelText("Email code")).toHaveValue("123456");
+  expect(screen.getByRole("button", { name: "Send another code" })).toBeEnabled();
+
+  fireEvent.click(screen.getByRole("button", { name: "Send another code" }));
+  expect(await screen.findByRole("status")).toHaveTextContent("A new code has been sent. Check your inbox.");
+  expect(screen.getByLabelText("Email code")).toHaveValue("");
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(request.mock.calls.filter(([input]) => String(input).endsWith("/email/start"))).toHaveLength(3);
+
+  fireEvent.change(screen.getByLabelText("Email code"), { target: { value: "654321" } });
+  request.mockResolvedValueOnce(Response.json({ error: "Incorrect email code" }, { status: 400 }));
+  fireEvent.click(screen.getByRole("button", { name: "Verify email code" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Incorrect email code");
+  expect(screen.getByLabelText("Email code")).toHaveValue("654321");
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Verify email code" })).toBeEnabled());
+
+  fireEvent.change(screen.getByLabelText("Email code"), { target: { value: "111222" } });
+  fireEvent.click(screen.getByRole("button", { name: "Verify email code" }));
+  expect(await screen.findByRole("region", { name: "Profile" })).toHaveTextContent(identity.username);
+  expect(request).toHaveBeenCalledWith(expect.stringContaining("/account/browser/email/verify"), expect.objectContaining({
+    body: JSON.stringify({ email: "alice@example.com", code: "111222" }),
+  }));
 });
 
 it("asks for a username only after email verification and requires explicit CLI approval", async () => {

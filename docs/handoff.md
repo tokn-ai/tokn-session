@@ -18,6 +18,12 @@ using the host key. Previously unclaimed encrypted hosts reuse their identities
 during automatic registration.
 See [Hub accounts](hub.md#hub-accounts-and-cli-login).
 
+Browser account sign-in and direct viewer connection share a responsive,
+theme-aware `AuthLayout`. Account email/code/username steps move keyboard focus
+to the active field, keep one autofill-friendly code input, and announce resends.
+Loading and connection failures use the same layout; authentication and explicit
+CLI approval remain separate from presentation.
+
 The Hub username is the namespace for an account's machine addresses and its
 discovery group. Pairing one host provides the encrypted group reference, and
 authenticated opens refresh it for previously paired devices. Discovery and per-host

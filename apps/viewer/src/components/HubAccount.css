@@ -1,11 +1,3 @@
-.hub-account-login .account-secondary {
-  color: var(--text);
-  border: 1px solid var(--border-strong);
-  background: var(--surface);
-}
-
-.hub-account-login { overflow: auto; }
-
 .account-section {
   display: grid;
   gap: 12px;

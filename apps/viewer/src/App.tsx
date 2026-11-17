@@ -16,6 +16,7 @@ import { RemoteWorkspace } from "./pages/RemoteWorkspace";
 import { viewerHost } from "./lib/platform";
 import { SettingsEntry } from "./components/SettingsEntry";
 import { ActionNotificationsProvider } from "./components/ActionNotifications";
+import { AuthLayout } from "./components/AuthLayout";
 
 function BrowserViewer({ initial_token }: { initial_token?: string }) {
   const [endpoint, setEndpoint] = useState(() => window.location.origin);
@@ -54,20 +55,29 @@ function BrowserViewer({ initial_token }: { initial_token?: string }) {
       <button onClick={() => { selectMachine(); setClient(undefined); setState("connecting"); }}>Change machine</button>
     </RemoteConnection>
   } />;
-  return <main className="machine-connect">
-    <form onSubmit={(event) => { event.preventDefault(); void connect(); }}>
-      <h1>Session viewer</h1>
-      <p>Connect to the viewer server on the machine whose sessions you want to read.</p>
-      <label htmlFor="machine-url">Viewer address</label>
-      <input id="machine-url" type="url" value={endpoint} disabled={busy} required onChange={(event) => setEndpoint(event.target.value)} />
-      <label htmlFor="machine-token">Access token</label>
-      <input id="machine-token" type="password" value={token} disabled={busy} autoComplete="off" onChange={(event) => setToken(event.target.value)} />
-      <p className="machine-hint">The token is kept only for this connection.</p>
-      {error && <p role="alert">{error}</p>}
-      <button disabled={busy}>{busy ? "Connecting…" : "Connect"}</button>
-      <SettingsEntry />
+  return <AuthLayout navigation={<SettingsEntry />} footer="Your sessions, wherever you work.">
+    <form className="auth-form" aria-busy={busy} onSubmit={(event) => { event.preventDefault(); void connect(); }}>
+      <header className="auth-heading">
+        <p className="auth-eyebrow">Session viewer</p>
+        <h1>Connect to your viewer</h1>
+        <p className="auth-description">Pick up your agent sessions on another machine.</p>
+      </header>
+      <div className="auth-field">
+        <label htmlFor="machine-url">Viewer address</label>
+        <input id="machine-url" type="url" autoComplete="url" spellCheck={false} value={endpoint} disabled={busy} required
+          aria-describedby="machine-url-hint" onChange={(event) => setEndpoint(event.target.value)} />
+        <p className="auth-hint" id="machine-url-hint">The address of the viewer server on your machine.</p>
+      </div>
+      <div className="auth-field">
+        <label htmlFor="machine-token">Access token</label>
+        <input id="machine-token" type="password" value={token} disabled={busy} autoComplete="off"
+          aria-describedby="machine-token-hint" onChange={(event) => setToken(event.target.value)} />
+        <p className="auth-hint" id="machine-token-hint">The token is kept only for this connection.</p>
+      </div>
+      {error && <p className="auth-feedback" role="alert">{error}</p>}
+      <button className="auth-primary" disabled={busy}>{busy ? "Connecting…" : "Connect"}</button>
     </form>
-  </main>;
+  </AuthLayout>;
 }
 
 function BrowserHubGallery() {
@@ -154,10 +164,17 @@ function BrowserGateway({ bootstrap_token }: { bootstrap_token?: string }) {
     if (window.location.pathname === "/account") return <HubAccount />;
     return <BrowserHubGallery />;
   }
-  return <main className="machine-connect"><form onSubmit={(event) => { event.preventDefault(); setAttempt((value) => value + 1); }}>
-    <h1>Session viewer</h1>
-    {error ? <><p role="alert">{error}</p><button>Retry connection</button></> : <p role="status">Connecting…</p>}
-  </form></main>;
+  return <AuthLayout footer="Your sessions, wherever you work.">
+    <form className="auth-form" onSubmit={(event) => { event.preventDefault(); setAttempt((value) => value + 1); }}>
+      <header className="auth-heading">
+        <p className="auth-eyebrow">Tokn</p>
+        <h1>Session viewer</h1>
+        <p className="auth-description">Your agent sessions are one connection away.</p>
+      </header>
+      {error ? <><p className="auth-feedback" role="alert">{error}</p><button className="auth-primary">Retry connection</button></>
+        : <p className="auth-feedback" role="status">Connecting…</p>}
+    </form>
+  </AuthLayout>;
 }
 
 interface AppProps { initial_token?: string; bootstrap_token?: string; }
