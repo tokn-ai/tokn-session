@@ -35,6 +35,7 @@ export function useSessionView(
   selected: SessionSummary | null,
   sessions: SessionSummary[],
   children: ReadonlyMap<string, SessionChildrenState>,
+  visible = true,
 ) {
   const candidates = useMemo(() => sessionViewCandidates(selected, sessions, children), [selected, sessions, children]);
   // Metadata-only sidebar refreshes do not change the lease's candidate set.
@@ -44,6 +45,7 @@ export function useSessionView(
   const report = useRef<(() => void) | null>(null);
 
   useEffect(() => {
+    if (!visible) return;
     // New id for each effect lifetime also makes StrictMode cleanup independent.
     const view_id = createUuid();
     const transport = captureTransport();
@@ -81,7 +83,7 @@ export function useSessionView(
       stopListening();
       release();
     };
-  }, []);
+  }, [visible]);
 
-  useEffect(() => { report.current?.(); }, [selectionKey]);
+  useEffect(() => { report.current?.(); }, [selectionKey, visible]);
 }

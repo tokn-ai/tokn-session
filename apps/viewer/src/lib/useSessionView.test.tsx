@@ -100,6 +100,24 @@ describe("session view leases", () => {
     }) });
   });
 
+  it("releases the selected session while away and reacquires it upon return", async () => {
+    const selected = session("a");
+    const { rerender } = renderHook(({ visible }) => useSessionView("a", selected, [selected], children, visible), {
+      initialProps: { visible: true },
+    });
+    await act(async () => {});
+    const previous = sent()[0];
+    await act(async () => rerender({ visible: false }));
+    expect(release).toHaveBeenCalledExactlyOnceWith("update_session_view", { request: {
+      view_id: previous.view_id, revision: 2, session_key: null, candidate_session_keys: [],
+    } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(sent()).toHaveLength(1);
+    await act(async () => rerender({ visible: true }));
+    expect(sent()[1]).toMatchObject({ session_key: "a", revision: 1 });
+    expect(sent()[1].view_id).not.toBe(previous.view_id);
+  });
+
   it("bounds candidates, includes known children, and ignores unrelated child caches", () => {
     const root = session("root");
     const tree = new Map([

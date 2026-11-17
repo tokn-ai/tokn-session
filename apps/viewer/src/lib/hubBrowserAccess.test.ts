@@ -58,6 +58,16 @@ it("expired tab authorization requires another passkey", async () => {
     expect(authenticateHubHost).toHaveBeenCalledTimes(2);
   } finally { vi.useRealTimers(); }
 });
+it("scopes the tab unlock to the authenticated machine key and ends it on disconnect", async () => {
+  const service = await open();
+  await service.authenticate(host, false, signal());
+  expect(service.authorizationDeadline(host)).toBeGreaterThan(Date.now());
+  expect(service.authorizationDeadline({ ...host, host_public_key: "K".repeat(43) })).toBe(0);
+  service.lock(host.host_id);
+  expect(service.authorizationDeadline(host)).toBe(0);
+  await service.connect(host, signal());
+  expect(authenticateHubHost).toHaveBeenCalledTimes(2);
+});
 it("disposing a tab destroys its private identity and prevents reuse", async () => {
   const store = await HubDeviceStore.open("https://hub.example", crypto, storage);
   const service = new BrowserHubAccess("https://hub.example", crypto, store);

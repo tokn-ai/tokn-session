@@ -1,16 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import "./App.css";
 import { RemoteConnection } from "./components/RemoteConnection";
 import { ViewerPage } from "./pages/ViewerPage";
 import { isDesktop, RemoteClient, selectMachine, type ConnectionState } from "./lib/transport";
 import { PairedConnection } from "./components/PairedConnection";
-import { HubConnection } from "./components/HubConnection";
-import { detectHub, HubError, hubErrorMessage, type HubClient, type HubStatus } from "./lib/hub";
-import { accountSession, browserAccountClient, hubAccountAvailability, loadAccountMachines, logoutAccount, refreshBrowserAccount, type AccountIdentity } from "./lib/hubAccount";
-import type { ResolvedMachine } from "./lib/types";
-import { HubAccess } from "./components/HubAccess";
-import { HubAccount } from "./components/HubAccount";
-import { HubAccountMenu } from "./components/HubAccountMenu";
+import { detectHub, hubErrorMessage, type HubStatus } from "./lib/hub";
+import { BrowserHub } from "./pages/BrowserHub";
 import { NativePasskey } from "./components/NativePasskey";
 import { DesktopWorkspace } from "./pages/DesktopWorkspace";
 import { RemoteWorkspace } from "./pages/RemoteWorkspace";
@@ -81,112 +76,6 @@ function BrowserViewer({ initial_token }: { initial_token?: string }) {
   </AuthLayout>;
 }
 
-function BrowserHubGallery() {
-  const [supported, setSupported] = useState(false);
-  const [identity, setIdentity] = useState<AccountIdentity>();
-  const [signing_out, setSigningOut] = useState(false);
-  const [sign_out_error, setSignOutError] = useState<string>();
-  const sign_out_client = useRef<HubClient>(undefined);
-  const account_user_id = useRef<string>(undefined);
-  const generation = useRef(0);
-  const [roster, setRoster] = useState<{ machines: ResolvedMachine[]; unavailable?: boolean }>({ machines: [] });
-  const [attempt, setAttempt] = useState(0);
-
-  useEffect(() => {
-    const client = browserAccountClient();
-    let roster_client: HubClient | undefined;
-    let available = false;
-    let refreshing = false;
-
-    async function refresh() {
-      if (!available || refreshing || client.signal.aborted || sign_out_client.current) return;
-      const current_generation = generation.current;
-      const stale = () => client.signal.aborted || generation.current !== current_generation;
-      refreshing = true;
-      try {
-        const identity = await refreshBrowserAccount(client);
-        if (stale()) return;
-        if (identity?.user_id !== account_user_id.current) {
-          account_user_id.current = identity?.user_id;
-          setSignOutError(undefined);
-          setRoster({ machines: [] });
-        }
-        setIdentity(identity);
-        if (!identity) { setRoster({ machines: [] }); return; }
-        const session = accountSession(identity);
-        roster_client = session.client;
-        const machines = await loadAccountMachines(session.client, session.username);
-        if (!stale()) setRoster({ machines });
-      } catch (error) {
-        if (stale()) return;
-        const account_changed = error instanceof HubError
-          && (error.status === 401 || (error.status === 409 && error.details?.account_session_changed === true));
-        if (account_changed) { account_user_id.current = undefined; setIdentity(undefined); }
-        setRoster({ machines: [], unavailable: !account_changed });
-      } finally {
-        roster_client?.close();
-        roster_client = undefined;
-        refreshing = false;
-      }
-    }
-
-    function cancel() { client.close(); roster_client?.close(); sign_out_client.current?.close(); }
-    function hide() { cancel(); account_user_id.current = undefined; setIdentity(undefined); setRoster({ machines: [] }); }
-    window.addEventListener("focus", refresh);
-    window.addEventListener("pagehide", hide);
-    void hubAccountAvailability(client).then((availability) => {
-      if (client.signal.aborted) return;
-      available = availability !== "unsupported";
-      setSupported(available);
-      void refresh();
-    }).catch(() => {});
-    return () => {
-      window.removeEventListener("focus", refresh);
-      window.removeEventListener("pagehide", hide);
-      cancel();
-    };
-  }, [attempt]);
-
-  async function logout() {
-    if (!identity || sign_out_client.current) return;
-    const client = browserAccountClient(identity.user_id);
-    sign_out_client.current = client;
-    generation.current += 1;
-    setSigningOut(true);
-    setSignOutError(undefined);
-    try {
-      await logoutAccount(client);
-      if (client.signal.aborted) return;
-      account_user_id.current = undefined;
-      setIdentity(undefined);
-      setRoster({ machines: [] });
-    } catch (error) {
-      if (client.signal.aborted) return;
-      const account_changed = error instanceof HubError
-        && (error.status === 401 || (error.status === 409 && error.details?.account_session_changed === true));
-      if (account_changed) {
-        account_user_id.current = undefined;
-        setIdentity(undefined);
-        setRoster({ machines: [] });
-      } else setSignOutError(hubErrorMessage(error));
-      // Restart any roster refresh discarded when sign-out began.
-      setAttempt((value) => value + 1);
-    } finally {
-      client.close();
-      sign_out_client.current = undefined;
-      setSigningOut(false);
-    }
-  }
-
-  return <HubAccess
-    account_control={supported && (identity
-      ? <HubAccountMenu key={identity.user_id} username={identity.username} signing_out={signing_out}
-        sign_out_error={sign_out_error} on_sign_out={() => { void logout(); }} />
-      : <><SettingsEntry /><a className="hub-sign-in" href="/account">Sign in</a></>)}
-    account_roster={{ hub_url: window.location.origin, ...roster, on_retry: () => setAttempt((value) => value + 1) }}
-  />;
-}
-
 function BrowserGateway({ bootstrap_token }: { bootstrap_token?: string }) {
   const [status, setStatus] = useState<HubStatus | null>();
   const [error, setError] = useState<string>();
@@ -204,11 +93,7 @@ function BrowserGateway({ bootstrap_token }: { bootstrap_token?: string }) {
     return () => { cancelled = true; clearTimeout(timer); controller.abort(); };
   }, [attempt]);
   if (status === null) return <BrowserViewer />;
-  if (status) {
-    if (window.location.pathname === "/admin") return <HubConnection initial_status={status} bootstrap_token={bootstrap_token} />;
-    if (window.location.pathname === "/account") return <HubAccount />;
-    return <BrowserHubGallery />;
-  }
+  if (status) return <BrowserHub status={status} bootstrap_token={bootstrap_token} />;
   return <AuthLayout footer="Your sessions, wherever you work.">
     <form className="auth-form" onSubmit={(event) => { event.preventDefault(); setAttempt((value) => value + 1); }}>
       <header className="auth-heading">

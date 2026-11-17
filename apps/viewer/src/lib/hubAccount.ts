@@ -99,7 +99,8 @@ export async function loadAccountKeys(client: HubClient): Promise<AccountKey[]> 
     && Array.isArray(key.scopes) && key.scopes.every((scope) => scope === MACHINE_READ || scope === MACHINE_REGISTER))) {
     throw new Error("Hub returned an invalid API key list.");
   }
-  return keys;
+  // Cache only the public metadata even if a server includes additional fields.
+  return keys.map(({ key_id, name, scopes, expires_at }) => ({ key_id, name, scopes, expires_at }));
 }
 
 export function createAccountKey(client: HubClient, name: string, scopes: AccountKeyScope[]): Promise<AccountKey & { token: string }> {

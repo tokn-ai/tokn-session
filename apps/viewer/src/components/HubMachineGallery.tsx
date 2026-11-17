@@ -65,6 +65,8 @@ export interface HubGalleryAccountRoster {
 }
 
 interface HubMachineGalleryProps {
+  visible?: boolean;
+  resumable_host_id?: string;
   service: HubAccessService;
   hosts: SavedHubHost[];
   account_roster?: HubGalleryAccountRoster;
@@ -77,12 +79,13 @@ interface HubMachineGalleryProps {
   on_forget: (host: SavedHubHost) => void;
 }
 
-export function HubMachineGallery({ service, hosts, account_roster, busy, opening_host_id, on_open, on_pair, on_add, on_passkey, on_forget }: HubMachineGalleryProps) {
-  const { groups, refresh_group } = useHubDiscovery(service, hosts);
+export function HubMachineGallery({ visible = true, resumable_host_id, service, hosts, account_roster, busy, opening_host_id, on_open, on_pair, on_add, on_passkey, on_forget }: HubMachineGalleryProps) {
+  const { groups, refresh_group } = useHubDiscovery(service, hosts, visible);
   const capabilities = viewerCapabilities();
   const heading_id = useId();
   const machines = galleryMachines(hosts, account_roster?.machines ?? [], groups);
-  const presence = useHubPresence(service, machines.map((machine) => machine.host_id));
+  const presence = useHubPresence(service, machines.map((machine) => machine.host_id), visible);
+  if (!visible) return null;
   // Namespace grouping is presentation only. Each capability keeps its own
   // request, cached results and host trust checks.
   const discovery = discoveryByNamespace(groups);
@@ -95,7 +98,7 @@ export function HubMachineGallery({ service, hosts, account_roster, busy, openin
     </p>}
     <ul className="hub-machine-grid" aria-label="Machines">
       {machines.map((machine) => <HubMachineCard key={machine.host_id} machine={machine}
-        status={presence.get(machine.host_id)!} busy={busy} opening={opening_host_id === machine.host_id}
+        status={presence.get(machine.host_id)!} resumable={resumable_host_id === machine.host_id} busy={busy} opening={opening_host_id === machine.host_id}
         on_open={on_open} on_pair={on_pair} on_passkey={on_passkey} on_forget={on_forget} />)}
       <li className="hub-machine-add"><button type="button" disabled={busy} onClick={on_add}>
         <span aria-hidden="true">+</span>Add machine

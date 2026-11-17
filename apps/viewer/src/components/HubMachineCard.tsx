@@ -19,6 +19,7 @@ interface HubMachineCardProps {
   status: MachinePresenceStatus;
   busy: boolean;
   opening: boolean;
+  resumable?: boolean;
   on_open: (host: SavedHubHost) => void;
   on_pair: (machine: DiscoveredMachine) => void;
   on_passkey: (host: SavedHubHost) => void;
@@ -32,7 +33,7 @@ const presence_labels = {
   offline: "Offline",
 };
 
-export function HubMachineCard({ machine, status, busy, opening, on_open, on_pair, on_passkey, on_forget }: HubMachineCardProps) {
+export function HubMachineCard({ machine, status, busy, opening, resumable, on_open, on_pair, on_passkey, on_forget }: HubMachineCardProps) {
   const host = machine.saved;
   const candidate = machine.account ?? machine.discovery;
   const address = machine.account?.machine_address ?? machine.discovery?.machine_address ?? host?.machine_address;
@@ -40,6 +41,7 @@ export function HubMachineCard({ machine, status, busy, opening, on_open, on_pai
   const label = address ?? name ?? (host ? hubHostLabel(host) : `Machine ${machine.host_id.slice(0, 8)}`);
   const namespaces = [...machine.namespaces].filter((namespace) => !address?.startsWith(`${namespace}:`));
   const capabilities = viewerCapabilities();
+  const open_label = resumable ? "Resume" : capabilities.native_hub ? "Open" : "Sign in";
   const online = status.state === "online" || (status.state !== "offline" && machine.online === true);
 
   return <li className="hub-machine-card">
@@ -66,8 +68,8 @@ export function HubMachineCard({ machine, status, busy, opening, on_open, on_pai
     <div className="hub-machine-card__footer">
       <span className="hub-machine-card__trust">{host ? "Paired" : "Pairing required"}</span>
       {host ? <button className="hub-machine-card__primary" type="button" disabled={busy}
-        aria-label={`${capabilities.native_hub ? "Open" : "Sign in to"} ${label}`} onClick={() => on_open(host)}>
-        {opening ? "Connecting…" : capabilities.native_hub ? "Open" : "Sign in"}<ChevronIcon />
+        aria-label={`${open_label === "Sign in" ? "Sign in to" : open_label} ${label}`} onClick={() => on_open(host)}>
+        {opening ? "Connecting…" : open_label}<ChevronIcon />
       </button> : candidate && <button className="hub-machine-card__primary" type="button" disabled={busy || !online}
         aria-label={`Pair ${label}`} onClick={() => on_pair({ ...candidate, online })}>Pair<ChevronIcon /></button>}
     </div>

@@ -1,6 +1,7 @@
 import { installViewerHost } from "../lib/platform";
 import { createApellHost } from "../lib/apellHost";
-import { StrictMode, type ReactNode } from "react";
+import { StrictMode, useState, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { HubAccess } from "./HubAccess";
@@ -10,7 +11,8 @@ import type { DiscoveryResult, SavedHubHost } from "../lib/types";
 import { RemoteClient, selectMachine, viewerStorageScope } from "../lib/transport";
 vi.mock("./HostSetup", async (importOriginal) => ({ ...await importOriginal<typeof import("./HostSetup")>(), HostSetup: () => <div>Host setup</div> }));
 vi.mock("../lib/hubAccess", () => ({ openHubAccess: vi.fn() }));
-vi.mock("../pages/ViewerPage", () => ({ ViewerPage: ({ connection }: { connection: ReactNode }) => <><div>Encrypted sessions</div>{connection}</> }));
+vi.mock("../pages/ViewerPage", () => ({ ViewerPage: ({ visible = true, connection }: { visible?: boolean; connection: ReactNode }) =>
+  <div hidden={!visible}><div>Encrypted sessions</div><input aria-label="Workspace draft" />{connection}</div> }));
 const host = { host_id: "550e8400-e29b-41d4-a716-446655440000", host_public_key: "H".repeat(43), machine_address: "alice:workstation", name: "Workstation" };
 let service: HubAccessService;
 let client: RemoteClient;
@@ -465,8 +467,11 @@ it("applet reopens a remembered machine using its native pairing", async () => {
   expect(settings.queryByRole("button", { name: "Add a passkey" })).not.toBeInTheDocument();
 });
 
-it("pairs in browser without a local bearer token and closes the selected machine on switching", async () => {
+it("retains the browser viewer and its drafts while navigating away, then releases it on disconnect", async () => {
+  vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: null, device_public_key: "D".repeat(43) });
   const close = vi.spyOn(client, "close");
+  const listen = vi.spyOn(client, "setStateListener");
+  service.lock = vi.fn();
   render(<StrictMode><HubAccess initial_hub_url="https://hub.example" /></StrictMode>);
   await pairingReady();
   expect(screen.getByRole("link", { name: "Hub administration" })).toHaveAttribute("href", "/admin");
@@ -479,10 +484,130 @@ it("pairs in browser without a local bearer token and closes the selected machin
   expect(screen.getByRole("dialog")).toHaveTextContent("alice:workstation");
   expect(screen.getByRole("dialog")).toHaveTextContent("https://hub.example");
   expect(screen.getByRole("dialog")).toHaveTextContent("End-to-end encrypted");
+  fireEvent.change(screen.getByLabelText("Workspace draft"), { target: { value: "In progress" } });
   fireEvent.click(screen.getByRole("button", { name: "Machines" }));
+  expect(close).not.toHaveBeenCalled();
+  expect(screen.getByText("Encrypted sessions")).not.toBeVisible();
+  act(() => listen.mock.calls[0][0]("reconnecting"));
+  fireEvent.click(await screen.findByRole("button", { name: "Resume alice:workstation" }));
+  await waitFor(() => expect(screen.getByText("Encrypted sessions")).toBeVisible());
+  expect(screen.getByLabelText("Workspace draft")).toHaveValue("In progress");
+  expect(service.connect).toHaveBeenCalledOnce();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /Reconnecting.*Connection settings/i }));
+  fireEvent.click(screen.getByRole("button", { name: "Disconnect machine" }));
+  expect(await screen.findByRole("button", { name: "Sign in to alice:workstation" })).toBeVisible();
   expect(close).toHaveBeenCalledOnce();
+  expect(service.lock).toHaveBeenCalledWith(host.host_id);
   await pairingReady();
   expect(screen.getByLabelText("Authenticator code")).toHaveValue("");
+});
+
+it("releases a parked machine when the user forgets it or selects another host", async () => {
+  const other = { ...host, host_id: discovered_laptop.host_id, machine_address: "alice:laptop" };
+  const status = { hosts: [host, other], selected_host_id: null, device_public_key: "D".repeat(43) };
+  vi.mocked(service.status).mockResolvedValue(status);
+  vi.mocked(service.forget).mockImplementation(async () => { status.hosts = [host]; });
+  const other_client = new RemoteClient("https://hub.example/encrypted/other", "");
+  vi.mocked(service.connect).mockResolvedValueOnce(client).mockResolvedValueOnce(other_client);
+  const first_close = vi.spyOn(client, "close");
+  const other_close = vi.spyOn(other_client, "close");
+  render(<HubAccess initial_hub_url="https://hub.example" />);
+  for (const label of ["alice:workstation", "alice:laptop"]) {
+    fireEvent.click(await screen.findByRole("button", { name: `Sign in to ${label}` }));
+    fireEvent.click(await screen.findByRole("button", { name: /connection settings/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Machines" }));
+  }
+  expect(first_close).toHaveBeenCalledOnce();
+  expect(other_close).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Settings for alice:laptop" }));
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Forget machine" }));
+  await waitFor(() => expect(other_close).toHaveBeenCalledOnce());
+  expect(screen.queryByText("Encrypted sessions")).not.toBeInTheDocument();
+});
+
+it("does not navigate back to a machine when a connection finishes after leaving the gallery", async () => {
+  vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: null, device_public_key: "D".repeat(43) });
+  let finish!: (value: RemoteClient) => void;
+  vi.mocked(service.connect).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+  const close = vi.spyOn(client, "close");
+  const browser_view = { host_id: null, on_change: vi.fn() };
+  const props = { browser_view, initial_hub_url: "https://hub.example" };
+  const view = render(<HubAccess {...props} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Sign in to alice:workstation" }));
+  view.rerender(<HubAccess {...props} visible={false} />);
+  await act(async () => finish(client));
+  expect(browser_view.on_change).not.toHaveBeenCalled();
+  expect(close).toHaveBeenCalledOnce();
+  view.rerender(<HubAccess {...props} />);
+  expect(await screen.findByRole("button", { name: "Sign in to alice:workstation" })).toBeEnabled();
+  expect(openHubAccess).toHaveBeenCalledOnce();
+});
+
+it("completes the opening gesture before publishing the browser route", async () => {
+  function RoutedAccess() {
+    const [host_id, setHostId] = useState<string | null>(null);
+    return <HubAccess initial_hub_url="https://hub.example" browser_view={{
+      host_id, on_change: (id) => flushSync(() => setHostId(id)),
+    }} />;
+  }
+  vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: null, device_public_key: "D".repeat(43) });
+  render(<RoutedAccess />);
+  fireEvent.click(await screen.findByRole("button", { name: "Sign in to alice:workstation" }));
+  fireEvent.click(await screen.findByRole("button", { name: /connection settings/i }));
+  expect(screen.getByRole("dialog")).not.toHaveTextContent(/connection canceled/i);
+  expect(vi.mocked(service.connect).mock.calls[0][1].aborted).toBe(false);
+});
+
+it("checks the current saved pin before revealing a machine through browser history", async () => {
+  vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: null, device_public_key: "D".repeat(43) });
+  const close = vi.spyOn(client, "close");
+  const on_change = vi.fn();
+  const access = (host_id: string | null) => <HubAccess initial_hub_url="https://hub.example" browser_view={{ host_id, on_change }} />;
+  const view = render(access(null));
+  fireEvent.click(await screen.findByRole("button", { name: "Sign in to alice:workstation" }));
+  await waitFor(() => expect(on_change).toHaveBeenCalledWith(host.host_id));
+  view.rerender(access(host.host_id));
+  await waitFor(() => expect(screen.getByText("Encrypted sessions")).toBeVisible());
+  view.rerender(access(null));
+  vi.mocked(service.status).mockResolvedValue({ hosts: [], selected_host_id: null, device_public_key: "D".repeat(43) });
+  view.rerender(access(host.host_id));
+  expect(screen.getByText("Encrypted sessions")).not.toBeVisible();
+  await waitFor(() => expect(close).toHaveBeenCalledOnce());
+  expect(screen.queryByText("Encrypted sessions")).not.toBeInTheDocument();
+  expect(service.connect).toHaveBeenCalledOnce();
+});
+
+it("locks a parked machine when its tab authorization expires", async () => {
+  vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: null, device_public_key: "D".repeat(43) });
+  const deadline = Date.now() + 100_000;
+  service.authorizationDeadline = () => deadline;
+  const close = vi.spyOn(client, "close");
+  render(<HubAccess initial_hub_url="https://hub.example" />);
+  fireEvent.click(await screen.findByRole("button", { name: "Sign in to alice:workstation" }));
+  fireEvent.click(await screen.findByRole("button", { name: /connection settings/i }));
+  fireEvent.click(screen.getByRole("button", { name: "Machines" }));
+  expect(screen.getByRole("button", { name: "Resume alice:workstation" })).toBeVisible();
+  vi.spyOn(Date, "now").mockReturnValue(deadline);
+  fireEvent(window, new Event("focus"));
+  expect(await screen.findByRole("button", { name: "Sign in to alice:workstation" })).toBeEnabled();
+  expect(close).toHaveBeenCalledOnce();
+  expect(screen.queryByText("Encrypted sessions")).not.toBeInTheDocument();
+});
+
+it("rejects a connection if its saved pin changes while opening", async () => {
+  const status = { hosts: [host], selected_host_id: null, device_public_key: "D".repeat(43) };
+  vi.mocked(service.status).mockResolvedValueOnce(status).mockResolvedValue({
+    ...status, hosts: [{ ...host, host_public_key: "K".repeat(43) }],
+  });
+  const close = vi.spyOn(client, "close");
+  const on_change = vi.fn();
+  render(<HubAccess initial_hub_url="https://hub.example" browser_view={{ host_id: null, on_change }} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Sign in to alice:workstation" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(/saved pairing changed/i);
+  expect(on_change).not.toHaveBeenCalled();
+  expect(close).toHaveBeenCalledOnce();
+  expect(screen.queryByText("Encrypted sessions")).not.toBeInTheDocument();
 });
 
 it("requires the complete machine reference before passkey first use", async () => {
@@ -495,6 +620,7 @@ it("requires the complete machine reference before passkey first use", async () 
   expect(await screen.findByRole("alert")).toHaveTextContent("complete machine reference");
   expect(service.authenticate).not.toHaveBeenCalled();
   fireEvent.change(screen.getByLabelText("Machine address or reference"), { target: { value: machineReference(host) } });
+  vi.mocked(service.status).mockResolvedValue({ hosts: [host], selected_host_id: host.host_id, device_public_key: "D".repeat(43) });
   fireEvent.click(screen.getByRole("button", { name: "Sign in with machine passkey" }));
   expect(await screen.findByText("Encrypted sessions")).toBeInTheDocument();
   expect(service.loginMachine).toHaveBeenLastCalledWith(machineReference(host), expect.any(AbortSignal));

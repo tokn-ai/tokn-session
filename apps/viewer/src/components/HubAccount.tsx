@@ -1,135 +1,32 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { HubClient, HubError, hubErrorMessage } from "../lib/hub";
+import { useEffect, useRef, useState } from "react";
+import { HubClient, hubErrorMessage } from "../lib/hub";
 import {
-  accountSession, browserAccountClient, hubAccountAvailability, logoutAccount,
-  refreshBrowserAccount, requestAccountCode, verifyAccountCode,
-  type AccountSession, type HubAccountAvailability,
+  browserAccountClient, requestAccountCode, verifyAccountCode, type AccountSession,
 } from "../lib/hubAccount";
+import { type BrowserHubAccount } from "../lib/useBrowserHubAccount";
 import "./HubAccount.css";
 import { AuthLayout } from "./AuthLayout";
 import { VerificationCodeInput } from "./VerificationCodeInput";
 import { AccountDeviceApproval } from "./AccountDeviceApproval";
 import { AccountKeys } from "./AccountKeys";
+import { HubPageLink } from "./HubNavigation";
 import { HubAccountMenu } from "./HubAccountMenu";
 
-const ACCOUNT_CHANGED = "Your Hub account changed in another tab. Review the active account before continuing.";
-const SESSION_EXPIRED = "Your Hub session expired. Sign in again.";
+export function HubAccount({ account }: { account: BrowserHubAccount }) {
+  return <AccountPage key={account.boundary} account={account} />;
+}
 
-export function HubAccount() {
-  const [availability, setAvailability] = useState<HubAccountAvailability>();
-  const [check_error, setCheckError] = useState<string>();
-  const [attempt, setAttempt] = useState(0);
-  const [session, setSession] = useState<AccountSession>();
-  const [signing_out, setSigningOut] = useState(false);
-  const [sign_out_error, setSignOutError] = useState<string>();
-  const [notice, setNotice] = useState<string>();
+function AccountPage({ account }: { account: BrowserHubAccount }) {
+  const { availability, check_error, session, notice, signedIn, signing_out, sign_out_error, logout, onFailure } = account;
   const [user_code, setUserCode] = useState(() => {
     const value = new URLSearchParams(window.location.search).get("user_code");
     return value && /^[A-Za-z0-9-]{1,32}$/.test(value) ? value : "";
   });
   const [approved, setApproved] = useState(false);
-  const active = useRef<AccountSession>(undefined);
-
-  const signedOut = useCallback((message?: string) => {
-    active.current?.client.close();
-    active.current = undefined;
-    setSession(undefined);
-    setApproved(false);
-    setSignOutError(undefined);
-    setNotice(message);
-  }, []);
-
-  useEffect(() => {
-    const client = browserAccountClient();
-    let refreshing = false;
-    async function restoreSession() {
-      if (refreshing || client.signal.aborted) return;
-      refreshing = true;
-      const previous = active.current;
-      try {
-        const identity = await refreshBrowserAccount(client);
-        if (client.signal.aborted || active.current !== previous) return;
-        if (!identity) {
-          if (previous) signedOut(SESSION_EXPIRED);
-          return;
-        }
-        if (identity.user_id === previous?.user_id) return;
-        if (previous) signedOut(ACCOUNT_CHANGED);
-        const restored = accountSession(identity);
-        active.current = restored;
-        setSession(restored);
-      } finally {
-        refreshing = false;
-      }
-    }
-    const refreshOnFocus = () => { if (active.current) void restoreSession().catch(() => {}); };
-    setCheckError(undefined);
-    const cancel = () => client.close();
-    window.addEventListener("focus", refreshOnFocus);
-    window.addEventListener("pagehide", cancel);
-    void hubAccountAvailability(client).then(async (next) => {
-      if (next !== "unsupported") await restoreSession();
-      if (!client.signal.aborted) setAvailability(next);
-    }).catch((error: unknown) => {
-      if (!client.signal.aborted) setCheckError(hubErrorMessage(error));
-    });
-    return () => {
-      window.removeEventListener("focus", refreshOnFocus);
-      window.removeEventListener("pagehide", cancel);
-      cancel();
-    };
-  }, [attempt, signedOut]);
-
-  useEffect(() => {
-    const lock = () => { active.current?.client.close(); active.current = undefined; };
-    const hide = () => { lock(); setSession(undefined); };
-    const restore = (event: PageTransitionEvent) => { if (event.persisted) window.location.reload(); };
-    window.addEventListener("pagehide", hide);
-    window.addEventListener("pageshow", restore);
-    return () => {
-      window.removeEventListener("pagehide", hide);
-      window.removeEventListener("pageshow", restore);
-      lock();
-    };
-  }, []);
-
-  function signedIn(next: AccountSession) {
-    active.current = next;
-    setNotice(undefined);
-    setSignOutError(undefined);
-    setSession(next);
-  }
-
-  async function logout() {
-    if (!session || signing_out) return;
-    const { client } = session;
-    setSigningOut(true);
-    setSignOutError(undefined);
-    try {
-      await logoutAccount(client);
-      if (!client.signal.aborted) signedOut();
-    } catch (error) {
-      onFailure(error, setSignOutError);
-    } finally {
-      setSigningOut(false);
-    }
-  }
-
-  function onFailure(error: unknown, report: (message: string) => void) {
-    if (session?.client.signal.aborted) return;
-    if (error instanceof HubError && error.status === 409 && error.details?.account_session_changed === true) {
-      signedOut(ACCOUNT_CHANGED);
-      setAvailability(undefined);
-      setAttempt((value) => value + 1);
-    } else if (error instanceof HubError && error.status === 401) {
-      signedOut(SESSION_EXPIRED);
-    } else report(hubErrorMessage(error));
-  }
-
-  if (!session) return <AuthLayout navigation={<a href="/"><span aria-hidden="true">←</span> Back to Machines</a>}
+  if (!session) return <AuthLayout navigation={<HubPageLink href="/"><span aria-hidden="true">←</span> Back to Machines</HubPageLink>}
     footer="Your machines. Your sessions. One place.">
-    {availability === "available" ? <AccountSignIn user_code={user_code} notice={notice} on_signed_in={signedIn} />
-      : <form className="auth-form" onSubmit={(event) => { event.preventDefault(); setAttempt((value) => value + 1); }}>
+    {availability === "available" && !check_error ? <AccountSignIn user_code={user_code} notice={notice} on_signed_in={signedIn} />
+      : <form className="auth-form" onSubmit={(event) => { event.preventDefault(); account.retry(); }}>
         <header className="auth-heading"><p className="auth-eyebrow">Hub account</p><h1>Welcome to Tokn</h1></header>
         {check_error ? <><p className="auth-feedback" role="alert">{check_error}</p><button className="auth-primary">Retry connection</button></>
           : availability === "email_unconfigured" ? <p className="auth-description">Ask your Hub administrator to set up email delivery for account sign-in.</p>
@@ -140,7 +37,7 @@ export function HubAccount() {
 
   return <main className="hub-home hub-account" key={session.user_id}><div className="hub-content">
     <div className="account-navigation">
-      <a className="account-back" href="/"><span aria-hidden="true">←</span> Back to Machines</a>
+      <HubPageLink className="account-back" href="/"><span aria-hidden="true">←</span> Back to Machines</HubPageLink>
       <div className="hub-actions">
         <HubAccountMenu username={session.username} signing_out={signing_out} sign_out_error={sign_out_error}
           profile_active on_sign_out={() => { void logout(); }} />
@@ -163,7 +60,7 @@ export function HubAccount() {
     <AccountDeviceApproval client={session.client} initial_code={user_code}
       approved={approved} on_approved={() => { setUserCode(""); setApproved(true); }}
       on_reset={() => setApproved(false)} on_failure={onFailure} />
-    <AccountKeys client={session.client} on_failure={onFailure} />
+    <AccountKeys client={session.client} key_list={account.key_list} on_failure={onFailure} />
   </div></main>;
 }
 

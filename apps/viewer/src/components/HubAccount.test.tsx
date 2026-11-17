@@ -1,6 +1,12 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { HubAccount } from "./HubAccount";
+import { HubAccount as AccountPage } from "./HubAccount";
+import { useBrowserHubAccount } from "../lib/useBrowserHubAccount";
+
+function HubAccount({ visible = true }: { visible?: boolean }) {
+  const account = useBrowserHubAccount(false, visible, false);
+  return visible ? <AccountPage account={account} /> : null;
+}
 
 const identity = {
   user_id: "550e8400-e29b-41d4-a716-446655440000",
@@ -472,6 +478,28 @@ it("creates a scoped key, shows its secret once, and revokes it after confirmati
   fireEvent.click(within(confirmation).getByRole("button", { name: "Confirm revoke" }));
   expect(await screen.findByText("No API keys yet.")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Create API key" })).toHaveFocus();
+});
+
+it("shows cached profile metadata on return and clears the one-time key dialog on leaving", async () => {
+  const request = mockAccount({ signed_in: true });
+  const view = render(<HubAccount />);
+  const dialog = await openCreateKeyDialog();
+  fireEvent.change(within(dialog).getByLabelText("Key name"), { target: { value: "Deploy" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Create API key" }));
+  expect(await within(dialog).findByText(key.token)).toBeVisible();
+  view.rerender(<HubAccount visible={false} />);
+  expect(screen.queryByText(key.token)).not.toBeInTheDocument();
+
+  let finish!: (response: Response) => void;
+  request.mockReturnValueOnce(new Promise<Response>((resolve) => { finish = resolve; }));
+  view.rerender(<HubAccount />);
+  expect(screen.getByRole("heading", { name: key.name })).toBeVisible();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(screen.queryByText(key.token)).not.toBeInTheDocument();
+  expect(request.mock.calls.filter(([url]) => String(url).endsWith("/account/browser/refresh"))).toHaveLength(1);
+
+  await act(async () => finish(Response.json({ keys: [] })));
+  expect(await screen.findByText("No API keys yet.")).toBeVisible();
 });
 
 it("restores a signed-in account after reopening the page", async () => {

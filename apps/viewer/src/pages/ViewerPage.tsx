@@ -7,6 +7,7 @@ import { Sidebar } from "../components/Sidebar";
 import { StatusBar } from "../components/StatusBar";
 import { QuestionAnswersProvider } from "../components/QuestionAnswersProvider";
 import { TranslationProvider } from "../components/TranslationProvider";
+import { ViewerVisibility } from "../lib/viewerVisibility";
 import { useViewerState } from "../lib/useViewerState";
 import { SettingsDialog } from "../components/SettingsDialog";
 import { ManagedPiDialog, ManagedSessionControls, RegisterProjectDialog } from "../components/ProjectWorkspace";
@@ -17,6 +18,7 @@ import { isDesktop } from "../lib/transport";
 import type { SettingsSection } from "./SettingsPage";
 
 interface ViewerPageProps {
+  visible?: boolean;
   remote?: boolean;
   connection?: ReactNode;
   on_open_machines?: () => void;
@@ -24,13 +26,14 @@ interface ViewerPageProps {
   machine_key?: string;
 }
 
-export function ViewerPage({ remote = false, connection, on_open_machines, machine_label, machine_key }: ViewerPageProps) {
-  return <TranslationProvider><QuestionAnswersProvider><ViewerContent remote={remote} connection={connection} on_open_machines={on_open_machines}
-    machine_label={machine_label} machine_key={machine_key} /></QuestionAnswersProvider></TranslationProvider>;
+export function ViewerPage(props: ViewerPageProps) {
+  return <ViewerVisibility.Provider value={props.visible ?? true}>
+    <TranslationProvider><QuestionAnswersProvider><ViewerContent {...props} /></QuestionAnswersProvider></TranslationProvider>
+  </ViewerVisibility.Provider>;
 }
 
-function ViewerContent({ remote = false, connection, on_open_machines, machine_label = remote ? "Selected machine" : "This computer", machine_key = remote ? "remote" : "local" }: ViewerPageProps) {
-  const viewer = useViewerState();
+function ViewerContent({ visible = true, remote = false, connection, on_open_machines, machine_label = remote ? "Selected machine" : "This computer", machine_key = remote ? "remote" : "local" }: ViewerPageProps) {
+  const viewer = useViewerState(visible);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("viewer");
@@ -111,9 +114,9 @@ function ViewerContent({ remote = false, connection, on_open_machines, machine_l
   }
 
   return (
-    <div className="viewer-app" data-remote={remote}>
+    <div className="viewer-app" data-remote={remote} hidden={!visible} inert={!visible}>
       <div className="viewer-shell" data-inspector-open={viewer.inspectorOpen} data-sidebar-collapsed={sidebarCollapsed}>
-        <SessionDrawer desktop_hidden={sidebarCollapsed} is_open={viewer.mobileSidebarOpen} on_close={() => viewer.setMobileSidebarOpen(false)}>
+        <SessionDrawer desktop_hidden={sidebarCollapsed} is_open={visible && viewer.mobileSidebarOpen} on_close={() => viewer.setMobileSidebarOpen(false)}>
           <Sidebar
             drafts={drafts?.drafts}
             selected_draft_id={selected_draft_id}
@@ -262,7 +265,7 @@ function ViewerContent({ remote = false, connection, on_open_machines, machine_l
         progress={viewer.sessionIndexProgress}
         source_errors={viewer.sourceErrors}
       />
-      {settingsOpen && <SettingsDialog key={machine_key} remote={remote} machine_label={machine_label}
+      {visible && settingsOpen && <SettingsDialog key={machine_key} remote={remote} machine_label={machine_label}
         machine_key={machine_key} initial_section={settingsSection} return_focus={settingsReturnFocus} on_close={closeSettings} />}
       {localWorkspace ? <>
         <RegisterProjectDialog key={`project:${machine_key}`} open={projectOpen} on_close={() => setProjectOpen(false)}

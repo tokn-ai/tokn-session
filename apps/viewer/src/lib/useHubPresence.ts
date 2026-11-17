@@ -15,11 +15,12 @@ interface PresenceSnapshot {
 }
 
 /** Presence is transient routing metadata, scoped to this visible gallery. */
-export function useHubPresence(service: HubAccessService, host_ids: string[]): Map<string, MachinePresenceStatus> {
+export function useHubPresence(service: HubAccessService, host_ids: string[], gallery_visible = true): Map<string, MachinePresenceStatus> {
   const ids = [...new Set(host_ids)].sort();
   const membership = JSON.stringify(ids);
   const [snapshot, setSnapshot] = useState<PresenceSnapshot>();
   useEffect(() => {
+    if (!gallery_visible) return;
     let disposed = false;
     let running = false;
     let queued = false;
@@ -79,7 +80,7 @@ export function useHubPresence(service: HubAccessService, host_ids: string[]): M
       window.removeEventListener("focus", focused);
     };
   // IDs are normalized into membership so unrelated host metadata cannot restart polling.
-  }, [service, membership]);
+  }, [service, membership, gallery_visible]);
   return new Map(ids.map((id) => [id, snapshot?.service === service && snapshot.membership === membership
     ? snapshot.statuses.get(id) ?? { state: "checking" }
     : { state: "checking" }]));

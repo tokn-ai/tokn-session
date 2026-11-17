@@ -1665,6 +1665,18 @@ describe("useViewerState session-index signalling", () => {
     await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(2));
   });
 
+  it("keeps a hidden machine's new page cached and unread until it is visible", async () => {
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
+    vi.mocked(loadEventPage).mockResolvedValue({ ...toolEventPage(), attention_revision: "4" });
+    const { result, rerender } = renderHook(({ visible }) => useViewerState(visible), { initialProps: { visible: false } });
+    await selectListedSession(result, "live");
+    await waitFor(() => expect(result.current.initialPageLoaded).toBe(true));
+    expect(acknowledgeSessionAttention).not.toHaveBeenCalled();
+    rerender({ visible: true });
+    await waitFor(() => expect(acknowledgeSessionAttention).toHaveBeenCalledWith({ session_key: "live", attention_revision: "4" }, expect.any(Function)));
+    expect(loadEventPage).toHaveBeenCalledOnce();
+  });
+
   it("keeps final replies unread while scrolled up and acknowledges when following resumes", async () => {
     let emit: ((change: RelayChange) => void) | undefined;
     vi.mocked(listenForRelayChanges).mockImplementation((handler) => { emit = handler; return Promise.resolve(vi.fn()); });

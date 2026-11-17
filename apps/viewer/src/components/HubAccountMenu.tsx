@@ -1,3 +1,4 @@
+import { HubPageLink } from "./HubNavigation";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { ChevronIcon, SettingsIcon } from "./Icons";
 import { SettingsDialog } from "./SettingsDialog";
@@ -112,12 +113,12 @@ export function HubAccountMenu({ username, signing_out, sign_out_error, on_sign_
     </button>
     {(open || feedback) && <div className="hub-account-menu__panel">
       {open && <div ref={menu} id={menu_id} role="menu" aria-labelledby={trigger_id} onKeyDown={navigate}>
-        <a className="hub-account-menu__item" href="/account" role="menuitem" tabIndex={-1}
+        <HubPageLink className="hub-account-menu__item" href="/account" role="menuitem" tabIndex={-1}
           aria-current={profile_active ? "page" : undefined} onClick={() => closeMenu()}>
           <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
             <circle cx="12" cy="8" r="3.5" /><path d="M5 20v-2a7 7 0 0 1 14 0v2" />
           </svg>Profile
-        </a>
+        </HubPageLink>
         <button className="hub-account-menu__item" type="button" role="menuitem" tabIndex={-1} aria-haspopup="dialog"
           onClick={() => { closeMenu(); setSettingsOpen(true); }}><SettingsIcon />Settings</button>
         <div className="hub-account-menu__divider" role="separator" />
