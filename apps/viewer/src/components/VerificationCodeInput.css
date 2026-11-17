@@ -1,0 +1,32 @@
+.verification-code-input { min-width: 0; margin: 0; padding: 0; border: 0; }
+.verification-code-input legend { margin-bottom: 9px; padding: 0; font-size: 13px; font-weight: 550; }
+.verification-code-input__slots { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
+.verification-code-input__slots input {
+  min-width: 0;
+  width: 100%;
+  height: 56px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  color: var(--text);
+  background: var(--app-bg);
+  font-family: ui-monospace, monospace;
+  font-size: 24px;
+  text-align: center;
+  caret-color: var(--text);
+}
+.verification-code-input__slots input:focus { outline: 2px solid var(--focus); outline-offset: 2px; }
+.verification-code-input__slots input:disabled { opacity: 0.6; }
+.verification-code-input--device .verification-code-input__slots { grid-template-columns: repeat(4, minmax(0, 1fr)) 10px repeat(4, minmax(0, 1fr)); gap: 6px; }
+.verification-code-input--device input { height: 52px; font-size: 20px; }
+.verification-code-input__separator { display: grid; place-items: center; color: var(--text-muted); font-size: 18px; }
+
+@media (max-width: 480px) {
+  .verification-code-input--device .verification-code-input__slots { grid-template-columns: repeat(4, minmax(0, 1fr)) 8px repeat(4, minmax(0, 1fr)); gap: 4px; }
+  .verification-code-input--device input { height: 48px; border-radius: 7px; }
+}
+
+@media (max-width: 360px) {
+  .verification-code-input--email .verification-code-input__slots { gap: 6px; }
+  .verification-code-input--email input { height: 48px; border-radius: 7px; font-size: 22px; }
+}

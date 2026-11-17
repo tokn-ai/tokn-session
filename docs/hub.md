@@ -67,8 +67,9 @@ prompted, then approve the displayed code. Native clients share their Rust
 account client and revocable credentials under `~/.tokn/sessions/hub`. Credentials
 stay in private native storage. A valid saved login is reused; an expired login
 opens approval again. Account-service outages preserve the saved credential.
-For automation, create a named API key in the
-account page with machine listing or registration scope. Supply it on stdin to
+For automation, choose **Create API key** on the account page. In the dialog,
+name the key and choose machine listing or registration scope, then copy the
+key shown once after creation. Supply it on stdin to
 `auth login --with-token --hub https://hub.example.com`.
 
 Start hosting from the desktop app, or use the CLI:

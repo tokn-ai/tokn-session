@@ -24,6 +24,12 @@ to the active field and announce resends. Email verification uses six digit boxe
 with automatic advance, keyboard navigation, full-code paste and autofill support.
 Loading and connection failures use the same layout; authentication and explicit
 CLI approval remain separate from presentation.
+The signed-in account page shows profile, CLI access and key metadata by default.
+CLI approval, key creation and revocation use native floating dialogs; CLI links
+open their review dialog after sign-in but never approve automatically. Dialogs
+restore focus, clear drafts/secrets on dismissal and stay open during mutations.
+CLI device codes use eight character boxes grouped four-and-four, sharing email
+code entry's keyboard and paste behavior while retaining the native code format.
 
 The Hub username is the namespace for an account's machine addresses and its
 discovery group. Pairing one host provides the encrypted group reference, and

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { HubAccount } from "./HubAccount";
 
@@ -81,6 +81,14 @@ function pasteCode(code: string, input = codeDigits()[0]) {
   fireEvent.paste(input, { clipboardData: { getData: () => code } });
 }
 
+function deviceCodeSlots(): HTMLInputElement[] {
+  return within(screen.getByRole("group", { name: "CLI device code" })).getAllByRole<HTMLInputElement>("textbox");
+}
+
+function pasteDeviceCode(code: string, input = deviceCodeSlots()[0]) {
+  fireEvent.paste(input, { clipboardData: { getData: () => code } });
+}
+
 async function openCodeStep() {
   fireEvent.change(await screen.findByLabelText("Email address"), { target: { value: "alice@example.com" } });
   fireEvent.click(screen.getByRole("button", { name: "Send email code" }));
@@ -91,6 +99,11 @@ async function submitEmailCode() {
   await openCodeStep();
   pasteCode("123456");
   fireEvent.click(screen.getByRole("button", { name: "Verify email code" }));
+}
+
+async function openCreateKeyDialog() {
+  fireEvent.click(await screen.findByRole("button", { name: "Create API key" }));
+  return screen.findByRole<HTMLDialogElement>("dialog", { name: "Create API key" });
 }
 
 it("explains the email setup requirement while keeping account details behind sign-in", async () => {
@@ -258,18 +271,181 @@ it("asks for a username only after email verification and requires explicit CLI 
   await submitEmailCode();
   fireEvent.change(await screen.findByLabelText("Username"), { target: { value: "alice" } });
   fireEvent.click(screen.getByRole("button", { name: "Create account" }));
-  expect(await screen.findByLabelText("CLI device code")).toHaveValue("ABCD-EFGH");
+  const dialog = await screen.findByRole("dialog", { name: "Approve a CLI login" });
+  expect(deviceCodeSlots().map((input) => input.value).join("")).toBe("ABCDEFGH");
   expect(request).toHaveBeenCalledWith(expect.stringContaining("/account/browser/email/verify"), expect.objectContaining({
     body: JSON.stringify({ email: "alice@example.com", code: "123456", username: "alice" }),
   }));
   expect(request).not.toHaveBeenCalledWith(expect.stringContaining("/device/approve"), expect.anything());
-  fireEvent.click(screen.getByRole("button", { name: "Approve CLI login" }));
-  expect(await screen.findByText("CLI login approved. Return to your terminal.")).toBeInTheDocument();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Approve CLI login" }));
+  expect(await within(dialog).findByText("CLI login approved. Return to your terminal.")).toBeInTheDocument();
   expect(request).toHaveBeenCalledWith(expect.stringContaining("/device/approve"), expect.objectContaining({
     body: JSON.stringify({ user_code: "ABCD-EFGH" }),
   }));
   expect(screen.getByRole("link", { name: "Open your machines" })).toHaveAttribute("href", "/");
   expect(request).not.toHaveBeenCalledWith(expect.stringContaining("/account/machines"), expect.anything());
+  fireEvent.click(within(dialog).getByRole("button", { name: "Done" }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(screen.queryByRole("group", { name: "CLI device code" })).not.toBeInTheDocument();
+});
+
+it("keeps the overview free of forms and clears dismissed dialog drafts while restoring focus", async () => {
+  mockAccount({ signed_in: true });
+  render(<HubAccount />);
+  await screen.findByRole("region", { name: "Profile" });
+  expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+  const approve = screen.getByRole("button", { name: "Approve a CLI login" });
+  fireEvent.click(approve);
+  const cli_dialog = screen.getByRole("dialog", { name: "Approve a CLI login" });
+  const code = deviceCodeSlots()[0];
+  expect(code).toHaveFocus();
+  pasteDeviceCode("DRAF-TCOD");
+  fireEvent(cli_dialog, new Event("cancel", { cancelable: true }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(approve).toHaveFocus();
+  fireEvent.click(approve);
+  expect(deviceCodeSlots().map((input) => input.value)).toEqual(Array(8).fill(""));
+  fireEvent.click(screen.getByRole("button", { name: "Close Approve a CLI login" }));
+
+  const create = screen.getByRole("button", { name: "Create API key" });
+  const key_dialog = await openCreateKeyDialog();
+  const name = within(key_dialog).getByLabelText("Key name");
+  expect(name).toHaveFocus();
+  fireEvent.change(name, { target: { value: "Unfinished key" } });
+  fireEvent.click(within(key_dialog).getByLabelText("Register machines"));
+  fireEvent.click(within(key_dialog).getByRole("button", { name: "Cancel" }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(create).toHaveFocus();
+  const reopened = await openCreateKeyDialog();
+  expect(within(reopened).getByLabelText("Key name")).toHaveValue("");
+  expect(within(reopened).getByLabelText("Read machines")).toBeChecked();
+  expect(within(reopened).getByLabelText("Register machines")).not.toBeChecked();
+});
+
+it("opens a linked CLI request after restoring sign-in without approving it automatically", async () => {
+  window.history.replaceState(null, "", "/account?user_code=ABCD-EFGH");
+  const request = mockAccount({ signed_in: true });
+  render(<HubAccount />);
+  const dialog = await screen.findByRole("dialog", { name: "Approve a CLI login" });
+  expect(deviceCodeSlots().map((input) => input.value).join("")).toBe("ABCDEFGH");
+  expect(request).not.toHaveBeenCalledWith(expect.stringContaining("/device/approve"), expect.anything());
+  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(request).not.toHaveBeenCalledWith(expect.stringContaining("/device/approve"), expect.anything());
+});
+
+it("advances across CLI code groups and preserves later characters while editing", async () => {
+  const request = mockAccount({ signed_in: true });
+  render(<HubAccount />);
+  fireEvent.click(await screen.findByRole("button", { name: "Approve a CLI login" }));
+  const slots = deviceCodeSlots();
+  expect(slots).toHaveLength(8);
+  slots.forEach((input, index) => {
+    expect(input).toHaveAccessibleName(`Character ${index + 1} of 8`);
+    fireEvent.change(input, { target: { value: "abcdefgh"[index] } });
+    expect(slots[Math.min(index + 1, 7)]).toHaveFocus();
+  });
+  expect(slots.map((input) => input.value).join("")).toBe("ABCDEFGH");
+  expect(request).not.toHaveBeenCalledWith(expect.stringContaining("/device/approve"), expect.anything());
+
+  for (const index of [7, 6, 5]) fireEvent.keyDown(slots[index], { key: "ArrowLeft" });
+  expect(slots[4]).toHaveFocus();
+  fireEvent.keyDown(slots[4], { key: "Delete" });
+  expect(slots.map((input) => input.value)).toEqual(["A", "B", "C", "D", "", "F", "G", "H"]);
+  fireEvent.keyDown(slots[4], { key: "Backspace" });
+  expect(slots[3]).toHaveFocus();
+  expect(slots.map((input) => input.value)).toEqual(["A", "B", "C", "", "", "F", "G", "H"]);
+  expect(screen.getByRole("button", { name: "Approve CLI login" })).toBeDisabled();
+});
+
+it("pastes a complete CLI code from any box and requires all eight characters before approval", async () => {
+  const request = mockAccount({ signed_in: true });
+  render(<HubAccount />);
+  await screen.findByText("No API keys yet.");
+  fireEvent.click(screen.getByRole("button", { name: "Approve a CLI login" }));
+  const dialog = screen.getByRole("dialog", { name: "Approve a CLI login" });
+  const slots = deviceCodeSlots();
+  pasteDeviceCode("abc");
+  expect(within(dialog).getByRole("button", { name: "Approve CLI login" })).toBeDisabled();
+  fireEvent.submit(slots[0].closest("form")!);
+  expect(request).not.toHaveBeenCalledWith(expect.stringContaining("/device/approve"), expect.anything());
+
+  pasteDeviceCode("ab12-cd34", slots[5]);
+  expect(slots.map((input) => input.value).join("")).toBe("AB12CD34");
+  expect(slots[7]).toHaveFocus();
+  expect([slots[7].selectionStart, slots[7].selectionEnd]).toEqual([0, 1]);
+  let resolve_approval!: (response: Response) => void;
+  request.mockReturnValueOnce(new Promise<Response>((resolve) => { resolve_approval = resolve; }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Approve CLI login" }));
+  slots.forEach((input) => expect(input).toBeDisabled());
+  expect(within(dialog).getByRole("button", { name: "Approving…" })).toBeDisabled();
+  expect(request).toHaveBeenCalledWith(expect.stringContaining("/device/approve"), expect.objectContaining({
+    body: JSON.stringify({ user_code: "AB12-CD34" }),
+  }));
+  resolve_approval(new Response(null, { status: 204 }));
+  expect(await within(dialog).findByText("CLI login approved. Return to your terminal.")).toBeInTheDocument();
+});
+
+it("keeps pending key creation open and contains its one-time secret until dismissal", async () => {
+  const request = mockAccount({ signed_in: true });
+  render(<HubAccount />);
+  await screen.findByText("No API keys yet.");
+  const dialog = await openCreateKeyDialog();
+  fireEvent.change(within(dialog).getByLabelText("Key name"), { target: { value: "Deploy" } });
+  let resolve_create!: (response: Response) => void;
+  request.mockReturnValueOnce(new Promise<Response>((resolve) => { resolve_create = resolve; }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Create API key" }));
+  expect(within(dialog).getByRole("button", { name: "Close Create API key" })).toBeDisabled();
+  expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeDisabled();
+  const cancel = new Event("cancel", { cancelable: true });
+  fireEvent(dialog, cancel);
+  expect(cancel.defaultPrevented).toBe(true);
+  expect(dialog).toBeInTheDocument();
+  expect(within(dialog).getByLabelText("Key name")).toBeDisabled();
+  resolve_create(Response.json(key, { status: 201 }));
+  expect(await within(dialog).findByText(key.token)).toBeInTheDocument();
+  expect(within(screen.getByRole("region", { name: "API keys" })).queryByText(key.token)).not.toBeInTheDocument();
+  expect(request.mock.calls.filter(([input, init]) => String(input).endsWith("/account/keys") && init?.method === "POST")).toHaveLength(1);
+  fireEvent.click(within(dialog).getByRole("button", { name: "Done" }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(screen.queryByText(key.token)).not.toBeInTheDocument();
+});
+
+it("keeps a created key and its secret when an older empty list arrives before the refresh", async () => {
+  const request = mockAccount({ signed_in: true });
+  const respond = request.getMockImplementation()!;
+  let resolve_initial!: (response: Response) => void;
+  let resolve_refresh!: (response: Response) => void;
+  const initial = new Promise<Response>((resolve) => { resolve_initial = resolve; });
+  const refresh = new Promise<Response>((resolve) => { resolve_refresh = resolve; });
+  let reads = 0;
+  request.mockImplementation((input, init) => {
+    if (String(input).endsWith("/account/keys") && init?.method !== "POST") {
+      reads++;
+      return reads === 1 ? initial : refresh;
+    }
+    return respond(input, init);
+  });
+  render(<HubAccount />);
+  await screen.findByText("Loading keys…");
+  const dialog = await openCreateKeyDialog();
+  fireEvent.change(within(dialog).getByLabelText("Key name"), { target: { value: "Deploy" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Create API key" }));
+  expect(await within(dialog).findByText(key.token)).toBeInTheDocument();
+  await waitFor(() => expect(reads).toBe(2));
+
+  await act(async () => { resolve_initial(Response.json({ keys: [] })); });
+  expect(within(dialog).getByText(key.token)).toBeInTheDocument();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Done" }));
+  expect(within(screen.getByRole("list", { name: "Account API keys" })).getByRole("heading", { name: "Deploy" })).toBeInTheDocument();
+  expect(screen.queryByText("No API keys yet.")).not.toBeInTheDocument();
+  expect(screen.queryByText(key.token)).not.toBeInTheDocument();
+
+  await act(async () => { resolve_refresh(Response.json({ keys: [{ ...key, token: undefined }] })); });
+  expect(within(screen.getByRole("list", { name: "Account API keys" })).getAllByRole("heading", { name: "Deploy" })).toHaveLength(1);
 });
 
 it("creates a scoped key, shows its secret once, and revokes it after confirmation", async () => {
@@ -279,19 +455,23 @@ it("creates a scoped key, shows its secret once, and revokes it after confirmati
   const profile = await screen.findByRole("region", { name: "Profile" });
   expect(profile).toHaveTextContent(identity.username);
   expect(profile).toHaveTextContent(identity.user_id);
-  fireEvent.change(await screen.findByLabelText("Key name"), { target: { value: "Deploy" } });
-  fireEvent.click(screen.getByLabelText("Register machines"));
-  fireEvent.click(screen.getByRole("button", { name: "Create API key" }));
-  expect(await screen.findByText(key.token)).toBeInTheDocument();
+  const dialog = await openCreateKeyDialog();
+  fireEvent.change(within(dialog).getByLabelText("Key name"), { target: { value: "Deploy" } });
+  fireEvent.click(within(dialog).getByLabelText("Register machines"));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Create API key" }));
+  expect(await within(dialog).findByText(key.token)).toBeInTheDocument();
   expect(request).toHaveBeenCalledWith(expect.stringContaining("/account/keys"), expect.objectContaining({
     method: "POST", body: JSON.stringify({ name: "Deploy", scopes: ["machines:read", "machines:register"] }),
   }));
-  fireEvent.click(screen.getByRole("button", { name: "Done" }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Done" }));
   expect(screen.queryByText(key.token)).not.toBeInTheDocument();
   const keys = await screen.findByRole("list", { name: "Account API keys" });
   fireEvent.click(within(keys).getByRole("button", { name: "Revoke Deploy" }));
-  fireEvent.click(within(keys).getByRole("button", { name: "Confirm revoke" }));
+  const confirmation = screen.getByRole("dialog", { name: "Revoke API key" });
+  expect(request).not.toHaveBeenCalledWith(expect.stringContaining("/keys/deployment-key"), expect.anything());
+  fireEvent.click(within(confirmation).getByRole("button", { name: "Confirm revoke" }));
   expect(await screen.findByText("No API keys yet.")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Create API key" })).toHaveFocus();
 });
 
 it("restores a signed-in account after reopening the page", async () => {
@@ -320,30 +500,36 @@ it("recovers from a stale account action without replaying it against the active
   let current = identity;
   const request = mockAccount({ signed_in: true, current_identity: () => current });
   render(<HubAccount />);
-  fireEvent.change(await screen.findByLabelText("Key name"), { target: { value: "Deploy" } });
+  const dialog = await openCreateKeyDialog();
+  fireEvent.change(within(dialog).getByLabelText("Key name"), { target: { value: "Deploy" } });
   current = other_identity;
-  fireEvent.click(screen.getByRole("button", { name: "Create API key" }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Create API key" }));
 
   expect(await screen.findByText(other_identity.username)).toBeInTheDocument();
   expect(within(screen.getByRole("region", { name: "Profile" })).getByRole("status"))
     .toHaveTextContent("Your Hub account changed in another tab.");
-  expect(screen.getByLabelText("Key name")).toHaveValue("");
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   expect(screen.queryByText(key.token)).not.toBeInTheDocument();
   const writes = request.mock.calls.filter(([input, init]) => String(input).endsWith("/account/keys") && init?.method === "POST");
   expect(writes).toHaveLength(1);
   expect(new Headers(writes[0][1]?.headers).get("X-Tokn-Account-Id")).toBe(identity.user_id);
+  const reopened = await openCreateKeyDialog();
+  expect(within(reopened).getByLabelText("Key name")).toHaveValue("");
 });
 
 it("restores a changed browser account when the account page regains focus", async () => {
   let current = identity;
   mockAccount({ signed_in: true, current_identity: () => current });
   render(<HubAccount />);
-  fireEvent.change(await screen.findByLabelText("Key name"), { target: { value: "Previous account draft" } });
+  const dialog = await openCreateKeyDialog();
+  fireEvent.change(within(dialog).getByLabelText("Key name"), { target: { value: "Previous account draft" } });
   current = other_identity;
   fireEvent.focus(window);
 
   expect(await screen.findByText(other_identity.username)).toBeInTheDocument();
-  expect(screen.getByLabelText("Key name")).toHaveValue("");
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  const reopened = await openCreateKeyDialog();
+  expect(within(reopened).getByLabelText("Key name")).toHaveValue("");
 });
 
 it("waits for logout, reports a failure, and clears the session after a successful retry", async () => {

@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { HubClient, HubError, hubErrorMessage } from "../lib/hub";
 import {
-  accountSession, approveAccountDevice, browserAccountClient, createAccountKey, hubAccountAvailability,
-  loadAccountKeys, logoutAccount, MACHINE_READ, MACHINE_REGISTER,
-  refreshBrowserAccount, requestAccountCode, revokeAccountKey, verifyAccountCode,
-  type AccountKey, type AccountKeyScope, type AccountSession, type HubAccountAvailability,
+  accountSession, browserAccountClient, hubAccountAvailability, logoutAccount,
+  refreshBrowserAccount, requestAccountCode, verifyAccountCode,
+  type AccountSession, type HubAccountAvailability,
 } from "../lib/hubAccount";
 import "./HubAccount.css";
 import { AuthLayout } from "./AuthLayout";
-import { EmailCodeInput } from "./EmailCodeInput";
+import { VerificationCodeInput } from "./VerificationCodeInput";
+import { AccountDeviceApproval } from "./AccountDeviceApproval";
+import { AccountKeys } from "./AccountKeys";
 
 const ACCOUNT_CHANGED = "Your Hub account changed in another tab. Review the active account before continuing.";
 const SESSION_EXPIRED = "Your Hub session expired. Sign in again.";
@@ -138,15 +139,20 @@ export function HubAccount() {
 
   return <main className="hub-home hub-account" key={session.user_id}><div className="hub-content">
     <header className="hub-header">
-      <div><p className="hub-eyebrow">Tokn Hub</p><h1>Hub account</h1></div>
+      <div><p className="hub-eyebrow">Tokn Hub</p><h1>Hub account</h1><p>Manage your account and connected tools.</p></div>
       <div className="hub-actions"><a href="/">Open your machines</a>
         <button type="button" onClick={() => { void logout(); }} disabled={signing_out}>{signing_out ? "Signing out…" : "Sign out"}</button>
       </div>
     </header>
     <section className="account-section" aria-labelledby="account-profile-title">
       <h2 id="account-profile-title">Profile</h2>
-      <p>Signed in as <strong>{session.username}</strong></p>
-      <p>Account ID <code>{session.user_id}</code></p>
+      <div className="account-profile-summary">
+        <span className="account-avatar" aria-hidden="true">{session.username.slice(0, 1).toUpperCase()}</span>
+        <div><strong className="account-username">{session.username}</strong><p>Your Hub account</p></div>
+      </div>
+      <details className="account-profile-details"><summary>Account details</summary>
+        <dl><dt>Account ID</dt><dd><code>{session.user_id}</code></dd></dl>
+      </details>
       {notice && <p role="status">{notice}</p>}
       {sign_out_error && <p className="hub-error" role="alert">{sign_out_error}</p>}
     </section>
@@ -234,7 +240,7 @@ function AccountSignIn({ user_code, notice, on_signed_in }: {
       <input ref={input} key="email" id="account-email" type="email" autoComplete="email" autoCapitalize="none" spellCheck={false}
         placeholder="you@example.com" aria-describedby="account-email-hint" required maxLength={254} value={email} disabled={busy} onChange={(event) => setEmail(event.target.value)} />
       <p className="auth-hint" id="account-email-hint">We’ll email you a 6-digit sign-in code.</p>
-    </div> : step === "code" ? <EmailCodeInput value={code} disabled={busy} input_ref={input} on_change={setCode} /> : <div className="auth-field">
+    </div> : step === "code" ? <VerificationCodeInput kind="email" value={code} disabled={busy} input_ref={input} on_change={setCode} /> : <div className="auth-field">
       <label htmlFor="account-username">Username</label>
       <input ref={input} key="username" id="account-username" autoComplete="username" autoCapitalize="none" spellCheck={false} required maxLength={63}
         aria-describedby="account-username-hint" pattern="[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?" value={username} disabled={busy} onChange={(event) => setUsername(event.target.value)} />
@@ -252,135 +258,4 @@ function AccountSignIn({ user_code, notice, on_signed_in }: {
     </div>}
     {step === "email" && <p className="auth-note">No password to remember. Just your email.</p>}
   </form>;
-}
-
-type AccountFailure = (error: unknown, report: (message: string) => void) => void;
-
-function AccountDeviceApproval({ client, initial_code, approved, on_approved, on_reset, on_failure }: {
-  client: HubClient;
-  initial_code: string;
-  approved: boolean;
-  on_approved: () => void;
-  on_reset: () => void;
-  on_failure: AccountFailure;
-}) {
-  const [code, setCode] = useState(initial_code);
-  const [open, setOpen] = useState(initial_code !== "" || approved);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
-
-  async function approve() {
-    setBusy(true);
-    setError(undefined);
-    try {
-      await approveAccountDevice(client, code.trim());
-      if (client.signal.aborted) return;
-      setCode("");
-      on_approved();
-    } catch (error) { on_failure(error, setError); }
-    finally { if (!client.signal.aborted) setBusy(false); }
-  }
-
-  return <details className="account-section" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary>Approve a CLI login</summary>
-    {approved ? <div className="account-form">
-      <p role="status">CLI login approved. Return to your terminal.</p>
-      <button type="button" onClick={on_reset}>Approve another login</button>
-    </div> : <form className="account-form"
-      onSubmit={(event) => { event.preventDefault(); void approve(); }}>
-      <p>Check that this code matches the one shown in your terminal.</p>
-      <label htmlFor="account-device-code">CLI device code</label>
-      <input id="account-device-code" autoComplete="off" spellCheck={false} required maxLength={32} value={code}
-        onChange={(event) => setCode(event.target.value)} disabled={busy} />
-      {error && <p className="hub-error" role="alert">{error}</p>}
-      <button type="submit" disabled={busy || !code.trim()}>{busy ? "Approving…" : "Approve CLI login"}</button>
-    </form>}
-  </details>;
-}
-
-const SCOPE_LABELS = { [MACHINE_READ]: "Read machines", [MACHINE_REGISTER]: "Register machines" };
-
-function AccountKeys({ client, on_failure }: { client: HubClient; on_failure: AccountFailure }) {
-  const [keys, setKeys] = useState<AccountKey[]>();
-  const [name, setName] = useState("");
-  const [scopes, setScopes] = useState<AccountKeyScope[]>([MACHINE_READ]);
-  const [created, setCreated] = useState<Pick<AccountKey, "key_id"> & { token: string }>();
-  const [copy_notice, setCopyNotice] = useState<string>();
-  const [revoke_id, setRevokeId] = useState<string>();
-  const [error, setError] = useState<string>();
-  const [busy, setBusy] = useState(false);
-  const [attempt, setAttempt] = useState(0);
-  useEffect(() => {
-    let current = true;
-    void loadAccountKeys(client).then((next) => {
-      if (current && !client.signal.aborted) setKeys(next);
-    }).catch((error: unknown) => { if (current) on_failure(error, setError); });
-    return () => { current = false; };
-  }, [client, attempt]);
-
-  async function mutate(operation: () => Promise<void>) {
-    setBusy(true);
-    setError(undefined);
-    try {
-      await operation();
-      if (!client.signal.aborted) setAttempt((value) => value + 1);
-    } catch (error) { on_failure(error, setError); }
-    finally { if (!client.signal.aborted) setBusy(false); }
-  }
-
-  return <section className="account-section" aria-labelledby="account-keys-title">
-    <h2 id="account-keys-title">API keys</h2>
-    <p>Use a scoped key to read or register your machines from scripts.</p>
-    <form className="account-form" onSubmit={(event) => {
-      event.preventDefault();
-      void mutate(async () => {
-        const key = await createAccountKey(client, name.trim(), scopes);
-        if (!client.signal.aborted) { setCreated(key); setName(""); setCopyNotice(undefined); }
-      });
-    }}>
-      <label htmlFor="account-key-name">Key name</label>
-      <input id="account-key-name" required maxLength={80} value={name} disabled={busy} onChange={(event) => setName(event.target.value)} />
-      <fieldset className="hub-auth-method" disabled={busy}>
-        <legend>Permissions</legend>
-        {([MACHINE_READ, MACHINE_REGISTER] as const).map((scope) => <label key={scope}>
-          <input type="checkbox" checked={scopes.includes(scope)} onChange={(event) => {
-            setScopes(event.target.checked ? [...scopes, scope] : scopes.filter((selected) => selected !== scope));
-          }} />{SCOPE_LABELS[scope]}
-        </label>)}
-      </fieldset>
-      <button type="submit" disabled={busy || !name.trim() || scopes.length === 0}>Create API key</button>
-    </form>
-    {created && <div className="account-key-value">
-      <p>Copy this API key now. It’s shown only once.</p>
-      <code>{created.token}</code>
-      <div className="hub-actions">
-        {navigator.clipboard?.writeText && <button type="button" onClick={() => {
-          void navigator.clipboard.writeText(created.token).then(() => setCopyNotice("API key copied."))
-            .catch(() => setCopyNotice("Select the key and copy it manually."));
-        }}>Copy API key</button>}
-        <button type="button" onClick={() => setCreated(undefined)}>Done</button>
-      </div>
-      {copy_notice && <p role="status">{copy_notice}</p>}
-    </div>}
-    {error && <p className="hub-error" role="alert">{error}</p>}
-    {!keys ? error ? <button type="button" onClick={() => { setError(undefined); setAttempt((value) => value + 1); }}>Retry loading keys</button>
-      : <p role="status">Loading keys…</p>
-      : keys.length === 0 ? <p>No API keys yet.</p>
-      : <ul className="hub-hosts" aria-label="Account API keys">{keys.map((key) => <li className="hub-host" key={key.key_id}>
-        <div className="hub-host-details">
-          <h3>{key.name}</h3><p>{key.scopes.map((scope) => SCOPE_LABELS[scope]).join(", ")}</p>
-          <p>Expires {new Date(key.expires_at * 1000).toLocaleDateString()}</p>
-        </div>
-        {revoke_id === key.key_id ? <div className="hub-actions">
-          <button type="button" disabled={busy} onClick={() => { void mutate(async () => {
-            await revokeAccountKey(client, key.key_id);
-            if (!client.signal.aborted) {
-              setRevokeId(undefined);
-              if (created?.key_id === key.key_id) setCreated(undefined);
-            }
-          }); }}>Confirm revoke</button>
-          <button type="button" disabled={busy} onClick={() => setRevokeId(undefined)}>Cancel</button>
-        </div> : <button type="button" disabled={busy} onClick={() => setRevokeId(key.key_id)}>Revoke {key.name}</button>}
-      </li>)}</ul>}
-  </section>;
 }

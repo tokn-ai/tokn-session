@@ -1,48 +1,78 @@
-.account-section {
-  display: grid;
-  gap: 12px;
-  margin-bottom: 20px;
-  padding: 20px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface);
-}
-
-.account-section h2 { margin: 0; font-size: 17px; }
-.account-section p { margin: 0; color: var(--text-soft); font-size: 13px; line-height: 1.5; }
-.account-section .hub-error { color: var(--danger); }
-.account-section summary { cursor: pointer; font-weight: 600; }
-.account-section[open] summary { margin-bottom: 12px; }
-.account-section > button { justify-self: start; }
-.account-section .hub-host { background: var(--surface-raised); }
-
-.account-form {
-  display: grid;
-  gap: 10px;
-  max-width: 440px;
-  margin: 0;
-}
-
-.account-form > label { font-size: 13px; font-weight: 600; }
-.account-form > input {
-  min-height: 42px;
-  width: 100%;
+.hub-home.hub-account { background: var(--sidebar-bg); padding: 48px 28px; }
+.hub-account .hub-content { max-width: 880px; }
+.hub-account .hub-header { align-items: flex-start; margin-bottom: 32px; }
+.hub-account .hub-header h1 { margin-bottom: 10px; font-size: 32px; font-weight: 600; letter-spacing: -1px; }
+.hub-account .hub-header > div > p:not(.hub-eyebrow) { color: var(--text-soft); font-size: 14px; }
+.hub-account .hub-actions { padding-top: 4px; }
+.hub-home.hub-account button {
+  min-height: 40px;
+  padding: 9px 14px;
   border: 1px solid var(--border-strong);
   border-radius: 8px;
-  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--text);
   background: var(--surface-raised);
-  font: inherit;
 }
-.account-form > button { justify-self: start; }
-.account-form .hub-auth-method { background: var(--surface-raised); }
-.account-key-value {
+.hub-home.hub-account button:hover:not(:disabled) { background: var(--surface-hover); }
+.hub-home.hub-account .account-primary { border-color: transparent; color: var(--app-bg); background: var(--text); }
+.hub-home.hub-account .account-primary:hover:not(:disabled) { background: var(--text-soft); }
+.hub-home.hub-account button:disabled { opacity: 0.55; }
+.hub-account :is(button, a, summary):focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
+
+.account-section {
   display: grid;
-  gap: 8px;
-  padding: 12px;
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
+  gap: 20px;
+  margin-bottom: 16px;
+  padding: 28px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
   background: var(--surface-raised);
 }
-.account-key-value code { overflow-wrap: anywhere; user-select: all; }
-.account-key-value button { justify-self: start; }
+.account-section h2 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -0.2px; }
+.account-section p { margin: 0; color: var(--text-soft); font-size: 13px; line-height: 1.65; }
+.account-section .hub-error, .account-section .account-error { color: var(--danger); }
+.account-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.account-section-heading > button { flex-shrink: 0; }
+.account-section-copy { min-width: 0; }
+.account-section-copy p { margin-top: 6px; }
+.account-action-copy { display: flex; align-items: center; gap: 14px; }
+.account-section-icon { display: grid; place-items: center; flex-shrink: 0; width: 42px; height: 42px; color: var(--text-soft); background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+.account-section-icon svg { width: 20px; height: 20px; }
+.account-profile-summary { display: flex; align-items: center; gap: 14px; }
+.account-avatar { display: grid; place-items: center; flex-shrink: 0; width: 48px; height: 48px; border: 1px solid var(--border); border-radius: 50%; color: var(--text); background: var(--surface); font-size: 20px; font-weight: 550; }
+.account-username { display: block; margin-bottom: 3px; font-size: 19px; font-weight: 600; overflow-wrap: anywhere; }
+.account-profile-details { padding-top: 16px; border-top: 1px solid var(--border); }
+.account-profile-details summary { width: fit-content; color: var(--text-muted); font-size: 12px; cursor: pointer; }
+.account-profile-details dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 12px; margin: 14px 0 0; color: var(--text-muted); font-size: 12px; }
+.account-profile-details dd { margin: 0; }
+.account-profile-details code { color: var(--text-soft); overflow-wrap: anywhere; user-select: all; }
+.account-empty { display: grid; gap: 4px; padding: 24px 20px; border: 1px dashed var(--border-strong); border-radius: 10px; text-align: center; background: var(--surface); }
+.account-empty p:first-child { color: var(--text); font-weight: 500; }
+.account-empty p + p { color: var(--text-muted); font-size: 12px; }
+.account-key-list { list-style: none; display: grid; margin: 0; padding: 0; }
+.account-key-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding-block: 20px; border-top: 1px solid var(--border); }
+.account-key-row:last-child { padding-bottom: 0; }
+.account-key-details { min-width: 0; }
+.account-key-details h3 { margin: 0 0 5px; font-size: 14px; font-weight: 550; overflow-wrap: anywhere; }
+.account-key-details p { font-size: 12px; color: var(--text-muted); }
+.account-key-details .account-key-scopes { color: var(--text-soft); margin-bottom: 4px; }
+.account-key-row > button { flex-shrink: 0; }
+.account-section .account-feedback { display: grid; gap: 10px; }
+.account-section .account-feedback > button { justify-self: start; }
+
+@media (max-width: 640px) {
+  .hub-home.hub-account { padding: 28px 20px; }
+  .hub-account .hub-header { gap: 20px; }
+  .hub-account .hub-actions { padding-top: 0; }
+  .account-section { padding: 22px; }
+  .account-section-heading { align-items: flex-start; flex-direction: column; gap: 16px; }
+  .hub-home.hub-account button { min-height: 44px; }
+  .account-profile-details dl { grid-template-columns: 1fr; gap: 6px; }
+}
+
+@media (max-width: 360px) {
+  .hub-home.hub-account { padding-inline: 16px; }
+  .account-section { padding: 20px; }
+  .account-key-row { align-items: flex-start; flex-direction: column; gap: 12px; }
+}
