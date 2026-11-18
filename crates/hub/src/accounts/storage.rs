@@ -1,5 +1,6 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Serialize;
+use tokn_hub_client_core::account::DevicePurpose;
 use tokn_hub_client_core::address::parse_machine_address;
 use uuid::Uuid;
 
@@ -281,7 +282,7 @@ pub(super) fn email_login(
   Ok(Login { identity, token })
 }
 
-pub(super) fn device_login(store: &Store, user_id: &str) -> Result<Login, AccountError> {
+pub(super) fn device_login(store: &Store, user_id: &str, purpose: DevicePurpose) -> Result<Login, AccountError> {
   let mut connection = store.connection().map_err(AccountError::internal)?;
   let tx = connection
     .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -300,7 +301,10 @@ pub(super) fn device_login(store: &Store, user_id: &str) -> Result<Login, Accoun
     user_id,
     CredentialKind::Cli,
     None,
-    ALL_SCOPES,
+    match purpose {
+      DevicePurpose::Cli => ALL_SCOPES,
+      DevicePurpose::Viewer => READ_SCOPE,
+    },
     CLI_TTL,
     TokenTransport::Bearer,
   )?;

@@ -1,5 +1,6 @@
 //! Remote-only applet backend. Keys, pairing and encrypted network state live
 //! here; the shared viewer owns rendered histories and display caches.
+mod account;
 mod bridge;
 mod connection;
 mod host;
@@ -25,6 +26,12 @@ async fn dispatch(command: &str, params: Value) -> Result<Value, String> {
     "initialize_device_preferences" => preferences::initialize(params).await,
     "write_viewer_preferences" => preferences::write("viewer", params).await,
     "write_machine_preferences" => preferences::write("machines", params).await,
+    "hub_account_status" => account::status(host::string(&params, "hub_url")?).await,
+    "hub_account_login_start" => account::start(params).await,
+    "hub_account_login_poll" => account::poll(params).await,
+    "hub_account_login_cancel" => account::cancel(params),
+    "hub_account_machines" => account::machines(host::string(&params, "hub_url")?).await,
+    "hub_account_logout" => account::logout(host::string(&params, "hub_url")?).await,
     "hub_client_status" => storage::status(host::string(&params, "hub_url")?).await,
     "hub_client_resolve" => {
       storage::resolve(

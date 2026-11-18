@@ -1,7 +1,6 @@
 import { useId } from "react";
 import type { HubAccessService } from "../lib/hubAccess";
 import { discoveryGroupKey } from "../lib/hubDiscovery";
-import { viewerCapabilities } from "../lib/platform";
 import type { DiscoveredMachine, ResolvedMachine, SavedHubHost } from "../lib/types";
 import { useHubDiscovery, type HubDiscoveryGroupState } from "../lib/useHubDiscovery";
 import { useHubPresence } from "../lib/useHubPresence";
@@ -61,6 +60,7 @@ export interface HubGalleryAccountRoster {
   hub_url: string;
   machines: ResolvedMachine[];
   unavailable?: boolean;
+  can_sign_in?: boolean;
   on_retry: () => void;
 }
 
@@ -81,7 +81,6 @@ interface HubMachineGalleryProps {
 
 export function HubMachineGallery({ visible = true, resumable_host_id, service, hosts, account_roster, busy, opening_host_id, on_open, on_pair, on_add, on_passkey, on_forget }: HubMachineGalleryProps) {
   const { groups, refresh_group } = useHubDiscovery(service, hosts, visible);
-  const capabilities = viewerCapabilities();
   const heading_id = useId();
   const machines = galleryMachines(hosts, account_roster?.machines ?? [], groups);
   const presence = useHubPresence(service, machines.map((machine) => machine.host_id), visible);
@@ -127,7 +126,7 @@ export function HubMachineGallery({ visible = true, resumable_host_id, service, 
       })}
     </div>
     <details className="hub-gallery-help"><summary>Set up discovery</summary><ol>
-      {!capabilities.native_hub && <li>Sign in to your Hub account to see machines registered to it.</li>}
+      {account_roster?.can_sign_in && <li>Sign in to your Hub account to see machines registered to it.</li>}
       <li>Register a host with your Hub account and a machine name to add it to your account.</li>
       <li>For discovery without signing in, pair a known machine on this Hub. If it’s already paired, open it and return to Machines.</li>
       <li>Pair each additional machine separately.</li>

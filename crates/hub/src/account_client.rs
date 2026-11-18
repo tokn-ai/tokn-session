@@ -9,12 +9,14 @@ use std::{
 };
 use tokio::{task::spawn_blocking, time::Instant};
 use tokio_util::sync::CancellationToken;
+use tokn_hub_client_core::account::{CLI_START, DEVICE_TOKEN, DeviceAuthorization, DevicePurpose};
 use tokn_hub_client_core::address::parse_machine_address;
 use tokn_session_storage::{read_private_json, update_private_json};
 use url::Url;
 use zeroize::{Zeroize, Zeroizing};
 
-const MAX_TOKEN_BYTES: usize = 1024;
+pub use tokn_hub_client_core::account::{LoginChallenge, validate_token};
+
 const MAX_RESPONSE_BYTES: usize = 16 * 1024;
 const MAX_STORE_BYTES: u64 = 64 * 1024;
 const CREDENTIAL_FILE: &str = "account-credentials.json";
@@ -24,14 +26,6 @@ const CANCELED: &str = "Hub sign-in canceled";
 pub struct AccountClient {
   path: PathBuf,
   http: Client,
-}
-
-/// Safe progress for presentation. The device credential remains inside Rust.
-#[derive(Clone, Serialize)]
-pub struct LoginChallenge {
-  pub verification_url: String,
-  pub user_code: String,
-  pub expires_at: u64,
 }
 
 /// Native-only result. Account credentials are never serialized to the viewer.
@@ -95,20 +89,6 @@ impl AccountIdentity {
       token: Zeroizing::new(credential.token.clone()),
       warning: None,
     }
-  }
-}
-
-#[derive(Deserialize)]
-struct DeviceAuthorization {
-  device_code: String,
-  user_code: String,
-  expires_in: u64,
-  interval: u64,
-}
-
-impl Drop for DeviceAuthorization {
-  fn drop(&mut self) {
-    self.device_code.zeroize();
   }
 }
 
@@ -359,7 +339,7 @@ impl AccountClient {
     let response = tokio::select! {
       biased;
       _ = cancel.cancelled() => return Err(CANCELED.into()),
-      response = self.http.post(endpoint(hub, "/hub/v1/account/device/start"))
+      response = self.http.post(endpoint(hub, CLI_START))
         .header(header::CONTENT_TYPE, "application/json").body("{}").send() =>
         response.map_err(|_| "Could not start sign-in through the Hub")?,
     };
@@ -368,31 +348,9 @@ impl AccountClient {
       _ = cancel.cancelled() => return Err(CANCELED.into()),
       result = read_json(response) => result?,
     };
-    if !(1..=900).contains(&authorization.expires_in)
-      || !(1..=60).contains(&authorization.interval)
-      || authorization.interval >= authorization.expires_in
-      || !(1..=32).contains(&authorization.user_code.len())
-      || !authorization
-        .user_code
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-    {
-      return Err("Hub returned an invalid device sign-in challenge".into());
-    }
-    validate_token(&authorization.device_code)?;
+    let challenge = authorization.challenge(hub, crate::secure_client::unix_time()?, DevicePurpose::Cli)?;
     let deadline = Instant::now() + Duration::from_secs(authorization.expires_in);
-    let expires_at = crate::secure_client::unix_time()?
-      .checked_add(authorization.expires_in)
-      .ok_or("Invalid sign-in expiry")?;
-    let mut verification = endpoint(hub, "/account");
-    verification
-      .query_pairs_mut()
-      .append_pair("user_code", &authorization.user_code);
-    on_challenge(LoginChallenge {
-      verification_url: verification.to_string(),
-      user_code: authorization.user_code.clone(),
-      expires_at,
-    });
+    on_challenge(challenge);
     let mut interval = Duration::from_secs(authorization.interval);
     let issued = tokio::select! {
       biased;
@@ -401,7 +359,7 @@ impl AccountClient {
         loop {
           tokio::time::sleep(interval).await;
           let response = self.http
-            .post(endpoint(hub, "/hub/v1/account/device/token"))
+            .post(endpoint(hub, DEVICE_TOKEN))
             .header(header::CONTENT_TYPE, "application/json")
             .body(json!({ "device_code": authorization.device_code }).to_string())
             .send().await;
@@ -558,13 +516,6 @@ async fn read_json<T: DeserializeOwned>(mut response: Response) -> Result<T, Str
     bytes.extend_from_slice(&chunk);
   }
   serde_json::from_slice(&bytes).map_err(|_| "Hub returned an invalid account response".into())
-}
-
-pub fn validate_token(value: &str) -> Result<(), String> {
-  if !(1..=MAX_TOKEN_BYTES).contains(&value.len()) || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
-    return Err("Invalid Hub account credential".into());
-  }
-  Ok(())
 }
 
 #[cfg(test)]

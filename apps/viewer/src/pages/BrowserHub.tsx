@@ -1,10 +1,9 @@
 import { useState } from "react";
 import { HubAccess } from "../components/HubAccess";
 import { HubAccount } from "../components/HubAccount";
-import { HubAccountMenu } from "../components/HubAccountMenu";
+import { HubAccountEntry } from "../components/HubAccountEntry";
 import { HubConnection } from "../components/HubConnection";
-import { HubNavigation, HubPageLink, useHubNavigation } from "../components/HubNavigation";
-import { SettingsEntry } from "../components/SettingsEntry";
+import { HubNavigation, useHubNavigation } from "../components/HubNavigation";
 import type { HubStatus } from "../lib/hub";
 import { useBrowserHubAccount, type BrowserHubAccount } from "../lib/useBrowserHubAccount";
 
@@ -49,9 +48,7 @@ function MachineWorkspace({ route, account }: { route: ReturnType<typeof useHubN
   if (!visited) return null;
   const { session } = account;
   return <HubAccess visible={visible} browser_view={{ host_id: route.host_id, on_change: route.showMachine }}
-    account_control={account.supported && (session
-      ? <HubAccountMenu key={session.user_id} username={session.username} signing_out={account.signing_out}
-        sign_out_error={account.sign_out_error} on_sign_out={account.logout} />
-      : <><SettingsEntry /><HubPageLink className="hub-sign-in" href="/account">Sign in</HubPageLink></>)}
-    account_roster={{ hub_url: window.location.origin, ...account.roster, on_retry: account.retry }} />;
+    account_control={account.supported && <HubAccountEntry session={session} signing_out={account.signing_out}
+      sign_out_error={account.sign_out_error} on_sign_out={account.logout} />}
+    account_roster={{ hub_url: window.location.origin, ...account.roster, can_sign_in: account.supported, on_retry: account.retry }} />;
 }

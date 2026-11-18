@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { HubClient } from "../lib/hub";
-import { approveAccountDevice } from "../lib/hubAccount";
+import { approveAccountDevice, type AccountDevicePurpose } from "../lib/hubAccount";
 import { AccountDialog, type AccountFailure } from "./AccountDialog";
 import { TerminalIcon } from "./Icons";
 import { VerificationCodeInput } from "./VerificationCodeInput";
@@ -30,14 +30,17 @@ export function AccountDeviceApproval({ client, initial_code, approved, on_appro
   </section>;
 }
 
-function DeviceApprovalDialog({ client, initial_code, approved, on_approved, on_failure, on_close, return_focus }: {
+export function DeviceApprovalDialog({
+  client, initial_code, approved, on_approved, on_failure, on_close, return_focus, purpose = "cli",
+}: {
   client: HubClient;
   initial_code: string;
   approved: boolean;
   on_approved: () => void;
   on_failure: AccountFailure;
   on_close: () => void;
-  return_focus: RefObject<HTMLButtonElement | null>;
+  return_focus: RefObject<HTMLElement | null>;
+  purpose?: AccountDevicePurpose;
 }) {
   const [code, setCode] = useState(() => {
     const normalized = initial_code.replace(/-/g, "").toUpperCase();
@@ -48,7 +51,8 @@ function DeviceApprovalDialog({ client, initial_code, approved, on_approved, on_
   const input = useRef<HTMLInputElement>(null);
   const done = useRef<HTMLButtonElement>(null);
   const submitting = useRef(false);
-  const complete = /^[A-Z0-9]{8}$/.test(code.join(""));
+  const viewer = purpose === "viewer";
+  const complete = viewer ? /^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(initial_code) : /^[A-Z0-9]{8}$/.test(code.join(""));
   useEffect(() => { if (approved) done.current?.focus(); }, [approved]);
 
   async function approve() {
@@ -57,7 +61,8 @@ function DeviceApprovalDialog({ client, initial_code, approved, on_approved, on_
     setBusy(true);
     setError(undefined);
     try {
-      await approveAccountDevice(client, `${code.slice(0, 4).join("")}-${code.slice(4).join("")}`);
+      const user_code = viewer ? initial_code : `${code.slice(0, 4).join("")}-${code.slice(4).join("")}`;
+      await approveAccountDevice(client, user_code, purpose);
       if (client.signal.aborted) return;
       setCode([]);
       on_approved();
@@ -68,17 +73,26 @@ function DeviceApprovalDialog({ client, initial_code, approved, on_approved, on_
     }
   }
 
-  return <AccountDialog title="Approve a CLI login" busy={busy} on_close={on_close} return_focus={return_focus} initial_focus={input}
-    description={approved ? undefined : "Enter the device code shown in your terminal. Only approve a login you started."}>
+  const title = viewer ? "Approve an Apell sign-in" : "Approve a CLI login";
+  const description = viewer
+    ? "Apell can list the machines registered to this account. Only approve a request with the code shown in Tokn Sessions."
+    : "Enter the device code shown in your terminal. Only approve a login you started.";
+  return <AccountDialog title={title} busy={busy} on_close={on_close} return_focus={return_focus}
+    initial_focus={viewer ? undefined : input} description={approved ? undefined : description}>
     {approved ? <>
-      <p className="account-feedback" role="status">CLI login approved. Return to your terminal.</p>
+      <p className="account-feedback" role="status">{viewer
+        ? "Sign-in approved. Return to Tokn Sessions in Apell."
+        : "CLI login approved. Return to your terminal."}</p>
       <div className="account-dialog-actions"><button ref={done} type="button" className="account-primary" onClick={on_close}>Done</button></div>
     </> : <form className="account-form" onSubmit={(event) => { event.preventDefault(); void approve(); }}>
-      <VerificationCodeInput kind="device" value={code} disabled={busy} input_ref={input} on_change={setCode} />
+      {viewer ? <div className="account-key-value"><code>{initial_code}</code></div>
+        : <VerificationCodeInput kind="device" value={code} disabled={busy} input_ref={input} on_change={setCode} />}
       {error && <p className="account-error" role="alert">{error}</p>}
       <div className="account-dialog-actions">
         <button type="button" disabled={busy} onClick={on_close}>Cancel</button>
-        <button type="submit" className="account-primary" disabled={busy || !complete}>{busy ? "Approving…" : "Approve CLI login"}</button>
+        <button type="submit" className="account-primary" disabled={busy || !complete}>
+          {busy ? "Approving…" : viewer ? "Approve Apell sign-in" : "Approve CLI login"}
+        </button>
       </div>
     </form>}
   </AccountDialog>;

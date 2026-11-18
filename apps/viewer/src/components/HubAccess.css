@@ -3,7 +3,7 @@
 .hub-access .hub-content { max-width: 1040px; }
 .hub-header .hub-actions a { color: var(--text-soft); text-decoration: none; font-size: 13px; }
 .hub-header .hub-actions a:hover { color: var(--text); text-decoration: underline; }
-.hub-access .hub-actions .hub-sign-in { display: inline-flex; align-items: center; min-height: 40px; padding: 8px 14px; border: 1px solid var(--border-strong); border-radius: 8px; color: var(--text); font-weight: 500; }
+.hub-access .hub-actions .hub-sign-in { display: inline-flex; align-items: center; min-height: 40px; padding: 8px 14px; border: 1px solid var(--border-strong); border-radius: 8px; color: var(--text); font-size: 13px; font-weight: 500; }
 .hub-access .hub-actions .hub-sign-in:hover { background: var(--surface-hover); text-decoration: none; }
 .hub-access .hub-actions .hub-sign-in:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
 .hub-access .hub-header { flex-direction: row; align-items: center; flex-wrap: wrap; gap: 16px; margin-bottom: 24px; }
@@ -53,6 +53,7 @@
 .hub-admin-host { flex-wrap: wrap; }
 @media (max-width: 860px) {
   .hub-access button { min-height: 44px; }
+  .hub-access .hub-actions .hub-sign-in { min-height: 44px; }
   .hub-access input:not([type="radio"]) { font-size: 16px; }
 }
 @media (max-width: 640px) {

@@ -343,6 +343,36 @@ it("opens a linked CLI request after restoring sign-in without approving it auto
   expect(request).not.toHaveBeenCalledWith(expect.stringContaining("/device/approve"), expect.anything());
 });
 
+it("approves a linked Apell request through the read-only viewer endpoint and keeps manual CLI approval separate", async () => {
+  window.history.replaceState(null, "", "/account?user_code=ABCD-EFGH&device=viewer");
+  const request = mockAccount({ signed_in: true });
+  render(<HubAccount />);
+  const dialog = await screen.findByRole("dialog", { name: "Approve an Apell sign-in" });
+  expect(within(dialog).getByText("ABCD-EFGH")).toBeInTheDocument();
+  expect(dialog).toHaveAccessibleDescription(/list the machines registered to this account/);
+  expect(request).not.toHaveBeenCalledWith(expect.stringContaining("/device/viewer/approve"), expect.anything());
+  fireEvent.click(within(dialog).getByRole("button", { name: "Approve Apell sign-in" }));
+  expect(await within(dialog).findByText("Sign-in approved. Return to Tokn Sessions in Apell.")).toBeInTheDocument();
+  expect(request).toHaveBeenCalledWith(expect.stringContaining("/device/viewer/approve"), expect.objectContaining({
+    body: JSON.stringify({ user_code: "ABCD-EFGH" }),
+  }));
+  expect(request).not.toHaveBeenCalledWith(expect.stringContaining("/device/approve"), expect.anything());
+  fireEvent.click(within(dialog).getByRole("button", { name: "Done" }));
+
+  fireEvent.click(screen.getByRole("button", { name: "Approve a CLI login" }));
+  expect(screen.getByRole("dialog", { name: "Approve a CLI login" })).toBeInTheDocument();
+  expect(deviceCodeSlots().map((input) => input.value)).toEqual(Array(8).fill(""));
+});
+
+it("ignores an invalid Apell approval code without opening a CLI approval", async () => {
+  window.history.replaceState(null, "", "/account?user_code=ABCD&device=viewer");
+  const request = mockAccount({ signed_in: true });
+  render(<HubAccount />);
+  await screen.findByRole("region", { name: "Profile" });
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(request).not.toHaveBeenCalledWith(expect.stringContaining("/approve"), expect.anything());
+});
+
 it("advances across CLI code groups and preserves later characters while editing", async () => {
   const request = mockAccount({ signed_in: true });
   render(<HubAccount />);
