@@ -57,7 +57,8 @@ runtime ownership remain desktop functionality.
 Use an Apell checkout containing the generic backend network/secure-storage
 services. Set `APELL_SOURCE` locally to that checkout; no machine paths enter the
 package or repository. Cargo and CI pin the same merged Apell revision for the
-guest/runtime and frontend SDK.
+guest/runtime and frontend SDK. Set `APELL_BIN` to use an installed CLI for
+packing. Viewer CI gets its CLI from the versioned Apell setup action.
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -77,6 +78,20 @@ For nightly installs and updates, choose **Install from GitHub** and enter
 `tokn-ai/tokn-session@nightly`. Main CI publishes the tested package and SHA-256
 after its checks pass. The stable asset name and prerelease channel let Apell
 replace builds even when their applet version is unchanged.
+
+## Publish to Apell Store
+
+Set the GitHub Actions repository variable `APELL_STORE_URL` to the Store's
+canonical HTTPS origin. A Store maintainer connects package
+`tokn-session` to `tokn-ai/tokn-session`, `.github/workflows/ci.yml`,
+`refs/heads/main`, and the `workflow_dispatch` event.
+
+Bump `apps/apell/manifest.json` to an unused version before publishing changed
+content. A version such as `0.2.0` goes to Stable. A prerelease such as
+`0.2.0-nightly.1` goes to Nightly. Update the listing in `apps/apell/publish.json`
+when needed. Run **CI** on **main** from the Actions tab and select
+**Publish the tested applet to Apell Store**. The Store job waits for all CI
+checks and publishes the artifact built in that run through GitHub OIDC.
 
 ## Verification
 

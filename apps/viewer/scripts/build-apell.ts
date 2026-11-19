@@ -12,6 +12,7 @@ const viewer = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repository = resolve(viewer, "../..");
 const source = resolve(repository, "apps/apell");
 const apell_source = process.env.APELL_SOURCE;
+const apell_bin = process.env.APELL_BIN;
 if (!apell_source) throw new Error("Set APELL_SOURCE to a checkout of Apell with the applet networking and secure-storage services.");
 const apell = await realpath(apell_source);
 const staging = await mkdtemp(join(tmpdir(), "tokn-session-apell-"));
@@ -49,7 +50,14 @@ try {
     process.stdout.write(`Checked shared applet entry, manifest and portable backend (${wasm.byteLength} bytes).\n`);
   } else {
     await mkdir(dirname(artifact), { recursive: true });
-    execFileSync("cargo", ["run", "--locked", "--manifest-path", join(apell, "Cargo.toml"), "-p", "apell-cli", "--", "pack", staging, "--output", artifact], { stdio: "inherit" });
+    const pack_args = ["pack", staging, "--output", artifact];
+    if (apell_bin) {
+      execFileSync(apell_bin, pack_args, { stdio: "inherit" });
+    } else {
+      execFileSync("cargo", [
+        "run", "--locked", "--manifest-path", join(apell, "Cargo.toml"), "-p", "apell-cli", "--", ...pack_args,
+      ], { stdio: "inherit" });
+    }
     const digest = createHash("sha256").update(await readFile(artifact)).digest("hex");
     await writeFile(artifact.replace(/\.apel$/, ".sha256"), `${digest}  tokn-session.apel\n`);
     process.stdout.write(`Built Tokn Session applet (${wasm.byteLength} backend bytes). SHA-256 ${digest}\n`);
