@@ -99,12 +99,13 @@ Run the shared viewer tests/build and Rust workspace checks. The portable core
 tests native/guest entropy interoperability, framing, credits and SSE boundaries.
 The Wasmi integration test uses the compiled guest with a synthetic Hub and
 generic host services; it requires no provider credentials or real session data.
-CI builds and executes this test explicitly:
+CI uses a release build of the interpreter to exercise the guest under the
+same health-check deadlines used by Apell:
 
 ```sh
 cargo build --locked --release --target wasm32-unknown-unknown -p tokn-session-apell
 TOKN_APELL_TEST_WASM=target/wasm32-unknown-unknown/release/tokn_session_apell.wasm \
-  cargo test --locked -p tokn-session-apell --test wasmi -- --ignored
+  cargo test --locked --release -p tokn-session-apell --test wasmi -- --ignored
 ```
 
 `TOKN_APELL_TEST_WASM` accepts an absolute path or a path relative to the workspace

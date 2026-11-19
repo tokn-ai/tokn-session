@@ -65,7 +65,7 @@ jobs:
       - name: Test interpreted Apell pairing and delivery
         env:
           TOKN_APELL_TEST_WASM: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/tokn_session_apell.wasm
-        run: cargo test --locked -p tokn-session-apell --test wasmi -- --ignored
+        run: cargo test --locked --release -p tokn-session-apell --test wasmi -- --ignored
 
       - name: Build CLI
         run: cargo build -p tokn-session-cli
