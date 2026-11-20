@@ -87,6 +87,8 @@ relative guest paths from the workspace root rather than its crate directory.
 Viewer CI packs the complete `.apel` and retains it as an Actions artifact.
 Successful main CI publishes stable applet/checksum assets to the rolling nightly
 prerelease; serialized publication skips stale commits and updates its tag.
+A main-branch manual CI run can also publish the tested artifact to Apell Store
+using the versioned Apell action and a trusted GitHub identity.
 
 Local folders discovered in saved session `cwd` metadata now register
 automatically across all six historical providers. Migration 13 preserves

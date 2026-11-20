@@ -69,7 +69,8 @@ runtime ownership remain desktop functionality.
 Use an Apell checkout containing the generic backend network/secure-storage
 services. Set `APELL_SOURCE` locally to that checkout; no machine paths enter the
 package or repository. Cargo and CI pin the same merged Apell revision for the
-guest/runtime and frontend SDK.
+guest/runtime and frontend SDK. Set `APELL_BIN` to use an installed CLI for
+packing. Viewer CI gets its CLI from the versioned Apell setup action.
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -92,18 +93,33 @@ For nightly installs and updates, choose **Install from GitHub** and enter
 after its checks pass. The stable asset name and prerelease channel let Apell
 replace builds even when their applet version is unchanged.
 
+## Publish to Apell Store
+
+Set the GitHub Actions repository variable `APELL_STORE_URL` to the Store's
+canonical HTTPS origin. A Store maintainer connects package
+`tokn-session` to `tokn-ai/tokn-session`, `.github/workflows/ci.yml`,
+`refs/heads/main`, and the `workflow_dispatch` event.
+
+Bump `apps/apell/manifest.json` to an unused version before publishing changed
+content. A version such as `0.2.0` goes to Stable. A prerelease such as
+`0.2.0-nightly.1` goes to Nightly. Update the listing in `apps/apell/publish.json`
+when needed. Run **CI** on **main** from the Actions tab and select
+**Publish the tested applet to Apell Store**. The Store job waits for all CI
+checks and publishes the artifact built in that run through GitHub OIDC.
+
 ## Verification
 
 Run the shared viewer tests/build and Rust workspace checks. The portable core
 tests native/guest entropy interoperability, framing, credits and SSE boundaries.
 The Wasmi integration test uses the compiled guest with a synthetic Hub and
 generic host services; it requires no provider credentials or real session data.
-CI builds and executes this test explicitly:
+CI uses a release build of the interpreter to exercise the guest under the
+same health-check deadlines used by Apell:
 
 ```sh
 cargo build --locked --release --target wasm32-unknown-unknown -p tokn-session-apell
 TOKN_APELL_TEST_WASM=target/wasm32-unknown-unknown/release/tokn_session_apell.wasm \
-  cargo test --locked -p tokn-session-apell --test wasmi -- --ignored
+  cargo test --locked --release -p tokn-session-apell --test wasmi -- --ignored
 ```
 
 `TOKN_APELL_TEST_WASM` accepts an absolute path or a path relative to the workspace

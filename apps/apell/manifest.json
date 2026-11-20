@@ -3,7 +3,7 @@
   "api_version": 2,
   "applet_id": "tokn-session",
   "name": "Tokn Sessions",
-  "version": "0.1.1",
+  "version": "0.1.2-nightly.1",
   "permissions": ["http", "config", "websocket", "secrets", "crypto", "runtime"],
   "lib": "lib/main.wasm"
 }
