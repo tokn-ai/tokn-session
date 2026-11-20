@@ -2,36 +2,48 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { hubErrorMessage, type HubClient } from "../lib/hub";
 import { browserAccountClient, type AccountSession } from "../lib/hubAccount";
 import {
-  completeGitHubAccount, loadGitHubConnection, signUpWithGitHub, startGitHubAccount, type AccountDeviceRequest,
-} from "../lib/hubGitHubAccount";
+  ACCOUNT_PROVIDER_LABELS, completeFederatedAccount, loadProviderConnection, signUpWithProvider, startFederatedAccount,
+  type AccountDeviceRequest, type AccountProvider, type AccountProviderId,
+} from "../lib/hubAccountFederation";
 import type { AccountFailure } from "./AccountDialog";
 
-type GitHubReturn = { kind: "idle" | "completing" | "linked" | "link_required" }
-  | { kind: "error"; message: string } | { kind: "signup"; suggested_username: string };
+type AccountReturn = { kind: "idle" } | ({ provider: AccountProviderId } & (
+  { kind: "completing" | "linked" | "link_required" }
+  | { kind: "error"; message: string }
+  | { kind: "signup"; suggested_username: string }
+));
 
-function readGitHubReturn(): GitHubReturn {
-  const markers = new URLSearchParams(window.location.search).getAll("github");
-  if (markers.length === 1 && markers[0] === "complete") return { kind: "completing" };
-  if (markers.length === 1 && markers[0] === "failed") return { kind: "error", message: "GitHub sign-in didn’t finish. Try again." };
-  return { kind: "idle" };
+function readAccountReturn(): AccountReturn {
+  const params = new URLSearchParams(window.location.search);
+  const results: AccountReturn[] = [];
+  for (const provider of ["apell", "github"] as const) {
+    const markers = params.getAll(provider);
+    if (markers.length !== 1) continue;
+    if (markers[0] === "complete") results.push({ kind: "completing", provider });
+    if (markers[0] === "failed") results.push({ kind: "error", provider, message: `${ACCOUNT_PROVIDER_LABELS[provider]} sign-in didn’t finish. Try again.` });
+  }
+  return results.length === 1 ? results[0] : { kind: "idle" };
 }
 
-function clearReturnMarker() {
+function clearReturnMarker(provider: AccountProviderId) {
   const url = new URL(window.location.href);
-  if (!url.searchParams.has("github")) return;
-  url.searchParams.delete("github");
+  if (!url.searchParams.has(provider)) return;
+  url.searchParams.delete(provider);
   window.history.replaceState(window.history.state, "", url);
 }
 
 // Keep one request per callback document, even when a focus refresh changes
 // account state or React re-runs mount effects. The cookie identifies the flow.
-export function useGitHubAccountReturn({ ready, github_configured, account_id, on_signed_in }: {
+export function useFederatedAccountReturn({ ready, apell_configured, github_configured, account_id, on_signed_in }: {
   ready: boolean;
+  apell_configured: boolean;
   github_configured: boolean;
   account_id?: string;
   on_signed_in: (session: AccountSession) => void;
 }) {
-  const [result, setResult] = useState(readGitHubReturn);
+  const [result, setResult] = useState(readAccountReturn);
+  const provider = result.kind === "idle" ? undefined : result.provider;
+  const configured = provider === "apell" ? apell_configured : github_configured;
   const active = useRef<HubClient>(undefined);
   useEffect(() => {
     const cancel = () => active.current?.close();
@@ -39,11 +51,12 @@ export function useGitHubAccountReturn({ ready, github_configured, account_id, o
     return () => { window.removeEventListener("pagehide", cancel); cancel(); };
   }, []);
   useEffect(() => {
-    if (result.kind === "error" && new URLSearchParams(window.location.search).get("github") === "failed") clearReturnMarker();
+    if (!provider) return;
+    if (result.kind === "error" && new URLSearchParams(window.location.search).get(provider) === "failed") clearReturnMarker(provider);
     if (result.kind !== "completing" || !ready) return;
-    if (!github_configured) {
-      clearReturnMarker();
-      setResult({ kind: "error", message: "GitHub sign-in is unavailable on this Hub." });
+    if (!configured) {
+      clearReturnMarker(provider);
+      setResult({ kind: "error", provider, message: `${ACCOUNT_PROVIDER_LABELS[provider]} sign-in is unavailable on this Hub.` });
       return;
     }
     // Defer until the first real mounted effect survives StrictMode cleanup.
@@ -52,31 +65,33 @@ export function useGitHubAccountReturn({ ready, github_configured, account_id, o
       if (!mounted || active.current) return;
       const client = browserAccountClient(account_id);
       active.current = client;
-      void completeGitHubAccount(client).then((reply) => {
+      void completeFederatedAccount(client, provider).then((reply) => {
         if (client.signal.aborted) {
           if (reply.status === "signed_in") reply.session.client.close();
           return;
         }
         // A reload during username selection can rehydrate the pending signup.
-        if (reply.status !== "signup_required") clearReturnMarker();
+        if (reply.status !== "signup_required") clearReturnMarker(provider);
         switch (reply.status) {
           case "signed_in": setResult({ kind: "idle" }); on_signed_in(reply.session); break;
-          case "signup_required": setResult({ kind: "signup", suggested_username: reply.suggested_username }); break;
-          default: setResult({ kind: reply.status });
+          case "signup_required": setResult({ kind: "signup", provider, suggested_username: reply.suggested_username }); break;
+          default: setResult({ kind: reply.status, provider });
         }
       }).catch((error) => {
         if (!client.signal.aborted) {
-          clearReturnMarker();
-          setResult({ kind: "error", message: hubErrorMessage(error) });
+          clearReturnMarker(provider);
+          setResult({ kind: "error", provider, message: hubErrorMessage(error) });
         }
       }).finally(() => { client.close(); });
     });
     return () => { mounted = false; };
-  }, [account_id, github_configured, on_signed_in, ready, result.kind]);
-  return { result, clear: () => { clearReturnMarker(); setResult({ kind: "idle" }); } };
+  }, [account_id, configured, on_signed_in, provider, ready, result.kind]);
+  return { result, clear: () => { if (provider) clearReturnMarker(provider); setResult({ kind: "idle" }); } };
 }
 
-export function GitHubStart({ mode, account_id, device_request, disabled = false, on_failure }: {
+export function FederatedStart({ provider, mode, account_id, device_request, primary = false, disabled = false, on_failure }: {
+  provider: AccountProvider;
+  primary?: boolean;
   mode: "sign_in" | "link";
   account_id?: string;
   device_request?: AccountDeviceRequest;
@@ -92,6 +107,8 @@ export function GitHubStart({ mode, account_id, device_request, disabled = false
     return () => { window.removeEventListener("pagehide", cancel); cancel(); };
   }, []);
 
+  const label = ACCOUNT_PROVIDER_LABELS[provider.id];
+
   async function start() {
     if (active.current || disabled) return;
     const client = browserAccountClient(account_id);
@@ -99,7 +116,7 @@ export function GitHubStart({ mode, account_id, device_request, disabled = false
     setBusy(true);
     setError(undefined);
     try {
-      const authorization_url = await startGitHubAccount(client, mode, device_request);
+      const authorization_url = await startFederatedAccount(client, provider, mode, device_request);
       if (!client.signal.aborted) window.location.assign(authorization_url);
     } catch (error) {
       if (!client.signal.aborted) {
@@ -111,17 +128,21 @@ export function GitHubStart({ mode, account_id, device_request, disabled = false
     } finally { client.close(); }
   }
 
-  return <div className="account-github-action">
-    <button className={mode === "sign_in" ? "auth-primary" : undefined} type="button" disabled={disabled || busy}
-      onClick={() => { void start(); }}>{busy ? "Opening GitHub…" : mode === "link" ? "Connect GitHub" : "Continue with GitHub"}</button>
+  return <div className="account-provider-action">
+    <button className={mode === "sign_in" ? (primary ? "auth-primary" : "account-provider-secondary") : undefined} type="button" disabled={disabled || busy}
+      onClick={() => { void start(); }}>{busy ? `Opening ${label}…` : mode === "link" ? `Connect ${label}` : `Continue with ${label}`}</button>
     {error && <p className={mode === "sign_in" ? "auth-feedback" : "account-error"} role="alert">{error}</p>}
   </div>;
 }
 
-export function GitHubConnection({ account_id, linked, disabled, on_failure }: {
+export function FederatedConnection({ provider, account_id, linked, disabled, on_failure }: {
+  provider: AccountProvider;
   account_id: string; linked: boolean; disabled: boolean; on_failure: AccountFailure;
 }) {
-  const [connection, setConnection] = useState<string | null>();
+  const [connection, setConnection] = useState<{ login: string | null } | null>();
+  const provider_id = provider.id;
+  const label = ACCOUNT_PROVIDER_LABELS[provider_id];
+  const title_id = `account-${provider_id}-title`;
   const [error, setError] = useState<string>();
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
@@ -129,27 +150,29 @@ export function GitHubConnection({ account_id, linked, disabled, on_failure }: {
     const cancel = () => client.close();
     window.addEventListener("pagehide", cancel);
     setError(undefined);
-    void loadGitHubConnection(client).then((login) => {
-      if (!client.signal.aborted) setConnection(login);
+    void loadProviderConnection(client, provider_id).then((value) => {
+      if (!client.signal.aborted) setConnection(value);
     }).catch((error) => { if (!client.signal.aborted) on_failure(error, setError); });
     return () => { window.removeEventListener("pagehide", cancel); cancel(); };
-  }, [account_id, attempt, on_failure]);
-  return <section className="account-section" aria-labelledby="account-github-title">
+  }, [account_id, attempt, linked, on_failure, provider_id]);
+  return <section className="account-section" aria-labelledby={title_id}>
     <div className="account-section-heading">
       <div className="account-section-copy">
-        <h2 id="account-github-title">GitHub</h2>
-        <p>{connection ? <>Connected as <strong>{connection}</strong>.</> : "Connect your GitHub account as another way to sign in."}</p>
+        <h2 id={title_id}>{label}</h2>
+        <p className="account-provider-connection">{connection ? (connection.login ? <>Connected as <strong>{connection.login}</strong>.</> : "Connected for sign-in.")
+          : `Connect ${label} as another way to sign in.`}</p>
       </div>
-      {connection === null && <GitHubStart mode="link" account_id={account_id} disabled={disabled} on_failure={on_failure} />}
+      {connection === null && <FederatedStart provider={provider} mode="link" account_id={account_id} disabled={disabled} on_failure={on_failure} />}
     </div>
-    {linked && <p role="status">GitHub connected.</p>}
+    {linked && <p role="status">{label} connected.</p>}
     {error ? <div className="account-feedback"><p className="account-error" role="alert">{error}</p>
       <button type="button" onClick={() => setAttempt((previous) => previous + 1)}>Retry connection check</button></div>
-      : connection === undefined && <p role="status">Checking GitHub connection…</p>}
+      : connection === undefined && <p role="status">Checking {label} connection…</p>}
   </section>;
 }
 
-export function GitHubSignup({ suggested_username, children, on_cancel, on_signed_in, on_email }: {
+export function FederatedSignup({ provider, suggested_username, children, on_cancel, on_signed_in, on_email }: {
+  provider: AccountProviderId;
   suggested_username: string;
   children?: ReactNode;
   on_cancel: () => void;
@@ -159,6 +182,7 @@ export function GitHubSignup({ suggested_username, children, on_cancel, on_signe
   const [username, setUsername] = useState(suggested_username);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  const label = ACCOUNT_PROVIDER_LABELS[provider];
   const input = useRef<HTMLInputElement>(null);
   const active = useRef<HubClient>(undefined);
   const valid = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(username.trim());
@@ -175,7 +199,7 @@ export function GitHubSignup({ suggested_username, children, on_cancel, on_signe
     setBusy(true);
     setError(undefined);
     try {
-      const session = await signUpWithGitHub(client, username.trim());
+      const session = await signUpWithProvider(client, provider, username.trim());
       if (client.signal.aborted) session.client.close();
       else on_signed_in(session);
     } catch (error) { if (!client.signal.aborted) setError(hubErrorMessage(error)); }
@@ -187,14 +211,14 @@ export function GitHubSignup({ suggested_username, children, on_cancel, on_signe
   }
   return <form className="auth-form" onSubmit={(event) => { event.preventDefault(); void signup(); }}>
     <header className="auth-heading"><p className="auth-eyebrow">Hub account</p><h1>Choose your Hub username</h1>
-      <p className="auth-description">Your GitHub account is verified. Choose a username for this Hub and its machine addresses.</p></header>
-    {on_email && <p className="auth-feedback">Already have a Hub account? Sign in with an email code first, then choose Connect GitHub in your account.</p>}
+      <p className="auth-description">Choose a username for this Hub and its machine addresses.</p></header>
+    <p className="auth-feedback">Already have a Hub account? Sign in using your current method, then choose Connect {label} in your Hub account.</p>
     {children}
     <div className="auth-field">
-      <label htmlFor="github-account-username">Username</label>
-      <input ref={input} id="github-account-username" autoComplete="username" autoCapitalize="none" spellCheck={false} required maxLength={63}
-        aria-describedby="github-account-username-hint" value={username} disabled={busy} onChange={(event) => { setUsername(event.target.value); setError(undefined); }} />
-      <p className="auth-hint" id="github-account-username-hint">Use lowercase letters, numbers, and internal hyphens.</p>
+      <label htmlFor="provider-account-username">Username</label>
+      <input ref={input} id="provider-account-username" autoComplete="username" autoCapitalize="none" spellCheck={false} required maxLength={63}
+        aria-describedby="provider-account-username-hint" value={username} disabled={busy} onChange={(event) => { setUsername(event.target.value); setError(undefined); }} />
+      <p className="auth-hint" id="provider-account-username-hint">Use lowercase letters, numbers, and internal hyphens.</p>
     </div>
     {error && <p role="alert" className="auth-feedback">{error}</p>}
     <button className="auth-primary" disabled={!valid || busy}>{busy ? "Creating account…" : "Create account"}</button>

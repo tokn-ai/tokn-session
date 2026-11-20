@@ -30,11 +30,13 @@ native-device trust rather than browser document/passkey sessions.
 ## Hub account sign-in
 
 After connecting to a Hub, choose **Sign in** on Machines. Open the approval
-address in a browser, sign in to the Hub with GitHub or an email code as
-configured by the Hub operator, and approve the matching device code. Return to
-Apell to see the account's machines alongside saved and discovered machines.
-Each new machine still requires its own authenticator code. Existing Hub users
-can [connect GitHub](hub.md#sign-in-with-github) without changing accounts.
+address in a browser, sign in to the Hub with Apell Account, GitHub or an email
+code as configured by the Hub operator, and approve the matching device code.
+Return to Apell to see the account's machines alongside saved and discovered
+machines. The applet uses the same device flow regardless of the browser
+sign-in method. Each new machine still requires its own authenticator code.
+Existing Hub users can [connect Apell Account](hub.md#sign-in-with-apell-account)
+without changing Hub accounts.
 
 The applet stores a revocable, read-only account credential for each Hub in its
 secure storage. Signing out clears that Hub's account and hides its account

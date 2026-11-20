@@ -3,14 +3,14 @@ import { HubClient, hubErrorMessage } from "../lib/hub";
 import {
   browserAccountClient, requestAccountCode, verifyAccountCode, type AccountSession,
 } from "../lib/hubAccount";
-import type { AccountDeviceRequest } from "../lib/hubGitHubAccount";
+import { ACCOUNT_PROVIDER_LABELS, type AccountDeviceRequest, type AccountProvider } from "../lib/hubAccountFederation";
 import { type BrowserHubAccount } from "../lib/useBrowserHubAccount";
 import "./HubAccount.css";
 import { AuthLayout } from "./AuthLayout";
 import { VerificationCodeInput } from "./VerificationCodeInput";
 import { AccountDeviceApproval, DeviceApprovalDialog } from "./AccountDeviceApproval";
 import { AccountKeys } from "./AccountKeys";
-import { GitHubConnection, GitHubSignup, GitHubStart, useGitHubAccountReturn } from "./AccountGitHub";
+import { FederatedConnection, FederatedSignup, FederatedStart, useFederatedAccountReturn } from "./AccountFederation";
 import { HubPageLink } from "./HubNavigation";
 import { HubAccountMenu } from "./HubAccountMenu";
 import { HubAccountProfile } from "./HubAccountProfile";
@@ -31,51 +31,64 @@ function readDeviceRequest(): AccountDeviceRequest | undefined {
 function AccountPage({ account }: { account: BrowserHubAccount }) {
   const { availability, check_error, session, notice, signedIn, signing_out, sign_out_error, logout, onFailure } = account;
   const capabilities = availability === "unsupported" ? undefined : availability;
+  const apell_issuer = capabilities?.apell_issuer;
   const github_configured = capabilities?.github_configured === true;
   const email_configured = capabilities?.email_configured === true;
-  const github = useGitHubAccountReturn({ ready: availability !== undefined && !check_error, github_configured,
+  const providers: AccountProvider[] = [];
+  if (apell_issuer) providers.push({ id: "apell", issuer: apell_issuer });
+  if (github_configured) providers.push({ id: "github" });
+  const federation = useFederatedAccountReturn({ ready: availability !== undefined && !check_error,
+    apell_configured: !!apell_issuer, github_configured,
     account_id: session?.user_id, on_signed_in: signedIn });
-  const [method, setMethod] = useState<"github" | "email">();
+  const { result } = federation;
+  const [method, setMethod] = useState<"provider" | "email">();
   const [device_request, setDeviceRequest] = useState(readDeviceRequest);
   const [cli_approved, setCliApproved] = useState(false);
   const [viewer_approved, setViewerApproved] = useState(false);
   const account_back = useRef<HTMLAnchorElement>(null);
-  const use_email = email_configured && (!github_configured || method === "email" || github.result.kind === "link_required");
-  const github_feedback = github.result.kind === "error" ? github.result.message
-    : github.result.kind === "link_required" ? (email_configured
-      ? "This email already belongs to a Hub account. Sign in with an email code, then choose Connect GitHub in your account."
-      : "This email already belongs to a Hub account. Ask your Hub administrator to restore email sign-in so you can connect GitHub.") : undefined;
-  if (!session || github.result.kind === "completing") {
+  const use_email = email_configured && (!providers.length || method === "email" || result.kind === "link_required");
+  const provider_label = result.kind !== "idle" ? ACCOUNT_PROVIDER_LABELS[result.provider] : undefined;
+  const provider_feedback = result.kind === "error" ? result.message
+    : result.kind === "link_required" ? (email_configured
+      ? `This email already belongs to a Hub account. Sign in with an email code, then choose Connect ${provider_label} in your account.`
+      : providers.length > 1
+        ? `This email already belongs to a Hub account. Sign in using your existing method, then choose Connect ${provider_label} in your account.`
+        : `This email already belongs to a Hub account. Ask your Hub administrator to restore email sign-in so you can connect ${provider_label}.`) : undefined;
+  if (!session || result.kind === "completing") {
     const device_notice = <DeviceSignInNotice request={device_request} />;
     let content: ReactNode;
-    if (check_error || github.result.kind === "completing" || (!github_configured && !email_configured)) {
+    if (check_error || result.kind === "completing" || (!providers.length && !email_configured)) {
       content = <form className="auth-form" onSubmit={(event) => { event.preventDefault(); account.retry(); }}>
         <header className="auth-heading"><p className="auth-eyebrow">Hub account</p><h1>Welcome to Tokn</h1></header>
         {check_error ? <><p className="auth-feedback" role="alert">{check_error}</p><button className="auth-primary">Retry connection</button></>
-          : github.result.kind === "completing" ? <p className="auth-description" role="status">Finishing GitHub sign-in…</p>
+          : result.kind === "completing" ? <p className="auth-description" role="status">Finishing {provider_label} sign-in…</p>
             : capabilities ? <p className="auth-description">Ask your Hub administrator to set up email delivery for account sign-in.</p>
               : availability === "unsupported" ? <p className="auth-description">Account sign-in is unavailable on this Hub.</p>
                 : <p className="auth-description" role="status">Connecting…</p>}
-        {github_feedback && <p className="auth-feedback" role="alert">{github_feedback}</p>}
+        {provider_feedback && <p className="auth-feedback" role="alert">{provider_feedback}</p>}
       </form>;
-    } else if (github.result.kind === "signup") {
-      content = <GitHubSignup suggested_username={github.result.suggested_username} on_cancel={github.clear}
-        on_signed_in={(next) => { github.clear(); signedIn(next); }}
-        on_email={email_configured ? () => { github.clear(); setMethod("email"); } : undefined}>{device_notice}</GitHubSignup>;
+    } else if (result.kind === "signup") {
+      content = <FederatedSignup provider={result.provider} suggested_username={result.suggested_username} on_cancel={federation.clear}
+        on_signed_in={(next) => { federation.clear(); signedIn(next); }}
+        on_email={email_configured ? () => { federation.clear(); setMethod("email"); } : undefined}>{device_notice}</FederatedSignup>;
     } else if (use_email) {
-      content = <AccountSignIn device_notice={device_notice} notice={notice} github_feedback={github_feedback}
-        on_signed_in={(next) => { github.clear(); signedIn(next); }}
-        on_github={github_configured ? () => { github.clear(); setMethod("github"); } : undefined} />;
+      content = <AccountSignIn device_notice={device_notice} notice={notice} provider_feedback={provider_feedback}
+        on_signed_in={(next) => { federation.clear(); signedIn(next); }}
+        provider_alternative={providers.length ? {
+          label: providers.length === 1 ? `Use ${ACCOUNT_PROVIDER_LABELS[providers[0].id]} instead` : "Other sign-in options",
+          select: () => { federation.clear(); setMethod("provider"); },
+        } : undefined} />;
     } else {
       content = <div className="auth-form">
         <header className="auth-heading"><p className="auth-eyebrow">Hub account</p><h1>Welcome to Tokn</h1>
           <p className="auth-description">Sign in or create an account to bring your machines together.</p></header>
         {device_notice}
         {notice && <p className="auth-feedback" role="status">{notice}</p>}
-        {github_feedback && <p className="auth-feedback" role="alert">{github_feedback}</p>}
-        <GitHubStart mode="sign_in" device_request={device_request} />
+        {provider_feedback && <p className="auth-feedback" role="alert">{provider_feedback}</p>}
+        {providers.map((provider, index) => <FederatedStart key={provider.id} provider={provider} mode="sign_in"
+          primary={index === 0} device_request={device_request} />)}
         {email_configured && <div className="auth-secondary-actions account-sign-in-alternate">
-          <button type="button" onClick={() => { github.clear(); setMethod("email"); }}>Use an email code</button>
+          <button type="button" onClick={() => { federation.clear(); setMethod("email"); }}>Use an email code</button>
         </div>}
       </div>;
     }
@@ -98,10 +111,10 @@ function AccountPage({ account }: { account: BrowserHubAccount }) {
       <h2 id="account-profile-title">Profile</h2>
       <HubAccountProfile {...session} />
       {notice && <p role="status">{notice}</p>}
-      {github_feedback && <p className="account-error" role="alert">{github_feedback}</p>}
+      {provider_feedback && <p className="account-error" role="alert">{provider_feedback}</p>}
     </section>
-    {github_configured && <GitHubConnection account_id={session.user_id} disabled={signing_out}
-      linked={github.result.kind === "linked"} on_failure={onFailure} />}
+    {providers.map((provider) => <FederatedConnection key={provider.id} provider={provider} account_id={session.user_id} disabled={signing_out}
+      linked={result.kind === "linked" && result.provider === provider.id} on_failure={onFailure} />)}
     <AccountDeviceApproval client={session.client} initial_code={device_request?.purpose === "cli" ? device_request.user_code : ""}
       approved={cli_approved} on_approved={() => { setDeviceRequest(undefined); setCliApproved(true); }}
       on_reset={() => setCliApproved(false)} on_failure={onFailure} />
@@ -116,11 +129,11 @@ function DeviceSignInNotice({ request }: { request?: AccountDeviceRequest }) {
   return request ? <p className="auth-feedback">Sign in to approve the {request.purpose === "viewer" ? "Tokn Sessions sign-in" : "CLI request"} for <strong>{request.user_code}</strong>.</p> : null;
 }
 
-function AccountSignIn({ device_notice, notice, github_feedback, on_github, on_signed_in }: {
+function AccountSignIn({ device_notice, notice, provider_feedback, provider_alternative, on_signed_in }: {
   device_notice?: ReactNode;
   notice?: string;
-  github_feedback?: string;
-  on_github?: () => void;
+  provider_feedback?: string;
+  provider_alternative?: { label: string; select: () => void };
   on_signed_in: (session: AccountSession) => void;
 }) {
   const [step, setStep] = useState<"email" | "code" | "username">("email");
@@ -190,7 +203,7 @@ function AccountSignIn({ device_notice, notice, github_feedback, on_github, on_s
     </header>
     {device_notice}
     {notice && <p className="auth-feedback" role="status">{notice}</p>}
-    {github_feedback && <p className="auth-feedback" role="alert">{github_feedback}</p>}
+    {provider_feedback && <p className="auth-feedback" role="alert">{provider_feedback}</p>}
     {step === "email" ? <div className="auth-field">
       <label htmlFor="account-email">Email address</label>
       <input ref={input} key="email" id="account-email" type="email" autoComplete="email" autoCapitalize="none" spellCheck={false}
@@ -212,8 +225,8 @@ function AccountSignIn({ device_notice, notice, github_feedback, on_github, on_s
       <button type="button" disabled={busy} onClick={changeEmail}>Change email</button>
       <button type="button" disabled={busy} onClick={() => { void submit(true); }}>Send another code</button>
     </div>}
-    {step === "email" && on_github && <div className="auth-secondary-actions account-sign-in-alternate">
-      <button type="button" disabled={busy} onClick={on_github}>Use GitHub instead</button>
+    {step === "email" && provider_alternative && <div className="auth-secondary-actions account-sign-in-alternate">
+      <button type="button" disabled={busy} onClick={provider_alternative.select}>{provider_alternative.label}</button>
     </div>}
     {step === "email" && <p className="auth-note">No password to remember. Just your email.</p>}
   </form>;

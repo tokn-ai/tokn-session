@@ -24,7 +24,7 @@ export interface AccountSession extends AccountIdentity {
   client: HubClient;
 }
 
-export type HubAccountAvailability = { email_configured: boolean; github_configured: boolean } | "unsupported";
+export type HubAccountAvailability = { email_configured: boolean; github_configured: boolean; apell_issuer?: string } | "unsupported";
 export type AccountDevicePurpose = "cli" | "viewer";
 
 export function browserAccountClient(user_id?: string): HubClient {
@@ -44,14 +44,31 @@ export function accountSession(identity: AccountIdentity): AccountSession {
   return { ...identity, client: browserAccountClient(identity.user_id) };
 }
 
+export function secureAccountUrl(value: unknown): URL | undefined {
+  if (typeof value !== "string" || value.length > 8192 || /[\s\\#]/u.test(value) || !/^https:\/\/[^/@?#]+(?:[/?]|$)/i.test(value)) return;
+  try {
+    const url = new URL(value);
+    if (url.protocol === "https:" && !url.username && !url.password) return url;
+  } catch { /* Invalid URL. */ }
+}
+
+export function validApellIssuer(value: unknown): value is string {
+  const url = secureAccountUrl(value);
+  return typeof value === "string" && value.length <= 2048 && !!url && url.href === value && !value.includes("?")
+    && !url.pathname.endsWith("/");
+}
+
 export async function hubAccountAvailability(client: HubClient): Promise<HubAccountAvailability> {
   try {
-    const response = await client.request<{ enabled: boolean; email_configured?: boolean; github_configured?: boolean }>(`${ACCOUNT}/capabilities`);
+    const response = await client.request<{ enabled: boolean; email_configured?: boolean; github_configured?: boolean; apell_issuer?: unknown }>(`${ACCOUNT}/capabilities`);
+    const apell_issuer = response?.apell_issuer;
     if (typeof response?.enabled !== "boolean" || (response.email_configured !== undefined && typeof response.email_configured !== "boolean")
-      || (response.github_configured !== undefined && typeof response.github_configured !== "boolean")) {
+      || (response.github_configured !== undefined && typeof response.github_configured !== "boolean")
+      || (apell_issuer !== undefined && !validApellIssuer(apell_issuer))) {
       throw new Error("Hub returned invalid account settings.");
     }
-    return { email_configured: response.email_configured ?? response.enabled, github_configured: response.github_configured === true };
+    return { email_configured: response.email_configured ?? response.enabled, github_configured: response.github_configured === true,
+      ...(apell_issuer && { apell_issuer }) };
   } catch (error) {
     if (error instanceof HubError && error.status === 404) return "unsupported";
     throw error;

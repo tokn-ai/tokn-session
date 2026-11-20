@@ -5,12 +5,13 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 ## Current Status
 
 Hubs require account ownership for all machines. Accounts have Hub-specific
-usernames and stable UUIDs. Email codes and optional GitHub OAuth use the same
-renewable 90-day browser session. Existing users explicitly connect GitHub in
-their profile; a matching email never connects accounts automatically. GitHub
-access tokens are used only to look up identity and are not persisted. Both
-sign-in methods retain explicit CLI and viewer device approval. Issue and revoke
-scoped automation keys in **Hub account**.
+usernames and stable UUIDs. Email codes, GitHub OAuth and Apell Account OIDC use
+the same renewable 90-day browser session. Providers share the browser flow;
+Apell Account verifies the issuer, signed ID token, nonce and UserInfo subject.
+Existing users connect providers in their profile; a matching email never links
+accounts automatically. Provider tokens do not persist. CLI and viewer device
+approval remains explicit for every sign-in method. Issue and revoke scoped
+automation keys in **Hub account**.
 Desktop **Start hosting** and CLI `connect` automatically sign in through browser
 approval and claim `username:machine` when an account assignment is missing.
 The shared Rust account client keeps credentials private and reuses valid saved

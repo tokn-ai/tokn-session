@@ -10,10 +10,9 @@ use super::super::{ACCOUNT_ID_HEADER, BROWSER_COOKIE, MACHINES_REGISTER, Sendmai
 use super::*;
 
 const ORIGIN: &str = "https://hub.example.test";
+const ISSUER: &str = "https://account.example.test/oidc";
 const BASE: &str = "/hub/v1/account/browser/github";
-const START: &str = "/hub/v1/account/browser/github/start";
 const COMPLETE: &str = "/hub/v1/account/browser/github/complete";
-const SIGNUP: &str = "/hub/v1/account/browser/github/signup";
 const EMAIL: &str = "person@example.test";
 
 fn fixture() -> (TempDir, Accounts, Router) {
@@ -21,12 +20,12 @@ fn fixture() -> (TempDir, Accounts, Router) {
   let store = Store::open(directory.path().join("hub.sqlite")).unwrap();
   let mut provider = Provider::new(ORIGIN, "example-client".into(), Zeroizing::new("test-secret".into())).unwrap();
   provider.exchange_for_test = Some(|code| match code {
-    "existing" => Ok(Identity {
+    "existing" => Ok(github::Identity {
       id: 123,
       login: "Octocat".into(),
       verified_email: Some(EMAIL.into()),
     }),
-    "new" => Ok(Identity {
+    "new" => Ok(github::Identity {
       id: 321,
       login: "Another-Hub".into(),
       verified_email: Some("new@example.test".into()),
@@ -37,7 +36,28 @@ fn fixture() -> (TempDir, Accounts, Router) {
     store,
     ORIGIN,
     Some(Sendmail::test_delivery()),
-    Some(GitHub::new(provider)),
+    Federation {
+      github: Some(provider),
+      apell: Some(Oidc::for_test(ISSUER, |code, nonce| {
+        assert!(valid_secret(nonce));
+        match code {
+          "existing" => Ok(apell::Identity {
+            issuer: ISSUER.into(),
+            subject: "apell-123".into(),
+            login: Some("Octocat".into()),
+            verified_email: Some(EMAIL.into()),
+          }),
+          "new" => Ok(apell::Identity {
+            issuer: ISSUER.into(),
+            subject: "apell-321".into(),
+            login: Some("Another-Hub".into()),
+            verified_email: Some("oidc-new@example.test".into()),
+          }),
+          _ => Err(()),
+        }
+      })),
+      ..Default::default()
+    },
   )
   .unwrap();
   let router = accounts.router();
@@ -108,52 +128,105 @@ async fn email_session(app: &Router, state: &Accounts) -> (String, Value) {
 }
 
 async fn start_flow(app: &Router, data: Value, headers: HeaderMap) -> (String, Url) {
-  let (status, headers, body) = request(app, "POST", START, data, headers).await;
-  assert_eq!(status, StatusCode::OK);
-  let url = body["authorization_url"].as_str().unwrap().parse::<Url>().unwrap();
-  (cookie(&headers, FLOW_COOKIE), url)
+  start_provider_flow(app, Kind::GitHub, data, headers).await
 }
 
-fn callback_path(url: &Url, code: &str) -> String {
+async fn start_provider_flow(app: &Router, kind: Kind, data: Value, headers: HeaderMap) -> (String, Url) {
+  let (status, headers, body) = request(
+    app,
+    "POST",
+    &format!("/hub/v1/account/browser/{}/start", kind.label()),
+    data,
+    headers,
+  )
+  .await;
+  assert_eq!(status, StatusCode::OK);
+  let url = body["authorization_url"].as_str().unwrap().parse::<Url>().unwrap();
+  (cookie(&headers, kind.cookie()), url)
+}
+
+fn provider_callback_path(kind: Kind, url: &Url, code: &str, issuer: Option<&str>) -> String {
   let state = url
     .query_pairs()
     .find_map(|(key, value)| (key == "state").then(|| value.into_owned()))
     .unwrap();
-  format!("{CALLBACK}?state={state}&code={code}")
+  let mut pairs = form_urlencoded::Serializer::new(String::new());
+  pairs.append_pair("state", &state).append_pair("code", code);
+  if let Some(issuer) = issuer {
+    pairs.append_pair("iss", issuer);
+  }
+  format!("{}?{}", kind.callback(), pairs.finish())
 }
 
 async fn exchange(app: &Router, url: &Url, code: &str, cookie: &str) -> (StatusCode, HeaderMap) {
+  provider_exchange(app, Kind::GitHub, url, code, cookie, None).await
+}
+
+async fn provider_exchange(
+  app: &Router,
+  kind: Kind,
+  url: &Url,
+  code: &str,
+  cookie: &str,
+  issuer: Option<&str>,
+) -> (StatusCode, HeaderMap) {
   let mut headers = headers(Some(cookie), None);
   headers.remove(header::ORIGIN);
-  let (status, headers, _) = request(app, "GET", &callback_path(url, code), Value::Null, headers).await;
+  let (status, headers, _) = request(
+    app,
+    "GET",
+    &provider_callback_path(kind, url, code, issuer),
+    Value::Null,
+    headers,
+  )
+  .await;
   assert_eq!(headers[header::REFERRER_POLICY], "no-referrer");
   (status, headers)
 }
 
 #[tokio::test]
-async fn github_login_binds_browser_state_uses_pkce_and_preserves_explicit_viewer_approval() {
+async fn provider_signup_binds_browser_state_uses_pkce_and_preserves_explicit_viewer_approval() {
+  for kind in [Kind::GitHub, Kind::Apell] {
+    exercise_provider_signup(kind).await;
+  }
+}
+
+async fn exercise_provider_signup(kind: Kind) {
   let (_directory, accounts, app) = fixture();
   let (status, _, viewer) = request(&app, "POST", VIEWER_START, json!({}), headers(None, None)).await;
   assert_eq!(status, StatusCode::OK);
   let user_code = viewer["user_code"].as_str().unwrap();
   let device_code = viewer["device_code"].as_str().unwrap();
-  let (bind, url) = start_flow(
+  let (bind, url) = start_provider_flow(
     &app,
+    kind,
     json!({"mode":"sign_in", "user_code": user_code, "device":"viewer"}),
     headers(None, None),
   )
   .await;
-  assert_eq!(url.origin().ascii_serialization(), "https://github.com");
-  assert_eq!(url.path(), "/login/oauth/authorize");
   let query = url.query_pairs().collect::<HashMap<_, _>>();
-  assert_eq!(query["client_id"], "example-client");
-  assert_eq!(query["redirect_uri"], format!("{ORIGIN}{CALLBACK}"));
-  assert_eq!(query["scope"], "user:email");
+  assert_eq!(query["redirect_uri"], format!("{ORIGIN}{}", kind.callback()));
+  match kind {
+    Kind::GitHub => {
+      assert_eq!(url.origin().ascii_serialization(), "https://github.com");
+      assert_eq!(url.path(), "/login/oauth/authorize");
+      assert_eq!(query["client_id"], "example-client");
+      assert_eq!(query["scope"], "user:email");
+      assert_eq!(query["prompt"], "select_account");
+    }
+    Kind::Apell => {
+      assert_eq!(url.origin().ascii_serialization(), "https://account.example.test");
+      assert_eq!(url.path(), "/oidc/auth");
+      assert_eq!(query["scope"], "openid profile email");
+      assert_ne!(query["nonce"], query["state"]);
+    }
+  }
   assert_eq!(query["code_challenge_method"], "S256");
-  assert_eq!(query["prompt"], "select_account");
-  let key = flow_key(&headers(Some(&bind), None)).unwrap();
-  match &accounts.inner.github.as_ref().unwrap().pending().unwrap().flows[&key].phase {
-    Phase::Authorizing { state_hash, verifier } => {
+  let key = flow_key(kind, &headers(Some(&bind), None)).unwrap();
+  match &accounts.inner.federation.pending().unwrap().flows[&key].phase {
+    Phase::Authorizing {
+      state_hash, verifier, ..
+    } => {
       assert_eq!(query["code_challenge"], code_challenge(verifier));
       assert!(bool::from(state_hash.ct_eq(&hash(query["state"].as_ref()))));
       assert_ne!(query["state"], **verifier);
@@ -162,14 +235,17 @@ async fn github_login_binds_browser_state_uses_pkce_and_preserves_explicit_viewe
     }
     _ => panic!("authorization disappeared"),
   }
-  let (status, headers_after) = exchange(&app, &url, "new", "__Host-tokn-hub-github=bogus").await;
+  let fail_redirect = format!("/account?{}=failed", kind.label());
+  let bogus_cookie = format!("{}=bogus", kind.cookie());
+  let issuer = (kind == Kind::Apell).then_some(ISSUER);
+  let (status, headers_after) = provider_exchange(&app, kind, &url, "new", &bogus_cookie, issuer).await;
   assert_eq!(status, StatusCode::SEE_OTHER);
-  assert_eq!(headers_after[header::LOCATION], "/account?github=failed");
+  assert_eq!(headers_after[header::LOCATION], fail_redirect);
   assert_eq!(
     request(
       &app,
       "HEAD",
-      &callback_path(&url, "new"),
+      &provider_callback_path(kind, &url, "new", issuer),
       Value::Null,
       headers(Some(&bind), None)
     )
@@ -177,16 +253,16 @@ async fn github_login_binds_browser_state_uses_pkce_and_preserves_explicit_viewe
     .0,
     StatusCode::METHOD_NOT_ALLOWED,
   );
-  let (status, headers_after) = exchange(&app, &url, "new", &bind).await;
+  let (status, headers_after) = provider_exchange(&app, kind, &url, "new", &bind, issuer).await;
   assert_eq!(status, StatusCode::SEE_OTHER);
   assert_eq!(
     headers_after[header::LOCATION],
-    format!("/account?github=complete&user_code={user_code}&device=viewer")
+    format!("/account?{}=complete&user_code={user_code}&device=viewer", kind.label())
   );
   assert!(!headers_after.contains_key(header::SET_COOKIE));
   assert_eq!(
-    exchange(&app, &url, "new", &bind).await.1[header::LOCATION],
-    "/account?github=failed"
+    provider_exchange(&app, kind, &url, "new", &bind, issuer).await.1[header::LOCATION],
+    fail_redirect,
   );
 
   let mut foreign = headers(Some(&bind), None);
@@ -194,11 +270,13 @@ async fn github_login_binds_browser_state_uses_pkce_and_preserves_explicit_viewe
     header::ORIGIN,
     HeaderValue::from_static("https://elsewhere.example.test"),
   );
+  let complete = format!("/hub/v1/account/browser/{}/complete", kind.label());
+  let signup = format!("/hub/v1/account/browser/{}/signup", kind.label());
   assert_eq!(
-    request(&app, "POST", COMPLETE, json!({}), foreign).await.0,
+    request(&app, "POST", &complete, json!({}), foreign).await.0,
     StatusCode::FORBIDDEN
   );
-  let (status, _, result) = request(&app, "POST", COMPLETE, json!({}), headers(Some(&bind), None)).await;
+  let (status, _, result) = request(&app, "POST", &complete, json!({}), headers(Some(&bind), None)).await;
   assert_eq!(status, StatusCode::OK);
   assert_eq!(
     result,
@@ -207,7 +285,7 @@ async fn github_login_binds_browser_state_uses_pkce_and_preserves_explicit_viewe
   let (status, _, _) = request(
     &app,
     "POST",
-    SIGNUP,
+    &signup,
     json!({"username":"invalid slug"}),
     headers(Some(&bind), None),
   )
@@ -216,7 +294,7 @@ async fn github_login_binds_browser_state_uses_pkce_and_preserves_explicit_viewe
   let (status, response, identity) = request(
     &app,
     "POST",
-    SIGNUP,
+    &signup,
     json!({"username":"example"}),
     headers(Some(&bind), None),
   )
@@ -227,7 +305,7 @@ async fn github_login_binds_browser_state_uses_pkce_and_preserves_explicit_viewe
     request(
       &app,
       "POST",
-      SIGNUP,
+      &signup,
       json!({"username":"retry"}),
       headers(Some(&bind), None)
     )
@@ -236,18 +314,29 @@ async fn github_login_binds_browser_state_uses_pkce_and_preserves_explicit_viewe
     StatusCode::BAD_REQUEST
   );
 
+  check_viewer_approval(&accounts, &app, user_code, device_code, &cookie, &identity).await;
+}
+
+async fn check_viewer_approval(
+  accounts: &Accounts,
+  app: &Router,
+  user_code: &str,
+  device_code: &str,
+  cookie: &str,
+  identity: &Value,
+) {
   let poll = json!({"device_code":device_code});
   assert_eq!(
-    request(&app, "POST", DEVICE_TOKEN, poll.clone(), headers(None, None))
+    request(app, "POST", DEVICE_TOKEN, poll.clone(), headers(None, None))
       .await
       .0,
     StatusCode::ACCEPTED
   );
   let approval = json!({"user_code": user_code});
-  let browser = headers(Some(&cookie), Some(&identity));
+  let browser = headers(Some(cookie), Some(identity));
   assert_eq!(
     request(
-      &app,
+      app,
       "POST",
       "/hub/v1/account/device/approve",
       approval.clone(),
@@ -258,7 +347,7 @@ async fn github_login_binds_browser_state_uses_pkce_and_preserves_explicit_viewe
     StatusCode::NOT_FOUND
   );
   assert_eq!(
-    request(&app, "POST", "/hub/v1/account/device/viewer/approve", approval, browser)
+    request(app, "POST", "/hub/v1/account/device/viewer/approve", approval, browser)
       .await
       .0,
     StatusCode::NO_CONTENT
@@ -270,7 +359,7 @@ async fn github_login_binds_browser_state_uses_pkce_and_preserves_explicit_viewe
     .get_mut(&hash(device_code))
     .unwrap()
     .next_poll = Instant::now();
-  let (status, _, viewer_login) = request(&app, "POST", DEVICE_TOKEN, poll, headers(None, None)).await;
+  let (status, _, viewer_login) = request(app, "POST", DEVICE_TOKEN, poll, headers(None, None)).await;
   assert_eq!(status, StatusCode::OK);
   assert_eq!(viewer_login["user_id"], identity["user_id"]);
   let mut bearer = headers(None, None);
@@ -282,7 +371,7 @@ async fn github_login_binds_browser_state_uses_pkce_and_preserves_explicit_viewe
   );
   assert_eq!(
     accounts.authenticate_machine_reader(&bearer).await.unwrap().username,
-    "example"
+    identity["username"].as_str().unwrap()
   );
   assert_eq!(
     accounts
@@ -365,4 +454,115 @@ async fn matching_email_does_not_link_and_linking_requires_its_original_browser_
   assert_eq!(outcome["user_id"], identity["user_id"]);
   assert_eq!(outcome["username"], "alice");
   assert!(cookie(&response, BROWSER_COOKIE).starts_with(&format!("{BROWSER_COOKIE}=")));
+}
+
+#[tokio::test]
+async fn apell_issuer_and_provider_are_bound_and_viewer_approval_stays_explicit() {
+  const APELL_BASE: &str = "/hub/v1/account/browser/apell";
+  const APELL_COMPLETE: &str = "/hub/v1/account/browser/apell/complete";
+  let kind = Kind::Apell;
+  let (_directory, accounts, app) = fixture();
+  let (_, _, caps) = request(
+    &app,
+    "GET",
+    "/hub/v1/account/capabilities",
+    Value::Null,
+    headers(None, None),
+  )
+  .await;
+  assert_eq!(caps["apell_issuer"], ISSUER);
+  assert_eq!(caps["github_configured"], true);
+  let (email_cookie, identity) = email_session(&app, &accounts).await;
+  let owner = headers(Some(&email_cookie), Some(&identity));
+  let (bind, url) = start_provider_flow(&app, kind, json!({"mode":"sign_in"}), headers(None, None)).await;
+  let query = url.query_pairs().collect::<HashMap<_, _>>();
+  let nonce = &query["nonce"];
+  assert_ne!(nonce, &query["state"]);
+  let key = flow_key(kind, &headers(Some(&bind), None)).unwrap();
+  assert!(
+    matches!(&accounts.inner.federation.pending().unwrap().flows[&key].phase,
+    Phase::Authorizing { nonce: saved, .. } if nonce == saved.as_str())
+  );
+
+  // Even a same-browser request carrying an Apell binder as a GitHub cookie
+  // cannot send an Apell authorization code into the GitHub flow.
+  let wrong_cookie = format!("{}={}", Kind::GitHub.cookie(), bind.split_once('=').unwrap().1);
+  let (_, wrong_provider) = exchange(&app, &url, "existing", &wrong_cookie).await;
+  assert_eq!(wrong_provider[header::LOCATION], "/account?github=failed");
+  let (_, wrong_issuer) = provider_exchange(
+    &app,
+    kind,
+    &url,
+    "existing",
+    &bind,
+    Some("https://other.example.test/oidc"),
+  )
+  .await;
+  assert_eq!(wrong_issuer[header::LOCATION], "/account?apell=failed");
+  let (_, returned) = provider_exchange(&app, kind, &url, "existing", &bind, Some(ISSUER)).await;
+  assert_eq!(returned[header::LOCATION], "/account?apell=complete");
+  assert_eq!(
+    request(&app, "POST", COMPLETE, json!({}), headers(Some(&wrong_cookie), None))
+      .await
+      .0,
+    StatusCode::BAD_REQUEST
+  );
+  let (status, _, result) = request(&app, "POST", APELL_COMPLETE, json!({}), headers(Some(&bind), None)).await;
+  assert_eq!(status, StatusCode::OK);
+  assert_eq!(result, json!({"status":"link_required"}));
+  assert_eq!(
+    request(&app, "GET", APELL_BASE, Value::Null, owner.clone()).await.2,
+    json!({"connection":null})
+  );
+
+  let (bind, url) = start_provider_flow(&app, kind, json!({"mode":"link"}), owner.clone()).await;
+  let (_, returned) = provider_exchange(&app, kind, &url, "existing", &bind, Some(ISSUER)).await;
+  assert_eq!(returned[header::LOCATION], "/account?apell=complete");
+  let same_session = format!("{bind}; {email_cookie}");
+  assert_eq!(
+    request(
+      &app,
+      "POST",
+      APELL_COMPLETE,
+      json!({}),
+      headers(Some(&same_session), Some(&identity))
+    )
+    .await
+    .2,
+    json!({"status":"linked"})
+  );
+  assert_eq!(
+    request(&app, "GET", APELL_BASE, Value::Null, owner.clone()).await.2,
+    json!({"connection":{"apell_login":"Octocat"}})
+  );
+  assert_eq!(
+    request(&app, "GET", BASE, Value::Null, owner).await.2,
+    json!({"connection":null})
+  );
+
+  let (status, _, viewer) = request(&app, "POST", VIEWER_START, json!({}), headers(None, None)).await;
+  assert_eq!(status, StatusCode::OK);
+  let user_code = viewer["user_code"].as_str().unwrap();
+  let device_code = viewer["device_code"].as_str().unwrap();
+  let (bind, url) = start_provider_flow(
+    &app,
+    kind,
+    json!({"mode":"sign_in", "user_code":user_code, "device":"viewer"}),
+    headers(None, None),
+  )
+  .await;
+  assert!(!url.as_str().contains(user_code));
+  assert!(!url.as_str().contains(device_code));
+  let (_, returned) = provider_exchange(&app, kind, &url, "existing", &bind, Some(ISSUER)).await;
+  assert_eq!(
+    returned[header::LOCATION],
+    format!("/account?apell=complete&user_code={user_code}&device=viewer")
+  );
+  let (_, response, signed_in) = request(&app, "POST", APELL_COMPLETE, json!({}), headers(Some(&bind), None)).await;
+  assert_eq!(
+    signed_in,
+    json!({"status":"signed_in", "user_id":identity["user_id"], "username":"alice"})
+  );
+  let signed_in_cookie = cookie(&response, BROWSER_COOKIE);
+  check_viewer_approval(&accounts, &app, user_code, device_code, &signed_in_cookie, &identity).await;
 }

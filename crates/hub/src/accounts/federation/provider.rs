@@ -5,8 +5,8 @@ use serde::{Deserialize, de::DeserializeOwned};
 use url::{Url, form_urlencoded::Serializer};
 use zeroize::Zeroizing;
 
-use super::{CALLBACK, Identity, code_challenge};
-use crate::accounts::mail;
+use super::{GITHUB_CALLBACK, code_challenge};
+use crate::accounts::{mail, storage::github::Identity};
 
 const CLIENT_ID: &str = "TOKN_HUB_GITHUB_CLIENT_ID";
 const CLIENT_SECRET: &str = "TOKN_HUB_GITHUB_CLIENT_SECRET";
@@ -72,7 +72,7 @@ impl Provider {
     {
       return Err("GitHub sign-in requires a public HTTPS Hub origin".into());
     }
-    callback.set_path(CALLBACK);
+    callback.set_path(GITHUB_CALLBACK);
     let http = Client::builder()
       .https_only(true)
       .redirect(Policy::none())

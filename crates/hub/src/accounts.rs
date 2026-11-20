@@ -1,7 +1,8 @@
 //! Hub accounts own directory entries and authenticate account API requests.
 
-mod github;
+mod federation;
 mod mail;
+mod oidc;
 mod storage;
 
 #[cfg(test)]
@@ -144,7 +145,7 @@ struct Inner {
   origin: String,
   local_http: bool,
   mailer: Option<Sendmail>,
-  github: Option<github::GitHub>,
+  federation: federation::Federation,
   code_key: Hash,
   pending: Mutex<Pending>,
 }
@@ -234,20 +235,20 @@ impl Accounts {
       store,
       public_url,
       Sendmail::from_env()?,
-      github::GitHub::from_env(public_url)?,
+      federation::Federation::from_env(public_url)?,
     )
   }
 
   #[cfg(test)]
   fn with_mailer(store: Store, public_url: &str, mailer: Option<Sendmail>) -> Result<Self, String> {
-    Self::with_providers(store, public_url, mailer, None)
+    Self::with_providers(store, public_url, mailer, federation::Federation::default())
   }
 
   fn with_providers(
     store: Store,
     public_url: &str,
     mailer: Option<Sendmail>,
-    github: Option<github::GitHub>,
+    federation: federation::Federation,
   ) -> Result<Self, String> {
     let public_url = Url::parse(public_url).map_err(|_| "Invalid Hub URL for account authentication")?;
     let origin = public_url.origin().ascii_serialization();
@@ -261,7 +262,7 @@ impl Accounts {
         origin,
         local_http,
         mailer,
-        github,
+        federation,
         code_key,
         pending: Mutex::new(Pending::default()),
       }),
@@ -288,7 +289,7 @@ impl Accounts {
       .route("/hub/v1/account/logout", post(logout))
       .route("/hub/v1/account/keys", get(keys).post(create_key))
       .route("/hub/v1/account/keys/{key_id}", delete(revoke_key))
-      .merge(github::router())
+      .merge(federation::router())
       .layer(DefaultBodyLimit::max(4096))
       .layer(middleware::from_fn_with_state(self.clone(), account_headers))
       .with_state(self.clone())
@@ -474,8 +475,11 @@ impl Accounts {
 
 async fn capabilities(State(state): State<Accounts>) -> Json<serde_json::Value> {
   let mut value = json!({"enabled": true, "email_configured": state.email_configured(), "viewer_device_login": true});
-  if state.inner.github.is_some() {
+  if state.inner.federation.github_configured() {
     value["github_configured"] = json!(true);
+  }
+  if let Some(issuer) = state.inner.federation.apell_issuer() {
+    value["apell_issuer"] = json!(issuer);
   }
   Json(value)
 }

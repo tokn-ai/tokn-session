@@ -63,8 +63,21 @@
 .account-key-row > button { flex-shrink: 0; }
 .account-section .account-feedback { display: grid; gap: 10px; }
 .account-section .account-feedback > button { justify-self: start; }
-.account-github-action { display: grid; gap: 10px; }
-.account-section-heading > .account-github-action { flex-shrink: 0; }
+.account-provider-action { display: grid; gap: 10px; }
+.account-section-heading > .account-provider-action { flex-shrink: 0; }
+.account-provider-connection { overflow-wrap: anywhere; }
+.auth-form .account-provider-secondary {
+  min-height: 48px;
+  padding: 12px 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  color: var(--text);
+  background: var(--surface-raised);
+  font-size: 14px;
+  font-weight: 550;
+  cursor: pointer;
+}
+.auth-form .account-provider-secondary:hover:not(:disabled) { background: var(--surface-hover); }
 .account-sign-in-alternate { justify-content: center; margin-top: 0; }
 
 @media (max-width: 640px) {

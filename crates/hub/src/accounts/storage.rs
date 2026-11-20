@@ -1,4 +1,7 @@
+pub(super) mod apell;
+mod federated;
 pub(super) mod github;
+pub(super) use federated::SignIn;
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Serialize;
@@ -88,6 +91,14 @@ pub(super) fn initialize(store: &Store) -> Result<(), String> {
          github_id INTEGER PRIMARY KEY CHECK (github_id > 0),
          user_id TEXT NOT NULL UNIQUE REFERENCES hub_accounts(user_id),
          github_login TEXT NOT NULL
+       );
+       CREATE TABLE IF NOT EXISTS hub_account_apell (
+         issuer TEXT NOT NULL,
+         subject TEXT NOT NULL,
+         user_id TEXT NOT NULL REFERENCES hub_accounts(user_id),
+         login TEXT,
+         PRIMARY KEY (issuer, subject),
+         UNIQUE (issuer, user_id)
        );",
     )
     .map_err(|error| error.to_string())
