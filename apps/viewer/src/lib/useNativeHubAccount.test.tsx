@@ -1,7 +1,7 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { invokeHost } from "./platform";
-import { useApellHubAccount } from "./useApellHubAccount";
+import { useNativeHubAccount } from "./useNativeHubAccount";
 
 vi.mock("./platform", () => ({ invokeHost: vi.fn() }));
 
@@ -35,7 +35,7 @@ it("approves an Apell device, shows the account machines, and clears them on sig
       default: throw new Error(`Unexpected guest command: ${command}`);
     }
   });
-  const { result } = renderHook(() => useApellHubAccount(hub));
+  const { result } = renderHook(() => useNativeHubAccount(hub));
   await act(async () => {});
   expect(result.current.supported).toBe(true);
   await act(async () => { await result.current.startSignIn(); });
@@ -61,7 +61,7 @@ it("drops a late account roster after switching Hubs", async () => {
       ? { supported: true, account: studio } : { supported: false };
     throw new Error(`Unexpected guest command: ${command}`);
   });
-  const { result, rerender } = renderHook(({ url }) => useApellHubAccount(url), { initialProps: { url: hub } });
+  const { result, rerender } = renderHook(({ url }) => useNativeHubAccount(url), { initialProps: { url: hub } });
   await waitFor(() => expect(result.current.session).toEqual(studio));
   rerender({ url: "https://other.example" });
   expect(result.current.session).toBeUndefined();
@@ -77,7 +77,7 @@ it("rejects an approval link for another origin, cancels its attempt, and never 
     if (command === "hub_account_login_cancel") return null;
     throw new Error(`Unexpected guest command: ${command}`);
   });
-  const { result } = renderHook(() => useApellHubAccount(hub));
+  const { result } = renderHook(() => useNativeHubAccount(hub));
   await waitFor(() => expect(result.current.supported).toBe(true));
   await act(async () => { await result.current.startSignIn(); });
   expect(result.current.sign_in_error).toMatch(/invalid sign-in request/i);

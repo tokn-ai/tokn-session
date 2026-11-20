@@ -65,6 +65,7 @@ fn canceled_persistence_restores_the_prior_credential_without_replacing_a_newer_
 struct FixtureState {
   identity_status: Arc<AtomicU16>,
   challenge_starts: Arc<AtomicUsize>,
+  viewer_starts: Arc<AtomicUsize>,
   polls: Arc<AtomicUsize>,
   logouts: Arc<AtomicUsize>,
   challenge_length: usize,
@@ -85,6 +86,7 @@ impl Fixture {
     let state = FixtureState {
       identity_status: Arc::new(AtomicU16::new(status)),
       challenge_starts: Arc::new(AtomicUsize::new(0)),
+      viewer_starts: Arc::new(AtomicUsize::new(0)),
       polls: Arc::new(AtomicUsize::new(0)),
       logouts: Arc::new(AtomicUsize::new(0)),
       challenge_length,
@@ -97,6 +99,20 @@ impl Fixture {
       .route("/hub/v1/account/device/start", post(|State(state): State<FixtureState>| async move {
         state.challenge_starts.fetch_add(1, Ordering::AcqRel);
         Json(json!({ "device_code": "private-device-token", "user_code": "A".repeat(state.challenge_length), "expires_in": 60, "interval": 1 }))
+      }))
+      .route("/hub/v1/account/capabilities", get(|| async {
+        Json(json!({"enabled": true, "email_configured": false, "viewer_device_login": true, "github_configured": true}))
+      }))
+      .route("/hub/v1/account/device/viewer/start", post(|State(state): State<FixtureState>| async move {
+        state.viewer_starts.fetch_add(1, Ordering::AcqRel);
+        Json(json!({ "device_code": "private-viewer-code", "user_code": "ABCD-EFGH", "expires_in": 60, "interval": 1 }))
+      }))
+      .route("/hub/v1/account/machines", get(|headers: axum::http::HeaderMap| async move {
+        assert_eq!(headers[header::AUTHORIZATION], "Bearer new-token");
+        Json(json!({ "machines": [ {
+          "host_id": "d7431d7d-0ec8-48c0-ba38-fcf50b4aba2d", "machine_address": "alice:workstation",
+          "name": "Workstation", "online": true
+        } ] }))
       }))
       .route("/hub/v1/account/device/token", post(|State(state): State<FixtureState>| async move {
         state.polls.fetch_add(1, Ordering::AcqRel);
@@ -120,6 +136,41 @@ impl Fixture {
 }
 fn identity() -> serde_json::Value {
   json!({ "user_id": "550e8400-e29b-41d4-a716-446655440000", "username": "alice" })
+}
+
+#[tokio::test]
+async fn desktop_uses_viewer_approval_and_leaves_the_cli_login_independent() {
+  let fixture = Fixture::start(200, 8).await;
+  let directory = tempfile::tempdir().unwrap();
+  let cli = AccountClient::new(directory.path().to_owned()).unwrap();
+  save_credential(&cli.path, fixture.hub.to_string(), credential("existing-cli"), None).unwrap();
+  let viewer = AccountClient::new_viewer(directory.path().to_owned()).unwrap();
+  assert!(viewer.viewer_login_supported(&fixture.hub).await.unwrap());
+  assert!(viewer.saved_account(&fixture.hub).await.unwrap().is_none());
+  viewer
+    .sign_in(&fixture.hub, &CancellationToken::new(), |challenge| {
+      let address = Url::parse(&challenge.verification_url).unwrap();
+      assert_eq!(address.path(), "/account");
+      assert_eq!(address.query(), Some("user_code=ABCD-EFGH&device=viewer"));
+      assert!(
+        !serde_json::to_string(&challenge)
+          .unwrap()
+          .contains("private-viewer-code")
+      );
+    })
+    .await
+    .unwrap();
+  assert_eq!(fixture.state.challenge_starts.load(Ordering::Acquire), 0);
+  assert_eq!(fixture.state.viewer_starts.load(Ordering::Acquire), 1);
+  let (account, machines) = viewer.viewer_roster(&fixture.hub).await.unwrap().unwrap();
+  assert_eq!(account.username, "alice");
+  assert_eq!(machines[0].machine_address, "alice:workstation");
+  viewer.logout(Some(&fixture.hub)).await.unwrap();
+  assert!(viewer.saved_account(&fixture.hub).await.unwrap().is_none());
+  assert_eq!(
+    cli.saved_account(&fixture.hub).await.unwrap().unwrap().token.as_str(),
+    "existing-cli"
+  );
 }
 
 #[tokio::test]

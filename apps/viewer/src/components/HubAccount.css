@@ -63,6 +63,9 @@
 .account-key-row > button { flex-shrink: 0; }
 .account-section .account-feedback { display: grid; gap: 10px; }
 .account-section .account-feedback > button { justify-self: start; }
+.account-github-action { display: grid; gap: 10px; }
+.account-section-heading > .account-github-action { flex-shrink: 0; }
+.account-sign-in-alternate { justify-content: center; margin-top: 0; }
 
 @media (max-width: 640px) {
   .hub-home.hub-account { padding: 28px 20px; }

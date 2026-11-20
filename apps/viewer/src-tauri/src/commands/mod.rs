@@ -6,6 +6,8 @@ pub(crate) mod events;
 pub(crate) mod host;
 pub(crate) mod hub;
 #[cfg(desktop)]
+pub(crate) mod hub_account;
+#[cfg(desktop)]
 pub(crate) mod images;
 #[cfg(desktop)]
 pub(crate) mod indexing;

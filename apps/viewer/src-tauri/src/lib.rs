@@ -34,6 +34,9 @@ pub fn run() {
         paths,
         app.path().app_config_dir()?.join("hub-client"),
       ));
+      app.manage(commands::hub_account::DesktopHubAccount::new(
+        app.path().app_config_dir()?.join("hub-client"),
+      )?);
       app.manage(device_preferences::DevicePreferences::default());
       app.manage(hub_passkey::PasskeyCallbacks::default());
       app.manage(runtime_management::RuntimeRestartBroker::default());
@@ -69,6 +72,13 @@ pub fn run() {
       commands::hub::hub_client_auth_finish,
       commands::hub::hub_client_auth_cancel,
       commands::hub::hub_client_passkey_credential,
+      commands::hub_account::hub_account_status,
+      commands::hub_account::hub_account_machines,
+      commands::hub_account::hub_account_login_start,
+      commands::hub_account::hub_account_login_poll,
+      commands::hub_account::hub_account_login_cancel,
+      commands::hub_account::hub_account_login_open,
+      commands::hub_account::hub_account_logout,
       commands::sessions::list_sessions,
       commands::projects::list_registered_projects,
       commands::projects::get_session_creation_options,
@@ -133,6 +143,7 @@ pub fn run() {
         tauri::async_runtime::block_on(app.state::<local_viewer::LocalViewer>().shutdown());
         tauri::async_runtime::block_on(app.state::<native_remote::NativeRemote>().shutdown());
         tauri::async_runtime::block_on(app.state::<hub_passkey::PasskeyCallbacks>().cancel_all());
+        app.state::<commands::hub_account::DesktopHubAccount>().cancel();
       }
     });
 }

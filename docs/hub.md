@@ -49,6 +49,30 @@ path to use your configured mail relay. The service user needs permission to use
 the relay. With email enabled, anyone with a verified address can choose an
 available username and create an account on this Hub.
 
+### Sign in with GitHub
+
+To enable GitHub sign-in, register a dedicated [GitHub OAuth App](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app).
+Set its homepage to your Hub's public HTTPS address and its callback to
+`https://hub.example.com/hub/v1/account/browser/github/callback`, replacing the
+example origin with the Hub's configured `--public-url`. Provide
+`TOKN_HUB_GITHUB_CLIENT_ID` and `TOKN_HUB_GITHUB_CLIENT_SECRET` to the Hub service
+through private configuration. Apply this to the Hub binary and browser bundle
+together. Keep GitHub credentials out of release files and logs.
+
+If you already have a Hub account, sign in with an email code and choose
+**Connect GitHub** under **Your account**. This keeps your Hub username, machines,
+and saved access. A matching email address never connects accounts automatically.
+New users can choose **Continue with GitHub** and confirm a Hub username. GitHub
+must provide a verified primary email for signup. The Hub uses GitHub's stable
+account ID for future sign-in; it does not request repository access or save
+GitHub access tokens. Email codes still work when the Hub has mail configured.
+
+Web sign-in finishes in the browser. On the desktop **Machines** page or in
+Apell, start **Sign in** and open the approval address. On the CLI use
+`tokn-session-hub auth login`. In all three cases, choose GitHub on the Hub page
+and explicitly approve the matching device code. Sign-in shows account machines;
+each machine still verifies access to its sessions.
+
 Open **Hub account** in the browser, or start a CLI login:
 
 ```sh

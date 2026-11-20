@@ -8,6 +8,7 @@ import type { HubMachineSelection } from "../lib/types";
 import { selectMachine } from "../lib/transport";
 import { useLocalSessionDrafts } from "../components/SessionDraftsProvider";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 
 const selection: HubMachineSelection = { kind: "hub", hub_url: "https://hub.example", host_id: "550e8400-e29b-41d4-a716-446655440000" };
 vi.mock("../components/LocalHostProvider", () => ({ LocalHostProvider: ({ children }: { children: import("react").ReactNode }) => children }));
@@ -15,10 +16,12 @@ vi.mock("../components/NativeDevicePreferencesProvider", () => ({ NativeDevicePr
 
 vi.mock("../lib/tauri", async (original) => ({ ...await original<typeof import("../lib/tauri")>(), initializeLocalViewer: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(vi.fn()) }));
-vi.mock("../components/HubAccess", () => ({ HubAccess: ({ initial_hub_url, startup_host_id, on_local, on_machine_open, on_hub_ready, local_error }: {
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("../components/HubAccess", () => ({ HubAccess: ({ initial_hub_url, startup_host_id, on_local, on_machine_open, on_hub_ready, local_error, account_control }: {
   initial_hub_url: string; startup_host_id: string | null; on_local: () => void; local_error?: string;
-  on_machine_open: (selection: HubMachineSelection) => void; on_hub_ready: (hub_url: string) => void;
+  on_machine_open: (selection: HubMachineSelection) => void; on_hub_ready: (hub_url: string) => void; account_control?: import("react").ReactNode;
 }) => <main><h1>Machines</h1><p>Hub: {initial_hub_url}</p><p>Reopen: {startup_host_id ?? "none"}</p>
+  {account_control}
   {local_error && <p role="alert">{local_error}</p>}<button onClick={on_local}>Open This machine</button>
   <button onClick={() => on_machine_open(selection)}>Open remote machine</button>
   <button onClick={() => on_hub_ready("https://other.example")}>Load another Hub</button>
@@ -51,6 +54,28 @@ it("reopens the exact remembered remote without initializing local sessions", ()
   expect(initializeLocalViewer).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "Load another Hub" }));
   expect(readMachinePreferences().selected_machine).toEqual(selection);
+});
+
+it("opens a desktop viewer approval in the browser and cancels the same attempt when dismissed", async () => {
+  const hub_url = "https://other.example";
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "hub_account_status") return { supported: true } as never;
+    if (command === "hub_account_login_start") return {
+      user_code: "ABCD-EFGH", verification_url: `${hub_url}/account?user_code=ABCD-EFGH&device=viewer`,
+      expires_at: Math.floor(Date.now() / 1000) + 120, interval_ms: 5000,
+    } as never;
+    return undefined as never;
+  });
+  render(<DesktopWorkspace />);
+  fireEvent.click(screen.getByRole("button", { name: "Load another Hub" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Sign in" }));
+  expect(await screen.findByText("ABCD-EFGH")).toBeVisible();
+  const start = vi.mocked(invoke).mock.calls.find(([command]) => command === "hub_account_login_start")?.[1];
+  expect(start).toMatchObject({ hub_url, attempt_id: expect.any(String) });
+  fireEvent.click(screen.getByRole("button", { name: "Open in browser" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("hub_account_login_open", start));
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("hub_account_login_cancel", start));
 });
 
 it("opens local sessions only after initialization succeeds and remembers Local for restart", async () => {

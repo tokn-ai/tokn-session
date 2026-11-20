@@ -73,15 +73,15 @@ export function DeviceApprovalDialog({
     }
   }
 
-  const title = viewer ? "Approve an Apell sign-in" : "Approve a CLI login";
+  const title = viewer ? "Approve a Tokn Sessions sign-in" : "Approve a CLI login";
   const description = viewer
-    ? "Apell can list the machines registered to this account. Only approve a request with the code shown in Tokn Sessions."
+    ? "Tokn Sessions can list the machines registered to this account. Only approve a request with the code shown in the app."
     : "Enter the device code shown in your terminal. Only approve a login you started.";
   return <AccountDialog title={title} busy={busy} on_close={on_close} return_focus={return_focus}
     initial_focus={viewer ? undefined : input} description={approved ? undefined : description}>
     {approved ? <>
       <p className="account-feedback" role="status">{viewer
-        ? "Sign-in approved. Return to Tokn Sessions in Apell."
+        ? "Sign-in approved. Return to the Tokn Sessions app."
         : "CLI login approved. Return to your terminal."}</p>
       <div className="account-dialog-actions"><button ref={done} type="button" className="account-primary" onClick={on_close}>Done</button></div>
     </> : <form className="account-form" onSubmit={(event) => { event.preventDefault(); void approve(); }}>
@@ -91,7 +91,7 @@ export function DeviceApprovalDialog({
       <div className="account-dialog-actions">
         <button type="button" disabled={busy} onClick={on_close}>Cancel</button>
         <button type="submit" className="account-primary" disabled={busy || !complete}>
-          {busy ? "Approving…" : viewer ? "Approve Apell sign-in" : "Approve CLI login"}
+          {busy ? "Approving…" : viewer ? "Approve Tokn Sessions sign-in" : "Approve CLI login"}
         </button>
       </div>
     </form>}

@@ -24,7 +24,7 @@ export interface AccountSession extends AccountIdentity {
   client: HubClient;
 }
 
-export type HubAccountAvailability = "available" | "email_unconfigured" | "unsupported";
+export type HubAccountAvailability = { email_configured: boolean; github_configured: boolean } | "unsupported";
 export type AccountDevicePurpose = "cli" | "viewer";
 
 export function browserAccountClient(user_id?: string): HubClient {
@@ -46,11 +46,12 @@ export function accountSession(identity: AccountIdentity): AccountSession {
 
 export async function hubAccountAvailability(client: HubClient): Promise<HubAccountAvailability> {
   try {
-    const response = await client.request<{ enabled: boolean; email_configured?: boolean }>(`${ACCOUNT}/capabilities`);
-    if (typeof response?.enabled !== "boolean" || (response.email_configured !== undefined && typeof response.email_configured !== "boolean")) {
+    const response = await client.request<{ enabled: boolean; email_configured?: boolean; github_configured?: boolean }>(`${ACCOUNT}/capabilities`);
+    if (typeof response?.enabled !== "boolean" || (response.email_configured !== undefined && typeof response.email_configured !== "boolean")
+      || (response.github_configured !== undefined && typeof response.github_configured !== "boolean")) {
       throw new Error("Hub returned invalid account settings.");
     }
-    return (response.email_configured ?? response.enabled) ? "available" : "email_unconfigured";
+    return { email_configured: response.email_configured ?? response.enabled, github_configured: response.github_configured === true };
   } catch (error) {
     if (error instanceof HubError && error.status === 404) return "unsupported";
     throw error;

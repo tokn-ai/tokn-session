@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { LocalHostProvider } from "../components/LocalHostProvider";
 import { NativeDevicePreferencesProvider } from "../components/NativeDevicePreferencesProvider";
 import { HubAccess } from "../components/HubAccess";
+import { NativeHubAccountEntry } from "../components/NativeHubAccountEntry";
 import { hubErrorMessage } from "../lib/hub";
 import { preferredHub, rememberHub, rememberMachine, useMachinePreferences } from "../lib/machinePreferences";
 import { initializeLocalViewer } from "../lib/tauri";
 import { selectMachine } from "../lib/transport";
 import type { HubMachineSelection } from "../lib/types";
+import { useNativeHubAccount } from "../lib/useNativeHubAccount";
 import { ViewerPage } from "./ViewerPage";
 import { SessionDraftsProvider } from "../components/SessionDraftsProvider";
 
@@ -30,9 +32,12 @@ function DesktopWorkspaceContent({ on_local_ready }: { on_local_ready: () => voi
     ? { kind: "opening_local" }
     : { kind: "machines", hub_url: preferredHub(preferences), startup_host_id: preferences.selected_machine?.kind === "hub" ? preferences.selected_machine.host_id : null });
   const [local_error, setLocalError] = useState<string>();
+  const [hub_url, setHubUrl] = useState<string>();
+  const account = useNativeHubAccount(view.kind === "machines" ? hub_url : undefined);
 
   function showMachines() {
     selectMachine();
+    setHubUrl(undefined);
     setView({ kind: "machines", hub_url: preferredHub(preferences_ref.current), startup_host_id: null });
   }
   function openLocal() {
@@ -69,5 +74,12 @@ function DesktopWorkspaceContent({ on_local_ready }: { on_local_ready: () => voi
   </div></main>;
   return <HubAccess initial_hub_url={view.hub_url} startup_host_id={view.startup_host_id}
     known_hub_urls={preferences.hub_urls} on_local={openLocal} local_error={local_error}
-    on_machine_open={rememberRemote} on_hub_ready={(hub_url) => { rememberHub(preferences_ref.current, hub_url); }} />;
+    on_machine_open={rememberRemote} on_hub_ready={(url) => { setHubUrl(url); rememberHub(preferences_ref.current, url); }}
+    on_hub_closed={() => setHubUrl(undefined)}
+    account_control={account.supported && <NativeHubAccountEntry key={hub_url}
+      session={account.session} signing_out={account.signing_out} sign_out_error={account.sign_out_error} on_sign_out={account.logout}
+      challenge={account.challenge} starting={account.starting} sign_in_error={account.sign_in_error}
+      on_start_sign_in={account.startSignIn} on_cancel_sign_in={account.cancelSignIn} on_open_approval={account.openApproval} />}
+    account_roster={hub_url ? { hub_url, machines: account.machines, unavailable: account.unavailable,
+      can_sign_in: account.supported, on_retry: account.retry } : undefined} />;
 }

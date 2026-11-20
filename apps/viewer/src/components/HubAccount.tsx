@@ -1,14 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { HubClient, hubErrorMessage } from "../lib/hub";
 import {
-  browserAccountClient, requestAccountCode, verifyAccountCode, type AccountDevicePurpose, type AccountSession,
+  browserAccountClient, requestAccountCode, verifyAccountCode, type AccountSession,
 } from "../lib/hubAccount";
+import type { AccountDeviceRequest } from "../lib/hubGitHubAccount";
 import { type BrowserHubAccount } from "../lib/useBrowserHubAccount";
 import "./HubAccount.css";
 import { AuthLayout } from "./AuthLayout";
 import { VerificationCodeInput } from "./VerificationCodeInput";
 import { AccountDeviceApproval, DeviceApprovalDialog } from "./AccountDeviceApproval";
 import { AccountKeys } from "./AccountKeys";
+import { GitHubConnection, GitHubSignup, GitHubStart, useGitHubAccountReturn } from "./AccountGitHub";
 import { HubPageLink } from "./HubNavigation";
 import { HubAccountMenu } from "./HubAccountMenu";
 import { HubAccountProfile } from "./HubAccountProfile";
@@ -17,12 +19,7 @@ export function HubAccount({ account }: { account: BrowserHubAccount }) {
   return <AccountPage key={account.boundary} account={account} />;
 }
 
-interface DeviceRequest {
-  user_code: string;
-  purpose: AccountDevicePurpose;
-}
-
-function readDeviceRequest(): DeviceRequest | undefined {
+function readDeviceRequest(): AccountDeviceRequest | undefined {
   const params = new URLSearchParams(window.location.search);
   const code = params.get("user_code");
   if (!code || !/^[A-Za-z0-9-]{1,32}$/.test(code)) return;
@@ -33,21 +30,58 @@ function readDeviceRequest(): DeviceRequest | undefined {
 
 function AccountPage({ account }: { account: BrowserHubAccount }) {
   const { availability, check_error, session, notice, signedIn, signing_out, sign_out_error, logout, onFailure } = account;
+  const capabilities = availability === "unsupported" ? undefined : availability;
+  const github_configured = capabilities?.github_configured === true;
+  const email_configured = capabilities?.email_configured === true;
+  const github = useGitHubAccountReturn({ ready: availability !== undefined && !check_error, github_configured,
+    account_id: session?.user_id, on_signed_in: signedIn });
+  const [method, setMethod] = useState<"github" | "email">();
   const [device_request, setDeviceRequest] = useState(readDeviceRequest);
   const [cli_approved, setCliApproved] = useState(false);
   const [viewer_approved, setViewerApproved] = useState(false);
   const account_back = useRef<HTMLAnchorElement>(null);
-  if (!session) return <AuthLayout navigation={<HubPageLink href="/"><span aria-hidden="true">←</span> Back to Machines</HubPageLink>}
-    footer="Your machines. Your sessions. One place.">
-    {availability === "available" && !check_error ? <AccountSignIn device_request={device_request} notice={notice} on_signed_in={signedIn} />
-      : <form className="auth-form" onSubmit={(event) => { event.preventDefault(); account.retry(); }}>
+  const use_email = email_configured && (!github_configured || method === "email" || github.result.kind === "link_required");
+  const github_feedback = github.result.kind === "error" ? github.result.message
+    : github.result.kind === "link_required" ? (email_configured
+      ? "This email already belongs to a Hub account. Sign in with an email code, then choose Connect GitHub in your account."
+      : "This email already belongs to a Hub account. Ask your Hub administrator to restore email sign-in so you can connect GitHub.") : undefined;
+  if (!session || github.result.kind === "completing") {
+    const device_notice = <DeviceSignInNotice request={device_request} />;
+    let content: ReactNode;
+    if (check_error || github.result.kind === "completing" || (!github_configured && !email_configured)) {
+      content = <form className="auth-form" onSubmit={(event) => { event.preventDefault(); account.retry(); }}>
         <header className="auth-heading"><p className="auth-eyebrow">Hub account</p><h1>Welcome to Tokn</h1></header>
         {check_error ? <><p className="auth-feedback" role="alert">{check_error}</p><button className="auth-primary">Retry connection</button></>
-          : availability === "email_unconfigured" ? <p className="auth-description">Ask your Hub administrator to set up email delivery for account sign-in.</p>
-            : availability === "unsupported" ? <p className="auth-description">Account sign-in is unavailable on this Hub.</p>
-              : <p className="auth-description" role="status">Connecting…</p>}
-      </form>}
-  </AuthLayout>;
+          : github.result.kind === "completing" ? <p className="auth-description" role="status">Finishing GitHub sign-in…</p>
+            : capabilities ? <p className="auth-description">Ask your Hub administrator to set up email delivery for account sign-in.</p>
+              : availability === "unsupported" ? <p className="auth-description">Account sign-in is unavailable on this Hub.</p>
+                : <p className="auth-description" role="status">Connecting…</p>}
+        {github_feedback && <p className="auth-feedback" role="alert">{github_feedback}</p>}
+      </form>;
+    } else if (github.result.kind === "signup") {
+      content = <GitHubSignup suggested_username={github.result.suggested_username} on_cancel={github.clear}
+        on_signed_in={(next) => { github.clear(); signedIn(next); }}
+        on_email={email_configured ? () => { github.clear(); setMethod("email"); } : undefined}>{device_notice}</GitHubSignup>;
+    } else if (use_email) {
+      content = <AccountSignIn device_notice={device_notice} notice={notice} github_feedback={github_feedback}
+        on_signed_in={(next) => { github.clear(); signedIn(next); }}
+        on_github={github_configured ? () => { github.clear(); setMethod("github"); } : undefined} />;
+    } else {
+      content = <div className="auth-form">
+        <header className="auth-heading"><p className="auth-eyebrow">Hub account</p><h1>Welcome to Tokn</h1>
+          <p className="auth-description">Sign in or create an account to bring your machines together.</p></header>
+        {device_notice}
+        {notice && <p className="auth-feedback" role="status">{notice}</p>}
+        {github_feedback && <p className="auth-feedback" role="alert">{github_feedback}</p>}
+        <GitHubStart mode="sign_in" device_request={device_request} />
+        {email_configured && <div className="auth-secondary-actions account-sign-in-alternate">
+          <button type="button" onClick={() => { github.clear(); setMethod("email"); }}>Use an email code</button>
+        </div>}
+      </div>;
+    }
+    return <AuthLayout navigation={<HubPageLink href="/"><span aria-hidden="true">←</span> Back to Machines</HubPageLink>}
+      footer="Your machines. Your sessions. One place.">{content}</AuthLayout>;
+  }
 
   return <main className="hub-home hub-account" key={session.user_id}><div className="hub-content">
     <div className="account-navigation">
@@ -64,7 +98,10 @@ function AccountPage({ account }: { account: BrowserHubAccount }) {
       <h2 id="account-profile-title">Profile</h2>
       <HubAccountProfile {...session} />
       {notice && <p role="status">{notice}</p>}
+      {github_feedback && <p className="account-error" role="alert">{github_feedback}</p>}
     </section>
+    {github_configured && <GitHubConnection account_id={session.user_id} disabled={signing_out}
+      linked={github.result.kind === "linked"} on_failure={onFailure} />}
     <AccountDeviceApproval client={session.client} initial_code={device_request?.purpose === "cli" ? device_request.user_code : ""}
       approved={cli_approved} on_approved={() => { setDeviceRequest(undefined); setCliApproved(true); }}
       on_reset={() => setCliApproved(false)} on_failure={onFailure} />
@@ -75,9 +112,15 @@ function AccountPage({ account }: { account: BrowserHubAccount }) {
   </div></main>;
 }
 
-function AccountSignIn({ device_request, notice, on_signed_in }: {
-  device_request?: DeviceRequest;
+function DeviceSignInNotice({ request }: { request?: AccountDeviceRequest }) {
+  return request ? <p className="auth-feedback">Sign in to approve the {request.purpose === "viewer" ? "Tokn Sessions sign-in" : "CLI request"} for <strong>{request.user_code}</strong>.</p> : null;
+}
+
+function AccountSignIn({ device_notice, notice, github_feedback, on_github, on_signed_in }: {
+  device_notice?: ReactNode;
   notice?: string;
+  github_feedback?: string;
+  on_github?: () => void;
   on_signed_in: (session: AccountSession) => void;
 }) {
   const [step, setStep] = useState<"email" | "code" | "username">("email");
@@ -145,8 +188,9 @@ function AccountSignIn({ device_request, notice, on_signed_in }: {
         : step === "code" ? <>Enter the 6-digit code sent to <strong>{email.trim()}</strong>.</>
           : "Choose a username for your account and machine addresses."}</p>
     </header>
-    {device_request && <p className="auth-feedback">Sign in to approve the {device_request.purpose === "viewer" ? "Apell sign-in" : "CLI request"} for <strong>{device_request.user_code}</strong>.</p>}
+    {device_notice}
     {notice && <p className="auth-feedback" role="status">{notice}</p>}
+    {github_feedback && <p className="auth-feedback" role="alert">{github_feedback}</p>}
     {step === "email" ? <div className="auth-field">
       <label htmlFor="account-email">Email address</label>
       <input ref={input} key="email" id="account-email" type="email" autoComplete="email" autoCapitalize="none" spellCheck={false}
@@ -167,6 +211,9 @@ function AccountSignIn({ device_request, notice, on_signed_in }: {
     {step !== "email" && <div className="auth-secondary-actions">
       <button type="button" disabled={busy} onClick={changeEmail}>Change email</button>
       <button type="button" disabled={busy} onClick={() => { void submit(true); }}>Send another code</button>
+    </div>}
+    {step === "email" && on_github && <div className="auth-secondary-actions account-sign-in-alternate">
+      <button type="button" disabled={busy} onClick={on_github}>Use GitHub instead</button>
     </div>}
     {step === "email" && <p className="auth-note">No password to remember. Just your email.</p>}
   </form>;

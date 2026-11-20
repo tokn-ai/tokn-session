@@ -4,10 +4,13 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
-Hubs require account ownership for all machines. Verified email enables signup
-with usernames unique per Hub and stable user UUIDs. A renewable 90-day browser
-account cookie restores sign-in across navigation and reloads. Browser device approval powers
-CLI `auth login`. Issue and revoke scoped automation keys in **Hub account**.
+Hubs require account ownership for all machines. Accounts have Hub-specific
+usernames and stable UUIDs. Email codes and optional GitHub OAuth use the same
+renewable 90-day browser session. Existing users explicitly connect GitHub in
+their profile; a matching email never connects accounts automatically. GitHub
+access tokens are used only to look up identity and are not persisted. Both
+sign-in methods retain explicit CLI and viewer device approval. Issue and revoke
+scoped automation keys in **Hub account**.
 Desktop **Start hosting** and CLI `connect` automatically sign in through browser
 approval and claim `username:machine` when an account assignment is missing.
 The shared Rust account client keeps credentials private and reuses valid saved
@@ -43,9 +46,10 @@ discovery group. Pairing one host provides the encrypted group reference, and
 authenticated opens refresh it for previously paired devices. Discovery and per-host
 authorization remain independent. See [discovery groups](hub-pairing.md#discovery-groups).
 The shared gallery combines Hub account machines with saved and discovered
-machines in the browser and Apell. Apell signs in through the Hub's browser
-device approval and stores a read-only machine-list credential in the guest's
-secure storage. Desktop's viewer combines saved and discovered machines.
+machines in the browser, Apell and desktop. Apell and desktop viewers share the
+device approval UI and read-only account grant. Apell keeps its credential in
+guest secure storage; desktop keeps it in its private client configuration,
+separately from credentials used to register and host machines.
 Each Hub host UUID appears once. Cards lead with the display name and show the
 assigned address, connector status and pairing action. The gear on a paired card
 opens a dialog with its saved reference, passkey setup where supported, and Forget.

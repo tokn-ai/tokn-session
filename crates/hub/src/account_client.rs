@@ -9,8 +9,8 @@ use std::{
 };
 use tokio::{task::spawn_blocking, time::Instant};
 use tokio_util::sync::CancellationToken;
-use tokn_hub_client_core::account::{CLI_START, DEVICE_TOKEN, DeviceAuthorization, DevicePurpose};
-use tokn_hub_client_core::address::parse_machine_address;
+use tokn_hub_client_core::account::{CLI_START, DEVICE_TOKEN, DeviceAuthorization, DevicePurpose, VIEWER_START};
+use tokn_hub_client_core::address::{ResolvedMachine, parse_machine_address};
 use tokn_session_storage::{read_private_json, update_private_json};
 use url::Url;
 use zeroize::{Zeroize, Zeroizing};
@@ -20,12 +20,15 @@ pub use tokn_hub_client_core::account::{LoginChallenge, validate_token};
 const MAX_RESPONSE_BYTES: usize = 16 * 1024;
 const MAX_STORE_BYTES: u64 = 64 * 1024;
 const CREDENTIAL_FILE: &str = "account-credentials.json";
+const VIEWER_CREDENTIAL_FILE: &str = "viewer-account-credentials.json";
+const MAX_MACHINES: usize = 64;
 const CANCELED: &str = "Hub sign-in canceled";
 
 #[derive(Clone)]
 pub struct AccountClient {
   path: PathBuf,
   http: Client,
+  purpose: DevicePurpose,
 }
 
 /// Native-only result. Account credentials are never serialized to the viewer.
@@ -101,6 +104,15 @@ struct IssuedCredential {
 
 impl AccountClient {
   pub fn new(state_dir: PathBuf) -> Result<Self, String> {
+    Self::for_purpose(state_dir, DevicePurpose::Cli)
+  }
+
+  /// The desktop Machines page uses the same read-only account grant as Apell.
+  pub fn new_viewer(state_dir: PathBuf) -> Result<Self, String> {
+    Self::for_purpose(state_dir, DevicePurpose::Viewer)
+  }
+
+  fn for_purpose(state_dir: PathBuf, purpose: DevicePurpose) -> Result<Self, String> {
     let http = Client::builder()
       .no_proxy()
       .redirect(reqwest::redirect::Policy::none())
@@ -110,9 +122,84 @@ impl AccountClient {
       .build()
       .map_err(|_| "Could not create a Hub account connection")?;
     Ok(Self {
-      path: state_dir.join(CREDENTIAL_FILE),
+      path: state_dir.join(match purpose {
+        DevicePurpose::Cli => CREDENTIAL_FILE,
+        DevicePurpose::Viewer => VIEWER_CREDENTIAL_FILE,
+      }),
       http,
+      purpose,
     })
+  }
+
+  pub async fn viewer_login_supported(&self, hub: &Url) -> Result<bool, String> {
+    #[derive(Deserialize)]
+    struct Capabilities {
+      enabled: bool,
+      #[serde(default)]
+      viewer_device_login: bool,
+    }
+    let hub = tokn_hub_remote::canonical_hub(hub.as_str())?;
+    let response = self
+      .http
+      .get(endpoint(&hub, "/hub/v1/account/capabilities"))
+      .header(header::ACCEPT, "application/json")
+      .send()
+      .await
+      .map_err(|_| "Could not reach the Hub account service")?;
+    if response.status() == StatusCode::NOT_FOUND {
+      return Ok(false);
+    }
+    let value: Capabilities = read_json(response).await?;
+    Ok(value.enabled && value.viewer_device_login)
+  }
+
+  pub async fn saved_account(&self, hub: &Url) -> Result<Option<SignedInAccount>, String> {
+    let hub = tokn_hub_remote::canonical_hub(hub.as_str())?;
+    let Some(credential) = self.saved_credential(&hub).await? else {
+      return Ok(None);
+    };
+    Ok(
+      self
+        .current_account(&hub, &credential.token)
+        .await?
+        .map(|account| account.signed_in(&credential)),
+    )
+  }
+
+  pub async fn viewer_roster(&self, hub: &Url) -> Result<Option<(SignedInAccount, Vec<ResolvedMachine>)>, String> {
+    #[derive(Deserialize)]
+    struct Roster {
+      machines: Vec<ResolvedMachine>,
+    }
+    let hub = tokn_hub_remote::canonical_hub(hub.as_str())?;
+    let Some(account) = self.saved_account(&hub).await? else {
+      return Ok(None);
+    };
+    let response = self
+      .http
+      .get(endpoint(&hub, "/hub/v1/account/machines"))
+      .header(header::ACCEPT, "application/json")
+      .bearer_auth(account.token.as_str())
+      .send()
+      .await
+      .map_err(|_| "Could not reach the Hub account service")?;
+    if response.status() == StatusCode::UNAUTHORIZED {
+      return Ok(None);
+    }
+    let Roster { machines } = read_json_limit(response, 64 * 1024).await?;
+    let mut ids = std::collections::BTreeSet::new();
+    let mut addresses = std::collections::BTreeSet::new();
+    if machines.len() > MAX_MACHINES {
+      return Err("Hub account machine list exceeds its size limit".into());
+    }
+    for machine in &machines {
+      machine.validate_for(&machine.machine_address)?;
+      let (username, _) = parse_machine_address(&machine.machine_address)?;
+      if username != account.username || !ids.insert(&machine.host_id) || !addresses.insert(&machine.machine_address) {
+        return Err("Hub returned an invalid account machine list".into());
+      }
+    }
+    Ok(Some((account, machines)))
   }
 
   /// Reuse a valid credential. Only absence or an explicit 401 starts sign-in.
@@ -339,7 +426,7 @@ impl AccountClient {
     let response = tokio::select! {
       biased;
       _ = cancel.cancelled() => return Err(CANCELED.into()),
-      response = self.http.post(endpoint(hub, CLI_START))
+      response = self.http.post(endpoint(hub, match self.purpose { DevicePurpose::Cli => CLI_START, DevicePurpose::Viewer => VIEWER_START }))
         .header(header::CONTENT_TYPE, "application/json").body("{}").send() =>
         response.map_err(|_| "Could not start sign-in through the Hub")?,
     };
@@ -348,7 +435,7 @@ impl AccountClient {
       _ = cancel.cancelled() => return Err(CANCELED.into()),
       result = read_json(response) => result?,
     };
-    let challenge = authorization.challenge(hub, crate::secure_client::unix_time()?, DevicePurpose::Cli)?;
+    let challenge = authorization.challenge(hub, crate::secure_client::unix_time()?, self.purpose)?;
     let deadline = Instant::now() + Duration::from_secs(authorization.expires_in);
     on_challenge(challenge);
     let mut interval = Duration::from_secs(authorization.interval);
@@ -481,7 +568,11 @@ fn account_error(status: StatusCode) -> String {
   }
 }
 
-async fn read_json<T: DeserializeOwned>(mut response: Response) -> Result<T, String> {
+async fn read_json<T: DeserializeOwned>(response: Response) -> Result<T, String> {
+  read_json_limit(response, MAX_RESPONSE_BYTES).await
+}
+
+async fn read_json_limit<T: DeserializeOwned>(mut response: Response, limit: usize) -> Result<T, String> {
   if response.status() != StatusCode::OK {
     return Err(account_error(response.status()));
   }
@@ -498,10 +589,7 @@ async fn read_json<T: DeserializeOwned>(mut response: Response) -> Result<T, Str
   if !json_type {
     return Err("Hub returned an unsupported account response type".into());
   }
-  if response
-    .content_length()
-    .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
-  {
+  if response.content_length().is_some_and(|length| length > limit as u64) {
     return Err("Hub account response exceeds its size limit".into());
   }
   let mut bytes = Zeroizing::new(Vec::new());
@@ -510,7 +598,7 @@ async fn read_json<T: DeserializeOwned>(mut response: Response) -> Result<T, Str
     .await
     .map_err(|_| "Could not read the Hub account response")?
   {
-    if chunk.len() > MAX_RESPONSE_BYTES - bytes.len() {
+    if chunk.len() > limit - bytes.len() {
       return Err("Hub account response exceeds its size limit".into());
     }
     bytes.extend_from_slice(&chunk);

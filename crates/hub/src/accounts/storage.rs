@@ -1,3 +1,5 @@
+pub(super) mod github;
+
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Serialize;
 use tokn_hub_client_core::account::DevicePurpose;
@@ -81,7 +83,12 @@ pub(super) fn initialize(store: &Store) -> Result<(), String> {
          expires_at INTEGER NOT NULL
        );
        CREATE INDEX IF NOT EXISTS hub_account_credentials_owner
-       ON hub_account_credentials(user_id, kind, expires_at);",
+       ON hub_account_credentials(user_id, kind, expires_at);
+       CREATE TABLE IF NOT EXISTS hub_account_github (
+         github_id INTEGER PRIMARY KEY CHECK (github_id > 0),
+         user_id TEXT NOT NULL UNIQUE REFERENCES hub_accounts(user_id),
+         github_login TEXT NOT NULL
+       );",
     )
     .map_err(|error| error.to_string())
 }
@@ -196,75 +203,72 @@ fn issue(
   Ok((id, token, expires_at))
 }
 
-pub(super) fn email_login(
-  store: &Store,
-  email: &str,
-  username: Option<&str>,
-  transport: TokenTransport,
-) -> Result<Login, AccountError> {
-  let mut connection = store.connection().map_err(AccountError::internal)?;
-  let tx = connection
-    .transaction_with_behavior(TransactionBehavior::Immediate)
-    .map_err(AccountError::internal)?;
-  let existing = tx
+fn identity_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountIdentity> {
+  Ok(AccountIdentity {
+    user_id: row.get(0)?,
+    username: row.get(1)?,
+  })
+}
+
+fn account_by_email(connection: &Connection, email: &str) -> Result<Option<AccountIdentity>, AccountError> {
+  connection
     .query_row(
       "SELECT user_id, username FROM hub_accounts WHERE email = ?1",
       [email],
-      |row| {
-        Ok(AccountIdentity {
-          user_id: row.get(0)?,
-          username: row.get(1)?,
-        })
-      },
+      identity_row,
     )
     .optional()
-    .map_err(AccountError::internal)?;
-  let identity = if let Some(identity) = existing {
-    identity
-  } else {
-    let username = username.map(str::trim).ok_or(AccountError {
-      username_required: true,
-      ..AccountError::new(StatusCode::CONFLICT, "Choose a username for your Hub account")
-    })?;
-    parse_machine_address(&format!("{username}:machine")).map_err(|_| {
-      AccountError::new(
-        StatusCode::BAD_REQUEST,
-        "Use 1 to 63 lowercase letters, digits, or internal hyphens",
-      )
-    })?;
-    let taken: bool = tx
-      .query_row(
-        "SELECT EXISTS (SELECT 1 FROM hub_accounts WHERE username = ?1)",
-        [username],
-        |row| row.get(0),
-      )
-      .map_err(AccountError::internal)?;
-    if taken {
-      return Err(AccountError::new(
-        StatusCode::CONFLICT,
-        "That username is already reserved",
-      ));
-    }
-    let count: u32 = tx
-      .query_row("SELECT COUNT(*) FROM hub_accounts", [], |row| row.get(0))
-      .map_err(AccountError::internal)?;
-    if count >= MAX_ACCOUNTS {
-      return Err(AccountError::new(
-        StatusCode::CONFLICT,
-        "This Hub has reached its account limit",
-      ));
-    }
-    let user_id = Uuid::new_v4().to_string();
-    tx.execute(
-      "INSERT INTO hub_accounts (user_id, username, email) VALUES (?1, ?2, ?3)",
-      params![user_id, username, email],
+    .map_err(AccountError::internal)
+}
+
+fn create_account(tx: &Transaction<'_>, email: &str, username: &str) -> Result<AccountIdentity, AccountError> {
+  let username = username.trim();
+  // Limit the input before creating the compound address used for its validation.
+  if username.len() > 63 || parse_machine_address(&format!("{username}:machine")).is_err() {
+    return Err(AccountError::new(
+      StatusCode::BAD_REQUEST,
+      "Use 1 to 63 lowercase letters, digits, or internal hyphens",
+    ));
+  }
+  let taken: bool = tx
+    .query_row(
+      "SELECT EXISTS (SELECT 1 FROM hub_accounts WHERE username = ?1)",
+      [username],
+      |row| row.get(0),
     )
     .map_err(AccountError::internal)?;
-    AccountIdentity {
-      user_id,
-      username: username.to_owned(),
-    }
-  };
+  if taken {
+    return Err(AccountError::new(
+      StatusCode::CONFLICT,
+      "That username is already reserved",
+    ));
+  }
+  let count: u32 = tx
+    .query_row("SELECT COUNT(*) FROM hub_accounts", [], |row| row.get(0))
+    .map_err(AccountError::internal)?;
+  if count >= MAX_ACCOUNTS {
+    return Err(AccountError::new(
+      StatusCode::CONFLICT,
+      "This Hub has reached its account limit",
+    ));
+  }
+  let user_id = Uuid::new_v4().to_string();
+  tx.execute(
+    "INSERT INTO hub_accounts (user_id, username, email) VALUES (?1, ?2, ?3)",
+    params![user_id, username, email],
+  )
+  .map_err(AccountError::internal)?;
+  Ok(AccountIdentity {
+    user_id,
+    username: username.to_owned(),
+  })
+}
+
+fn finish_browser_login(
+  tx: Transaction<'_>,
+  identity: AccountIdentity,
+  transport: TokenTransport,
+) -> Result<Login, AccountError> {
   let (name, lifetime) = match transport {
     TokenTransport::Bearer => (None, BROWSER_BEARER_TTL),
     TokenTransport::Cookie => (Some(COOKIE_CREDENTIAL_NAME), BROWSER_COOKIE_TTL),
@@ -280,6 +284,30 @@ pub(super) fn email_login(
   )?;
   tx.commit().map_err(AccountError::internal)?;
   Ok(Login { identity, token })
+}
+
+pub(super) fn email_login(
+  store: &Store,
+  email: &str,
+  username: Option<&str>,
+  transport: TokenTransport,
+) -> Result<Login, AccountError> {
+  let mut connection = store.connection().map_err(AccountError::internal)?;
+  let tx = connection
+    .transaction_with_behavior(TransactionBehavior::Immediate)
+    .map_err(AccountError::internal)?;
+  let identity = match account_by_email(&tx, email)? {
+    Some(identity) => identity,
+    None => create_account(
+      &tx,
+      email,
+      username.ok_or(AccountError {
+        username_required: true,
+        ..AccountError::new(StatusCode::CONFLICT, "Choose a username for your Hub account")
+      })?,
+    )?,
+  };
+  finish_browser_login(tx, identity, transport)
 }
 
 pub(super) fn device_login(store: &Store, user_id: &str, purpose: DevicePurpose) -> Result<Login, AccountError> {

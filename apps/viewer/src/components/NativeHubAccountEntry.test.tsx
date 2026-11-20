@@ -1,7 +1,7 @@
 import { StrictMode } from "react";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { ApellHubAccountEntry } from "./ApellHubAccountEntry";
+import { NativeHubAccountEntry } from "./NativeHubAccountEntry";
 
 afterEach(cleanup);
 
@@ -17,14 +17,14 @@ function callbacks() {
 
 it("shares the sign-in control and shows the approval details without relying on opening a browser", () => {
   const actions = callbacks();
-  const view = render(<ApellHubAccountEntry {...actions} starting />);
+  const view = render(<NativeHubAccountEntry {...actions} starting />);
   const trigger = screen.getByRole("button", { name: "Sign in" });
   fireEvent.click(trigger);
   const dialog = screen.getByRole("dialog", { name: "Sign in to Hub" });
   expect(actions.on_start_sign_in).toHaveBeenCalledOnce();
   expect(within(dialog).getByRole("status")).toHaveTextContent("Requesting an approval code…");
 
-  view.rerender(<ApellHubAccountEntry {...actions} challenge={challenge} />);
+  view.rerender(<NativeHubAccountEntry {...actions} challenge={challenge} />);
   expect(within(dialog).getByText(challenge.verification_url)).toBeInTheDocument();
   expect(within(dialog).getByText(challenge.user_code)).toBeInTheDocument();
   fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
@@ -35,7 +35,7 @@ it("shares the sign-in control and shows the approval details without relying on
 it("cancels a pending attempt against the latest owner when its header unmounts", () => {
   const actions = callbacks();
   const renderEntry = (on_cancel_sign_in: () => void) =>
-    <StrictMode><ApellHubAccountEntry {...actions} on_cancel_sign_in={on_cancel_sign_in} /></StrictMode>;
+    <StrictMode><NativeHubAccountEntry {...actions} on_cancel_sign_in={on_cancel_sign_in} /></StrictMode>;
   const view = render(renderEntry(actions.on_cancel_sign_in));
   fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
   const latest_cancel = vi.fn();
@@ -48,9 +48,9 @@ it("cancels a pending attempt against the latest owner when its header unmounts"
 
 it("reuses the signed-in menu and shows the shared profile without navigating outside the applet", () => {
   const actions = callbacks();
-  const view = render(<ApellHubAccountEntry {...actions} challenge={challenge} />);
+  const view = render(<NativeHubAccountEntry {...actions} challenge={challenge} />);
   fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
-  view.rerender(<ApellHubAccountEntry {...actions} session={session} />);
+  view.rerender(<NativeHubAccountEntry {...actions} session={session} />);
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   expect(actions.on_cancel_sign_in).not.toHaveBeenCalled();
   const menu = screen.getByRole("button", { name: "Account menu for alice" });
@@ -63,6 +63,6 @@ it("reuses the signed-in menu and shows the shared profile without navigating ou
   fireEvent.click(menu);
   fireEvent.click(screen.getByRole("menuitem", { name: "Sign out" }));
   expect(actions.on_sign_out).toHaveBeenCalledOnce();
-  view.rerender(<ApellHubAccountEntry {...actions} />);
+  view.rerender(<NativeHubAccountEntry {...actions} />);
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });

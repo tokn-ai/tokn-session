@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { HubAccount as AccountPage } from "./HubAccount";
 import { useBrowserHubAccount } from "../lib/useBrowserHubAccount";
@@ -23,6 +24,7 @@ const key = {
   expires_at: 2_000_000_000,
   token: `tkna_${"B".repeat(43)}`,
 };
+const github_base = "/hub/v1/account/browser/github";
 
 afterEach(() => {
   cleanup();
@@ -32,10 +34,11 @@ afterEach(() => {
 
 function mockAccount({
   signup = false, email_configured = true, signed_in = false, logout,
-  current_identity = () => identity,
+  current_identity = () => identity, github,
 }: {
   signup?: boolean; email_configured?: boolean; signed_in?: boolean;
   logout?: () => Promise<Response>; current_identity?: () => typeof identity;
+  github?: { complete?: "signed_in" | "linked" | "link_required" | "signup_required"; connection?: string };
 } = {}) {
   let keys: Omit<typeof key, "token">[] = [];
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -44,10 +47,29 @@ function mockAccount({
     const headers = new Headers(init?.headers);
     expect(init).toMatchObject({ credentials: "same-origin", mode: "same-origin", referrerPolicy: "strict-origin" });
     expect(headers.has("Authorization")).toBe(false);
-    if (path.endsWith("/capabilities")) return Response.json({ enabled: true, email_configured });
+    if (path.endsWith("/capabilities")) return Response.json({ enabled: true, email_configured, ...(github && { github_configured: true }) });
     if (path.endsWith("/email/start")) return Response.json({}, { status: 202 });
     if (path.endsWith("/account/browser/email/verify")) {
       if (signup && !request.username) return Response.json({ error: "Choose a username", username_required: true }, { status: 409 });
+      signed_in = true;
+      return Response.json(current_identity());
+    }
+    if (github && path === `${github_base}/start`) {
+      if (request.mode === "link") expect(headers.get("X-Tokn-Account-Id")).toBe(current_identity().user_id);
+      else expect(headers.has("X-Tokn-Account-Id")).toBe(false);
+      // The UI must refuse to navigate to an invalid OAuth destination.
+      return Response.json({ authorization_url: "https://github.com.example.test/login/oauth/authorize" });
+    }
+    if (github?.complete && path === `${github_base}/complete`) {
+      if (github.complete === "linked") expect(headers.get("X-Tokn-Account-Id")).toBe(current_identity().user_id);
+      else expect(headers.has("X-Tokn-Account-Id")).toBe(false);
+      if (github.complete === "signup_required") return Response.json({ status: github.complete, suggested_username: "existing" });
+      if (github.complete === "signed_in") signed_in = true;
+      return Response.json({ status: github.complete, ...(github.complete === "signed_in" && current_identity()) });
+    }
+    if (github && path === `${github_base}/signup`) {
+      expect(headers.has("X-Tokn-Account-Id")).toBe(false);
+      if (request.username === "existing") return Response.json({ error: "That username is already reserved" }, { status: 409 });
       signed_in = true;
       return Response.json(current_identity());
     }
@@ -59,6 +81,7 @@ function mockAccount({
     if (headers.get("X-Tokn-Account-Id") !== current_identity().user_id) {
       return Response.json({ error: "Hub account changed", account_session_changed: true }, { status: 409 });
     }
+    if (github && path === github_base) return Response.json({ connection: github.connection ? { github_login: github.connection } : null });
     if (path.endsWith("/account/logout")) {
       const response = logout ? await logout() : new Response(null, { status: 204 });
       if (response.ok) signed_in = false;
@@ -119,6 +142,80 @@ it("explains the email setup requirement while keeping account details behind si
   expect(screen.getByRole("link", { name: "Back to Machines" })).toHaveAttribute("href", "/");
   expect(screen.queryByRole("heading", { name: "Profile" })).not.toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: "API keys" })).not.toBeInTheDocument();
+});
+
+it("starts GitHub sign-in even without email configured and sends the Apell device request", async () => {
+  window.history.replaceState(null, "", "/account?user_code=ABCD-EFGH&device=viewer");
+  const request = mockAccount({ github: {}, email_configured: false });
+  render(<HubAccount />);
+  expect(await screen.findByText("ABCD-EFGH")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Use an email code" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Continue with GitHub" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Hub returned an invalid GitHub sign-in address.");
+  expect(request).toHaveBeenCalledWith(expect.stringContaining(`${github_base}/start`), expect.objectContaining({
+    method: "POST", body: JSON.stringify({ mode: "sign_in", user_code: "ABCD-EFGH", device: "viewer" }),
+  }));
+});
+
+it("finishes the GitHub callback once and leaves the Apell device code for explicit approval", async () => {
+  window.history.replaceState(null, "", "/account?github=complete&user_code=ABCD-EFGH&device=viewer");
+  const request = mockAccount({ github: { complete: "signed_in" }, email_configured: false });
+  render(<StrictMode><HubAccount /></StrictMode>);
+  const dialog = await screen.findByRole("dialog", { name: "Approve a Tokn Sessions sign-in" });
+  expect(within(dialog).getByText("ABCD-EFGH")).toBeInTheDocument();
+  expect(window.location.search).toBe("?user_code=ABCD-EFGH&device=viewer");
+  expect(request.mock.calls.filter(([url]) => String(url).endsWith(`${github_base}/complete`))).toHaveLength(1);
+  expect(request).not.toHaveBeenCalledWith(expect.stringContaining("/device/viewer/approve"), expect.anything());
+  fireEvent.click(within(dialog).getByRole("button", { name: "Approve Tokn Sessions sign-in" }));
+  expect(await within(dialog).findByText("Sign-in approved. Return to the Tokn Sessions app.")).toBeInTheDocument();
+  expect(request).toHaveBeenCalledWith(expect.stringContaining("/device/viewer/approve"), expect.objectContaining({
+    body: JSON.stringify({ user_code: "ABCD-EFGH" }),
+  }));
+});
+
+it("asks an existing email account to sign in before connecting GitHub", async () => {
+  window.history.replaceState(null, "", "/account?github=complete");
+  const request = mockAccount({ github: { complete: "link_required" } });
+  render(<HubAccount />);
+  expect(await screen.findByRole("alert")).toHaveTextContent("This email already belongs to a Hub account.");
+  await submitEmailCode();
+  const section = await screen.findByRole("region", { name: "GitHub" });
+  fireEvent.click(await within(section).findByRole("button", { name: "Connect GitHub" }));
+  expect(await within(section).findByRole("alert")).toHaveTextContent("Hub returned an invalid GitHub sign-in address.");
+  expect(request).toHaveBeenCalledWith(expect.stringContaining(`${github_base}/start`), expect.objectContaining({
+    method: "POST", body: JSON.stringify({ mode: "link" }),
+    headers: expect.objectContaining({ "X-Tokn-Account-Id": identity.user_id }),
+  }));
+});
+
+it("asks first-time GitHub users for a Hub username and allows them to retry a collision", async () => {
+  window.history.replaceState(null, "", "/account?github=complete");
+  mockAccount({ github: { complete: "signup_required", connection: "alice-on-github" } });
+  render(<HubAccount />);
+  const username = await screen.findByLabelText("Username");
+  expect(username).toHaveValue("existing");
+  expect(screen.getByText(/Already have a Hub account\?/)).toBeVisible();
+  expect(screen.getByRole("button", { name: "Use an email code" })).toBeVisible();
+  expect(window.location.search).toBe("?github=complete");
+  fireEvent.click(screen.getByRole("button", { name: "Create account" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("That username is already reserved");
+  fireEvent.change(username, { target: { value: "alice" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create account" }));
+  expect(await screen.findByText("alice-on-github")).toBeVisible();
+  expect(window.location.search).toBe("");
+});
+
+it("finishes connecting GitHub with the restored Hub account's ID", async () => {
+  window.history.replaceState(null, "", "/account?github=complete");
+  const request = mockAccount({ github: { complete: "linked", connection: "alice-on-github" }, signed_in: true });
+  render(<HubAccount />);
+  const section = await screen.findByRole("region", { name: "GitHub" });
+  expect(within(section).getByText("GitHub connected.")).toBeInTheDocument();
+  expect(await within(section).findByText("alice-on-github")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Account menu for alice" })).toBeInTheDocument();
+  expect(request).toHaveBeenCalledWith(expect.stringContaining(`${github_base}/complete`), expect.objectContaining({
+    headers: expect.objectContaining({ "X-Tokn-Account-Id": identity.user_id }),
+  }));
 });
 
 it("moves keyboard focus through sign-in steps and back to the retained email", async () => {
@@ -347,12 +444,12 @@ it("approves a linked Apell request through the read-only viewer endpoint and ke
   window.history.replaceState(null, "", "/account?user_code=ABCD-EFGH&device=viewer");
   const request = mockAccount({ signed_in: true });
   render(<HubAccount />);
-  const dialog = await screen.findByRole("dialog", { name: "Approve an Apell sign-in" });
+  const dialog = await screen.findByRole("dialog", { name: "Approve a Tokn Sessions sign-in" });
   expect(within(dialog).getByText("ABCD-EFGH")).toBeInTheDocument();
   expect(dialog).toHaveAccessibleDescription(/list the machines registered to this account/);
   expect(request).not.toHaveBeenCalledWith(expect.stringContaining("/device/viewer/approve"), expect.anything());
-  fireEvent.click(within(dialog).getByRole("button", { name: "Approve Apell sign-in" }));
-  expect(await within(dialog).findByText("Sign-in approved. Return to Tokn Sessions in Apell.")).toBeInTheDocument();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Approve Tokn Sessions sign-in" }));
+  expect(await within(dialog).findByText("Sign-in approved. Return to the Tokn Sessions app.")).toBeInTheDocument();
   expect(request).toHaveBeenCalledWith(expect.stringContaining("/device/viewer/approve"), expect.objectContaining({
     body: JSON.stringify({ user_code: "ABCD-EFGH" }),
   }));
