@@ -5,6 +5,12 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      publish_to_store:
+        description: Publish the tested applet to Apell Store
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -59,7 +65,7 @@ jobs:
       - name: Test interpreted Apell pairing and delivery
         env:
           TOKN_APELL_TEST_WASM: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/tokn_session_apell.wasm
-        run: cargo test --locked -p tokn-session-apell --test wasmi -- --ignored
+        run: cargo test --locked --release -p tokn-session-apell --test wasmi -- --ignored
 
       - name: Build CLI
         run: cargo build -p tokn-session-cli
@@ -67,6 +73,8 @@ jobs:
   viewer:
     name: Session viewer
     runs-on: ubuntu-latest
+    outputs:
+      apell_artifact_id: ${{ steps.apell_package.outputs.artifact-id }}
 
     steps:
       - name: Checkout
@@ -108,20 +116,33 @@ jobs:
           ref: 51e17021c5e12839013bd6a098eb1cd18b285d49
           path: .apell-sdk
 
+      - name: Set up Apell CLI
+        id: apell_cli
+        uses: agentic-rs/apell/actions/setup@actions-v1.0.0
+
       - name: Build and validate Apell package
         working-directory: apps/viewer
         env:
           APELL_SOURCE: ${{ github.workspace }}/.apell-sdk
+          APELL_BIN: ${{ steps.apell_cli.outputs.binary }}
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: node --import tsx scripts/build-apell.ts
 
+      - name: Stage Store listing files
+        run: |
+          cp apps/apell/publish.json artifacts/tokn-session.publish.json
+          cp apps/apell/public/icon.png artifacts/tokn-session.png
+
       - name: Save Apell package
-        uses: actions/upload-artifact@v4
+        id: apell_package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: apell-package
           path: |
             artifacts/tokn-session.apel
             artifacts/tokn-session.sha256
+            artifacts/tokn-session.publish.json
+            artifacts/tokn-session.png
           if-no-files-found: error
           overwrite: true
           compression-level: 0
@@ -208,12 +229,44 @@ jobs:
           node-version: 22
 
       - name: Download tested Apell package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: apell-package
+          artifact-ids: ${{ needs.viewer.outputs.apell_artifact_id }}
           path: artifacts
+          digest-mismatch: error
 
       - name: Publish nightly package
         env:
           GH_TOKEN: ${{ github.token }}
         run: node --experimental-strip-types apps/viewer/scripts/publish-apell-nightly.ts
+
+  publish-apell-store:
+    name: Publish to Apell Store
+    needs: [rust, viewer, bun-apps, codex-ipc]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.publish_to_store
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+    concurrency:
+      group: apell-store
+      cancel-in-progress: false
+
+    steps:
+      - name: Download tested Apell package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.viewer.outputs.apell_artifact_id }}
+          path: artifacts
+          digest-mismatch: error
+
+      - name: Verify package checksum
+        working-directory: artifacts
+        run: sha256sum --check tokn-session.sha256
+
+      - uses: agentic-rs/apell/actions/publish@actions-v1.0.0
+        with:
+          store_url: ${{ vars.APELL_STORE_URL }}
+          package: artifacts/tokn-session.apel
+          metadata: artifacts/tokn-session.publish.json
+          icon: artifacts/tokn-session.png
