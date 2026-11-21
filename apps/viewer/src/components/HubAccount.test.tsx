@@ -29,9 +29,11 @@ const key = {
 const github_base = "/hub/v1/account/browser/github";
 const apell_base = "/hub/v1/account/browser/apell";
 const apell_issuer = "https://identity.example.test/oidc";
+const apell_confirmation = "A".repeat(43);
 
 interface ProviderFixture {
   complete?: "signed_in" | "linked" | "link_required" | "signup_required";
+  link_confirmation?: string;
   connection?: string | null;
   authorization_url?: string;
 }
@@ -51,6 +53,7 @@ function mockAccount({
   github?: ProviderFixture; apell?: ProviderFixture;
 } = {}) {
   let keys: Omit<typeof key, "token">[] = [];
+  let apell_connected = false;
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const path = new URL(String(input)).pathname;
     const request = init?.body ? JSON.parse(String(init.body)) : undefined;
@@ -80,8 +83,18 @@ function mockAccount({
         if (provider.complete === "linked") expect(headers.get("X-Tokn-Account-Id")).toBe(current_identity().user_id);
         else expect(headers.has("X-Tokn-Account-Id")).toBe(false);
         if (provider.complete === "signup_required") return Response.json({ status: provider.complete, suggested_username: "existing" });
+        if (provider.complete === "link_required" && name === "apell" && provider.link_confirmation) {
+          return Response.json({ status: provider.complete, username: current_identity().username, confirmation: provider.link_confirmation });
+        }
         if (provider.complete === "signed_in") signed_in = true;
         return Response.json({ status: provider.complete, ...(provider.complete === "signed_in" && current_identity()) });
+      }
+      if (name === "apell" && path === `${base}/confirm-link` && provider.link_confirmation) {
+        expect(headers.has("X-Tokn-Account-Id")).toBe(false);
+        expect(request).toEqual({ confirmation: provider.link_confirmation });
+        signed_in = true;
+        apell_connected = true;
+        return Response.json({ status: "signed_in", ...current_identity() });
       }
       if (path === `${base}/signup`) {
         expect(headers.has("X-Tokn-Account-Id")).toBe(false);
@@ -90,7 +103,8 @@ function mockAccount({
         return Response.json(current_identity());
       }
       if (path === base && signed_in && headers.get("X-Tokn-Account-Id") === current_identity().user_id) {
-        return Response.json({ connection: provider.connection === undefined ? null : { [name + "_login"]: provider.connection } });
+        const connection = name === "apell" && apell_connected ? null : provider.connection;
+        return Response.json({ connection: connection === undefined ? null : { [name + "_login"]: connection } });
       }
     }
     if (!signed_in) return Response.json({ error: "Sign in required" }, { status: 401 });
@@ -290,7 +304,7 @@ it("finishes the Apell Account callback once and leaves the device code unapprov
   expect(await within(dialog).findByText("Sign-in approved. Return to the Tokn Sessions app.")).toBeInTheDocument();
 });
 
-it("requires an existing Hub account session before starting an explicit Apell Account link", async () => {
+it("keeps the profile linking instructions for a Hub without Apell email-match confirmation", async () => {
   window.history.replaceState(null, "", "/account?apell=complete");
   const request = mockAccount({ apell: { complete: "link_required" } });
   render(<HubAccount />);
@@ -304,6 +318,41 @@ it("requires an existing Hub account session before starting an explicit Apell A
     method: "POST", body: JSON.stringify({ mode: "link" }),
     headers: expect.objectContaining({ "X-Tokn-Account-Id": identity.user_id }),
   }));
+});
+
+it("asks before connecting a matching verified Apell email and keeps device approval separate", async () => {
+  window.history.replaceState(null, "", "/account?apell=complete&user_code=ABCD-EFGH&device=viewer");
+  const request = mockAccount({ apell: { complete: "link_required", link_confirmation: apell_confirmation }, email_configured: false });
+  render(<StrictMode><HubAccount /></StrictMode>);
+
+  const heading = await screen.findByRole("heading", { name: "Connect to your Hub account?" });
+  expect(heading).toHaveFocus();
+  expect(screen.getByText(identity.username)).toBeVisible();
+  expect(screen.getByText("ABCD-EFGH")).toBeVisible();
+  expect(window.location.search).toBe("?apell=complete&user_code=ABCD-EFGH&device=viewer");
+  expect(request).not.toHaveBeenCalledWith(expect.stringContaining(`${apell_base}/confirm-link`), expect.anything());
+
+  fireEvent.click(screen.getByRole("button", { name: "Connect Apell Account" }));
+  const dialog = await screen.findByRole("dialog", { name: "Approve a Tokn Sessions sign-in" });
+  expect(within(dialog).getByText("ABCD-EFGH")).toBeInTheDocument();
+  expect(window.location.search).toBe("?user_code=ABCD-EFGH&device=viewer");
+  expect(request).toHaveBeenCalledWith(expect.stringContaining(`${apell_base}/confirm-link`), expect.objectContaining({
+    method: "POST", body: JSON.stringify({ confirmation: apell_confirmation }),
+  }));
+  expect(request).not.toHaveBeenCalledWith(expect.stringContaining("/device/viewer/approve"), expect.anything());
+  const section = screen.getByRole("region", { name: "Apell Account" });
+  expect(await within(section).findByText("Connected for sign-in.")).toBeVisible();
+});
+
+it("lets a user leave the Apell confirmation and sign in by email", async () => {
+  window.history.replaceState(null, "", "/account?apell=complete");
+  const request = mockAccount({ apell: { complete: "link_required", link_confirmation: apell_confirmation } });
+  render(<HubAccount />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Use an email code" }));
+  expect(await screen.findByLabelText("Email address")).toHaveFocus();
+  expect(window.location.search).toBe("");
+  expect(request).not.toHaveBeenCalledWith(expect.stringContaining(`${apell_base}/confirm-link`), expect.anything());
 });
 
 it("finishes linking Apell Account without replacing the restored Hub account", async () => {

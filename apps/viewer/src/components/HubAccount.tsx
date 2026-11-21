@@ -10,7 +10,7 @@ import { AuthLayout } from "./AuthLayout";
 import { VerificationCodeInput } from "./VerificationCodeInput";
 import { AccountDeviceApproval, DeviceApprovalDialog } from "./AccountDeviceApproval";
 import { AccountKeys } from "./AccountKeys";
-import { FederatedConnection, FederatedSignup, FederatedStart, useFederatedAccountReturn } from "./AccountFederation";
+import { ApellLinkPrompt, FederatedConnection, FederatedSignup, FederatedStart, useFederatedAccountReturn } from "./AccountFederation";
 import { HubPageLink } from "./HubNavigation";
 import { HubAccountMenu } from "./HubAccountMenu";
 import { HubAccountProfile } from "./HubAccountProfile";
@@ -71,6 +71,10 @@ function AccountPage({ account }: { account: BrowserHubAccount }) {
       content = <FederatedSignup provider={result.provider} suggested_username={result.suggested_username} on_cancel={federation.clear}
         on_signed_in={(next) => { federation.clear(); signedIn(next); }}
         on_email={email_configured ? () => { federation.clear(); setMethod("email"); } : undefined}>{device_notice}</FederatedSignup>;
+    } else if (result.kind === "confirm_apell_link") {
+      content = <ApellLinkPrompt target={result.target} on_cancel={federation.clear}
+        on_signed_in={(next) => { federation.clear(); signedIn(next); }}
+        on_email={email_configured ? () => { federation.clear(); setMethod("email"); } : undefined}>{device_notice}</ApellLinkPrompt>;
     } else if (use_email) {
       content = <AccountSignIn device_notice={device_notice} notice={notice} provider_feedback={provider_feedback}
         on_signed_in={(next) => { federation.clear(); signedIn(next); }}

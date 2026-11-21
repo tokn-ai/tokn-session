@@ -42,7 +42,7 @@ fn matching_email_requires_an_explicit_link_and_preserves_the_hub_identity() {
   let existing_token = token(&existing, TokenTransport::Cookie);
   let identity = github(1234, "different-github-login", Some(EMAIL));
 
-  assert!(matches!(sign_in(&store, &identity).unwrap(), SignIn::LinkRequired));
+  assert!(matches!(sign_in(&store, &identity).unwrap(), SignIn::LinkRequired(_)));
   assert_eq!(
     sign_up(&store, &identity, "unused").err().unwrap().status,
     StatusCode::CONFLICT
@@ -79,7 +79,10 @@ fn matching_email_requires_an_explicit_link_and_preserves_the_hub_identity() {
   );
   // Neither a reused login name nor a second verified email can impersonate the link.
   let different_id = github(2222, "Renamed-GitHub", Some(EMAIL));
-  assert!(matches!(sign_in(&store, &different_id).unwrap(), SignIn::LinkRequired));
+  assert!(matches!(
+    sign_in(&store, &different_id).unwrap(),
+    SignIn::LinkRequired(_)
+  ));
   assert_eq!(
     link(&store, &existing_token, &different_id).unwrap_err().status,
     StatusCode::CONFLICT
