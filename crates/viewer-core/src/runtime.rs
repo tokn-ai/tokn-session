@@ -153,6 +153,23 @@ impl ViewerRuntime {
       }
     }));
     let mut rpc_changes = service.sessions.runtimes.subscribe();
+    let mut rpc_output_events = service.sessions.runtimes.subscribe_events();
+    let rpc_output = service.sessions.runtimes.clone();
+    tasks.push(tokio::spawn(async move {
+      let mut changed = false;
+      let mut tick = tokio::time::interval(Duration::from_millis(100));
+      tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+      loop {
+        tokio::select! {
+          event = rpc_output_events.recv() => match event {
+            Ok(event) => changed |= rpc_output.record_live_output(&event),
+            Err(broadcast::error::RecvError::Lagged(_)) => { rpc_output.clear_live_output(); changed = true; }
+            Err(_) => return,
+          },
+          _ = tick.tick(), if changed => { changed = false; rpc_output.changed(); },
+        }
+      }
+    }));
     let rpc_events = events.clone();
     tasks.push(tokio::spawn(async move {
       loop {
@@ -160,8 +177,8 @@ impl ViewerRuntime {
           Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {}
           Err(_) => return,
         }
-        // Token and tool traffic never enters this notification. Coalesce
-        // control transitions instead of forcing an inventory read per event.
+        // Control transitions and bounded live-output previews share one
+        // coalesced signal rather than forcing an inventory read per chunk.
         tokio::time::sleep(Duration::from_millis(100)).await;
         while rpc_changes.try_recv().is_ok() {}
         let _ = emit(&rpc_events, "rpc-runtimes-changed", serde_json::json!({}));

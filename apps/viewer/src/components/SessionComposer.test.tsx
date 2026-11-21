@@ -80,6 +80,20 @@ afterEach(() => {
 });
 
 describe("SessionComposer", () => {
+  it("submits a Qoder prompt without advertising strict start, guidance or queue controls", async () => {
+    vi.mocked(getSessionInputStatus).mockResolvedValue({ ...AVAILABLE,
+      message: "Send submits a prompt; Qoder controls how it is scheduled." });
+    render(<SessionComposer session={{ ...SESSION, provider: "qoder" }} />);
+    await ready();
+    expect(screen.queryByRole("button", { name: "Guide" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Queue" })).not.toBeInTheDocument();
+    expect(screen.getByText(/Qoder controls how it is scheduled/)).toBeVisible();
+    draft("Continue this work");
+    send();
+    await waitFor(() => expect(submitSessionInput).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(submitSessionInput).mock.calls[0][0].delivery).toBeUndefined();
+  });
+
   it("identifies ZCode while resuming its first RPC message", async () => {
     vi.mocked(getSessionInputStatus).mockResolvedValue({ ...RESUMABLE, message: "ZCode will resume on Send." });
     const pending = deferred<SubmitSessionInputResponse>();

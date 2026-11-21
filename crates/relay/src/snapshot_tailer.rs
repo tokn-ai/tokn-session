@@ -16,6 +16,58 @@ pub(crate) struct SnapshotTailer {
   sessions: HashMap<String, Observation>,
 }
 
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::io::Write;
+  use tokn_session_core::AgentEvent;
+
+  #[test]
+  fn qoder_snapshots_follow_complete_appends_without_replaying_history() {
+    let fixture = tempfile::tempdir().unwrap();
+    let project = fixture.path().join("fixture-project");
+    std::fs::create_dir(&project).unwrap();
+    let path = project.join("session-main.jsonl");
+    let user = serde_json::json!({
+      "type": "user", "uuid": "user-1", "parentUuid": null,
+      "sessionId": "session-main", "cwd": fixture.path(), "isSidechain": false,
+      "timestamp": "2026-11-20T10:00:00Z",
+      "message": {"role": "user", "content": "Hello"}
+    });
+    std::fs::write(&path, format!("{user}\n")).unwrap();
+    let mut tailer = SnapshotTailer::new(ProviderRoot::new(Provider::Qoder, fixture.path().to_path_buf()));
+    let seed = tailer.scan(false, false, NewFileReplay::All).unwrap();
+    assert!(seed.warnings.is_empty(), "{:?}", seed.warnings);
+    assert!(seed.records.is_empty());
+
+    let assistant = serde_json::json!({
+      "type": "assistant", "uuid": "assistant-1", "parentUuid": "user-1",
+      "sessionId": "session-main", "cwd": fixture.path(), "isSidechain": false,
+      "timestamp": "2026-11-20T10:00:01Z",
+      "message": {"id": "message-1", "role": "assistant", "model": "fixture-model",
+        "content": [{"type": "text", "text": "Hello back"}]}
+    });
+    let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(file, "{assistant}").unwrap();
+    file.flush().unwrap();
+    let update = tailer.scan(true, false, NewFileReplay::All).unwrap();
+    assert!(update.warnings.is_empty(), "{:?}", update.warnings);
+    let messages: Vec<_> = update
+      .records
+      .iter()
+      .flat_map(|record| {
+        assert_eq!(record.topic, "qoder.session-main");
+        record.record.events.iter().filter_map(|event| match event {
+          AgentEvent::Message(message) => Some(message.text.as_str()),
+          _ => None,
+        })
+      })
+      .collect();
+    assert_eq!(messages, ["Hello back"]);
+    assert!(tailer.scan(true, false, NewFileReplay::All).unwrap().records.is_empty());
+  }
+}
+
 struct Observation {
   version: Vec<Option<FileVersion>>,
   fingerprints: HashMap<String, String>,
@@ -65,6 +117,8 @@ impl SnapshotTailer {
         Provider::WorkBuddy => tokn_session_workbuddy::WorkBuddySessionSource::new(Some(self.root.path.clone()))
           .load_session_records_path(&header.path, native, 128 * 1024 * 1024),
         Provider::Dsh => tokn_session_dsh::DshSessionSource::new(Some(self.root.path.clone()))
+          .load_session_records_path(&header.path, native, 128 * 1024 * 1024),
+        Provider::Qoder => tokn_session_qoder::QoderSessionSource::new(Some(self.root.path.clone()))
           .load_session_records_path(&header.path, native, 128 * 1024 * 1024),
         _ => unreachable!(),
       };

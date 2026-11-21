@@ -20,6 +20,9 @@ members = [
   "crates/opencode",
   "crates/zcode",
   "crates/zcode-adapter",
+  "crates/acp-protocol",
+  "crates/qoder-adapter",
+  "crates/qoder",
   "crates/workbuddy-protocol",
   "crates/workbuddy",
   "crates/dsh-protocol",
@@ -58,6 +61,8 @@ tokn-opencode-adapter = { version = "0.1.1", path = "crates/opencode-adapter" }
 tokn-dsh-rpc-protocol = { version = "0.1.1", path = "crates/dsh-rpc-protocol" }
 tokn-dsh-adapter = { version = "0.1.1", path = "crates/dsh-adapter" }
 tokn-zcode-adapter = { version = "0.1.1", path = "crates/zcode-adapter" }
+tokn-acp-protocol = { version = "0.1.1", path = "crates/acp-protocol" }
+tokn-qoder-adapter = { version = "0.1.1", path = "crates/qoder-adapter" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 crossterm = "0.28"
 dirs = "6"
@@ -84,6 +89,7 @@ tokn-session-dsh = { version = "0.1.1", path = "crates/dsh" }
 tokn-session-opencode = { version = "0.1.1", path = "crates/opencode" }
 tokn-session-pi = { version = "0.1.1", path = "crates/pi" }
 tokn-session-zcode = { version = "0.1.1", path = "crates/zcode" }
+tokn-session-qoder = { version = "0.1.1", path = "crates/qoder" }
 tokn-session-workbuddy = { version = "0.1.1", path = "crates/workbuddy" }
 tokn-session-relay = { version = "0.1.1", path = "crates/relay" }
 tokn-session-render = { version = "0.1.1", path = "crates/render" }

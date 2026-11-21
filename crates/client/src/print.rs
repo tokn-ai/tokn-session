@@ -63,6 +63,9 @@ pub(crate) fn append_session(request: AppendSessionRequest) -> Result<(), String
 }
 
 fn run_print_session(request: PrintSessionRequest) -> Result<(), String> {
+  if request.source == Source::Qoder {
+    return qoder::run(request);
+  }
   if matches!(request.source, Source::Dsh | Source::WorkBuddy) {
     return Err(format!(
       "{} currently supports historical list/show/browse only; create/append are not implemented",
@@ -106,6 +109,7 @@ fn print_args(source: Source, action: &PrintAction) -> Result<Vec<String>, Strin
     Source::OpenCode => opencode_print_args(action),
     Source::WorkBuddy => return Err("workbuddy create/append are not implemented".into()),
     Source::ZCode => zcode_print_args(action)?,
+    Source::Qoder => return Err("qoder create/append use ACP rather than print arguments".into()),
   })
 }
 
@@ -196,6 +200,10 @@ fn executor_required_error(source: Source) -> String {
     return "zcode create/append requires --executor or TOKN_SESSION_ZCODE_EXECUTOR, for example: --executor zcode"
       .to_string();
   }
+  if source == Source::Qoder {
+    return "qoder create/append requires --executor or TOKN_SESSION_QODER_EXECUTOR, for example: --executor qoder"
+      .into();
+  }
   format!(
     "create requires --executor or TOKN_SESSION_{}_EXECUTOR, for example: --executor \"tokn-gateway proxy {} --npx --\"",
     source.as_str().to_ascii_uppercase(),
@@ -284,6 +292,8 @@ fn split_command_line(input: &str) -> Result<Vec<String>, String> {
 
   Ok(args)
 }
+
+mod qoder;
 
 #[cfg(test)]
 mod tests {

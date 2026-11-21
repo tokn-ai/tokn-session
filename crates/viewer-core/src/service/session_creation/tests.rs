@@ -831,6 +831,7 @@ async fn all_provider_options_share_typed_plans_without_launching_agents() {
         "TOKN_SESSION_CODEX_EXECUTABLE",
         "TOKN_SESSION_OPENCODE_EXECUTABLE",
         "TOKN_SESSION_ZCODE_EXECUTABLE",
+        "TOKN_SESSION_QODER_EXECUTABLE",
         "TOKN_SESSION_DSH_EXECUTABLE",
       ]
       .into_iter()
@@ -845,7 +846,7 @@ async fn all_provider_options_share_typed_plans_without_launching_agents() {
     .unwrap();
   for entry in options.providers {
     assert!(entry.available, "{:?}: {:?}", entry.provider, entry.reason);
-    if entry.provider == LiveProvider::ZCode {
+    if matches!(entry.provider, LiveProvider::ZCode | LiveProvider::Qoder) {
       assert!(entry.supports_images);
     }
     let plan = service

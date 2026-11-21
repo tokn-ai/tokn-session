@@ -122,7 +122,7 @@ it("clears live routing proof on disconnect and exposes Stop only for active RPC
   expect(screen.getByText(/Machine disconnected/)).toBeVisible();
 });
 
-it.each(["dsh", "zcode"] as const)("offers native %s cancellation using the host capability", async (provider) => {
+it.each(["dsh", "zcode", "qoder"] as const)("offers native %s cancellation using the host capability", async (provider) => {
   vi.mocked(getSessionControl).mockResolvedValue(status({ provider, can_select: false, can_cancel: true }));
   vi.mocked(cancelSessionTurn).mockImplementation(async (request) => ({ request_id: request.request_id, status: "accepted", message: "Stop requested" }));
   render(<Controls selected={{ ...session, provider, is_running: true }} />);
@@ -141,15 +141,15 @@ it("keeps ZCode composer availability independent of its Stop lookup", async () 
   expect(result.current.blocked).toBe(false);
 });
 
-it("shows Stop from native ZCode activity before any historical output and clears it on completion", async () => {
-  vi.mocked(getSessionControl).mockResolvedValue(status({ provider: "zcode", can_select: false, is_running: false }));
-  const view = render(<Controls selected={{ ...session, provider: "zcode", is_running: false }} />);
+it.each(["zcode", "qoder"] as const)("shows Stop from native %s activity before any historical output and clears it on completion", async (provider) => {
+  vi.mocked(getSessionControl).mockResolvedValue(status({ provider, can_select: false, is_running: false }));
+  const view = render(<Controls selected={{ ...session, provider, is_running: false }} />);
   await waitFor(() => expect(machine.changes.size).toBe(1));
   expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
-  vi.mocked(getSessionControl).mockResolvedValue(status({ provider: "zcode", can_select: false, is_running: true }));
+  vi.mocked(getSessionControl).mockResolvedValue(status({ provider, can_select: false, is_running: true }));
   act(() => { for (const changed of machine.changes) changed(); });
   expect(await screen.findByRole("button", { name: "Stop" })).toBeEnabled();
-  vi.mocked(getSessionControl).mockResolvedValue(status({ provider: "zcode", can_select: false, is_running: false }));
+  vi.mocked(getSessionControl).mockResolvedValue(status({ provider, can_select: false, is_running: false }));
   act(() => { for (const changed of machine.changes) changed(); });
   await waitFor(() => expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument());
   view.unmount();
@@ -162,6 +162,41 @@ it("keeps cancellation available while input is awaiting acknowledgement", async
   render(<SessionControlSelector control={result.current} input_busy running />);
   expect(screen.getByRole("combobox")).toBeDisabled();
   expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
+});
+
+it("refreshes saved Qoder history before retiring its current-turn preview and ignores a late completion after selection changes", async () => {
+  const output = { prompt_id: "prompt", parts: [{ kind: "text" as const, text: "Streaming" }], truncated: false };
+  vi.mocked(getSessionControl).mockResolvedValue(status({ provider: "qoder", can_select: false, is_running: true, live_output: output }));
+  const refreshed = deferred<void>();
+  const complete = vi.fn(() => refreshed.promise);
+  const { result, rerender } = renderHook(({ key }) => useSessionControl({ ...session, provider: "qoder", session_key: key }, 0, complete), {
+    initialProps: { key: "one" },
+  });
+  await waitFor(() => expect(result.current.status?.live_output).toEqual(output));
+  vi.mocked(getSessionControl).mockResolvedValue(status({ provider: "qoder", can_select: false, is_running: false }));
+  act(() => { for (const changed of machine.changes) changed(); });
+  await waitFor(() => expect(complete).toHaveBeenCalledWith("one"));
+  expect(result.current.status?.live_output).toEqual(output);
+  vi.mocked(getSessionControl).mockResolvedValue(status({ session_key: "two", provider: "qoder", can_select: false, is_running: false }));
+  rerender({ key: "two" });
+  await waitFor(() => expect(result.current.status?.session_key).toBe("two"));
+  await act(async () => refreshed.resolve());
+  expect(result.current.status?.session_key).toBe("two");
+  expect(result.current.status?.live_output).toBeUndefined();
+});
+
+it("applies authoritative Qoder completion even when refreshing saved messages fails", async () => {
+  const output = { prompt_id: "prompt", parts: [{ kind: "text" as const, text: "Streaming" }], truncated: false };
+  vi.mocked(getSessionControl).mockResolvedValue(status({ provider: "qoder", is_running: true, live_output: output }));
+  const complete = vi.fn(async () => { throw new Error("History unavailable"); });
+  const { result } = renderHook(() => useSessionControl({ ...session, provider: "qoder" }, 0, complete));
+  await waitFor(() => expect(result.current.status?.live_output).toEqual(output));
+  vi.mocked(getSessionControl).mockResolvedValue(status({ provider: "qoder", is_running: false }));
+  act(() => { for (const changed of machine.changes) changed(); });
+  await waitFor(() => expect(result.current.status?.is_running).toBe(false));
+  expect(result.current.status?.live_output).toBeUndefined();
+  expect(result.current.error).toBe("Could not refresh messages.");
+  expect(complete).toHaveBeenCalledWith("one");
 });
 
 it("refreshes cancellation after activation and explicit input revisions without polling", async () => {

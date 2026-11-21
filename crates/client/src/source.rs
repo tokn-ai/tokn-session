@@ -2,6 +2,7 @@
 pub enum Source {
   Dsh,
   Pi,
+  Qoder,
   Codex,
   OpenCode,
   ZCode,
@@ -13,6 +14,7 @@ impl Source {
     match self {
       Self::Dsh => "dsh",
       Self::Pi => "pi",
+      Self::Qoder => "qoder",
       Self::Codex => "codex",
       Self::OpenCode => "opencode",
       Self::ZCode => "zcode",

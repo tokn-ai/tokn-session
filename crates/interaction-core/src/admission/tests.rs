@@ -113,7 +113,12 @@ async fn delivery_intent_is_bound_to_receipts_without_replay() {
         .status,
       expected_status
     );
-    for delivery in [None, Some(crate::DeliveryMode::Start), Some(crate::DeliveryMode::Queue)] {
+    for delivery in [
+      None,
+      Some(crate::DeliveryMode::Prompt),
+      Some(crate::DeliveryMode::Start),
+      Some(crate::DeliveryMode::Queue),
+    ] {
       request.delivery = delivery;
       assert_eq!(
         broker

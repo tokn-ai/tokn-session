@@ -17,14 +17,14 @@ export interface RpcRuntimeDraft {
   password: string;
   is_default: boolean;
 }
-export const RPC_PROVIDER_LABELS: Record<RpcProvider, string> = { codex: "Codex", pi: "Pi", open_code: "OpenCode", zcode: "ZCode", dsh: "DSH" };
+export const RPC_PROVIDER_LABELS: Record<RpcProvider, string> = { codex: "Codex", pi: "Pi", open_code: "OpenCode", zcode: "ZCode", qoder: "Qoder", dsh: "DSH" };
 
 export function supportsRpcAttachment(provider: RpcProvider): boolean {
-  return provider !== "pi" && provider !== "zcode";
+  return provider !== "pi" && provider !== "zcode" && provider !== "qoder";
 }
 
 export function supportsRpcLaunchArguments(provider: RpcProvider): boolean {
-  return provider === "codex" || provider === "pi" || provider === "zcode";
+  return provider === "codex" || provider === "pi" || provider === "zcode" || provider === "qoder";
 }
 
 export function rpcRuntimeDraft(profile?: RpcRuntimeProfile): RpcRuntimeDraft {

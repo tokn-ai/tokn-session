@@ -1,6 +1,6 @@
 # tokn-session-client
 
-One Rust interface for Pi, Codex, OpenCode, ZCode, WorkBuddy, and DeepSeek
+One Rust interface for Pi, Codex, OpenCode, ZCode, Qoder, WorkBuddy, and DeepSeek
 Harness session providers.
 
 ```toml
@@ -16,3 +16,5 @@ an optional directory overrides provider storage discovery.
 Provider readers preserve native details through the common event model.
 The client also exposes configurable create/append requests for supported
 provider executors; historical readers do not modify stored sessions.
+Qoder create/append use ACP stdio, including explicit permission handling.
+Its storage override is the `projects` directory under its configuration root.

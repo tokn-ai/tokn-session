@@ -8,7 +8,7 @@ an agent, resume history, or send a prompt.
 
 ## Profiles and storage
 
-Profiles support managed Codex/Pi/OpenCode/ZCode/DSH processes, attached Codex WS(S),
+Profiles support managed Codex/Pi/OpenCode/ZCode/Qoder/DSH processes, attached Codex WS(S),
 OpenCode V2 HTTP/SSE, and DSH HTTP/WebSocket servers. Pi attachment needs explicit
 IO handles and is not available through profiles. Managed profiles require an
 absolute executable and working folder; attached OpenCode also requires its
@@ -27,7 +27,7 @@ repairing the file and choosing Refresh retries the read without restarting.
 Automatic resolution prefers a suitable saved default or sole suitable profile.
 An explicit profile must match its revision/provider and launch requirements;
 invalid or ambiguous saved configuration does not silently fall back. OpenCode
-and ZCode profiles must match the native session or draft project folder. If no suitable
+and ZCode/Qoder profiles must match the native session or draft project folder. If no suitable
 profile exists, the host can discover managed local runtimes without saving a
 profile:
 
@@ -36,6 +36,7 @@ profile:
 | Codex | `TOKN_SESSION_CODEX_EXECUTABLE` | `codex` |
 | OpenCode | `TOKN_SESSION_OPENCODE_EXECUTABLE` | `opencode` |
 | ZCode | `TOKN_SESSION_ZCODE_EXECUTABLE` | `zcode` |
+| Qoder | `TOKN_SESSION_QODER_EXECUTABLE` | `qodercli` or `qoder` |
 | DSH | `TOKN_SESSION_DSH_EXECUTABLE` | `dsh` |
 
 Overrides are executable paths or names, without shell syntax or arguments. An
@@ -49,6 +50,17 @@ support. The runtime verifies that the app-server uses the Viewer’s ZCode
 history database, normally `~/.zcode/cli/db/db.sqlite` or the database under
 `ZCODE_STORAGE_DIR`. A desktop bundle with no Agent CLI on `PATH` needs an
 explicit launcher or profile. See the [ZCode CLI distribution](https://github.com/zai-org/ZCode/blob/main/README.en.md#zcode-cli-distribution).
+
+Qoder requires an installed, signed-in CLI with ACP v1 support. Run `qoder login`
+in a terminal before sending. The Viewer launches `--acp`, verifies the matching
+`QODER_CONFIG_DIR/projects` history namespace and resumes only exact root
+identities in the selected project. Conflicting configuration/session flags in
+profile arguments reject before launch. Images require negotiated prompt image
+support. Send uses native prompt scheduling; Stop and advertised allow-once/deny
+tool approvals are available. Overlapping managed prompts, strict idle admission,
+steering, queues and structured questions are unavailable. Live text
+and tool progress appear in a bounded transient current-turn panel; persisted
+history remains authoritative after completion.
 
 Pi creation uses `TOKN_SESSION_PI_EXECUTABLE`/`PATH` through its existing worker,
 represented by the same plan contract; selecting a saved Pi profile for a draft

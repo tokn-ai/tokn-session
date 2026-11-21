@@ -14,6 +14,12 @@ tokn-session-codex.workspace = true
 tokn-session-core.workspace = true
 tokn-session-opencode.workspace = true
 tokn-session-pi.workspace = true
+tokn-session-qoder.workspace = true
+tokn-qoder-adapter.workspace = true
+tokn-interaction-core.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+uuid = { version = "1", features = ["v4"] }
 tokn-session-workbuddy.workspace = true
 tokn-session-zcode.workspace = true
 

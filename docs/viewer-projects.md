@@ -1,9 +1,9 @@
 # Viewer projects and session creation
 
 The desktop viewer discovers or manually registers folders and creates Pi, Codex, OpenCode,
-ZCode, and DSH sessions on the viewing computer’s local connection. The project registry
+ZCode, Qoder, and DSH sessions on the viewing computer’s local connection. The project registry
 and creation commands remain unavailable to browser, HTTP/Hub remote, session-share
-and External reader connections. ZCode also supports CLI `create` and `append`.
+and External reader connections. ZCode and Qoder also support CLI `create` and `append`.
 
 ## Create a session
 
@@ -22,7 +22,7 @@ window closes or reloads. **Discard draft** removes an editable draft immediatel
 
 **Automatic** uses a suitable
 provider default or a single suitable saved profile. Ambiguous profiles require
-an explicit choice. If no suitable saved profile exists, Codex/OpenCode/ZCode/DSH can
+an explicit choice. If no suitable saved profile exists, Codex/OpenCode/ZCode/Qoder/DSH can
 use a local executable discovered through their `TOKN_SESSION_*_EXECUTABLE`
 override or `PATH`; see [runtime configuration](viewer-rpc-runtimes.md).
 An explicit profile or executable override never silently falls back. Missing
@@ -31,7 +31,7 @@ configuration without starting a runtime.
 Unavailable RPC agents offer **Configure agent runtime**, opening Settings at
 **Agent runtimes**. Returning to the draft or saving a runtime profile refreshes
 its configuration without discarding text, images or the selected project.
-OpenCode and ZCode saved runtime folders must match the draft's project folder;
+OpenCode, ZCode and Qoder saved runtime folders must match the draft's project folder;
 discovered runtimes are scoped to that folder.
 New session remains accessible when no folder is available. Choose **Add project**
 inside the conversation to register an existing directory and return to the same
@@ -44,7 +44,9 @@ applies the model before the first prompt. Changing project, agent or runtime
 clears the choice while retaining text/images. An incompatible model keeps image
 attachments visible and blocks Send until corrected. ZCode's full catalog comes
 from an authorized creation in the current runtime; cold probes retain its
-default without creating a conversation for discovery. DSH uses its runtime default.
+default without creating a conversation for discovery. Qoder reuses model choices
+from an already connected session, or keeps the runtime default without creating
+a conversation for discovery. DSH uses its runtime default.
 Codex uses app-server RPC. DSH passes the project directory to native session
 creation and retains the deployment’s default agent preset.
 
@@ -56,7 +58,8 @@ keeps text/images. Pi uses this same plan boundary while retaining its existing
 worker execution and receipts. Checking availability never launches an agent.
 
 Initial images are supported for Pi, Codex, OpenCode and ZCode, with host-side validation
-against the effective model before delivery. DSH accepts text in drafts.
+against the effective model before delivery. Qoder images are checked against
+the runtime's negotiated ACP image capability before prompt dispatch. DSH accepts text in drafts.
 Switching agents keeps drafts and previews; unsupported images
 must be removed or used with another supported agent.
 
@@ -74,7 +77,7 @@ creation rather than creating another native session.
 ## Creation recovery and ownership
 
 The shared core durably admits one UUID before native effects. OpenCode/ZCode/DSH use
-reserved native IDs; Codex returns its native thread ID. First-prompt admission
+reserved native IDs; Codex and Qoder return their native session IDs. First-prompt admission
 has its own state, and a disconnect or timeout never automatically recreates a
 session or replays that prompt. **Check session start** observes the same original
 request, provider, resolved runtime plan, revision and model intent. The draft
@@ -91,7 +94,7 @@ Older Pi receipts with no acknowledgement field remain unknown.
 If an OpenCode/ZCode/DSH create acknowledgement is lost, the host can find history by
 its reserved native ID and adopt the exact existing runtime owner. The first
 prompt is still marked unsent and is never replayed during this reconciliation.
-Codex cannot recover an unacknowledged server-assigned ID through this receipt.
+Codex and Qoder cannot recover an unacknowledged server-assigned ID through this receipt.
 
 `viewer/session-creations.json` stores bounded RPC creation identities, phases,
 fingerprints and the exact resolved runtime plan. Retrying a receipt never
@@ -112,7 +115,7 @@ open existing saved history; only a new explicit Send resumes its runtime.
 ## Folder discovery and registration
 
 Every valid absolute `cwd` discovered in saved Codex, Pi, OpenCode, ZCode,
-WorkBuddy or DSH session metadata becomes a registered launch folder. Discovery
+Qoder, WorkBuddy or DSH session metadata becomes a registered launch folder. Discovery
 uses the metadata catalog, never sidebar filters or the currently loaded page.
 A verified index can seed these folders without reopening provider histories.
 Legacy indexes first reread lightweight headers to verify exact paths; older

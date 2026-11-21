@@ -213,7 +213,10 @@ impl SessionReader {
     if self.database.is_some() {
       return self.poll_database(version);
     }
-    if matches!(self.snapshot.entry.provider, Provider::WorkBuddy | Provider::Dsh) {
+    if matches!(
+      self.snapshot.entry.provider,
+      Provider::WorkBuddy | Provider::Dsh | Provider::Qoder
+    ) {
       return self.poll_grouped_file(version);
     }
     let result = self.poll_file(version);
@@ -394,6 +397,8 @@ impl SessionReader {
         self.native,
         max_bytes,
       )?,
+      Provider::Qoder => tokn_session_qoder::QoderSessionSource::new(Some(self.root.clone()))
+        .load_session_records_path(&entry.header.path, self.native, max_bytes)?,
       _ => unreachable!(),
     };
     if loaded.reference.id != entry.header.id {

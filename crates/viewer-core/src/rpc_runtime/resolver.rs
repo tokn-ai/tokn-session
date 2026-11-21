@@ -156,5 +156,5 @@ fn select_profile<'a>(
 }
 
 fn requires_project_scope(provider: Provider) -> bool {
-  matches!(provider, Provider::OpenCode | Provider::ZCode)
+  matches!(provider, Provider::OpenCode | Provider::ZCode | Provider::Qoder)
 }

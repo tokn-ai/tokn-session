@@ -4,15 +4,17 @@ use tokn_session_client::{AgentClient, Source};
 use tokn_session_core::Provider;
 use tokn_session_dsh::DshSessionSource;
 use tokn_session_opencode::OpenCodeSessionSource;
+use tokn_session_qoder::QoderSessionSource;
 use tokn_session_workbuddy::WorkBuddySessionSource;
 
 use crate::ProviderRoot;
 
-pub const PROVIDERS: [Provider; 6] = [
+pub const PROVIDERS: [Provider; 7] = [
   Provider::Codex,
   Provider::Pi,
   Provider::OpenCode,
   Provider::ZCode,
+  Provider::Qoder,
   Provider::WorkBuddy,
   Provider::Dsh,
 ];
@@ -23,6 +25,7 @@ pub fn source(provider: Provider) -> Source {
     Provider::Pi => Source::Pi,
     Provider::OpenCode => Source::OpenCode,
     Provider::ZCode => Source::ZCode,
+    Provider::Qoder => Source::Qoder,
     Provider::WorkBuddy => Source::WorkBuddy,
     Provider::Dsh => Source::Dsh,
   }
@@ -43,6 +46,7 @@ pub fn provider_roots(provider: Provider, path: Option<PathBuf>) -> Result<Vec<P
     Provider::OpenCode | Provider::ZCode => vec![database(provider, path).database_path()?],
     Provider::WorkBuddy => vec![WorkBuddySessionSource::new(path).config_dir()?],
     Provider::Dsh => vec![DshSessionSource::new(path).session_root()?],
+    Provider::Qoder => vec![QoderSessionSource::new(path).session_root()?],
   };
   Ok(
     paths

@@ -384,7 +384,7 @@ impl DshAdapter {
         let mode = match delivery {
           DeliveryMode::StartOrSteer => "steer",
           DeliveryMode::Queue => "queue",
-          DeliveryMode::Start | DeliveryMode::Steer | DeliveryMode::Guide => {
+          DeliveryMode::Prompt | DeliveryMode::Start | DeliveryMode::Steer | DeliveryMode::Guide => {
             return Err(InteractionError::unsupported(
               "DSH supports start-or-steer and queue, without strict start, strict steer or advisory guide admission",
             ));

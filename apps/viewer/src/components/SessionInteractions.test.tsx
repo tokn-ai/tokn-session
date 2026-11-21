@@ -69,9 +69,9 @@ it("submits complete questions with multiple choices, notes and secret input usi
   await waitFor(() => expect(screen.queryByRole("region", { name: "Pending requests" })).not.toBeInTheDocument());
 });
 
-it("shows the requested operation and only permission decisions supplied by the host", async () => {
+it.each(["zcode", "qoder"] as const)("shows %s operation details and only permission decisions supplied by the host", async (provider) => {
   vi.mocked(listSessionInteractions).mockResolvedValue(snapshot([{ ...permission, permission_decisions: ["deny"] }]));
-  render(<SessionInteractions session={session} />); await ready();
+  render(<SessionInteractions session={{ ...session, provider }} />); await ready();
   expect(screen.getByText(/printf 'fixture'/).textContent).toBe(permission.details);
   expect(screen.queryByRole("button", { name: "Allow once" })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Deny" }));

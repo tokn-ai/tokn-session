@@ -1,0 +1,3 @@
+{"type":"user","uuid":"user-cli","parentUuid":null,"isSidechain":false,"cwd":"/workspace/demo","sessionId":"session-cli","timestamp":"2026-11-20T10:00:00Z","message":{"role":"user","content":"Describe the fixture"}}
+{"type":"assistant","uuid":"assistant-cli","parentUuid":"user-cli","isSidechain":false,"cwd":"/workspace/demo","sessionId":"session-cli","timestamp":"2026-11-20T10:00:01Z","message":{"role":"assistant","model":"fixture-model","content":[{"type":"text","text":"Qoder fixture response."}]}}
+{"type":"future-cli-record","sessionId":"session-cli","detail":"preserved"}

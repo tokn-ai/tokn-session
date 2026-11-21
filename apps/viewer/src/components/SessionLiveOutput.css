@@ -1,0 +1,6 @@
+.session-live-output { flex: 0 0 auto; margin: 8px 16px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); max-height: 320px; overflow: auto; }
+.session-live-output header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.session-live-output small { color: var(--text-muted); }
+.session-live-output pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; margin: 8px 0; }
+.session-live-output details { color: var(--text-soft); }
+.session-live-output__tool { display: flex; gap: 8px; align-items: baseline; font-size: 12px; }

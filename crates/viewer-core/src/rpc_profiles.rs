@@ -472,6 +472,35 @@ fn absolute_path(value: &str) -> bool {
   value.len() <= 4096 && !value.contains('\0') && Path::new(value).is_absolute()
 }
 
+pub(crate) fn qoder_storage_override(arguments: &[String]) -> bool {
+  arguments.iter().any(|argument| {
+    let name = argument.split('=').next().unwrap_or(argument);
+    matches!(
+      name,
+      "--config-dir"
+        | "--resume"
+        | "--resume-session"
+        | "--continue"
+        | "--continue-session"
+        | "--remote"
+        | "--remote-session"
+        | "--worktree"
+        | "--session-id"
+        | "--fork-session"
+        | "--print"
+        | "--prompt"
+        | "--cwd"
+        | "--workspace"
+        | "--directory"
+        | "--chdir"
+        | "--acp"
+    ) || (!argument.starts_with("--")
+      && ["-r", "-c", "-w", "-p"]
+        .iter()
+        .any(|prefix| argument.starts_with(prefix)))
+  })
+}
+
 fn schema_issues(profile: &StoredProfile) -> Vec<RpcProfileValidationIssue> {
   let mut issues = Vec::new();
   if uuid::Uuid::parse_str(&profile.profile_id).is_err() {
@@ -494,6 +523,13 @@ fn schema_issues(profile: &StoredProfile) -> Vec<RpcProfileValidationIssue> {
       &mut issues,
       "arguments",
       "Arguments exceed their limits or contain a null character",
+    );
+  }
+  if profile.provider == Provider::Qoder && qoder_storage_override(&profile.arguments) {
+    issue(
+      &mut issues,
+      "arguments",
+      "The host owns Qoder ACP, session, project and history options; use the matching QODER_CONFIG_DIR environment instead of --config-dir",
     );
   }
   if profile
@@ -556,6 +592,9 @@ fn schema_issues(profile: &StoredProfile) -> Vec<RpcProfileValidationIssue> {
       if profile.provider == Provider::ZCode {
         issue(&mut issues, "mode", "ZCode requires a managed stdio process");
       }
+      if profile.provider == Provider::Qoder {
+        issue(&mut issues, "mode", "Qoder requires a managed ACP process");
+      }
       if profile.executable.is_some() || !profile.arguments.is_empty() {
         issue(
           &mut issues,
@@ -597,7 +636,7 @@ fn schema_issues(profile: &StoredProfile) -> Vec<RpcProfileValidationIssue> {
         let scheme_ok = match profile.provider {
           Provider::Codex => matches!(url.scheme(), "ws" | "wss"),
           Provider::OpenCode | Provider::Dsh => matches!(url.scheme(), "http" | "https") && url.path() == "/",
-          Provider::Pi | Provider::ZCode => false,
+          Provider::Pi | Provider::ZCode | Provider::Qoder => false,
         };
         scheme_ok
           && url.host_str().is_some()

@@ -132,7 +132,7 @@ export interface TranslateTextResponse {
   texts: string[];
 }
 
-export const PROVIDERS = ["codex", "pi", "opencode", "zcode", "workbuddy", "dsh"] as const;
+export const PROVIDERS = ["codex", "pi", "opencode", "zcode", "qoder", "workbuddy", "dsh"] as const;
 
 export type ViewerProvider = (typeof PROVIDERS)[number];
 
@@ -386,10 +386,17 @@ export interface SessionControlStatus {
   can_select: boolean;
   can_cancel: boolean;
   is_running?: boolean;
+  live_output?: SessionLiveOutput;
   available: boolean;
   message: string;
   runtime_id: string | null;
   instance_id: string | null;
+}
+
+export interface SessionLiveOutput {
+  prompt_id: string;
+  parts: { kind: "text" | "reasoning" | "tool"; text: string; status?: string }[];
+  truncated: boolean;
 }
 
 export interface SessionInteractionQuestion {
@@ -488,7 +495,7 @@ export interface SessionInputStatus {
   delivery_modes?: SessionInputDeliveryMode[];
 }
 
-export type SessionInputDeliveryMode = "start" | "guide" | "queue";
+export type SessionInputDeliveryMode = "start" | "guide" | "queue" | "prompt";
 
 export interface SubmitSessionInputRequest {
   session_key: string;
@@ -601,7 +608,7 @@ export interface RuntimeInventory { version: 1; runtimes: RuntimeInfo[]; }
 export interface RuntimeRestartRequest { request_id: string; runtime_id: string; expected_instance_id: string; }
 export interface RuntimeRestartResponse { request_id: string; runtime_id: string; message: string; }
 
-export type RpcProvider = "codex" | "pi" | "open_code" | "zcode" | "dsh";
+export type RpcProvider = "codex" | "pi" | "open_code" | "zcode" | "qoder" | "dsh";
 export type RpcRuntimeMode = "managed" | "attached";
 export interface RpcRuntimeProfile {
   profile_id: string;
@@ -653,6 +660,7 @@ export interface RpcRuntimeInfo {
     operations: Partial<Record<RpcOperation, { supported: boolean; reason: string | null }>>;
     atomic_model_on_send: boolean;
     per_input_model?: boolean;
+    image_input?: boolean;
   };
   session_count: number;
   last_error: string | null;

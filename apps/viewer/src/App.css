@@ -34,6 +34,7 @@
   --pi: #8067c7;
   --opencode: #437ca3;
   --zcode: #8a6b2f;
+  --qoder: #536e9c;
   --workbuddy: #7a5d9d;
   --dsh: #b46d36;
   --reasoning: #8067c7;
@@ -64,6 +65,7 @@
     --pi: #9c89dd;
     --opencode: #68a0c8;
     --zcode: #c59b4d;
+    --qoder: #8ea9d8;
     --workbuddy: #b092d2;
     --dsh: #d28a51;
     --reasoning: #9c89dd;
@@ -1040,6 +1042,11 @@ button:disabled {
   color: var(--zcode);
 }
 
+[data-provider="qoder"] .provider-dot,
+.provider-filter[data-provider="qoder"] .provider-dot {
+  color: var(--qoder);
+}
+
 [data-provider="workbuddy"] .provider-dot,
 .provider-filter[data-provider="workbuddy"] .provider-dot {
   color: var(--workbuddy);
@@ -1629,6 +1636,11 @@ button:disabled {
 .session-row__provider[data-provider="zcode"],
 .provider-badge[data-provider="zcode"] {
   color: var(--zcode);
+}
+
+.session-row__provider[data-provider="qoder"],
+.provider-badge[data-provider="qoder"] {
+  color: var(--qoder);
 }
 
 .session-row__provider[data-provider="workbuddy"],
