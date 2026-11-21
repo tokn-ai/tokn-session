@@ -205,7 +205,7 @@ mod tests {
     let path = directory.path().join("db.sqlite");
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection
-      .execute_batch(include_str!("../../../zcode/fixtures/session.sql"))
+      .execute_batch(include_str!("../../tests/fixtures/zcode/root_session.sql"))
       .unwrap();
     let header = tokn_session_zcode::ZCodeSessionSource::new(Some(path.clone()))
       .session_header_exact("sess_zcode")
