@@ -1,7 +1,7 @@
 import type { RegisteredProject, RpcProvider } from "./types";
 import type { SessionDraft } from "./useSessionDrafts";
 
-export const DRAFT_AGENT_NAMES: Record<RpcProvider, string> = { pi: "Pi", codex: "Codex", open_code: "OpenCode", zcode: "ZCode", dsh: "DSH" };
+export const DRAFT_AGENT_NAMES: Record<RpcProvider, string> = { pi: "Pi", codex: "Codex", open_code: "OpenCode", zcode: "ZCode", qoder: "Qoder", dsh: "DSH" };
 
 export interface SidebarDraftEntry {
   draft: SessionDraft;

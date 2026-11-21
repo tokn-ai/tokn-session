@@ -11,7 +11,9 @@ import { ViewerPage } from "./ViewerPage";
 const calls = vi.hoisted(() => ({ clear: vi.fn(), select: vi.fn(), open_created: vi.fn(), respond: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
-vi.mock("../lib/transport", async (original) => ({ ...await original<typeof import("../lib/transport")>(), isDesktop: () => true }));
+vi.mock("../lib/transport", async (original) => ({ ...await original<typeof import("../lib/transport")>(), isDesktop: () => true,
+  captureTransport: () => ({ invoke, listen, release: invoke, on_close: () => () => {} }),
+}));
 vi.mock("../components/TranslationProvider", () => ({ TranslationProvider: ({ children }: { children: ReactNode }) => children }));
 vi.mock("../components/QuestionAnswersProvider", () => ({ QuestionAnswersProvider: ({ children }: { children: ReactNode }) => children }));
 vi.mock("../components/SessionDrawer", () => ({ SessionDrawer: ({ children }: { children: ReactNode }) => children }));
@@ -48,6 +50,7 @@ const workspace = {
   controlling: false, control_error: null, error: null, input_refresh_key: 0, controlErrorFor: () => null, control: vi.fn(), respond: calls.respond,
   loadCreationOptions: async (project_id: string) => ({ project_id, providers: [
     { provider: "pi" as const, available: true, reason: null, supports_images: true, default_profile_id: null, runtimes: [] },
+    { provider: "qoder" as const, available: true, reason: null, supports_images: true, default_profile_id: null, runtimes: [] },
   ] }),
 };
 vi.mock("../lib/useProjectWorkspace", () => ({ useProjectWorkspace: () => workspace }));
@@ -73,8 +76,9 @@ function publish(snapshot: ManagedSessionSnapshot) {
 function firstRequest(): CreateProjectSessionRequest {
   return (vi.mocked(invoke).mock.calls.find(([command]) => command === "create_project_session")![1] as { request: CreateProjectSessionRequest }).request;
 }
-async function startDraft(prompt: string) {
+async function startDraft(prompt: string, provider?: "qoder") {
   fireEvent.click(screen.getByRole("button", { name: "New session" }));
+  if (provider) fireEvent.change(screen.getByRole("combobox", { name: "Agent" }), { target: { value: provider } });
   fireEvent.change(screen.getByRole("textbox", { name: "First message" }), { target: { value: prompt } });
   await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeEnabled());
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
@@ -83,7 +87,10 @@ async function startDraft(prompt: string) {
 }
 beforeEach(() => {
   vi.stubGlobal("__TAURI_INTERNALS__", {});
-  vi.mocked(listen).mockImplementation(async (_name, handler) => { emit = handler as typeof emit; return () => {}; });
+  vi.mocked(listen).mockImplementation(async (name, handler) => {
+    if (name === "managed-session-changed") emit = handler as typeof emit;
+    return () => {};
+  });
   vi.mocked(invoke).mockImplementation(async (command, payload) => {
     const request = (payload as { request: { request_id: string } }).request;
     if (command === "create_project_session") {
@@ -130,6 +137,56 @@ describe("draft selection in the viewer", () => {
     expect(screen.getByRole("main", { name: "Saved conversation" })).toHaveTextContent("Created task");
     expect(screen.queryByTestId("draft-row")).not.toBeInTheDocument();
     expect(calls.select).not.toHaveBeenCalled();
+  });
+
+  it("answers a first Qoder permission and shows streamed work before initial admission completes while retaining its draft", async () => {
+    const original = vi.mocked(invoke).getMockImplementation()!;
+    const native = { ...created, provider: "qoder" as const, session_key: "qoder:created" };
+    let response_sent = false;
+    vi.mocked(invoke).mockImplementation(async (command, payload) => {
+      if (command === "get_session_control") return { session_key: native.session_key, provider: "qoder", transport: "rpc",
+        can_select: false, can_cancel: true, available: true, is_running: true, message: "", runtime_id: "runtime", instance_id: "instance",
+        live_output: { prompt_id: "managed-window", truncated: false, parts: [{ kind: "text", text: "Checking the fixture" }] } };
+      if (command === "list_session_interactions") return { session_key: native.session_key, runtime_id: "runtime", instance_id: "instance", interactions: [{
+        interaction_id: "native-permission", kind: "permission", title: "Read fixture?", details: "cat fixture.txt", questions: [],
+        permission_decisions: ["allow_once", "deny"], response_pending: response_sent,
+      }] };
+      if (command === "respond_session_interaction") {
+        response_sent = true;
+        return { request_id: (payload as { request: { request_id: string } }).request.request_id, status: "accepted", message: "Response sent" };
+      }
+      return original(command, payload);
+    });
+    render(<SessionDraftsProvider enabled><ViewerPage /></SessionDraftsProvider>);
+    const request_id = await startDraft("Inspect this fixture", "qoder");
+    expect(screen.queryByRole("region", { name: "Session activity" })).not.toBeInTheDocument();
+    expect(invoke).not.toHaveBeenCalledWith("list_session_interactions", expect.anything());
+    act(() => publish({ ...pending(request_id), provider: "qoder", revision: 2, session_key: "qoder:another-session",
+      session: native, creation_phase: "history_pending", creation_input_state: "not_attempted" }));
+    expect(screen.queryByRole("region", { name: "Session activity" })).not.toBeInTheDocument();
+    expect(invoke).not.toHaveBeenCalledWith("list_session_interactions", expect.anything());
+    act(() => publish({ ...pending(request_id), provider: "qoder", revision: 3, session_key: native.session_key,
+      session: native, creation_phase: "history_pending", creation_input_state: "not_attempted" }));
+    expect(await screen.findByRole("button", { name: "Allow once" })).toBeEnabled();
+    expect(vi.mocked(invoke).mock.calls.map(([command]) => command)).toContain("get_session_control");
+    expect(await screen.findByRole("button", { name: "Stop" })).toBeEnabled();
+    expect(await screen.findByText("Checking the fixture")).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "First message" })).toHaveValue("Inspect this fixture");
+    expect(screen.getByRole("textbox", { name: "First message" })).toBeDisabled();
+    expect(calls.open_created).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Allow once" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("respond_session_interaction", { request: {
+      session_key: native.session_key, request_id: expect.any(String), runtime_id: "runtime", instance_id: "instance",
+      interaction_id: "native-permission", response: { type: "permission", decision: "allow_once" },
+    } }));
+    expect(screen.getByTestId("draft-row")).toHaveTextContent("Inspect this fixture");
+    expect(calls.open_created).not.toHaveBeenCalled();
+    act(() => publish({ ...pending(request_id), provider: "qoder", revision: 4, session_key: native.session_key,
+      session: native, creation_phase: "ready", creation_input_state: "accepted" }));
+    expect(calls.open_created).toHaveBeenCalledExactlyOnceWith(native);
+    expect(screen.queryByTestId("draft-row")).not.toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "create_project_session")).toHaveLength(1);
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "submit_session_input")).toHaveLength(0);
   });
 
   it.each(["native", "draft"] as const)("does not steal the selected %s conversation when another draft completes", async (destination) => {

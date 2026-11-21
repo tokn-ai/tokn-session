@@ -2,7 +2,7 @@
 
 `tokn-session` is a provider-agnostic session layer for agent tools. It can
 discover and normalize historical sessions from Pi, Codex, OpenCode, ZCode,
-WorkBuddy, and DeepSeek Harness (DSH), while preserving provider-native detail
+Qoder, WorkBuddy, and DeepSeek Harness (DSH), while preserving provider-native detail
 needed for display and debugging.
 
 The Rust CLI currently supports listing, showing, and browsing sessions, plus
@@ -52,13 +52,15 @@ cargo run -p tokn-session-cli -- list --source codex --limit 5
 cargo run -p tokn-session-cli -- show --source pi <session-id>
 cargo run -p tokn-session-cli -- browse --source dsh
 cargo run -p tokn-session-cli -- list --source zcode --limit 5
+cargo run -p tokn-session-cli -- list --source qoder --limit 5
+cargo run -p tokn-session-cli -- create --source qoder --executor qoder "Summarize this project"
 cargo run -p tokn-session-cli -- create --source zcode --executor zcode "Summarize this project"
 cargo run -p tokn-session-cli -- list --source workbuddy --limit 5
 ```
 
 ## Native interaction libraries
 
-Rust interaction contracts and native Codex, Pi, OpenCode V2, ZCode, and DSH
+Rust interaction contracts and native Codex, Pi, OpenCode V2, ZCode, Qoder ACP, and DSH
 adapters support managed runtimes. Attachment, model catalogs, delivery modes,
 cancellation, and live interactions depend on the provider.
 The core owns runtime identity and bounded receipts; native protocols remain
@@ -68,13 +70,14 @@ capabilities, and current viewer integration.
 ## Desktop viewer
 
 `apps/viewer` is a Tauri and browser app that presents root sessions from all
-six providers in one searchable interface. It reuses the Rust session crates
+seven providers in one searchable interface. It reuses the Rust session crates
 directly rather than parsing CLI output and safely renders conversational
 Markdown without allowing provider content to navigate the WebView. A local,
 metadata-only index keeps its sidebar current without writing provider data.
 Its message composer can send through the selected machine’s supported runtime.
 ZCode uses the native Agent CLI for desktop creation and continuation of root
 sessions.
+Qoder uses its native CLI's Agent Client Protocol (ACP) interface.
 
 ```sh
 cd apps/viewer

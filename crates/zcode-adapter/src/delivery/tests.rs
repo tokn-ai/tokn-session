@@ -62,7 +62,12 @@ async fn creates_deferred_sessions_and_dispatches_only_honest_v4_modes() {
     .await
     .unwrap()
     .target;
-  for mode in [DeliveryMode::Start, DeliveryMode::Steer, DeliveryMode::StartOrSteer] {
+  for mode in [
+    DeliveryMode::Prompt,
+    DeliveryMode::Start,
+    DeliveryMode::Steer,
+    DeliveryMode::StartOrSteer,
+  ] {
     assert_eq!(
       adapter
         .inner

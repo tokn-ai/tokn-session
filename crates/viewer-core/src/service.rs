@@ -4121,6 +4121,7 @@ fn source_cursor(provider: ViewerProvider, source_path: &Path) -> Result<String,
     ViewerProvider::Pi => "source-revision.pi.v3",
     ViewerProvider::OpenCode => "source-revision.opencode.v2",
     ViewerProvider::ZCode => "source-revision.zcode.v2",
+    ViewerProvider::Qoder => "source-revision.qoder.v1",
     ViewerProvider::WorkBuddy => "source-revision.workbuddy.v2",
     ViewerProvider::Dsh => "source-revision.dsh.v2",
     ViewerProvider::Codex => "source-revision.v1",
@@ -5641,6 +5642,7 @@ pub(crate) fn viewer_provider(provider: Provider) -> ViewerProvider {
     Provider::Pi => ViewerProvider::Pi,
     Provider::OpenCode => ViewerProvider::OpenCode,
     Provider::ZCode => ViewerProvider::ZCode,
+    Provider::Qoder => ViewerProvider::Qoder,
     Provider::WorkBuddy => ViewerProvider::WorkBuddy,
     Provider::Dsh => ViewerProvider::Dsh,
   }
@@ -8689,50 +8691,23 @@ mod tests {
     assert_eq!(startup.body.failed_jobs, 0);
     assert_eq!(
       startup.body.providers,
-      vec![
-        ProviderBody {
-          provider: ViewerProvider::Codex,
-          total_jobs: 1,
-          completed_jobs: 0,
-          pending_jobs: 1,
-          failed_jobs: 0,
-        },
-        ProviderBody {
-          provider: ViewerProvider::Pi,
-          total_jobs: 1,
-          completed_jobs: 0,
-          pending_jobs: 1,
-          failed_jobs: 0,
-        },
-        ProviderBody {
-          provider: ViewerProvider::OpenCode,
-          total_jobs: 0,
-          completed_jobs: 0,
-          pending_jobs: 0,
-          failed_jobs: 0,
-        },
-        ProviderBody {
-          provider: ViewerProvider::ZCode,
-          total_jobs: 0,
-          completed_jobs: 0,
-          pending_jobs: 0,
-          failed_jobs: 0,
-        },
-        ProviderBody {
-          provider: ViewerProvider::WorkBuddy,
-          total_jobs: 0,
-          completed_jobs: 0,
-          pending_jobs: 0,
-          failed_jobs: 0,
-        },
-        ProviderBody {
-          provider: ViewerProvider::Dsh,
-          total_jobs: 0,
-          completed_jobs: 0,
-          pending_jobs: 0,
-          failed_jobs: 0,
-        },
-      ]
+      ViewerProvider::ALL
+        .into_iter()
+        .map(|provider| {
+          let pending = if matches!(provider, ViewerProvider::Codex | ViewerProvider::Pi) {
+            1
+          } else {
+            0
+          };
+          ProviderBody {
+            provider,
+            total_jobs: pending,
+            completed_jobs: 0,
+            pending_jobs: pending,
+            failed_jobs: 0,
+          }
+        })
+        .collect::<Vec<_>>()
     );
 
     let all_jobs = service

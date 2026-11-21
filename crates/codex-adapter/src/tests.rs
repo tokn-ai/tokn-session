@@ -339,6 +339,7 @@ async fn inspection_does_not_grant_control_and_unsupported_delivery_is_explicit(
 
   let (adapter, _peer) = attach_bound().await;
   for (id, delivery) in [
+    ("native-prompt", DeliveryMode::Prompt),
     ("strict-start", DeliveryMode::Start),
     ("guide", DeliveryMode::Guide),
     ("queue", DeliveryMode::Queue),

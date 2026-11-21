@@ -23,10 +23,12 @@ const bindingKey = (status: SessionControlStatus) => JSON.stringify([status.tran
 export const SessionControlContext = createContext<{ session_key: string | null; revision: string; blocked: boolean } | null>(null);
 
 /** Host-owned routing is explicit. A failed RPC never chooses Desktop locally. */
-export function useSessionControl(session: SessionSummary | null, refresh_key = 0) {
+export function useSessionControl(session: SessionSummary | null, refresh_key = 0,
+  on_completed?: (session_key: string) => void | Promise<void>) {
   const provider = session?.provider;
   const gated_input = provider === "codex" || provider === "dsh";
-  const enabled = !!session && (gated_input || provider === "zcode") && !session.is_subagent;
+  const live_activity = provider === "zcode" || provider === "qoder";
+  const enabled = !!session && (gated_input || live_activity) && !session.is_subagent;
   const session_key = enabled ? session.session_key : null;
   const scope = viewerStorageScope();
   const transport = useMemo(captureTransport, [scope]);
@@ -38,6 +40,10 @@ export function useSessionControl(session: SessionSummary | null, refresh_key = 
   const active = useRef(false);
   const [view, setView] = useState(() => emptyView(owner));
   const value = view.owner === owner ? view : emptyView(owner);
+  const latest_status = useRef(value.status);
+  latest_status.current = value.status;
+  const completed = useRef(on_completed);
+  completed.current = on_completed;
   const update = useCallback((target: string, apply: (old: ControlView) => ControlView) => {
     if (!active.current || latest_owner.current !== target) return;
     setView((old) => apply(old.owner === target ? old : emptyView(target)));
@@ -50,7 +56,15 @@ export function useSessionControl(session: SessionSummary | null, refresh_key = 
       const status = await getSessionControl({ session_key }, transport.invoke);
       if (sequence.current !== request) return;
       if (status.session_key !== session_key) throw new Error("Control status identifies another session.");
-      update(owner, (old) => ({ ...old, status, checking: false, error: null, binding_key: bindingKey(status),
+      const previous = latest_status.current;
+      let completion_error: string | null = null;
+      if (previous?.is_running === true && status.is_running === false
+        && previous.runtime_id === status.runtime_id && previous.instance_id === status.instance_id) {
+        try { await completed.current?.(session_key); }
+        catch { completion_error = "Could not refresh messages."; }
+        if (sequence.current !== request) return;
+      }
+      update(owner, (old) => ({ ...old, status, checking: false, error: completion_error, binding_key: bindingKey(status),
         revision: old.revision + (old.binding_key !== null && old.binding_key !== bindingKey(status) ? 1 : 0) }));
     } catch (error) {
       if (sequence.current === request) update(owner, (old) => ({ ...old, status: null, checking: false, error: errorMessage(error) }));
@@ -71,7 +85,7 @@ export function useSessionControl(session: SessionSummary | null, refresh_key = 
   useEffect(() => { void refresh(); }, [refresh, session?.is_running, refresh_key]);
 
   useEffect(() => {
-    if (!session_key || provider !== "zcode") return;
+    if (!session_key || !live_activity) return;
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     void transport.listen("rpc-runtimes-changed", () => {
@@ -83,7 +97,7 @@ export function useSessionControl(session: SessionSummary | null, refresh_key = 
       if (!cancelled) update(owner, (old) => ({ ...old, error: "Live control updates are unavailable. Retry control to check this session." }));
     });
     return () => { cancelled = true; unlisten?.(); };
-  }, [owner, provider, refresh, session_key, transport, update]);
+  }, [owner, live_activity, refresh, session_key, transport, update]);
 
   async function choose(next: SessionTransport) {
     if (!session_key || !value.status?.can_select || busy.current || value.checking || next === value.status.transport) return;
@@ -118,11 +132,11 @@ export function useSessionControl(session: SessionSummary | null, refresh_key = 
     } finally {
       if (sequence.current === request) {
         busy.current = false;
-        if (provider === "zcode") void refresh();
+        if (live_activity) void refresh();
       }
     }
   }
-  // ZCode has one control transport. Its optional Stop lookup does not gate the composer.
+  // Single-transport agents keep optional Stop inspection independent of input.
   const blocked = gated_input && !!session_key && (value.checking || value.changing || !value.status);
   const revision = JSON.stringify([owner, value.revision]);
   return { ...value, provider: session?.provider, enabled, blocked, revision, choose, cancel, refresh };

@@ -794,6 +794,7 @@ fn viewer_provider(provider: Provider) -> Option<ViewerProvider> {
     Provider::Pi => Some(ViewerProvider::Pi),
     Provider::OpenCode => Some(ViewerProvider::OpenCode),
     Provider::ZCode => Some(ViewerProvider::ZCode),
+    Provider::Qoder => Some(ViewerProvider::Qoder),
     Provider::WorkBuddy => Some(ViewerProvider::WorkBuddy),
     Provider::Dsh => Some(ViewerProvider::Dsh),
   }

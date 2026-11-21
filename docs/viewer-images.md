@@ -1,6 +1,6 @@
 # Viewer images
 
-The viewer displays recorded image messages from Codex, Pi, OpenCode, and ZCode.
+The viewer displays recorded image messages from Codex, Pi, OpenCode, ZCode, and Qoder.
 Image-only messages remain visible. Message cards show lazy thumbnails and open
 a larger preview; missing files, unsupported formats, relative paths, remote URLs,
 and opaque provider references retain an unavailable/error placeholder. The host
@@ -43,6 +43,12 @@ begin/chunk/commit copies bytes into session-owned artifacts. Busy Guide with
 attachments becomes native queued work, retaining its model and images. Upload
 failure leaves an editable draft and never dispatches the prompt. Only the
 verified CLI 0.17.1 attachment schema is supported; unknown schemas fail closed.
+
+Qoder sends validated image content through ACP only when the runtime negotiates
+`promptCapabilities.image`. The generic `image_input` capability records that
+transport fact separately from per-model vision support. Images and text share
+one native prompt request; no temporary native attachment or model switch is
+needed. Existing-session model-on-send and busy image delivery are unsupported.
 
 Stopped viewer-owned Pi sessions expose no image capability until Resume verifies
 the current model; status inspection never starts a worker. Image-bearing requests

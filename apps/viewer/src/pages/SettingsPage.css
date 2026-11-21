@@ -193,6 +193,7 @@
 .settings-page__provider[data-provider="pi"] { background: var(--pi); }
 .settings-page__provider[data-provider="opencode"] { background: var(--opencode); }
 .settings-page__provider[data-provider="zcode"] { background: var(--zcode); }
+.settings-page__provider[data-provider="qoder"] { background: var(--qoder); }
 .settings-page__provider[data-provider="workbuddy"] { background: var(--workbuddy); }
 .settings-page__provider[data-provider="dsh"] { background: var(--dsh); }
 .settings-page__source p { margin: 0; color: var(--text-muted); font-size: 12px; line-height: 1.6; }

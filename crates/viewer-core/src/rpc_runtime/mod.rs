@@ -84,6 +84,7 @@ pub(crate) struct RpcRuntimeManager(Arc<Inner>);
 struct Inner {
   resolver: resolver::RuntimeResolver,
   runtimes: core_runtime::RuntimeCoordinator<Host>,
+  live_output: Mutex<crate::live_output::LiveOutputProjection>,
   #[cfg(test)]
   interactions: InteractionService,
 }
@@ -207,6 +208,7 @@ impl RpcRuntimeManager {
     };
     Self(Arc::new(Inner {
       resolver,
+      live_output: Mutex::new(crate::live_output::LiveOutputProjection::default()),
       #[cfg(test)]
       interactions: interactions.clone(),
       runtimes: core_runtime::RuntimeCoordinator::new(host, interactions, lease_directory, ownership),
@@ -230,6 +232,47 @@ impl RpcRuntimeManager {
 
   pub(crate) fn subscribe(&self) -> broadcast::Receiver<()> {
     self.0.runtimes.subscribe()
+  }
+
+  pub(crate) fn subscribe_events(&self) -> broadcast::Receiver<RuntimeEvent> {
+    self.0.runtimes.subscribe_events()
+  }
+
+  pub(crate) fn record_live_output(&self, event: &RuntimeEvent) -> bool {
+    if !matches!(event.kind, RuntimeEventKind::Disconnected { .. })
+      && !self.inventory().runtimes.iter().any(|runtime| {
+        runtime.provider == Provider::Qoder
+          && runtime.runtime_id == event.runtime_id
+          && runtime.instance_id == event.instance_id
+          && runtime.status == "connected"
+      })
+    {
+      return false;
+    }
+    self
+      .0
+      .live_output
+      .lock()
+      .unwrap_or_else(|error| error.into_inner())
+      .apply(event)
+  }
+
+  pub(crate) fn clear_live_output(&self) {
+    self
+      .0
+      .live_output
+      .lock()
+      .unwrap_or_else(|error| error.into_inner())
+      .clear();
+  }
+
+  pub(crate) fn live_output(&self, binding: &RpcSessionBinding) -> Option<crate::live_output::SessionLiveOutput> {
+    self
+      .0
+      .live_output
+      .lock()
+      .unwrap_or_else(|error| error.into_inner())
+      .get(&binding.target)
   }
 
   pub(crate) fn changed(&self) {

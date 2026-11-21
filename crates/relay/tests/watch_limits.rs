@@ -36,7 +36,7 @@ fn exhausted_native_watches_keep_following_through_polling() {
     .arg(&sessions);
   // Every provider override is explicit, so neither startup nor recovery can
   // resolve a developer's normal session storage through environment defaults.
-  for provider in ["codex", "opencode", "zcode", "workbuddy", "dsh"] {
+  for provider in ["codex", "opencode", "zcode", "qoder", "workbuddy", "dsh"] {
     command
       .arg(format!("--{provider}-dir"))
       .arg(fixture.path().join(format!("missing-{provider}")));

@@ -74,6 +74,7 @@ impl ViewerService {
       LiveProvider::Codex,
       LiveProvider::OpenCode,
       LiveProvider::ZCode,
+      LiveProvider::Qoder,
       LiveProvider::Dsh,
     ] {
       let mut runtimes = Vec::new();
@@ -413,6 +414,7 @@ fn viewer_provider(provider: LiveProvider) -> ViewerProvider {
     LiveProvider::Codex => ViewerProvider::Codex,
     LiveProvider::OpenCode => ViewerProvider::OpenCode,
     LiveProvider::ZCode => ViewerProvider::ZCode,
+    LiveProvider::Qoder => ViewerProvider::Qoder,
     LiveProvider::Dsh => ViewerProvider::Dsh,
   }
 }
@@ -420,7 +422,7 @@ fn viewer_provider(provider: LiveProvider) -> ViewerProvider {
 fn supports_creation_images(provider: LiveProvider) -> bool {
   matches!(
     provider,
-    LiveProvider::Pi | LiveProvider::Codex | LiveProvider::OpenCode | LiveProvider::ZCode
+    LiveProvider::Pi | LiveProvider::Codex | LiveProvider::OpenCode | LiveProvider::ZCode | LiveProvider::Qoder
   )
 }
 
@@ -428,7 +430,10 @@ pub(crate) fn validate_creation_profile(
   profile: &crate::rpc_profiles::RpcResolvedProfile,
   cwd: &Path,
 ) -> Result<(), String> {
-  if matches!(profile.profile.provider, LiveProvider::OpenCode | LiveProvider::ZCode) {
+  if matches!(
+    profile.profile.provider,
+    LiveProvider::OpenCode | LiveProvider::ZCode | LiveProvider::Qoder
+  ) {
     let configured = profile
       .profile
       .working_directory
@@ -464,7 +469,7 @@ impl CreationHost for Host {
       LiveProvider::OpenCode => Ok(Some(tokn_opencode_adapter::new_session_id())),
       LiveProvider::ZCode => Ok(Some(tokn_zcode_adapter::new_session_id())),
       LiveProvider::Dsh => Ok(Some(tokn_dsh_adapter::new_session_id())),
-      LiveProvider::Codex => Ok(None),
+      LiveProvider::Codex | LiveProvider::Qoder => Ok(None),
       LiveProvider::Pi => Err("Pi creation uses its managed-session driver".into()),
     }
   }
@@ -533,7 +538,12 @@ impl CreationHost for Host {
       } else {
         None
       };
-      if !input.images.is_empty() {
+      if created.provider == LiveProvider::Qoder && !input.images.is_empty() && !created.capabilities.image_input {
+        return Err(InteractionError::unsupported(
+          "The Qoder runtime did not advertise image input",
+        ));
+      }
+      if created.provider != LiveProvider::Qoder && !input.images.is_empty() {
         let catalog = self
           .runtimes
           .execute_created(created, uuid::Uuid::new_v4().to_string(), Command::Models)

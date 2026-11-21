@@ -866,6 +866,7 @@ fn provider_name(provider: crate::Provider) -> &'static str {
     crate::Provider::Pi => "pi",
     crate::Provider::OpenCode => "opencode",
     crate::Provider::ZCode => "zcode",
+    crate::Provider::Qoder => "qoder",
     crate::Provider::Dsh => "dsh",
   }
 }

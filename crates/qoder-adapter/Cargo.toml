@@ -1,0 +1,22 @@
+[package]
+name = "tokn-qoder-adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Managed Qoder ACP interaction adapter."
+
+[dependencies]
+tokn-interaction-core.workspace = true
+tokn-acp-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["process"] }
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

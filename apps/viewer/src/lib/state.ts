@@ -280,6 +280,8 @@ export function providerLabel(provider: ViewerProvider): string {
       return "OpenCode";
     case "zcode":
       return "ZCode";
+    case "qoder":
+      return "Qoder";
     case "workbuddy":
       return "WorkBuddy";
     case "dsh":

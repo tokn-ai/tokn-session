@@ -29,6 +29,7 @@ import { EventCard } from "./EventCard";
 import { LoadingRows, StateView } from "./StateView";
 import { SessionComposer } from "./SessionComposer";
 import { SessionInteractions } from "./SessionInteractions";
+import { SessionLiveOutput } from "./SessionLiveOutput";
 
 interface ConversationProps {
   current_model?: SessionModelState;
@@ -135,7 +136,7 @@ export function Conversation({
   on_retry,
   on_retry_expanded_detail,
 }: ConversationProps) {
-  const control = useSessionControl(session, input_refresh_key);
+  const control = useSessionControl(session, input_refresh_key, on_input_accepted);
   const model = useSessionModel(control.blocked ? null : session?.session_key ?? null, current_model, session?.is_running,
     input_refresh_key, control.enabled ? control.revision : undefined);
   const { preferences, updatePreferences } = useViewerPreferences();
@@ -467,6 +468,7 @@ export function Conversation({
         ) : null}
       </div>
       <SessionInteractions session={session} refresh_key={input_refresh_key} on_accepted={on_input_accepted} />
+      <SessionLiveOutput output={control.status?.live_output} />
       <SessionComposer session={session} on_accepted={on_input_accepted} model={model}
         control={control.enabled ? control : undefined}
         input_refresh_key={(input_refresh_key ?? 0) + model.input_revision} />

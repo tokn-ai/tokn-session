@@ -38,6 +38,7 @@ impl shared::ManagedSessionHost for ViewerHost {
       Provider::Pi => ViewerProvider::Pi,
       Provider::OpenCode => ViewerProvider::OpenCode,
       Provider::ZCode => ViewerProvider::ZCode,
+      Provider::Qoder => ViewerProvider::Qoder,
       Provider::Dsh => ViewerProvider::Dsh,
     };
     encode_session_key(&SessionLocator {

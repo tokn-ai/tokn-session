@@ -49,6 +49,7 @@ export function RpcRuntimeProfileForm({ profile, revision, busy, on_save, on_val
       </div>
       {draft.provider === "pi" && <p className="settings-page__hint">Pi requires a managed process; existing Pi process pipes cannot be attached through an endpoint.</p>}
       {draft.provider === "zcode" && <p className="settings-page__hint">ZCode requires a managed process for the selected project folder.</p>}
+      {draft.provider === "qoder" && <p className="settings-page__hint">Qoder requires a managed ACP process for the selected project folder.</p>}
       {draft.mode === "managed" ? <>
         {textField("executable", "Executable", "Absolute executable path on the selected machine.")}
         {supportsRpcLaunchArguments(draft.provider) && <div className="rpc-profile-form__field"><label htmlFor={`${id}-arguments`}>Arguments</label><textarea id={`${id}-arguments`} value={draft.arguments} rows={3} spellCheck={false} onChange={(event) => change({ arguments: event.currentTarget.value })} /><p>JSON array of arguments. The host adds the provider’s RPC launch options.</p></div>}

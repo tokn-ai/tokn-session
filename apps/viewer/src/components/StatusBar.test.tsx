@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SessionIndexProgress, SourceError } from "../lib/types";
+import { PROVIDERS } from "../lib/types";
 import { StatusBar } from "./StatusBar";
 
 afterEach(cleanup);
@@ -13,8 +14,8 @@ function progress(overrides: Partial<SessionIndexProgress> = {}): SessionIndexPr
     catalog: {
       scope: "full",
       active_provider: null,
-      processed_providers: 6,
-      total_providers: 6,
+      processed_providers: PROVIDERS.length,
+      total_providers: PROVIDERS.length,
       pending_providers: [],
       error_providers: [],
     },
@@ -113,7 +114,7 @@ describe("StatusBar", () => {
       catalog: {
         active_provider: "codex",
         processed_providers: 1,
-        total_providers: 6,
+        total_providers: PROVIDERS.length,
         pending_providers: ["codex", "pi"],
         error_providers: ["dsh"],
       },
@@ -130,7 +131,7 @@ describe("StatusBar", () => {
       },
     }), [{ provider: "dsh", message: "Session log is unavailable." }]);
 
-    expect(screen.getByText("Finding sessions · 1 / 6 providers")).toBeInTheDocument();
+    expect(screen.getByText(`Finding sessions · 1 / ${PROVIDERS.length} providers`)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /open notifications/i }));
 
     expect(screen.getByRole("dialog", { name: "Notifications" })).toHaveFocus();
@@ -138,7 +139,7 @@ describe("StatusBar", () => {
     expect(screen.getByLabelText("Queued: Waiting to find sessions.")).toBeInTheDocument();
     expect(screen.getByLabelText("Queued · 0 / 3: Waiting to load session details.")).toBeInTheDocument();
     expect(screen.getByLabelText("Needs attention: Session log is unavailable.")).toBeInTheDocument();
-    expect(screen.getAllByLabelText("Up to date: Session details are current.")).toHaveLength(2);
+    expect(screen.getAllByLabelText("Up to date: Session details are current.")).toHaveLength(PROVIDERS.length - 4);
   });
 
   it("describes a targeted catalog as a check for changes", () => {

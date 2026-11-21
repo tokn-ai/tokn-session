@@ -8,7 +8,8 @@ Pi JSONL ─────────── pi-rpc-protocol ───────
 Codex app-server ── codex-rpc-protocol ────── codex-adapter ────┤
 OpenCode V2 HTTP/SSE ─ opencode-rpc-protocol ─ opencode-adapter ─┼─ InteractionService ─ host API/UI
 DSH HTTP/WebSocket ─ dsh-rpc-protocol ──────── dsh-adapter ─────┤
-ZCode app-server NDJSON ──────────────────── zcode-adapter ────┘
+ZCode app-server NDJSON ──────────────────── zcode-adapter ────┤
+Qoder ACP stdio ────────── acp-protocol ───── qoder-adapter ────┘
 ```
 
 Dependencies point inward: the core defines `InteractionAdapter`, commands,
@@ -31,7 +32,7 @@ questions, transport limits, and ownership.
 A runtime has a host-chosen `runtime_id`, a fresh connection/process
 `instance_id`, a provider, and `Managed` or `Attached` ownership. Commands bind
 both identities and an optional native session ID; mutations require an explicit
-session ID. Multiple sessions can share one Codex/OpenCode/ZCode/DSH runtime. Never identify
+session ID. Multiple sessions can share one Codex/OpenCode/ZCode/Qoder/DSH runtime. Never identify
 a runtime solely by a saved history path, PID, or listening port.
 
 Pi `spawn` owns a headless `--mode rpc` child; `attach` accepts IO handles
@@ -58,6 +59,17 @@ across envelope reannouncements. The adapter normalizes question choices, notes,
 plan approval and per-use permissions. Responses have transport-write receipts;
 native resolution or the pending snapshot retires a dispatched request.
 
+Qoder launches a managed project-scoped `--acp` process and negotiates ACP v1
+capabilities. The host verifies the native transcript ID, working directory and
+configuration namespace before resuming saved root sessions. Native creation
+assigns the session ID; a lost response never causes automatic creation replay.
+Authentication remains in the installed Qoder CLI. The adapter does not open
+login flows or supply an account on the user's behalf.
+Standard tool permissions expose only advertised per-use approval and denial.
+Permanent grants and callbacks that change the session's permission mode are
+not presented as per-use approvals. Structured question elicitation is not
+advertised by this client.
+
 Snapshot inspection does not call a provider, start a process, or resume saved
 work. Initial snapshots require recovery and do not claim a live connection until
 a state/pending baseline or corresponding live event confirms one. Metadata,
@@ -71,7 +83,8 @@ keeps that binding reserved until shutdown, preventing accidental replacement.
 
 Commands cover metadata, current state, model catalogs, messages, cancellation,
 pending questions/permissions/dialogs, and typed replies. Consult capabilities
-instead of treating all providers as equivalent. `StartOrSteer` uses native
+instead of treating all providers as equivalent. `Prompt` submits ordinary
+native input without an atomic idle, steering or queue guarantee. `StartOrSteer` uses native
 admission to start when idle or steer when running. `Guide` permits native
 advisory guidance with idle start and follow-up fallback. `Queue` uses native
 follow-up delivery and may start immediately when idle.
@@ -80,6 +93,18 @@ unsupported modes reject rather than relying on a racing status preflight.
 ZCode supports `Guide` and `Queue`, and rejects all strict delivery modes and
 `StartOrSteer`. An `Accepted` admission is distinct from started, steered, or completed work.
 Cancellation ends native turn work and may preserve queued inputs.
+
+Qoder supports ordinary native `Prompt` delivery and prevents overlapping
+host-managed prompts. ACP does not expose an atomic native idle fence, so strict
+`Start`, steering, guidance and queue delivery reject without dispatch.
+ACP's prompt result reports completion, not an early admission acknowledgement.
+Qoder can publish background activity without a prompt identity, so progress and
+permission requests cannot prove consumption. Admission stays pending until the
+matching prompt RPC completes; live output, Stop and permissions remain available.
+It does not infer started or queued disposition. Uncertain delivery is never replayed.
+`image_input` records negotiated image-content support independently of a
+per-model catalog. It does not assert that a particular model supports vision.
+ACP model changes are separate operations, so model-on-send remains unsupported.
 
 `MessageInput.model` requires an explicit native capability. The established
 `atomic_model_on_send` contract applies the choice only when starting and ignores

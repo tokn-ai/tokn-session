@@ -156,6 +156,7 @@ impl ViewerService {
         | ViewerProvider::Dsh
         | ViewerProvider::OpenCode
         | ViewerProvider::ZCode
+        | ViewerProvider::Qoder
     ) {
       return Err("This provider has no compatible live history binding yet.".into());
     }
@@ -183,8 +184,11 @@ impl ViewerService {
     if locator.provider == ViewerProvider::OpenCode {
       self.verify_opencode_control(&locator)?;
     }
-    if locator.provider == ViewerProvider::ZCode && header.parent_session_id.is_some() {
-      return Err("Control ZCode subagents through their parent session".into());
+    if matches!(locator.provider, ViewerProvider::ZCode | ViewerProvider::Qoder) && header.parent_session_id.is_some() {
+      return Err(format!(
+        "Control {:?} subagents through their parent session",
+        locator.provider
+      ));
     }
     if locator.provider == ViewerProvider::Codex
       && (header.parent_session_id.as_deref().is_some_and(|id| !id.is_empty())

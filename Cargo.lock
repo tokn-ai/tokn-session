@@ -6415,6 +6415,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokn-acp-protocol"
+version = "0.1.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "tokn-codex-adapter"
 version = "0.1.1"
 dependencies = [
@@ -6644,6 +6652,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokn-qoder-adapter"
+version = "0.1.1"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokn-acp-protocol",
+ "tokn-interaction-core",
+ "uuid",
+]
+
+[[package]]
 name = "tokn-session-apell"
 version = "0.1.1"
 dependencies = [
@@ -6667,6 +6690,7 @@ dependencies = [
  "crossterm",
  "ratatui",
  "serde_json",
+ "tempfile",
  "tokn-session-client",
  "tokn-session-core",
  "tokn-session-render",
@@ -6676,14 +6700,20 @@ dependencies = [
 name = "tokn-session-client"
 version = "0.1.1"
 dependencies = [
+ "serde_json",
  "tempfile",
+ "tokio",
+ "tokn-interaction-core",
+ "tokn-qoder-adapter",
  "tokn-session-codex",
  "tokn-session-core",
  "tokn-session-dsh",
  "tokn-session-opencode",
  "tokn-session-pi",
+ "tokn-session-qoder",
  "tokn-session-workbuddy",
  "tokn-session-zcode",
+ "uuid",
 ]
 
 [[package]]
@@ -6796,6 +6826,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokn-session-qoder"
+version = "0.1.1"
+dependencies = [
+ "dirs 6.0.0",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokn-session-core",
+]
+
+[[package]]
 name = "tokn-session-relay"
 version = "0.1.1"
 dependencies = [
@@ -6811,6 +6852,7 @@ dependencies = [
  "tokn-session-dsh",
  "tokn-session-opencode",
  "tokn-session-pi",
+ "tokn-session-qoder",
  "tokn-session-render",
  "tokn-session-workbuddy",
  "zeromq",
@@ -6936,6 +6978,7 @@ dependencies = [
  "tokn-opencode-adapter",
  "tokn-pi-adapter",
  "tokn-pi-rpc-protocol",
+ "tokn-qoder-adapter",
  "tokn-session-client",
  "tokn-session-codex",
  "tokn-session-core",
@@ -6943,6 +6986,7 @@ dependencies = [
  "tokn-session-index",
  "tokn-session-opencode",
  "tokn-session-pi",
+ "tokn-session-qoder",
  "tokn-session-relay",
  "tokn-session-render",
  "tokn-session-storage",

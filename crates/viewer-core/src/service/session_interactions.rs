@@ -23,7 +23,7 @@ impl ViewerService {
       interactions: Vec::new(),
     };
     // Recorded Codex questions and managed Pi dialogs retain their existing UI.
-    if target.input.provider != ViewerProvider::ZCode {
+    if !matches!(target.input.provider, ViewerProvider::ZCode | ViewerProvider::Qoder) {
       return Ok(result);
     }
     let Some(binding) = self.sessions.runtimes.binding(&target.session_key) else {
@@ -72,7 +72,7 @@ impl ViewerService {
       Ok(target) => target,
       Err(message) => return Ok(rejected(&message)),
     };
-    if target.input.provider != ViewerProvider::ZCode {
+    if !matches!(target.input.provider, ViewerProvider::ZCode | ViewerProvider::Qoder) {
       return Ok(rejected("This provider uses its existing interaction controls"));
     }
     let broker_target = InputTarget {
@@ -228,6 +228,65 @@ mod tests {
         runtime_id: "stale-runtime".into(),
         instance_id: "stale-instance".into(),
         interaction_id: "perm_one".into(),
+        response: tokn_interaction_core::InteractionResponse::Permission {
+          decision: PermissionDecision::AllowOnce,
+        },
+      })
+      .await
+      .unwrap();
+    assert_eq!(response.status, InputDeliveryStatus::NotSent);
+    assert!(service.list_rpc_runtimes().await.unwrap().runtimes.is_empty());
+    service.shutdown_managed_sessions().await;
+  }
+
+  struct QoderRepository(PathBuf);
+
+  impl ViewerRepository for QoderRepository {
+    fn list_session_headers(&self, provider: ViewerProvider) -> Result<Vec<SessionHeader>, String> {
+      if provider == ViewerProvider::Qoder {
+        Ok(vec![tokn_session_qoder::read_session_header_exact(
+          &self.0,
+          "11111111-1111-4111-8111-111111111111",
+        )?])
+      } else {
+        Ok(Vec::new())
+      }
+    }
+
+    fn session_header_exact(&self, _: ViewerProvider, path: &Path, id: &str) -> Result<SessionHeader, String> {
+      tokn_session_qoder::read_session_header_exact(path, id)
+    }
+
+    fn load_session(&self, _: &SessionLocator) -> Result<LoadedSession, String> {
+      panic!("Qoder interaction inspection must not parse saved messages");
+    }
+  }
+
+  #[tokio::test]
+  async fn qoder_saved_permission_inspection_is_read_only_and_old_instance_response_is_not_sent() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = "11111111-1111-4111-8111-111111111111";
+    let path = directory.path().join(format!("{id}.jsonl"));
+    std::fs::write(&path, include_str!("../../tests/fixtures/qoder/root_session.jsonl")).unwrap();
+    let header = tokn_session_qoder::read_session_header_exact(&path, id).unwrap();
+    let key = encode_session_key(&locator_for_header(ViewerProvider::Qoder, &header)).unwrap();
+    let service = ViewerService::new(Arc::new(QoderRepository(path)));
+    service.refresh_provider_catalog(ViewerProvider::Qoder).unwrap();
+    let pending = service
+      .list_session_interactions(SessionInteractionsRequest {
+        session_key: key.clone(),
+      })
+      .await
+      .unwrap();
+    assert!(pending.runtime_id.is_none());
+    assert!(pending.interactions.is_empty());
+    let response = service
+      .respond_session_interaction(RespondSessionInteractionRequest {
+        session_key: key,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        runtime_id: "old-runtime".into(),
+        instance_id: "old-instance".into(),
+        interaction_id: "old-permission".into(),
         response: tokn_interaction_core::InteractionResponse::Permission {
           decision: PermissionDecision::AllowOnce,
         },

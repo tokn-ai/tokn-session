@@ -1,6 +1,60 @@
 use super::*;
 
 #[test]
+fn provider_defaults_preserve_native_delivery_guarantees() {
+  assert_eq!(rpc_message_delivery(Provider::Qoder), DeliveryMode::Prompt);
+  assert_eq!(rpc_message_delivery(Provider::ZCode), DeliveryMode::Guide);
+  assert_eq!(rpc_message_delivery(Provider::Codex), DeliveryMode::StartOrSteer);
+}
+
+#[tokio::test]
+async fn qoder_rejects_strict_delivery_modes_before_runtime_activation() {
+  let directory = tempfile::tempdir().unwrap();
+  let supervisor = SessionSupervisor::new(Some(directory.path().into()), InteractionService::default()).unwrap();
+  let target = VerifiedSession {
+    session_key: "qoder-session".into(),
+    input: InputTarget {
+      provider: ViewerProvider::Qoder,
+      session_id: "native-id".into(),
+      session_file: directory.path().join("native-id.jsonl"),
+    },
+    cwd: directory.path().into(),
+  };
+  for delivery in [
+    DeliveryMode::Start,
+    DeliveryMode::StartOrSteer,
+    DeliveryMode::Steer,
+    DeliveryMode::Guide,
+    DeliveryMode::Queue,
+  ] {
+    let request = SubmitSessionInputRequest {
+      session_key: target.session_key.clone(),
+      request_id: uuid::Uuid::new_v4().to_string(),
+      text: "Fixture prompt".into(),
+      image_ids: Vec::new(),
+      model_selection: None,
+      delivery: Some(delivery),
+    };
+    let error = supervisor
+      .submit(
+        VerifiedSession {
+          session_key: target.session_key.clone(),
+          input: target.input.clone(),
+          cwd: target.cwd.clone(),
+        },
+        request,
+        Vec::new(),
+        SessionTransport::Rpc,
+      )
+      .await
+      .unwrap_err();
+    assert!(error.message.contains("does not support the requested delivery mode"));
+  }
+  assert!(supervisor.runtimes.inventory().runtimes.is_empty());
+  supervisor.shutdown().await;
+}
+
+#[test]
 fn codex_defaults_to_rpc_and_explicit_desktop_persists() {
   let directory = tempfile::tempdir().unwrap();
   let path = directory.path().join("session-controls.json");
