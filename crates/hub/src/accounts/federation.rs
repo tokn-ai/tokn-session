@@ -25,7 +25,7 @@ use url::form_urlencoded;
 use zeroize::Zeroizing;
 
 use super::{
-  AccountError, AccountIdentity, Accounts, BrowserAccess, Budget, Hash, hash,
+  AccountError, AccountIdentity, Accounts, BrowserAccess, Budget, Hash, Login, hash,
   oidc::Oidc,
   random_secret,
   storage::{self, CredentialKind, SignIn, apell, github},
@@ -186,6 +186,11 @@ enum Phase {
   Exchanging,
   Ready(Identity),
   Signup(Identity),
+  ConfirmLink {
+    identity: apell::Identity,
+    matched: AccountIdentity,
+    confirmation: Zeroizing<String>,
+  },
 }
 
 #[derive(Deserialize)]
@@ -221,6 +226,18 @@ struct Signup {
   username: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfirmLink {
+  confirmation: String,
+}
+
+#[derive(Serialize)]
+struct LinkPrompt {
+  username: String,
+  confirmation: String,
+}
+
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum Complete {
@@ -232,7 +249,10 @@ enum Complete {
   SignupRequired {
     suggested_username: String,
   },
-  LinkRequired,
+  LinkRequired {
+    #[serde(flatten)]
+    prompt: Option<LinkPrompt>,
+  },
 }
 
 impl Federation {
@@ -302,6 +322,7 @@ pub(super) fn router() -> Router<Accounts> {
           post(move |state, headers, request| signup(kind, state, headers, request)),
         )
     })
+    .route("/hub/v1/account/browser/apell/confirm-link", post(confirm_link))
 }
 
 pub(super) fn code_challenge(verifier: &str) -> String {
@@ -621,6 +642,13 @@ async fn complete(kind: Kind, State(accounts): State<Accounts>, headers: HeaderM
         ensure_signed_out(&accounts, &headers)?;
         return Ok(Json(signup_prompt(identity)).into_response());
       }
+      if let Phase::ConfirmLink {
+        matched, confirmation, ..
+      } = &flow.phase
+      {
+        ensure_signed_out(&accounts, &headers)?;
+        return Ok(Json(link_prompt(matched, confirmation)).into_response());
+      }
       if !matches!(flow.phase, Phase::Ready(_)) {
         return Err(kind.expired());
       }
@@ -628,19 +656,11 @@ async fn complete(kind: Kind, State(accounts): State<Accounts>, headers: HeaderM
       let Phase::Ready(identity) = flow.phase else {
         unreachable!("verified ready")
       };
-      let (outcome, cookie) = match flow.operation {
+      match flow.operation {
         Operation::SignIn => {
           ensure_signed_out(&accounts, &headers)?;
           match identity.sign_in(&accounts.inner.store)? {
-            SignIn::SignedIn(login) => {
-              let cookie = accounts.browser_login_cookie(&login)?;
-              (
-                Complete::SignedIn {
-                  identity: login.identity,
-                },
-                Some(cookie),
-              )
-            }
+            SignIn::SignedIn(login) => signed_in_response(&accounts, kind, login),
             SignIn::SignupRequired => {
               let outcome = signup_prompt(&identity);
               pending.flows.insert(
@@ -650,9 +670,27 @@ async fn complete(kind: Kind, State(accounts): State<Accounts>, headers: HeaderM
                   ..flow
                 },
               );
-              return Ok(Json(outcome).into_response());
+              Ok(Json(outcome).into_response())
             }
-            SignIn::LinkRequired => (Complete::LinkRequired, None),
+            SignIn::LinkRequired(matched) => {
+              let Identity::Apell(identity) = identity else {
+                return finish_response(kind, Complete::LinkRequired { prompt: None }, None);
+              };
+              let confirmation = Zeroizing::new(random_secret());
+              let outcome = link_prompt(&matched, &confirmation);
+              pending.flows.insert(
+                key,
+                Flow {
+                  phase: Phase::ConfirmLink {
+                    identity,
+                    matched,
+                    confirmation,
+                  },
+                  ..flow
+                },
+              );
+              Ok(Json(outcome).into_response())
+            }
           }
         }
         Operation::Link { session_hash } => {
@@ -661,10 +699,57 @@ async fn complete(kind: Kind, State(accounts): State<Accounts>, headers: HeaderM
             return Err(AccountError::session_changed());
           }
           identity.link(&accounts.inner.store, &token)?;
-          (Complete::Linked, None)
+          finish_response(kind, Complete::Linked, None)
         }
+      }
+    })
+    .await
+}
+
+fn link_prompt(matched: &AccountIdentity, confirmation: &str) -> Complete {
+  Complete::LinkRequired {
+    prompt: Some(LinkPrompt {
+      username: matched.username.clone(),
+      confirmation: confirmation.to_owned(),
+    }),
+  }
+}
+
+async fn confirm_link(
+  State(accounts): State<Accounts>,
+  headers: HeaderMap,
+  Json(request): Json<ConfirmLink>,
+) -> Result<Response, AccountError> {
+  let kind = Kind::Apell;
+  accounts.check_origin(&headers, true)?;
+  require_browser(&headers)?;
+  let key = flow_key(kind, &headers)?;
+  if !valid_secret(&request.confirmation) {
+    return Err(kind.expired());
+  }
+  accounts
+    .blocking(move |accounts| {
+      let federation = &accounts.inner.federation;
+      federation.provider(kind).ok_or_else(|| kind.unavailable())?;
+      let mut pending = federation.pending()?;
+      let Some(flow) = pending.live(kind, &key) else {
+        return Err(kind.expired());
       };
-      finish_response(kind, outcome, cookie)
+      let Phase::ConfirmLink {
+        identity,
+        matched,
+        confirmation,
+      } = &flow.phase
+      else {
+        return Err(kind.expired());
+      };
+      if !bool::from(confirmation.as_bytes().ct_eq(request.confirmation.as_bytes())) {
+        return Err(kind.expired());
+      }
+      ensure_signed_out(&accounts, &headers)?;
+      let login = apell::confirm_link(&accounts.inner.store, identity, &matched.user_id)?;
+      pending.flows.remove(&key);
+      signed_in_response(&accounts, kind, login)
     })
     .await
 }
@@ -721,4 +806,15 @@ fn finish_response(
     headers.append(header::SET_COOKIE, account);
   }
   Ok(response)
+}
+
+fn signed_in_response(accounts: &Accounts, kind: Kind, login: Login) -> Result<Response, AccountError> {
+  let cookie = accounts.browser_login_cookie(&login)?;
+  finish_response(
+    kind,
+    Complete::SignedIn {
+      identity: login.identity,
+    },
+    Some(cookie),
+  )
 }

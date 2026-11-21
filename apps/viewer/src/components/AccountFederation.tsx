@@ -2,8 +2,9 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { hubErrorMessage, type HubClient } from "../lib/hub";
 import { browserAccountClient, type AccountSession } from "../lib/hubAccount";
 import {
-  ACCOUNT_PROVIDER_LABELS, completeFederatedAccount, loadProviderConnection, signUpWithProvider, startFederatedAccount,
-  type AccountDeviceRequest, type AccountProvider, type AccountProviderId,
+  ACCOUNT_PROVIDER_LABELS, completeFederatedAccount, confirmApellAccountLink, loadProviderConnection, signUpWithProvider,
+  startFederatedAccount, type AccountDeviceRequest, type AccountProvider, type AccountProviderId,
+  type ApellLinkConfirmation,
 } from "../lib/hubAccountFederation";
 import type { AccountFailure } from "./AccountDialog";
 
@@ -11,7 +12,7 @@ type AccountReturn = { kind: "idle" } | ({ provider: AccountProviderId } & (
   { kind: "completing" | "linked" | "link_required" }
   | { kind: "error"; message: string }
   | { kind: "signup"; suggested_username: string }
-));
+)) | { kind: "confirm_apell_link"; provider: "apell"; target: ApellLinkConfirmation };
 
 function readAccountReturn(): AccountReturn {
   const params = new URLSearchParams(window.location.search);
@@ -70,11 +71,15 @@ export function useFederatedAccountReturn({ ready, apell_configured, github_conf
           if (reply.status === "signed_in") reply.session.client.close();
           return;
         }
-        // A reload during username selection can rehydrate the pending signup.
-        if (reply.status !== "signup_required") clearReturnMarker(provider);
+        // Keep the callback marker while a pending decision can be resumed on reload.
+        const target = reply.status === "link_required" ? reply.apell_link : undefined;
+        if (reply.status !== "signup_required" && !target) clearReturnMarker(provider);
         switch (reply.status) {
           case "signed_in": setResult({ kind: "idle" }); on_signed_in(reply.session); break;
           case "signup_required": setResult({ kind: "signup", provider, suggested_username: reply.suggested_username }); break;
+          case "link_required": setResult(target
+            ? { kind: "confirm_apell_link", provider: "apell", target }
+            : { kind: "link_required", provider }); break;
           default: setResult({ kind: reply.status, provider });
         }
       }).catch((error) => {
@@ -169,6 +174,60 @@ export function FederatedConnection({ provider, account_id, linked, disabled, on
       <button type="button" onClick={() => setAttempt((previous) => previous + 1)}>Retry connection check</button></div>
       : connection === undefined && <p role="status">Checking {label} connection…</p>}
   </section>;
+}
+
+export function ApellLinkPrompt({ target, children, on_cancel, on_email, on_signed_in }: {
+  target: ApellLinkConfirmation;
+  children?: ReactNode;
+  on_cancel: () => void;
+  on_email?: () => void;
+  on_signed_in: (session: AccountSession) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const heading = useRef<HTMLHeadingElement>(null);
+  const active = useRef<HubClient>(undefined);
+  useEffect(() => {
+    heading.current?.focus();
+    const cancel = () => active.current?.close();
+    window.addEventListener("pagehide", cancel);
+    return () => { window.removeEventListener("pagehide", cancel); cancel(); };
+  }, []);
+
+  async function confirm() {
+    if (active.current) return;
+    const client = browserAccountClient();
+    active.current = client;
+    setBusy(true);
+    setError(undefined);
+    try {
+      const session = await confirmApellAccountLink(client, target.confirmation);
+      if (client.signal.aborted) session.client.close();
+      else on_signed_in(session);
+    } catch (error) { if (!client.signal.aborted) setError(hubErrorMessage(error)); }
+    finally {
+      if (!client.signal.aborted) setBusy(false);
+      active.current = undefined;
+      client.close();
+    }
+  }
+
+  return <div className="auth-form">
+    <header className="auth-heading">
+      <p className="auth-eyebrow">Hub account</p>
+      <h1 ref={heading} tabIndex={-1}>Connect to your Hub account?</h1>
+      <p className="auth-description">Your verified Apell email matches the Hub account <strong>{target.username}</strong>. Connect your accounts to sign in and keep your machines.</p>
+    </header>
+    {children}
+    {error && <p className="auth-feedback" role="alert">{error}</p>}
+    <button className="auth-primary" type="button" disabled={busy} onClick={() => { void confirm(); }}>
+      {busy ? "Connecting…" : "Connect Apell Account"}
+    </button>
+    <div className="auth-secondary-actions">
+      <button type="button" disabled={busy} onClick={on_cancel}>Back to sign in</button>
+      {on_email && <button type="button" disabled={busy} onClick={on_email}>Use an email code</button>}
+    </div>
+  </div>;
 }
 
 export function FederatedSignup({ provider, suggested_username, children, on_cancel, on_signed_in, on_email }: {

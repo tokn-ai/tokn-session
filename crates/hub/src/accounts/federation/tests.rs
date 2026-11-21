@@ -13,6 +13,9 @@ const ORIGIN: &str = "https://hub.example.test";
 const ISSUER: &str = "https://account.example.test/oidc";
 const BASE: &str = "/hub/v1/account/browser/github";
 const COMPLETE: &str = "/hub/v1/account/browser/github/complete";
+const APELL_BASE: &str = "/hub/v1/account/browser/apell";
+const APELL_COMPLETE: &str = "/hub/v1/account/browser/apell/complete";
+const APELL_CONFIRM_LINK: &str = "/hub/v1/account/browser/apell/confirm-link";
 const EMAIL: &str = "person@example.test";
 
 fn fixture() -> (TempDir, Accounts, Router) {
@@ -458,8 +461,6 @@ async fn matching_email_does_not_link_and_linking_requires_its_original_browser_
 
 #[tokio::test]
 async fn apell_issuer_and_provider_are_bound_and_viewer_approval_stays_explicit() {
-  const APELL_BASE: &str = "/hub/v1/account/browser/apell";
-  const APELL_COMPLETE: &str = "/hub/v1/account/browser/apell/complete";
   let kind = Kind::Apell;
   let (_directory, accounts, app) = fixture();
   let (_, _, caps) = request(
@@ -507,9 +508,7 @@ async fn apell_issuer_and_provider_are_bound_and_viewer_approval_stays_explicit(
       .0,
     StatusCode::BAD_REQUEST
   );
-  let (status, _, result) = request(&app, "POST", APELL_COMPLETE, json!({}), headers(Some(&bind), None)).await;
-  assert_eq!(status, StatusCode::OK);
-  assert_eq!(result, json!({"status":"link_required"}));
+  apell_link_prompt(&app, &bind).await;
   assert_eq!(
     request(&app, "GET", APELL_BASE, Value::Null, owner.clone()).await.2,
     json!({"connection":null})
@@ -565,4 +564,171 @@ async fn apell_issuer_and_provider_are_bound_and_viewer_approval_stays_explicit(
   );
   let signed_in_cookie = cookie(&response, BROWSER_COOKIE);
   check_viewer_approval(&accounts, &app, user_code, device_code, &signed_in_cookie, &identity).await;
+}
+
+async fn apell_link_prompt(app: &Router, bind: &str) -> (HeaderMap, Value) {
+  let (status, response, prompt) = request(app, "POST", APELL_COMPLETE, json!({}), headers(Some(bind), None)).await;
+  assert_eq!(status, StatusCode::OK);
+  assert_eq!(prompt["status"], "link_required");
+  assert_eq!(prompt["username"], "alice");
+  assert!(valid_secret(prompt["confirmation"].as_str().unwrap()));
+  (response, prompt)
+}
+
+#[tokio::test]
+async fn apell_verified_email_match_requires_consent_before_sign_in_and_viewer_approval() {
+  let (_directory, accounts, app) = fixture();
+  let (email_cookie, identity) = email_session(&app, &accounts).await;
+  let owner = headers(Some(&email_cookie), Some(&identity));
+  let (status, _, viewer) = request(&app, "POST", VIEWER_START, json!({}), headers(None, None)).await;
+  assert_eq!(status, StatusCode::OK);
+  let user_code = viewer["user_code"].as_str().unwrap();
+  let device_code = viewer["device_code"].as_str().unwrap();
+  let (bind, url) = start_provider_flow(
+    &app,
+    Kind::Apell,
+    json!({"mode":"sign_in", "user_code":user_code, "device":"viewer"}),
+    headers(None, None),
+  )
+  .await;
+  let (_, returned) = provider_exchange(&app, Kind::Apell, &url, "existing", &bind, Some(ISSUER)).await;
+  assert_eq!(
+    returned[header::LOCATION],
+    format!("/account?apell=complete&user_code={user_code}&device=viewer")
+  );
+  let (response, prompt) = apell_link_prompt(&app, &bind).await;
+  assert!(!response.contains_key(header::SET_COOKIE));
+  assert_eq!(apell_link_prompt(&app, &bind).await.1, prompt);
+  assert_eq!(
+    request(&app, "GET", APELL_BASE, Value::Null, owner.clone()).await.2,
+    json!({"connection":null})
+  );
+
+  let consent = json!({"confirmation":prompt["confirmation"]});
+  let mut foreign = headers(Some(&bind), None);
+  foreign.insert(
+    header::ORIGIN,
+    HeaderValue::from_static("https://elsewhere.example.test"),
+  );
+  assert_eq!(
+    request(&app, "POST", APELL_CONFIRM_LINK, consent.clone(), foreign)
+      .await
+      .0,
+    StatusCode::FORBIDDEN
+  );
+  assert_eq!(
+    request(&app, "POST", APELL_CONFIRM_LINK, consent.clone(), headers(None, None))
+      .await
+      .0,
+    StatusCode::BAD_REQUEST
+  );
+  let signed_in_browser = format!("{bind}; {email_cookie}");
+  assert_eq!(
+    request(
+      &app,
+      "POST",
+      APELL_CONFIRM_LINK,
+      consent.clone(),
+      headers(Some(&signed_in_browser), Some(&identity)),
+    )
+    .await
+    .0,
+    StatusCode::CONFLICT
+  );
+  assert_eq!(
+    request(&app, "GET", APELL_BASE, Value::Null, owner.clone()).await.2,
+    json!({"connection":null})
+  );
+
+  let (status, response, signed_in) = request(
+    &app,
+    "POST",
+    APELL_CONFIRM_LINK,
+    consent.clone(),
+    headers(Some(&bind), None),
+  )
+  .await;
+  assert_eq!(status, StatusCode::OK);
+  assert_eq!(
+    signed_in,
+    json!({"status":"signed_in", "user_id":identity["user_id"], "username":"alice"})
+  );
+  assert_eq!(
+    cookie(&response, Kind::Apell.cookie()),
+    format!("{}=", Kind::Apell.cookie())
+  );
+  let signed_in_cookie = cookie(&response, BROWSER_COOKIE);
+  assert_eq!(
+    request(&app, "GET", APELL_BASE, Value::Null, owner).await.2,
+    json!({"connection":{"apell_login":"Octocat"}})
+  );
+  assert_eq!(
+    request(&app, "POST", APELL_CONFIRM_LINK, consent, headers(Some(&bind), None))
+      .await
+      .0,
+    StatusCode::BAD_REQUEST
+  );
+  check_viewer_approval(&accounts, &app, user_code, device_code, &signed_in_cookie, &identity).await;
+}
+
+#[tokio::test]
+async fn apell_link_confirmation_only_accepts_the_current_unexpired_prompt() {
+  let (_directory, accounts, app) = fixture();
+  let (email_cookie, identity) = email_session(&app, &accounts).await;
+  let (old_bind, old_url) =
+    start_provider_flow(&app, Kind::Apell, json!({"mode":"sign_in"}), headers(None, None)).await;
+  provider_exchange(&app, Kind::Apell, &old_url, "existing", &old_bind, Some(ISSUER)).await;
+  let (_, old_prompt) = apell_link_prompt(&app, &old_bind).await;
+
+  let (bind, url) = start_provider_flow(
+    &app,
+    Kind::Apell,
+    json!({"mode":"sign_in"}),
+    headers(Some(&old_bind), None),
+  )
+  .await;
+  provider_exchange(&app, Kind::Apell, &url, "existing", &bind, Some(ISSUER)).await;
+  let (_, prompt) = apell_link_prompt(&app, &bind).await;
+  assert_ne!(old_prompt["confirmation"], prompt["confirmation"]);
+  let (status, _, _) = request(
+    &app,
+    "POST",
+    APELL_CONFIRM_LINK,
+    json!({"confirmation":old_prompt["confirmation"]}),
+    headers(Some(&bind), None),
+  )
+  .await;
+  assert_eq!(status, StatusCode::BAD_REQUEST);
+
+  let key = flow_key(Kind::Apell, &headers(Some(&bind), None)).unwrap();
+  accounts
+    .inner
+    .federation
+    .pending()
+    .unwrap()
+    .flows
+    .get_mut(&key)
+    .unwrap()
+    .started = Instant::now() - LIFETIME;
+  let (status, _, _) = request(
+    &app,
+    "POST",
+    APELL_CONFIRM_LINK,
+    json!({"confirmation":prompt["confirmation"]}),
+    headers(Some(&bind), None),
+  )
+  .await;
+  assert_eq!(status, StatusCode::BAD_REQUEST);
+  assert_eq!(
+    request(
+      &app,
+      "GET",
+      APELL_BASE,
+      Value::Null,
+      headers(Some(&email_cookie), Some(&identity))
+    )
+    .await
+    .2,
+    json!({"connection":null})
+  );
 }

@@ -8,8 +8,9 @@ Hubs require account ownership for all machines. Accounts have Hub-specific
 usernames and stable UUIDs. Email codes, GitHub OAuth and Apell Account OIDC use
 the same renewable 90-day browser session. Providers share the browser flow;
 Apell Account verifies the issuer, signed ID token, nonce and UserInfo subject.
-Existing users connect providers in their profile; a matching email never links
-accounts automatically. Provider tokens do not persist. CLI and viewer device
+On Apell sign-in, a verified email matching a Hub account offers a confirmation
+to link to that account and sign in. Providers can also be connected in the Hub
+profile. Provider tokens do not persist. CLI and viewer device
 approval remains explicit for every sign-in method. Issue and revoke scoped
 automation keys in **Hub account**.
 Desktop **Start hosting** and CLI `connect` automatically sign in through browser

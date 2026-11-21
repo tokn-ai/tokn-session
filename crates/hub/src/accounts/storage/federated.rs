@@ -1,5 +1,5 @@
-//! Provider identities add sign-in methods to a Hub account. A verified email
-//! helps recover an existing account but never proves a provider link.
+//! Provider identities add sign-in methods to a Hub account. A verified Apell
+//! email may authorize a link after explicit browser confirmation.
 
 use super::{
   AccountError, AccountIdentity, AccountToken, Connection, Login, OptionalExtension, StatusCode, Store, TokenTransport,
@@ -23,7 +23,7 @@ pub(super) struct Identity<'a> {
 pub(in crate::accounts) enum SignIn {
   SignedIn(Login),
   SignupRequired,
-  LinkRequired,
+  LinkRequired(AccountIdentity),
 }
 
 impl Key<'_> {
@@ -112,10 +112,40 @@ pub(super) fn sign_in(store: &Store, provider: &Identity<'_>) -> Result<SignIn, 
     provider.update_login(&tx)?;
     return finish_browser_login(tx, identity, TokenTransport::Cookie).map(SignIn::SignedIn);
   }
-  if account_by_email(&tx, &provider.signup_email()?)?.is_some() {
-    return Ok(SignIn::LinkRequired);
+  if let Some(matched) = account_by_email(&tx, &provider.signup_email()?)? {
+    return Ok(SignIn::LinkRequired(matched));
   }
   Ok(SignIn::SignupRequired)
+}
+
+pub(super) fn confirm_email_link(
+  store: &Store,
+  provider: &Identity<'_>,
+  expected_user_id: &str,
+) -> Result<Login, AccountError> {
+  let email = provider.signup_email()?;
+  let mut connection = store.connection().map_err(AccountError::internal)?;
+  let tx = connection
+    .transaction_with_behavior(TransactionBehavior::Immediate)
+    .map_err(AccountError::internal)?;
+  let identity = account_by_email(&tx, &email)?
+    .filter(|identity| identity.user_id == expected_user_id)
+    .ok_or_else(|| {
+      AccountError::new(
+        StatusCode::CONFLICT,
+        "The matching Hub account changed. Start sign-in again",
+      )
+    })?;
+
+  if let Some(owner) = provider.key.owner(&tx)? {
+    if owner.user_id != identity.user_id {
+      return Err(provider_identity_in_use());
+    }
+    provider.update_login(&tx)?;
+  } else {
+    provider.insert(&tx, &identity)?;
+  }
+  finish_browser_login(tx, identity, TokenTransport::Cookie)
 }
 
 pub(super) fn sign_up(store: &Store, provider: &Identity<'_>, username: &str) -> Result<Login, AccountError> {
@@ -149,10 +179,7 @@ pub(super) fn link(store: &Store, token: &AccountToken, provider: &Identity<'_>)
   let identity = require_browser(&tx, token)?;
   if let Some(owner) = provider.key.owner(&tx)? {
     if owner.user_id != identity.user_id {
-      return Err(AccountError::new(
-        StatusCode::CONFLICT,
-        "This sign-in identity is already connected to a Hub account",
-      ));
+      return Err(provider_identity_in_use());
     }
     provider.update_login(&tx)?;
     return tx.commit().map_err(AccountError::internal);
@@ -167,4 +194,11 @@ pub(super) fn link(store: &Store, token: &AccountToken, provider: &Identity<'_>)
   }
   provider.insert(&tx, &identity)?;
   tx.commit().map_err(AccountError::internal)
+}
+
+fn provider_identity_in_use() -> AccountError {
+  AccountError::new(
+    StatusCode::CONFLICT,
+    "This sign-in identity is already connected to a Hub account",
+  )
 }

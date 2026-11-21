@@ -40,6 +40,14 @@ pub(in crate::accounts) fn sign_in(store: &Store, identity: &Identity) -> Result
   federated::sign_in(store, &identity.credential()?)
 }
 
+pub(in crate::accounts) fn confirm_link(
+  store: &Store,
+  identity: &Identity,
+  expected_user_id: &str,
+) -> Result<Login, AccountError> {
+  federated::confirm_email_link(store, &identity.credential()?, expected_user_id)
+}
+
 pub(in crate::accounts) fn sign_up(store: &Store, identity: &Identity, username: &str) -> Result<Login, AccountError> {
   federated::sign_up(store, &identity.credential()?, username)
 }

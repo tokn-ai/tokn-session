@@ -62,12 +62,12 @@ Use the Tokn client registration; the Store has its own client and callback.
 Deploy the Hub binary and web bundle together.
 
 Choose **Continue with Apell Account** on the Hub sign-in page. The Apell sign-in
-page offers whichever options its operator enabled. If you already have a Hub
-account, sign in the usual way and choose **Connect Apell Account** in your
-profile first. That preserves your username and machines. A shared email address
-does not link accounts automatically. New Hub accounts need a verified Apell
-email and a Hub username. The Hub stores the verified issuer and subject for
-future sign-ins; it does not store provider tokens.
+page offers whichever options its operator enabled. If your verified Apell
+email matches an existing Hub account, confirm **Connect Apell Account** to
+sign in with the same Hub username and machines. You can also connect Apell
+from your signed-in profile. New Hub accounts need a verified Apell email and
+a Hub username. The Hub stores the verified issuer and subject for future
+sign-ins. Provider tokens are discarded.
 
 Desktop, CLI, and Apell still ask you to approve the matching device code on
 the Hub page after browser sign-in. Direct GitHub sign-in and email codes remain
