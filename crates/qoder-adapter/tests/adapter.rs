@@ -30,7 +30,13 @@ async fn launch(scenario: &str) -> (QoderAdapter, TempDir) {
     executable: peer().clone(),
     arguments: Vec::new(),
     directory: directory.path().to_owned(),
-    environment: BTreeMap::from([("ACP_FIXTURE_SCENARIO".into(), scenario.into())]),
+    environment: BTreeMap::from([
+      ("ACP_FIXTURE_SCENARIO".into(), scenario.into()),
+      (
+        "ACP_FIXTURE_TRACE".into(),
+        directory.path().join("methods.txt").to_string_lossy().into_owned(),
+      ),
+    ]),
   })
   .await
   .unwrap();
@@ -344,6 +350,83 @@ async fn zero_output_refusal_has_terminal_event_and_disconnect_never_fakes_admis
       .unwrap_err()
       .kind,
     ErrorKind::Uncertain
+  );
+  adapter.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn standard_configuration_wins_and_qoder_legacy_compatibility_is_separate() {
+  for scenario in ["grouped-model", "prefer-standard", "legacy-model"] {
+    let (adapter, directory) = launch(scenario).await;
+    let target = adapter
+      .create_session(Some(ModelIdentity {
+        model_provider: None,
+        model_id: "model-b".into(),
+        display_name: None,
+      }))
+      .await
+      .unwrap()
+      .target;
+    assert!(
+      matches!(adapter.execute(request(&target,Command::State)).await.unwrap(),Reply::State(state) if state.model.as_ref().unwrap().model_id=="model-b")
+    );
+    let Reply::Admission(receipt) = adapter.execute(message(&target, DeliveryMode::Prompt)).await.unwrap() else {
+      panic!("native admission required")
+    };
+    assert_eq!(
+      receipt.native_id.as_deref(),
+      if scenario == "legacy-model" {
+        Some("legacy-user-message")
+      } else {
+        None
+      }
+    );
+    adapter.close().await.unwrap();
+    let trace = std::fs::read_to_string(directory.path().join("methods.txt")).unwrap();
+    if scenario == "legacy-model" {
+      assert!(trace.lines().any(|method| method == "session/set_model"));
+      assert!(!trace.lines().any(|method| method == "session/set_config_option"));
+    } else {
+      assert!(trace.lines().any(|method| method == "session/set_config_option"));
+      assert!(!trace.lines().any(|method| method == "session/set_model"));
+    }
+  }
+}
+
+#[tokio::test]
+async fn standard_setter_requires_full_confirmed_state_and_never_retries_the_legacy_setter() {
+  for scenario in ["incomplete-config-result", "wrong-config-result"] {
+    let (adapter, directory) = launch(scenario).await;
+    let error = adapter
+      .create_session(Some(ModelIdentity {
+        model_provider: None,
+        model_id: "model-b".into(),
+        display_name: None,
+      }))
+      .await
+      .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Uncertain);
+    adapter.close().await.unwrap();
+    let trace = std::fs::read_to_string(directory.path().join("methods.txt")).unwrap();
+    assert_eq!(trace.lines().filter(|method| *method == "session/new").count(), 1);
+    assert_eq!(
+      trace
+        .lines()
+        .filter(|method| *method == "session/set_config_option")
+        .count(),
+      1
+    );
+    assert!(!trace.lines().any(|method| method == "session/set_model"));
+  }
+}
+
+#[tokio::test]
+async fn standard_model_updates_use_semantic_category_and_an_opaque_selector_id() {
+  let (adapter, _directory) = launch("config-update").await;
+  let target = adapter.create_session(None).await.unwrap().target;
+  adapter.execute(message(&target, DeliveryMode::Prompt)).await.unwrap();
+  assert!(
+    matches!(adapter.execute(request(&target,Command::State)).await.unwrap(),Reply::State(state) if state.model.as_ref().unwrap().model_id=="model-b")
   );
   adapter.close().await.unwrap();
 }

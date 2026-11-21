@@ -70,6 +70,15 @@ Permanent grants and callbacks that change the session's permission mode are
 not presented as per-use approvals. Structured question elicitation is not
 advertised by this client.
 
+`acp-protocol` models current standard session configuration and keeps `_meta`
+opaque. The adapter prefers `configOptions` and `session/set_config_option` for
+creation model selection, checking the complete returned configuration. Qoder
+compatibility is isolated in its own adapter module: legacy model catalogs and
+`session/set_model`, optional `userMessageId`, and `_meta.qoder.toolName` policy.
+Legacy selection is a pre-dispatch route choice, never a retry after a failed or
+uncertain standard setter. Shared standard wire types do not define these
+compatibility fields or methods.
+
 Snapshot inspection does not call a provider, start a process, or resume saved
 work. Initial snapshots require recovery and do not claim a live connection until
 a state/pending baseline or corresponding live event confirms one. Metadata,

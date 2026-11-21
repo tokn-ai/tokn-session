@@ -1,4 +1,7 @@
-//! Tolerant Agent Client Protocol v1 wire types.
+//! Current standard Agent Client Protocol v1 wire types.
+//! Vendor metadata stays opaque; provider extensions and legacy APIs belong in adapters.
+mod config;
+pub use config::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -18,7 +21,7 @@ pub struct InitializeResult {
 pub struct AgentInfo {
   pub name: String,
   pub title: Option<String>,
-  pub version: Option<String>,
+  pub version: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -40,36 +43,25 @@ pub struct PromptCapabilities {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct SessionCapabilities {
-  pub resume: Option<Value>,
+  pub resume: Option<ResumeCapability>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ResumeCapability {}
+
+/// Common setup response fields. New-session clients must additionally require
+/// `session_id`; load/resume responses may omit it.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionResult {
   pub session_id: Option<String>,
-  pub models: Option<SessionModels>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionModels {
-  pub current_model_id: String,
-  pub available_models: Vec<ModelInfo>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelInfo {
-  pub model_id: String,
-  pub name: String,
-  pub description: Option<String>,
+  pub config_options: Option<Vec<SessionConfigOption>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptResult {
   pub stop_reason: String,
-  pub user_message_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -137,7 +129,7 @@ mod tests {
   }
 
   #[test]
-  fn preserves_opaque_model_ids_and_permission_options() {
+  fn preserves_opaque_permission_identifiers() {
     let request: PermissionRequest = serde_json::from_value(json!({
       "sessionId":"session-1","toolCall":{"toolCallId":"call-1","rawInput":{"command":"fixture"}},
       "options":[{"optionId":"once","kind":"allow_once","name":"Allow once"}],"extension":true
@@ -145,5 +137,32 @@ mod tests {
     .unwrap();
     assert_eq!(request.tool_call.tool_call_id, "call-1");
     assert_eq!(request.options[0].option_id, "once");
+  }
+
+  #[test]
+  fn legacy_and_vendor_response_fields_do_not_change_standard_decoding() {
+    let session: SessionResult = serde_json::from_value(json!({
+      "sessionId":"session-1", "models":{"unrecognized_legacy_shape":true}
+    }))
+    .unwrap();
+    assert_eq!(session.session_id.as_deref(), Some("session-1"));
+    assert!(session.config_options.is_none());
+    let prompt: PromptResult = serde_json::from_value(json!({
+      "stopReason":"end_turn", "userMessageId":{"opaque_extension":true}
+    }))
+    .unwrap();
+    assert_eq!(prompt.stop_reason, "end_turn");
+  }
+
+  #[test]
+  fn validates_standard_implementation_and_resume_capability_shapes() {
+    assert!(serde_json::from_value::<AgentInfo>(json!({"name":"agent"})).is_err());
+    let implementation: AgentInfo = serde_json::from_value(json!({"name":"agent", "version":"1.0"})).unwrap();
+    assert_eq!(implementation.version, "1.0");
+    for value in [json!(true), json!("enabled"), json!(0)] {
+      assert!(serde_json::from_value::<SessionCapabilities>(json!({"resume":value})).is_err());
+    }
+    let capabilities: SessionCapabilities = serde_json::from_value(json!({"resume":{"_meta":{"extra":true}}})).unwrap();
+    assert!(capabilities.resume.is_some());
   }
 }

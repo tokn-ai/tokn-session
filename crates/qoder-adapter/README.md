@@ -13,10 +13,25 @@ metadata/model inspection, normal native prompts, streaming updates, cancellatio
 and per-use tool permission allow/deny. A requested creation model is validated
 against the actual new session's catalog and applied before returning the
 session. Model intent on individual prompts, revision fences, steering, Guide,
-Queue and strict Start are unsupported. No sessions are created or resumed for inspection;
+Queue and strict Start are unsupported. No sessions are created or resumed for
+inspection;
 global model inspection reuses an already-bound session catalog, or reports
 unsupported when none is resident. Catalogs do not assert individual model
 vision support.
+
+`tokn-acp-protocol` contains only standard ACP wire types. Model discovery and
+selection prefer standard `configOptions` whose category is `model`, preserve
+the opaque configuration ID, flatten standard grouped choices, and use
+`session/set_config_option`. Its complete returned configuration must confirm
+the requested selected value. An incomplete or failed standard response never
+triggers a second mutation through a different API.
+
+Qoder compatibility is isolated in `src/qoder.rs`: the retired `models` catalog
+and `session/set_model` are available only when no standard model selector was
+provided. The optional nonstandard root `userMessageId` response field and
+`_meta.qoder.toolName` interpretation also stay in that module. Local wrappers
+flatten the standard ACP response types; these fields do not extend the shared
+protocol crate. Compatibility support does not claim full ACP conformance.
 
 Image content is enabled only when the agent negotiates prompt image support.
 PNG, JPEG, WebP and GIF inputs use ACP inline base64, at most four images,
@@ -50,12 +65,14 @@ ordinary tool approvals: native plan approval can alter the permission mode.
 
 The transport bounds incoming frames to 16 MiB, outgoing frames to 36 MiB,
 requests to 32 in flight, writes to 3 seconds and ordinary RPC replies to
-20 seconds. Prompt completion and admission have a one-hour bound. A partial/cancelled write closes the pipe. Owned processes receive
+20 seconds. Prompt completion and admission have a one-hour bound. A partial or
+cancelled write closes the pipe. Owned processes receive
 EOF on close and are killed/reaped after a bounded grace period. There is no
 attached-process transport or automatic mutation retry. At most 128 sessions
 are resident per adapter.
 
-Verification uses a standalone Rust scripted ACP peer, including permission,
+Verification uses a standalone Rust scripted ACP peer, with standard-only and
+separate Qoder compatibility scenarios, including permission,
 resume, image, Stop ordering and framing failure scenarios. An ignored test
 accepts explicit `TOKN_QODER_ACP_EXECUTABLE` and JSON-array
 `TOKN_QODER_ACP_ARGUMENTS` for a disposable anonymous handshake/auth-failure

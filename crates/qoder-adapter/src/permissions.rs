@@ -71,16 +71,10 @@ impl Inner {
       .unwrap()
       .get(&request.session_id)
       .is_some_and(|session| session.prompt.is_some() && session.state.status == ExecutionState::Running);
-    let tool_name = request
-      .tool_call
-      .meta
-      .as_ref()
-      .and_then(|meta| meta.get("qoder"))
-      .and_then(|meta| meta.get("toolName"))
-      .and_then(Value::as_str);
+    let tool_name = qoder::tool_name(&request.tool_call);
     // Native plan options change the permission mode; they are not per-use tool approval.
     // Structured elicitation was not negotiated, so neither plan nor question is presented as permission.
-    let unsupported_tool = matches!(tool_name, Some("ExitPlanMode" | "AskUserQuestion" | "EnterPlanMode"));
+    let unsupported_tool = qoder::unsupported_interaction(&request.tool_call);
     let valid = active
       && !unsupported_tool
       && !request.tool_call.tool_call_id.is_empty()

@@ -216,7 +216,14 @@ RPC capability limits remain distinct from the exclusive managed Pi workflow.
 
 Qoder adds a seventh historical provider and managed project-scoped ACP v1
 interaction. `qoder-adapter` depends on the core-independent `acp-protocol` wire
-crate. CLI create/append and Viewer creation/resume use `--acp`; there is no
+crate, which contains current standard ACP types and opaque metadata only.
+Standard model configuration uses typed `configOptions`, opaque config IDs and
+`session/set_config_option`, with complete returned-state verification.
+Qoder's legacy model catalog/setter, optional `userMessageId`, and interpretation
+of `_meta.qoder.toolName` live in `qoder-adapter::qoder`. A legacy setter is chosen
+only before dispatch when no standard model selector is advertised; an uncertain
+standard mutation never falls back or retries. CLI create/append and Viewer
+creation/resume use `--acp`; there is no
 headless fallback or automatic mutation replay. The host verifies exact native
 root identity, effective cwd and the configured project transcript namespace
 before resume. Native creation assigns its ID. Model inspection never creates

@@ -10,35 +10,12 @@ impl Inner {
     if update["sessionUpdate"] != "config_option_update" {
       return Ok(());
     }
-    let Some(options) = update["configOptions"].as_array() else {
+    let options: Vec<acp::SessionConfigOption> = decode(update["configOptions"].clone(), false)?;
+    let Some(catalog) = models::from_config(Some(&options), None)? else {
       return Ok(());
     };
-    let Some(model) = options
-      .iter()
-      .find(|option| option["id"] == "model" && option["type"] == "select")
-    else {
-      return Ok(());
-    };
-    let Some(choices) = model["options"].as_array() else {
-      return Err(InteractionError::unavailable("Qoder sent an invalid model update"));
-    };
-    let catalog: acp::SessionModels = decode(
-      json!({
-        "currentModelId":model["currentValue"],
-        "availableModels":choices.iter().map(|choice| json!({"modelId":choice["value"],"name":choice["name"],"description":choice["description"]})).collect::<Vec<_>>()
-      }),
-      false,
-    )?;
-    let fresh = make_session(
-      id,
-      acp::SessionResult {
-        session_id: Some(id.into()),
-        models: Some(catalog),
-      },
-    )?;
     if let Some(session) = self.sessions.lock().unwrap().get_mut(id) {
-      session.state.model = fresh.state.model;
-      session.models = fresh.models;
+      apply_catalog(session, catalog);
     }
     self.publish_state(id);
     Ok(())
@@ -80,10 +57,11 @@ impl Inner {
     if let Some(id) = native_id {
       params["sessionId"] = json!(id);
     }
-    let result: acp::SessionResult = decode(self.transport.call(method, params, true).await?, true)?;
+    let result: qoder::SessionResult = decode(self.transport.call(method, params, true).await?, true)?;
     let id = match native_id {
-      Some(id) if result.session_id.as_ref().is_none_or(|actual| actual == id) => id.to_owned(),
+      Some(id) if result.standard.session_id.as_ref().is_none_or(|actual| actual == id) => id.to_owned(),
       None => result
+        .standard
         .session_id
         .clone()
         .ok_or_else(|| InteractionError::uncertain("Qoder created a session without confirming its identity"))?,
@@ -94,7 +72,15 @@ impl Inner {
       }
     };
     validate_id(&id).map_err(|_| InteractionError::uncertain("Qoder returned an invalid session identity"))?;
-    let mut session = make_session(&id, result)?;
+    let catalog = models::from_config(result.standard.config_options.as_deref(), None)
+      .and_then(|catalog| match catalog {
+        Some(catalog) => Ok(catalog),
+        None => result.legacy_catalog().map(Option::unwrap_or_default),
+      })
+      .map_err(|_| {
+        InteractionError::uncertain("Qoder created or resumed a session but returned an invalid model catalog")
+      })?;
+    let mut session = make_session(&id, catalog);
     if let Some(model) = model {
       if model.model_provider.is_some()
         || !session
@@ -106,23 +92,49 @@ impl Inner {
           "Qoder created a session but the requested model is not available",
         ));
       }
-      let response = self
-        .transport
-        .call(
-          "session/set_model",
-          json!({"sessionId":id,"modelId":model.model_id}),
-          true,
-        )
-        .await
-        .map_err(|_| InteractionError::uncertain("Qoder created a session but did not confirm its requested model"))?;
-      if !response.is_object() {
-        return Err(InteractionError::uncertain("Qoder did not confirm its requested model"));
+      match &session.model_route {
+        models::Route::Config { config_id } => {
+          let value = self
+            .transport
+            .call(
+              "session/set_config_option",
+              json!({"sessionId":id,"configId":config_id,"value":model.model_id}),
+              true,
+            )
+            .await
+            .map_err(|_| {
+              InteractionError::uncertain("Qoder created a session but did not confirm its requested model")
+            })?;
+          let result: acp::SetSessionConfigOptionResult = decode(value, true)?;
+          let catalog = models::from_config(Some(&result.config_options), Some(config_id))
+            .map_err(|_| InteractionError::uncertain("Qoder returned an invalid model selection state"))?
+            .filter(|catalog| {
+              catalog
+                .current
+                .as_ref()
+                .is_some_and(|current| current.model_id == model.model_id)
+            })
+            .ok_or_else(|| InteractionError::uncertain("Qoder did not confirm its requested model identity"))?;
+          apply_catalog(&mut session, catalog);
+        }
+        models::Route::QoderLegacy => {
+          qoder::set_legacy_model(&self.transport, &id, &model.model_id)
+            .await
+            .map_err(|_| {
+              InteractionError::uncertain("Qoder created a session but did not confirm its requested model")
+            })?;
+          session.state.model = session
+            .models
+            .iter()
+            .find(|choice| choice.model.model_id == model.model_id)
+            .map(|choice| choice.model.clone());
+        }
+        models::Route::Unavailable => {
+          return Err(InteractionError::uncertain(
+            "Qoder created a session but model selection is unavailable",
+          ));
+        }
       }
-      session.state.model = session
-        .models
-        .iter()
-        .find(|choice| choice.model.model_id == model.model_id)
-        .map(|choice| choice.model.clone());
     }
     self.sessions.lock().unwrap().insert(id.clone(), session);
     self.publish_state(&id);
@@ -182,7 +194,7 @@ impl Inner {
           Some(dispatch),
         )
         .await
-        .and_then(|value| decode::<acp::PromptResult>(value, true));
+        .and_then(|value| decode::<qoder::PromptResult>(value, true));
       inner.finish_prompt(&id, &token, result);
     });
     let native_id = loop {
@@ -202,19 +214,15 @@ impl Inner {
     }))
   }
 
-  fn finish_prompt(&self, id: &str, token: &str, result: Result<acp::PromptResult, InteractionError>) {
+  fn finish_prompt(&self, id: &str, token: &str, result: Result<qoder::PromptResult, InteractionError>) {
     let result = result.and_then(|result| {
-      if result
-        .user_message_id
-        .as_ref()
-        .is_some_and(|id| validate_id(id).is_err())
-      {
+      if result.native_message_id().is_some_and(|id| validate_id(id).is_err()) {
         return Err(InteractionError::uncertain(
           "Qoder returned an invalid native message identity",
         ));
       }
       if matches!(
-        result.stop_reason.as_str(),
+        result.standard.stop_reason.as_str(),
         "end_turn" | "max_tokens" | "max_turn_requests" | "refusal" | "cancelled"
       ) {
         Ok(result)
@@ -251,7 +259,7 @@ impl Inner {
         *admitted = Some(
           result
             .as_ref()
-            .map(|result| result.user_message_id.clone())
+            .map(|result| result.native_message_id().map(str::to_owned))
             .map_err(Clone::clone),
         );
         true
@@ -262,7 +270,7 @@ impl Inner {
     self.publish(
       Some(id.into()),
       RuntimeEventKind::Native(match result {
-        Ok(result) => json!({"type":"qoder.prompt_result","prompt_id":token,"stop_reason":result.stop_reason}),
+        Ok(result) => json!({"type":"qoder.prompt_result","prompt_id":token,"stop_reason":result.standard.stop_reason}),
         Err(error) => json!({"type":"qoder.prompt_result","prompt_id":token,"error_kind":error.kind}),
       }),
     );
@@ -319,55 +327,24 @@ impl Inner {
   }
 }
 
-fn make_session(id: &str, result: acp::SessionResult) -> Result<Session, InteractionError> {
-  let mut models = Vec::new();
-  let mut current = None;
-  if let Some(catalog) = result.models {
-    if catalog.available_models.len() > 512 || catalog.current_model_id.len() > 1024 {
-      return Err(InteractionError::uncertain("Qoder returned an invalid model catalog"));
-    }
-    for model in catalog.available_models {
-      if model.model_id.is_empty() || model.model_id.len() > 1024 || model.name.len() > 4096 {
-        return Err(InteractionError::uncertain("Qoder returned an invalid model identity"));
-      }
-      let identity = ModelIdentity {
-        model_provider: None,
-        model_id: model.model_id,
-        display_name: Some(model.name),
-      };
-      if identity.model_id == catalog.current_model_id {
-        current = Some(identity.clone());
-      }
-      if models
-        .iter()
-        .any(|choice: &ModelChoice| choice.model.model_id == identity.model_id)
-      {
-        return Err(InteractionError::uncertain("Qoder returned ambiguous model identities"));
-      }
-      models.push(ModelChoice {
-        model: identity,
-        supports_images: false,
-      });
-    }
-    if current.is_none() && !catalog.current_model_id.is_empty() {
-      current = Some(ModelIdentity {
-        model_provider: None,
-        model_id: catalog.current_model_id,
-        display_name: None,
-      });
-    }
-  }
-  Ok(Session {
+fn make_session(id: &str, catalog: models::Catalog) -> Session {
+  Session {
     state: SessionState {
       session_id: Some(id.into()),
       status: ExecutionState::Idle,
-      model: current,
+      model: catalog.current,
       pending_inputs: Some(0),
       revision: None,
     },
-    models,
+    models: catalog.choices,
+    model_route: catalog.route,
     prompt: None,
-  })
+  }
+}
+fn apply_catalog(session: &mut Session, catalog: models::Catalog) {
+  session.state.model = catalog.current;
+  session.models = catalog.choices;
+  session.model_route = catalog.route;
 }
 
 fn prompt_content(input: MessageInput, images_supported: bool) -> Result<Vec<acp::PromptContent>, InteractionError> {

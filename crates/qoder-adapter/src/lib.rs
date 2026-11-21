@@ -1,5 +1,7 @@
 //! Managed Qoder CLI interaction through ACP v1.
+mod models;
 mod permissions;
+mod qoder;
 mod session;
 mod transport;
 
@@ -52,6 +54,7 @@ struct Prompt {
 struct Session {
   state: SessionState,
   models: Vec<ModelChoice>,
+  model_route: models::Route,
   prompt: Option<Prompt>,
 }
 struct Inner {
@@ -308,7 +311,7 @@ impl InteractionAdapter for QoderAdapter {
           let agent = self.inner.agent.lock().unwrap();
           Ok(Reply::Metadata(Metadata {
             name: agent.as_ref().map(|a| a.name.clone()),
-            version: agent.as_ref().and_then(|a| a.version.clone()),
+            version: agent.as_ref().map(|a| a.version.clone()),
             model: id.and_then(|id| {
               self
                 .inner

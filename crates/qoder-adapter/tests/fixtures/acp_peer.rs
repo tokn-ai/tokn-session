@@ -15,8 +15,15 @@ fn field<'a>(line: &'a str, field: &str) -> &'a str {
 fn reply(id: &str, value: &str) { send(&format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{value}}}")); }
 fn update(value: &str) { send(&format!("{{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{{\"sessionId\":\"fixture-session\",\"update\":{value}}}}}")); }
 fn permission(id: u32, tool: &str) {
-  send(&format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"session/request_permission\",\"params\":{{\"sessionId\":\"fixture-session\",\"toolCall\":{{\"toolCallId\":\"fixture-tool\",\"title\":\"Write fixture\",\"rawInput\":{{\"command\":\"write fixture.txt\"}},\"_meta\":{{\"qoder\":{{\"toolName\":\"{tool}\"}}}}}},\"options\":[{{\"optionId\":\"native-once\",\"name\":\"Allow once\",\"kind\":\"allow_once\"}},{{\"optionId\":\"native-always\",\"name\":\"Always\",\"kind\":\"allow_always\"}},{{\"optionId\":\"native-deny\",\"name\":\"Deny\",\"kind\":\"reject_once\"}}]}}}}"));
+  let vendor = if tool == "Bash" { String::new() } else { format!(",\"_meta\":{{\"qoder\":{{\"toolName\":\"{tool}\"}}}}") };
+  send(&format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"session/request_permission\",\"params\":{{\"sessionId\":\"fixture-session\",\"toolCall\":{{\"toolCallId\":\"fixture-tool\",\"title\":\"Write fixture\",\"rawInput\":{{\"command\":\"write fixture.txt\"}}{vendor}}},\"options\":[{{\"optionId\":\"native-once\",\"name\":\"Allow once\",\"kind\":\"allow_once\"}},{{\"optionId\":\"native-always\",\"name\":\"Always\",\"kind\":\"allow_always\"}},{{\"optionId\":\"native-deny\",\"name\":\"Deny\",\"kind\":\"reject_once\"}}]}}}}"));
 }
+fn config(current: &str, grouped: bool) -> String {
+  let values = "[{\"value\":\"model-a\",\"name\":\"A\"},{\"value\":\"model-b\",\"name\":\"B\"}]";
+  let options = if grouped { format!("[{{\"group\":\"fixture-group\",\"name\":\"Fixture group\",\"options\":{values}}}]") } else { values.into() };
+  format!("[{{\"id\":\"opaque-engine-selector\",\"name\":\"Model\",\"category\":\"model\",\"type\":\"select\",\"currentValue\":\"{current}\",\"options\":{options}}},{{\"id\":\"future-option\",\"name\":\"Future option\",\"type\":\"future\"}}]")
+}
+
 fn main() {
   let scenario = std::env::var("ACP_FIXTURE_SCENARIO").unwrap_or_default();
   let mut prompt = String::new();
@@ -48,6 +55,10 @@ fn main() {
       continue;
     }
     let method = field(&line, "method");
+    if let Ok(path) = std::env::var("ACP_FIXTURE_TRACE") {
+      let mut trace = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+      writeln!(trace,"{method}").unwrap();
+    }
     if method == "session/cancel" {
       assert!(!prompt.is_empty(), "Stop must never precede prompt dispatch");
       if scenario == "cancel" { permission(74, "Bash"); }
@@ -65,11 +76,26 @@ fn main() {
       "session/new" | "session/resume" => {
         if method == "session/resume" { assert!(line.contains("\"sessionId\":\"fixture-session\"")); }
         let identity = if method == "session/new" { "\"sessionId\":\"fixture-session\"," } else { "" };
-        reply(id, &format!("{{{identity}\"models\":{{\"currentModelId\":\"model-a\",\"availableModels\":[{{\"modelId\":\"model-a\",\"name\":\"A\"}},{{\"modelId\":\"model-b\",\"name\":\"B\"}}]}}}}"));
+        if scenario == "legacy-model" {
+          reply(id,&format!("{{{identity}\"models\":{{\"currentModelId\":\"model-a\",\"availableModels\":[{{\"modelId\":\"model-a\",\"name\":\"A\"}},{{\"modelId\":\"model-b\",\"name\":\"B\"}}]}}}}"));
+        } else {
+          let extra = if scenario == "prefer-standard" { ",\"models\":{\"invalidLegacyValue\":true}" }
+            else if scenario == "incomplete-config-result" || scenario == "wrong-config-result" {
+              ",\"models\":{\"currentModelId\":\"model-a\",\"availableModels\":[{\"modelId\":\"model-a\",\"name\":\"A\"},{\"modelId\":\"model-b\",\"name\":\"B\"}]}"
+            } else { "" };
+          reply(id,&format!("{{{identity}\"configOptions\":{}{extra}}}",config("model-a",scenario=="grouped-model")));
+        }
         // A delayed lifecycle update cannot prove prompt admission or enter the live overlay.
         update("{\"sessionUpdate\":\"available_commands_update\",\"availableCommands\":[]}");
       }
-      "session/set_model" => { assert!(line.contains("\"modelId\":\"model-b\"")); reply(id, "{}"); }
+      "session/set_model" => { assert_eq!(scenario,"legacy-model"); assert!(line.contains("\"modelId\":\"model-b\"")); reply(id,"{}"); }
+      "session/set_config_option" => {
+        assert_ne!(scenario,"legacy-model");
+        assert!(line.contains("\"configId\":\"opaque-engine-selector\""));
+        assert!(line.contains("\"value\":\"model-b\""));
+        if scenario == "incomplete-config-result" { reply(id,"{}"); }
+        else { reply(id,&format!("{{\"configOptions\":{}}}",config(if scenario=="wrong-config-result" { "model-a" } else { "model-b" },scenario=="grouped-model"))); }
+      }
       "session/prompt" => {
         prompt_count += 1;
         assert_eq!(prompt_count, 1, "No automatic prompt retry");
@@ -80,12 +106,16 @@ fn main() {
         if scenario == "auth" { send(&format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"error\":{{\"code\":-32000,\"message\":\"Authentication required\"}}}}")); continue; }
         if scenario == "zero" { reply(id, "{\"stopReason\":\"refusal\"}"); continue; }
         update("{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"fixture output\"}}");
+        if scenario == "config-update" {
+          update(&format!("{{\"sessionUpdate\":\"config_option_update\",\"configOptions\":{}}}",config("model-b",true)));
+        }
         match scenario.as_str() {
           "permission" => { permission(71, "Bash"); permission(72, "Bash"); }
           "cancel" => permission(71, "Bash"),
           "plan" => permission(71, "ExitPlanMode"),
           "unknown" => send("{\"jsonrpc\":\"2.0\",\"id\":70,\"method\":\"fs/read_text_file\",\"params\":{}}"),
           "stop-order" => {},
+          "legacy-model" => reply(id,"{\"stopReason\":\"end_turn\",\"userMessageId\":\"legacy-user-message\"}"),
           _ => reply(id, "{\"stopReason\":\"end_turn\"}"),
         }
       }
