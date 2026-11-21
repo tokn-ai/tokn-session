@@ -25,12 +25,14 @@ export interface AccountSession extends AccountIdentity {
 }
 
 export type HubAccountAvailability = "available" | "email_unconfigured" | "unsupported";
+export type AccountDevicePurpose = "cli" | "viewer";
 
 export function browserAccountClient(user_id?: string): HubClient {
   return new HubClient("", window.location.origin, { user_id });
 }
 
-function validateAccountIdentity(reply: AccountIdentity): AccountIdentity {
+export function validateAccountIdentity(value: unknown): AccountIdentity {
+  const reply = value as Partial<AccountIdentity> | null | undefined;
   if (typeof reply?.username !== "string" || typeof reply.user_id !== "string" || !UUID.test(reply.user_id)) {
     throw new Error("Hub returned an invalid account session.");
   }
@@ -78,18 +80,23 @@ export async function verifyAccountCode(client: HubClient, email: string, code: 
   }
 }
 
-export function approveAccountDevice(client: HubClient, user_code: string): Promise<void> {
-  return client.request(`${ACCOUNT}/device/approve`, "POST", { user_code });
+export function approveAccountDevice(client: HubClient, user_code: string, purpose: AccountDevicePurpose = "cli"): Promise<void> {
+  const path = purpose === "viewer" ? "device/viewer/approve" : "device/approve";
+  return client.request(`${ACCOUNT}/${path}`, "POST", { user_code });
 }
 
-export async function loadAccountMachines(client: HubClient, username: string): Promise<ResolvedMachine[]> {
-  const { machines } = await client.request<{ machines: ResolvedMachine[] }>(`${ACCOUNT}/machines`);
+export function validateAccountMachines(machines: unknown, username: string): ResolvedMachine[] {
   if (!Array.isArray(machines)) throw new Error("Hub returned an invalid machine list.");
   return machines.map((machine) => {
     const address = machine?.machine_address;
     if (parseMachineAddress(address).username !== username) throw new Error("Hub returned a machine from another account.");
     return validateResolvedMachine(machine, address);
   });
+}
+
+export async function loadAccountMachines(client: HubClient, username: string): Promise<ResolvedMachine[]> {
+  const { machines } = await client.request<{ machines: unknown }>(`${ACCOUNT}/machines`);
+  return validateAccountMachines(machines, username);
 }
 
 export async function loadAccountKeys(client: HubClient): Promise<AccountKey[]> {

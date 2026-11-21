@@ -84,6 +84,24 @@ it("keeps the account roster scoped to the same Hub", async () => {
   expect(screen.queryByText("alice:laptop")).not.toBeInTheDocument();
 });
 
+it("uses the shared account gallery for Apell without treating account machines as paired", async () => {
+  restore_host = installViewerHost(createApellHost({ invoke: vi.fn(), onEvent: () => () => {} }));
+  const roster = { hub_url: service.hub_url, machines: [{ ...discovered_laptop, machine_address: "alice:laptop" }],
+    can_sign_in: true, on_retry: vi.fn() };
+  const account_control = <button type="button">Hub account menu</button>;
+  const { rerender } = render(<HubAccess initial_hub_url={service.hub_url} account_control={account_control} account_roster={roster} />);
+  expect(await screen.findByRole("button", { name: "Hub account menu" })).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Pair alice:laptop" }));
+  expect(screen.getByLabelText("Authenticator code")).toBeVisible();
+  expect(service.connect).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole("button", { name: "Close Add machine" }));
+  rerender(<HubAccess initial_hub_url={service.hub_url} account_control={account_control}
+    account_roster={{ ...roster, hub_url: "https://other.example" }} />);
+  expect(screen.queryByRole("button", { name: "Hub account menu" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Pair alice:laptop" })).not.toBeInTheDocument();
+});
+
 it("runs settings actions on the selected pairing and shows the result in the gallery", async () => {
   const other = { ...host, host_id: discovered_laptop.host_id, machine_address: "alice:laptop" };
   const status = { hosts: [host, other], selected_host_id: null, device_public_key: "D".repeat(43) };

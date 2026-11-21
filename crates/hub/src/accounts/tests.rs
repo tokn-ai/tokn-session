@@ -624,6 +624,80 @@ async fn api_keys_are_scoped_revocable_and_visible_only_to_their_owner() {
 }
 
 #[tokio::test]
+async fn viewer_device_approval_issues_only_a_machine_reader() {
+  let (_directory, state, app) = fixture();
+  let browser = signup(&app, &state, EMAIL, "alice").await;
+  let browser_token = browser["token"].as_str();
+  let (status, viewer) = request(&app, "POST", "device/viewer/start", json!({}), None).await;
+  assert_eq!(status, StatusCode::OK);
+  let (status, cli) = request(&app, "POST", "device/start", json!({}), None).await;
+  assert_eq!(status, StatusCode::OK);
+  for (path, challenge) in [("device/approve", &viewer), ("device/viewer/approve", &cli)] {
+    let approval = json!({"user_code": challenge["user_code"]});
+    assert_eq!(
+      request(&app, "POST", path, approval, browser_token).await.0,
+      StatusCode::NOT_FOUND
+    );
+  }
+  let approval = json!({"user_code": viewer["user_code"]});
+  assert_eq!(
+    request(&app, "POST", "device/viewer/approve", approval.clone(), None)
+      .await
+      .0,
+    StatusCode::UNAUTHORIZED
+  );
+  assert_eq!(
+    request(&app, "POST", "device/viewer/approve", approval, browser_token)
+      .await
+      .0,
+    StatusCode::NO_CONTENT
+  );
+  let redemption = json!({"device_code": viewer["device_code"]});
+  let (status, login) = request(&app, "POST", "device/token", redemption, None).await;
+  assert_eq!(status, StatusCode::OK);
+  assert_eq!(login["user_id"], browser["user_id"]);
+  let token = login["token"].as_str().unwrap();
+  let mut headers = HeaderMap::new();
+  headers.insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+  assert_eq!(
+    state.authenticate_machine_reader(&headers).await.unwrap().username,
+    "alice"
+  );
+  assert_eq!(
+    state
+      .authenticate(&headers, MACHINES_REGISTER)
+      .await
+      .unwrap_err()
+      .status,
+    StatusCode::FORBIDDEN
+  );
+  assert_eq!(
+    request(&app, "GET", "keys", Value::Null, Some(token)).await.0,
+    StatusCode::FORBIDDEN
+  );
+  assert_eq!(
+    request(
+      &app,
+      "POST",
+      "keys",
+      json!({"name":"forbidden","scopes":[MACHINES_READ]}),
+      Some(token),
+    )
+    .await
+    .0,
+    StatusCode::FORBIDDEN
+  );
+  assert_eq!(
+    request(&app, "POST", "logout", json!({}), Some(token)).await.0,
+    StatusCode::NO_CONTENT
+  );
+  assert_eq!(
+    state.authenticate_machine_reader(&headers).await.unwrap_err().status,
+    StatusCode::UNAUTHORIZED
+  );
+}
+
+#[tokio::test]
 async fn signup_without_mail_and_foreign_browser_requests_fail_closed() {
   let (_directory, state, app) = fixture();
   let account = signup(&app, &state, EMAIL, "alice").await;
@@ -632,7 +706,7 @@ async fn signup_without_mail_and_foreign_browser_requests_fail_closed() {
     .router();
   assert_eq!(
     request(&disabled, "GET", "capabilities", Value::Null, None).await.1,
-    json!({"enabled": true, "email_configured": false})
+    json!({"enabled": true, "email_configured": false, "viewer_device_login": true})
   );
   assert_eq!(
     request(&disabled, "POST", "email/start", json!({"email": EMAIL}), None)

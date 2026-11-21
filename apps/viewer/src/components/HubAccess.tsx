@@ -34,12 +34,13 @@ export interface HubAccessProps {
   local_error?: string;
   on_machine_open?: (selection: HubMachineSelection) => void;
   on_hub_ready?: (hub_url: string) => void;
+  on_hub_closed?: () => void;
   known_hub_urls?: string[];
   account_roster?: HubGalleryAccountRoster;
   account_control?: ReactNode;
 }
 
-export function HubAccess({ visible = true, browser_view, initial_hub_url = window.location.origin, startup_host_id, on_local, local_error, on_machine_open, on_hub_ready, known_hub_urls = [], account_roster, account_control }: HubAccessProps) {
+export function HubAccess({ visible = true, browser_view, initial_hub_url = window.location.origin, startup_host_id, on_local, local_error, on_machine_open, on_hub_ready, on_hub_closed, known_hub_urls = [], account_roster, account_control }: HubAccessProps) {
   const [draft_hub_url, setDraftHubUrl] = useState(initial_hub_url);
   const [service, setService] = useState<HubAccessService>();
   const [hosts, setHosts] = useState<SavedHubHost[]>([]);
@@ -68,8 +69,8 @@ export function HubAccess({ visible = true, browser_view, initial_hub_url = wind
   const active_client = useRef<ViewerClient>(undefined);
   const startup = useRef({ hub_url: initial_hub_url, host_id: startup_host_id });
   const requested_host = useRef(startup_host_id);
-  const callbacks = useRef({ on_machine_open, on_hub_ready });
-  callbacks.current = { on_machine_open, on_hub_ready };
+  const callbacks = useRef({ on_machine_open, on_hub_ready, on_hub_closed });
+  callbacks.current = { on_machine_open, on_hub_ready, on_hub_closed };
   const busy = !!pending;
   const capabilities = viewerCapabilities();
   const native = capabilities.native_hub;
@@ -81,6 +82,7 @@ export function HubAccess({ visible = true, browser_view, initial_hub_url = wind
   const viewer_requested = visible && !!active && (native || active.host.host_id === current_view_id);
   const viewer_visible = viewer_requested && (native || pin_verified);
   const gallery_visible = visible && !viewer_requested;
+  const current_roster = account_roster?.hub_url === service?.hub_url ? account_roster : undefined;
 
   function releaseHost() {
     const owned = active_client.current;
@@ -136,6 +138,7 @@ export function HubAccess({ visible = true, browser_view, initial_hub_url = wind
     requested_host.current = requested_host_id;
     setEditingHub(false);
     releaseHost();
+    if (service_ref.current) callbacks.current.on_hub_closed?.();
     service_ref.current?.dispose?.(); service_ref.current = undefined;
     setService(undefined); setHosts([]); setMachine(""); setCode(""); setPairTarget(undefined); setPairingOpen(false);
     const next = await openHubAccess(url);
@@ -309,7 +312,7 @@ export function HubAccess({ visible = true, browser_view, initial_hub_url = wind
   return <>{viewer}{viewer_requested && !viewer_visible && <main className="hub-home"><p role="status">Checking saved machine…</p></main>}
     <main className="hub-home hub-access" hidden={!gallery_visible} inert={!gallery_visible}><div className="hub-content">
     <header className="hub-header"><div className="hub-app-title"><span className="hub-app-mark"><ServerIcon /></span><div><span className="hub-app-brand">Tokn Sessions</span><h1>Machines</h1></div></div>
-      <div className="hub-actions">{gallery_visible && ((!native && account_control) || <SettingsEntry />)}</div>
+      <div className="hub-actions">{gallery_visible && (((!native || current_roster) && account_control) || <SettingsEntry />)}</div>
     </header>
     {desktop && <section className="hub-this-machine" aria-labelledby="this-machine-title">
       <div><h2 id="this-machine-title">This machine</h2><p>Open sessions saved on this computer.</p>{local_error && <p className="hub-error" role="alert">{local_error}</p>}</div>
@@ -330,7 +333,7 @@ export function HubAccess({ visible = true, browser_view, initial_hub_url = wind
     {!pairing_open && <>{!loading_hub && progress}{error && !hub_error && <p className="hub-error hub-feedback" role="alert">{error}</p>}{notice && <p className="hub-feedback" role="status">{notice}</p>}</>}
     {service && <HubMachineGallery key={service.hub_url} visible={gallery_visible}
       resumable_host_id={active && canResume(active.host) ? active.host.host_id : undefined} service={service} hosts={hosts} busy={busy}
-      account_roster={account_roster?.hub_url === service.hub_url ? account_roster : undefined}
+      account_roster={current_roster}
       opening_host_id={pending?.kind === "opening_machine" ? pending.host_id : undefined}
       on_open={(host) => {
         if (canResume(host)) { showHost(host.host_id); return; }

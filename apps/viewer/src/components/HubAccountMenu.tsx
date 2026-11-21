@@ -2,6 +2,7 @@ import { HubPageLink } from "./HubNavigation";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { ChevronIcon, SettingsIcon } from "./Icons";
 import { SettingsDialog } from "./SettingsDialog";
+import type { AccountAction } from "./HubAccountEntry";
 import "./HubAccountMenu.css";
 
 interface HubAccountMenuProps {
@@ -10,9 +11,12 @@ interface HubAccountMenuProps {
   sign_out_error?: string;
   on_sign_out: () => void;
   profile_active?: boolean;
+  on_profile?: AccountAction;
 }
 
-export function HubAccountMenu({ username, signing_out, sign_out_error, on_sign_out, profile_active = false }: HubAccountMenuProps) {
+export function HubAccountMenu({
+  username, signing_out, sign_out_error, on_sign_out, profile_active = false, on_profile,
+}: HubAccountMenuProps) {
   const [open, setOpen] = useState(false);
   const [settings_open, setSettingsOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
@@ -93,6 +97,10 @@ export function HubAccountMenu({ username, signing_out, sign_out_error, on_sign_
 
   const feedback = signing_out ? <p className="hub-account-menu__feedback" role="status">Signing out…</p>
     : sign_out_error ? <p className="hub-account-menu__feedback hub-account-menu__error" role="alert">{sign_out_error}</p> : null;
+  const profile_icon = <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
+    <circle cx="12" cy="8" r="3.5" /><path d="M5 20v-2a7 7 0 0 1 14 0v2" />
+  </svg>;
 
   return <div className="hub-account-menu" ref={root}>
     <button ref={trigger} id={trigger_id} className="hub-account-menu__trigger" type="button"
@@ -113,12 +121,11 @@ export function HubAccountMenu({ username, signing_out, sign_out_error, on_sign_
     </button>
     {(open || feedback) && <div className="hub-account-menu__panel">
       {open && <div ref={menu} id={menu_id} role="menu" aria-labelledby={trigger_id} onKeyDown={navigate}>
-        <HubPageLink className="hub-account-menu__item" href="/account" role="menuitem" tabIndex={-1}
-          aria-current={profile_active ? "page" : undefined} onClick={() => closeMenu()}>
-          <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
-            <circle cx="12" cy="8" r="3.5" /><path d="M5 20v-2a7 7 0 0 1 14 0v2" />
-          </svg>Profile
-        </HubPageLink>
+        {on_profile
+          ? <button className="hub-account-menu__item" type="button" role="menuitem" tabIndex={-1} aria-haspopup="dialog"
+            onClick={() => { closeMenu(); on_profile(trigger); }}>{profile_icon}Profile</button>
+          : <HubPageLink className="hub-account-menu__item" href="/account" role="menuitem" tabIndex={-1}
+            aria-current={profile_active ? "page" : undefined} onClick={() => closeMenu()}>{profile_icon}Profile</HubPageLink>}
         <button className="hub-account-menu__item" type="button" role="menuitem" tabIndex={-1} aria-haspopup="dialog"
           onClick={() => { closeMenu(); setSettingsOpen(true); }}><SettingsIcon />Settings</button>
         <div className="hub-account-menu__divider" role="separator" />

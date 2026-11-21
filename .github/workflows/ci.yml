@@ -131,7 +131,7 @@ jobs:
       - name: Stage Store listing files
         run: |
           cp apps/apell/publish.json artifacts/tokn-session.publish.json
-          cp apps/viewer/src-tauri/icons/128x128@2x.png artifacts/tokn-session.png
+          cp apps/apell/public/icon.png artifacts/tokn-session.png
 
       - name: Save Apell package
         id: apell_package

@@ -27,6 +27,18 @@ Viewer preferences use applet config. The frontend receives public metadata and
 decrypted viewer responses, never the device private key. The applet uses durable
 native-device trust rather than browser document/passkey sessions.
 
+## Hub account sign-in
+
+After connecting to a Hub, choose **Sign in** on Machines. Open the approval
+address in a browser, sign in to the Hub, and approve the matching device code.
+Return to Apell to see the account's machines alongside saved and discovered
+machines. Each new machine still requires its own authenticator code.
+
+The applet stores a revocable, read-only account credential for each Hub in its
+secure storage. Signing out clears that Hub's account and hides its account
+machine list. Saved machine pairings remain available. On older Hubs, use the
+existing machine pairing and discovery flow until the Hub is upgraded.
+
 ## Data and lifecycle
 
 The host remains authoritative for session histories, RPC and permissions. The
@@ -70,6 +82,8 @@ APELL_SOURCE=/path/to/apell pnpm run build:apell
 The build produces `artifacts/tokn-session.apel` and its SHA-256 beside the
 repository root. It bundles the existing viewer, remaps compiler source paths,
 rejects unexpected WASM imports, and uses Apell's package validator/packer.
+The build includes the Tokn Sessions launcher icon. Use the same
+`apps/apell/public/icon.png` when publishing the Store listing.
 Install the file through Apell's **+ → Install from file**, then pair using the
 Hub URL, trusted machine reference and authenticator code. Applet code updates
 take effect in a fresh Apell run; restart Apell if that applet already ran.

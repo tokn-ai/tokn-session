@@ -42,8 +42,10 @@ The Hub username is the namespace for an account's machine addresses and its
 discovery group. Pairing one host provides the encrypted group reference, and
 authenticated opens refresh it for previously paired devices. Discovery and per-host
 authorization remain independent. See [discovery groups](hub-pairing.md#discovery-groups).
-The gallery combines account machines in the signed-in browser with saved and
-discovered machines. Desktop and Apell combine saved and discovered machines.
+The shared gallery combines Hub account machines with saved and discovered
+machines in the browser and Apell. Apell signs in through the Hub's browser
+device approval and stores a read-only machine-list credential in the guest's
+secure storage. Desktop's viewer combines saved and discovered machines.
 Each Hub host UUID appears once. Cards lead with the display name and show the
 assigned address, connector status and pairing action. The gear on a paired card
 opens a dialog with its saved reference, passkey setup where supported, and Forget.
@@ -76,8 +78,9 @@ and applet bridge; desktop retains local history, hosting, creation and native
 services. Phone layout depends on viewport size, not runtime identity. The
 standalone Android/iOS Tauri entry, generated project/configuration and mobile
 release workflow are removed; mobile delivery uses the `.apel` applet.
-Applets use durable app-style device trust and authenticator pairing, without
-browser per-document passkey semantics. Browser behavior remains separate.
+Apell shares the Machines page, account menu, profile summary and machine cards
+with the browser. Its account credential and durable machine trust are separate.
+Account sign-in requires a Hub with viewer-device approval support.
 See [the Apell applet](viewer-apell.md) for guest/host boundaries and verification.
 Cargo and CI use the merged Apell service revision; the Wasmi test resolves
 relative guest paths from the workspace root rather than its crate directory.

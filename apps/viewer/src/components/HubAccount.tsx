@@ -1,31 +1,45 @@
 import { useEffect, useRef, useState } from "react";
 import { HubClient, hubErrorMessage } from "../lib/hub";
 import {
-  browserAccountClient, requestAccountCode, verifyAccountCode, type AccountSession,
+  browserAccountClient, requestAccountCode, verifyAccountCode, type AccountDevicePurpose, type AccountSession,
 } from "../lib/hubAccount";
 import { type BrowserHubAccount } from "../lib/useBrowserHubAccount";
 import "./HubAccount.css";
 import { AuthLayout } from "./AuthLayout";
 import { VerificationCodeInput } from "./VerificationCodeInput";
-import { AccountDeviceApproval } from "./AccountDeviceApproval";
+import { AccountDeviceApproval, DeviceApprovalDialog } from "./AccountDeviceApproval";
 import { AccountKeys } from "./AccountKeys";
 import { HubPageLink } from "./HubNavigation";
 import { HubAccountMenu } from "./HubAccountMenu";
+import { HubAccountProfile } from "./HubAccountProfile";
 
 export function HubAccount({ account }: { account: BrowserHubAccount }) {
   return <AccountPage key={account.boundary} account={account} />;
 }
 
+interface DeviceRequest {
+  user_code: string;
+  purpose: AccountDevicePurpose;
+}
+
+function readDeviceRequest(): DeviceRequest | undefined {
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get("user_code");
+  if (!code || !/^[A-Za-z0-9-]{1,32}$/.test(code)) return;
+  if (params.get("device") !== "viewer") return { user_code: code, purpose: "cli" };
+  const normalized = code.toUpperCase();
+  if (/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(normalized)) return { user_code: normalized, purpose: "viewer" };
+}
+
 function AccountPage({ account }: { account: BrowserHubAccount }) {
   const { availability, check_error, session, notice, signedIn, signing_out, sign_out_error, logout, onFailure } = account;
-  const [user_code, setUserCode] = useState(() => {
-    const value = new URLSearchParams(window.location.search).get("user_code");
-    return value && /^[A-Za-z0-9-]{1,32}$/.test(value) ? value : "";
-  });
-  const [approved, setApproved] = useState(false);
+  const [device_request, setDeviceRequest] = useState(readDeviceRequest);
+  const [cli_approved, setCliApproved] = useState(false);
+  const [viewer_approved, setViewerApproved] = useState(false);
+  const account_back = useRef<HTMLAnchorElement>(null);
   if (!session) return <AuthLayout navigation={<HubPageLink href="/"><span aria-hidden="true">←</span> Back to Machines</HubPageLink>}
     footer="Your machines. Your sessions. One place.">
-    {availability === "available" && !check_error ? <AccountSignIn user_code={user_code} notice={notice} on_signed_in={signedIn} />
+    {availability === "available" && !check_error ? <AccountSignIn device_request={device_request} notice={notice} on_signed_in={signedIn} />
       : <form className="auth-form" onSubmit={(event) => { event.preventDefault(); account.retry(); }}>
         <header className="auth-heading"><p className="auth-eyebrow">Hub account</p><h1>Welcome to Tokn</h1></header>
         {check_error ? <><p className="auth-feedback" role="alert">{check_error}</p><button className="auth-primary">Retry connection</button></>
@@ -37,7 +51,7 @@ function AccountPage({ account }: { account: BrowserHubAccount }) {
 
   return <main className="hub-home hub-account" key={session.user_id}><div className="hub-content">
     <div className="account-navigation">
-      <HubPageLink className="account-back" href="/"><span aria-hidden="true">←</span> Back to Machines</HubPageLink>
+      <HubPageLink ref={account_back} className="account-back" href="/"><span aria-hidden="true">←</span> Back to Machines</HubPageLink>
       <div className="hub-actions">
         <HubAccountMenu username={session.username} signing_out={signing_out} sign_out_error={sign_out_error}
           profile_active on_sign_out={() => { void logout(); }} />
@@ -48,24 +62,21 @@ function AccountPage({ account }: { account: BrowserHubAccount }) {
     </header>
     <section className="account-section" aria-labelledby="account-profile-title">
       <h2 id="account-profile-title">Profile</h2>
-      <div className="account-profile-summary">
-        <span className="account-avatar" aria-hidden="true">{session.username.slice(0, 1).toUpperCase()}</span>
-        <div><strong className="account-username">{session.username}</strong><p>Your Hub account</p></div>
-      </div>
-      <details className="account-profile-details"><summary>Account details</summary>
-        <dl><dt>Account ID</dt><dd><code>{session.user_id}</code></dd></dl>
-      </details>
+      <HubAccountProfile {...session} />
       {notice && <p role="status">{notice}</p>}
     </section>
-    <AccountDeviceApproval client={session.client} initial_code={user_code}
-      approved={approved} on_approved={() => { setUserCode(""); setApproved(true); }}
-      on_reset={() => setApproved(false)} on_failure={onFailure} />
+    <AccountDeviceApproval client={session.client} initial_code={device_request?.purpose === "cli" ? device_request.user_code : ""}
+      approved={cli_approved} on_approved={() => { setDeviceRequest(undefined); setCliApproved(true); }}
+      on_reset={() => setCliApproved(false)} on_failure={onFailure} />
+    {device_request?.purpose === "viewer" && <DeviceApprovalDialog client={session.client} purpose="viewer"
+      initial_code={device_request.user_code} approved={viewer_approved} on_approved={() => setViewerApproved(true)}
+      on_failure={onFailure} on_close={() => setDeviceRequest(undefined)} return_focus={account_back} />}
     <AccountKeys client={session.client} key_list={account.key_list} on_failure={onFailure} />
   </div></main>;
 }
 
-function AccountSignIn({ user_code, notice, on_signed_in }: {
-  user_code: string;
+function AccountSignIn({ device_request, notice, on_signed_in }: {
+  device_request?: DeviceRequest;
   notice?: string;
   on_signed_in: (session: AccountSession) => void;
 }) {
@@ -134,7 +145,7 @@ function AccountSignIn({ user_code, notice, on_signed_in }: {
         : step === "code" ? <>Enter the 6-digit code sent to <strong>{email.trim()}</strong>.</>
           : "Choose a username for your account and machine addresses."}</p>
     </header>
-    {user_code && <p className="auth-feedback">Sign in to approve the CLI request for <strong>{user_code}</strong>.</p>}
+    {device_request && <p className="auth-feedback">Sign in to approve the {device_request.purpose === "viewer" ? "Apell sign-in" : "CLI request"} for <strong>{device_request.user_code}</strong>.</p>}
     {notice && <p className="auth-feedback" role="status">{notice}</p>}
     {step === "email" ? <div className="auth-field">
       <label htmlFor="account-email">Email address</label>
