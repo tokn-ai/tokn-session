@@ -582,6 +582,7 @@ for line in sys.stdin:
         .available
     );
     let follow_up = SubmitSessionInputRequest {
+      delivery: None,
       model_selection: None,
       session_key: key.clone(),
       request_id: uuid::Uuid::new_v4().to_string(),
@@ -636,6 +637,7 @@ for line in sys.stdin:
       ManagedSessionStatus::Stopped
     );
     let next = SubmitSessionInputRequest {
+      delivery: None,
       model_selection: None,
       session_key: key.clone(),
       request_id: uuid::Uuid::new_v4().to_string(),

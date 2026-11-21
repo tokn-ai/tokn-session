@@ -338,7 +338,11 @@ async fn inspection_does_not_grant_control_and_unsupported_delivery_is_explicit(
   adapter.close().await.unwrap();
 
   let (adapter, _peer) = attach_bound().await;
-  for (id, delivery) in [("strict-start", DeliveryMode::Start), ("queue", DeliveryMode::Queue)] {
+  for (id, delivery) in [
+    ("strict-start", DeliveryMode::Start),
+    ("guide", DeliveryMode::Guide),
+    ("queue", DeliveryMode::Queue),
+  ] {
     let command = request(&adapter, id, Some("thread-one"), message("hello", delivery));
     assert_eq!(adapter.execute(command).await.unwrap_err().kind, ErrorKind::Unsupported);
   }

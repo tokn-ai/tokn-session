@@ -1,4 +1,7 @@
 //! Managed interaction with the native ZCode Protocol app-server.
+mod delivery;
+mod images;
+mod interactions;
 mod transport;
 mod wire;
 
@@ -55,7 +58,9 @@ struct Inner {
   // Serialize residency transitions while allowing independent controls.
   binding: AsyncMutex<()>,
   sessions: Mutex<HashSet<String>>,
+  model_catalog: Mutex<Option<wire::CapturedCatalog>>,
   active_prompts: Mutex<HashSet<String>>,
+  interactions: Mutex<interactions::Interactions>,
 }
 
 #[derive(Clone)]
@@ -85,13 +90,19 @@ impl ZCodeAdapter {
         instance_id: uuid::Uuid::new_v4().to_string(),
         provider: Provider::ZCode,
         ownership: Ownership::Managed,
-        capabilities: Capabilities::default()
-          .with(Operation::Metadata)
-          .with(Operation::State)
-          .with(Operation::Models)
-          .with(Operation::Message)
-          .with(Operation::CancelTurn)
-          .with(Operation::PendingInteractions),
+        capabilities: Capabilities {
+          per_input_model: true,
+          ..Capabilities::default()
+            .with(Operation::Metadata)
+            .with(Operation::State)
+            .with(Operation::Models)
+            .with(Operation::Message)
+            .with(Operation::Guide)
+            .with(Operation::Queue)
+            .with(Operation::CancelTurn)
+            .with(Operation::PendingInteractions)
+            .with(Operation::Respond)
+        },
       },
       directory: options.directory,
       history_path: options.history_path,
@@ -102,7 +113,9 @@ impl ZCodeAdapter {
       disconnected: AtomicBool::new(false),
       binding: AsyncMutex::new(()),
       sessions: Mutex::new(HashSet::new()),
+      model_catalog: Mutex::new(None),
       active_prompts: Mutex::new(HashSet::new()),
+      interactions: Mutex::new(interactions::Interactions::default()),
     });
     inner.transport.start_reader(stdout, Arc::downgrade(&inner));
     let startup = tokio::time::timeout(STARTUP_TIMEOUT, async {
@@ -152,8 +165,8 @@ impl ZCodeAdapter {
     Ok(Self { inner })
   }
 
-  /// Materialize an empty native session at the durable caller-reserved ID.
-  /// ZCode writes the history row when a first turn starts.
+  /// Create a deferred native session at the durable caller-reserved ID.
+  /// ZCode writes its history row at first V4 input admission.
   pub async fn create_session_with_id(
     &self,
     session_id: &str,
@@ -165,18 +178,35 @@ impl ZCodeAdapter {
     let mut params = json!({
       "sessionId": session_id,
       "workspace": self.inner.workspace(),
-      "persistence": "immediate",
+      // V4 admission materializes deferred sessions before writing its input
+      // ledger; immediate creation is still lazy in native CLI 0.17.1.
+      "persistence": "deferred",
     });
     if let Some(model) = model {
-      params["model"] = serde_json::to_value(wire::ModelSelection::from_model(model)?)
-        .map_err(|_| InteractionError::invalid("Invalid ZCode model selection"))?;
+      let (selection, _) = self.inner.catalog_snapshot().await?.input_model(Some(&model), false)?;
+      if let Some(level) = selection
+        .options
+        .as_ref()
+        .and_then(|options| options.reasoning_level.as_ref())
+      {
+        // Initial app construction needs the full selection. Native create's
+        // later legacy setter drops options, so preserve reasoning in both slots.
+        params["thoughtLevel"] = json!(level);
+      }
+      params["model"] =
+        serde_json::to_value(selection).map_err(|_| InteractionError::invalid("Invalid ZCode model selection"))?;
     }
     let snapshot: wire::Snapshot =
       wire::decode(self.inner.transport.call("session/create", params, true).await?, true)?;
     self.inner.verify_snapshot(&snapshot, session_id, true)?;
-    self.inner.bind(session_id).await.map_err(|_| {
+    let created = self.inner.bind(session_id).await.map_err(|_| {
       InteractionError::uncertain("ZCode created a session but its live event subscription could not be verified")
-    })
+    })?;
+    self.inner.model_catalog.lock().unwrap().replace(wire::CapturedCatalog {
+      source_session: session_id.into(),
+      models: snapshot.settings.model.available,
+    });
+    Ok(created)
   }
 
   pub async fn resume_session(&self, session_id: &str) -> Result<CreatedSession, InteractionError> {
@@ -290,7 +320,7 @@ impl Inner {
   }
 
   async fn snapshot(&self, id: &str) -> Result<wire::Snapshot, InteractionError> {
-    let snapshot: wire::Snapshot = wire::decode(
+    let mut snapshot: wire::Snapshot = wire::decode(
       self
         .transport
         .call(
@@ -304,7 +334,43 @@ impl Inner {
       false,
     )?;
     self.verify_snapshot(&snapshot, id, false)?;
+    self.merge_model_catalog(&mut snapshot);
     Ok(snapshot)
+  }
+
+  fn merge_model_catalog(&self, snapshot: &mut wire::Snapshot) {
+    let mut cache = self.model_catalog.lock().unwrap();
+    let Some(captured) = cache.as_ref() else { return };
+    if snapshot.settings.model.available.iter().any(|fresh| {
+      captured
+        .models
+        .iter()
+        .find(|known| known.same_identity(fresh))
+        .is_some_and(|known| !known.same_configuration(fresh))
+    }) {
+      // A new active choice or reasoning level does not change the catalog.
+      // Changed capability facts for the same identity invalidate older peers.
+      cache.take();
+      return;
+    }
+    let mut merged = captured.models.clone();
+    for fresh in std::mem::take(&mut snapshot.settings.model.available) {
+      if let Some(known) = merged.iter_mut().find(|known| known.same_identity(&fresh)) {
+        *known = fresh;
+      } else {
+        merged.push(fresh);
+      }
+    }
+    snapshot.settings.model.available = merged;
+  }
+
+  async fn catalog_snapshot(&self) -> Result<wire::Snapshot, InteractionError> {
+    // App-server has no sessionless catalog RPC. Reuse only an already bound
+    // resident session in this verified project; inspection never activates one.
+    let id = self.sessions.lock().unwrap().iter().min().cloned().ok_or_else(|| {
+      InteractionError::unsupported("Connect a ZCode session first to read this runtime's model catalog")
+    })?;
+    self.snapshot(&id).await
   }
 
   fn session_state(&self, snapshot: &wire::Snapshot) -> SessionState {
@@ -386,6 +452,8 @@ impl Inner {
   fn disconnect(&self, reason: &str) {
     self.transport.terminate();
     self.active_prompts.lock().unwrap().clear();
+    self.model_catalog.lock().unwrap().take();
+    *self.interactions.lock().unwrap() = interactions::Interactions::default();
     self.storage.send_if_modified(|storage| {
       if storage.is_none() {
         *storage = Some(false);
@@ -411,7 +479,15 @@ impl Inner {
     };
     let params = &frame["params"];
     if let Some(id) = frame.get("id") {
-      return self.transport.send(decline_callback(id, method)?, false).await;
+      return self.receive_callback(id, method, params).await;
+    }
+    if method == "state.updated"
+      && matches!(
+        params["reason"].as_str(),
+        Some("model_changed" | "thought_level_changed" | "mode_changed")
+      )
+    {
+      self.model_catalog.lock().unwrap().take();
     }
     if method == "startup/storageState" && params["databaseKind"] == "session" {
       if params["phase"] == "ready" {
@@ -432,6 +508,9 @@ impl Inner {
       .as_str()
       .filter(|id| self.sessions.lock().unwrap().contains(*id))
     {
+      if method == "session/event" {
+        self.native_interaction_event(id, params);
+      }
       match (method, params["type"].as_str()) {
         ("session/event", Some("turn.started")) => self.publish_state(id, ExecutionState::Running),
         ("state.updated", _) => match params["reason"].as_str() {
@@ -439,17 +518,23 @@ impl Inner {
             self.active_prompts.lock().unwrap().insert(id.into());
             self.publish_state(id, ExecutionState::Running);
           }
-          // Core completion precedes bootstrap releasing its active prompt lock.
-          // Only these native ready notifications allow another session/send.
+          // Core completion precedes bootstrap finalization and native queue
+          // promotion. Preserve the native ready boundary in host state.
           Some("prompt_completed" | "prompt_failed") => {
+            self.retire_interactions(id, true);
             self.active_prompts.lock().unwrap().remove(id);
             self.publish_state(id, ExecutionState::Idle);
           }
           _ => {}
         },
         ("session/event", Some("session.closed")) => {
+          self.retire_interactions(id, false);
           self.sessions.lock().unwrap().remove(id);
           self.active_prompts.lock().unwrap().remove(id);
+          let mut catalog = self.model_catalog.lock().unwrap();
+          if catalog.as_ref().is_some_and(|catalog| catalog.source_session == id) {
+            catalog.take();
+          }
           self.publish_state(id, ExecutionState::Stopped);
         }
         _ => {}
@@ -478,10 +563,7 @@ impl Inner {
     input: MessageInput,
     delivery: DeliveryMode,
   ) -> Result<Reply, InteractionError> {
-    if !input.images.is_empty() {
-      return Err(InteractionError::unsupported("ZCode image upload is unavailable"));
-    }
-    if input.text.trim().is_empty()
+    if (input.text.trim().is_empty() && input.images.is_empty())
       || input.text.chars().count() > tokn_interaction_core::admission::MAX_INPUT_LENGTH
       || input
         .text
@@ -490,38 +572,12 @@ impl Inner {
     {
       return Err(InteractionError::invalid("Invalid ZCode message text"));
     }
-    if request_id.trim().is_empty() || request_id.len() > 128 {
-      return Err(InteractionError::invalid(
-        "ZCode message request requires a bounded request ID",
-      ));
+    if matches!(delivery, DeliveryMode::Guide | DeliveryMode::Queue) {
+      return self.deliver_followup(id, request_id, input, delivery).await;
     }
-    if delivery != DeliveryMode::Start {
-      return Err(InteractionError::unsupported(
-        "ZCode only supports starting a turn while idle",
-      ));
-    }
-    let mut params = json!({"sessionId": id, "inputId": request_id, "content": input.text});
-    if let Some(revision) = input.expected_revision {
-      let revision = revision
-        .parse::<u64>()
-        .map_err(|_| InteractionError::invalid("Invalid ZCode session revision"))?;
-      params["expectedRevision"] = json!(revision);
-    }
-    if let Some(model) = input.model.clone() {
-      params["modelSelection"] = json!(wire::ModelSelection::from_model(model)?);
-    }
-    let admission: wire::Admission = wire::decode(self.transport.call("session/send", params, true).await?, true)?;
-    if admission.session_id != id || !admission.accepted {
-      return Err(InteractionError::uncertain(
-        "ZCode returned an unverified message admission",
-      ));
-    }
-    Ok(Reply::Admission(InputReceipt {
-      disposition: InputDisposition::Started,
-      model: input.model,
-      model_ignored: false,
-      native_id: Some(request_id.to_owned()),
-    }))
+    Err(InteractionError::unsupported(
+      "ZCode does not guarantee strict idle-only start, active-turn steering, or start-or-steer admission",
+    ))
   }
 }
 
@@ -536,12 +592,17 @@ impl InteractionAdapter for ZCodeAdapter {
         && request.target.runtime_id == self.inner.descriptor.runtime_id
         && request.target.instance_id == self.inner.descriptor.instance_id
         && self.inner.transport.is_live()
-        && matches!(request.command, Command::Metadata)
       {
-        return Ok(Reply::Metadata(Metadata {
-          name: Some("ZCode".into()),
-          ..Metadata::default()
-        }));
+        match request.command {
+          Command::Metadata => {
+            return Ok(Reply::Metadata(Metadata {
+              name: Some("ZCode".into()),
+              ..Metadata::default()
+            }));
+          }
+          Command::Models => return Ok(Reply::Models(self.inner.catalog_snapshot().await?.models())),
+          _ => {}
+        }
       }
       let id = self.inner.check_target(&request.target)?;
       match request.command {
@@ -557,21 +618,12 @@ impl InteractionAdapter for ZCodeAdapter {
         Command::State => Ok(Reply::State(self.inner.session_state(&self.inner.snapshot(id).await?))),
         Command::Models => Ok(Reply::Models(self.inner.snapshot(id).await?.models())),
         Command::Message { input, delivery } => self.inner.message(id, &request.request_id, input, delivery).await,
-        Command::CancelTurn => {
-          let result = self
-            .inner
-            .transport
-            .call("session/stop", json!({"sessionId": id}), true)
-            .await?;
-          if result.as_object().is_none_or(|object| !object.is_empty()) {
-            return Err(InteractionError::uncertain("ZCode did not confirm the stop request"));
-          }
-          Ok(Reply::Acknowledged)
-        }
-        Command::PendingInteractions => Ok(Reply::Interactions(Vec::new())),
-        Command::Respond { .. } => Err(InteractionError::unsupported(
-          "ZCode interaction responses are unavailable",
-        )),
+        Command::CancelTurn => self.inner.stop_turn(id, &request.request_id).await,
+        Command::PendingInteractions => self.inner.pending_interactions(id).await,
+        Command::Respond {
+          interaction_id,
+          response,
+        } => self.inner.respond_interaction(id, &interaction_id, response).await,
       }
     })
   }
@@ -592,8 +644,8 @@ fn decline_callback(id: &Value, method: &str) -> Result<Value, InteractionError>
   if !id.is_string() && !id.is_number() {
     return Err(InteractionError::unavailable("ZCode returned an invalid callback ID"));
   }
-  // The viewer has no ZCode permission or question surface. Deny or decline
-  // these reverse requests so native turns do not wait for an invisible dialog.
+  // Unsupported reverse request shapes must not leave an invisible dialog
+  // waiting in the native process.
   Ok(match method {
     "interaction/requestPermission" => json!({"id": id, "result": {"decision": "deny"}}),
     "interaction/requestUserInput" => json!({"id": id, "result": {"action": "decline"}}),

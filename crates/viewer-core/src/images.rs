@@ -1,5 +1,6 @@
 //! Session-bound image resources and private input uploads.
 pub(crate) mod markdown;
+pub(crate) mod zcode;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
@@ -516,31 +517,34 @@ pub(crate) fn image_response(bytes: Vec<u8>, variant: ImageVariant) -> Result<Se
 
 pub(crate) fn read_source(image: &tokn_session_core::MessageImage) -> Result<Vec<u8>, String> {
   use tokn_session_core::MessageImageSource;
-  let decode = |data: &str| {
-    if data.len() > MAX_IMAGE_BYTES.div_ceil(3) * 4 {
-      return Err("Image exceeds the size limit".to_string());
-    }
-    STANDARD.decode(data).map_err(|_| "Image data is invalid".to_string())
-  };
   match &image.source {
-    MessageImageSource::DataUrl { url } => {
-      let (header, data) = url.split_once(',').ok_or("Image data URL is invalid")?;
-      let mime = header
-        .strip_prefix("data:")
-        .and_then(|header| header.strip_suffix(";base64"))
-        .filter(|mime| IMAGE_MIME_TYPES.contains(mime))
-        .ok_or("Image format is unsupported")?;
-      let bytes = decode(data)?;
-      if raster_format(&bytes)?.to_mime_type() != mime {
-        return Err("Image data does not match its format".into());
-      }
-      Ok(bytes)
-    }
-    MessageImageSource::Base64 { data } => decode(data),
+    MessageImageSource::DataUrl { url } => read_data_url(url),
+    MessageImageSource::Base64 { data } => decode_base64(data),
     MessageImageSource::LocalFile { path } if path.is_absolute() => read_file(path),
     MessageImageSource::LocalFile { .. } => Err("Relative image paths are unavailable".into()),
     MessageImageSource::Unavailable { .. } => Err("This image reference is unavailable on the session host".into()),
   }
+}
+
+fn decode_base64(data: &str) -> Result<Vec<u8>, String> {
+  if data.len() > MAX_IMAGE_BYTES.div_ceil(3) * 4 {
+    return Err("Image exceeds the size limit".into());
+  }
+  STANDARD.decode(data).map_err(|_| "Image data is invalid".into())
+}
+
+fn read_data_url(url: &str) -> Result<Vec<u8>, String> {
+  let (header, data) = url.split_once(',').ok_or("Image data URL is invalid")?;
+  let mime = header
+    .strip_prefix("data:")
+    .and_then(|header| header.strip_suffix(";base64"))
+    .filter(|mime| IMAGE_MIME_TYPES.contains(mime))
+    .ok_or("Image format is unsupported")?;
+  let bytes = decode_base64(data)?;
+  if raster_format(&bytes)?.to_mime_type() != mime {
+    return Err("Image data does not match its format".into());
+  }
+  Ok(bytes)
 }
 
 /// Binary bodies are explicit resources; even an `all` native projection must

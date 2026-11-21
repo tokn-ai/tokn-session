@@ -38,12 +38,13 @@ inside the conversation to register an existing directory and return to the same
 provider, prompt and image draft.
 
 Pi keeps its existing model/authentication settings and exclusive worker.
-The draft model picker offers verified Pi, Codex and OpenCode choices, or
+The draft model picker offers verified Pi, Codex, OpenCode and advertised ZCode choices, or
 **Use runtime default**. Choosing stays local; Send revalidates the catalog and
 applies the model before the first prompt. Changing project, agent or runtime
 clears the choice while retaining text/images. An incompatible model keeps image
-attachments visible and blocks Send until corrected. ZCode and DSH use their
-runtime defaults.
+attachments visible and blocks Send until corrected. ZCode's full catalog comes
+from an authorized creation in the current runtime; cold probes retain its
+default without creating a conversation for discovery. DSH uses its runtime default.
 Codex uses app-server RPC. DSH passes the project directory to native session
 creation and retains the deployment’s default agent preset.
 
@@ -54,8 +55,8 @@ invalidates the old scope; refreshing options clears only the model choice and
 keeps text/images. Pi uses this same plan boundary while retaining its existing
 worker execution and receipts. Checking availability never launches an agent.
 
-Initial images are supported for Pi, Codex and OpenCode, with host-side validation
-against the effective model before delivery. ZCode and DSH accept text in drafts.
+Initial images are supported for Pi, Codex, OpenCode and ZCode, with host-side validation
+against the effective model before delivery. DSH accepts text in drafts.
 Switching agents keeps drafts and previews; unsupported images
 must be removed or used with another supported agent.
 

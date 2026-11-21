@@ -48,8 +48,15 @@ commands may update them; ordinary session commands carry only verified runtime
 and session identities. See [viewer RPC runtimes](viewer-rpc-runtimes.md).
 
 ZCode launches a project-scoped Agent CLI over stdio. It verifies the native
-database path, explicitly creates or resumes the selected root session, and
-uses idle-only native admission for the Viewer’s text composer.
+database path and explicitly creates or resumes the selected root session.
+The Viewer sends text through native advisory guidance or explicit follow-up
+queue admission. Guidance starts idle sessions, can join active work at a tool
+boundary, and can fall back to a later turn. Its native acknowledgement does
+not distinguish current-turn consumption from queued fallback.
+Native question and permission callbacks retain their business request identity
+across envelope reannouncements. The adapter normalizes question choices, notes,
+plan approval and per-use permissions. Responses have transport-write receipts;
+native resolution or the pending snapshot retires a dispatched request.
 
 Snapshot inspection does not call a provider, start a process, or resume saved
 work. Initial snapshots require recovery and do not claim a live connection until
@@ -65,17 +72,29 @@ keeps that binding reserved until shutdown, preventing accidental replacement.
 Commands cover metadata, current state, model catalogs, messages, cancellation,
 pending questions/permissions/dialogs, and typed replies. Consult capabilities
 instead of treating all providers as equivalent. `StartOrSteer` uses native
-admission to start when idle or steer when running. `Queue` uses native follow-up
-delivery. Strict `Start` and `Steer` require native atomic state enforcement;
+admission to start when idle or steer when running. `Guide` permits native
+advisory guidance with idle start and follow-up fallback. `Queue` uses native
+follow-up delivery and may start immediately when idle.
+Strict `Start` and `Steer` require native atomic state enforcement;
 unsupported modes reject rather than relying on a racing status preflight.
-An `Accepted` admission is distinct from started, steered, or completed work.
+ZCode supports `Guide` and `Queue`, and rejects all strict delivery modes and
+`StartOrSteer`. An `Accepted` admission is distinct from started, steered, or completed work.
 Cancellation ends native turn work and may preserve queued inputs.
 
-`MessageInput.model` is reserved for an adapter that can atomically apply it only
-when starting, ignoring it during steering. The general adapters
-advertise this as unsupported: their native APIs cannot guarantee applying it
-only on idle admission. Model catalogs still provide real metadata.
-The viewer's existing Pi bridge can retain its stronger native admission path.
+`MessageInput.model` requires an explicit native capability. The established
+`atomic_model_on_send` contract applies the choice only when starting and ignores
+it during steering. ZCode instead advertises `per_input_model`: native admission
+captures the model with each Guide/Queue input. An in-flight model request is
+unchanged; guidance can apply the choice at its next model boundary, and queued
+work retains its own model. These contracts are separate. Other general adapters
+remain read-only for model selection; the Viewer Pi workflow keeps its existing
+idle selection behavior.
+
+ZCode image inputs use native chunked attachment transactions followed by one
+V4 input command. The adapter validates all images and pins an advertised vision
+model before staging. Attachment failure means no prompt was dispatched, even
+if an uncertain commit leaves an orphan native artifact. Once input dispatch
+begins, uncertain admission is retained without replay.
 
 The core permits one awaiting message admission per session while allowing
 cancellation and question replies to proceed independently. A request receipt binds
@@ -107,6 +126,9 @@ coverage for previously observed sessions. Recovery scopes are bounded; overflow
 sets `reattach_required` and blocks further mutations until a fresh binding. Inspectors and history readers remain
 separate from this live channel; token payloads need not be forwarded to every
 frontend.
+Binding permits bounded fresh state/pending reads when live events race a
+baseline, while the exact runtime instance remains connected. Native activation
+and mutations are not repeated by that recovery.
 
 OpenCode and DSH do not negotiate an attached server-instance nonce. A lost
 attached stream therefore requires an explicit fresh attachment and refreshed

@@ -9,6 +9,7 @@ readme = "README.md"
 description = "Managed ZCode app-server adapter."
 
 [dependencies]
+base64 = "0.22"
 tokn-interaction-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true

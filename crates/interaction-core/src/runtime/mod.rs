@@ -828,16 +828,41 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     self.ensure_open()?;
     handle.bind_history(&key, &native_id).await?;
     for (id, command) in [("state", Command::State), ("pending", Command::PendingInteractions)] {
-      self
-        .0
-        .interactions
-        .execute(InteractionRequest {
-          request_id: format!("bind-{id}-{}", uuid::Uuid::new_v4()),
-          target: target.clone(),
-          command,
-        })
-        .await
-        .map_err(|_| "Could not recover live session state")?;
+      for attempt in 0..3 {
+        self.ensure_open()?;
+        let result = self
+          .0
+          .interactions
+          .execute(InteractionRequest {
+            request_id: format!("bind-{id}-{}", uuid::Uuid::new_v4()),
+            target: target.clone(),
+            command: command.clone(),
+          })
+          .await;
+        match result {
+          Ok(_) => break,
+          Err(error) => {
+            // Native bind events can advance the cache during a baseline read.
+            // Retry only inspection on the same connected instance, never the
+            // activation above or a mutation whose dispatch may be uncertain.
+            let retry = attempt < 2
+              && error.kind == ErrorKind::Unavailable
+              && self
+                .0
+                .interactions
+                .snapshot(&target.runtime_id)
+                .is_some_and(|snapshot| {
+                  snapshot.descriptor.instance_id == target.instance_id
+                    && snapshot.connected
+                    && !snapshot.reattach_required
+                });
+            if !retry {
+              return Err("Could not recover live session state".into());
+            }
+            tokio::task::yield_now().await;
+          }
+        }
+      }
     }
     let binding = SessionBinding {
       session_key: key.clone(),

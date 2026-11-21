@@ -31,6 +31,7 @@ pub enum Operation {
   Models,
   Message,
   Steer,
+  Guide,
   Queue,
   CancelTurn,
   Respond,
@@ -63,6 +64,10 @@ pub struct Capabilities {
   /// True only if the runtime can atomically apply model intent on a new turn
   /// while ignoring it when the same admission steers an existing turn.
   pub atomic_model_on_send: bool,
+  /// Native input admission captures explicit model intent for this input,
+  /// including guidance and queued work; an in-flight model call is unchanged.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub per_input_model: bool,
 }
 impl Capabilities {
   pub fn supports(&self, operation: Operation) -> bool {
@@ -161,6 +166,8 @@ pub enum DeliveryMode {
   Steer,
   /// Native admission starts if idle, steers if busy, and reports its outcome.
   StartOrSteer,
+  /// Advisory current-turn guidance; native admission may start idle or queue a follow-up.
+  Guide,
   /// Native follow-up delivery; execution may begin immediately if already idle.
   Queue,
 }
@@ -268,6 +275,10 @@ impl Command {
         ..
       } => Operation::Steer,
       Self::Message {
+        delivery: DeliveryMode::Guide,
+        ..
+      } => Operation::Guide,
+      Self::Message {
         delivery: DeliveryMode::Queue,
         ..
       } => Operation::Queue,
@@ -326,6 +337,8 @@ pub enum ErrorKind {
   InvalidRequest,
   StaleTarget,
   Rejected,
+  /// Input was rejected until the user decides how to handle a held native queue.
+  QueueHeld,
   Conflict,
   Uncertain,
 }

@@ -420,7 +420,7 @@ fn viewer_provider(provider: LiveProvider) -> ViewerProvider {
 fn supports_creation_images(provider: LiveProvider) -> bool {
   matches!(
     provider,
-    LiveProvider::Pi | LiveProvider::Codex | LiveProvider::OpenCode
+    LiveProvider::Pi | LiveProvider::Codex | LiveProvider::OpenCode | LiveProvider::ZCode
   )
 }
 
@@ -555,13 +555,19 @@ impl CreationHost for Host {
           ));
         }
       }
+      let mut input = input.clone();
+      if created.provider == LiveProvider::ZCode {
+        // Keep the choice in native V4 admission as well as native creation.
+        // A model read cannot pin the execution intent across a later change.
+        input.model = model.cloned();
+      }
       match self
         .runtimes
         .execute_created(
           created,
           request_id.to_owned(),
           Command::Message {
-            input: input.clone(),
+            input,
             delivery: crate::session_supervisor::rpc_message_delivery(created.provider),
           },
         )

@@ -98,6 +98,7 @@ impl ViewerService {
       .map(|answer| (&answer.question_id, answer.option_index, &answer.text))
       .collect::<Vec<_>>();
     let message = SubmitSessionInputRequest {
+      delivery: None,
       session_key: target.session_key.clone(),
       request_id: request.request_id.clone(),
       // A stable receipt fingerprint, never delivered as prompt text. It is

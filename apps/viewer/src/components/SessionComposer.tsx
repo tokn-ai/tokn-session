@@ -42,6 +42,9 @@ export function SessionComposer({ session, on_accepted, input_refresh_key, model
   const disabled = input.checking || !input.availability?.available
     || input.sending || input.delivery_uncertain;
   const overLimit = input.length > input.max_length;
+  const guide_available = input.availability?.delivery_modes?.includes("guide") === true;
+  const has_start = input.availability?.delivery_modes?.includes("start") === true;
+  const advisory_send = guide_available && !has_start;
 
   return (
     <form
@@ -89,11 +92,17 @@ export function SessionComposer({ session, on_accepted, input_refresh_key, model
             {model ? <SessionModelPicker key={session.session_key} model={model} provider={providerLabel(session.provider)} input_busy={input.sending || input.delivery_uncertain}
               selected_model={input.model_draft} on_select={input.setModel} on_clear={input.clearModel} />
               : <span className="session-composer__provider">{providerLabel(session.provider)}</span>}
+            {guide_available && has_start ? <button type="button" className="text-button"
+              disabled={!input.can_guide} title="Start if idle, guide active work when possible, or queue a follow-up."
+              onClick={() => { void input.send("guide"); }}>Guide</button> : null}
+            {input.availability?.delivery_modes?.includes("queue") ? <button type="button" className="text-button"
+              disabled={!input.can_queue} title="Add a follow-up, or start immediately when idle."
+              onClick={() => { void input.send("queue"); }}>Queue</button> : null}
             <button
               aria-label={input.sending ? input.resuming ? `Resuming ${providerLabel(session.provider)}…` : "Sending…" : "Send"}
               className="session-composer__send"
               disabled={!input.can_send}
-              title="Send message (⌘ / Ctrl + Enter)"
+              title={advisory_send ? "Start if idle, guide active work when possible, or queue a follow-up." : "Send message (⌘ / Ctrl + Enter)"}
               type="submit"
             >
               {input.sending ? <span aria-hidden="true" className="inline-spinner" /> : <SendIcon />}
@@ -104,7 +113,9 @@ export function SessionComposer({ session, on_accepted, input_refresh_key, model
           <span id={`${inputId}-hint`} className={overLimit ? "session-composer__limit" : undefined}>
             {overLimit
               ? `${input.length.toLocaleString()} / ${input.max_length.toLocaleString()} characters`
-              : "⌘ / Ctrl + Enter to send · Enter for a new line"}
+              : `⌘ / Ctrl + Enter to send · Enter for a new line${advisory_send
+                ? " · Send may guide active work or become a follow-up"
+                : guide_available ? " · Guide may become a follow-up" : ""}`}
           </span>
         </div>
         <div className="session-composer__status" id={`${inputId}-status`} role="status">

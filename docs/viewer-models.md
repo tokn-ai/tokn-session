@@ -33,7 +33,7 @@ configuration/extensions and can run native migrations. No saved conversation,
 prompt or model-setting call is made during discovery.
 
 **Use runtime default** preserves existing creation behavior. Explicit Pi,
-Codex and OpenCode choices stay in the draft until Send, reset when the
+Codex, OpenCode and advertised ZCode choices stay in the draft until Send, reset when the
 project/provider/runtime changes, and determine image compatibility. A refreshed
 runtime plan also clears the model choice while preserving text/images. DSH
 remains default-only because its creation API does not accept a model. The host verifies
@@ -47,7 +47,7 @@ identity and runtime-plan proof belong to the same durable creation fingerprint
 as the first prompt. RPC receipts also retain the exact resolved plan;
 uncertain results never trigger a separate setter or prompt replay. Native
 catalog details and credentials do not enter receipts. This flow remains local
-desktop only and does not change existing-session RPC model capabilities.
+desktop only.
 
 `get_session_model_status`, `list_session_models`, and `submit_session_input`
 share snake_case request/response contracts in `viewer-core::models`. Tauri
@@ -90,9 +90,28 @@ also persist its default provider/model for new sessions, but this happens only
 when sending an idle prompt with that choice. New Pi sessions inherit defaults
 unless their draft explicitly chooses a creation model.
 
+ZCode advertises `model_input_mode: "per_input"`. Send and Queue capture the
+selected model with the input, including while busy. The current model call
+continues unchanged; consumed guidance can use the choice for its next model
+step, and queued work keeps its captured choice. Native admission also updates
+the session's continuation default. The host validates runtime generation,
+the picker's model revision, and catalog membership before dispatch; these
+preflight checks do not claim a native revision CAS. Clients explicitly echo
+the input mode with their model intent. Older clients cannot silently opt into
+different busy semantics. The picker refreshes actual native state after
+acceptance rather than marking a queued model as currently executing.
+
+ZCode 0.17.1 has no independent full-catalog read. Authorized creation supplies
+the instance's catalog; current-state reads refresh its current model facts.
+Cold metadata probes return connect-first guidance without creating a session.
+A cold-resumed runtime initially advertises its current model; creating a real
+new conversation in that instance supplies its full choices. Resume retains
+bounded native reads instead of fetching an unbounded image transcript merely
+to obtain a model list.
+
 Codex defaults to RPC. Model reads use an already bound app-server and native
 catalog; an unbound thread retains recorded context without starting or resuming
-it. The common RPC adapters do not guarantee atomic model-on-send, so these
+it. The other common RPC adapters do not guarantee atomic model-on-send, so these
 catalogs remain inspectable metadata with read-only selection and an explicit
 reason. Opening an existing session's picker does not activate a runtime. See
 [shared session supervision](shared-session-supervisor.md).

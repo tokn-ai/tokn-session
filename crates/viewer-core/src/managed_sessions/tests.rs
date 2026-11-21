@@ -100,6 +100,7 @@ for line in sys.stdin:
     cwd: folder.clone(),
   };
   let request = SubmitSessionInputRequest {
+    delivery: None,
     request_id: uuid::Uuid::new_v4().to_string(),
     session_key: key.clone(),
     text: "dialog:confirm".into(),

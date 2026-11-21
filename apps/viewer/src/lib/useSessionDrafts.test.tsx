@@ -109,7 +109,7 @@ describe("app-only session drafts", () => {
     expect(result.current.drafts).toEqual([]); expect(host.invoke).not.toHaveBeenCalled(); expect(host.transport.listen).not.toHaveBeenCalled();
   });
 
-  it.each(["pi", "codex", "open_code", "dsh"] as const)("freezes %s first-message selection and rejects same-frame duplicates", async (provider) => {
+  it.each(["pi", "codex", "open_code", "zcode", "dsh"] as const)("freezes %s first-message selection and rejects same-frame duplicates", async (provider) => {
     const host = connection(); const start = deferred<ManagedSessionSnapshot>(); const original = host.invoke.getMockImplementation()!;
     host.invoke.mockImplementation((command, payload) => command === "create_project_session" ? start.promise : original(command, payload));
     const { result } = renderHook(() => useSessionDrafts(options(), host.transport));

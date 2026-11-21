@@ -9,7 +9,7 @@ import type { SessionControlController } from "../lib/useSessionControl";
 
 const transport = vi.hoisted(() => ({ scope: "local", invoke: vi.fn() }));
 vi.mock("../lib/transport", () => ({ invoke: vi.fn(), listen: vi.fn(), viewerStorageScope: () => transport.scope,
-  captureTransport: () => ({ invoke: transport.invoke, on_close: () => () => {}, release: vi.fn() }) }));
+  captureTransport: () => ({ invoke: transport.invoke, listen: async () => () => {}, on_close: () => () => {}, release: vi.fn() }) }));
 vi.mock("../lib/tauri", () => ({ getSessionInputStatus: vi.fn(), getSessionModelStatus: vi.fn(), listSessionModels: vi.fn(),
   submitSessionInput: vi.fn(), uploadImageChunk: vi.fn(), releaseImageUpload: vi.fn() }));
 const session = { session_key: "pi:one", provider: "pi" } as SessionSummary;
@@ -125,6 +125,89 @@ it("stages a busy vision draft and resets its choice after the host rejects imag
   expect(screen.getByAltText("screen.png")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
   expect(screen.getByLabelText("Runtime model")).toHaveTextContent("First model");
+});
+
+it.each(["Send", "Queue"])("binds a busy per-input vision choice and image to %s, then reads actual model state", async (action) => {
+  actual = { ...actual, model_input_mode: "per_input", updates_pi_default: false };
+  vi.mocked(getSessionInputStatus).mockImplementation(async () => ({ available: true, max_length: 1000, message: "",
+    delivery_modes: ["guide", "queue"], images_available: false, images_stageable: true, ...DEFAULT_IMAGE_LIMITS }));
+  vi.mocked(submitSessionInput).mockImplementation(async (request) => ({ request_id: request.request_id, status: "accepted", message: "Input admitted" }));
+  const target = { ...session, session_key: "zcode:one", provider: "zcode", is_running: true } as SessionSummary;
+  render(<Composer target={target} running />);
+  await waitFor(() => expect(field()).toBeEnabled());
+  await chooseSecond();
+  fireEvent.change(screen.getByLabelText("Image files"), { target: { files: [new File(["png"], "screen.png", { type: "image/png" })] } });
+  expect(uploadImageChunk).not.toHaveBeenCalled();
+  expect(screen.getByRole("button", { name: action })).toBeEnabled();
+  const state_reads = vi.mocked(getSessionModelStatus).mock.calls.length;
+  fireEvent.click(screen.getByRole("button", { name: action }));
+  await waitFor(() => expect(field()).toHaveValue(""));
+  await waitFor(() => expect(getSessionModelStatus).toHaveBeenCalledTimes(state_reads + 1));
+  expect(vi.mocked(submitSessionInput).mock.calls[0][0]).toEqual({ session_key: target.session_key,
+    request_id: expect.any(String), text: "", image_ids: ["uploaded"],
+    model_selection: { model_provider: "anthropic", model_id: "second", expected_revision: "1", runtime_generation: "runtime", model_input_mode: "per_input" },
+    ...(action === "Queue" ? { delivery: "queue" } : {}) });
+  expect(screen.getByLabelText("Runtime model")).toHaveTextContent("First model");
+  expect(screen.queryByRole("button", { name: "Use current model" })).not.toBeInTheDocument();
+  expect(screen.queryByAltText("screen.png")).not.toBeInTheDocument();
+});
+
+it("discovers per-input model controls after the first Send connects the native runtime", async () => {
+  actual = { ...actual, can_select: false, can_list: false, supports_model_input: false };
+  vi.mocked(getSessionInputStatus).mockResolvedValue({ available: true, max_length: 1000, message: "Ready to connect", delivery_modes: [] });
+  vi.mocked(submitSessionInput).mockImplementation(async (request) => {
+    actual = { ...actual, can_select: true, can_list: true, supports_model_input: true, model_input_mode: "per_input" };
+    return { request_id: request.request_id, status: "accepted", message: "Sent" };
+  });
+  render(<Composer target={{ ...session, session_key: "zcode:one", provider: "zcode" } as SessionSummary} />);
+  await waitFor(() => expect(field()).toBeEnabled()); prompt();
+  expect(screen.queryByRole("button", { name: /Change model/ })).not.toBeInTheDocument();
+  fireEvent.submit(screen.getByRole("form"));
+  expect(await screen.findByRole("button", { name: /Model: First model/ })).toBeEnabled();
+  expect(listSessionModels).not.toHaveBeenCalled();
+  expect(getSessionModelStatus).toHaveBeenCalledTimes(2);
+});
+
+it("does not display a queued per-input selection as current while native model state is refreshing", async () => {
+  actual = { ...actual, model_input_mode: "per_input", updates_pi_default: false };
+  render(<Composer running />);
+  await waitFor(() => expect(field()).toBeEnabled()); prompt(); await chooseSecond();
+  let refresh!: (status: SessionModelStatus) => void;
+  vi.mocked(getSessionModelStatus).mockReturnValueOnce(new Promise((resolve) => { refresh = resolve; }));
+  vi.mocked(submitSessionInput).mockImplementation(async (request) => ({ request_id: request.request_id,
+    status: "accepted", message: "Queued", model_result: { outcome: "applied", state: { model: second, source: "live", revision: "future-input" } } }));
+  fireEvent.submit(screen.getByRole("form"));
+  await waitFor(() => expect(field()).toHaveValue(""));
+  expect(screen.getByLabelText("Runtime model")).toHaveTextContent("First model");
+  await act(async () => refresh(actual));
+  expect(screen.getByLabelText("Runtime model")).toHaveTextContent("First model");
+});
+
+it("freezes per-input model proof and Queue intent before image staging and retains drafts on stale rejection", async () => {
+  actual = { ...actual, model_input_mode: "per_input", updates_pi_default: false };
+  vi.mocked(getSessionInputStatus).mockImplementation(async () => ({ available: true, max_length: 1000, message: "",
+    delivery_modes: ["guide", "queue"], images_available: false, images_stageable: true, ...DEFAULT_IMAGE_LIMITS }));
+  let finish_upload!: (value: Awaited<ReturnType<typeof uploadImageChunk>>) => void;
+  vi.mocked(uploadImageChunk).mockReturnValueOnce(new Promise((resolve) => { finish_upload = resolve; }));
+  vi.mocked(submitSessionInput).mockImplementation(async (request) => ({ request_id: request.request_id, status: "not_sent", message: "Model state changed" }));
+  const target = { ...session, session_key: "zcode:one", provider: "zcode", is_running: true } as SessionSummary;
+  const view = render(<Composer target={target} running />);
+  await waitFor(() => expect(field()).toBeEnabled()); prompt(); await chooseSecond();
+  fireEvent.change(screen.getByLabelText("Image files"), { target: { files: [new File(["png"], "screen.png", { type: "image/png" })] } });
+  fireEvent.click(screen.getByRole("button", { name: "Queue" }));
+  await waitFor(() => expect(uploadImageChunk).toHaveBeenCalledOnce());
+  actual = { ...actual, state: { ...actual.state, revision: "new-model-state" } };
+  view.rerender(<Composer target={target} running refresh_key={1} />);
+  await waitFor(() => expect(getSessionModelStatus).toHaveBeenCalledTimes(2));
+  const upload = vi.mocked(uploadImageChunk).mock.calls[0][0];
+  await act(async () => finish_upload({ upload_id: upload.upload_id, received_bytes: upload.total_bytes, image_id: "uploaded" }));
+  await screen.findByText("Model state changed");
+  expect(vi.mocked(submitSessionInput).mock.calls[0][0]).toMatchObject({ delivery: "queue", image_ids: ["uploaded"],
+    model_selection: { model_id: "second", expected_revision: "1", runtime_generation: "runtime", model_input_mode: "per_input" } });
+  expect(submitSessionInput).toHaveBeenCalledOnce();
+  expect(field()).toHaveValue("Keep this message");
+  expect(screen.getByRole("button", { name: /Model: Second model/ })).toBeInTheDocument();
+  expect(screen.getByAltText("screen.png")).toBeInTheDocument();
 });
 
 it("captures the latest runtime revision and retains each session's model draft", async () => {

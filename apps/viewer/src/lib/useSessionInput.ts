@@ -2,8 +2,8 @@ import { createUuid } from "./id";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getSessionInputStatus, submitSessionInput } from "./tauri";
 import { errorMessage } from "./state";
-import type { ModelChoice, SessionInputStatus } from "./types";
-import { captureTransport, viewerStorageScope } from "./transport";
+import type { ModelChoice, SessionInputDeliveryMode, SessionInputStatus } from "./types";
+import { captureTransport, viewerStorageScope, type CommandInvoker } from "./transport";
 import { sameModel } from "./sessionModels";
 import type { SessionModelController } from "./useSessionModel";
 import type { SessionControlController } from "./useSessionControl";
@@ -52,12 +52,13 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
     if (mounted.current) render((revision) => revision + 1);
   }, []);
 
-  const checkAvailability = useCallback(async (key: string, target_session: string) => {
+  const checkAvailability = useCallback(async (key: string, target_session: string, send?: CommandInvoker) => {
     const checkId = ++check_sequence.current;
     update(key, (state) => ({ ...state, checking: true, check_id: checkId }));
     let availability: SessionInputStatus;
     try {
-      availability = await getSessionInputStatus({ session_key: target_session });
+      availability = send ? await getSessionInputStatus({ session_key: target_session }, send)
+        : await getSessionInputStatus({ session_key: target_session });
     } catch (error) {
       availability = {
         available: false,
@@ -96,8 +97,23 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
     ? { ...saved, checking: true, availability: null } : saved;
   const maxLength = state.availability?.max_length ?? DEFAULT_MAX_LENGTH;
   const length = Array.from(state.draft).length;
+  const supports_delivery_modes = state.availability?.delivery_modes !== undefined;
 
-  async function send() {
+  useEffect(() => {
+    if (!session_key || !supports_delivery_modes) return;
+    const key = JSON.stringify([scope, session_key]);
+    const transport = captureTransport();
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    const refresh = () => { if (!cancelled) void checkAvailability(key, session_key, transport.invoke); };
+    void transport.listen("rpc-runtimes-changed", refresh).then((stop) => {
+      if (cancelled) stop(); else { unlisten = stop; refresh(); }
+    }).catch(() => { /* Focus and accepted input also refresh delivery capabilities. */ });
+    window.addEventListener("focus", refresh);
+    return () => { cancelled = true; unlisten?.(); window.removeEventListener("focus", refresh); };
+  }, [checkAvailability, scope, session_key, supports_delivery_modes]);
+
+  async function send(delivery?: SessionInputDeliveryMode) {
     if (!session_key || control?.blocked) return;
     const key = scopedKey(session_key);
     const source_session = session_key;
@@ -107,13 +123,16 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
       || !current.availability?.available || (!current.draft.trim() && !current.images.length)
       || (current.model_draft && (model?.status?.supports_model_input !== true || !model.status.can_list || model.checking))
       || (current.images.length > 0 && !draftImageLimits(current.availability, current.model_draft, model))
+      || (delivery && !current.availability.delivery_modes?.includes(delivery))
       || Array.from(current.draft).length > current.availability.max_length) return;
     const text = current.draft;
     const images = current.images;
     const model_draft = current.model_draft;
+    const per_input_model = model?.status?.model_input_mode === "per_input";
     const model_selection = model_draft && model?.status ? {
       model_provider: model_draft.model.model_provider, model_id: model_draft.model.model_id,
       expected_revision: model.status.state.revision, runtime_generation: model.status.runtime_generation,
+      ...(model.status.model_input_mode ? { model_input_mode: model.status.model_input_mode } : {}),
     } : undefined;
     const source_scope = scope;
     update(key, (value) => ({ ...value, sending: true, resuming: current.availability?.resume_required === true, notice: null }));
@@ -130,7 +149,7 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
     }
     let accepted = false;
     let provider_attempted = false;
-    const transport = images.length || model_selection ? captureTransport() : null;
+    const transport = images.length || model_selection || supports_delivery_modes ? captureTransport() : null;
     const uploads: ImageUploadReceipt[] = [];
     let disconnected = false;
     const releaseUploads = () => transport ? releaseImageUploads(uploads, transport.release) : Promise.resolve();
@@ -140,12 +159,17 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
       if (transport) image_ids = await uploadImageDrafts(images, { type: "session", session_key: source_session }, transport.invoke,
         () => mounted.current && current_scope.current === source_scope && !disconnected, (receipt) => uploads.push(receipt));
       if (current_scope.current !== source_scope || disconnected || images.length && !mounted.current) throw new Error("The selected machine changed. Message was not sent.");
+      if (delivery && !states.current.get(key)?.availability?.delivery_modes?.includes(delivery)) {
+        update(key, (value) => ({ ...value, sending: false, resuming: false,
+          notice: "This delivery mode is no longer available. Refresh availability before sending." }));
+        return;
+      }
       provider_attempted = true;
       const request = { session_key: source_session, request_id: requestId, text,
-        ...(image_ids.length ? { image_ids } : {}), ...(model_selection ? { model_selection } : {}) };
+        ...(image_ids.length ? { image_ids } : {}), ...(model_selection ? { model_selection } : {}), ...(delivery ? { delivery } : {}) };
       const result = transport ? await submitSessionInput(request, transport.invoke) : await submitSessionInput(request);
       const matchingResponse = result.request_id === requestId;
-      if (matchingResponse && result.model_result) {
+      if (matchingResponse && result.model_result && !per_input_model) {
         const reset_model = result.status === "accepted" || result.model_result.outcome === "ignored_while_running";
         if (reset_model) update(key, (value) => ({ ...value, model_draft: value.model_draft === model_draft ? null : value.model_draft }));
         if (model?.acceptState(result.model_result.state, reset_model)) {
@@ -179,7 +203,8 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
     } catch (error) {
       update(key, (value) => ({
         ...value, sending: false, resuming: false, delivery_uncertain: provider_attempted,
-        notice: withDetail(provider_attempted ? UNCONFIRMED_MESSAGE : "Message was not sent. Could not upload images.", errorMessage(error)),
+        notice: withDetail(provider_attempted ? UNCONFIRMED_MESSAGE
+          : images.length ? "Message was not sent. Could not upload images." : "Message was not sent. Could not prepare delivery.", errorMessage(error)),
       }));
     } finally {
       unlisten?.();
@@ -189,6 +214,10 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
     }
     // A refresh failure cannot change the provider's delivery acknowledgement.
     if (accepted && mounted.current && current_scope.current === source_scope) {
+      // A queued model choice belongs to its input. Read native state rather
+      // than displaying that choice as the session's current model.
+      if (per_input_model || supports_delivery_modes) void model?.refresh();
+      if (supports_delivery_modes) void checkAvailability(key, source_session, transport?.invoke);
       try {
         await acceptedHandler.current?.(source_session);
       } catch {
@@ -197,6 +226,10 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
     }
   }
 
+  const can_deliver = !!session_key && !state.checking && !!state.availability?.available
+    && !state.sending && !state.delivery_uncertain && (!!state.draft.trim() || state.images.length > 0)
+    && (!state.model_draft || model?.status?.supports_model_input === true && model.status.can_list && !model.checking)
+    && (!state.images.length || !!draftImageLimits(state.availability, state.model_draft, model)) && length <= maxLength;
   return {
     ...state,
     image_limits: draftImageLimits(state.availability, state.model_draft, model),
@@ -204,14 +237,13 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
       : state.model_draft && (model?.status?.supports_model_input !== true || !model.status.can_list)
       ? "This connection cannot send your model choice. Use the current model or retry availability."
       : state.images.length && !draftImageLimits(state.availability, state.model_draft, model)
-        ? model?.running ? "The running model cannot use these images. Remove them or wait for it to finish."
+        ? model?.running && model.status?.model_input_mode !== "per_input" ? "The running model cannot use these images. Remove them or wait for it to finish."
           : "This model cannot use the attached images. Choose an image model or remove the images." : null,
     max_length: maxLength,
     length,
-    can_send: !!session_key && !state.checking && !!state.availability?.available
-      && !state.sending && !state.delivery_uncertain && (!!state.draft.trim() || state.images.length > 0)
-      && (!state.model_draft || model?.status?.supports_model_input === true && model.status.can_list && !model.checking)
-      && (!state.images.length || !!draftImageLimits(state.availability, state.model_draft, model)) && length <= maxLength,
+    can_send: can_deliver,
+    can_guide: can_deliver && state.availability?.delivery_modes?.includes("guide") === true,
+    can_queue: can_deliver && state.availability?.delivery_modes?.includes("queue") === true,
     setModel(choice: ModelChoice) {
       if (!session_key || !model?.choiceAllowed(choice.model)) return;
       update(scopedKey(session_key), (value) => value.sending || value.delivery_uncertain ? value : {

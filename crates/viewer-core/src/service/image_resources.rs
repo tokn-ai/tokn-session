@@ -27,7 +27,17 @@ impl ViewerService {
     if matching.next().is_some() {
       return Err("Image identity is ambiguous".into());
     }
-    images::image_response(images::read_source(image)?, request.variant)
+    let bytes = match &image.source {
+      RecordedImageSource::Unavailable {
+        reference: Some(reference),
+      } if locator.provider == ViewerProvider::ZCode
+        && image_owner(event) == Some((Provider::ZCode, locator.session_id.as_str())) =>
+      {
+        images::zcode::read_artifact(&locator.source_path, &locator.session_id, reference)?
+      }
+      _ => images::read_source(image)?,
+    };
+    images::image_response(bytes, request.variant)
   }
 
   pub async fn upload_image_chunk(&self, request: UploadImageChunkRequest) -> Result<UploadImageChunkResponse, String> {
@@ -83,7 +93,12 @@ pub(super) fn event_images(event: &AgentEvent) -> Vec<MessageImageSummary> {
   if event.is_hidden() {
     return Vec::new();
   }
-  let mut summaries: Vec<_> = recorded_images(event).iter().take(64).map(image_summary).collect();
+  let owner = image_owner(event);
+  let mut summaries: Vec<_> = recorded_images(event)
+    .iter()
+    .take(64)
+    .map(|image| image_summary(image, owner))
+    .collect();
   if summaries.len() < 64 {
     let remaining = 64 - summaries.len();
     summaries.extend(
@@ -91,7 +106,7 @@ pub(super) fn event_images(event: &AgentEvent) -> Vec<MessageImageSummary> {
         .into_iter()
         .take(remaining)
         .map(|(image, range)| {
-          let mut summary = image_summary(&image);
+          let mut summary = image_summary(&image, None);
           summary.markdown_range = Some(range);
           summary
         }),
@@ -123,13 +138,24 @@ fn recorded_images(event: &AgentEvent) -> &[RecordedImage] {
   }
 }
 
+fn image_owner(event: &AgentEvent) -> Option<(Provider, &str)> {
+  match event {
+    AgentEvent::Message(message) => message.session_id.as_deref().map(|id| (message.provider, id)),
+    AgentEvent::ToolCall(tool) => tool.session_id.as_deref().map(|id| (tool.provider, id)),
+    _ => None,
+  }
+}
+
 pub(super) fn operation_images(operation: &ToolOperation) -> Vec<MessageImageSummary> {
   operation
     .images
     .iter()
     .take(64)
     .map(|image| {
-      let mut summary = image_summary(&image.image);
+      let mut summary = image_summary(
+        &image.image,
+        operation.session_id.as_deref().map(|id| (operation.provider, id)),
+      );
       summary.source_event_key = Some(encode_event_key(image.source_event_index));
       summary
     })
@@ -206,7 +232,7 @@ fn image_revision(images: &(impl Serialize + ?Sized)) -> Option<String> {
   Some(format!("{:x}", digest.finalize()))
 }
 
-fn image_summary(image: &RecordedImage) -> MessageImageSummary {
+fn image_summary(image: &RecordedImage, owner: Option<(Provider, &str)>) -> MessageImageSummary {
   MessageImageSummary {
     image_id: display_image_id(&image.image_id),
     source_event_key: None,
@@ -223,10 +249,17 @@ fn image_summary(image: &RecordedImage) -> MessageImageSummary {
         .take(255)
         .collect()
     }),
-    availability: if matches!(image.source, RecordedImageSource::Unavailable { .. }) {
-      ImageAvailability::Unavailable
-    } else {
-      ImageAvailability::Available
+    availability: match &image.source {
+      RecordedImageSource::Unavailable {
+        reference: Some(reference),
+      } if owner.is_some_and(|(provider, session)| {
+        provider == Provider::ZCode && images::zcode::matches_reference(reference, session)
+      }) =>
+      {
+        ImageAvailability::Available
+      }
+      RecordedImageSource::Unavailable { .. } => ImageAvailability::Unavailable,
+      _ => ImageAvailability::Available,
     },
   }
 }

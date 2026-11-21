@@ -28,7 +28,6 @@ impl ViewerService {
     let runtime_plan_id = Some(plan.fingerprint()?);
     let runtime_default_reason = match request.provider {
       LiveProvider::Dsh => Some("DSH uses its runtime default when creating a session."),
-      LiveProvider::ZCode => Some("ZCode uses its runtime default when creating a session."),
       _ => None,
     };
     if let Some(reason) = runtime_default_reason {
@@ -42,15 +41,26 @@ impl ViewerService {
       });
     }
     let cwd = PathBuf::from(&project.folder_path);
-    let models = if plan.strategy == RuntimeStrategy::SessionWorker {
-      self.sessions.managed.creation_models(cwd).await?
+    let (models, discovery_reason) = if plan.strategy == RuntimeStrategy::SessionWorker {
+      (self.sessions.managed.creation_models(cwd).await?, None)
     } else {
-      self
+      match self
         .sessions
         .runtimes
         .creation_models(request.provider, cwd, runtime.clone())
         .await
-        .map_err(|error| error.to_string())?
+      {
+        Ok(models) => (models, None),
+        Err(error)
+          if request.provider == LiveProvider::ZCode && error.kind == tokn_interaction_core::ErrorKind::Unsupported =>
+        {
+          (
+            Vec::new(),
+            Some("Connect a ZCode session with this runtime to discover its models".to_owned()),
+          )
+        }
+        Err(error) => return Err(error.to_string()),
+      }
     };
     let models = normalize_models(models)?;
     // A catalog from a replaced project/default/profile must never verify a
@@ -63,13 +73,18 @@ impl ViewerService {
     if current_project.folder_path != project.folder_path || current_plan != plan {
       return Err("The project or runtime changed while loading models. Open the model picker again.".into());
     }
-    let revision = catalog_revision(&project, provider, &plan, &models)?;
+    let revision = discovery_reason
+      .is_none()
+      .then(|| catalog_revision(&project, provider, &plan, &models))
+      .transpose()?;
     Ok(SessionCreationModels {
-      reason: models
-        .is_empty()
-        .then(|| "This runtime did not advertise any models. You can use its default.".into()),
+      reason: discovery_reason.or_else(|| {
+        models
+          .is_empty()
+          .then(|| "This runtime did not advertise any models. You can use its default.".into())
+      }),
       models,
-      catalog_revision: Some(revision),
+      catalog_revision: revision,
       runtime_profile_id: runtime.as_ref().map(|runtime| runtime.profile_id.clone()),
       runtime_revision: runtime.as_ref().map(|runtime| runtime.expected_revision),
       runtime_plan_id,

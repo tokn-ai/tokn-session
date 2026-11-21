@@ -364,6 +364,7 @@ if mode == 'ignore_eof':
       "discovery cannot apply a draft"
     );
     let mut selection = MessageModelSelection {
+      model_input_mode: None,
       model_provider: Some("synthetic".into()),
       model_id: "vision".into(),
       expected_revision: status.state.revision,
@@ -480,6 +481,7 @@ if mode == 'ignore_eof':
     fixture.create().await;
     let key = fixture.persisted().await.session_key.unwrap();
     let invalid = MessageModelSelection {
+      model_input_mode: None,
       model_provider: None,
       model_id: String::new(),
       expected_revision: String::new(),
@@ -550,6 +552,7 @@ if mode == 'ignore_eof':
         "must not be written",
         Vec::new(),
         Some(MessageModelSelection {
+          model_input_mode: None,
           model_provider: Some("synthetic".into()),
           model_id: "vision".into(),
           expected_revision: status.state.revision,
@@ -581,6 +584,7 @@ if mode == 'ignore_eof':
           "race steering",
           Vec::new(),
           Some(MessageModelSelection {
+            model_input_mode: None,
             model_provider: Some("synthetic".into()),
             model_id: "vision".into(),
             expected_revision: status.state.revision,
@@ -630,6 +634,7 @@ if mode == 'ignore_eof':
         "reject-follow-up",
         Vec::new(),
         Some(MessageModelSelection {
+          model_input_mode: None,
           model_provider: Some("synthetic".into()),
           model_id: "vision".into(),
           expected_revision: status.state.revision,
@@ -658,6 +663,7 @@ if mode == 'ignore_eof':
     let key = fixture.idle().await.session_key.unwrap();
     let status = fixture.manager.model_status(&key).await.unwrap().unwrap();
     let selection = MessageModelSelection {
+      model_input_mode: None,
       model_provider: Some("synthetic".into()),
       model_id: "text".into(),
       expected_revision: status.state.revision,
@@ -734,6 +740,7 @@ if mode == 'ignore_eof':
         "must not be written",
         Vec::new(),
         Some(MessageModelSelection {
+          model_input_mode: None,
           model_provider: Some("synthetic".into()),
           model_id: "vision".into(),
           expected_revision: status.state.revision,

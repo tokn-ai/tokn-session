@@ -447,7 +447,7 @@ async fn rejects_legacy_history_strict_modes_and_nonatomic_model_intent_before_m
   };
   assert_eq!(state.status, ExecutionState::Unknown);
   server.state.legacy.store(false, Ordering::Relaxed);
-  for mode in [DeliveryMode::Start, DeliveryMode::Steer] {
+  for mode in [DeliveryMode::Start, DeliveryMode::Steer, DeliveryMode::Guide] {
     assert_eq!(
       adapter
         .execute(request(&adapter, "strict", message("hello", mode)))

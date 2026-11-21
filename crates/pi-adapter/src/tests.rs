@@ -290,20 +290,22 @@ async fn native_auto_admission_deduplicates_and_never_changes_the_model() {
       .iter()
       .any(|request| request["type"] == "set_model")
   );
-  assert_eq!(
-    fixture
-      .execute(
-        "strict-steer",
-        Command::Message {
-          input: input("Only while active"),
-          delivery: DeliveryMode::Steer
-        }
-      )
-      .await
-      .unwrap_err()
-      .kind,
-    ErrorKind::Unsupported
-  );
+  for (id, delivery) in [("strict-steer", DeliveryMode::Steer), ("guide", DeliveryMode::Guide)] {
+    assert_eq!(
+      fixture
+        .execute(
+          id,
+          Command::Message {
+            input: input("Only while active"),
+            delivery
+          }
+        )
+        .await
+        .unwrap_err()
+        .kind,
+      ErrorKind::Unsupported
+    );
+  }
 }
 
 #[tokio::test]

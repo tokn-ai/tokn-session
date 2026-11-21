@@ -82,6 +82,14 @@ impl Actor {
         return Ok(());
       }
     }
+    if pending
+      .selection
+      .as_ref()
+      .is_some_and(|selection| selection.model_input_mode.is_some())
+    {
+      self.reject_message(pending, "Pi does not support per-input model selection", false);
+      return Ok(());
+    }
     self.send(wire::Command::GetState, PendingKind::Message(pending)).await
   }
 

@@ -946,6 +946,129 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn paired_interactions_require_device_authorization_and_current_host_control() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = paired_host(directory.path());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    config.local_url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
+    let forwarded = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+    let observed = forwarded.clone();
+    let api = tokio::spawn(async move {
+      let app = axum::Router::new().fallback(
+        move |axum::extract::OriginalUri(uri): axum::extract::OriginalUri, axum::Json(payload): axum::Json<Value>| {
+          let observed = observed.clone();
+          async move {
+            observed.lock().unwrap().push((uri.path().to_owned(), payload.clone()));
+            axum::Json(if uri.path() == "/api/v1/list_session_interactions" {
+              json!({
+                "session_key":"one", "runtime_id":"private-runtime", "instance_id":"private-instance",
+                "interactions":[{"interaction_id":"permission-one", "details":"private-operation"}]
+              })
+            } else {
+              json!({"request_id":payload["request"]["request_id"], "status":"accepted", "message":"Response sent"})
+            })
+          }
+        },
+      );
+      axum::serve(listener, app).await.unwrap();
+    });
+    let device = NoiseIdentity::generate().unwrap();
+    for command in ["list_session_interactions", "respond_session_interaction"] {
+      let (task, incoming, mut frames, mut channel) = open_host(&config, &device).await;
+      incoming
+        .send(
+          channel
+            .encrypt(&InnerMessage::DeviceRequest {
+              method: "POST".into(),
+              path: format!("/api/v1/{command}"),
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+      assert!(matches!(
+        read_inner(&mut frames, &mut channel).await,
+        InnerMessage::Error { .. }
+      ));
+      assert!(task.await.unwrap().is_err());
+      assert!(forwarded.lock().unwrap().is_empty());
+    }
+    let current = now().unwrap();
+    crate::onboarding::authorize_device(&config.paired.state_file, &device.public_key(), current / 30, current)
+      .unwrap();
+    // Agent control does not require the independent runtime-admin permission.
+    assert!(!crate::onboarding::can_manage_runtimes(&config.paired.state_file, &device.public_key()).unwrap());
+    for allow_control in [false, true] {
+      config.allow_control = allow_control;
+      for command in ["list_session_interactions", "respond_session_interaction"] {
+        let path = format!("/api/v1/{command}");
+        let payload = if command == "list_session_interactions" {
+          json!({"request":{"session_key":"one"}})
+        } else {
+          json!({"request":{
+            "session_key":"one", "request_id":"9a1b2c3d-1234-4321-9876-0123456789ab",
+            "runtime_id":"private-runtime", "instance_id":"private-instance", "interaction_id":"permission-one",
+            "response":{"type":"permission", "decision":"allow_once"}
+          }})
+        };
+        let before = forwarded.lock().unwrap().len();
+        let (task, incoming, mut frames, mut channel) = open_host(&config, &device).await;
+        for message in [
+          InnerMessage::DeviceRequest {
+            method: "POST".into(),
+            path: path.clone(),
+          },
+          InnerMessage::RequestBody {
+            data: protocol::encode(&serde_json::to_vec(&payload).unwrap()),
+          },
+          InnerMessage::RequestEnd {},
+        ] {
+          incoming.send(channel.encrypt(&message).unwrap()).await.unwrap();
+        }
+        if !allow_control && command == "respond_session_interaction" {
+          assert!(matches!(
+            read_inner(&mut frames, &mut channel).await,
+            InnerMessage::Error { .. }
+          ));
+          assert!(task.await.unwrap().is_err());
+          assert_eq!(forwarded.lock().unwrap().len(), before);
+          continue;
+        }
+        assert!(matches!(
+          read_inner(&mut frames, &mut channel).await,
+          InnerMessage::Response { status: 200, .. }
+        ));
+        let InnerMessage::Chunk { data } = read_inner(&mut frames, &mut channel).await else {
+          panic!("Expected interaction response");
+        };
+        let response: Value = serde_json::from_slice(&protocol::decode(&data, protocol::CHUNK_SIZE).unwrap()).unwrap();
+        if allow_control {
+          assert_eq!(forwarded.lock().unwrap().last(), Some(&(path, payload)));
+          assert_eq!(forwarded.lock().unwrap().len(), before + 1);
+          if command == "list_session_interactions" {
+            assert_eq!(response["runtime_id"], "private-runtime");
+          } else {
+            assert_eq!(response["status"], "accepted");
+          }
+        } else {
+          assert_eq!(
+            response,
+            json!({"session_key":"one", "runtime_id":null, "instance_id":null, "interactions":[]})
+          );
+          assert_eq!(forwarded.lock().unwrap().len(), before);
+        }
+        assert!(matches!(
+          read_inner(&mut frames, &mut channel).await,
+          InnerMessage::End {}
+        ));
+        drop(incoming);
+        task.await.unwrap().unwrap();
+      }
+    }
+    api.abort();
+  }
+
+  #[tokio::test]
   async fn runtime_administration_requires_both_host_permissions_before_forwarding() {
     let directory = tempfile::tempdir().unwrap();
     let mut config = paired_host(directory.path());

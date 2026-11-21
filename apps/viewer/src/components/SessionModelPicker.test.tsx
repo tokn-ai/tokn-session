@@ -66,6 +66,17 @@ it("checks the draft model separately from actual state and chooses a verified o
   expect(actions.on_clear).toHaveBeenCalledTimes(1);
 });
 
+it("explains per-input choices while busy without claiming they are ignored", () => {
+  const model = controller({ running: true, status: { ...controller().status!, updates_pi_default: false, model_input_mode: "per_input" } });
+  render(<SessionModelPicker model={model} provider="ZCode" {...callbacks()} />);
+  fireEvent.click(screen.getByRole("button", { name: /Change model/ }));
+  expect(screen.getByRole("dialog")).toHaveTextContent("Your model choice stays with this message");
+  expect(screen.getByRole("dialog")).toHaveTextContent("Guidance can use it in ongoing work");
+  expect(screen.getByRole("dialog")).toHaveTextContent("queued follow-ups keep their choice");
+  expect(screen.getByRole("dialog")).not.toHaveTextContent("ignores this choice");
+  expect(screen.getByRole("dialog")).not.toHaveTextContent("Pi’s default");
+});
+
 it("shows recorded/read-only reasons without opening a catalog", () => {
   const model = controller({ can_open: false, can_select: false, state: { ...state, source: "recorded" }, reason: "This session is read-only." });
   render(<SessionModelPicker model={model} provider="Pi" {...callbacks()} />);

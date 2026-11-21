@@ -2,6 +2,24 @@
 use super::*;
 use crate::runtime_plan::{RuntimePlan, VerifiedSessionDescriptor};
 
+fn public_command_error(error: InteractionError) -> InteractionError {
+  InteractionError::new(
+    error.kind,
+    match error.kind {
+      ErrorKind::Uncertain => "RPC delivery was not confirmed; inspect the session before retrying",
+      ErrorKind::StaleTarget => "The native session or runtime changed; refresh before retrying",
+      ErrorKind::Unsupported => "The selected runtime does not support this operation or delivery mode",
+      ErrorKind::Conflict => "The native runtime is busy or this request conflicts with an earlier admission",
+      ErrorKind::InvalidRequest => "The runtime request is invalid",
+      ErrorKind::Rejected => "The native agent rejected this request; check its configuration on the host",
+      ErrorKind::QueueHeld => {
+        "The native agent paused queued messages after Stop. Open its native app to keep or clear the held queue before sending again."
+      }
+      ErrorKind::Unavailable => "The native runtime is unavailable; inspect its status on the host",
+    },
+  )
+}
+
 impl<H: RuntimeHost> RuntimeCoordinator<H> {
   /// Called only after the host has verified a historical session and an
   /// explicit Send. This prepares a target without delivering or replaying input.
@@ -218,20 +236,7 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
         command,
       })
       .await
-      .map_err(|error| {
-        InteractionError::new(
-          error.kind,
-          match error.kind {
-            ErrorKind::Uncertain => "RPC delivery was not confirmed; inspect the session before retrying",
-            ErrorKind::StaleTarget => "The native session or runtime changed; refresh before retrying",
-            ErrorKind::Unsupported => "The selected runtime does not support this operation or delivery mode",
-            ErrorKind::Conflict => "The native runtime is busy or this request conflicts with an earlier admission",
-            ErrorKind::InvalidRequest => "The runtime request is invalid",
-            ErrorKind::Rejected => "The native agent rejected this request; check its configuration on the host",
-            ErrorKind::Unavailable => "The native runtime is unavailable; inspect its status on the host",
-          },
-        )
-      })
+      .map_err(public_command_error)
   }
 
   /// Cached runtime state only. A missing binding never creates or resumes work.
@@ -326,5 +331,23 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     drop(state);
     self.changed();
     Ok(())
+  }
+}
+
+#[cfg(test)]
+mod error_tests {
+  use super::*;
+
+  #[test]
+  fn held_queue_recovery_is_public_without_exposing_native_error_text() {
+    let native = "private provider credentials and diagnostic content";
+    let held = public_command_error(InteractionError::new(ErrorKind::QueueHeld, native));
+    assert_eq!(held.kind, ErrorKind::QueueHeld);
+    assert!(held.message.contains("keep or clear the held queue"));
+    assert!(!held.message.contains(native));
+    let rejected = public_command_error(InteractionError::new(ErrorKind::Rejected, native));
+    assert_eq!(rejected.kind, ErrorKind::Rejected);
+    assert!(!rejected.message.contains(native));
+    assert!(!rejected.message.contains("keep or clear"));
   }
 }

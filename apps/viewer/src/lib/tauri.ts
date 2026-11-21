@@ -43,6 +43,7 @@ import type {
   RpcRuntimeAccess,
   SessionModelStatusRequest, SessionModelStatus, ListSessionModelsResponse,
   SessionControlRequest, SetSessionControlRequest, SessionControlStatus, CancelSessionTurnRequest,
+  SessionInteractionsResponse, RespondSessionInteractionRequest,
 } from "./types";
 
 export function getRpcRuntimeProfiles(send: CommandInvoker = invoke): Promise<RpcRuntimeProfilesSnapshot> {
@@ -116,6 +117,13 @@ export function setSessionControl(request: SetSessionControlRequest, send: Comma
 }
 export function cancelSessionTurn(request: CancelSessionTurnRequest, send: CommandInvoker = invoke): Promise<SubmitSessionInputResponse> {
   return send("cancel_session_turn", { request });
+}
+
+export function listSessionInteractions(request: SessionControlRequest, send: CommandInvoker = invoke): Promise<SessionInteractionsResponse> {
+  return send("list_session_interactions", { request });
+}
+export function respondSessionInteraction(request: RespondSessionInteractionRequest, send: CommandInvoker = invoke): Promise<SubmitSessionInputResponse> {
+  return send("respond_session_interaction", { request });
 }
 
 export function getSessionModelStatus(request: SessionModelStatusRequest, send: CommandInvoker = invoke): Promise<SessionModelStatus> {

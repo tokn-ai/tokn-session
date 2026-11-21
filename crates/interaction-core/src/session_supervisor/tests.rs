@@ -52,6 +52,7 @@ fn identity() -> SessionIdentity {
 }
 fn input() -> SubmitSessionInputRequest {
   SubmitSessionInputRequest {
+    delivery: None,
     session_key: "host-key".into(),
     request_id: uuid::Uuid::new_v4().to_string(),
     text: "prompt".into(),

@@ -43,6 +43,7 @@ fn configure(supervisor: &SessionSupervisor, endpoint: String) {
 
 fn request() -> SubmitSessionInputRequest {
   SubmitSessionInputRequest {
+    delivery: None,
     session_key: "verified-codex-session".into(),
     request_id: uuid::Uuid::new_v4().to_string(),
     text: "one supervisor prompt".into(),
@@ -116,6 +117,100 @@ async fn codex_default_rpc_inspection_does_not_connect_and_first_send_delivers_o
   );
   assert!(supervisor.coordinator.route_owner_count() == 0);
   supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn explicit_delivery_rejects_other_providers_before_activation() {
+  let directory = tempfile::tempdir().unwrap();
+  let supervisor = SessionSupervisor::new(Some(directory.path().to_path_buf()), InteractionService::default()).unwrap();
+  for provider in [
+    ViewerProvider::Codex,
+    ViewerProvider::Pi,
+    ViewerProvider::OpenCode,
+    ViewerProvider::Dsh,
+  ] {
+    for delivery in [DeliveryMode::Start, DeliveryMode::Guide, DeliveryMode::Queue] {
+      let mut target = target(directory.path());
+      target.input.provider = provider;
+      let mut request = request();
+      request.delivery = Some(delivery);
+      let error = supervisor
+        .submit(target, request, Vec::new(), SessionTransport::Rpc)
+        .await
+        .unwrap_err();
+      assert!(error.message.contains("does not support the requested delivery mode"));
+    }
+  }
+  for delivery in [DeliveryMode::Start, DeliveryMode::Steer, DeliveryMode::StartOrSteer] {
+    let mut target = target(directory.path());
+    target.input.provider = ViewerProvider::ZCode;
+    let mut request = request();
+    request.delivery = Some(delivery);
+    let error = supervisor
+      .submit(target, request, Vec::new(), SessionTransport::Rpc)
+      .await
+      .unwrap_err();
+    assert!(error.message.contains("does not support the requested delivery mode"));
+  }
+}
+
+#[test]
+fn model_selection_fences_runtime_revision_and_catalog_identity() {
+  use crate::models::{MessageModelSelection, ModelChoice, ModelIdentity, SessionModelState};
+  let current = ModelIdentity {
+    model_provider: Some("fixture".into()),
+    model_id: "current".into(),
+    display_name: None,
+  };
+  let selected = ModelIdentity {
+    model_provider: Some("fixture".into()),
+    model_id: "selected".into(),
+    display_name: Some("Selected model".into()),
+  };
+  let state = SessionModelState::live(Some(current), "instance-a");
+  let models = vec![ModelChoice {
+    model: selected.clone(),
+    supports_images: true,
+  }];
+  let selection = MessageModelSelection {
+    model_input_mode: Some(crate::models::ModelInputMode::PerInput),
+    model_provider: selected.model_provider.clone(),
+    model_id: selected.model_id.clone(),
+    expected_revision: state.revision.clone(),
+    runtime_generation: Some("instance-a".into()),
+  };
+  assert_eq!(
+    rpc::selected_rpc_model(&selection, "instance-a", &state, &models).unwrap(),
+    selected
+  );
+  for selection in [
+    MessageModelSelection {
+      model_input_mode: None,
+      ..selection.clone()
+    },
+    MessageModelSelection {
+      runtime_generation: Some("old-instance".into()),
+      ..selection.clone()
+    },
+    MessageModelSelection {
+      expected_revision: "old-revision".into(),
+      ..selection.clone()
+    },
+    MessageModelSelection {
+      model_provider: Some("different-provider".into()),
+      ..selection.clone()
+    },
+    MessageModelSelection {
+      model_id: "unavailable".into(),
+      ..selection.clone()
+    },
+  ] {
+    assert!(
+      !rpc::selected_rpc_model(&selection, "instance-a", &state, &models)
+        .unwrap_err()
+        .may_have_been_sent
+    );
+  }
 }
 
 #[tokio::test]

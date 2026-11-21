@@ -55,6 +55,7 @@ impl Actor {
       runtime_generation: generation,
       can_list: true,
       supports_model_input: true,
+      model_input_mode: None,
       can_select,
       updates_default: true,
       reason: (!can_select)

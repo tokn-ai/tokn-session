@@ -149,6 +149,8 @@ async fn command(
       | "get_session_model_status"
       | "list_session_models"
       | "get_session_control"
+      | "list_session_interactions"
+      | "respond_session_interaction"
       | "set_session_control"
       | "cancel_session_turn"
       | "get_rpc_runtime_profiles"
@@ -176,6 +178,8 @@ async fn command(
     }
     let response = match command.as_str() {
       "get_session_control" => rpc_call!(get_session_control),
+      "list_session_interactions" => rpc_call!(list_session_interactions),
+      "respond_session_interaction" => rpc_call!(respond_session_interaction),
       "set_session_control" => rpc_call!(set_session_control),
       "cancel_session_turn" => rpc_call!(cancel_session_turn),
       "get_rpc_runtime_profiles" => serde_json::to_value(

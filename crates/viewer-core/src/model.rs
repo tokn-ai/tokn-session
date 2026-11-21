@@ -392,6 +392,8 @@ pub struct SessionInputStatus {
   pub available: bool,
   pub message: String,
   pub max_length: usize,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub delivery_modes: Option<Vec<tokn_interaction_core::DeliveryMode>>,
   #[serde(skip_serializing_if = "std::ops::Not::not")]
   pub resume_required: bool,
   pub images_available: bool,
