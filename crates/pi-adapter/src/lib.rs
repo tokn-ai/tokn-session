@@ -208,7 +208,7 @@ impl PiAdapter {
         ));
       }
       Command::Message {
-        delivery: DeliveryMode::Steer | DeliveryMode::Guide,
+        delivery: DeliveryMode::Prompt | DeliveryMode::Steer | DeliveryMode::Guide,
         ..
       } => {
         return Err(InteractionError::unsupported(
@@ -282,7 +282,9 @@ impl PiAdapter {
             images,
             streaming_behavior: Some(wire::StreamingBehavior::Steer),
           },
-          DeliveryMode::Steer | DeliveryMode::Guide => unreachable!("unsupported delivery was rejected"),
+          DeliveryMode::Prompt | DeliveryMode::Steer | DeliveryMode::Guide => {
+            unreachable!("unsupported delivery was rejected")
+          }
         };
         self.inner.rpc(command, true).await?;
         // Pi acknowledges acceptance without reporting which side of an idle

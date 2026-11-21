@@ -21,8 +21,8 @@ it("retains the required project directory only for runtimes that use it", () =>
   expect(rpcRuntimeInput({ ...draft, mode: "attached", provider: "codex" }).working_directory).toBeNull();
   expect(rpcRuntimeInput({ ...draft, mode: "attached", provider: "dsh" }).working_directory).toBeNull();
 });
-it("keeps launch arguments and the project folder for managed ZCode profiles", () => {
-  const draft = { ...rpcRuntimeDraft(), provider: "zcode" as const, working_directory: " /project/path ", arguments: '["--fixture-argument"]' };
+it.each(["zcode", "qoder"] as const)("keeps launch arguments and the project folder for managed %s profiles", (provider) => {
+  const draft = { ...rpcRuntimeDraft(), provider, working_directory: " /project/path ", arguments: '["--fixture-argument"]' };
   expect(supportsRpcAttachment(draft.provider)).toBe(false);
-  expect(rpcRuntimeInput(draft)).toMatchObject({ mode: "managed", provider: "zcode", working_directory: "/project/path", arguments: ["--fixture-argument"] });
+  expect(rpcRuntimeInput(draft)).toMatchObject({ mode: "managed", provider, working_directory: "/project/path", arguments: ["--fixture-argument"] });
 });

@@ -23,6 +23,7 @@ use tokn_interaction_core::{DeliveryMode, InteractionService, Provider};
 pub(crate) fn rpc_message_delivery(provider: Provider) -> DeliveryMode {
   match provider {
     Provider::ZCode => DeliveryMode::Guide,
+    Provider::Qoder => DeliveryMode::Prompt,
     _ => DeliveryMode::StartOrSteer,
   }
 }
@@ -57,6 +58,8 @@ pub struct SessionControlStatus {
   pub can_cancel: bool,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub is_running: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub live_output: Option<crate::live_output::SessionLiveOutput>,
   pub available: bool,
   pub message: String,
   pub runtime_id: Option<String>,
@@ -78,6 +81,7 @@ impl VerifiedSession {
       ViewerProvider::Pi => Ok(Provider::Pi),
       ViewerProvider::OpenCode => Ok(Provider::OpenCode),
       ViewerProvider::ZCode => Ok(Provider::ZCode),
+      ViewerProvider::Qoder => Ok(Provider::Qoder),
       ViewerProvider::Dsh => Ok(Provider::Dsh),
       _ => Err("This provider has no live RPC adapter".into()),
     }
@@ -236,9 +240,12 @@ impl SessionSupervisor {
       ));
     }
     if let Some(delivery) = request.delivery {
-      if target.input.provider != ViewerProvider::ZCode
-        || !matches!(delivery, DeliveryMode::Guide | DeliveryMode::Queue)
-      {
+      let supported = match target.input.provider {
+        ViewerProvider::ZCode => matches!(delivery, DeliveryMode::Guide | DeliveryMode::Queue),
+        ViewerProvider::Qoder => delivery == DeliveryMode::Prompt,
+        _ => false,
+      };
+      if !supported {
         return Err(DeliveryError::not_sent(
           "This session does not support the requested delivery mode",
         ));

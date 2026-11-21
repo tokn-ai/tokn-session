@@ -290,7 +290,11 @@ async fn native_auto_admission_deduplicates_and_never_changes_the_model() {
       .iter()
       .any(|request| request["type"] == "set_model")
   );
-  for (id, delivery) in [("strict-steer", DeliveryMode::Steer), ("guide", DeliveryMode::Guide)] {
+  for (id, delivery) in [
+    ("native-prompt", DeliveryMode::Prompt),
+    ("strict-steer", DeliveryMode::Steer),
+    ("guide", DeliveryMode::Guide),
+  ] {
     assert_eq!(
       fixture
         .execute(

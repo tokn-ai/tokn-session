@@ -606,7 +606,10 @@ mod tests {
     assert_eq!(value["sources_editable"], false);
     assert_eq!(value["hosting"]["editable"], false);
     assert!(value["reader"]["edit_reason"].is_string());
-    assert_eq!(value["sources"].as_array().unwrap().len(), 6);
+    assert_eq!(
+      value["sources"].as_array().unwrap().len(),
+      tokn_session_relay::PROVIDERS.len()
+    );
   }
 
   #[tokio::test]

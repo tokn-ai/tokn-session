@@ -90,7 +90,9 @@ impl ViewerService {
     let is_running = snapshot
       .as_ref()
       .filter(|snapshot| {
-        target.input.provider == ViewerProvider::ZCode && snapshot.connected && !snapshot.recovery_required
+        matches!(target.input.provider, ViewerProvider::ZCode | ViewerProvider::Qoder)
+          && snapshot.connected
+          && !snapshot.recovery_required
       })
       .and_then(|snapshot| {
         snapshot
@@ -104,6 +106,13 @@ impl ViewerService {
         tokn_interaction_core::ExecutionState::Unknown => None,
       });
     let readiness = self.sessions.input_status(target).await;
+    let live_output = (target.input.provider == ViewerProvider::Qoder && is_running == Some(true))
+      .then(|| {
+        binding
+          .as_ref()
+          .and_then(|binding| self.sessions.runtimes.live_output(binding))
+      })
+      .flatten();
     Ok(SessionControlStatus {
       session_key: target.session_key.clone(),
       provider: target.input.provider,
@@ -116,6 +125,7 @@ impl ViewerService {
             .supports(tokn_interaction_core::Operation::CancelTurn)
         }) || self.sessions.managed.input_status(&target.session_key).is_some()),
       is_running,
+      live_output,
       available: readiness.is_ok(),
       message: if let Err(error) = readiness {
         error.message

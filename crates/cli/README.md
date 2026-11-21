@@ -1,6 +1,6 @@
 # tokn-session CLI
 
-List, inspect, and browse agent sessions from Pi, Codex, OpenCode, ZCode,
+List, inspect, and browse agent sessions from Pi, Codex, OpenCode, ZCode, Qoder,
 WorkBuddy, and DeepSeek Harness.
 
 The package is `tokn-session-cli`; the installed executable is `tokn-session`.
@@ -30,3 +30,24 @@ Replace `sess_example` with the session ID from the creation result, or use
 `append --continue` to resume the latest ZCode session in the working directory.
 ZCode defaults to `yolo` for headless prompts. An executor such as
 `--executor "zcode --mode plan"` selects a different permission mode.
+
+Qoder uses its native ACP stdio interface for both creation and continuation:
+
+```sh
+tokn-session create --source qoder --executor qoder --cwd . "Describe this project"
+tokn-session append --source qoder --executor qoder --cwd . --continue "What would you test next?"
+```
+
+Use `TOKN_SESSION_QODER_EXECUTOR` instead of repeating `--executor`, and
+`--session <exact-id>` to choose a particular root session. `--continue` selects
+the most recently modified persisted root in the exact working directory and
+Qoder configuration. Its default historical root is `~/.qoder/projects`, or
+`$QODER_CONFIG_DIR/projects`; `--session-dir` overrides that projects directory
+for reading. An executor can include `--config-dir <dir>` for ACP storage.
+Prompts travel as JSON-RPC content, so flag-shaped prompts require only the
+usual `--` CLI separator. ACP errors never fall back to Qoder's print mode.
+Qoder uses ordinary native prompt delivery; ACP does not provide an atomic
+idle-only start, steering, or queue admission fence.
+Output is JSON lines containing session identity, runtime updates, and a final
+idle result. Terminal permission prompts allow once or deny; non-terminal
+commands deny pending permission requests and exit with an actionable error.

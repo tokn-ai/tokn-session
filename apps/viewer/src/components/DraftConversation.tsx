@@ -8,6 +8,7 @@ import { creationModelScope, useSessionCreationModels } from "../lib/useSessionC
 import { ImageAttachmentPicker, ImageAttachmentPreviews, imageDrop, imagePaste } from "./ImageAttachments";
 import { PanelIcon, SendIcon } from "./Icons";
 import { SessionModelPicker } from "./SessionModelPicker";
+import { DraftSessionActivity } from "./DraftSessionActivity";
 import "./DraftConversation.css";
 
 const MAX_MESSAGE_LENGTH = 16_384;
@@ -58,13 +59,19 @@ export function DraftConversation({ draft, projects, workspace_available, worksp
   const model = useSessionCreationModels(model_request, model_scope,
     workspace_available && !!project?.available && agent_available && plan_current && !options_loading && !options_error, on_load_models);
   const model_current = model.selectionValid(draft.model);
-  const images_allowed = agent?.supports_images === true && (!draft.model || model_current && draft.model.choice.supports_images);
+  const images_allowed = agent?.supports_images === true
+    && (!draft.model || model_current && (provider === "qoder" || draft.model.choice.supports_images));
   const length = Array.from(draft.prompt).length;
   const over_limit = length > MAX_MESSAGE_LENGTH;
   const can_send = workspace_available && !!project?.available && agent_available && !options_loading && !options_error
     && !draft.locked && !draft.sending && !over_limit && (!!draft.prompt.trim() || !!draft.images.length)
     && plan_current && model_current && (!draft.images.length || images_allowed);
   const checking_existing = draft.locked || draft.uncertain;
+  const pending_session = draft.locked && provider === "qoder" && draft.snapshot?.creation_input_state !== "accepted"
+    && draft.snapshot?.creation_input_state !== "rejected" && draft.snapshot?.status !== "failed"
+    && draft.snapshot?.status !== "stopped" && draft.snapshot?.creation_phase !== "failed"
+    && draft.snapshot?.session?.provider === "qoder" && !draft.snapshot.session.is_subagent
+    && draft.snapshot.session.session_key === draft.snapshot.session_key ? draft.snapshot.session : null;
   const unavailable_projects = projects.filter((entry) => !entry.available);
 
   useEffect(() => {
@@ -172,6 +179,8 @@ export function DraftConversation({ draft, projects, workspace_available, worksp
         {runtime?.reason || !runtime_id && agent?.reason ? <p className={agent_available ? "draft-conversation__notice" : "draft-conversation__error"} role={agent_available ? "status" : "alert"}>{runtime?.reason ?? agent?.reason}</p> : null}
         {provider !== "pi" && workspace_available && project?.available && options && !options_loading && !options_error && !agent_available && !draft.locked && on_configure_runtime
           ? <button className="text-button" type="button" disabled={draft.sending} onClick={(event) => on_configure_runtime(event.currentTarget)}>Configure agent runtime</button> : null}
+        {pending_session ? <DraftSessionActivity key={pending_session.session_key} session={pending_session}
+          revision={draft.snapshot!.revision} on_check={on_check} /> : null}
       </div>
     </div>
 

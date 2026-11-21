@@ -17,13 +17,19 @@ impl DiscoveryEnvironment {
   pub(crate) fn current() -> Self {
     Self {
       path: std::env::var_os("PATH"),
-      executables: [Provider::Codex, Provider::OpenCode, Provider::ZCode, Provider::Dsh]
-        .into_iter()
-        .filter_map(|provider| {
-          let (_, _, key) = provider_command(provider).expect("discovered provider");
-          std::env::var_os(key).map(|value| (key.to_owned(), value))
-        })
-        .collect(),
+      executables: [
+        Provider::Codex,
+        Provider::OpenCode,
+        Provider::ZCode,
+        Provider::Qoder,
+        Provider::Dsh,
+      ]
+      .into_iter()
+      .filter_map(|provider| {
+        let (_, _, key) = provider_command(provider).expect("discovered provider");
+        std::env::var_os(key).map(|value| (key.to_owned(), value))
+      })
+      .collect(),
     }
   }
 }
@@ -90,6 +96,7 @@ fn provider_command(provider: Provider) -> Result<(&'static str, &'static str, &
     Provider::Codex => Ok(("Codex", "codex", "TOKN_SESSION_CODEX_EXECUTABLE")),
     Provider::OpenCode => Ok(("OpenCode", "opencode", "TOKN_SESSION_OPENCODE_EXECUTABLE")),
     Provider::ZCode => Ok(("ZCode", "zcode", "TOKN_SESSION_ZCODE_EXECUTABLE")),
+    Provider::Qoder => Ok(("Qoder", "qodercli", "TOKN_SESSION_QODER_EXECUTABLE")),
     Provider::Dsh => Ok(("DSH", "dsh", "TOKN_SESSION_DSH_EXECUTABLE")),
     Provider::Pi => Err("Pi uses its verified managed-session driver".into()),
   }
@@ -105,11 +112,14 @@ pub(super) fn builtin_profile(
   if !cwd.is_dir() {
     return Err("The session working directory is unavailable".into());
   }
-  let executable = resolve_executable(
-    environment.executables.get(key).map(OsString::as_os_str),
-    environment.path.as_deref(),
-    command,
-  )?;
+  let configured = environment.executables.get(key).map(OsString::as_os_str);
+  let executable = resolve_executable(configured, environment.path.as_deref(), command).or_else(|error| {
+    if provider == Provider::Qoder && configured.is_none() {
+      resolve_executable(None, environment.path.as_deref(), "qoder")
+    } else {
+      Err(error)
+    }
+  })?;
   let mut profile = RpcResolvedProfile {
     revision: 0,
     profile: RpcRuntimeProfile {

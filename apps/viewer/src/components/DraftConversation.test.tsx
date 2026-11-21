@@ -36,7 +36,7 @@ async function ready() { await waitFor(() => expect(screen.queryByText("Checking
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; }
 
 describe("draft conversation", () => {
-  it.each(["pi", "codex", "open_code", "zcode", "dsh"] as RpcProvider[])("pins %s automatic availability before first Send without loading models", async (provider) => {
+  it.each(["pi", "codex", "open_code", "zcode", "qoder", "dsh"] as RpcProvider[])("pins %s automatic availability before first Send without loading models", async (provider) => {
     const available: SessionCreationOptions = { project_id: "repo", providers: [{ provider, available: true, reason: null,
       supports_images: false, default_profile_id: null, runtimes: [], runtime_plan_id: `${provider}-plan` }] };
     const loading = deferred<SessionCreationOptions>();
@@ -128,6 +128,25 @@ describe("draft conversation", () => {
     expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     expect(input.on_send).toHaveBeenCalledOnce();
+  });
+
+  it("keeps Qoder images available independently of per-model vision metadata", async () => {
+    const chosen = { model: { model_provider: null, model_id: "native", display_name: "Native model" }, supports_images: false };
+    const input = props({ on_load_options: vi.fn(async () => ({ project_id: "repo", providers: [
+      { provider: "qoder" as const, available: true, reason: null, supports_images: true, default_profile_id: null, runtimes: [] },
+    ] })), on_load_models: vi.fn(async () => ({ models: [chosen], catalog_revision: "catalog", runtime_profile_id: null, runtime_revision: null, reason: null })) });
+    function Stateful() {
+      const [value, setValue] = useState(draft({ selection: { provider: "qoder" }, prompt: "Inspect", images: [
+        { draft_id: "image", file: new File(["png"], "fixture.png", { type: "image/png" }), url: "blob:fixture" },
+      ] }));
+      return <DraftConversation {...input} draft={value} on_change={(patch) => setValue((previous) => ({ ...previous, ...patch }))} />;
+    }
+    render(<Stateful />); await ready();
+    fireEvent.click(screen.getByRole("button", { name: /Model: Runtime default/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Native model/ }));
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Attach images" })).toBeEnabled();
+    expect(screen.queryByText(/This model cannot accept these images/)).not.toBeInTheDocument();
   });
 
   it("refreshes a reopened catalog and lets the same model be selected with its new proof", async () => {

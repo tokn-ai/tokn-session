@@ -523,7 +523,7 @@ impl CodexAdapter {
         }
         if matches!(
           delivery,
-          DeliveryMode::Start | DeliveryMode::Guide | DeliveryMode::Queue
+          DeliveryMode::Prompt | DeliveryMode::Start | DeliveryMode::Guide | DeliveryMode::Queue
         ) {
           return Err(InteractionError::unsupported(
             "Codex supports start_or_steer and strict steer; strict start, advisory guide and automatic follow-up queue are unavailable",

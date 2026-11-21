@@ -20,17 +20,19 @@ pub enum ViewerProvider {
   OpenCode,
   #[serde(rename = "zcode")]
   ZCode,
+  Qoder,
   #[serde(rename = "workbuddy")]
   WorkBuddy,
   Dsh,
 }
 
 impl ViewerProvider {
-  pub const ALL: [Self; 6] = [
+  pub const ALL: [Self; 7] = [
     Self::Codex,
     Self::Pi,
     Self::OpenCode,
     Self::ZCode,
+    Self::Qoder,
     Self::WorkBuddy,
     Self::Dsh,
   ];
@@ -41,6 +43,7 @@ impl ViewerProvider {
       Self::Pi => "pi",
       Self::OpenCode => "opencode",
       Self::ZCode => "zcode",
+      Self::Qoder => "qoder",
       Self::WorkBuddy => "workbuddy",
       Self::Dsh => "dsh",
     }
@@ -52,6 +55,7 @@ impl ViewerProvider {
       Self::Pi => Source::Pi,
       Self::OpenCode => Source::OpenCode,
       Self::ZCode => Source::ZCode,
+      Self::Qoder => Source::Qoder,
       Self::WorkBuddy => Source::WorkBuddy,
       Self::Dsh => Source::Dsh,
     }
@@ -898,6 +902,7 @@ mod tests {
       (ViewerProvider::Pi, "pi"),
       (ViewerProvider::OpenCode, "opencode"),
       (ViewerProvider::ZCode, "zcode"),
+      (ViewerProvider::Qoder, "qoder"),
       (ViewerProvider::WorkBuddy, "workbuddy"),
       (ViewerProvider::Dsh, "dsh"),
     ] {

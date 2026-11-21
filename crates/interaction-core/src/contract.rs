@@ -13,6 +13,7 @@ pub enum Provider {
   OpenCode,
   #[serde(rename = "zcode")]
   ZCode,
+  Qoder,
   Dsh,
 }
 
@@ -68,6 +69,10 @@ pub struct Capabilities {
   /// including guidance and queued work; an in-flight model call is unchanged.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub per_input_model: bool,
+  /// The runtime negotiated support for image prompt content independently of
+  /// a model catalog. This does not assert a particular model's vision support.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub image_input: bool,
 }
 impl Capabilities {
   pub fn supports(&self, operation: Operation) -> bool {
@@ -160,6 +165,9 @@ pub struct MessageInput {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryMode {
+  /// Submit an ordinary native prompt without an atomic idle, steering or queue
+  /// guarantee. The adapter may reject overlapping host-managed prompts.
+  Prompt,
   /// Start only if native admission can guarantee idle state; otherwise reject.
   Start,
   /// Steer only an active turn; never silently start or queue on an idle runtime.

@@ -166,6 +166,9 @@ impl ViewerRepository for NativeRepository {
     if provider == ViewerProvider::Dsh {
       return tokn_session_dsh::read_session_header_exact(path, session_id);
     }
+    if provider == ViewerProvider::Qoder {
+      return tokn_session_qoder::read_session_header_exact(path, session_id);
+    }
     if provider == ViewerProvider::OpenCode {
       return tokn_session_opencode::OpenCodeSessionSource::new(Some(path.to_owned())).session_header_exact(session_id);
     }
@@ -214,7 +217,11 @@ impl ViewerRepository for NativeRepository {
         Some(locator.source_path.clone()),
         &locator.session_id,
       ),
-      ViewerProvider::Codex | ViewerProvider::Pi | ViewerProvider::WorkBuddy | ViewerProvider::Dsh => {
+      ViewerProvider::Codex
+      | ViewerProvider::Pi
+      | ViewerProvider::WorkBuddy
+      | ViewerProvider::Dsh
+      | ViewerProvider::Qoder => {
         let path = locator
           .source_path
           .to_str()

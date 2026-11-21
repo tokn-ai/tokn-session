@@ -139,7 +139,7 @@ mod tests {
     assert_eq!(value["sources_editable"], false);
     assert_eq!(value["hosting"]["available"], false);
     assert_eq!(value["hosting"]["editable"], false);
-    assert_eq!(value["sources"].as_array().unwrap().len(), 6);
+    assert_eq!(value["sources"].as_array().unwrap().len(), ViewerProvider::ALL.len());
     assert_eq!(
       value["reader"]["status"],
       serde_json::to_value(service.relay.status()).unwrap()

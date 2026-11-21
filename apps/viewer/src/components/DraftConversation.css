@@ -31,6 +31,10 @@
 .draft-conversation__status:empty { display: none; }
 .draft-conversation__status p { margin: 4px 0; }
 .draft-conversation__status > button { margin-top: 5px; }
+.draft-session-activity { margin-top: 24px; border-top: 1px solid var(--border); padding-top: 16px; }
+.draft-session-activity h2 { margin: 0; font-size: 15px; font-weight: 550; }
+.draft-session-activity > p { color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+.draft-session-activity .session-interactions, .draft-session-activity .session-live-output { margin-right: 0; margin-left: 0; }
 @media (max-width: 600px) {
   .draft-conversation__body { padding: 20px 16px; }
   .draft-conversation__welcome { margin-bottom: 20px; }

@@ -134,7 +134,7 @@ impl SessionTailer {
     tailer.snapshots = tailer
       .roots
       .iter()
-      .filter(|root| matches!(root.provider, Provider::WorkBuddy | Provider::Dsh))
+      .filter(|root| matches!(root.provider, Provider::WorkBuddy | Provider::Dsh | Provider::Qoder))
       .cloned()
       .map(crate::snapshot_tailer::SnapshotTailer::new)
       .collect();
@@ -1029,7 +1029,7 @@ impl SessionNormalizer {
     match provider {
       Provider::Codex => Self::Codex(CodexNormalizer::new()),
       Provider::Pi => Self::Pi(PiNormalizer::new()),
-      Provider::OpenCode | Provider::ZCode | Provider::WorkBuddy | Provider::Dsh => {
+      Provider::OpenCode | Provider::ZCode | Provider::Qoder | Provider::WorkBuddy | Provider::Dsh => {
         unreachable!("provider is not supported by the JSONL tailer")
       }
     }
@@ -1145,6 +1145,7 @@ fn provider_name(provider: Provider) -> &'static str {
     Provider::Pi => "pi",
     Provider::OpenCode => "opencode",
     Provider::ZCode => "zcode",
+    Provider::Qoder => "qoder",
     Provider::WorkBuddy => "workbuddy",
     Provider::Dsh => "dsh",
   }

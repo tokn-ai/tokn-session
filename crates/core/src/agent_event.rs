@@ -448,6 +448,7 @@ pub enum Provider {
   OpenCode,
   #[serde(rename = "zcode")]
   ZCode,
+  Qoder,
   #[serde(rename = "workbuddy")]
   WorkBuddy,
 }

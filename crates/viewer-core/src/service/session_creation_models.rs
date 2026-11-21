@@ -52,11 +52,15 @@ impl ViewerService {
       {
         Ok(models) => (models, None),
         Err(error)
-          if request.provider == LiveProvider::ZCode && error.kind == tokn_interaction_core::ErrorKind::Unsupported =>
+          if matches!(request.provider, LiveProvider::ZCode | LiveProvider::Qoder)
+            && error.kind == tokn_interaction_core::ErrorKind::Unsupported =>
         {
           (
             Vec::new(),
-            Some("Connect a ZCode session with this runtime to discover its models".to_owned()),
+            Some(format!(
+              "Connect a {:?} session with this runtime to discover its models",
+              request.provider
+            )),
           )
         }
         Err(error) => return Err(error.to_string()),
@@ -212,7 +216,9 @@ fn validate_selection(request: &CreateProjectSessionRequest, catalog: &SessionCr
       choice.model.model_id == selection.model_id && choice.model.model_provider == selection.model_provider
     })
     .ok_or("The selected model is no longer available. Choose a model again, or use the runtime default.")?;
-  if !request.image_ids.is_empty() && !choice.supports_images {
+  // ACP negotiates image input for the runtime rather than individual models.
+  // Creation checks that capability after launch and before its first prompt.
+  if request.provider != LiveProvider::Qoder && !request.image_ids.is_empty() && !choice.supports_images {
     return Err("The selected model does not support images. Keep the draft and choose an image-capable model.".into());
   }
   Ok(())
@@ -287,6 +293,12 @@ mod tests {
       reason: None,
     };
     assert!(validate_selection(&request, &catalog).unwrap_err().contains("images"));
+    request.provider = LiveProvider::Qoder;
+    assert!(
+      validate_selection(&request, &catalog).is_ok(),
+      "Qoder negotiates runtime image input after creation"
+    );
+    request.provider = LiveProvider::Codex;
     request.image_ids.clear();
     assert!(validate_selection(&request, &catalog).is_ok());
     request.model.as_mut().unwrap().runtime_revision = Some(2);

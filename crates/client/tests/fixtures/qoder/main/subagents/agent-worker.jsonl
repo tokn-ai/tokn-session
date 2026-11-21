@@ -1,0 +1,1 @@
+{"type":"user","uuid":"child-user","parentUuid":null,"isSidechain":true,"agentId":"worker","cwd":"/workspace/demo","sessionId":"main","timestamp":"2026-11-20T10:00:01Z","message":{"role":"user","content":"Child prompt"}}

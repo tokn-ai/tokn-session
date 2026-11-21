@@ -15,6 +15,7 @@ const PROVIDER_LABELS: Record<ViewerProvider, string> = {
   pi: "Pi",
   opencode: "OpenCode",
   zcode: "ZCode",
+  qoder: "Qoder",
   workbuddy: "WorkBuddy",
   dsh: "DeepSeek Harness",
 };

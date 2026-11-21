@@ -48,7 +48,7 @@ Compaction observations use the same record batches and snapshot/follow updates;
 no extra transport or native subscription is required. Codex, Pi, OpenCode, ZCode, and DSH
 normalization supplies these events even with native disabled. The viewer
 projects correlated observations into a stable expandable card; terminal-pet
-does not treat them as conversation replies or turn completion. All six providers are available through Relay.
+does not treat them as conversation replies or turn completion. All seven providers are available through Relay.
 This adds an `AgentEvent` variant: strict enum consumers must upgrade alongside
 the producer. The transport framing/version is unchanged; older consumers are
 not guaranteed to understand the expanded event vocabulary.
@@ -78,12 +78,15 @@ whole batch at that key, rather than appending every event again.
   row; events flatten its direct logical members. Subagent seed filtering and
   assembled-message/usage reconciliation match historical loading. Plain JSONL
   and concatenated `.jsonl.zstd` frames are supported.
+- Qoder: complete chained JSONL records from native project transcripts are
+  normalized through the historical reader. Changed snapshots replace records
+  by their stable record identities, preserving branch and subagent semantics.
 
 The reader shares its grouped normalization with historical OpenCode/ZCode
 loading; historical APIs still flatten to the existing `LoadedSession` shape.
-Relay supports Codex, Pi, OpenCode, ZCode, WorkBuddy, and DSH.
+Relay supports Codex, Pi, OpenCode, ZCode, Qoder, WorkBuddy, and DSH.
 
-WorkBuddy/DSH snapshots reload and normalize changed files; unchanged file
+Qoder/WorkBuddy/DSH snapshots reload and normalize changed files; unchanged file
 revisions are cached. Unfinished lines wait for a newline. Invalid complete
 rows and incomplete/corrupt compressed frames fail without committing partial
 snapshots. A later complete source can be followed after reconnecting.
@@ -116,6 +119,7 @@ overrides, shared with the viewer's automatic Relay:
 | Pi | `~/.pi/agent/sessions` | `PI_CODING_AGENT_SESSION_DIR` |
 | OpenCode | `~/.local/share/opencode/opencode.db` | `OPENCODE_DB`, `XDG_DATA_HOME` |
 | ZCode | `~/.zcode/cli/db/db.sqlite` | `ZCODE_STORAGE_DIR` |
+| Qoder | `~/.qoder/projects` | `QODER_CONFIG_DIR` (configuration root) |
 | WorkBuddy | `~/.workbuddy-ai` catalog and `projects` histories | `WORKBUDDY_CONFIG_DIR`, `CODEBUDDY_CONFIG_DIR` |
 | DSH | `~/.dsh/sessions` | `DSH_HOME` |
 

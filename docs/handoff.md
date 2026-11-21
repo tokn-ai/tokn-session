@@ -97,7 +97,7 @@ A main-branch manual CI run can also publish the tested artifact to Apell Store
 using the versioned Apell action and a trusted GitHub identity.
 
 Local folders discovered in saved session `cwd` metadata now register
-automatically across all six historical providers. Migration 13 preserves
+automatically across all seven historical providers. Migration 13 preserves
 existing registrations as manual and tracks per-provider presence separately
 from directory availability. Only complete, stable scans of the same readable
 scope can remove a provider's claim; partial reads and unavailable roots retain
@@ -131,7 +131,7 @@ without replay. Managed Pi now persists its explicit first-input acknowledgement
 independently of history readiness; legacy receipts remain unknown. New session
 can add a project with an empty registry. See [projects and creation](viewer-projects.md).
 
-Pi, Codex, OpenCode, ZCode and DSH Viewer creation remains local desktop only.
+Pi, Codex, OpenCode, ZCode, Qoder and DSH Viewer creation remains local desktop only.
 Provider/runtime options are checked without starting agents; lazy model catalogs
 reuse connected runtimes or close temporary metadata processes after querying.
 Automatic prefers a suitable saved default or sole suitable profile, then
@@ -176,7 +176,7 @@ Existing commands, Pi behavior and exclusive supervised transport remain.
 Managed receipt storage migrates legacy version-one Pi catalogs to version two
 with explicit provider identity; the Pi lease namespace is preserved.
 
-Settings → Agent runtimes now manages selected-machine Codex/Pi/OpenCode/ZCode/DSH
+Settings → Agent runtimes now manages selected-machine Codex/Pi/OpenCode/ZCode/Qoder/DSH
 RPC profiles and real managed/attached adapters through the shared Rust registry.
 Private versioned profiles live under `viewer/rpc-runtimes.json`; public reads
 redact environment/credential values. Explicit lifecycle actions use instance
@@ -214,6 +214,40 @@ honestly. Inspection never starts or resumes a session. See
 The viewer composes the shared core managers with native adapter factories and
 host verification; provider wire workflows stay in their adapters. The common
 RPC capability limits remain distinct from the exclusive managed Pi workflow.
+
+Qoder adds a seventh historical provider and managed project-scoped ACP v1
+interaction. `qoder-adapter` depends on the core-independent `acp-protocol` wire
+crate, which contains current standard ACP types and opaque metadata only.
+Standard model configuration uses typed `configOptions`, opaque config IDs and
+`session/set_config_option`, with complete returned-state verification.
+Qoder's legacy model catalog/setter, optional `userMessageId`, and interpretation
+of `_meta.qoder.toolName` live in `qoder-adapter::qoder`. A legacy setter is chosen
+only before dispatch when no standard model selector is advertised; an uncertain
+standard mutation never falls back or retries. CLI create/append and Viewer
+creation/resume use `--acp`; there is no
+headless fallback or automatic mutation replay. The host verifies exact native
+root identity, effective cwd and the configured project transcript namespace
+before resume. Native creation assigns its ID. Model inspection never creates
+or resumes a conversation. Image input follows the negotiated `image_input`
+capability; per-model vision facts and atomic model-on-send are not invented.
+Ordinary native Prompt, Stop and advertised per-use tool permissions are supported.
+ACP has no atomic idle fence; strict Start, Steer, Guide and Queue are unsupported.
+Overlapping host-managed prompts reject locally. Structured question elicitation and
+permission-mode-changing plan callbacks are not advertised as generic approvals.
+Qoder authentication stays in its installed CLI.
+Prompt admission is completion-only: ACP progress and permission events lack the
+native command identity needed to distinguish background work. The host retains
+pending receipts while live preview, approvals and Stop remain available; it does
+not infer early acceptance or replay a timed-out mutation.
+The historical reader uses `$QODER_CONFIG_DIR/projects`, or `~/.qoder/projects`,
+and normalizes committed message branches, response models, tools, usage,
+compaction, metadata and embedded images. Subagents retain the native root ID,
+so display identities include the agent ID and cannot authorize root control.
+Snapshot following reuses the same record normalization. The published CLI
+1.1.94 supplied storage/protocol evidence and a real anonymous ACP handshake;
+authenticated turn execution still requires a signed-in Qoder installation.
+See the [adapter](../crates/qoder-adapter/README.md) and
+[history reader](../crates/qoder/README.md).
 
 ZCode Viewer control uses a managed, project-scoped `zcode app-server --stdio`
 process and verifies its database path against the historical source. It
@@ -529,7 +563,7 @@ Accepted event pages synchronize sidebar question counts, including cached child
 rows; the selected timeline overrides catalog counts while indexing catches up.
 
 `tokn-session` can list and show existing sessions from Pi, Codex, OpenCode,
-ZCode, WorkBuddy, and DSH.
+ZCode, Qoder, WorkBuddy, and DSH.
 
 Codex Desktop `token_usage_record` rows now normalize to per-response usage
 cards. Turn/thread totals remain native inspection detail; the separate
@@ -564,6 +598,7 @@ tokn-session show --source opencode <session-id> --format pretty
 tokn-session show --source codex <session-id> --scope tree
 tokn-session show --source pi <session-id> --format jsonl
 tokn-session list --source zcode --limit 5
+tokn-session list --source qoder --limit 5
 tokn-session list --source workbuddy --limit 5
 tokn-session browse --source codex <session-id>
 tokn-session create --source opencode --executor "tokn-gateway proxy opencode --npx --" "create a todo app"
@@ -880,7 +915,7 @@ tracking remains process-local. The v1 append/reset contract still
 requires replacement generations for mutable OpenCode records; avoiding those
 resets would need a record-update protocol and stable viewer event identities.
 
-`tokn-session-relay` follows all six providers: Codex, Pi, OpenCode, ZCode,
+`tokn-session-relay` follows all seven providers: Codex, Pi, OpenCode, ZCode, Qoder,
 WorkBuddy, and DSH. It requires an output subcommand:
 
 ```sh
@@ -1904,7 +1939,7 @@ OpenCode has the first live-output normalizer: `OpenCodeLiveNormalizer` parses `
 - Arbitrary Pi history adoption still requires a compatible live bridge or
   viewer-owned Pi runtime. Without Relay, selected timelines refresh from the
   durable index and historical source reads. Relay snapshot/follow supports
-  all six providers. Relay unread tracking is not persisted yet.
+  all seven providers. Relay unread tracking is not persisted yet.
 - Viewer session-file relocation is deliberately conservative. Repeated or
   overlapping moves can make the retired source ambiguous, in which case the
   later path is treated as a new row instead of transferring prior attention.

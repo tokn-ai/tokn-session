@@ -39,7 +39,14 @@ fn shared_selection_preserves_the_explicit_configuration_fence() {
 
 #[test]
 fn session_worker_constraints_do_not_depend_on_provider_name() {
-  for provider in [Provider::Pi, Provider::Codex, Provider::OpenCode, Provider::Dsh] {
+  for provider in [
+    Provider::Pi,
+    Provider::Codex,
+    Provider::OpenCode,
+    Provider::ZCode,
+    Provider::Qoder,
+    Provider::Dsh,
+  ] {
     let mut plan = plan();
     plan.provider = provider;
     plan.configuration.id = "opaque-worker-configuration".into();
@@ -119,7 +126,14 @@ fn resume_validation_preserves_provider_directory_and_file_evidence() {
 #[test]
 fn verification_requires_valid_structure_but_leaves_native_path_policy_to_the_factory() {
   let plan = plan();
-  for provider in [Provider::Pi, Provider::Codex, Provider::OpenCode, Provider::Dsh] {
+  for provider in [
+    Provider::Pi,
+    Provider::Codex,
+    Provider::OpenCode,
+    Provider::ZCode,
+    Provider::Qoder,
+    Provider::Dsh,
+  ] {
     let mut native = descriptor(&plan);
     native.history_path = None;
     assert!(VerifiedSessionDescriptor::from_verified_history(provider, native).is_ok());

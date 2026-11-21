@@ -10,6 +10,7 @@ use tokn_session_core::{
 use tokn_session_dsh::DshSessionSource;
 use tokn_session_opencode::OpenCodeSessionSource;
 use tokn_session_pi::PiSessionSource;
+use tokn_session_qoder::QoderSessionSource;
 use tokn_session_workbuddy::WorkBuddySessionSource;
 use tokn_session_zcode::ZCodeSessionSource;
 
@@ -20,6 +21,7 @@ pub(crate) enum SessionSourceClient {
   Codex(CodexSessionSource),
   OpenCode(OpenCodeSessionSource),
   Pi(PiSessionSource),
+  Qoder(QoderSessionSource),
   WorkBuddy(WorkBuddySessionSource),
   ZCode(ZCodeSessionSource),
 }
@@ -31,6 +33,7 @@ impl SessionSourceClient {
       Self::Codex(source) => file_headers(source.list_session_relations()?),
       Self::OpenCode(source) => source.list_session_headers()?,
       Self::Pi(source) => file_headers(source.list_session_relations()?),
+      Self::Qoder(source) => file_headers(source.list_session_relations()?),
       Self::WorkBuddy(source) => source.list_session_headers()?,
       Self::ZCode(source) => source.list_session_headers()?,
     };
@@ -44,6 +47,7 @@ impl SessionSourceClient {
       Self::Codex(source) => file_header_catalog(source.list_session_relation_catalog()?),
       Self::OpenCode(source) => source.list_session_header_catalog()?,
       Self::Pi(source) => file_header_catalog(source.list_session_relation_catalog()?),
+      Self::Qoder(source) => file_header_catalog(source.list_session_relation_catalog()?),
       Self::WorkBuddy(source) => source.list_session_header_catalog()?,
       Self::ZCode(source) => source.list_session_header_catalog()?,
     };
@@ -55,6 +59,7 @@ impl SessionSourceClient {
     match self {
       Self::Codex(source) => source.session_roots(),
       Self::Pi(source) => source.session_roots(),
+      Self::Qoder(source) => source.session_roots(),
       Self::Dsh(source) => Ok(vec![source.session_root()?]),
       Self::OpenCode(source) => Ok(vec![source.database_path()?]),
       Self::WorkBuddy(source) => Ok(vec![source.config_dir()?]),
@@ -66,6 +71,7 @@ impl SessionSourceClient {
     match self {
       Self::Codex(source) => source.session_roots(),
       Self::Pi(source) => source.session_roots(),
+      Self::Qoder(source) => source.session_roots(),
       Self::Dsh(_) => Err(path_targeting_unsupported("dsh")),
       Self::OpenCode(_) => Err(path_targeting_unsupported("opencode")),
       Self::WorkBuddy(_) => Err(path_targeting_unsupported("workbuddy")),
@@ -77,6 +83,7 @@ impl SessionSourceClient {
     match self {
       Self::Codex(source) => source.session_paths(),
       Self::Pi(source) => source.session_paths(),
+      Self::Qoder(source) => source.session_paths(),
       Self::Dsh(_) => Err(path_targeting_unsupported("dsh")),
       Self::OpenCode(_) => Err(path_targeting_unsupported("opencode")),
       Self::WorkBuddy(_) => Err(path_targeting_unsupported("workbuddy")),
@@ -88,6 +95,7 @@ impl SessionSourceClient {
     match self {
       Self::Codex(source) => source.session_path_catalog(),
       Self::Pi(source) => source.session_path_catalog(),
+      Self::Qoder(source) => source.session_path_catalog(),
       Self::Dsh(_) => Err(path_targeting_unsupported("dsh")),
       Self::OpenCode(_) => Err(path_targeting_unsupported("opencode")),
       Self::WorkBuddy(_) => Err(path_targeting_unsupported("workbuddy")),
@@ -108,6 +116,7 @@ impl SessionSourceClient {
       // pass owns private Desktop state and legacy-index presentation metadata.
       Self::Codex(source) => source.session_relation_at_path_for_incremental_catalog(path),
       Self::Pi(source) => source.session_relation_at_path(path),
+      Self::Qoder(source) => source.session_relation_at_path(path),
       Self::Dsh(_) => Err(path_targeting_unsupported("dsh")),
       Self::OpenCode(_) => Err(path_targeting_unsupported("opencode")),
       Self::WorkBuddy(_) => Err(path_targeting_unsupported("workbuddy")),
@@ -122,6 +131,7 @@ impl SessionSourceClient {
       Self::Codex(source) => source.list_sessions(),
       Self::OpenCode(source) => source.list_sessions(),
       Self::Pi(source) => source.list_sessions(),
+      Self::Qoder(source) => source.list_sessions(),
       Self::WorkBuddy(source) => source.list_sessions(),
       Self::ZCode(source) => source.list_sessions(),
     }
@@ -133,6 +143,7 @@ impl SessionSourceClient {
       Self::Codex(source) => source.hydrate_session_header(header),
       Self::OpenCode(source) => source.hydrate_session_header(header),
       Self::Pi(source) => source.hydrate_session_header(header),
+      Self::Qoder(source) => source.hydrate_session_header(header),
       Self::WorkBuddy(source) => source.hydrate_session_header(header),
       Self::ZCode(source) => source.hydrate_session_header(header),
     }
@@ -144,6 +155,7 @@ impl SessionSourceClient {
       Self::Codex(source) => source.list_session_relations(),
       Self::OpenCode(source) => source.list_session_relations(),
       Self::Pi(source) => source.list_session_relations(),
+      Self::Qoder(source) => source.list_session_relations(),
       Self::WorkBuddy(source) => source.list_session_relations(),
       Self::ZCode(source) => source.list_session_relations(),
     }
@@ -155,6 +167,7 @@ impl SessionSourceClient {
       Self::Codex(source) => source.load_session(session),
       Self::OpenCode(source) => source.load_session(session),
       Self::Pi(source) => source.load_session(session),
+      Self::Qoder(source) => source.load_session(session),
       Self::WorkBuddy(source) => source.load_session(session),
       Self::ZCode(source) => source.load_session(session),
     }
@@ -168,6 +181,7 @@ impl SessionSourceClient {
         Err("opencode sessions are stored in sqlite; pass a session id and use --session-dir for the database".into())
       }
       Self::Pi(source) => source.load_session_path(path),
+      Self::Qoder(source) => source.load_session_path(path),
       Self::WorkBuddy(source) => {
         let path = path
           .to_str()
@@ -242,6 +256,7 @@ impl SessionSourceClient {
       Self::Codex(source) => source.load_session_path(&reference.path),
       Self::OpenCode(source) => source.load_session_exact(&reference.id),
       Self::Pi(source) => source.load_session_path(&reference.path),
+      Self::Qoder(source) => source.load_session_path(&reference.path),
       Self::WorkBuddy(source) => source.load_session_exact(&reference.id),
       Self::ZCode(source) => source.load_session_exact(&reference.id),
     }
@@ -305,6 +320,7 @@ pub(crate) fn session_source(source: Source, session_dir: Option<PathBuf>) -> Re
   match source {
     Source::Dsh => Ok(SessionSourceClient::Dsh(DshSessionSource::new(session_dir))),
     Source::Pi => Ok(SessionSourceClient::Pi(PiSessionSource::new(session_dir))),
+    Source::Qoder => Ok(SessionSourceClient::Qoder(QoderSessionSource::new(session_dir))),
     Source::Codex => Ok(SessionSourceClient::Codex(CodexSessionSource::new(session_dir))),
     Source::OpenCode => Ok(SessionSourceClient::OpenCode(OpenCodeSessionSource::new(session_dir))),
     Source::WorkBuddy => Ok(SessionSourceClient::WorkBuddy(WorkBuddySessionSource::new(session_dir))),

@@ -23,6 +23,7 @@ tokn-session-core.workspace = true
 tokn-session-pi.workspace = true
 tokn-session-opencode.workspace = true
 tokn-session-dsh.workspace = true
+tokn-session-qoder.workspace = true
 tokn-session-workbuddy.workspace = true
 tokn-session-render.workspace = true
 zeromq.workspace = true

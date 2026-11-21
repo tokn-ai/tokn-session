@@ -44,12 +44,12 @@ async fn run(args: Args) -> Result<(), String> {
     Command::Serve { .. } => unreachable!(),
     Command::ZeroMq { endpoint } => {
       let publisher = ZmqPublisher::bind(&endpoint).await?;
-      eprintln!("following Codex/Pi/OpenCode/ZCode/WorkBuddy/DSH session events via ZeroMQ on {endpoint}");
+      eprintln!("following Codex/Pi/OpenCode/ZCode/Qoder/WorkBuddy/DSH session events via ZeroMQ on {endpoint}");
       Output::ZeroMq(publisher)
     }
     Command::Stdout { format, color } => {
       eprintln!(
-        "following Codex/Pi/OpenCode/ZCode/WorkBuddy/DSH session events on stdout ({})",
+        "following Codex/Pi/OpenCode/ZCode/Qoder/WorkBuddy/DSH session events on stdout ({})",
         format.name()
       );
       Output::Stdout {
@@ -296,6 +296,7 @@ fn provider_name(provider: Provider) -> &'static str {
     Provider::Codex => "codex",
     Provider::OpenCode => "opencode",
     Provider::ZCode => "zcode",
+    Provider::Qoder => "qoder",
     Provider::WorkBuddy => "workbuddy",
     Provider::Dsh => "dsh",
   }
@@ -445,6 +446,7 @@ struct Args {
   pi_dir: Option<PathBuf>,
   opencode_dir: Option<PathBuf>,
   zcode_dir: Option<PathBuf>,
+  qoder_dir: Option<PathBuf>,
   workbuddy_dir: Option<PathBuf>,
   dsh_dir: Option<PathBuf>,
   poll_interval: Duration,
@@ -496,6 +498,7 @@ impl Args {
       pi_dir: None,
       opencode_dir: None,
       zcode_dir: None,
+      qoder_dir: None,
       workbuddy_dir: None,
       dsh_dir: None,
       poll_interval: if command == "serve" {
@@ -533,6 +536,7 @@ impl Args {
         "--pi-dir" => parsed.pi_dir = Some(PathBuf::from(next_value(&mut args, "--pi-dir")?)),
         "--opencode-dir" => parsed.opencode_dir = Some(PathBuf::from(next_value(&mut args, "--opencode-dir")?)),
         "--zcode-dir" => parsed.zcode_dir = Some(PathBuf::from(next_value(&mut args, "--zcode-dir")?)),
+        "--qoder-dir" => parsed.qoder_dir = Some(PathBuf::from(next_value(&mut args, "--qoder-dir")?)),
         "--workbuddy-dir" => parsed.workbuddy_dir = Some(PathBuf::from(next_value(&mut args, "--workbuddy-dir")?)),
         "--dsh-dir" => parsed.dsh_dir = Some(PathBuf::from(next_value(&mut args, "--dsh-dir")?)),
         "--poll-interval" => parsed.poll_interval = parse_duration(&next_value(&mut args, "--poll-interval")?)?,
@@ -573,6 +577,7 @@ impl Args {
       (Provider::Pi, &self.pi_dir),
       (Provider::OpenCode, &self.opencode_dir),
       (Provider::ZCode, &self.zcode_dir),
+      (Provider::Qoder, &self.qoder_dir),
       (Provider::WorkBuddy, &self.workbuddy_dir),
       (Provider::Dsh, &self.dsh_dir),
     ] {
@@ -628,7 +633,7 @@ fn print_help(help: Help) {
     ),
     Help::Root => println!(
       "\
-Follow all six providers and emit normalized session events.
+Follow all seven providers and emit normalized session events.
 
 Usage:
   tokn-session-relay <subcommand> [options]
@@ -653,6 +658,7 @@ Options:
   --pi-dir <path>             Pi session root (default: ~/.pi/agent/sessions)
   --opencode-dir <path>       OpenCode data directory or database
   --zcode-dir <path>          ZCode storage directory or database
+  --qoder-dir <path>          Qoder projects directory
   --workbuddy-dir <path>      WorkBuddy config directory
   --dsh-dir <path>            DSH sessions directory
   --poll-interval <duration>  Fallback rescan interval, such as 250ms, 2s, or 1m (default: 30s)
@@ -679,6 +685,7 @@ Options:
   --pi-dir <path>             Pi session root (default: ~/.pi/agent/sessions)
   --opencode-dir <path>       OpenCode data directory or database
   --zcode-dir <path>          ZCode storage directory or database
+  --qoder-dir <path>          Qoder projects directory
   --workbuddy-dir <path>      WorkBuddy config directory
   --dsh-dir <path>            DSH sessions directory
   --poll-interval <duration>  Fallback rescan interval, such as 250ms, 2s, or 1m (default: 30s)

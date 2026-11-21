@@ -183,18 +183,16 @@ async fn per_input_model_intent_has_a_distinct_capability_from_idle_only_selecti
 }
 
 #[test]
-fn old_runtime_descriptors_do_not_gain_per_input_model_support() {
+fn old_runtime_descriptors_do_not_gain_unnegotiated_capabilities() {
   let capabilities: Capabilities = serde_json::from_value(serde_json::json!({
     "operations":{}, "atomic_model_on_send":false,
   }))
   .unwrap();
   assert!(!capabilities.per_input_model);
-  assert!(
-    serde_json::to_value(capabilities)
-      .unwrap()
-      .get("per_input_model")
-      .is_none()
-  );
+  assert!(!capabilities.image_input);
+  let wire = serde_json::to_value(capabilities).unwrap();
+  assert!(wire.get("per_input_model").is_none());
+  assert!(wire.get("image_input").is_none());
 }
 
 #[test]

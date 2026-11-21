@@ -273,6 +273,7 @@ fn parse_options(args: &[String]) -> Result<ParsedOptions, String> {
 fn parse_source(value: &str) -> Result<Source, String> {
   match value {
     "pi" => Ok(Source::Pi),
+    "qoder" => Ok(Source::Qoder),
     "codex" => Ok(Source::Codex),
     "opencode" => Ok(Source::OpenCode),
     "zcode" => Ok(Source::ZCode),
@@ -316,12 +317,12 @@ fn reject_show_scope(command: &str, scope: Option<ShowScope>) -> Result<(), Stri
 
 pub fn help() -> String {
   "usage:
-  tokn-session list [--source pi|codex|opencode|zcode|workbuddy|dsh] [--session-dir <dir>]
-  tokn-session list [--source pi|codex|opencode|zcode|workbuddy|dsh] [--limit <n>]
-  tokn-session show [--source pi|codex|opencode|zcode|workbuddy|dsh] [--format pretty|jsonl] [--scope self|tree] [--session-dir <dir>] <session-id-or-path>
-  tokn-session browse [--source pi|codex|opencode|zcode|workbuddy|dsh] [--session-dir <dir>] [session-id-or-path]
-  tokn-session create [--source pi|codex|opencode|zcode] [--executor <command>] [--cwd <dir>] [--] <prompt>
-  tokn-session append [--source pi|codex|opencode|zcode] [--executor <command>] [--cwd <dir>] (--continue|--session <id>) [--] <prompt>"
+  tokn-session list [--source pi|codex|opencode|zcode|qoder|workbuddy|dsh] [--session-dir <dir>]
+  tokn-session list [--source pi|codex|opencode|zcode|qoder|workbuddy|dsh] [--limit <n>]
+  tokn-session show [--source pi|codex|opencode|zcode|qoder|workbuddy|dsh] [--format pretty|jsonl] [--scope self|tree] [--session-dir <dir>] <session-id-or-path>
+  tokn-session browse [--source pi|codex|opencode|zcode|qoder|workbuddy|dsh] [--session-dir <dir>] [session-id-or-path]
+  tokn-session create [--source pi|codex|opencode|zcode|qoder] [--executor <command>] [--cwd <dir>] [--] <prompt>
+  tokn-session append [--source pi|codex|opencode|zcode|qoder] [--executor <command>] [--cwd <dir>] (--continue|--session <id>) [--] <prompt>"
     .to_string()
 }
 

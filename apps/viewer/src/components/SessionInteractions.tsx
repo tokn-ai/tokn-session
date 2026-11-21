@@ -12,7 +12,7 @@ export function SessionInteractions({ session, refresh_key = 0, on_accepted }: {
   refresh_key?: number;
   on_accepted?: (session_key: string) => void;
 }) {
-  const enabled = session?.provider === "zcode" && !session.is_subagent;
+  const enabled = !!session && (session.provider === "zcode" || session.provider === "qoder") && !session.is_subagent;
   const requests = useSessionInteractions(enabled ? session.session_key : null, refresh_key, on_accepted);
   const drafts = useRef(new Map<string, Record<string, QuestionDraft>>());
   useEffect(() => {

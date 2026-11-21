@@ -24,19 +24,60 @@ fn install_environment(manager: &RpcRuntimeManager, bin: &Path) {
 }
 
 #[tokio::test]
+async fn qoder_discovery_accepts_both_official_commands_without_overriding_explicit_configuration() {
+  let manager = manager();
+  let bin = tempfile::tempdir().unwrap();
+  let project = tempfile::tempdir().unwrap();
+  let qoder = executable(bin.path(), "qoder");
+  install_environment(&manager, bin.path());
+  let plan = manager.resolve_plan(Provider::Qoder, project.path(), None).unwrap();
+  let selected = plan.shared_runtime_selection().unwrap();
+  let resolved = manager
+    .0
+    .resolver
+    .resolve_profile(&selected.profile_id, selected.expected_revision)
+    .unwrap();
+  assert_eq!(
+    resolved.profile.executable.as_deref(),
+    qoder.canonicalize().unwrap().to_str()
+  );
+  manager.set_discovery_environment(discovery::DiscoveryEnvironment {
+    path: Some(std::env::join_paths([bin.path()]).unwrap()),
+    executables: BTreeMap::from([(
+      "TOKN_SESSION_QODER_EXECUTABLE".into(),
+      bin.path().join("missing-qoder").into_os_string(),
+    )]),
+  });
+  assert!(
+    manager
+      .resolve_plan(Provider::Qoder, project.path(), None)
+      .unwrap_err()
+      .contains("configured")
+  );
+  assert!(manager.inventory().runtimes.is_empty());
+  manager.shutdown().await;
+}
+
+#[tokio::test]
 async fn all_shared_providers_discover_the_same_plan_for_availability_catalog_and_startup_policy() {
   let manager = manager();
   let bin = tempfile::tempdir().unwrap();
   let project = tempfile::tempdir().unwrap();
   let cwd = std::fs::canonicalize(project.path()).unwrap();
-  for command in ["codex", "opencode", "zcode", "dsh"] {
+  for command in ["codex", "opencode", "zcode", "qodercli", "dsh"] {
     executable(bin.path(), command);
   }
   install_environment(&manager, bin.path());
   let host = Host {
     resolver: manager.0.resolver.clone(),
   };
-  for provider in [Provider::Codex, Provider::OpenCode, Provider::ZCode, Provider::Dsh] {
+  for provider in [
+    Provider::Codex,
+    Provider::OpenCode,
+    Provider::ZCode,
+    Provider::Qoder,
+    Provider::Dsh,
+  ] {
     let plan = manager.resolve_plan(provider, &cwd, None).unwrap();
     assert_eq!(plan.provider, provider);
     assert_eq!(plan.ownership, Ownership::Managed);

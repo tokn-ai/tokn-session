@@ -243,6 +243,12 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     self.0.changes.subscribe()
   }
 
+  /// Instance-validated adapter events for host-owned live presentation. Native
+  /// payloads remain internal to the host and do not authorize mutations.
+  pub fn subscribe_events(&self) -> broadcast::Receiver<RuntimeEvent> {
+    self.0.interactions.subscribe()
+  }
+
   pub fn changed(&self) {
     let _ = self.0.changes.send(());
   }

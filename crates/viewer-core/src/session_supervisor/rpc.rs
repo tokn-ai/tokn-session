@@ -24,7 +24,9 @@ impl SessionSupervisor {
       if !binding.capabilities.supports(Operation::Message) {
         return Err(DeliveryError::not_sent("This runtime does not support message input"));
       }
-      let images_available = if matches!(
+      let images_available = if target.input.provider == ViewerProvider::Qoder {
+        binding.capabilities.image_input
+      } else if matches!(
         target.input.provider,
         ViewerProvider::Codex | ViewerProvider::OpenCode | ViewerProvider::ZCode
       ) {
@@ -41,7 +43,9 @@ impl SessionSupervisor {
         false
       };
       return Ok(input::InputCapability {
-        message: if provider == Provider::ZCode {
+        message: if provider == Provider::Qoder {
+          "Connected through Qoder ACP. Send submits a prompt; Qoder controls how it is scheduled."
+        } else if provider == Provider::ZCode {
           "Connected through ZCode. Send starts idle sessions or guides active work; guidance may become a follow-up. Queue waits for the current turn."
         } else {
           "Connected through agent RPC. Send starts or steers this session."
@@ -57,7 +61,7 @@ impl SessionSupervisor {
       .map_err(DeliveryError::not_sent)?;
     Ok(input::InputCapability {
       message: "Send will connect the configured RPC runtime and resume this session.".into(),
-      images_available: target.input.provider == ViewerProvider::Codex,
+      images_available: matches!(target.input.provider, ViewerProvider::Codex | ViewerProvider::Qoder),
     })
   }
 
@@ -116,6 +120,11 @@ impl SessionSupervisor {
         .await
     }
     .map_err(DeliveryError::not_sent)?;
+    if provider == Provider::Qoder && !images.is_empty() && !binding.capabilities.image_input {
+      return Err(DeliveryError::not_sent(
+        "This Qoder runtime did not advertise image input",
+      ));
+    }
     let model = if let Some(selection) = &request.model_selection {
       if !binding.capabilities.per_input_model {
         return Err(DeliveryError::not_sent(
