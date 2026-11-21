@@ -1,6 +1,8 @@
 //! Hub accounts own directory entries and authenticate account API requests.
 
+mod federation;
 mod mail;
+mod oidc;
 mod storage;
 
 #[cfg(test)]
@@ -143,6 +145,7 @@ struct Inner {
   origin: String,
   local_http: bool,
   mailer: Option<Sendmail>,
+  federation: federation::Federation,
   code_key: Hash,
   pending: Mutex<Pending>,
 }
@@ -228,10 +231,25 @@ impl Budget {
 
 impl Accounts {
   pub fn new(store: Store, public_url: &str) -> Result<Self, String> {
-    Self::with_mailer(store, public_url, Sendmail::from_env()?)
+    Self::with_providers(
+      store,
+      public_url,
+      Sendmail::from_env()?,
+      federation::Federation::from_env(public_url)?,
+    )
   }
 
+  #[cfg(test)]
   fn with_mailer(store: Store, public_url: &str, mailer: Option<Sendmail>) -> Result<Self, String> {
+    Self::with_providers(store, public_url, mailer, federation::Federation::default())
+  }
+
+  fn with_providers(
+    store: Store,
+    public_url: &str,
+    mailer: Option<Sendmail>,
+    federation: federation::Federation,
+  ) -> Result<Self, String> {
     let public_url = Url::parse(public_url).map_err(|_| "Invalid Hub URL for account authentication")?;
     let origin = public_url.origin().ascii_serialization();
     let local_http = public_url.scheme() == "http" && public_url.domain() == Some("localhost");
@@ -244,6 +262,7 @@ impl Accounts {
         origin,
         local_http,
         mailer,
+        federation,
         code_key,
         pending: Mutex::new(Pending::default()),
       }),
@@ -270,6 +289,7 @@ impl Accounts {
       .route("/hub/v1/account/logout", post(logout))
       .route("/hub/v1/account/keys", get(keys).post(create_key))
       .route("/hub/v1/account/keys/{key_id}", delete(revoke_key))
+      .merge(federation::router())
       .layer(DefaultBodyLimit::max(4096))
       .layer(middleware::from_fn_with_state(self.clone(), account_headers))
       .with_state(self.clone())
@@ -361,6 +381,10 @@ impl Accounts {
     Ok(cookie)
   }
 
+  fn browser_login_cookie(&self, login: &Login) -> Result<HeaderValue, AccountError> {
+    self.browser_cookie(&login.token, storage::BROWSER_COOKIE_TTL)
+  }
+
   fn check_origin(&self, headers: &HeaderMap, required: bool) -> Result<(), AccountError> {
     let mut origins = headers.get_all(header::ORIGIN).iter();
     match origins.next() {
@@ -450,7 +474,14 @@ impl Accounts {
 }
 
 async fn capabilities(State(state): State<Accounts>) -> Json<serde_json::Value> {
-  Json(json!({"enabled": true, "email_configured": state.email_configured(), "viewer_device_login": true}))
+  let mut value = json!({"enabled": true, "email_configured": state.email_configured(), "viewer_device_login": true});
+  if state.inner.federation.github_configured() {
+    value["github_configured"] = json!(true);
+  }
+  if let Some(issuer) = state.inner.federation.apell_issuer() {
+    value["apell_issuer"] = json!(issuer);
+  }
+  Json(value)
 }
 
 async fn account_headers(State(state): State<Accounts>, request: Request, next: Next) -> Response {
@@ -535,7 +566,7 @@ async fn browser_email_verify(
 ) -> Result<Response, AccountError> {
   state.check_origin(&headers, true)?;
   let login = verify_login(&state, request, TokenTransport::Cookie).await?;
-  let cookie = state.browser_cookie(&login.token, storage::BROWSER_COOKIE_TTL)?;
+  let cookie = state.browser_login_cookie(&login)?;
   Ok(([(header::SET_COOKIE, cookie)], Json(login.identity)).into_response())
 }
 

@@ -67,8 +67,8 @@ function revokeAttempt(scope: HubAccountScope) {
   void invokeHost("hub_account_login_cancel", { hub_url: scope.hub_url, attempt_id: attempt.attempt_id }).catch(() => {});
 }
 
-/** The guest owns approval and credentials. React only holds public account data for the connected Hub. */
-export function useApellHubAccount(hub_url?: string) {
+/** The native host owns approval and credentials. React only holds public account data for the connected Hub. */
+export function useNativeHubAccount(hub_url?: string) {
   const scope = useMemo<HubAccountScope | undefined>(() => hub_url ? { hub_url, active: false } : undefined, [hub_url]);
   const [snapshot, setSnapshot] = useState<{ scope: HubAccountScope; state: AccountState }>();
   const state = snapshot?.scope === scope ? snapshot?.state ?? EMPTY_ACCOUNT : EMPTY_ACCOUNT;
@@ -170,6 +170,11 @@ export function useApellHubAccount(hub_url?: string) {
     publish(scope, (previous) => ({ ...previous, starting: false, challenge: undefined, sign_in_error: undefined }));
   }
 
+  async function openApproval() {
+    if (!scope?.active || !scope.login || !state.challenge) return;
+    await invokeHost("hub_account_login_open", { hub_url: scope.hub_url, attempt_id: scope.login.attempt_id });
+  }
+
   async function logout() {
     if (!scope?.active || !state.session || scope.signing_out) return;
     scope.read = undefined;
@@ -186,5 +191,5 @@ export function useApellHubAccount(hub_url?: string) {
     }
   }
 
-  return { ...state, startSignIn, cancelSignIn, logout, retry: () => { if (scope) void refresh(scope); } };
+  return { ...state, startSignIn, cancelSignIn, openApproval, logout, retry: () => { if (scope) void refresh(scope); } };
 }

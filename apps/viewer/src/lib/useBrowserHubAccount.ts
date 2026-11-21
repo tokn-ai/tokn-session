@@ -174,7 +174,7 @@ export function useBrowserHubAccount(load_roster: boolean, showing_profile: bool
     }
   }
 
-  function signedIn(next: AccountSession) { replace(next); setNotice(undefined); }
+  const signedIn = useCallback((next: AccountSession) => { replace(next); setNotice(undefined); }, [replace]);
 
   const onFailure = useCallback((error: unknown, report: (message: string) => void) => {
     if (session && session === active.current && !session.client.signal.aborted && !handleSessionError(error)) {

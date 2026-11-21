@@ -1,9 +1,9 @@
 import { useRef, useState } from "react";
-import { ApellHubAccountEntry } from "../components/ApellHubAccountEntry";
+import { NativeHubAccountEntry } from "../components/NativeHubAccountEntry";
 import { HubAccess } from "../components/HubAccess";
 import { NativeDevicePreferencesProvider } from "../components/NativeDevicePreferencesProvider";
 import { preferredHub, rememberHub, rememberMachine, useMachinePreferences } from "../lib/machinePreferences";
-import { useApellHubAccount } from "../lib/useApellHubAccount";
+import { useNativeHubAccount } from "../lib/useNativeHubAccount";
 
 export function RemoteWorkspace() {
   return <NativeDevicePreferencesProvider><RemoteMachines /></NativeDevicePreferencesProvider>;
@@ -14,7 +14,7 @@ function RemoteMachines() {
   const current = useRef(preferences);
   current.current = preferences;
   const [hub_url, setHubUrl] = useState<string>();
-  const account = useApellHubAccount(hub_url);
+  const account = useNativeHubAccount(hub_url);
   const initial = useRef({
     hub_url: preferredHub(preferences),
     host_id: preferences.selected_machine?.kind === "hub" ? preferences.selected_machine.host_id : null,
@@ -24,7 +24,7 @@ function RemoteMachines() {
     on_machine_open={(selection) => rememberMachine(current.current, selection)}
     on_hub_ready={(url) => { setHubUrl(url); rememberHub(current.current, url); }}
     on_hub_closed={() => setHubUrl(undefined)}
-    account_control={account.supported && <ApellHubAccountEntry key={hub_url}
+    account_control={account.supported && <NativeHubAccountEntry key={hub_url}
       session={account.session} signing_out={account.signing_out} sign_out_error={account.sign_out_error} on_sign_out={account.logout}
       challenge={account.challenge} starting={account.starting} sign_in_error={account.sign_in_error}
       on_start_sign_in={account.startSignIn} on_cancel_sign_in={account.cancelSignIn} />}

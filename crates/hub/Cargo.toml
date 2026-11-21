@@ -17,6 +17,7 @@ clap = { version = "4", features = ["derive", "env"] }
 dirs.workspace = true
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures-util = { version = "0.3", features = ["sink"] }
+jsonwebtoken = { version = "12", default-features = false, features = ["rust_crypto"] }
 libc = "0.2"
 rand = "0.8"
 qrcode = { version = "0.14", default-features = false }

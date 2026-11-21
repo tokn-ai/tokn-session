@@ -21,9 +21,12 @@ your target system before installing the copies.
 - `tokn-hub.service.example`: unprivileged Hub service, including its explicit
   public URL and persistent state path.
 
-Configure a sender and sendmail-compatible mail delivery for Hub account
-signup. New connectors need an account machine assignment. See
-[Hub accounts](../../docs/hub.md#hub-accounts-and-cli-login).
+Configure email delivery for Hub account sign-in and recovery. To enable GitHub
+sign-in, register the Hub's HTTPS callback and configure its OAuth client ID and
+secret in the service's private environment. New connectors need an account
+machine assignment. See [Hub accounts](../../docs/hub.md#hub-accounts-and-cli-login)
+for [Apell Account OIDC](../../docs/hub.md#sign-in-with-apell-account) and
+[GitHub sign-in](../../docs/hub.md#sign-in-with-github) configuration.
 
 The example layout uses `/opt/tokn-hub/releases/<release>/` for the binary and
 `web/`, `/opt/tokn-hub/current` for the active release symlink, and
@@ -37,7 +40,8 @@ and issue a certificate using the `/var/lib/letsencrypt` webroot. Install the
 rendered HTTPS configuration once its certificate files exist. Validate nginx
 with `nginx -t` and the service with `systemd-analyze verify` before activation.
 nginx preserves streaming/WebSocket connections and logs paths without query
-strings.
+strings. Keep that logging behavior on proxies in front of the provider
+callbacks because their queries carry temporary authorization codes.
 
 ## Build and update
 
