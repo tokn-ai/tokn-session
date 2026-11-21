@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useViewerVisible } from "../lib/viewerVisibility";
 import { useFloatingPanel } from "../lib/useFloatingPanel";
 import { modelLabel, sameModel } from "../lib/sessionModels";
 import type { ModelChoice, SessionModelState, SessionModelStatus } from "../lib/types";
@@ -28,6 +29,7 @@ export function SessionModelPicker({ model, provider, input_busy = false, select
   on_select: (choice: ModelChoice) => void;
   on_clear: () => void;
 }) {
+  const visible = useViewerVisible();
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ left: 16, bottom: 80, maxHeight: 460 });
   const trigger = useRef<HTMLButtonElement>(null);
@@ -78,7 +80,7 @@ export function SessionModelPicker({ model, provider, input_busy = false, select
     {selected_model ? <button className="text-button session-model__retry" type="button" disabled={input_busy} onClick={on_clear}>{mode === "creation" ? "Use runtime default" : "Use current model"}</button> : null}
     {!model.can_open && !model.checking ? <small className="session-model__reason" title={reason}>{reason}</small> : null}
     {!model.can_open && !model.checking && model.error ? <button className="text-button session-model__retry" type="button" onClick={() => { void model.refresh(); }}>Refresh model status</button> : null}
-    {open ? createPortal(<div className="session-model__panel" ref={panel} id={panel_id} role="dialog" aria-modal="false"
+    {open && visible ? createPortal(<div className="session-model__panel" ref={panel} id={panel_id} role="dialog" aria-modal="false"
       aria-labelledby={`${panel_id}-title`} tabIndex={-1} style={position}>
       <header><div><h3 id={`${panel_id}-title`}>Model</h3><p>{provider}</p></div>
         <button className="icon-button" type="button" aria-label="Close model selection" onClick={close}><CloseIcon /></button></header>

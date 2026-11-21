@@ -80,7 +80,10 @@ fn matching_code_authenticates_both_noise_keys_and_final_ack() {
 #[test]
 fn final_ack_encrypts_and_authenticates_discovery_metadata() {
   let seed = seed();
-  let group = seed.discovery_group("https://hub.example", "personal").unwrap();
+  let group = DiscoveryGroup {
+    namespace: "personal".into(),
+    secret_digest: encode(&[1; 32]),
+  };
   let pair = || {
     let host_identity = NoiseIdentity::generate().unwrap();
     let client_identity = NoiseIdentity::generate().unwrap();

@@ -172,6 +172,28 @@ impl ClientStore {
   /// Remember display metadata for an already-pinned host. The caller verifies
   /// the directory mapping before entering this atomic local transaction.
   pub fn remember_metadata(&self, host_id: &str, machine_address: &str, name: &str) -> Result<SavedHost, String> {
+    self.save_metadata(host_id, None, machine_address, name)
+  }
+
+  /// A successful pinned-key exchange also permits a changed address. Never
+  /// use an unverified directory entry as the key supplied to this method.
+  pub fn remember_authenticated_metadata(
+    &self,
+    host_id: &str,
+    verified_host_public_key: &str,
+    machine_address: &str,
+    name: &str,
+  ) -> Result<SavedHost, String> {
+    self.save_metadata(host_id, Some(verified_host_public_key), machine_address, name)
+  }
+
+  fn save_metadata(
+    &self,
+    host_id: &str,
+    verified_host_public_key: Option<&str>,
+    machine_address: &str,
+    name: &str,
+  ) -> Result<SavedHost, String> {
     validate_uuid(host_id)?;
     tokn_hub_client_core::address::parse_machine_address(machine_address)?;
     tokn_hub_client_core::address::validate_machine_name(name)?;
@@ -194,10 +216,14 @@ impl ClientStore {
       .iter_mut()
       .find(|host| host.host_id == host_id)
       .ok_or("Pair this machine before remembering its address")?;
+    if verified_host_public_key.is_some_and(|key| key != host.host_public_key) {
+      return Err("Machine key does not match its remembered identity".into());
+    }
     if host
       .machine_address
       .as_deref()
       .is_some_and(|address| address != machine_address)
+      && verified_host_public_key.is_none()
     {
       return Err("This host already has a different saved machine address".into());
     }
@@ -237,6 +263,29 @@ impl ClientStore {
     let remembered = host.clone();
     write_atomic(&path, &state)?;
     Ok(remembered)
+  }
+
+  /// Remove only an exact capability explicitly retired by this Hub. Read the
+  /// latest state under the lock so a concurrently refreshed group is retained.
+  pub fn retire_discovery_group(&self, group: &DiscoveryGroup) -> Result<(), String> {
+    group.validate()?;
+    let path = self.path();
+    let _lock = lock(&path)?;
+    let mut state = self.read()?;
+    let Some(hub) = state.hubs.get_mut(&self.hub) else {
+      return Ok(());
+    };
+    let mut changed = false;
+    for host in &mut hub.hosts {
+      if host.discovery_group.as_ref() == Some(group) {
+        host.discovery_group = None;
+        changed = true;
+      }
+    }
+    if changed {
+      write_atomic(&path, &state)?;
+    }
+    Ok(())
   }
 
   pub fn selected_host(&self) -> Result<Option<String>, String> {
@@ -524,6 +573,16 @@ mod tests {
       .remember_metadata(&second.host_id, "alice:workstation", "Other Hub")
       .unwrap();
     assert_eq!(reopened.hosts().unwrap()[0], renamed);
+    assert!(
+      reopened
+        .remember_authenticated_metadata(&host.host_id, &second.host_public_key, "alice:studio", "Studio")
+        .is_err()
+    );
+    let refreshed = reopened
+      .remember_authenticated_metadata(&host.host_id, &host.host_public_key, "alice:studio", "Studio")
+      .unwrap();
+    assert_eq!(refreshed.machine_address.as_deref(), Some("alice:studio"));
+    assert_eq!(refreshed.host_public_key, host.host_public_key);
     assert_eq!(reopened.selected_host().unwrap(), Some(host.host_id));
   }
 

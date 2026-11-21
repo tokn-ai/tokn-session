@@ -1,8 +1,4 @@
-use super::grant::{Grant, SignedGrant};
 use crate::protocol::{decode, encode};
-use ed25519_dalek::{Signer, SigningKey};
-#[cfg(any(not(target_arch = "wasm32"), feature = "system-rng"))]
-use rand::rngs::OsRng;
 use snow::{
   params::DHChoice,
   resolvers::{CryptoResolver, DefaultResolver},
@@ -97,35 +93,6 @@ impl NoiseIdentity {
   }
 }
 
-/// An owner-controlled signing identity, distinct from every transport key.
-#[derive(Clone)]
-pub struct OwnerIdentity(SigningKey);
-
-impl OwnerIdentity {
-  #[cfg(any(not(target_arch = "wasm32"), feature = "system-rng"))]
-  pub fn generate() -> Self {
-    Self(SigningKey::generate(&mut OsRng))
-  }
-
-  #[cfg(not(target_arch = "wasm32"))]
-  pub fn load_or_create(path: &Path) -> Result<Self, String> {
-    let secret = load_or_create_secret(path, "owner_ed25519", || Ok(Self::generate().0.to_bytes()))?;
-    Ok(Self(SigningKey::from_bytes(&secret)))
-  }
-
-  pub fn public_key(&self) -> String {
-    encode(self.0.verifying_key().as_bytes())
-  }
-
-  /// Sign the exact typed grant; callers choose scope and expiry explicitly.
-  pub fn sign_grant(&self, grant: Grant) -> Result<SignedGrant, String> {
-    let signature = encode(&self.0.sign(&grant.signing_bytes()?).to_bytes());
-    let signed = SignedGrant { grant, signature };
-    signed.validate()?;
-    Ok(signed)
-  }
-}
-
 /// Public keys use canonical unpadded URL-safe base64, always exactly 32 bytes.
 pub fn decode_public_key(value: &str) -> Result<[u8; 32], String> {
   if value.len() != 43 {
@@ -186,22 +153,18 @@ mod tests {
   }
 
   #[test]
-  fn identities_round_trip_and_key_kinds_cannot_be_confused() {
+  fn noise_identities_round_trip_and_reject_unsupported_key_kinds() {
     let directory = tempfile::tempdir().unwrap();
     let noise_path = directory.path().join("noise.json");
-    let owner_path = directory.path().join("owner.json");
     let noise = NoiseIdentity::load_or_create(&noise_path).unwrap();
-    let owner = OwnerIdentity::load_or_create(&owner_path).unwrap();
     assert_eq!(
       noise.public_key(),
       NoiseIdentity::load_or_create(&noise_path).unwrap().public_key()
     );
-    assert_eq!(
-      owner.public_key(),
-      OwnerIdentity::load_or_create(&owner_path).unwrap().public_key()
-    );
-    assert!(OwnerIdentity::load_or_create(&noise_path).is_err());
-    assert!(NoiseIdentity::load_or_create(&owner_path).is_err());
+    let mut stored: serde_json::Value = serde_json::from_slice(&fs::read(&noise_path).unwrap()).unwrap();
+    stored["kind"] = "owner_ed25519".into();
+    fs::write(&noise_path, serde_json::to_vec(&stored).unwrap()).unwrap();
+    assert!(NoiseIdentity::load_or_create(&noise_path).is_err());
   }
 
   #[test]

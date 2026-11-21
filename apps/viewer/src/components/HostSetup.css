@@ -31,11 +31,13 @@
 .host-summary > div { display: grid; gap: 4px; }
 .host-summary dt { color: var(--text-muted); }
 .host-summary dd { margin: 0; overflow-wrap: anywhere; }
-.host-registration { border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
-.host-registration summary { cursor: pointer; font-weight: 550; }
-.host-registration > div { display: grid; gap: 10px; padding-top: 10px; }
-.host-registration ol { display: grid; gap: 8px; margin: 0; padding-left: 20px; }
-.host-registration li > code { display: block; overflow-wrap: anywhere; }
+.host-login, .host-machine { display: grid; gap: 12px; border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+.host-login__code { font: 22px ui-monospace, monospace; letter-spacing: 2px; }
+.host-machine__heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.host-machine__heading > div { display: grid; gap: 5px; min-width: 0; }
+.host-machine__heading span { color: var(--text-muted); }
+.host-machine__heading strong { overflow-wrap: anywhere; font-weight: 550; }
+.host-form-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .host-dialog .hub-error, .host-quick [role="alert"] { color: var(--danger); }
 .host-background, .host-background > div { display: grid; gap: 12px; }
 .host-background { padding-top: 16px; border-top: 1px solid var(--border); }

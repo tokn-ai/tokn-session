@@ -12,12 +12,15 @@ export interface LocalHostControls {
   retry: () => void;
   remove_external: () => Promise<void>;
   stop_external: () => Promise<void>;
+  cancel: () => Promise<void>;
+  rename: (machine_name: string) => Promise<boolean>;
   change: (request?: StartLocalHostRequest) => Promise<void>;
 }
 export const LocalHostContext = createContext<LocalHostControls | undefined>(undefined);
 export const useLocalHost = () => useContext(LocalHostContext);
 export const isHosting = (status?: LocalHostStatus) => !!status && !["stopped", "external", "background", "unavailable"].includes(status.phase);
 export const hostLabels: Record<LocalHostStatus["phase"], string> = {
+  signing_in: "Waiting for Hub sign-in…", registering: "Registering this computer…", renaming: "Renaming this computer…",
   background: "Background API running",
   external: "Hosting externally", unavailable: "Hosting status unavailable",
   stopped: "Hosting off", connecting: "Connecting to Hub…", online: "Hosting online",

@@ -1,4 +1,4 @@
-use crate::local_host::{HostPairing, HostStatus, LocalHost, StartHostRequest};
+use crate::local_host::{HostPairing, HostStatus, LocalHost, RenameHostRequest, StartHostRequest};
 use tauri::{AppHandle, State};
 
 #[tauri::command]
@@ -16,6 +16,18 @@ pub async fn local_host_start(
 #[tauri::command]
 pub async fn local_host_stop(app: AppHandle, state: State<'_, LocalHost>) -> Result<HostStatus, String> {
   state.stop(&app).await
+}
+#[tauri::command]
+pub async fn local_host_rename(
+  app: AppHandle,
+  state: State<'_, LocalHost>,
+  request: RenameHostRequest,
+) -> Result<HostStatus, String> {
+  state.rename(app, request).await
+}
+#[tauri::command]
+pub async fn local_host_open_login(app: AppHandle, state: State<'_, LocalHost>) -> Result<(), String> {
+  state.open_login(&app).await
 }
 #[tauri::command]
 pub async fn local_host_pairing(state: State<'_, LocalHost>) -> Result<HostPairing, String> {

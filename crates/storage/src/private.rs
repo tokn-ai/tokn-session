@@ -118,6 +118,16 @@ fn lock_path(path: &Path) -> PathBuf {
   name.into()
 }
 
+struct TransactionLock(File);
+
+impl Drop for TransactionLock {
+  fn drop(&mut self) {
+    // A concurrent process spawn can inherit this open file description until
+    // exec. Explicitly unlock so that its descriptor cannot extend a transaction.
+    let _ = self.0.unlock();
+  }
+}
+
 /// Read bounded private JSON without creating files or directories.
 pub fn read_private_json<T: DeserializeOwned>(path: &Path, max_bytes: u64) -> Result<Option<T>, String> {
   let Some(file) = open_private(path, false)? else {
@@ -150,7 +160,7 @@ pub fn update_private_json<T: Serialize + DeserializeOwned>(
     .filter(|parent| !parent.as_os_str().is_empty())
     .ok_or("Private JSON needs a parent")?;
   private_directory(parent)?;
-  let _lock = acquire_lock(&lock_path(path))?;
+  let _lock = TransactionLock(acquire_lock(&lock_path(path))?);
   let value = update(read_private_json(path, max_bytes)?)?;
   let bytes = serde_json::to_vec_pretty(&value).map_err(|error| error.to_string())?;
   if bytes.len() as u64 > max_bytes {
@@ -171,6 +181,35 @@ pub fn update_private_json<T: Serialize + DeserializeOwned>(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn transaction_unlocks_while_an_inherited_description_remains_open() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("transaction.lock");
+    let transaction = TransactionLock(acquire_lock(&path).unwrap());
+    let inherited = transaction.0.try_clone().unwrap();
+    assert!(acquire_lock(&path).is_err());
+    drop(transaction);
+    let next = acquire_lock(&path).unwrap();
+    assert!(acquire_lock(&path).is_err());
+    drop(next);
+    drop(inherited);
+  }
+
+  #[test]
+  fn an_early_transaction_error_releases_inherited_descriptions() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("transaction.lock");
+    let mut inherited = None;
+    let result = (|| -> Result<(), String> {
+      let transaction = TransactionLock(acquire_lock(&path)?);
+      inherited = Some(transaction.0.try_clone().map_err(|error| error.to_string())?);
+      Err("Update failed".into())
+    })();
+    assert_eq!(result.unwrap_err(), "Update failed");
+    assert!(acquire_lock(&path).is_ok());
+    drop(inherited);
+  }
 
   #[test]
   fn missing_read_is_pure_and_updates_preserve_current_valid_state() {

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { getLocalHostStatus, listenForLocalHostStatus, startLocalHost, stopLocalHost, stopExternalLocalHost, removeExternalLocalHost } from "../lib/tauri";
+import { getLocalHostStatus, listenForLocalHostStatus, startLocalHost, stopLocalHost, stopExternalLocalHost, removeExternalLocalHost, renameLocalHost } from "../lib/tauri";
 import { isHosting, LocalHostContext } from "../lib/localHost";
 import type { LocalHostStatus, StartLocalHostRequest } from "../lib/types";
 import { HostDialog } from "./HostSetup";
@@ -14,6 +14,8 @@ export function LocalHostProvider({ children }: { children: ReactNode }) {
   const alive = useRef(false);
   const revision = useRef(0);
   const pending = useRef(false);
+  const operation = useRef(0);
+  const canceling = useRef(false);
   const return_focus = useRef<HTMLElement | undefined>(undefined);
   function open(opener?: HTMLElement | null) {
     return_focus.current = opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : undefined);
@@ -59,54 +61,66 @@ export function LocalHostProvider({ children }: { children: ReactNode }) {
     };
   }, [attempt]);
 
-  async function change(request?: StartLocalHostRequest) {
-    if (pending.current || !status || ["external", "background", "unavailable"].includes(status.phase)) return;
-    const hosting = isHosting(status);
-    const settings = request ?? status;
-    if (!hosting && (!settings.hub_url.trim() || !settings.name.trim())) { open(); return; }
+  async function perform(action: () => Promise<LocalHostStatus>, options: { supersede?: boolean; clear_external_conflict?: boolean } = {}): Promise<boolean> {
+    if (pending.current && !options.supersede) return false;
+    const current = ++operation.current;
     pending.current = true;
     setBusy(true); setError(undefined);
     const before = revision.current;
     try {
-      const next = hosting ? await stopLocalHost() : await startLocalHost({
-        hub_url: settings.hub_url.trim(), name: settings.name.trim(), allow_control: settings.allow_control,
-      });
+      const next = await action();
+      if (current !== operation.current) return false;
       if (alive.current && before === revision.current) { revision.current++; setStatus(next); }
+      return true;
     } catch (error) {
-      if (alive.current) {
+      if (alive.current && current === operation.current) {
         setError(error instanceof Error ? error.message : String(error));
         // A connector may have started after the last observation. Refresh ownership
         // after a rejected start rather than leaving an apparently available switch.
         const observed = revision.current;
         try {
           const next = await getLocalHostStatus();
-          if (alive.current && observed === revision.current) {
+          if (alive.current && current === operation.current && observed === revision.current) {
             revision.current++; setStatus(next);
-            if (next.phase === "external") setError(undefined);
+            if (next.phase === "external" && options.clear_external_conflict) setError(undefined);
           }
         } catch { /* Preserve the action error until a later status refresh succeeds. */ }
       }
+      return false;
     } finally {
-      pending.current = false;
-      if (alive.current) setBusy(false);
+      if (current === operation.current) {
+        pending.current = false;
+        if (alive.current) setBusy(false);
+      }
     }
+  }
+  async function change(request?: StartLocalHostRequest) {
+    if (pending.current || !status || ["external", "background", "unavailable"].includes(status.phase)) return;
+    if (isHosting(status)) { await perform(stopLocalHost); return; }
+    const settings = request ?? status;
+    if (!settings.hub_url.trim() || !settings.name.trim()) { open(); return; }
+    const machine_name = settings.machine_name?.trim();
+    await perform(() => startLocalHost({
+      hub_url: settings.hub_url.trim(), name: settings.name.trim(), allow_control: settings.allow_control,
+      ...(machine_name ? { machine_name } : {}),
+    }), { clear_external_conflict: true });
+  }
+  async function cancel() {
+    if (canceling.current) return;
+    canceling.current = true;
+    try { await perform(stopLocalHost, { supersede: true }); }
+    finally { canceling.current = false; }
+  }
+  async function rename(machine_name: string): Promise<boolean> {
+    if (!status?.machine_address || ["external", "background", "unavailable"].includes(status.phase)) return false;
+    return perform(() => renameLocalHost({ machine_name: machine_name.trim() }));
   }
   async function manageExternal(remove: boolean) {
     if (pending.current || !status || isHosting(status)
       || !(remove ? status.external_remove_supported : status.external_stop_supported)) return;
-    pending.current = true; setBusy(true); setError(undefined);
-    const before = revision.current;
-    try {
-      const next = await (remove ? removeExternalLocalHost() : stopExternalLocalHost());
-      if (alive.current && before === revision.current) { revision.current++; setStatus(next); }
-    } catch (error) {
-      if (alive.current) setError(error instanceof Error ? error.message : String(error));
-    } finally {
-      pending.current = false;
-      if (alive.current) setBusy(false);
-    }
+    await perform(remove ? removeExternalLocalHost : stopExternalLocalHost);
   }
-  return <LocalHostContext value={{ status, busy, error, is_open, change, stop_external: () => manageExternal(false), remove_external: () => manageExternal(true),
+  return <LocalHostContext value={{ status, busy, error, is_open, change, cancel, rename, stop_external: () => manageExternal(false), remove_external: () => manageExternal(true),
     return_focus: return_focus.current, open, close: () => setOpen(false), retry: () => setAttempt((value) => value + 1) }}>
     {children}
     {is_open && <HostDialog />}

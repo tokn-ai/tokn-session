@@ -58,6 +58,16 @@ it("expired tab authorization requires another passkey", async () => {
     expect(authenticateHubHost).toHaveBeenCalledTimes(2);
   } finally { vi.useRealTimers(); }
 });
+it("scopes the tab unlock to the authenticated machine key and ends it on disconnect", async () => {
+  const service = await open();
+  await service.authenticate(host, false, signal());
+  expect(service.authorizationDeadline(host)).toBeGreaterThan(Date.now());
+  expect(service.authorizationDeadline({ ...host, host_public_key: "K".repeat(43) })).toBe(0);
+  service.lock(host.host_id);
+  expect(service.authorizationDeadline(host)).toBe(0);
+  await service.connect(host, signal());
+  expect(authenticateHubHost).toHaveBeenCalledTimes(2);
+});
 it("disposing a tab destroys its private identity and prevents reuse", async () => {
   const store = await HubDeviceStore.open("https://hub.example", crypto, storage);
   const service = new BrowserHubAccess("https://hub.example", crypto, store);
@@ -82,6 +92,24 @@ it("learns a discovery group only from successful machine pairing and keeps cand
   expect((await service.status()).hosts).toEqual([{ ...host, discovery_group: group }]);
   expect(authenticateHubHost).not.toHaveBeenCalled();
   expect(EncryptedHubClient.connect).not.toHaveBeenCalled();
+});
+
+it("clears discovery only after explicit retirement while retaining the paired machine", async () => {
+  const service = await open();
+  const group = { namespace: "personal", secret_digest: "A".repeat(43) };
+  vi.mocked(pairHubHost).mockResolvedValueOnce({ ...host, discovery_group: group });
+  await service.pair(host.host_id, "123456", signal());
+  const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ...group, machines: [] }), { headers: { "Content-Type": "application/json" } }));
+  vi.stubGlobal("fetch", fetcher);
+  await service.discover(group, signal());
+  expect((await service.status()).hosts[0].discovery_group).toEqual(group);
+  fetcher.mockRejectedValueOnce(new Error("Network unavailable"));
+  await expect(service.discover(group, signal())).rejects.toThrow("Network unavailable");
+  expect((await service.status()).hosts[0].discovery_group).toEqual(group);
+  fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ ...group, machines: [], retired: true }), { headers: { "Content-Type": "application/json" } }));
+  expect(await service.discover(group, signal())).toEqual({ ...group, machines: [], retired: true });
+  expect((await service.status()).hosts).toEqual([host]);
+  expect((await (await open()).status()).hosts).toEqual([host]);
 });
 
 it("refreshes a previously paired machine's group through its authenticated connection and preserves it on lookup errors", async () => {

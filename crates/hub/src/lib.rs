@@ -1,4 +1,5 @@
 //! Passwordless access to multiple session hosts through one endpoint.
+pub mod account_client;
 pub mod account_host;
 mod accounts;
 pub mod auth;
@@ -11,7 +12,6 @@ pub mod pairing;
 pub mod protocol;
 pub mod secure;
 pub mod secure_client;
-pub mod secure_scope;
 pub mod server;
 pub mod storage;
 pub mod store;

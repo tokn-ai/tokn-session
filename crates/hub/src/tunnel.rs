@@ -1,25 +1,22 @@
-//! Authenticated host enrollment and bounded HTTP multiplexing.
+//! Account-owned host connections and bounded encrypted tunnel multiplexing.
 use crate::{
   protocol::{self, Frame},
   store::{HostRecord, Store},
 };
 use axum::{
-  body::{Body, Bytes},
+  body::Bytes,
   extract::ws::{Message, WebSocket},
-  http::{Method, StatusCode, header},
-  response::Response,
 };
 use ed25519_dalek::{Signature, VerifyingKey};
 use rand::{RngCore, rngs::OsRng};
 use std::{
   collections::HashMap,
-  io,
   sync::{Arc, Mutex, Weak},
   time::{Duration, Instant},
 };
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
-use tokn_hub_client_core::presence::MachinePresence;
+use tokn_hub_client_core::{discovery::DiscoveryGroup, presence::MachinePresence};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -39,42 +36,15 @@ struct HubInner {
 }
 
 struct Connection {
-  // Only socket handlers own strong leases. Keeping an old HTTP response body
-  // alive cannot retain host capacity after that socket disconnects.
+  // Only host socket handlers own strong leases. An old client socket cannot
+  // retain host capacity after its connector disconnects.
   capacity: Weak<OwnedSemaphorePermit>,
   outgoing: mpsc::Sender<Frame>,
-  requests: Mutex<HashMap<u64, InFlight>>,
   secure_channels: Mutex<HashMap<u64, mpsc::Sender<Bytes>>>,
   next_id: std::sync::atomic::AtomicU64,
   allow_control: bool,
-  secure_only: std::sync::atomic::AtomicBool,
   connector_version: Option<String>,
   shutdown: CancellationToken,
-}
-
-struct InFlight {
-  headers: Option<oneshot::Sender<Result<(u16, Option<String>), String>>>,
-  chunks: mpsc::Sender<Bytes>,
-  failure: Arc<Mutex<Option<String>>>,
-}
-
-pub struct ProxyError {
-  pub status: StatusCode,
-  pub message: String,
-}
-
-impl ProxyError {
-  fn new(status: StatusCode, message: impl Into<String>) -> Self {
-    Self {
-      status,
-      message: message.into(),
-    }
-  }
-}
-
-struct RequestGuard {
-  connection: Arc<Connection>,
-  request_id: u64,
 }
 
 struct SecureGuard {
@@ -100,32 +70,6 @@ impl Drop for SecureGuard {
         .is_err()
     {
       self.connection.shutdown.cancel();
-    }
-  }
-}
-
-impl Drop for RequestGuard {
-  fn drop(&mut self) {
-    if self
-      .connection
-      .requests
-      .lock()
-      .unwrap()
-      .remove(&self.request_id)
-      .is_some()
-    {
-      // A saturated control queue makes cancellation uncertain. Closing this
-      // connection reliably cancels every task on the host, without replay.
-      if self
-        .connection
-        .outgoing
-        .try_send(Frame::Cancel {
-          request_id: self.request_id,
-        })
-        .is_err()
-      {
-        self.connection.shutdown.cancel();
-      }
     }
   }
 }
@@ -193,16 +137,6 @@ impl HubTunnels {
       .map(|connection| if connection.allow_control { "control" } else { "view" }.into())
   }
 
-  pub fn secure_only(&self, host_id: &str) -> bool {
-    self
-      .inner
-      .lock()
-      .unwrap()
-      .online
-      .get(host_id)
-      .is_some_and(|connection| connection.secure_only.load(std::sync::atomic::Ordering::Relaxed))
-  }
-
   pub fn reserve_secure_channel(&self) -> Result<OwnedSemaphorePermit, String> {
     self
       .secure_capacity
@@ -228,18 +162,15 @@ impl HubTunnels {
       return;
     };
     let result = tokio::time::timeout(IO_TIMEOUT, self.authenticate(&mut socket)).await;
-    let Ok(Ok((record, allow_control, encrypted_registration, discovery_group))) = result else {
+    let Ok(Ok(authenticated)) = result else {
       return;
     };
     drop(handshake_permit);
-    let registered = if encrypted_registration {
-      self.store.register_tunnel_host(record, discovery_group.as_ref())
-    } else {
-      self.reconnect_legacy_host(record)
-    };
+    let (record, group) = authenticated;
+    let registered = self.store.register_tunnel_host(record, group.as_ref());
     let record = match registered {
       Ok(record) => record,
-      Err(error) if encrypted_registration || error == crate::store::ACCOUNT_REQUIRED => {
+      Err(error) => {
         let _ = send(
           &mut socket,
           &Frame::RegistrationRejected {
@@ -249,12 +180,11 @@ impl HubTunnels {
         .await;
         return;
       }
-      Err(_) => return,
     };
     let (outgoing, mut outgoing_rx) = mpsc::channel(64);
     let (connection, _approved_permit) = {
-      // Recheck under the same lock as revoke, including the latest grant. A
-      // revoked/reapproved identity cannot retain its earlier, broader access.
+      // Recheck under the same lock as revoke so an identity revoked during
+      // the handshake cannot install a connection.
       let mut inner = self.inner.lock().unwrap();
       let Some(stored) = self.store.host(&record.host_id).ok().flatten() else {
         return;
@@ -273,11 +203,9 @@ impl HubTunnels {
       let connection = Arc::new(Connection {
         capacity: Arc::downgrade(&permit),
         outgoing,
-        requests: Mutex::new(HashMap::new()),
         secure_channels: Mutex::new(HashMap::new()),
         next_id: std::sync::atomic::AtomicU64::new(1),
-        allow_control: allow_control && stored.access == "control",
-        secure_only: std::sync::atomic::AtomicBool::new(encrypted_registration),
+        allow_control: record.access == "control" && stored.access == "control",
         connector_version,
         shutdown: self.shutdown.child_token(),
       });
@@ -328,8 +256,7 @@ impl HubTunnels {
     }
     .await;
     connection.shutdown.cancel();
-    connection
-      .fail_all("Host disconnected; delivery of submitted input may be uncertain. Requests are never replayed.");
+    connection.secure_channels.lock().unwrap().clear();
     let mut inner = self.inner.lock().unwrap();
     if inner
       .online
@@ -340,18 +267,7 @@ impl HubTunnels {
     }
   }
 
-  async fn authenticate(
-    &self,
-    socket: &mut WebSocket,
-  ) -> Result<
-    (
-      HostRecord,
-      bool,
-      bool,
-      Option<tokn_hub_client_core::discovery::DiscoveryGroup>,
-    ),
-    String,
-  > {
+  async fn authenticate(&self, socket: &mut WebSocket) -> Result<(HostRecord, Option<DiscoveryGroup>), String> {
     let mut random = [0u8; 32];
     OsRng.fill_bytes(&mut random);
     let nonce = protocol::encode(&random);
@@ -369,34 +285,21 @@ impl HubTunnels {
     if text.len() > 4096 {
       return Err("Host authentication is too large".into());
     }
-    let (version, registered_id, public_key, name, allow_control, signature, discovery_group) =
-      match serde_json::from_str(&text).map_err(|_| "Invalid host authentication")? {
-        Frame::Authenticate {
-          version,
-          public_key,
-          name,
-          allow_control,
-          signature,
-        } => (version, None, public_key, name, allow_control, signature, None),
-        Frame::Register {
-          version,
-          host_id,
-          public_key,
-          name,
-          allow_control,
-          signature,
-          discovery_group,
-        } if protocol::valid_host_uuid(&host_id) => (
-          version,
-          Some(host_id),
-          public_key,
-          name,
-          allow_control,
-          signature,
-          discovery_group,
-        ),
-        _ => return Err("Expected host authentication or encrypted registration".into()),
-      };
+    let Frame::Register {
+      version,
+      host_id,
+      public_key,
+      name,
+      allow_control,
+      signature,
+      discovery_group,
+    } = serde_json::from_str(&text).map_err(|_| "Invalid host registration")?
+    else {
+      return Err("Expected encrypted host registration".into());
+    };
+    if !protocol::valid_host_uuid(&host_id) {
+      return Err("Host registration requires a canonical random UUID".into());
+    }
     if version != protocol::VERSION || name.trim().is_empty() || name.len() > 128 || name.chars().any(char::is_control)
     {
       return Err("Invalid host version or name".into());
@@ -409,152 +312,24 @@ impl HubTunnels {
       .map_err(|_| "Invalid host key")?;
     let key = VerifyingKey::from_bytes(&key_bytes).map_err(|_| "Invalid host key")?;
     let signature = Signature::from_slice(&protocol::decode(&signature, 64)?).map_err(|_| "Invalid host proof")?;
-    let proof = if let Some(host_id) = &registered_id {
-      protocol::discovery_registration_proof(
-        &nonce,
-        host_id,
-        &public_key,
-        &name,
-        allow_control,
-        discovery_group.as_ref(),
-      )
-    } else {
-      protocol::proof(&nonce, &public_key, &name, allow_control)
-    };
+    let proof = protocol::discovery_registration_proof(
+      &nonce,
+      &host_id,
+      &public_key,
+      &name,
+      allow_control,
+      discovery_group.as_ref(),
+    );
     key
       .verify_strict(&proof, &signature)
       .map_err(|_| "Invalid host proof")?;
-    let encrypted_registration = registered_id.is_some();
-    Ok((
-      HostRecord {
-        host_id: registered_id.unwrap_or_else(|| protocol::host_id(&key_bytes)),
-        public_key,
-        name,
-        access: if allow_control { "control" } else { "view" }.into(),
-      },
-      allow_control,
-      encrypted_registration,
-      discovery_group,
-    ))
-  }
-
-  fn reconnect_legacy_host(&self, record: HostRecord) -> Result<HostRecord, String> {
-    let stored = self
-      .store
-      .host(&record.host_id)?
-      .ok_or(crate::store::ACCOUNT_REQUIRED)?;
-    if stored.public_key != record.public_key {
-      return Err("Host key changed".into());
-    }
-    Ok(stored)
-  }
-
-  pub async fn proxy(&self, host_id: &str, method: Method, path: &str, body: Bytes) -> Result<Response, ProxyError> {
-    let connection = self
-      .inner
-      .lock()
-      .unwrap()
-      .online
-      .get(host_id)
-      .cloned()
-      .filter(|connection| !connection.shutdown.is_cancelled())
-      .ok_or_else(|| ProxyError::new(StatusCode::BAD_GATEWAY, "Host is offline"))?;
-    if connection.secure_only.load(std::sync::atomic::Ordering::Relaxed) {
-      return Err(ProxyError::new(
-        StatusCode::FORBIDDEN,
-        "This host requires the installed encrypted client",
-      ));
-    }
-    if !protocol::allowed_route(method.as_str(), path, connection.allow_control) {
-      return Err(ProxyError::new(
-        StatusCode::FORBIDDEN,
-        "Route is unavailable or host control is disabled",
-      ));
-    }
-    if body.len() > protocol::MAX_BODY {
-      return Err(ProxyError::new(StatusCode::PAYLOAD_TOO_LARGE, "Request is too large"));
-    }
-    let request_id = connection.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let (headers, ready) = oneshot::channel();
-    let (chunks, mut received) = mpsc::channel(protocol::RESPONSE_WINDOW);
-    let failure = Arc::new(Mutex::new(None));
-    {
-      let mut requests = connection.requests.lock().unwrap();
-      if requests.len() >= protocol::MAX_REQUESTS {
-        return Err(ProxyError::new(
-          StatusCode::TOO_MANY_REQUESTS,
-          "Host request capacity reached",
-        ));
-      }
-      requests.insert(
-        request_id,
-        InFlight {
-          headers: Some(headers),
-          chunks,
-          failure: failure.clone(),
-        },
-      );
-    }
-    let guard = RequestGuard {
-      connection: connection.clone(),
-      request_id,
+    let record = HostRecord {
+      host_id,
+      public_key,
+      name,
+      access: if allow_control { "control" } else { "view" }.into(),
     };
-    connection
-      .outgoing
-      .try_send(Frame::Request {
-        request_id,
-        method: method.to_string(),
-        path: path.into(),
-        body: protocol::encode(&body),
-      })
-      .map_err(|_| ProxyError::new(StatusCode::BAD_GATEWAY, "Host tunnel is busy or disconnected"))?;
-    let (status, _content_type) = tokio::time::timeout(Duration::from_secs(30), ready)
-      .await
-      .map_err(|_| {
-        ProxyError::new(
-          StatusCode::GATEWAY_TIMEOUT,
-          "Host response timed out; requests are never replayed",
-        )
-      })?
-      .map_err(|_| ProxyError::new(StatusCode::BAD_GATEWAY, "Host disconnected"))?
-      .map_err(|error| ProxyError::new(StatusCode::BAD_GATEWAY, error))?;
-    let stream = async_stream::try_stream! {
-      let _guard = guard;
-      loop {
-        let next = tokio::select! {
-          biased;
-          _ = connection.shutdown.cancelled() => Err(io::Error::other("Host disconnected or access revoked")),
-          next = tokio::time::timeout(Duration::from_secs(90), received.recv()) =>
-            next.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Host response stalled")),
-        }?;
-        let Some(chunk) = next else { break };
-        yield chunk;
-        if connection.requests.lock().unwrap().contains_key(&request_id) {
-          tokio::time::timeout(IO_TIMEOUT, connection.outgoing.send(Frame::Window { request_id, credits: 1 })).await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Host response flow control stalled"))?
-            .map_err(|_| io::Error::other("Host disconnected"))?;
-        }
-      }
-      let error = failure.lock().unwrap().take();
-      if let Some(error) = error { Err::<(), _>(io::Error::other(error))?; }
-    };
-    let stream = futures_util::StreamExt::map(stream, |item: Result<Bytes, io::Error>| item);
-    let response = Response::builder()
-      .status(status)
-      .header(header::CACHE_CONTROL, "no-store")
-      .header("x-accel-buffering", "no")
-      .header("x-content-type-options", "nosniff")
-      .header(
-        header::CONTENT_TYPE,
-        if path == "/api/v1/events" {
-          "text/event-stream"
-        } else {
-          "application/json"
-        },
-      );
-    response
-      .body(Body::from_stream(stream))
-      .map_err(|_| ProxyError::new(StatusCode::BAD_GATEWAY, "Invalid host response"))
+    Ok((record, discovery_group))
   }
 
   /// One native client socket carries one encrypted request or event stream.
@@ -622,10 +397,7 @@ async fn secure_enqueue(connection: &Connection, frame: Frame) -> Result<(), Str
 impl Connection {
   fn receive(&self, frame: Frame) -> Result<(), String> {
     match frame {
-      Frame::SecureOnly {} => {
-        self.secure_only.store(true, std::sync::atomic::Ordering::Relaxed);
-        return Ok(());
-      }
+      Frame::SecureOnly {} => Ok(()),
       Frame::SecureData { channel_id, data } => {
         let bytes = protocol::decode(&data, protocol::MAX_SECURE_RECORD)?;
         if bytes.is_empty() {
@@ -640,79 +412,13 @@ impl Connection {
             }
           }
         }
-        return Ok(());
+        Ok(())
       }
       Frame::SecureClose { channel_id } => {
         self.secure_channels.lock().unwrap().remove(&channel_id);
-        return Ok(());
+        Ok(())
       }
-      _ => {}
-    }
-    let mut requests = self.requests.lock().unwrap();
-    match frame {
-      Frame::Response {
-        request_id,
-        status,
-        content_type,
-      } => {
-        if !(200..=599).contains(&status)
-          || content_type
-            .as_ref()
-            .is_some_and(|value| value.len() > 256 || axum::http::HeaderValue::from_str(value).is_err())
-        {
-          return Err("Invalid response headers".into());
-        }
-        if let Some(request) = requests.get_mut(&request_id) {
-          let headers = request.headers.take().ok_or("Duplicate response headers")?;
-          let _ = headers.send(Ok((status, content_type)));
-        }
-      }
-      Frame::Chunk { request_id, data } => {
-        let bytes = protocol::decode(&data, protocol::CHUNK_SIZE)?;
-        if let Some(request) = requests.get(&request_id) {
-          if request.headers.is_some() {
-            return Err("Response body preceded headers".into());
-          }
-          if request.chunks.try_send(Bytes::from(bytes)).is_err() {
-            let request = requests.remove(&request_id).unwrap();
-            *request.failure.lock().unwrap() =
-              Some("Client could not keep up with the host stream; reconnect to refresh".into());
-            if self.outgoing.try_send(Frame::Cancel { request_id }).is_err() {
-              self.shutdown.cancel();
-            }
-          }
-        }
-      }
-      Frame::End { request_id } => {
-        if let Some(request) = requests.remove(&request_id) {
-          if let Some(headers) = request.headers {
-            let _ = headers.send(Err("Host ended before sending response headers".into()));
-          }
-        }
-      }
-      Frame::Error { request_id, message } => {
-        if message.len() > 1024 {
-          return Err("Host error is too large".into());
-        }
-        if let Some(request) = requests.remove(&request_id) {
-          *request.failure.lock().unwrap() = Some(message.clone());
-          if let Some(headers) = request.headers {
-            let _ = headers.send(Err(message));
-          }
-        }
-      }
-      _ => return Err("Unexpected message from host".into()),
-    }
-    Ok(())
-  }
-
-  fn fail_all(&self, message: &str) {
-    self.secure_channels.lock().unwrap().clear();
-    for (_, request) in self.requests.lock().unwrap().drain() {
-      *request.failure.lock().unwrap() = Some(message.into());
-      if let Some(headers) = request.headers {
-        let _ = headers.send(Err(message.into()));
-      }
+      _ => Err("Unexpected message from host".into()),
     }
   }
 }
@@ -722,15 +428,6 @@ impl Connection {
 fn registration_diagnostic(error: &str) -> &'static str {
   match error {
     crate::store::ACCOUNT_REQUIRED => crate::store::ACCOUNT_REQUIRED,
-    "New host registration rate limit reached; retry in one minute" => {
-      "New host registration rate limit reached; retry in one minute"
-    }
-    "Encrypted host registration capacity reached; a Hub administrator can revoke unused hosts" => {
-      "Encrypted host registration capacity reached; a Hub administrator can revoke unused hosts"
-    }
-    "Encrypted host revocation ledger is full; Hub administrator maintenance is required before registering new hosts" => {
-      "Encrypted host revocation ledger is full; Hub administrator maintenance is required before registering new hosts"
-    }
     "Host UUID registration is revoked or belongs to a different identity" => {
       "Host UUID registration is revoked or belongs to a different identity"
     }

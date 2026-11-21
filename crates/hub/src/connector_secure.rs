@@ -1,16 +1,12 @@
 //! Host-owned trust boundary for encrypted requests. The Hub is only a carrier.
-use super::{ConnectorConfig, PairedHostConfig, SecureHostConfig, enqueue};
+use super::{ConnectorConfig, PairedHostConfig, enqueue};
 use crate::{
   host_passkeys::{CEREMONY_SECONDS, HostPasskeys},
   protocol::{self, Frame},
-  secure::{HostAuthOperation, InnerMessage, NoiseIdentity, NoiseResponder, SecureChannel, SignedGrant},
+  secure::{HostAuthOperation, InnerMessage, NoiseIdentity, NoiseResponder, SecureChannel},
 };
 use futures_util::StreamExt;
 use std::{
-  collections::HashSet,
-  fs::OpenOptions,
-  io::Read,
-  path::Path,
   sync::{Arc, Mutex},
   time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -20,22 +16,7 @@ use tokn_hub_client_core::discovery::DiscoveryGroup;
 use tokn_hub_transport::{BoxTransport, WebRtcPeer};
 
 pub(super) fn discovery_group(config: &ConnectorConfig) -> Result<Option<DiscoveryGroup>, String> {
-  if let Some(group) = crate::account_host::membership_group(config)? {
-    return Ok(Some(group));
-  }
-  let Some(paired) = &config.paired else { return Ok(None) };
-  let profile = paired
-    .state_file
-    .parent()
-    .map(|directory| crate::onboarding::HostProfile::load(&directory.join("host.json")))
-    .transpose()?
-    .flatten();
-  let Some(namespace) = profile.and_then(|profile| profile.discovery_namespace) else {
-    return Ok(None);
-  };
-  crate::onboarding::read_totp_secret(&paired.state_file)?
-    .discovery_group(config.hub_url.as_str(), &namespace)
-    .map(Some)
+  crate::account_host::membership_group(config)
 }
 
 #[derive(Clone)]
@@ -120,7 +101,7 @@ impl DirectManager {
           result.map_err(|_| "Direct negotiation timed out; use encrypted Hub relay")??
         }
       };
-      let result = self.host.verify(None, &self.host_id, &recipient);
+      let result = self.host.verify(&self.host_id, &recipient);
       if let Err(error) = result {
         peer.close().await;
         return Err(error);
@@ -150,7 +131,7 @@ impl DirectManager {
         _ = self.shutdown.cancelled() => break,
         _ = closed.cancelled() => break,
         _ = policy_check.tick() => {
-          if self.host.verify(None, &self.host_id, &recipient).is_err() {
+          if self.host.verify(&self.host_id, &recipient).is_err() {
             revoked = true;
             break;
           }
@@ -229,107 +210,64 @@ impl DirectManager {
 
 pub(super) struct Host {
   identity: NoiseIdentity,
-  trust: HostTrust,
+  paired: PairedHostConfig,
   passkeys: Option<HostPasskeys>,
   discovery_group: Option<DiscoveryGroup>,
 }
 
-enum HostTrust {
-  SignedGrants(SecureHostConfig),
-  PairedDevices(PairedHostConfig),
-}
-
 impl Host {
-  pub(super) fn load(config: &ConnectorConfig) -> Result<Option<Self>, String> {
-    let host = if let Some(paired) = &config.paired {
-      crate::onboarding::read_totp_secret(&paired.state_file)?;
-      let profile = paired
-        .state_file
-        .parent()
-        .map(|directory| crate::onboarding::HostProfile::load(&directory.join("host.json")))
-        .transpose()?
-        .flatten();
-      if profile
-        .as_ref()
-        .is_some_and(|profile| profile.host_id != paired.host_id)
-      {
-        return Err("Saved passkey host configuration does not match this connector".into());
+  pub(super) fn load(config: &ConnectorConfig) -> Result<Self, String> {
+    let paired = &config.paired;
+    crate::onboarding::read_totp_secret(&paired.state_file)?;
+    let profile = paired
+      .state_file
+      .parent()
+      .map(|directory| crate::onboarding::HostProfile::load(&directory.join("host.json")))
+      .transpose()?
+      .flatten();
+    if profile
+      .as_ref()
+      .is_some_and(|profile| profile.host_id != paired.host_id)
+    {
+      return Err("Saved passkey host configuration does not match this connector".into());
+    }
+    let origin = match profile.and_then(|profile| profile.passkey_origin) {
+      Some(origin) => Some(
+        crate::host_passkeys::validate_origin(&origin)?
+          .origin()
+          .ascii_serialization(),
+      ),
+      None => {
+        let origin = crate::onboarding::canonical_hub(&config.hub_url)?;
+        crate::host_passkeys::validate_origin(&origin)
+          .ok()
+          .map(|origin| origin.origin().ascii_serialization())
       }
-      let origin = match profile.and_then(|profile| profile.passkey_origin) {
-        Some(origin) => Some(
-          crate::host_passkeys::validate_origin(&origin)?
-            .origin()
-            .ascii_serialization(),
-        ),
-        None => {
-          let origin = crate::onboarding::canonical_hub(&config.hub_url)?;
-          crate::host_passkeys::validate_origin(&origin)
-            .ok()
-            .map(|origin| origin.origin().ascii_serialization())
-        }
-      };
-      crate::onboarding::validate_host_passkey_origin(&paired.state_file, origin.as_deref())?;
-      let passkeys = origin
-        .map(|origin| HostPasskeys::new(paired.state_file.clone(), &paired.host_id, &config.name, &origin))
-        .transpose()?;
-      Self {
-        identity: NoiseIdentity::load_or_create(&paired.noise_key_file)?,
-        trust: HostTrust::PairedDevices(paired.clone()),
-        passkeys,
-        discovery_group: discovery_group(config)?,
-      }
-    } else if let Some(config) = &config.secure {
-      let bytes: [u8; 32] = protocol::decode(&config.owner_public_key, 32)?
-        .try_into()
-        .map_err(|_| "Invalid owner public key")?;
-      ed25519_dalek::VerifyingKey::from_bytes(&bytes).map_err(|_| "Invalid owner public key")?;
-      Self {
-        identity: NoiseIdentity::load_or_create(&config.noise_key_file)?,
-        trust: HostTrust::SignedGrants(config.clone()),
-        passkeys: None,
-        discovery_group: None,
-      }
-    } else {
-      return Ok(None);
     };
-    host.revocations()?;
-    Ok(Some(host))
+    crate::onboarding::validate_host_passkey_origin(&paired.state_file, origin.as_deref())?;
+    let passkeys = origin
+      .map(|origin| HostPasskeys::new(paired.state_file.clone(), &paired.host_id, &config.name, &origin))
+      .transpose()?;
+    Ok(Self {
+      identity: NoiseIdentity::load_or_create(&paired.noise_key_file)?,
+      paired: paired.clone(),
+      passkeys,
+      discovery_group: discovery_group(config)?,
+    })
   }
 
   pub(super) fn public_key(&self) -> String {
     self.identity.public_key()
   }
 
-  fn revocations(&self) -> Result<HashSet<String>, String> {
-    let HostTrust::SignedGrants(config) = &self.trust else {
-      return Ok(HashSet::new());
-    };
-    config
-      .revocations_file
-      .as_deref()
-      .map(read_revocations)
-      .transpose()
-      .map(|value| value.unwrap_or_default())
-  }
-
-  fn verify(&self, grant: Option<&SignedGrant>, host_id: &str, recipient: &str) -> Result<(), String> {
-    match (&self.trust, grant) {
-      (HostTrust::SignedGrants(config), Some(grant)) => grant.verify(
-        &config.owner_public_key,
-        host_id,
-        &self.public_key(),
-        recipient,
-        now()?,
-        &self.revocations()?,
-      ),
-      (HostTrust::PairedDevices(config), None) if config.host_id == host_id => {
-        if crate::onboarding::is_authorized(&config.state_file, recipient)? {
-          Ok(())
-        } else {
-          Err("Device is not paired with this host".into())
-        }
-      }
-      _ => Err("This host does not accept that authorization mode".into()),
+  fn verify(&self, host_id: &str, recipient: &str) -> Result<(), String> {
+    if self.paired.host_id != host_id {
+      return Err("Incorrect paired host target".into());
+    }
+    if crate::onboarding::is_authorized(&self.paired.state_file, recipient)? {
+      Ok(())
+    } else {
+      Err("Device is not paired with this host".into())
     }
   }
 
@@ -337,20 +275,13 @@ impl Host {
     &self,
     config: &ConnectorConfig,
     recipient: &str,
-    grant: Option<&SignedGrant>,
     method: &str,
     path: &str,
   ) -> Result<(), String> {
     if !protocol::runtime_management_route(method, path) {
       return Ok(());
     }
-    let HostTrust::PairedDevices(paired) = &self.trust else {
-      return Err("Runtime management is unavailable to legacy grants".into());
-    };
-    if grant.is_some()
-      || !config.allow_control
-      || !crate::onboarding::can_manage_runtimes(&paired.state_file, recipient)?
-    {
+    if !config.allow_control || !crate::onboarding::can_manage_runtimes(&self.paired.state_file, recipient)? {
       return Err(
         "Remote runtime management is disabled on this host; enable it locally in Settings → Agent runtimes".into(),
       );
@@ -365,9 +296,7 @@ impl Host {
     incoming: &mut mpsc::Receiver<Vec<u8>>,
     outgoing: &RecordOutput,
   ) -> Result<(), String> {
-    let HostTrust::PairedDevices(config) = &self.trust else {
-      return Err("Authenticator pairing is unavailable".into());
-    };
+    let config = &self.paired;
     if config.host_id != host_id {
       return Err("Incorrect pairing target".into());
     }
@@ -399,9 +328,7 @@ impl Host {
     incoming: &mut mpsc::Receiver<Vec<u8>>,
     outgoing: &RecordOutput,
   ) -> Result<(), String> {
-    let HostTrust::PairedDevices(config) = &self.trust else {
-      return Err("This host does not support passkey device authorization".into());
-    };
+    let config = &self.paired;
     if config.host_id != host_id {
       return Err("Incorrect passkey authentication target".into());
     }
@@ -434,47 +361,6 @@ fn now() -> Result<u64, String> {
 
 async fn send_record(outgoing: &RecordOutput, record: Vec<u8>) -> Result<(), String> {
   outgoing.send(record).await
-}
-
-fn read_revocations(path: &Path) -> Result<HashSet<String>, String> {
-  let mut options = OpenOptions::new();
-  options.read(true);
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::OpenOptionsExt;
-    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-  }
-  #[cfg(not(unix))]
-  if std::fs::symlink_metadata(path)
-    .map_err(|_| "Cannot inspect grant revocations")?
-    .file_type()
-    .is_symlink()
-  {
-    return Err("Grant revocations must not be a symlink".into());
-  }
-  let file = options
-    .open(path)
-    .map_err(|_| "Cannot read configured grant revocations")?;
-  let metadata = file.metadata().map_err(|_| "Cannot inspect grant revocations")?;
-  if !metadata.is_file() || metadata.len() > 1024 * 1024 {
-    return Err("Grant revocations must be a regular file of at most 1 MiB".into());
-  }
-  let mut bytes = Vec::new();
-  file
-    .take(1024 * 1024 + 1)
-    .read_to_end(&mut bytes)
-    .map_err(|_| "Cannot read grant revocations")?;
-  if bytes.len() > 1024 * 1024 {
-    return Err("Grant revocations exceed 1 MiB".into());
-  }
-  let ids: Vec<String> = serde_json::from_slice(&bytes).map_err(|_| "Invalid grant revocations JSON")?;
-  if ids
-    .iter()
-    .any(|id| id.is_empty() || id.len() > 256 || id.chars().any(char::is_control))
-  {
-    return Err("Invalid revoked grant identifier".into());
-  }
-  Ok(ids.into_iter().collect())
 }
 
 async fn receive(incoming: &mut mpsc::Receiver<Vec<u8>>) -> Result<Vec<u8>, String> {
@@ -546,7 +432,7 @@ async fn run_records(
   }
   if let InnerMessage::DiscoveryRequest {} = header {
     let result = async {
-      host.verify(None, host_id, channel.remote_public_key())?;
+      host.verify(host_id, channel.remote_public_key())?;
       send_record(
         outgoing,
         channel.encrypt(&InnerMessage::DiscoveryResponse {
@@ -574,7 +460,7 @@ async fn run_records(
         return Err("Negotiate direct connections through the encrypted Hub channel".into());
       }
       let recipient = channel.remote_public_key().to_owned();
-      host.verify(None, host_id, &recipient)?;
+      host.verify(host_id, &recipient)?;
       match header {
         InnerMessage::DirectConfigRequest {} => {
           send_record(
@@ -604,13 +490,11 @@ async fn run_records(
     }
     return result;
   }
-  let (method, path, grant) = match header {
-    InnerMessage::Request { method, path, grant } => (method, path, Some(grant)),
-    InnerMessage::DeviceRequest { method, path } => (method, path, None),
-    _ => return Err("Expected encrypted request".into()),
+  let InnerMessage::DeviceRequest { method, path } = header else {
+    return Err("Expected encrypted paired-device request".into());
   };
   let recipient = channel.remote_public_key().to_owned();
-  if let Err(message) = host.verify(grant.as_ref(), host_id, &recipient) {
+  if let Err(message) = host.verify(host_id, &recipient) {
     if let Ok(record) = channel.encrypt(&InnerMessage::Error {
       message: message.clone(),
     }) {
@@ -641,8 +525,8 @@ async fn run_records(
   })
   .await
   .map_err(|_| "Encrypted request body timed out")??;
-  host.verify(grant.as_ref(), host_id, &recipient)?;
-  let runtime_access = host.verify_runtime_management(config, &recipient, grant.as_ref(), &method, &path);
+  host.verify(host_id, &recipient)?;
+  let runtime_access = host.verify_runtime_management(config, &recipient, &method, &path);
   let channel = Mutex::new(channel);
   if let Err(message) = runtime_access {
     let _ = send_inner(
@@ -657,17 +541,7 @@ async fn run_records(
   }
   let window = Semaphore::new(protocol::RESPONSE_WINDOW);
   let result = {
-    let response = forward(
-      config,
-      client,
-      grant.as_ref(),
-      &method,
-      &path,
-      body,
-      outgoing,
-      &channel,
-      &window,
-    );
+    let response = forward(config, client, &method, &path, body, outgoing, &channel, &window);
     let timeout = tokio::time::sleep(Duration::from_secs(120));
     tokio::pin!(response, timeout);
     let mut policy_check = tokio::time::interval(Duration::from_secs(1));
@@ -675,7 +549,7 @@ async fn run_records(
       tokio::select! {
         biased;
         _ = policy_check.tick() => {
-          if let Err(error) = host.verify(grant.as_ref(), host_id, &recipient) { break Err(error); }
+          if let Err(error) = host.verify(host_id, &recipient) { break Err(error); }
         }
         _ = &mut timeout, if path != "/api/v1/events" => break Err("Encrypted request timed out; delivery may be uncertain and is never retried".into()),
         record = incoming.recv() => {
@@ -735,7 +609,6 @@ async fn send_inner(
 async fn forward(
   config: &ConnectorConfig,
   client: &reqwest::Client,
-  grant: Option<&SignedGrant>,
   method: &str,
   path: &str,
   body: Vec<u8>,
@@ -743,11 +616,7 @@ async fn forward(
   channel: &Mutex<SecureChannel>,
   window: &Semaphore,
 ) -> Result<(), String> {
-  let response = if let Some(grant) = grant {
-    crate::secure_scope::forward(config, client, &grant.grant, method, path, body).await?
-  } else {
-    forward_device(config, client, method, path, body).await?
-  };
+  let response = forward_device(config, client, method, path, body).await?;
   if response.status().is_redirection() {
     return Err("Local API redirects are forbidden".into());
   }
@@ -870,7 +739,7 @@ mod tests {
   use super::*;
   use crate::secure::NoiseInitiator;
   use serde_json::{Value, json};
-  use std::{fs, sync::Arc};
+  use std::{path::Path, sync::Arc};
   use webauthn_authenticator_rs::{WebauthnAuthenticator, softpasskey::SoftPasskey};
 
   fn paired_host(directory: &Path) -> ConnectorConfig {
@@ -885,12 +754,11 @@ mod tests {
       allow_control: false,
       insecure_loopback: false,
       ice_servers: Vec::new(),
-      secure: None,
-      paired: Some(PairedHostConfig {
+      paired: PairedHostConfig {
         host_id: "11111111-1111-4111-8111-111111111111".into(),
         noise_key_file: directory.join("host-noise.key"),
         state_file,
-      }),
+      },
     }
   }
 
@@ -916,10 +784,10 @@ mod tests {
     mpsc::Receiver<Frame>,
     SecureChannel,
   ) {
-    let host = Arc::new(Host::load(config).unwrap().unwrap());
+    let host = Arc::new(Host::load(config).unwrap());
     let mut initiator = NoiseInitiator::new(device, &host.public_key()).unwrap();
     let config = config.clone();
-    let host_id = config.paired.as_ref().unwrap().host_id.clone();
+    let host_id = config.paired.host_id.clone();
     let (incoming, received) = mpsc::channel(16);
     let (outgoing, mut frames) = mpsc::channel(16);
     let task = tokio::spawn(async move {
@@ -1015,13 +883,13 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn discovery_metadata_requires_independent_device_authorization_and_tracks_group_opt_out() {
+  async fn discovery_metadata_requires_independent_device_authorization_and_account_membership() {
     let directory = tempfile::tempdir().unwrap();
     let config = paired_host(directory.path());
     let profile_path = directory.path().join("host.json");
-    let mut profile = crate::onboarding::HostProfile {
+    let profile = crate::onboarding::HostProfile {
       version: 1,
-      host_id: config.paired.as_ref().unwrap().host_id.clone(),
+      host_id: config.paired.host_id.clone(),
       hub_url: config.hub_url.to_string(),
       name: config.name.clone(),
       viewer_url: config.local_url.to_string(),
@@ -1029,7 +897,6 @@ mod tests {
       insecure_loopback: false,
       passkey_origin: Some(config.hub_url.to_string()),
       ice_servers: Vec::new(),
-      discovery_namespace: Some("personal".into()),
     };
     profile.save(&profile_path).unwrap();
     let device = NoiseIdentity::generate().unwrap();
@@ -1042,18 +909,29 @@ mod tests {
     ));
     assert!(task.await.unwrap().is_err());
     let current = now().unwrap();
-    let state_file = &config.paired.as_ref().unwrap().state_file;
+    let state_file = &config.paired.state_file;
     crate::onboarding::authorize_device(state_file, &device.public_key(), current / 30, current).unwrap();
-    for namespace in [Some("personal"), None] {
-      profile.discovery_namespace = namespace.map(str::to_owned);
-      profile.save(&profile_path).unwrap();
+    let account_group = DiscoveryGroup {
+      namespace: "alice".into(),
+      secret_digest: "A".repeat(43),
+    };
+    let membership_path = directory.path().join("host-account.json");
+    for group in [None, Some(account_group)] {
+      if let Some(group) = &group {
+        crate::onboarding::save_configuration(
+          &membership_path,
+          &json!({
+            "hub_origin": profile.hub_url,
+            "claim": { "host_id": profile.host_id, "machine_address": "alice:workstation", "group": group },
+          }),
+        )
+        .unwrap();
+      }
       let (task, incoming, mut frames, mut channel) = open_host(&config, &device).await;
       incoming.send(request(&mut channel)).await.unwrap();
       assert_eq!(
         read_inner(&mut frames, &mut channel).await,
-        InnerMessage::DiscoveryResponse {
-          group: discovery_group(&config).unwrap()
-        }
+        InnerMessage::DiscoveryResponse { group }
       );
       task.await.unwrap().unwrap();
     }
@@ -1068,11 +946,134 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn paired_interactions_require_device_authorization_and_current_host_control() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = paired_host(directory.path());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    config.local_url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
+    let forwarded = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+    let observed = forwarded.clone();
+    let api = tokio::spawn(async move {
+      let app = axum::Router::new().fallback(
+        move |axum::extract::OriginalUri(uri): axum::extract::OriginalUri, axum::Json(payload): axum::Json<Value>| {
+          let observed = observed.clone();
+          async move {
+            observed.lock().unwrap().push((uri.path().to_owned(), payload.clone()));
+            axum::Json(if uri.path() == "/api/v1/list_session_interactions" {
+              json!({
+                "session_key":"one", "runtime_id":"private-runtime", "instance_id":"private-instance",
+                "interactions":[{"interaction_id":"permission-one", "details":"private-operation"}]
+              })
+            } else {
+              json!({"request_id":payload["request"]["request_id"], "status":"accepted", "message":"Response sent"})
+            })
+          }
+        },
+      );
+      axum::serve(listener, app).await.unwrap();
+    });
+    let device = NoiseIdentity::generate().unwrap();
+    for command in ["list_session_interactions", "respond_session_interaction"] {
+      let (task, incoming, mut frames, mut channel) = open_host(&config, &device).await;
+      incoming
+        .send(
+          channel
+            .encrypt(&InnerMessage::DeviceRequest {
+              method: "POST".into(),
+              path: format!("/api/v1/{command}"),
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+      assert!(matches!(
+        read_inner(&mut frames, &mut channel).await,
+        InnerMessage::Error { .. }
+      ));
+      assert!(task.await.unwrap().is_err());
+      assert!(forwarded.lock().unwrap().is_empty());
+    }
+    let current = now().unwrap();
+    crate::onboarding::authorize_device(&config.paired.state_file, &device.public_key(), current / 30, current)
+      .unwrap();
+    // Agent control does not require the independent runtime-admin permission.
+    assert!(!crate::onboarding::can_manage_runtimes(&config.paired.state_file, &device.public_key()).unwrap());
+    for allow_control in [false, true] {
+      config.allow_control = allow_control;
+      for command in ["list_session_interactions", "respond_session_interaction"] {
+        let path = format!("/api/v1/{command}");
+        let payload = if command == "list_session_interactions" {
+          json!({"request":{"session_key":"one"}})
+        } else {
+          json!({"request":{
+            "session_key":"one", "request_id":"9a1b2c3d-1234-4321-9876-0123456789ab",
+            "runtime_id":"private-runtime", "instance_id":"private-instance", "interaction_id":"permission-one",
+            "response":{"type":"permission", "decision":"allow_once"}
+          }})
+        };
+        let before = forwarded.lock().unwrap().len();
+        let (task, incoming, mut frames, mut channel) = open_host(&config, &device).await;
+        for message in [
+          InnerMessage::DeviceRequest {
+            method: "POST".into(),
+            path: path.clone(),
+          },
+          InnerMessage::RequestBody {
+            data: protocol::encode(&serde_json::to_vec(&payload).unwrap()),
+          },
+          InnerMessage::RequestEnd {},
+        ] {
+          incoming.send(channel.encrypt(&message).unwrap()).await.unwrap();
+        }
+        if !allow_control && command == "respond_session_interaction" {
+          assert!(matches!(
+            read_inner(&mut frames, &mut channel).await,
+            InnerMessage::Error { .. }
+          ));
+          assert!(task.await.unwrap().is_err());
+          assert_eq!(forwarded.lock().unwrap().len(), before);
+          continue;
+        }
+        assert!(matches!(
+          read_inner(&mut frames, &mut channel).await,
+          InnerMessage::Response { status: 200, .. }
+        ));
+        let InnerMessage::Chunk { data } = read_inner(&mut frames, &mut channel).await else {
+          panic!("Expected interaction response");
+        };
+        let response: Value = serde_json::from_slice(&protocol::decode(&data, protocol::CHUNK_SIZE).unwrap()).unwrap();
+        if allow_control {
+          assert_eq!(forwarded.lock().unwrap().last(), Some(&(path, payload)));
+          assert_eq!(forwarded.lock().unwrap().len(), before + 1);
+          if command == "list_session_interactions" {
+            assert_eq!(response["runtime_id"], "private-runtime");
+          } else {
+            assert_eq!(response["status"], "accepted");
+          }
+        } else {
+          assert_eq!(
+            response,
+            json!({"session_key":"one", "runtime_id":null, "instance_id":null, "interactions":[]})
+          );
+          assert_eq!(forwarded.lock().unwrap().len(), before);
+        }
+        assert!(matches!(
+          read_inner(&mut frames, &mut channel).await,
+          InnerMessage::End {}
+        ));
+        drop(incoming);
+        task.await.unwrap().unwrap();
+      }
+    }
+    api.abort();
+  }
+
+  #[tokio::test]
   async fn runtime_administration_requires_both_host_permissions_before_forwarding() {
     let directory = tempfile::tempdir().unwrap();
     let mut config = paired_host(directory.path());
     let device = NoiseIdentity::generate().unwrap();
-    let state_file = config.paired.as_ref().unwrap().state_file.clone();
+    let state_file = config.paired.state_file.clone();
     let current = now().unwrap();
     crate::onboarding::authorize_device(&state_file, &device.public_key(), current / 30, current).unwrap();
     for (control, management) in [(false, false), (true, false), (false, true)] {
@@ -1144,14 +1145,14 @@ mod tests {
     drop(incoming);
     task.await.unwrap().unwrap();
     api.abort();
-    let host = Host::load(&config).unwrap().unwrap();
+    let host = Host::load(&config).unwrap();
     host
-      .verify_runtime_management(&config, &device.public_key(), None, "POST", "/api/v1/start_rpc_runtime")
+      .verify_runtime_management(&config, &device.public_key(), "POST", "/api/v1/start_rpc_runtime")
       .unwrap();
     crate::onboarding::set_runtime_management_enabled(&state_file, false).unwrap();
     assert!(
       host
-        .verify_runtime_management(&config, &device.public_key(), None, "POST", "/api/v1/start_rpc_runtime")
+        .verify_runtime_management(&config, &device.public_key(), "POST", "/api/v1/start_rpc_runtime")
         .is_err()
     );
   }
@@ -1182,7 +1183,7 @@ mod tests {
       ));
       assert!(task.await.unwrap().is_err());
     }
-    let state_file = &config.paired.as_ref().unwrap().state_file;
+    let state_file = &config.paired.state_file;
     let paired = NoiseIdentity::generate().unwrap();
     let now = now().unwrap();
     crate::onboarding::authorize_device(state_file, &paired.public_key(), now / 30, now).unwrap();
@@ -1194,15 +1195,13 @@ mod tests {
     assert!(!crate::onboarding::is_authorized(state_file, &device.public_key()).unwrap());
     let accepted = authenticate_wire(&config, &device, &mut authenticator, false).await;
     assert_eq!(accepted["device_public_key"], device.public_key());
-    let reopened = Host::load(&config).unwrap().unwrap();
-    reopened
-      .verify(None, &config.paired.as_ref().unwrap().host_id, &device.public_key())
-      .unwrap();
+    let reopened = Host::load(&config).unwrap();
+    reopened.verify(&config.paired.host_id, &device.public_key()).unwrap();
     // Saved explicit origins and a URL-derived origin must have the same
     // canonical representation before checking the persisted credential RP.
     let mut profile = crate::onboarding::HostProfile {
       version: 1,
-      host_id: config.paired.as_ref().unwrap().host_id.clone(),
+      host_id: config.paired.host_id.clone(),
       hub_url: config.hub_url.to_string(),
       name: config.name.clone(),
       viewer_url: config.local_url.to_string(),
@@ -1210,7 +1209,6 @@ mod tests {
       insecure_loopback: config.insecure_loopback,
       passkey_origin: Some(config.hub_url.to_string()),
       ice_servers: Vec::new(),
-      discovery_namespace: None,
     };
     let profile_path = directory.path().join("host.json");
     profile.save(&profile_path).unwrap();
@@ -1219,18 +1217,14 @@ mod tests {
     profile.save(&profile_path).unwrap();
     assert!(Host::load(&config).is_err());
     crate::onboarding::remove_device(state_file, &device.public_key()).unwrap();
-    assert!(
-      reopened
-        .verify(None, &config.paired.as_ref().unwrap().host_id, &device.public_key())
-        .is_err()
-    );
+    assert!(reopened.verify(&config.paired.host_id, &device.public_key()).is_err());
   }
 
   #[tokio::test]
   async fn direct_channel_cannot_substitute_a_different_noise_device() {
     let directory = tempfile::tempdir().unwrap();
     let config = paired_host(directory.path());
-    let host = Arc::new(Host::load(&config).unwrap().unwrap());
+    let host = Arc::new(Host::load(&config).unwrap());
     let expected = NoiseIdentity::generate().unwrap().public_key();
     let impostor = NoiseIdentity::generate().unwrap();
     let mut initiator = NoiseInitiator::new(&impostor, &host.public_key()).unwrap();
@@ -1240,7 +1234,7 @@ mod tests {
     let task = tokio::spawn(async move {
       run_records(
         &host,
-        &config.paired.as_ref().unwrap().host_id,
+        &config.paired.host_id,
         &config,
         &reqwest::Client::new(),
         &output,
@@ -1294,11 +1288,11 @@ mod tests {
     let mut config = paired_host(directory.path());
     config.local_url = local_url;
     let device = NoiseIdentity::generate().unwrap();
-    let state_file = config.paired.as_ref().unwrap().state_file.clone();
+    let state_file = config.paired.state_file.clone();
     let current = now().unwrap();
     crate::onboarding::authorize_device(&state_file, &device.public_key(), current / 30, current).unwrap();
-    let host = Arc::new(Host::load(&config).unwrap().unwrap());
-    let host_id = config.paired.as_ref().unwrap().host_id.clone();
+    let host = Arc::new(Host::load(&config).unwrap());
+    let host_id = config.paired.host_id.clone();
     let shutdown = CancellationToken::new();
     let manager = DirectManager::new(
       host.clone(),
@@ -1424,32 +1418,6 @@ mod tests {
     shutdown.cancel();
     peer.close().await;
     api.abort();
-  }
-
-  #[test]
-  fn revocations_are_reloaded_and_invalid_files_fail_closed() {
-    let directory = tempfile::tempdir().unwrap();
-    let file = directory.path().join("revoked.json");
-    assert!(read_revocations(&file).is_err());
-    fs::write(&file, "[]").unwrap();
-    assert!(read_revocations(&file).unwrap().is_empty());
-    fs::write(&file, r#"["grant_1"]"#).unwrap();
-    assert!(read_revocations(&file).unwrap().contains("grant_1"));
-    fs::write(&file, "{}").unwrap();
-    assert!(read_revocations(&file).is_err());
-    #[cfg(unix)]
-    {
-      let link = directory.path().join("link.json");
-      std::os::unix::fs::symlink(&file, &link).unwrap();
-      assert!(read_revocations(&link).is_err());
-      let fifo = directory.path().join("fifo");
-      let name = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
-      assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-      assert!(
-        read_revocations(&fifo).is_err(),
-        "a FIFO must fail without waiting for a writer"
-      );
-    }
   }
 
   #[test]

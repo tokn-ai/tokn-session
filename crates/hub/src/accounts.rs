@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use tokn_hub_client_core::account::{CLI_START, DEVICE_TOKEN, DeviceAuthorization, DevicePurpose, VIEWER_START};
 use url::Url;
 
 use crate::store::Store;
@@ -196,6 +197,7 @@ struct EmailCode {
 
 struct DeviceCode {
   user_code: String,
+  purpose: DevicePurpose,
   expires_at: Instant,
   next_poll: Instant,
   user_id: Option<String>,
@@ -259,9 +261,11 @@ impl Accounts {
       .route("/hub/v1/account/email/verify", post(email_verify))
       .route("/hub/v1/account/browser/email/verify", post(browser_email_verify))
       .route("/hub/v1/account/browser/refresh", post(browser_refresh))
-      .route("/hub/v1/account/device/start", post(device_start))
+      .route(CLI_START, post(device_start))
       .route("/hub/v1/account/device/approve", post(device_approve))
-      .route("/hub/v1/account/device/token", post(device_token))
+      .route(VIEWER_START, post(viewer_device_start))
+      .route("/hub/v1/account/device/viewer/approve", post(viewer_device_approve))
+      .route(DEVICE_TOKEN, post(device_token))
       .route("/hub/v1/account/me", get(me))
       .route("/hub/v1/account/logout", post(logout))
       .route("/hub/v1/account/keys", get(keys).post(create_key))
@@ -446,7 +450,7 @@ impl Accounts {
 }
 
 async fn capabilities(State(state): State<Accounts>) -> Json<serde_json::Value> {
-  Json(json!({"enabled": true, "email_configured": state.email_configured()}))
+  Json(json!({"enabled": true, "email_configured": state.email_configured(), "viewer_device_login": true}))
 }
 
 async fn account_headers(State(state): State<Accounts>, request: Request, next: Next) -> Response {
@@ -571,15 +575,15 @@ async fn verify_login(
     .await
 }
 
-#[derive(Serialize)]
-struct DeviceStart {
-  device_code: String,
-  user_code: String,
-  expires_in: u64,
-  interval: u64,
+async fn device_start(State(state): State<Accounts>) -> Result<Json<DeviceAuthorization>, AccountError> {
+  start_device_login(&state, DevicePurpose::Cli)
 }
 
-async fn device_start(State(state): State<Accounts>) -> Result<Json<DeviceStart>, AccountError> {
+async fn viewer_device_start(State(state): State<Accounts>) -> Result<Json<DeviceAuthorization>, AccountError> {
+  start_device_login(&state, DevicePurpose::Viewer)
+}
+
+fn start_device_login(state: &Accounts, purpose: DevicePurpose) -> Result<Json<DeviceAuthorization>, AccountError> {
   let now = Instant::now();
   let mut pending = state.pending()?;
   pending.devices.retain(|_, device| device.expires_at > now);
@@ -596,12 +600,13 @@ async fn device_start(State(state): State<Accounts>) -> Result<Json<DeviceStart>
     hash(&device_code),
     DeviceCode {
       user_code: user_code.clone(),
+      purpose,
       expires_at: now + DEVICE_LIFETIME,
       next_poll: now,
       user_id: None,
     },
   );
-  Ok(Json(DeviceStart {
+  Ok(Json(DeviceAuthorization {
     device_code,
     user_code,
     expires_in: DEVICE_LIFETIME.as_secs(),
@@ -631,8 +636,25 @@ async fn device_approve(
   headers: HeaderMap,
   Json(request): Json<ApproveRequest>,
 ) -> Result<StatusCode, AccountError> {
+  approve_device_login(&state, &headers, &request.user_code, DevicePurpose::Cli).await
+}
+
+async fn viewer_device_approve(
+  State(state): State<Accounts>,
+  headers: HeaderMap,
+  Json(request): Json<ApproveRequest>,
+) -> Result<StatusCode, AccountError> {
+  approve_device_login(&state, &headers, &request.user_code, DevicePurpose::Viewer).await
+}
+
+async fn approve_device_login(
+  state: &Accounts,
+  headers: &HeaderMap,
+  user_code: &str,
+  purpose: DevicePurpose,
+) -> Result<StatusCode, AccountError> {
   let credential = state
-    .credential(state.account_token(&headers, BrowserAccess::Write)?)
+    .credential(state.account_token(headers, BrowserAccess::Write)?)
     .await?;
   if credential.kind != CredentialKind::Browser {
     return Err(AccountError::forbidden());
@@ -650,11 +672,13 @@ async fn device_approve(
     .entry(credential.identity.user_id.clone())
     .or_default()
     .reserve(now, MAX_DEVICE_ATTEMPTS_PER_ACCOUNT)?;
-  let code = request.user_code.trim().to_ascii_uppercase();
+  let code = user_code.trim().to_ascii_uppercase();
   let device = pending
     .devices
     .values_mut()
-    .find(|device| device.expires_at > now && device.user_code == code && device.user_id.is_none())
+    .find(|device| {
+      device.expires_at > now && device.user_code == code && device.purpose == purpose && device.user_id.is_none()
+    })
     .ok_or_else(|| AccountError::new(StatusCode::NOT_FOUND, "Device code is invalid or expired"))?;
   device.user_id = Some(credential.identity.user_id);
   Ok(StatusCode::NO_CONTENT)
@@ -691,7 +715,7 @@ async fn device_token(
       let Some(user_id) = device.user_id.as_deref() else {
         return Ok(StatusCode::ACCEPTED.into_response());
       };
-      let login = storage::device_login(&state.inner.store, user_id)?;
+      let login = storage::device_login(&state.inner.store, user_id, device.purpose)?;
       pending.devices.remove(&key);
       Ok(Json(login).into_response())
     })

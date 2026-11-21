@@ -17,6 +17,7 @@ use std::{
 use tokio::sync::{Mutex as AsyncMutex, watch};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 use tokn_hub_client_core::{
+  account::{DEVICE_TOKEN, VIEWER_START},
   discovery::{DISCOVERY_ADDRESSES_HEADER, DiscoveredMachine, DiscoveryGroup, DiscoveryResult},
   pairing::{ClientKind, HostPairing, TotpSecret, is_pairing_record},
   presence::{MachinePresence, PRESENCE_VERSIONS_HEADER, PresenceRequest, PresenceResult},
@@ -25,6 +26,7 @@ use tokn_hub_client_core::{
 };
 
 const HOST_ID: &str = "11111111-2222-4333-8444-555555555555";
+const TEST_ACCOUNT_ID: &str = "11111111-2222-4333-8444-999999999999";
 type ClientSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 fn guest() -> Vec<u8> {
@@ -76,6 +78,7 @@ struct Services {
   discovery: Mutex<Option<DiscoveryResult>>,
   presence: Mutex<Option<PresenceResult>>,
   presence_requests: AtomicUsize,
+  account_approved: AtomicBool,
 }
 impl Services {
   fn socket(&self, handle: &str) -> Result<Arc<Socket>, String> {
@@ -185,6 +188,9 @@ impl Services {
       }
       "http.request" => {
         let url = url::Url::parse(text("url")?).map_err(|_| "Invalid fixture URL")?;
+        if url.path().starts_with("/hub/v1/account/") {
+          return self.account_http(&url, &params);
+        }
         if url.path() == "/hub/v1/presence" {
           assert_eq!(params["method"], "POST");
           assert_eq!(params["timeout_ms"], 10000);
@@ -240,6 +246,78 @@ impl Services {
       _ => Err(format!("Unexpected fixture service {method}")),
     }
   }
+  fn account_http(&self, url: &url::Url, request: &Value) -> Result<Value, String> {
+    let response = |status, value: Value| {
+      Ok(json!({
+        "status":status,
+        "headers":[{"name":"content-type","value":"application/json"}],
+        "body":serde_json::to_vec(&value).unwrap(),
+      }))
+    };
+    let token = format!("tkna_{}", protocol::encode(&[21; 32]));
+    let device_code = protocol::encode(&[42; 32]);
+    let authorized = request["headers"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .any(|header| header["name"] == "Authorization" && header["value"] == format!("Bearer {token}"));
+    let supported = url.host_str() != Some("old-hub.example");
+    let approved = self.account_approved.load(Ordering::SeqCst);
+    match url.path() {
+      "/hub/v1/account/capabilities" => {
+        assert!(!authorized);
+        response(200, json!({"enabled":true,"viewer_device_login":supported}))
+      }
+      VIEWER_START => {
+        assert!(!authorized);
+        if !supported {
+          return response(404, Value::Null);
+        }
+        response(
+          200,
+          json!({
+            "device_code":device_code,"user_code":"ABCD-EFGH","expires_in":600,"interval":5,
+          }),
+        )
+      }
+      DEVICE_TOKEN => {
+        assert!(!authorized);
+        let body: Vec<u8> = serde_json::from_value(request["body"].clone()).unwrap();
+        assert_eq!(
+          serde_json::from_slice::<Value>(&body).unwrap(),
+          json!({"device_code":device_code})
+        );
+        if !approved {
+          return response(202, Value::Null);
+        }
+        response(
+          200,
+          json!({"token":token,"user_id":TEST_ACCOUNT_ID,"username":"personal"}),
+        )
+      }
+      "/hub/v1/account/me" | "/hub/v1/account/machines" | "/hub/v1/account/logout" => {
+        assert!(supported, "credential sent to an unrelated origin");
+        assert!(authorized);
+        if !approved {
+          return response(401, Value::Null);
+        }
+        match url.path() {
+          "/hub/v1/account/me" => response(200, json!({"user_id":TEST_ACCOUNT_ID,"username":"personal"})),
+          "/hub/v1/account/machines" => response(
+            200,
+            json!({"machines":[
+              {"host_id":HOST_ID,"machine_address":"personal:fixture","name":"Named machine","online":true},
+            ]}),
+          ),
+          _ => {
+            self.account_approved.store(false, Ordering::SeqCst);
+            response(204, Value::Null)
+          }
+        }
+      }
+      _ => Err("Unexpected account request".into()),
+    }
+  }
   async fn close(&self) {
     let sockets = std::mem::take(&mut *self.sockets.lock().unwrap());
     for (_, socket) in sockets {
@@ -290,7 +368,10 @@ impl Peer {
     let identity = Arc::new(NoiseIdentity::generate().unwrap());
     let key = identity.public_key();
     let secret = Arc::new(TotpSecret::generate());
-    let discovery = Arc::new(Mutex::new(Some(secret.discovery_group(&hub, "personal").unwrap())));
+    let discovery = Arc::new(Mutex::new(Some(DiscoveryGroup {
+      namespace: "personal".into(),
+      secret_digest: protocol::encode(&[1; 32]),
+    })));
     let paired = Arc::new(Mutex::new(None::<String>));
     let mutations = Arc::new(AtomicUsize::new(0));
     let drop_ack = Arc::new(AtomicBool::new(false));
@@ -474,6 +555,7 @@ async fn interpreted_guest_pairs_streams_reuses_view_connections_and_never_repla
   let services = Arc::new(Services::default());
   let discovery_group = peer.discovery.lock().unwrap().clone().unwrap();
   *services.discovery.lock().unwrap() = Some(DiscoveryResult {
+    retired: false,
     namespace: discovery_group.namespace.clone(),
     secret_digest: discovery_group.secret_digest.clone(),
     machines: vec![
@@ -664,6 +746,58 @@ async fn interpreted_guest_pairs_streams_reuses_view_connections_and_never_repla
   .unwrap();
   assert_eq!(named["discovery_group"], json!(discovery_group));
   assert_eq!(named["host_public_key"], peer.key);
+  let before_retirement = invoke(&run, "hub_client_status", json!({"hub_url":peer.hub}))
+    .await
+    .unwrap();
+  let current_directory = services.discovery.lock().unwrap().clone();
+  services.discovery.lock().unwrap().as_mut().unwrap().machines.clear();
+  let discovery_params = json!({
+    "hub_url":peer.hub,"namespace":discovery_group.namespace,"secret_digest":discovery_group.secret_digest,
+  });
+  invoke(&run, "hub_client_discover", discovery_params.clone())
+    .await
+    .unwrap();
+  assert_eq!(
+    invoke(&run, "hub_client_status", json!({"hub_url":peer.hub}))
+      .await
+      .unwrap(),
+    before_retirement,
+    "an empty current group must retain saved metadata"
+  );
+  services.discovery.lock().unwrap().as_mut().unwrap().retired = true;
+  let retired = invoke(&run, "hub_client_discover", discovery_params.clone())
+    .await
+    .unwrap();
+  assert_eq!(retired["retired"], true);
+  let after_retirement = invoke(&run, "hub_client_status", json!({"hub_url":peer.hub}))
+    .await
+    .unwrap();
+  assert!(after_retirement["hosts"][0]["discovery_group"].is_null());
+  let mut expected_retirement = before_retirement.clone();
+  expected_retirement["hosts"][0]
+    .as_object_mut()
+    .unwrap()
+    .remove("discovery_group");
+  assert_eq!(
+    after_retirement, expected_retirement,
+    "retirement changes only the cached group"
+  );
+  assert!(invoke(&run, "hub_client_discover", discovery_params).await.is_err());
+  *services.discovery.lock().unwrap() = current_directory;
+  // Existing authorization and pins still open the host and relearn its current group.
+  invoke(
+    &run,
+    "hub_client_open",
+    json!({"hub_url":peer.hub,"host_id":HOST_ID,"host_public_key":peer.key}),
+  )
+  .await
+  .unwrap();
+  assert_eq!(
+    invoke(&run, "hub_client_status", json!({"hub_url":peer.hub}))
+      .await
+      .unwrap(),
+    before_retirement
+  );
   let mut events = run.subscribe();
   let reader = run.clone();
   let connection_id = id.clone();
@@ -703,6 +837,7 @@ async fn interpreted_guest_pairs_streams_reuses_view_connections_and_never_repla
   invoke(&run, "hub_client_close", json!({"connection_id":id}))
     .await
     .unwrap();
+
   run.stop().await;
   services.close().await;
   let reopened = RuntimeHandle::start(wasm, Arc::new(Adapter(services.clone())))
@@ -733,4 +868,77 @@ async fn interpreted_guest_pairs_streams_reuses_view_connections_and_never_repla
   );
   reopened.stop().await;
   services.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a compiled wasm guest; CI runs this test explicitly"]
+async fn interpreted_guest_keeps_scoped_account_login_out_of_the_view_and_machine_storage() {
+  let hub_url = "https://hub.example/";
+  let hub = json!({"hub_url":hub_url});
+  let services = Arc::new(Services::default());
+  let wasm = guest();
+  let run = RuntimeHandle::start(wasm.clone(), Arc::new(Adapter(services.clone())))
+    .await
+    .unwrap();
+  invoke(&run, "initialize", json!({})).await.unwrap();
+  let device = invoke(&run, "hub_client_status", hub.clone()).await.unwrap();
+  let old_hub = "https://old-hub.example";
+  let old_attempt = json!({"hub_url":old_hub,"attempt_id":"11111111-2222-4333-8444-777777777777"});
+  assert_eq!(
+    invoke(&run, "hub_account_status", json!({"hub_url":old_hub}))
+      .await
+      .unwrap(),
+    json!({"supported":false}),
+  );
+  assert!(invoke(&run, "hub_account_login_start", old_attempt).await.is_err());
+  let first = json!({"hub_url":hub_url,"attempt_id":"11111111-2222-4333-8444-888888888888"});
+  let second = json!({"hub_url":hub_url,"attempt_id":"11111111-2222-4333-8444-999999999999"});
+  invoke(&run, "hub_account_login_start", first.clone()).await.unwrap();
+  let challenge = invoke(&run, "hub_account_login_start", second.clone()).await.unwrap();
+  assert_eq!(
+    challenge["verification_url"],
+    format!("{}account?user_code=ABCD-EFGH&device=viewer", hub_url)
+  );
+  assert_eq!(challenge.as_object().unwrap().len(), 4);
+  invoke(&run, "hub_account_login_cancel", first.clone()).await.unwrap();
+  assert!(invoke(&run, "hub_account_login_poll", first).await.is_err());
+  assert_eq!(
+    invoke(&run, "hub_account_login_poll", second.clone()).await.unwrap(),
+    json!({"interval_ms":5000}),
+  );
+  services.account_approved.store(true, Ordering::SeqCst);
+  let account = json!({"user_id":TEST_ACCOUNT_ID,"username":"personal"});
+  assert_eq!(
+    invoke(&run, "hub_account_login_poll", second).await.unwrap(),
+    json!({"account":account,"interval_ms":0}),
+  );
+  assert_eq!(
+    invoke(&run, "hub_account_machines", json!({"hub_url":old_hub}))
+      .await
+      .unwrap(),
+    json!({"machines":[]}),
+  );
+  run.stop().await;
+  let reopened = RuntimeHandle::start(wasm, Arc::new(Adapter(services.clone())))
+    .await
+    .unwrap();
+  invoke(&reopened, "initialize", json!({})).await.unwrap();
+  assert_eq!(
+    invoke(&reopened, "hub_account_status", hub.clone()).await.unwrap(),
+    json!({"supported":true,"account":account}),
+  );
+  assert_eq!(
+    invoke(&reopened, "hub_account_machines", hub.clone()).await.unwrap(),
+    json!({"account":account,"machines":[
+      {"host_id":HOST_ID,"machine_address":"personal:fixture","name":"Named machine","online":true},
+    ]}),
+  );
+  invoke(&reopened, "hub_account_logout", hub.clone()).await.unwrap();
+  assert!(!services.account_approved.load(Ordering::SeqCst));
+  assert_eq!(
+    invoke(&reopened, "hub_account_status", hub.clone()).await.unwrap(),
+    json!({"supported":true}),
+  );
+  assert_eq!(invoke(&reopened, "hub_client_status", hub).await.unwrap(), device);
+  reopened.stop().await;
 }

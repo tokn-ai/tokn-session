@@ -10,7 +10,7 @@ use tokn_hub_client_core::{
   pairing::ClientPairing,
   presence::{MAX_PRESENCE_RESPONSE, PRESENCE_VERSIONS_HEADER, PresenceRequest, PresenceResult},
   protocol,
-  secure::{NoiseIdentity, decode_public_key},
+  secure::{InnerMessage, NoiseIdentity, NoiseInitiator, decode_public_key},
 };
 use url::Url;
 use zeroize::Zeroizing;
@@ -206,6 +206,25 @@ impl Store {
     Ok(remembered)
   }
 
+  async fn retire_discovery_group(&self, group: &DiscoveryGroup) -> Result<(), String> {
+    group.validate()?;
+    let gate = GATE.with(Clone::clone);
+    let _guard = gate.lock().await;
+    let mut saved = clone_saved(&self.saved.borrow());
+    let mut changed = false;
+    for host in &mut saved.hosts {
+      if host.discovery_group.as_ref() == Some(group) {
+        host.discovery_group = None;
+        changed = true;
+      }
+    }
+    if changed {
+      save(&self.hub, &saved).await?;
+      *self.saved.borrow_mut() = saved;
+    }
+    Ok(())
+  }
+
   pub async fn remember_discovery_group(
     &self,
     host_id: &str,
@@ -290,6 +309,9 @@ pub async fn discover(params: Value) -> Result<Value, String> {
   let bytes = directory_body(response, MAX_DISCOVERY_RESPONSE)?;
   let result: DiscoveryResult = serde_json::from_slice(&bytes).map_err(|_| "Invalid Hub discovery metadata")?;
   result.validate_for(&group)?;
+  if result.retired {
+    store.retire_discovery_group(&group).await?;
+  }
   serde_json::to_value(result).map_err(|_| "Invalid Hub discovery metadata".into())
 }
 
@@ -349,6 +371,40 @@ pub async fn remember(params: Value) -> Result<Value, String> {
     serde_json::from_value(resolve(store.hub.as_str(), address).await?).map_err(|_| "Invalid resolved machine")?;
   if resolved.host_id != id {
     return Err("Machine address now identifies another machine".into());
+  }
+  let pinned = store
+    .hosts()
+    .into_iter()
+    .find(|host| host.host_id == id)
+    .ok_or("Pair this machine before saving its address")?;
+  if pinned
+    .machine_address
+    .as_deref()
+    .is_some_and(|previous| previous != address)
+  {
+    let socket = host::Socket::open(&endpoint(&store.hub, id)?).await?;
+    let verified = async {
+      let mut initiator =
+        NoiseInitiator::new_with_entropy(&store.identity, &pinned.host_public_key, host::entropy().await?)?;
+      socket.send(initiator.start()?).await?;
+      let mut channel = initiator.finish(&socket.receive().await?)?;
+      socket
+        .send(channel.encrypt(&InnerMessage::DiscoveryRequest {})?)
+        .await?;
+      match channel.decrypt(&socket.receive().await?)? {
+        InnerMessage::DiscoveryResponse { group } => {
+          if let Some(group) = group {
+            group.validate()?;
+          }
+          Ok::<_, String>(())
+        }
+        InnerMessage::Error { message } => Err(message),
+        _ => Err("Machine returned invalid discovery metadata".into()),
+      }
+    }
+    .await;
+    socket.close().await;
+    verified?;
   }
   Ok(json!(store.remember_metadata(resolved).await?))
 }

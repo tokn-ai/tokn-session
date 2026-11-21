@@ -24,9 +24,6 @@ pub struct HostProfile {
   pub host_id: String,
   pub hub_url: String,
   pub name: String,
-  /// Optional host-chosen discovery label, scoped by a shared seed digest.
-  #[serde(default)]
-  pub discovery_namespace: Option<String>,
   pub viewer_url: String,
   pub allow_control: bool,
   pub insecure_loopback: bool,
@@ -40,12 +37,16 @@ pub struct HostProfile {
 
 impl HostProfile {
   pub fn load(path: &Path) -> Result<Option<Self>, String> {
-    let value: Option<Self> = read_optional(path)?;
+    let value = read_optional::<serde_json::Value>(path)?
+      .map(|mut value| {
+        if let Some(fields) = value.as_object_mut() {
+          fields.remove("discovery_namespace");
+        }
+        serde_json::from_value::<Self>(value).map_err(|error| format!("Invalid host configuration: {error}"))
+      })
+      .transpose()?;
     if let Some(value) = &value {
       validate_uuid(&value.host_id)?;
-      if let Some(namespace) = &value.discovery_namespace {
-        tokn_hub_client_core::discovery::validate_namespace(namespace)?;
-      }
       tokn_hub_transport::validate_stun_urls(&value.ice_servers)?;
       if value.version != 1 {
         return Err("Unsupported host configuration version".into());
@@ -56,9 +57,6 @@ impl HostProfile {
 
   pub fn save(&self, path: &Path) -> Result<(), String> {
     validate_uuid(&self.host_id)?;
-    if let Some(namespace) = &self.discovery_namespace {
-      tokn_hub_client_core::discovery::validate_namespace(namespace)?;
-    }
     tokn_hub_transport::validate_stun_urls(&self.ice_servers)?;
     let _lock = lock(path)?;
     if let Some(previous) = Self::load(path)? {
@@ -125,8 +123,8 @@ impl Drop for HostAccess {
 
 fn host_access(path: &Path) -> Result<HostAccess, String> {
   let value: serde_json::Value = read_required(path)?;
-  if value["version"] == 1 {
-    return Err("Legacy pairing state requires `tokn-session-hub authenticator --upgrade-sha256`; rescan its QR and pair app devices again".into());
+  if value["version"] != 2 {
+    return Err("Unsupported host pairing state version. Preserve this state directory and set up a new host with `tokn-session-hub connect --hub <hub-url> --state-dir <new-directory> --machine <new-name>`, then pair devices again".into());
   }
   let state: HostAccess = serde_json::from_value(value).map_err(|_| "Invalid host pairing state")?;
   validate_host_access(&state)?;
@@ -153,37 +151,9 @@ fn validate_host_access(state: &HostAccess) -> Result<(), String> {
   Ok(())
 }
 
-/// Read-only validation for moving a complete bundle. A valid legacy SHA1
-/// record may move unchanged; upgrading its authenticator remains explicit.
+/// Read-only validation for moving a complete current pairing bundle.
 pub fn validate_host_access_for_storage(path: &Path) -> Result<(), String> {
-  let value: serde_json::Value = read_required(path)?;
-  if value["version"] == 1 {
-    legacy_host_access(value).map(|_| ())
-  } else {
-    host_access(path).map(|_| ())
-  }
-}
-
-fn legacy_host_access(mut value: serde_json::Value) -> Result<HostAccess, String> {
-  if value["version"] != 1 {
-    return Err("Unsupported host pairing state".into());
-  }
-  TotpSecret::from_base32(value["totp_secret"].as_str().ok_or("Invalid legacy authenticator")?)?;
-  let devices: BTreeMap<String, u64> =
-    serde_json::from_value(value["devices"].clone()).map_err(|_| "Invalid legacy devices")?;
-  if devices.len() > MAX_DEVICES {
-    return Err("Invalid legacy devices".into());
-  }
-  for key in devices.keys() {
-    decode_public_key(key)?;
-  }
-  // Decode the remaining fields with the current schema while keeping the
-  // original seed, replay state, passkeys, and file entirely unchanged.
-  value["version"] = serde_json::json!(2);
-  value["devices"] = serde_json::json!({});
-  let state: HostAccess = serde_json::from_value(value).map_err(|_| "Invalid legacy host pairing state")?;
-  validate_host_access(&state)?;
-  Ok(state)
+  host_access(path).map(|_| ())
 }
 
 /// Setup only; importing a seed never overwrites existing trust or replay state.
@@ -208,21 +178,6 @@ pub fn initialize_host_access(path: &Path, secret: &TotpSecret) -> Result<(), St
       passkey_attempts: 0,
     },
   )
-}
-
-/// Explicit local migration preserves host identities/passkeys, rotates the OTP
-/// seed, and removes legacy device grants whose client type cannot be proven.
-pub fn upgrade_authenticator(path: &Path) -> Result<(), String> {
-  let _lock = lock(path)?;
-  let value: serde_json::Value = read_required(path)?;
-  if value["version"] == 2 {
-    host_access(path)?;
-    return Ok(());
-  }
-  let mut state = legacy_host_access(value)?;
-  state.totp_secret = TotpSecret::generate().to_base32();
-  state.last_used_step = None;
-  write_atomic(path, &state)
 }
 
 pub fn read_totp_secret(path: &Path) -> Result<TotpSecret, String> {
@@ -646,31 +601,31 @@ mod tests {
   }
 
   #[test]
-  fn legacy_upgrade_is_explicit_rotates_seed_and_retires_unclassified_devices() {
+  fn unsupported_pairing_versions_fail_closed_without_rewriting_state() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("host-access.json");
     let seed = TotpSecret::generate();
     let key = NoiseIdentity::generate().unwrap().public_key();
-    let legacy = serde_json::json!({
+    let mut unsupported = serde_json::json!({
       "version": 1, "totp_secret": seed.to_base32(), "devices": { key.clone(): 900 },
       "last_used_step": 30, "attempt_window_start": 900, "attempts": 3,
       "passkey_origin": "https://hub.example.com", "passkeys": [],
       "passkey_attempt_window_start": 901, "passkey_attempts": 4,
     });
-    write_atomic(&path, &legacy).unwrap();
-    assert!(is_authorized(&path, &key).unwrap_err().contains("upgrade-sha256"));
-    assert_eq!(read_required::<serde_json::Value>(&path).unwrap(), legacy);
-    upgrade_authenticator(&path).unwrap();
-    let state = host_access(&path).unwrap();
-    assert_ne!(state.totp_secret, seed.to_base32());
-    assert!(state.devices.is_empty());
-    assert_eq!(state.last_used_step, None);
-    assert_eq!(state.attempts, 3);
-    assert_eq!(state.passkey_attempts, 4);
-    assert_eq!(state.passkey_origin.as_deref(), Some("https://hub.example.com"));
-    let upgraded = read_required::<serde_json::Value>(&path).unwrap();
-    upgrade_authenticator(&path).unwrap();
-    assert_eq!(read_required::<serde_json::Value>(&path).unwrap(), upgraded);
+    for version in [1, 3, 255] {
+      unsupported["version"] = serde_json::json!(version);
+      write_atomic(&path, &unsupported).unwrap();
+      let before = fs::read(&path).unwrap();
+      let error = is_authorized(&path, &key).unwrap_err();
+      assert!(error.contains("Unsupported host pairing state version"));
+      assert!(error.contains("tokn-session-hub connect"));
+      assert!(error.contains("--state-dir <new-directory>"));
+      assert!(read_totp_secret(&path).is_err());
+      assert!(validate_host_access_for_storage(&path).is_err());
+      assert!(authorize_device(&path, &key, 31, 930).is_err());
+      assert!(initialize_host_access(&path, &TotpSecret::generate()).is_err());
+      assert_eq!(fs::read(&path).unwrap(), before);
+    }
   }
 
   #[cfg(unix)]

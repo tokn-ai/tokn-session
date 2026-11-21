@@ -12,6 +12,26 @@ const makeIdentity = (secret: string): DeviceIdentity => ({ public_key: () => se
 const crypto = { DeviceIdentity: { generate: () => makeIdentity(String.fromCharCode(65 + identities++).repeat(43)), from_secret: makeIdentity } } as unknown as CryptoApi;
 const first_host = { host_id: "550e8400-e29b-41d4-a716-446655440000", host_public_key: "H".repeat(43) };
 const second_host = { host_id: "550e8400-e29b-41d4-a716-446655440001", host_public_key: "I".repeat(43) };
+
+it("retires only matching discovery metadata while preserving refreshed pins, selection and other Hubs", async () => {
+  const storage = new MemoryStorage();
+  const retired = { namespace: "personal", secret_digest: "A".repeat(43) };
+  const current = { ...retired, secret_digest: `${"B".repeat(42)}A` };
+  const store = await HubDeviceStore.open("https://hub.example", crypto, storage);
+  const identity = store.identity;
+  await store.saveHost({ ...first_host, discovery_group: retired });
+  await store.saveHost({ ...second_host, discovery_group: retired });
+  await store.selectHost(second_host.host_id);
+  const other_hub = await HubDeviceStore.open("https://other.example", crypto, storage);
+  await other_hub.saveHost({ ...first_host, discovery_group: retired });
+  const other_tab = await HubDeviceStore.open("https://hub.example", crypto, storage);
+  await other_tab.rememberDiscoveryGroup(first_host, current);
+  await store.retireDiscoveryGroup(retired);
+  expect(store.hosts).toEqual([{ ...first_host, discovery_group: current }, second_host]);
+  expect(store.selected_host_id).toBe(second_host.host_id);
+  expect(store.identity).toBe(identity);
+  expect(other_hub.hosts).toEqual([{ ...first_host, discovery_group: retired }]);
+});
 it("persists metadata with a fresh identity per tab and partitions host pins and selected machines", async () => {
   const storage = new MemoryStorage();
   const first = await HubDeviceStore.open("https://hub.example", crypto, storage);
@@ -65,6 +85,11 @@ it("metadata commits preserve selection and cannot resurrect a pin forgotten in 
   const named = { ...first_host, machine_address: "alice:macbook", name: "MacBook" };
   await first_tab.rememberMetadata(named);
   expect(first_tab.selected_host_id).toBe(second_host.host_id);
+  const renamed = { ...named, machine_address: "alice:studio" };
+  await first_tab.rememberMetadata(renamed);
+  expect(first_tab.hosts[0]).toEqual(renamed);
+  expect(first_tab.selected_host_id).toBe(second_host.host_id);
+  await expect(first_tab.rememberMetadata({ ...renamed, host_public_key: "Z".repeat(43) })).rejects.toThrow("encryption key changed");
   await second_tab.forgetHost(first_host.host_id);
   await expect(first_tab.rememberMetadata(named)).rejects.toThrow("forgotten");
   const reopened = await HubDeviceStore.open("https://hub.example", crypto, storage);

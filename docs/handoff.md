@@ -4,30 +4,65 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
-Hubs require account ownership for new machines. Verified email enables signup
+Hubs require account ownership for all machines. Verified email enables signup
 with usernames unique per Hub and stable user UUIDs. A renewable 90-day browser
 account cookie restores sign-in across navigation and reloads. Browser device approval powers
 CLI `auth login`. Issue and revoke scoped automation keys in **Hub account**.
-New machines claim `username:machine` with an account credential and proof of
-their existing host key. They inherit account discovery and reconnect using the
-host key. Legacy registered hosts can claim addresses without changing keys or
-pairing. See [Hub accounts](hub.md#hub-accounts-and-cli-login).
+Desktop **Start hosting** and CLI `connect` automatically sign in through browser
+approval and claim `username:machine` when an account assignment is missing.
+The shared Rust account client keeps credentials private and reuses valid saved
+logins. Registration proves the host key; `register` remains an explicit script
+command. Rename works from the app or CLI, retaining the UUID, keys, and pairings
+while retiring the old address. Machines inherit account discovery and reconnect
+using the host key. Previously unclaimed encrypted hosts reuse their identities
+during automatic registration.
+See [Hub accounts](hub.md#hub-accounts-and-cli-login).
+
+Browser account sign-in and direct viewer connection share a responsive,
+theme-aware `AuthLayout`. Account email/code/username steps move keyboard focus
+to the active field and announce resends. Email verification uses six digit boxes
+with automatic advance, keyboard navigation, full-code paste and autofill support.
+Loading and connection failures use the same layout; authentication and explicit
+CLI approval remain separate from presentation.
+Machines is the browser home page. Its top-right account control offers **Sign in**
+when signed out, or a username menu with **Profile**, **Settings** and **Sign out**.
+Profile, Machines and Hub administration share one browser document and support
+Back and Forward. The browser keeps one live machine and its viewer data while
+browsing other pages. **Resume** returns to it. Signing out, switching accounts,
+or leaving the document clears the in-memory machine workspace. Sign-out also
+clears the account roster and invalidates pending refreshes. The signed-in
+account page shows profile, CLI access and key metadata by default.
+CLI approval, key creation and revocation use native floating dialogs; CLI links
+open their review dialog after sign-in but never approve automatically. Dialogs
+restore focus, clear drafts/secrets on dismissal and stay open during mutations.
+CLI device codes use eight character boxes grouped four-and-four, sharing email
+code entry's keyboard and paste behavior while retaining the native code format.
 
 The Hub username is the namespace for an account's machine addresses and its
 discovery group. Pairing one host provides the encrypted group reference, and
-authenticated opens refresh it for previously paired devices. Existing unclaimed
-hosts retain their saved legacy groups and addresses. Discovery and per-host
+authenticated opens refresh it for previously paired devices. Discovery and per-host
 authorization remain independent. See [discovery groups](hub-pairing.md#discovery-groups).
-The gallery combines account machines in the signed-in browser with saved and
-discovered machines. Desktop and Apell combine saved and discovered machines.
-Each Hub host UUID appears once, with its assigned address or display name.
-Opening a paired card preserves the saved host key and alias.
+The shared gallery combines Hub account machines with saved and discovered
+machines in the browser and Apell. Apell signs in through the Hub's browser
+device approval and stores a read-only machine-list credential in the guest's
+secure storage. Desktop's viewer combines saved and discovered machines.
+Each Hub host UUID appears once. Cards lead with the display name and show the
+assigned address, connector status and pairing action. The gear on a paired card
+opens a dialog with its saved reference, passkey setup where supported, and Forget.
+Opening a paired card uses the saved host key.
 A plus tile opens the **Add machine** dialog. Closing it cancels pending pairing
 and clears its code.
-Discovery controls remain compact, with **Set up discovery** collapsed below the
-gallery. Group results cache independently across host-list refreshes; removed
+Discovery shows one entry per username while keeping independently learned
+discovery references separate. The Hub explicitly marks references absent from
+account discovery as retired; browser, desktop, and Apell remove only that exact
+cached reference while preserving machine pins. Empty current groups and network
+failures retain references. Opening a saved machine learns its current group.
+**Set up discovery** stays collapsed below the gallery.
+Group results cache independently across host-list refreshes; removed
 groups and Hub changes cancel requests and exclude stale results. Unknown groups
 never trigger directory requests.
+Initial Hub connections use a focused progress panel. Address entry appears when
+needed or after cancellation; failures offer retry or an editable address.
 All gallery cards use batched Hub connector presence, including saved UUID-only
 machines outside discovery groups. Checks refresh every 15 seconds while visible
 and on focus; failures show **Status unavailable**, never an inferred offline
@@ -43,14 +78,17 @@ and applet bridge; desktop retains local history, hosting, creation and native
 services. Phone layout depends on viewport size, not runtime identity. The
 standalone Android/iOS Tauri entry, generated project/configuration and mobile
 release workflow are removed; mobile delivery uses the `.apel` applet.
-Applets use durable app-style device trust and authenticator pairing, without
-browser per-document passkey semantics. Browser behavior remains separate.
+Apell shares the Machines page, account menu, profile summary and machine cards
+with the browser. Its account credential and durable machine trust are separate.
+Account sign-in requires a Hub with viewer-device approval support.
 See [the Apell applet](viewer-apell.md) for guest/host boundaries and verification.
 Cargo and CI use the merged Apell service revision; the Wasmi test resolves
 relative guest paths from the workspace root rather than its crate directory.
 Viewer CI packs the complete `.apel` and retains it as an Actions artifact.
 Successful main CI publishes stable applet/checksum assets to the rolling nightly
 prerelease; serialized publication skips stale commits and updates its tag.
+A main-branch manual CI run can also publish the tested artifact to Apell Store
+using the versioned Apell action and a trusted GitHub identity.
 
 Local folders discovered in saved session `cwd` metadata now register
 automatically across all six historical providers. Migration 13 preserves
@@ -467,8 +505,8 @@ catalog ownership, async item IDs, unanswered state, choices, and envelope limit
 Delivery steers the owning Desktop turn through the observed version-1 IPC
 method; no fallback starts a new turn. In-memory per-question claims cover
 pending/accepted/uncertain delivery and clear only for definite non-delivery or
-resolved source state. Desktop, HTTP, direct encrypted clients, and legacy Hub
-relays share commands and control gates. Session shares remain read-only.
+resolved source state. Desktop, HTTP, and encrypted Hub clients share commands
+and control gates. Session shares remain read-only.
 Viewer-scoped drafts survive card closure/session switching within 128 recent
 requests, without browser persistence. Acceptance waits for recorded live replies;
 uncertain delivery never retries automatically. Blocking questions and historical
@@ -607,10 +645,11 @@ passkey sign-in grants at most eight hours to a fresh in-memory tab key. New tab
 reloads, and reopened windows require sign-in; live-tab network reconnects retain
 authorization. IndexedDB v2 holds metadata/pins only and deletes legacy secrets.
 Pagehide clears active content and keys; BFCache restoration reloads. Host state
-v2 distinguishes native, browser enrollment, and browser session grants. Legacy
-state fails closed; explicit `authenticator --upgrade-sha256` rotates OTP, clears
-unclassified grants, preserves host keys/passkeys/limits, and requires rescanning
-and app re-pairing. Protocol v2 and clients must upgrade together.
+v2 distinguishes native, browser enrollment, and browser session grants. Version-one
+host state fails closed and its SHA-1 upgrade command is removed. Owner-signed
+invitations, owner-key generation, grant/revoke CLI commands, and plaintext Hub
+tunnels are removed. Supported access uses account-owned hosts, pairing v2,
+SHA-256 authenticators, and host-verified device/passkey authorization.
 The authenticator CLI also shows its saved machine reference and current TOTP
 with seconds remaining in trusted-terminal output, plus the full setup URI and
 explicit manual settings/mismatch guidance; exports stay Base32-only.
@@ -627,8 +666,8 @@ from code/passkey onboarding; its panel shows the machine, Hub, and encryption s
 Legacy saved UUID pins remain valid. First-device passkey access still requires a
 trusted `UUID@key` or `username:host@key` reference.
 Browser code delivery trusts Hub; a malicious code publisher can read decrypted
-content even though the relay cannot decrypt traffic. The old installed
-`client` helper remains optional compatibility, not part of the default path.
+content even though the relay cannot decrypt traffic. The optional installed
+`client` helper uses current pairing and encrypted access.
 Switching cancels requests and streams; host-local
 revocation is rechecked every second. Agent input requires saved host
 `--allow-control`; `--allow-control=false` disables it. Seed import/export supports
@@ -636,17 +675,14 @@ user-managed synchronization; replay and five-attempt/five-minute limits persist
 per host. Same-seed hosts share enrollment trust, not asymmetric identities.
 SPAKE2/HKDF/HMAC pairing is experimental and unaudited; normal traffic uses Noise
 IK. Hub registrations have bounded capacity/rate and persistent UUID tombstones.
-The default flow defers sharing; earlier owner-signed grants and selected-session
-scoping remain behind explicit CLI options. `connect --trusted-hub` retains the
-older plaintext browser-through-Hub mode. See [onboarding](hub-pairing.md),
-[legacy grants](hub-e2ee.md), and [Hub administration](hub.md). Remote connections
+Hub machine access uses host-verified pairing. See [onboarding](hub-pairing.md)
+and [Hub administration](hub.md). Remote connections
 require HTTPS termination; the host API stays on loopback. Browser builds need
 the `wasm32-unknown-unknown` Rust target and pinned `wasm-bindgen-cli` 0.2.126;
 `pnpm build` generates bindings before bundling them.
 The shared Hub viewer-route allowlist includes subscription, backward loading,
 resource details, independent inspection, lease renewal, and legacy session
-updates. These HTTP commands reach hosts through paired, signed-grant, and
-trusted-Hub connections. Encrypted tunnel tests cover forwarding request bodies.
+updates. Encrypted tunnel tests cover forwarding request bodies.
 
 ## Viewer core and remote API
 

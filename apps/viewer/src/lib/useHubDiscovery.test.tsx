@@ -64,6 +64,24 @@ it("isolates failures and retries only the requested group", async () => {
   expect(discover.mock.calls.filter(([group]) => group.secret_digest === second_group.secret_digest)).toHaveLength(1);
 });
 
+it("immediately hides explicitly retired discovery without retry loops or removing another capability", async () => {
+  let retire = false;
+  const discover = vi.fn<HubAccessService["discover"]>().mockImplementation(async (group) =>
+    retire && group.secret_digest === first_group.secret_digest ? { ...group, machines: [], retired: true } : resultFor(group));
+  const current = service(discover);
+  const hosts = [saved(first_group), saved(second_group, machine.host_id)];
+  const { result, rerender } = renderHook(({ hosts }) => useHubDiscovery(current, hosts), { initialProps: { hosts } });
+  await waitFor(() => expect(result.current.groups.every((group) => !group.loading)).toBe(true));
+  retire = true;
+  act(() => result.current.refresh_group(discoveryGroupKey(first_group)));
+  await waitFor(() => expect(result.current.groups.map((state) => state.group_key)).toEqual([discoveryGroupKey(second_group)]));
+  expect(result.current.groups[0].machines).toEqual([machine]);
+  rerender({ hosts: hosts.map((host) => ({ ...host })) });
+  act(() => result.current.refresh_group(discoveryGroupKey(first_group)));
+  expect(discover).toHaveBeenCalledTimes(3);
+  expect(result.current.groups.map((state) => state.group_key)).toEqual([discoveryGroupKey(second_group)]);
+});
+
 it("hides cached machines immediately when switching service and ignores its late response", async () => {
   const old_request = deferred<DiscoveryResult>();
   const next_request = deferred<DiscoveryResult>();

@@ -1,5 +1,6 @@
 import { type MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useViewerVisible } from "../lib/viewerVisibility";
 import { currentImageCache } from "../lib/imageCache";
 import { errorMessage } from "../lib/state";
 import type { MessageImageSummary } from "../lib/types";
@@ -82,24 +83,26 @@ function ImagePreview({ on_close, ...props }: ImageProps & { on_close: () => voi
 export function MessageImages({ session_key, event_key, revision = null, images, aria_label = "Message images" }: {
   session_key: string; event_key: string; revision?: string | null; images: MessageImageSummary[]; aria_label?: string;
 }) {
+  const visible = useViewerVisible();
   const [preview, setPreview] = useState<string | null>(null);
   const imageKey = (image: MessageImageSummary) => JSON.stringify([image.source_event_key ?? event_key, image.image_id]);
   const selected = images.find((image) => imageKey(image) === preview);
   useEffect(() => { setPreview(null); }, [session_key, event_key, revision]);
   return <div className="message-images" aria-label={aria_label}>
     {images.map((image) => <ImageResource key={imageKey(image)} session_key={session_key} event_key={event_key} revision={revision} image={image} on_open={() => setPreview(imageKey(image))} />)}
-    {selected ? <ImagePreview session_key={session_key} event_key={event_key} revision={revision} image={selected} on_close={() => setPreview(null)} /> : null}
+    {visible && selected ? <ImagePreview session_key={session_key} event_key={event_key} revision={revision} image={selected} on_close={() => setPreview(null)} /> : null}
   </div>;
 }
 
 /** Paragraph-safe image presentation for an authorized Markdown image span. */
 export function InlineMessageImage({ session_key, event_key, revision, image, alt_text }: ImageProps & { alt_text?: string }) {
+  const visible = useViewerVisible();
   const [preview, setPreview] = useState(false);
   const label = alt_text ? Array.from(alt_text.replace(/[\u0000-\u001f\u007f-\u009f]/g, "")).slice(0, 255).join("") : null;
   const display_image = label ? { ...image, name: label } : image;
   useEffect(() => { setPreview(false); }, [session_key, event_key, revision, image.image_id, image.source_event_key]);
   return <span className="message-image-inline">
     <ImageResource session_key={session_key} event_key={event_key} revision={revision} image={display_image} on_open={() => setPreview(true)} />
-    {preview ? <ImagePreview session_key={session_key} event_key={event_key} revision={revision} image={display_image} on_close={() => setPreview(false)} /> : null}
+    {visible && preview ? <ImagePreview session_key={session_key} event_key={event_key} revision={revision} image={display_image} on_close={() => setPreview(false)} /> : null}
   </span>;
 }

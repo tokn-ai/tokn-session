@@ -13,11 +13,7 @@ use std::{
   sync::Arc,
   time::{Duration, Instant},
 };
-use tokio::{
-  net::TcpStream,
-  sync::{Semaphore, mpsc},
-  task::JoinSet,
-};
+use tokio::{net::TcpStream, sync::mpsc, task::JoinSet};
 use tokio_tungstenite::{
   MaybeTlsStream, WebSocketStream, connect_async_with_config,
   tungstenite::{Message, client::IntoClientRequest, http::HeaderValue, protocol::WebSocketConfig},
@@ -30,13 +26,6 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 #[path = "connector_secure.rs"]
 mod secure_transport;
-
-#[derive(Clone)]
-pub struct SecureHostConfig {
-  pub noise_key_file: PathBuf,
-  pub owner_public_key: String,
-  pub revocations_file: Option<PathBuf>,
-}
 
 #[derive(Clone)]
 pub struct PairedHostConfig {
@@ -56,21 +45,13 @@ pub struct ConnectorConfig {
   pub insecure_loopback: bool,
   /// Explicit STUN discovery servers; relay fallback needs no third-party service.
   pub ice_servers: Vec<String>,
-  pub secure: Option<SecureHostConfig>,
-  pub paired: Option<PairedHostConfig>,
+  pub paired: PairedHostConfig,
 }
 
 impl ConnectorConfig {
   pub fn validate(&self) -> Result<Url, String> {
     crate::secure::validate_ice_servers(&self.ice_servers)?;
-    if self.secure.is_some() && self.paired.is_some() {
-      return Err("Choose paired-device access or legacy signed grants, not both".into());
-    }
-    if self
-      .paired
-      .as_ref()
-      .is_some_and(|paired| !protocol::valid_host_uuid(&paired.host_id))
-    {
+    if !protocol::valid_host_uuid(&self.paired.host_id) {
       return Err("Paired host identity must be a canonical random UUID".into());
     }
     if self.name.trim().is_empty() || self.name.len() > 128 || self.name.chars().any(char::is_control) {
@@ -108,14 +89,6 @@ impl ConnectorConfig {
     endpoint.set_path(protocol::TUNNEL_PATH);
     Ok(endpoint)
   }
-}
-
-fn routing_id(config: &ConnectorConfig, key: &SigningKey) -> String {
-  config
-    .paired
-    .as_ref()
-    .map(|paired| paired.host_id.clone())
-    .unwrap_or_else(|| protocol::host_id(key.verifying_key().as_bytes()))
 }
 
 fn numeric_loopback(url: &Url) -> bool {
@@ -217,7 +190,7 @@ pub fn initialize_identity(path: &Path) -> Result<(), String> {
   load_key(path).map(|_| ())
 }
 
-/// Holds one connector's ownership for a saved enrollment key across CLI/app processes.
+/// Holds exclusive ownership of a saved enrollment key during registration or hosting.
 pub struct HostLease {
   key_file: PathBuf,
   _lock: std::fs::File,
@@ -232,7 +205,7 @@ impl HostLease {
     let mut path = key_file.as_os_str().to_owned();
     path.push(".connector");
     let lock = crate::onboarding::lock(Path::new(&path)).map_err(|error| {
-      format!("Could not acquire host ownership: {error}. Stop any other connector before hosting in the app.")
+      format!("Could not acquire host ownership: {error}. Stop hosting on this computer before retrying.")
     })?;
     Ok(Self {
       key_file: key_file.to_owned(),
@@ -260,23 +233,6 @@ pub async fn run(config: ConnectorConfig, shutdown: CancellationToken) -> Result
   run_owned(config, shutdown, lease, None).await
 }
 
-#[cfg(test)]
-pub(crate) fn remember_legacy_host(store: &crate::store::Store, config: &ConnectorConfig) -> crate::store::HostRecord {
-  let key = load_key(&config.key_file).unwrap();
-  let record = crate::store::HostRecord {
-    host_id: routing_id(config, &key),
-    name: config.name.clone(),
-    public_key: protocol::encode(key.verifying_key().as_bytes()),
-    access: if config.allow_control { "control" } else { "view" }.into(),
-  };
-  if config.paired.is_some() {
-    store.register_encrypted_host(record.clone()).unwrap();
-  } else {
-    store.approve_host(record.clone()).unwrap();
-  }
-  record
-}
-
 /// Setup callers acquire ownership before changing saved configuration.
 pub async fn run_owned(
   config: ConnectorConfig,
@@ -290,7 +246,7 @@ pub async fn run_owned(
   let _lease = lease;
   let endpoint = config.validate()?;
   let key = load_key(&config.key_file)?;
-  let secure = secure_transport::Host::load(&config)?.map(Arc::new);
+  let secure = Arc::new(secure_transport::Host::load(&config)?);
   let client = reqwest::Client::builder()
     .no_proxy()
     .redirect(reqwest::redirect::Policy::none())
@@ -299,19 +255,15 @@ pub async fn run_owned(
     .read_timeout(Duration::from_secs(90))
     .build()
     .map_err(|e| e.to_string())?;
-  let direct = secure.as_ref().map(|host| {
-    secure_transport::DirectManager::new(
-      host.clone(),
-      routing_id(&config, &key),
-      config.clone(),
-      client.clone(),
-      shutdown.clone(),
-    )
-  });
-  eprintln!("Host identity: {}", routing_id(&config, &key));
-  if let Some(secure) = &secure {
-    eprintln!("Host encryption public key: {}", secure.public_key());
-  }
+  let direct = secure_transport::DirectManager::new(
+    secure.clone(),
+    config.paired.host_id.clone(),
+    config.clone(),
+    client.clone(),
+    shutdown.clone(),
+  );
+  eprintln!("Host identity: {}", config.paired.host_id);
+  eprintln!("Host encryption public key: {}", secure.public_key());
   let mut backoff = 1u64;
   loop {
     notify(&status, ConnectorStatus::Connecting);
@@ -341,8 +293,8 @@ async fn connect_once(
   endpoint: &Url,
   key: &SigningKey,
   client: &reqwest::Client,
-  secure: Option<Arc<secure_transport::Host>>,
-  direct: Option<Arc<secure_transport::DirectManager>>,
+  secure: Arc<secure_transport::Host>,
+  direct: Arc<secure_transport::DirectManager>,
   status: &Option<StatusSink>,
 ) -> Result<(), String> {
   let ws_config = WebSocketConfig::default()
@@ -372,7 +324,6 @@ async fn connect_once(
     .await
     .map_err(|_| "Hub authentication timed out")??;
   let (outgoing, mut outgoing_rx) = mpsc::channel::<Frame>(64);
-  let mut requests = HashMap::new();
   let mut secure_channels: HashMap<u64, (tokio::task::AbortHandle, mpsc::Sender<Vec<u8>>)> = HashMap::new();
   let mut tasks = JoinSet::new();
   let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
@@ -391,62 +342,33 @@ async fn connect_once(
               Frame::RegistrationRejected { message } if !ready => {
                 return Err(registration_failure(&message));
               }
-              Frame::Pending { code, expires_in } if !ready => {
-                if code.len() > 64 || code.chars().any(char::is_control) { return Err("Invalid pairing code".into()); }
-                eprintln!("Approve host '{}' in the Hub using pairing code {code} (expires in {expires_in}s).", config.name);
-              }
               Frame::Ready { host_id, allow_control } if !ready => {
-                if host_id != routing_id(config, key) { return Err("Hub returned an incorrect host identity".into()); }
+                if host_id != config.paired.host_id { return Err("Hub returned an incorrect host identity".into()); }
                 ready = true;
                 notify(status, ConnectorStatus::Online);
-                if secure.is_some() { enqueue(&outgoing, Frame::SecureOnly {}).await?; }
+                enqueue(&outgoing, Frame::SecureOnly {}).await?;
                 eprintln!("Connected to Hub as {host_id} ({})", if config.allow_control && allow_control { "control enabled" } else { "view access" });
                 if let Some(version) = hub_version {
                   eprintln!("Hub version: {version}");
                 }
               }
-              Frame::Request { request_id, method, path, body } if ready => {
-                if secure.is_some() {
-                  enqueue(&outgoing, Frame::Error { request_id, message: "This host requires end-to-end encrypted access".into() }).await?;
-                  continue;
-                }
-                if requests.contains_key(&request_id) { return Err("Hub reused an active request ID".into()); }
-                if requests.len() >= protocol::MAX_REQUESTS || !protocol::allowed_route(&method, &path, config.allow_control) {
-                  enqueue(&outgoing, Frame::Error { request_id, message: "Host route is unavailable or request capacity reached".into() }).await?;
-                  continue;
-                }
-                let body = protocol::decode(&body, protocol::MAX_BODY)?;
-                let config = config.clone();
-                let client = client.clone();
-                let outgoing = outgoing.clone();
-                let window = Arc::new(Semaphore::new(protocol::RESPONSE_WINDOW));
-                let credits = window.clone();
-                let abort = tasks.spawn(async move {
-                  let future = forward(&config, &client, &outgoing, &credits, request_id, &method, &path, body);
-                  let result = if path == "/api/v1/events" { future.await } else {
-                    tokio::time::timeout(Duration::from_secs(120), future).await.unwrap_or_else(|_| Err("Local API request timed out; delivery may be uncertain and will not be retried".into()))
-                  };
-                  if let Err(message) = result { let _ = enqueue(&outgoing, Frame::Error { request_id, message }).await; }
-                  (request_id, false)
-                });
-                requests.insert(request_id, (abort, window));
-              }
               Frame::SecureOpen { channel_id } if ready => {
                 if secure_channels.contains_key(&channel_id) { return Err("Hub reused an active secure channel".into()); }
-                let Some(secure) = secure.clone().filter(|_| secure_channels.len() < protocol::MAX_REQUESTS) else {
+                if secure_channels.len() >= protocol::MAX_REQUESTS {
                   enqueue(&outgoing, Frame::SecureClose { channel_id }).await?;
                   continue;
-                };
+                }
+                let secure = secure.clone();
                 let (incoming, received) = mpsc::channel(protocol::MAX_BODY / protocol::CHUNK_SIZE + 4);
                 let outgoing = outgoing.clone();
                 let config = config.clone();
                 let client = client.clone();
-                let host_id = routing_id(&config, key);
+                let host_id = config.paired.host_id.clone();
                 let direct = direct.clone();
                 let abort = tasks.spawn(async move {
-                  let _ = secure_transport::run(&secure, &host_id, &config, &client, &outgoing, channel_id, received, direct.as_ref()).await;
+                  let _ = secure_transport::run(&secure, &host_id, &config, &client, &outgoing, channel_id, received, Some(&direct)).await;
                   let _ = enqueue(&outgoing, Frame::SecureClose { channel_id }).await;
-                  (channel_id, true)
+                  channel_id
                 });
                 secure_channels.insert(channel_id, (abort, incoming));
               }
@@ -462,16 +384,6 @@ async fn connect_once(
               Frame::SecureClose { channel_id } if ready => {
                 if let Some((task, _)) = secure_channels.remove(&channel_id) { task.abort(); }
               }
-              Frame::Cancel { request_id } if ready => {
-                if let Some((task, _)) = requests.remove(&request_id) { task.abort(); }
-              }
-              Frame::Window { request_id, credits } if ready => {
-                if credits == 0 || credits > protocol::RESPONSE_WINDOW { return Err("Invalid response window".into()); }
-                if let Some((_, window)) = requests.get(&request_id) {
-                  if window.available_permits() + credits > protocol::RESPONSE_WINDOW { return Err("Response window overflow".into()); }
-                  window.add_permits(credits);
-                }
-              }
               _ => return Err("Unexpected Hub tunnel message".into()),
             }
           }
@@ -485,8 +397,8 @@ async fn connect_once(
         send(&mut socket, &frame).await?;
       }
       task = tasks.join_next(), if !tasks.is_empty() => {
-        if let Some(Ok((id, encrypted))) = task {
-          if encrypted { secure_channels.remove(&id); } else { requests.remove(&id); }
+        if let Some(Ok(id)) = task {
+          secure_channels.remove(&id);
         }
       }
       _ = heartbeat.tick() => {
@@ -518,137 +430,29 @@ async fn authenticate(socket: &mut Socket, config: &ConnectorConfig, key: &Signi
     return Err("Unsupported Hub protocol or invalid challenge".into());
   }
   let public_key = protocol::encode(key.verifying_key().as_bytes());
-  if let Some(paired) = &config.paired {
-    let discovery_group = secure_transport::discovery_group(config)?;
-    let signature = key.sign(&protocol::discovery_registration_proof(
-      &nonce,
-      &paired.host_id,
-      &public_key,
-      &config.name,
-      config.allow_control,
-      discovery_group.as_ref(),
-    ));
-    return send(
-      socket,
-      &Frame::Register {
-        version: protocol::VERSION,
-        host_id: paired.host_id.clone(),
-        public_key,
-        name: config.name.clone(),
-        allow_control: config.allow_control,
-        discovery_group,
-        signature: protocol::encode(&signature.to_bytes()),
-      },
-    )
-    .await;
-  }
-  let signature = key.sign(&protocol::proof(
+  let paired = &config.paired;
+  let discovery_group = secure_transport::discovery_group(config)?;
+  let signature = key.sign(&protocol::discovery_registration_proof(
     &nonce,
+    &paired.host_id,
     &public_key,
     &config.name,
     config.allow_control,
+    discovery_group.as_ref(),
   ));
   send(
     socket,
-    &Frame::Authenticate {
+    &Frame::Register {
       version: protocol::VERSION,
+      host_id: paired.host_id.clone(),
       public_key,
       name: config.name.clone(),
       allow_control: config.allow_control,
+      discovery_group,
       signature: protocol::encode(&signature.to_bytes()),
     },
   )
   .await
-}
-
-async fn forward(
-  config: &ConnectorConfig,
-  client: &reqwest::Client,
-  outgoing: &mpsc::Sender<Frame>,
-  window: &Arc<Semaphore>,
-  request_id: u64,
-  method: &str,
-  path: &str,
-  body: Vec<u8>,
-) -> Result<(), String> {
-  // Validate independently of Hub routing. Never resolve a destination supplied
-  // by the remote peer: only replace the path on the configured loopback origin.
-  if !protocol::allowed_route(method, path, config.allow_control) {
-    return Err("Route unavailable".into());
-  }
-  let mut url = config.local_url.clone();
-  url.set_path(path);
-  let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|_| "Invalid request method")?;
-  let control_response = (!config.allow_control)
-    .then(|| protocol::read_only_session_control_response(path, &body, "Agent control is disabled on this host"))
-    .flatten();
-  let mut request = client
-    .request(method, url)
-    .header(reqwest::header::CONTENT_TYPE, "application/json")
-    .body(body);
-  if let Some(token) = &config.local_token {
-    request = request.bearer_auth(token);
-  }
-  let viewing_response = (!config.allow_control)
-    .then(|| protocol::read_only_model_response(path, "Agent control is disabled on this host"))
-    .flatten();
-  let response = if let Some(value) = control_response.or(viewing_response) {
-    reqwest::Response::from(
-      axum::http::Response::builder()
-        .header("content-type", "application/json")
-        .body(serde_json::to_vec(&value).map_err(|_| "Could not encode model status")?)
-        .map_err(|_| "Could not encode model status")?,
-    )
-  } else {
-    request
-      .send()
-      .await
-      .map_err(|_| "Local API request failed; delivery may be uncertain and will not be retried")?
-  };
-  if response.status().is_redirection() {
-    return Err("Local API redirects are forbidden".into());
-  }
-  let content_type = response
-    .headers()
-    .get(reqwest::header::CONTENT_TYPE)
-    .and_then(|value| value.to_str().ok())
-    .map(str::to_owned);
-  enqueue(
-    outgoing,
-    Frame::Response {
-      request_id,
-      status: response.status().as_u16(),
-      content_type,
-    },
-  )
-  .await?;
-  let mut stream = response.bytes_stream();
-  let mut total = 0usize;
-  while let Some(chunk) = stream.next().await {
-    let chunk = chunk.map_err(|_| "Local API response stream failed")?;
-    total = total.saturating_add(chunk.len());
-    if path != "/api/v1/events" && total > 128 * 1024 * 1024 {
-      return Err("Local API response exceeds 128 MiB".into());
-    }
-    for part in chunk.chunks(protocol::CHUNK_SIZE) {
-      // Consume one credit before emitting each chunk. The Hub replenishes it
-      // only as its HTTP consumer reads, bounding memory independently per stream.
-      window
-        .acquire()
-        .await
-        .map_err(|_| "Response stream cancelled")?
-        .forget();
-      enqueue(
-        outgoing,
-        Frame::Chunk {
-          request_id,
-          data: protocol::encode(part),
-        },
-      )
-      .await?;
-    }
-  }
-  enqueue(outgoing, Frame::End { request_id }).await
 }
 
 async fn enqueue(outgoing: &mpsc::Sender<Frame>, frame: Frame) -> Result<(), String> {
@@ -698,8 +502,11 @@ mod tests {
       allow_control: false,
       insecure_loopback: false,
       ice_servers: Vec::new(),
-      secure: None,
-      paired: None,
+      paired: PairedHostConfig {
+        host_id: "f1b8648d-5a2c-469d-85a2-c462cf440111".into(),
+        noise_key_file: PathBuf::from("unused-noise"),
+        state_file: PathBuf::from("unused-access"),
+      },
     }
   }
 
