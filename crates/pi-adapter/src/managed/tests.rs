@@ -2566,7 +2566,16 @@ if mode == 'ignore_eof':
   async fn native_prompt_dispositions_preserve_acceptance_without_inventing_turn_or_steering_proof() {
     let fixture = Fixture::new("normal", "handled");
     fixture.create().await;
-    let key = fixture.persisted().await.session_key.unwrap();
+    // Handled input emits no agent activity. Synchronize on its settled state,
+    // not the transient Running state used while prompt preflight is pending.
+    let settled = fixture.idle().await;
+    assert_eq!(
+      settled.creation_input_state,
+      Some(tokn_interaction_core::creation::FirstInputState::Accepted)
+    );
+    assert_eq!(fixture.prompts(), ["handled"]);
+    fixture.wait_durable(&settled).await;
+    let key = settled.session_key.unwrap();
     for (proof, text) in [
       ("handled", "handled"),
       ("started", "start proof"),
