@@ -3,7 +3,7 @@
 //! The Hub never supplies executable code or a trusted public key to this client.
 use crate::{
   protocol,
-  secure::{InnerMessage, MAX_CHUNK, MAX_RECORD, MAX_REQUEST_BODY, NoiseIdentity, NoiseInitiator},
+  secure::{MAX_RECORD, MAX_REQUEST_BODY},
 };
 use axum::{
   Json,
@@ -27,20 +27,12 @@ use tokio_tungstenite::{
   tungstenite::{Message, protocol::WebSocketConfig},
 };
 use tokio_util::sync::CancellationToken;
+use tokn_hub_remote::PinnedRelay;
 use url::{Host, Url};
 
 pub(crate) type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const IO_TIMEOUT: Duration = Duration::from_secs(90);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
-
-#[derive(Clone)]
-struct ClientState {
-  endpoint: Url,
-  host_public_key: String,
-  identity: Arc<NoiseIdentity>,
-  requests: Arc<Semaphore>,
-  shutdown: CancellationToken,
-}
 
 #[derive(Clone)]
 pub(crate) struct LocalBoundary {
@@ -59,26 +51,15 @@ impl LocalBoundary {
   }
 }
 
+#[derive(Clone)]
 pub(crate) struct PairedRequest {
-  pub endpoint: Url,
-  pub host_public_key: String,
-  pub identity: Arc<NoiseIdentity>,
+  pub relay: Arc<PinnedRelay>,
   pub requests: Arc<Semaphore>,
   pub shutdown: CancellationToken,
 }
 
 pub(crate) async fn proxy_paired(target: PairedRequest, request: Request) -> Response {
-  proxy(
-    State(ClientState {
-      endpoint: target.endpoint,
-      host_public_key: target.host_public_key,
-      identity: target.identity,
-      requests: target.requests,
-      shutdown: target.shutdown,
-    }),
-    request,
-  )
-  .await
+  proxy(State(target), request).await
 }
 
 pub fn unix_time() -> Result<u64, String> {
@@ -89,6 +70,15 @@ pub fn unix_time() -> Result<u64, String> {
 }
 
 pub(crate) fn secure_endpoint(hub: &Url, host_id: &str, insecure_loopback: bool) -> Result<Url, String> {
+  if !protocol::valid_host_uuid(host_id) {
+    return Err("Invalid host ID".into());
+  }
+  let mut endpoint = relay_origin(hub, insecure_loopback)?;
+  endpoint.set_path(&format!("/hub/v1/secure/{host_id}"));
+  Ok(endpoint)
+}
+
+pub(crate) fn relay_origin(hub: &Url, insecure_loopback: bool) -> Result<Url, String> {
   if !hub.username().is_empty()
     || hub.password().is_some()
     || hub.query().is_some()
@@ -96,9 +86,6 @@ pub(crate) fn secure_endpoint(hub: &Url, host_id: &str, insecure_loopback: bool)
     || hub.path() != "/"
   {
     return Err("Hub URL must be an origin without credentials, paths, queries, or fragments".into());
-  }
-  if !protocol::valid_host_uuid(host_id) {
-    return Err("Invalid host ID".into());
   }
   let loopback = matches!(hub.host(), Some(Host::Ipv4(ip)) if IpAddr::V4(ip).is_loopback())
     || matches!(hub.host(), Some(Host::Ipv6(ip)) if IpAddr::V6(ip).is_loopback())
@@ -113,7 +100,6 @@ pub(crate) fn secure_endpoint(hub: &Url, host_id: &str, insecure_loopback: bool)
       );
     }
   }
-  endpoint.set_path(&format!("/hub/v1/secure/{host_id}"));
   Ok(endpoint)
 }
 
@@ -162,7 +148,7 @@ pub(crate) async fn protect_origin(State(state): State<LocalBoundary>, request: 
   response
 }
 
-async fn proxy(State(state): State<ClientState>, request: Request) -> Response {
+async fn proxy(State(state): State<PairedRequest>, request: Request) -> Response {
   let method = request.method().as_str().to_owned();
   let path = request
     .uri()
@@ -189,11 +175,19 @@ async fn proxy(State(state): State<ClientState>, request: Request) -> Response {
   };
   let result = tokio::select! {
     _ = state.shutdown.cancelled() => return error(StatusCode::SERVICE_UNAVAILABLE, "Secure client stopped"),
-    result = open_request(&state, method, path.clone(), &body) => result,
+    result = tokio::time::timeout(REQUEST_TIMEOUT, state.relay.request(&method, &path, &body)) =>
+      result.map_err(|_| "Machine request timed out; delivery may be uncertain".to_owned()).and_then(|result| result),
   };
-  let (mut socket, mut channel, status, content_type) = match result {
+  let mut exchange = match result {
     Ok(result) => result,
     Err(message) => return error(StatusCode::BAD_GATEWAY, message),
+  };
+  let Ok(status) = StatusCode::from_u16(exchange.status) else {
+    return error(StatusCode::BAD_GATEWAY, "Invalid host status");
+  };
+  let content_type = match exchange.content_type.as_deref().map(HeaderValue::from_str).transpose() {
+    Ok(value) => value,
+    Err(_) => return error(StatusCode::BAD_GATEWAY, "Invalid host response type"),
   };
   let shutdown = state.shutdown.clone();
   let request_deadline = if path == "/api/v1/events" {
@@ -207,24 +201,16 @@ async fn proxy(State(state): State<ClientState>, request: Request) -> Response {
       loop {
         let deadline = [request_deadline, Some(Instant::now() + IO_TIMEOUT)]
           .into_iter().flatten().min().expect("I/O timeout is always present");
-        let record = tokio::select! {
+        let chunk = tokio::select! {
           _ = shutdown.cancelled() => Err("Secure client stopped".to_owned()),
-          record = receive_record(&mut socket, deadline) => record,
+          result = tokio::time::timeout_at(deadline, exchange.next()) =>
+            result.map_err(|_| "Encrypted response timed out".to_owned()).and_then(|result| result),
         }.map_err(std::io::Error::other)?;
-        let message = channel.decrypt(&record).map_err(std::io::Error::other)?;
-        match message {
-          InnerMessage::Chunk { data } => {
-            let bytes = protocol::decode(&data, MAX_CHUNK).map_err(std::io::Error::other)?;
-            yield Bytes::from(bytes);
-            // This executes only once the HTTP consumer polls again after the
-            // preceding chunk, propagating its backpressure to the host.
-            let credit = channel.encrypt(&InnerMessage::Window { credits: 1 }).map_err(std::io::Error::other)?;
-            send_record(&mut socket, credit).await.map_err(std::io::Error::other)?;
-          }
-          InnerMessage::End {} => break,
-          InnerMessage::Error { message } => Err(std::io::Error::other(message))?,
-          _ => Err(std::io::Error::other("Unexpected encrypted response message"))?,
-        }
+        let Some(bytes) = chunk else { break };
+        yield Bytes::from(bytes);
+        // Returning credit only when the HTTP consumer polls again propagates
+        // that consumer's backpressure to its own logical stream.
+        exchange.acknowledge().await.map_err(std::io::Error::other)?;
       }
     });
   let mut response = Response::new(Body::from_stream(stream));
@@ -233,59 +219,6 @@ async fn proxy(State(state): State<ClientState>, request: Request) -> Response {
     response.headers_mut().insert(header::CONTENT_TYPE, content_type);
   }
   response
-}
-
-async fn open_request(
-  state: &ClientState,
-  method: String,
-  path: String,
-  body: &[u8],
-) -> Result<(Socket, crate::secure::SecureChannel, StatusCode, Option<HeaderValue>), String> {
-  let mut socket = connect_endpoint(&state.endpoint).await?;
-  let mut initiator = NoiseInitiator::new(&state.identity, &state.host_public_key)?;
-  send_record(&mut socket, initiator.start()?).await?;
-  let reply = receive_record(&mut socket, Instant::now() + Duration::from_secs(10)).await?;
-  let mut channel = initiator.finish(&reply)?;
-  let request = InnerMessage::DeviceRequest { method, path };
-  send_record(&mut socket, channel.encrypt(&request)?).await?;
-  for chunk in body.chunks(MAX_CHUNK) {
-    send_record(
-      &mut socket,
-      channel.encrypt(&InnerMessage::RequestBody {
-        data: protocol::encode(chunk),
-      })?,
-    )
-    .await?;
-  }
-  send_record(&mut socket, channel.encrypt(&InnerMessage::RequestEnd {})?).await?;
-  let response = receive_record(&mut socket, Instant::now() + REQUEST_TIMEOUT).await?;
-  match channel.decrypt(&response)? {
-    InnerMessage::Response { status, content_type } => {
-      if !(200..=599).contains(&status) {
-        return Err("Host returned an invalid HTTP status".into());
-      }
-      let content_type = match content_type {
-        Some(value)
-          if matches!(
-            value.split(';').next().map(str::trim),
-            Some("application/json" | "text/event-stream")
-          ) =>
-        {
-          Some(HeaderValue::from_str(&value).map_err(|_| "Invalid host response type")?)
-        }
-        None if status == 204 => None,
-        _ => return Err("Host returned an unsupported response type".into()),
-      };
-      Ok((
-        socket,
-        channel,
-        StatusCode::from_u16(status).map_err(|_| "Invalid host status")?,
-        content_type,
-      ))
-    }
-    InnerMessage::Error { message } => Err(message),
-    _ => Err("Expected an authenticated response from the host".into()),
-  }
 }
 
 pub(crate) async fn connect_endpoint(endpoint: &Url) -> Result<Socket, String> {
@@ -331,7 +264,10 @@ pub(crate) async fn receive_record(socket: &mut Socket, deadline: Instant) -> Re
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::{secure::NoiseResponder, server};
+  use crate::{
+    secure::{InnerMessage, MAX_CHUNK, NoiseIdentity, NoiseResponder},
+    server,
+  };
   use axum::{
     Router,
     extract::{DefaultBodyLimit, WebSocketUpgrade},
@@ -342,18 +278,21 @@ mod tests {
   use std::path::PathBuf;
   use tower::ServiceExt;
 
-  fn state(host: &NoiseIdentity) -> ClientState {
-    let identity = Arc::new(NoiseIdentity::generate().unwrap());
-    ClientState {
-      endpoint: Url::parse("ws://127.0.0.1:9/hub/v1/secure/11111111-1111-4111-8111-111111111111").unwrap(),
-      host_public_key: host.public_key(),
-      identity,
+  fn state(host: &NoiseIdentity, endpoint: Url, identity: Arc<NoiseIdentity>) -> PairedRequest {
+    let shutdown = CancellationToken::new();
+    PairedRequest {
+      relay: Arc::new(PinnedRelay::new(
+        endpoint,
+        identity,
+        host.public_key(),
+        shutdown.clone(),
+      )),
       requests: Arc::new(Semaphore::new(2)),
-      shutdown: CancellationToken::new(),
+      shutdown,
     }
   }
 
-  fn router(state: ClientState, boundary: LocalBoundary, web_root: PathBuf) -> Result<Router, String> {
+  fn router(state: PairedRequest, boundary: LocalBoundary, web_root: PathBuf) -> Result<Router, String> {
     let app = Router::new()
       .route("/api/v1/{command}", any(proxy))
       .with_state(state)
@@ -376,7 +315,11 @@ mod tests {
   async fn local_browser_boundary_rejects_rebinding_cross_origin_and_missing_bearers() {
     let directory = tempfile::tempdir().unwrap();
     fs_write(directory.path().join("index.html"), b"<p>local trusted viewer</p>");
-    let state = state(&NoiseIdentity::generate().unwrap());
+    let state = state(
+      &NoiseIdentity::generate().unwrap(),
+      Url::parse("ws://127.0.0.1:9").unwrap(),
+      Arc::new(NoiseIdentity::generate().unwrap()),
+    );
     let boundary = LocalBoundary {
       authority: "127.0.0.1:5555".into(),
       origin: "http://127.0.0.1:5555".into(),
@@ -477,16 +420,17 @@ mod tests {
   #[tokio::test]
   async fn native_client_authenticates_host_fragments_body_and_returns_response_credits() {
     let host = NoiseIdentity::generate().unwrap();
-    let mut state = state(&host);
-    let expected_recipient = state.identity.public_key();
+    let identity = Arc::new(NoiseIdentity::generate().unwrap());
+    let expected_recipient = identity.public_key();
     let expected_body = vec![b's'; MAX_CHUNK * 3 + 27];
     let expected = expected_body.clone();
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let sender = Arc::new(std::sync::Mutex::new(Some(sender)));
+    let peer = host.clone();
     let app = Router::new().route(
       "/hub/v1/secure/11111111-1111-4111-8111-111111111111",
       axum::routing::get(move |upgrade: WebSocketUpgrade| {
-        let host = host.clone();
+        let host = peer.clone();
         let sender = sender.clone();
         let expected_recipient = expected_recipient.clone();
         let expected = expected.clone();
@@ -505,7 +449,10 @@ mod tests {
                 .windows(b"list_sessions".len())
                 .any(|window| window == b"list_sessions")
             );
-            let InnerMessage::DeviceRequest { method, path } = channel.decrypt(&record).unwrap() else {
+            let InnerMessage::Stream { stream_id, frame } = channel.decrypt(&record).unwrap() else {
+              panic!("Missing stream ID")
+            };
+            let InnerMessage::DeviceRequest { method, path } = *frame else {
               panic!("Expected request")
             };
             assert_eq!(method, "POST");
@@ -513,7 +460,11 @@ mod tests {
             let mut body = Vec::new();
             loop {
               let record = socket.recv().await.unwrap().unwrap().into_data();
-              match channel.decrypt(&record).unwrap() {
+              let InnerMessage::Stream { stream_id: id, frame } = channel.decrypt(&record).unwrap() else {
+                panic!("Missing request body stream ID")
+              };
+              assert_eq!(id, stream_id);
+              match *frame {
                 InnerMessage::RequestBody { data } => body.extend(protocol::decode(&data, MAX_CHUNK).unwrap()),
                 InnerMessage::RequestEnd {} => break,
                 _ => panic!("Unexpected body message"),
@@ -526,7 +477,7 @@ mod tests {
             };
             socket
               .send(axum::extract::ws::Message::Binary(
-                channel.encrypt(&header).unwrap().into(),
+                channel.encrypt(&header.on_stream(stream_id)).unwrap().into(),
               ))
               .await
               .unwrap();
@@ -534,7 +485,11 @@ mod tests {
             for _ in 0..20 {
               if credits == 0 {
                 let record = socket.recv().await.unwrap().unwrap().into_data();
-                let InnerMessage::Window { credits: returned } = channel.decrypt(&record).unwrap() else {
+                let InnerMessage::Stream { stream_id: id, frame } = channel.decrypt(&record).unwrap() else {
+                  panic!("Missing response credit stream ID")
+                };
+                assert_eq!(id, stream_id);
+                let InnerMessage::Window { credits: returned } = *frame else {
                   panic!("Expected encrypted response credits")
                 };
                 credits += returned;
@@ -545,14 +500,17 @@ mod tests {
               };
               socket
                 .send(axum::extract::ws::Message::Binary(
-                  channel.encrypt(&chunk).unwrap().into(),
+                  channel.encrypt(&chunk.on_stream(stream_id)).unwrap().into(),
                 ))
                 .await
                 .unwrap();
             }
             socket
               .send(axum::extract::ws::Message::Binary(
-                channel.encrypt(&InnerMessage::End {}).unwrap().into(),
+                channel
+                  .encrypt(&InnerMessage::End {}.on_stream(stream_id))
+                  .unwrap()
+                  .into(),
               ))
               .await
               .unwrap();
@@ -565,11 +523,12 @@ mod tests {
       }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    state.endpoint = Url::parse(&format!(
+    let endpoint = Url::parse(&format!(
       "ws://{}/hub/v1/secure/11111111-1111-4111-8111-111111111111",
       listener.local_addr().unwrap()
     ))
     .unwrap();
+    let state = state(&host, endpoint, identity);
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let request = Request::builder()
       .method("POST")
@@ -585,6 +544,7 @@ mod tests {
       .to_bytes();
     assert_eq!(bytes, b"{\"version\":1}".repeat(20));
     assert_eq!(state.requests.available_permits(), 2);
+    state.shutdown.cancel();
     receiver.await.unwrap();
     server.abort();
   }

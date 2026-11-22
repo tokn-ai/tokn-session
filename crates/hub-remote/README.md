@@ -11,12 +11,15 @@ tokn-hub-remote = "0.1.1"
 remembered identities, requests, and live events. `ClientStatus` and
 `ConnectionInfo` expose connection and transport status to installed clients.
 
-Connections prefer direct WebRTC and can fall back to the encrypted Hub relay.
-Both paths retain the same Noise encryption, pinned host identity, and
-authorization. Saved native device state allows trusted clients to reconnect;
-browser sign-in and browser secret storage are separate policies.
+Connections start on the encrypted Hub relay and upgrade to direct WebRTC when
+available. Health checks, discovery, direct negotiation, viewer commands and
+live events share one authenticated Noise channel on the current carrier.
+A new carrier proves the pinned host identity before it takes over. Concurrent
+streams have independent response credits. An interrupted command reports
+uncertain delivery. The client reconnects the read-only event stream.
 
-The installed Android/iOS and desktop viewers use this same native client.
+The desktop viewer uses this native client. The Apell guest shares its wire
+protocol and Noise implementation through `tokn-hub-client-core`.
 `ClientStore` owns its bounded private identity and pinned-host bundle; the
 client has no runtime dependency on the Hub server, SQLite, or its OpenSSL-based
 passkey administration. The Hub crate re-exports the store for existing native

@@ -1,3 +1,4 @@
+use crate::session::{Session, Stream};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
@@ -9,7 +10,7 @@ use tokio_tungstenite::{
 };
 use tokn_hub_client_core::{
   exchange::{RequestFrames, ResponseState},
-  secure::{MAX_RECORD, NoiseIdentity, NoiseInitiator, SecureChannel},
+  secure::MAX_RECORD,
 };
 use tokn_hub_transport::{BoxTransport, RecordTransport};
 use url::Url;
@@ -39,21 +40,25 @@ pub(crate) async fn send(socket: &mut Socket, record: Vec<u8>) -> Result<(), Str
 
 pub(crate) async fn receive(socket: &mut Socket) -> Result<Vec<u8>, String> {
   // Relay pings never extend the authenticated-data timeout.
-  tokio::time::timeout(Duration::from_secs(90), async {
-    loop {
-      match socket.next().await {
-        Some(Ok(Message::Binary(record))) if record.len() <= MAX_RECORD => return Ok(record.to_vec()),
-        Some(Ok(Message::Ping(record))) => socket
-          .send(Message::Pong(record))
+  tokio::time::timeout(Duration::from_secs(90), receive_from_relay(socket))
+    .await
+    .map_err(|_| "Encrypted response timed out; requests are not retried")?
+}
+
+async fn receive_from_relay(socket: &mut Socket) -> Result<Vec<u8>, String> {
+  loop {
+    match socket.next().await {
+      Some(Ok(Message::Binary(record))) if record.len() <= MAX_RECORD => return Ok(record.to_vec()),
+      Some(Ok(Message::Ping(record))) => {
+        tokio::time::timeout(Duration::from_secs(10), socket.send(Message::Pong(record)))
           .await
-          .map_err(|_| "Relay disconnected")?,
-        Some(Ok(Message::Pong(_))) => {}
-        _ => return Err("Encrypted connection ended unexpectedly".into()),
+          .map_err(|_| "Relay pong timed out")?
+          .map_err(|_| "Relay disconnected")?
       }
+      Some(Ok(Message::Pong(_))) => {}
+      _ => return Err("Encrypted connection ended unexpectedly".into()),
     }
-  })
-  .await
-  .map_err(|_| "Encrypted response timed out; requests are not retried")?
+  }
 }
 
 /// A carrier only transports ordered encrypted records. Noise owns identity,
@@ -66,7 +71,7 @@ impl RecordTransport for RelayTransport {
     send(&mut self.0, record).await
   }
   async fn receive(&mut self) -> Result<Option<Vec<u8>>, String> {
-    receive(&mut self.0).await.map(Some)
+    receive_from_relay(&mut self.0).await.map(Some)
   }
   async fn close(&mut self) {
     let _ = self.0.close(None).await;
@@ -85,51 +90,37 @@ pub(crate) async fn read_record(transport: &mut BoxTransport) -> Result<Vec<u8>,
     .ok_or_else(|| "Encrypted connection ended unexpectedly".into())
 }
 
-pub(crate) struct Exchange {
-  pub transport: BoxTransport,
-  pub channel: SecureChannel,
+pub struct Exchange {
+  stream: Stream,
   pub status: u16,
   pub content_type: Option<String>,
   response: ResponseState,
 }
 
 impl Exchange {
-  pub async fn open(
-    mut transport: BoxTransport,
-    identity: &NoiseIdentity,
-    host_key: &str,
-    method: &str,
-    path: &str,
-    body: &[u8],
-  ) -> Result<Self, String> {
-    let frames = RequestFrames::new(method, path, body)?;
-    let mut initiator = NoiseInitiator::new(identity, host_key)?;
-    transport.send(initiator.start()?).await?;
-    let mut channel = initiator.finish(&read_record(&mut transport).await?)?;
+  pub(crate) async fn open(session: &Session, method: &str, path: &str, body: &[u8]) -> Result<Self, String> {
+    let mut frames = RequestFrames::new(method, path, body)?;
+    let mut stream = session
+      .open(frames.next().expect("request starts with its header"))
+      .await?;
     for frame in frames {
-      transport.send(channel.encrypt(&frame)?).await?;
+      stream.send(frame).await?;
     }
-    let response = ResponseState::from_header(channel.decrypt(&read_record(&mut transport).await?)?, None)?;
+    let response = ResponseState::from_header(stream.receive().await?, None)?;
     Ok(Self {
       status: response.status,
       content_type: response.content_type.clone(),
-      transport,
-      channel,
+      stream,
       response,
     })
   }
 
   pub async fn next(&mut self) -> Result<Option<Vec<u8>>, String> {
-    self
-      .response
-      .next(self.channel.decrypt(&read_record(&mut self.transport).await?)?)
+    self.response.next(self.stream.receive().await?)
   }
 
   pub async fn acknowledge(&mut self) -> Result<(), String> {
-    self
-      .transport
-      .send(self.channel.encrypt(&self.response.acknowledge()?)?)
-      .await
+    self.stream.send(self.response.acknowledge()?).await
   }
 
   pub async fn json(mut self) -> Result<Value, String> {

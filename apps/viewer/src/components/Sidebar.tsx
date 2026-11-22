@@ -448,7 +448,7 @@ export function Sidebar({
 
         {!is_loading && error && sessions.length > 0 ? (
           <div className="sidebar-refresh-error" role="alert">
-            <strong>Session catalog could not refresh</strong>
+            <strong>Couldn’t refresh the session list</strong>
             <span>{error}</span>
             <button className="text-button" onClick={on_retry} type="button">
               Try again
@@ -462,7 +462,7 @@ export function Sidebar({
               {noProviders
                 ? "No providers selected"
                 : isIndexingCatalog
-                  ? "Building session catalog"
+                  ? "Finding sessions"
                   : "No sessions found"}
             </strong>
             <span>

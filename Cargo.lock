@@ -6672,6 +6672,7 @@ version = "0.1.1"
 dependencies = [
  "apell-guest",
  "apell-runtime",
+ "futures-channel",
  "futures-util",
  "serde",
  "serde_json",

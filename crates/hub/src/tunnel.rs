@@ -27,6 +27,7 @@ pub struct HubTunnels {
   handshakes: Arc<Semaphore>,
   approved: Arc<Semaphore>,
   secure_capacity: Arc<Semaphore>,
+  response_bytes: Arc<Semaphore>,
   shutdown: CancellationToken,
 }
 
@@ -41,6 +42,7 @@ struct Connection {
   capacity: Weak<OwnedSemaphorePermit>,
   outgoing: mpsc::Sender<Frame>,
   secure_channels: Mutex<HashMap<u64, mpsc::Sender<Bytes>>>,
+  response_bytes: Arc<Semaphore>,
   next_id: std::sync::atomic::AtomicU64,
   allow_control: bool,
   connector_version: Option<String>,
@@ -86,6 +88,7 @@ impl HubTunnels {
       handshakes: Arc::new(Semaphore::new(handshakes)),
       approved: Arc::new(Semaphore::new(approved)),
       secure_capacity: Arc::new(Semaphore::new(128)),
+      response_bytes: Arc::new(Semaphore::new(64 * 1024 * 1024)),
       shutdown: CancellationToken::new(),
     }
   }
@@ -204,6 +207,7 @@ impl HubTunnels {
         capacity: Arc::downgrade(&permit),
         outgoing,
         secure_channels: Mutex::new(HashMap::new()),
+        response_bytes: self.response_bytes.clone(),
         next_id: std::sync::atomic::AtomicU64::new(1),
         allow_control: record.access == "control" && stored.access == "control",
         connector_version,
@@ -332,7 +336,7 @@ impl HubTunnels {
     Ok((record, discovery_group))
   }
 
-  /// One native client socket carries one encrypted request or event stream.
+  /// The Hub relays opaque records for an authenticated machine connection.
   /// Neither public metadata nor a Hub login grants authority at the host.
   pub async fn handle_secure_socket(&self, host_id: &str, mut socket: WebSocket, _permit: OwnedSemaphorePermit) {
     let connection = self.inner.lock().unwrap().online.get(host_id).cloned();
@@ -340,8 +344,7 @@ impl HubTunnels {
       return;
     };
     let channel_id = connection.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // Include handshake, headers and terminal records beyond the chunk window.
-    let (sender, mut received) = mpsc::channel(protocol::RESPONSE_WINDOW + 4);
+    let (sender, mut received) = mpsc::channel(protocol::RESPONSE_RECORD_SLOTS);
     {
       let mut channels = connection.secure_channels.lock().unwrap();
       if channels.len() >= protocol::MAX_REQUESTS {
@@ -405,7 +408,8 @@ impl Connection {
         }
         let mut channels = self.secure_channels.lock().unwrap();
         if let Some(channel) = channels.get(&channel_id) {
-          if channel.try_send(Bytes::from(bytes)).is_err() {
+          if protocol::budget_record(bytes, &self.response_bytes).is_none_or(|record| channel.try_send(record).is_err())
+          {
             channels.remove(&channel_id);
             if self.outgoing.try_send(Frame::SecureClose { channel_id }).is_err() {
               self.shutdown.cancel();

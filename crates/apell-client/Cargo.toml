@@ -16,6 +16,7 @@ tokn-hub-client-core = { path = "../hub-client-core", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 futures-util = { version = "0.3", features = ["async-await"] }
+futures-channel = "0.3"
 url = "2"
 sha2 = "0.10"
 zeroize = "1"

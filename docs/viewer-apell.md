@@ -45,10 +45,11 @@ existing machine pairing and discovery flow until the Hub is upgraded.
 
 ## Data and lifecycle
 
-The host remains authoritative for session histories, RPC and permissions. The
-existing subscription, latest-three-turn backward load, complete-group details,
-tool details and inspector APIs are preserved. The shared frontend continues to
-own display coverage and caches.
+The machine owns session histories, commands and permissions. Each applet
+connection opens one authenticated relay socket. Concurrent opens, health
+checks, discovery, viewer commands and live events reuse that socket. A new
+listener can replace the old listener without interrupting another request.
+The shared frontend owns the session list, timeline and display caches.
 
 The guest decrypts bounded records and forwards acknowledged chunks across the
 bridge instead of retaining full histories. One chunk per transfer can await the
@@ -57,8 +58,8 @@ the guest's 64 MiB heap or the 8 MiB ABI limit. Failed or uncertain input is nev
 automatically replayed. Only the read-only event stream reconnects automatically.
 
 Apell can keep the backend alive while its view is detached. A new view loads
-preferences and reconnects to a remembered host; a fresh stream generation
-replaces the previous view's delivery state. Process termination ends active
+preferences and checks access to its remembered host. An existing connection
+can serve that check and the replacement event stream. Process termination ends active
 operations. Saved identity and trust survive restart, subject to the platform's
 secure-store policy. Mobile OS background networking is not guaranteed.
 

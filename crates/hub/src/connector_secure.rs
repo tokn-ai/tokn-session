@@ -1,13 +1,16 @@
 //! Host-owned trust boundary for encrypted requests. The Hub is only a carrier.
-use super::{ConnectorConfig, PairedHostConfig, enqueue};
+#[path = "connector_requests.rs"]
+mod requests;
+
+use super::{ConnectorConfig, PairedHostConfig};
 use crate::{
   host_passkeys::{CEREMONY_SECONDS, HostPasskeys},
   protocol::{self, Frame},
   secure::{HostAuthOperation, InnerMessage, NoiseIdentity, NoiseResponder, SecureChannel},
 };
-use futures_util::StreamExt;
+
 use std::{
-  sync::{Arc, Mutex},
+  sync::Arc,
   time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{Semaphore, mpsc};
@@ -30,22 +33,26 @@ enum RecordOutput {
 
 impl RecordOutput {
   async fn send(&self, record: Vec<u8>) -> Result<(), String> {
-    match self {
-      Self::Relay { sender, channel_id } => {
-        enqueue(
-          sender,
-          Frame::SecureData {
-            channel_id: *channel_id,
-            data: protocol::encode(&record),
-          },
-        )
+    self.send_with(|| Ok(record)).await
+  }
+
+  // Reserve capacity before consuming a Noise nonce. The policy timer can
+  // cancel a stalled write and still deliver a decryptable revocation error.
+  async fn send_with(&self, record: impl FnOnce() -> Result<Vec<u8>, String>) -> Result<(), String> {
+    async fn reserve<T>(sender: &mpsc::Sender<T>) -> Result<mpsc::Permit<'_, T>, String> {
+      tokio::time::timeout(Duration::from_secs(10), sender.reserve())
         .await
-      }
-      Self::Direct(sender) => tokio::time::timeout(Duration::from_secs(10), sender.send(record))
-        .await
-        .map_err(|_| "Direct encrypted record send timed out; delivery may be uncertain")?
-        .map_err(|_| "Direct encrypted transport closed".into()),
+        .map_err(|_| "Encrypted transport stalled; delivery may be uncertain")?
+        .map_err(|_| "Encrypted transport closed".into())
     }
+    match self {
+      Self::Relay { sender, channel_id } => reserve(sender).await?.send(Frame::SecureData {
+        channel_id: *channel_id,
+        data: protocol::encode(&record()?),
+      }),
+      Self::Direct(sender) => reserve(sender).await?.send(record()?),
+    }
+    Ok(())
   }
 }
 
@@ -80,44 +87,28 @@ impl DirectManager {
     })
   }
 
-  // Erasing this future also breaks the type cycle between signaling and the
-  // independently spawned peer's reusable secure exchange state machine.
-  fn negotiate<'a>(
-    self: &'a Arc<Self>,
-    recipient: String,
-    sdp: &'a str,
-    outgoing: &'a RecordOutput,
-    channel: &'a mut SecureChannel,
-  ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
-    Box::pin(async move {
-      let permit = self
-        .peers
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| "Direct peer capacity reached; use encrypted Hub relay")?;
-      let (peer, answer) = tokio::select! {
-        _ = self.shutdown.cancelled() => return Err("Host connector is shutting down".into()),
-        result = tokio::time::timeout(Duration::from_secs(20), WebRtcPeer::answer(self.config.ice_servers.clone(), sdp)) => {
-          result.map_err(|_| "Direct negotiation timed out; use encrypted Hub relay")??
-        }
-      };
-      let result = self.host.verify(&self.host_id, &recipient);
-      if let Err(error) = result {
-        peer.close().await;
-        return Err(error);
+  async fn negotiate(self: &Arc<Self>, recipient: &str, sdp: &str) -> Result<(String, NegotiatedPeer), String> {
+    let permit = self
+      .peers
+      .clone()
+      .try_acquire_owned()
+      .map_err(|_| "Direct peer capacity reached; use encrypted Hub relay")?;
+    let (peer, answer) = tokio::select! {
+      _ = self.shutdown.cancelled() => return Err("Host connector is shutting down".into()),
+      result = tokio::time::timeout(Duration::from_secs(20), WebRtcPeer::answer(self.config.ice_servers.clone(), sdp)) => {
+        result.map_err(|_| "Direct negotiation timed out; use encrypted Hub relay")??
       }
-      let result = send_record(outgoing, channel.encrypt(&InnerMessage::DirectAnswer { sdp: answer })?).await;
-      if let Err(error) = result {
-        peer.close().await;
-        return Err(error);
-      }
-      let manager = self.clone();
-      tokio::spawn(async move {
-        let _permit = permit;
-        manager.serve_peer(peer, recipient).await;
-      });
-      Ok(())
-    })
+    };
+    self.host.verify(&self.host_id, recipient)?;
+    Ok((
+      answer,
+      NegotiatedPeer {
+        manager: self.clone(),
+        recipient: recipient.into(),
+        peer,
+        _permit: permit,
+      },
+    ))
   }
 
   async fn serve_peer(self: &Arc<Self>, peer: WebRtcPeer, recipient: String) {
@@ -196,11 +187,14 @@ impl DirectManager {
           let Some(record) = record else { break; };
           if transport.send(record).await.is_err() { break; }
         }
-        result = transport.receive() => {
-          let Ok(Some(record)) = result else { break; };
-          // Excess records fail closed rather than buffering unbounded input
-          // while a local API request waits for authenticated response credits.
-          if incoming.try_send(record).is_err() { break; }
+        result = async {
+          let slot = incoming.reserve().await.map_err(|_| "Host closed incoming stream")?;
+          let record = transport.receive().await?.ok_or("Direct connection closed")?;
+          slot.send(bytes::Bytes::from(record));
+          Ok::<(), String>(())
+        } => {
+          if result.is_err() { break; }
+
         }
       }
     }
@@ -208,10 +202,29 @@ impl DirectManager {
   }
 }
 
+// Dropping an unsent answer drops the WebRTC peer and releases its capacity.
+// Only delivery on the authenticated signaling channel starts serving it.
+struct NegotiatedPeer {
+  manager: Arc<DirectManager>,
+  recipient: String,
+  peer: WebRtcPeer,
+  _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl NegotiatedPeer {
+  fn start(self) {
+    tokio::spawn(async move {
+      let _permit = self._permit;
+      self.manager.serve_peer(self.peer, self.recipient).await;
+    });
+  }
+}
+
 pub(super) struct Host {
   identity: NoiseIdentity,
   paired: PairedHostConfig,
   passkeys: Option<HostPasskeys>,
+  requests: Arc<Semaphore>,
   discovery_group: Option<DiscoveryGroup>,
 }
 
@@ -252,6 +265,7 @@ impl Host {
       identity: NoiseIdentity::load_or_create(&paired.noise_key_file)?,
       paired: paired.clone(),
       passkeys,
+      requests: Arc::new(Semaphore::new(protocol::MAX_REQUESTS)),
       discovery_group: discovery_group(config)?,
     })
   }
@@ -293,7 +307,7 @@ impl Host {
     &self,
     host_id: &str,
     first: &[u8],
-    incoming: &mut mpsc::Receiver<Vec<u8>>,
+    incoming: &mut mpsc::Receiver<bytes::Bytes>,
     outgoing: &RecordOutput,
   ) -> Result<(), String> {
     let config = &self.paired;
@@ -325,7 +339,7 @@ impl Host {
     operation: HostAuthOperation,
     payload: serde_json::Value,
     channel: &mut SecureChannel,
-    incoming: &mut mpsc::Receiver<Vec<u8>>,
+    incoming: &mut mpsc::Receiver<bytes::Bytes>,
     outgoing: &RecordOutput,
   ) -> Result<(), String> {
     let config = &self.paired;
@@ -363,7 +377,7 @@ async fn send_record(outgoing: &RecordOutput, record: Vec<u8>) -> Result<(), Str
   outgoing.send(record).await
 }
 
-async fn receive(incoming: &mut mpsc::Receiver<Vec<u8>>) -> Result<Vec<u8>, String> {
+async fn receive(incoming: &mut mpsc::Receiver<bytes::Bytes>) -> Result<bytes::Bytes, String> {
   tokio::time::timeout(Duration::from_secs(10), incoming.recv())
     .await
     .map_err(|_| "Encrypted request timed out")?
@@ -378,7 +392,7 @@ pub(super) async fn run(
   client: &reqwest::Client,
   outgoing: &mpsc::Sender<Frame>,
   channel_id: u64,
-  incoming: mpsc::Receiver<Vec<u8>>,
+  incoming: mpsc::Receiver<bytes::Bytes>,
   direct: Option<&Arc<DirectManager>>,
 ) -> Result<(), String> {
   let output = RecordOutput::Relay {
@@ -395,7 +409,7 @@ async fn run_records(
   config: &ConnectorConfig,
   client: &reqwest::Client,
   outgoing: &RecordOutput,
-  mut incoming: mpsc::Receiver<Vec<u8>>,
+  mut incoming: mpsc::Receiver<bytes::Bytes>,
   expected_device: Option<&str>,
   direct: Option<&Arc<DirectManager>>,
 ) -> Result<(), String> {
@@ -431,238 +445,31 @@ async fn run_records(
     return result;
   }
   if let InnerMessage::DiscoveryRequest {} = header {
-    let result = async {
-      host.verify(host_id, channel.remote_public_key())?;
-      send_record(
-        outgoing,
-        channel.encrypt(&InnerMessage::DiscoveryResponse {
-          group: discovery_group(config)?,
-        })?,
-      )
-      .await
-    }
-    .await;
-    if let Err(message) = &result {
-      if let Ok(record) = channel.encrypt(&InnerMessage::Error {
-        message: message.clone(),
-      }) {
-        let _ = send_record(outgoing, record).await;
-      }
-    }
-    return result;
-  }
-  if matches!(
-    &header,
-    InnerMessage::DirectConfigRequest {} | InnerMessage::DirectOffer { .. }
-  ) {
-    let result = async {
-      if expected_device.is_some() {
-        return Err("Negotiate direct connections through the encrypted Hub channel".into());
-      }
-      let recipient = channel.remote_public_key().to_owned();
-      host.verify(host_id, &recipient)?;
-      match header {
-        InnerMessage::DirectConfigRequest {} => {
-          send_record(
-            outgoing,
-            channel.encrypt(&InnerMessage::DirectConfig {
-              ice_servers: config.ice_servers.clone(),
-            })?,
-          )
-          .await
-        }
-        InnerMessage::DirectOffer { sdp } => {
-          direct
-            .ok_or("Direct connections are unavailable on this host")?
-            .negotiate(recipient, &sdp, outgoing, &mut channel)
-            .await
-        }
-        _ => unreachable!(),
-      }
-    }
-    .await;
-    if let Err(message) = &result {
-      if let Ok(record) = channel.encrypt(&InnerMessage::Error {
-        message: message.clone(),
-      }) {
-        let _ = send_record(outgoing, record).await;
-      }
-    }
-    return result;
-  }
-  let InnerMessage::DeviceRequest { method, path } = header else {
-    return Err("Expected encrypted paired-device request".into());
-  };
-  let recipient = channel.remote_public_key().to_owned();
-  if let Err(message) = host.verify(host_id, &recipient) {
-    if let Ok(record) = channel.encrypt(&InnerMessage::Error {
-      message: message.clone(),
-    }) {
-      let _ = send_record(outgoing, record).await;
-    }
-    return Err(message);
-  }
-  let body = tokio::time::timeout(Duration::from_secs(10), async {
-    let mut body = Vec::new();
-    let mut records = 0;
-    loop {
-      match channel.decrypt(&receive(&mut incoming).await?)? {
-        InnerMessage::RequestBody { data } => {
-          records += 1;
-          if records > protocol::MAX_BODY.div_ceil(protocol::CHUNK_SIZE) {
-            return Err("Too many request body records".into());
-          }
-          let bytes = protocol::decode(&data, protocol::CHUNK_SIZE)?;
-          if body.len() + bytes.len() > protocol::MAX_BODY {
-            return Err("Encrypted request body is too large".into());
-          }
-          body.extend_from_slice(&bytes);
-        }
-        InnerMessage::RequestEnd {} => return Ok::<_, String>(body),
-        _ => return Err("Expected encrypted request body".into()),
-      }
-    }
-  })
-  .await
-  .map_err(|_| "Encrypted request body timed out")??;
-  host.verify(host_id, &recipient)?;
-  let runtime_access = host.verify_runtime_management(config, &recipient, &method, &path);
-  let channel = Mutex::new(channel);
-  if let Err(message) = runtime_access {
-    let _ = send_inner(
-      outgoing,
-      &channel,
-      &InnerMessage::Error {
+    let result = host
+      .verify(host_id, channel.remote_public_key())
+      .and_then(|_| discovery_group(config));
+    let frame = match &result {
+      Ok(group) => InnerMessage::DiscoveryResponse { group: group.clone() },
+      Err(message) => InnerMessage::Error {
         message: message.clone(),
       },
-    )
-    .await;
-    return Err(message);
+    };
+    outgoing.send(channel.encrypt(&frame)?).await?;
+    return result.map(|_| ());
   }
-  let window = Semaphore::new(protocol::RESPONSE_WINDOW);
-  let result = {
-    let response = forward(config, client, &method, &path, body, outgoing, &channel, &window);
-    let timeout = tokio::time::sleep(Duration::from_secs(120));
-    tokio::pin!(response, timeout);
-    let mut policy_check = tokio::time::interval(Duration::from_secs(1));
-    loop {
-      tokio::select! {
-        biased;
-        _ = policy_check.tick() => {
-          if let Err(error) = host.verify(host_id, &recipient) { break Err(error); }
-        }
-        _ = &mut timeout, if path != "/api/v1/events" => break Err("Encrypted request timed out; delivery may be uncertain and is never retried".into()),
-        record = incoming.recv() => {
-          let Some(record) = record else { break Err("Encrypted channel closed".into()) };
-          let message = channel.lock().unwrap().decrypt(&record);
-          match message {
-            Ok(InnerMessage::Window { credits }) if credits > 0 && credits <= protocol::RESPONSE_WINDOW && window.available_permits() + credits <= protocol::RESPONSE_WINDOW => window.add_permits(credits),
-            _ => break Err("Invalid encrypted response window".into()),
-          }
-        }
-        result = &mut response => break result,
-      }
-    }
-  };
-  if let Err(message) = &result {
-    let _ = send_inner(
-      outgoing,
-      &channel,
-      &InnerMessage::Error {
-        message: message.clone(),
-      },
-    )
-    .await;
-  } else {
-    // End may be queued behind the final chunk at the recipient. Keep the
-    // receive side alive while it acknowledges that chunk and reads End, rather
-    // than racing its final credit with an abrupt relay socket close.
-    let _ = tokio::time::timeout(Duration::from_secs(10), async {
-      while let Some(record) = incoming.recv().await {
-        match channel.lock().unwrap().decrypt(&record) {
-          Ok(InnerMessage::Window { credits })
-            if credits > 0
-              && credits <= protocol::RESPONSE_WINDOW
-              && window.available_permits() + credits <= protocol::RESPONSE_WINDOW =>
-          {
-            window.add_permits(credits)
-          }
-          _ => break,
-        }
-      }
-    })
-    .await;
-  }
-  result
-}
-
-async fn send_inner(
-  outgoing: &RecordOutput,
-  channel: &Mutex<SecureChannel>,
-  message: &InnerMessage,
-) -> Result<(), String> {
-  let bytes = channel.lock().unwrap().encrypt(message)?;
-  send_record(outgoing, bytes).await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn forward(
-  config: &ConnectorConfig,
-  client: &reqwest::Client,
-  method: &str,
-  path: &str,
-  body: Vec<u8>,
-  outgoing: &RecordOutput,
-  channel: &Mutex<SecureChannel>,
-  window: &Semaphore,
-) -> Result<(), String> {
-  let response = forward_device(config, client, method, path, body).await?;
-  if response.status().is_redirection() {
-    return Err("Local API redirects are forbidden".into());
-  }
-  send_inner(
-    outgoing,
+  requests::serve(
+    host,
+    host_id,
+    config,
+    client,
     channel,
-    &InnerMessage::Response {
-      status: response.status().as_u16(),
-      content_type: Some(
-        if path == "/api/v1/events" {
-          "text/event-stream"
-        } else {
-          "application/json"
-        }
-        .into(),
-      ),
-    },
+    incoming,
+    outgoing,
+    header,
+    expected_device.is_none(),
+    direct,
   )
-  .await?;
-  let mut stream = response.bytes_stream();
-  let mut total = 0usize;
-  while let Some(chunk) = stream.next().await {
-    let chunk = chunk.map_err(|_| "Local API response stream failed")?;
-    total = total.saturating_add(chunk.len());
-    if path != "/api/v1/events" && total > 128 * 1024 * 1024 {
-      return Err("Local API response exceeds 128 MiB".into());
-    }
-    for part in chunk.chunks(protocol::CHUNK_SIZE) {
-      // Only the authenticated recipient can return these encrypted credits.
-      // The Hub cannot manufacture acknowledgements to make us spool plaintext.
-      window
-        .acquire()
-        .await
-        .map_err(|_| "Encrypted response cancelled")?
-        .forget();
-      send_inner(
-        outgoing,
-        channel,
-        &InnerMessage::Chunk {
-          data: protocol::encode(part),
-        },
-      )
-      .await?;
-    }
-  }
-  send_inner(outgoing, channel, &InnerMessage::End {}).await
+  .await
 }
 
 async fn forward_device(
@@ -738,8 +545,12 @@ async fn forward_device(
 mod tests {
   use super::*;
   use crate::secure::NoiseInitiator;
+  use futures_util::StreamExt;
   use serde_json::{Value, json};
-  use std::{path::Path, sync::Arc};
+  use std::{
+    path::Path,
+    sync::{Arc, Mutex},
+  };
   use webauthn_authenticator_rs::{WebauthnAuthenticator, softpasskey::SoftPasskey};
 
   fn paired_host(directory: &Path) -> ConnectorConfig {
@@ -762,12 +573,19 @@ mod tests {
     }
   }
 
+  struct TestInput(mpsc::Sender<bytes::Bytes>);
+  impl TestInput {
+    async fn send(&self, record: Vec<u8>) -> Result<(), mpsc::error::SendError<bytes::Bytes>> {
+      self.0.send(record.into()).await
+    }
+  }
+
   async fn open_host(
     config: &ConnectorConfig,
     device: &NoiseIdentity,
   ) -> (
     tokio::task::JoinHandle<Result<(), String>>,
-    mpsc::Sender<Vec<u8>>,
+    TestInput,
     mpsc::Receiver<Frame>,
     SecureChannel,
   ) {
@@ -780,7 +598,7 @@ mod tests {
     direct: Option<Arc<DirectManager>>,
   ) -> (
     tokio::task::JoinHandle<Result<(), String>>,
-    mpsc::Sender<Vec<u8>>,
+    TestInput,
     mpsc::Receiver<Frame>,
     SecureChannel,
   ) {
@@ -803,14 +621,14 @@ mod tests {
       )
       .await
     });
-    incoming.send(initiator.start().unwrap()).await.unwrap();
+    incoming.send(initiator.start().unwrap().into()).await.unwrap();
     let Frame::SecureData { data, .. } = frames.recv().await.unwrap() else {
       panic!("Expected Noise handshake response");
     };
     let channel = initiator
       .finish(&protocol::decode(&data, protocol::MAX_SECURE_RECORD).unwrap())
       .unwrap();
-    (task, incoming, frames, channel)
+    (task, TestInput(incoming), frames, channel)
   }
 
   async fn read_inner(frames: &mut mpsc::Receiver<Frame>, channel: &mut SecureChannel) -> InnerMessage {
@@ -820,6 +638,142 @@ mod tests {
     channel
       .decrypt(&protocol::decode(&data, protocol::MAX_SECURE_RECORD).unwrap())
       .unwrap()
+  }
+
+  async fn stream_send(input: &TestInput, channel: &mut SecureChannel, id: u32, frame: InnerMessage) {
+    input
+      .send(
+        channel
+          .encrypt(&InnerMessage::Stream {
+            stream_id: id,
+            frame: Box::new(frame),
+          })
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+  }
+
+  async fn stream_frame(output: &mut mpsc::Receiver<Frame>, channel: &mut SecureChannel, id: u32) -> InnerMessage {
+    let InnerMessage::Stream { stream_id, frame } =
+      tokio::time::timeout(Duration::from_secs(5), read_inner(output, channel))
+        .await
+        .expect("The other stream must make progress")
+    else {
+      panic!("Expected stream response")
+    };
+    assert_eq!(stream_id, id);
+    *frame
+  }
+
+  #[tokio::test]
+  async fn one_handshake_serves_discovery_commands_and_events_with_independent_credits() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = paired_host(directory.path());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    config.local_url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
+    let api = tokio::spawn(async move {
+      let app = axum::Router::new()
+        .route(
+          "/api/v1/events",
+          axum::routing::post(|| async { vec![b'e'; protocol::CHUNK_SIZE * (protocol::RESPONSE_WINDOW + 2)] }),
+        )
+        .route(
+          "/api/v1/health",
+          axum::routing::get(|| async { axum::Json(json!({"version":2})) }),
+        );
+      axum::serve(listener, app).await.unwrap();
+    });
+    let device = NoiseIdentity::generate().unwrap();
+    let state = &config.paired.state_file;
+    let current = now().unwrap();
+    crate::onboarding::authorize_device(state, &device.public_key(), current / 30, current).unwrap();
+    let (task, input, mut output, mut channel) = open_host(&config, &device).await;
+    let start = |method: &str, command: &str| InnerMessage::DeviceRequest {
+      method: method.into(),
+      path: format!("/api/v1/{command}"),
+    };
+    stream_send(&input, &mut channel, 1, InnerMessage::DiscoveryRequest {}).await;
+    assert_eq!(
+      stream_frame(&mut output, &mut channel, 1).await,
+      InnerMessage::DiscoveryResponse { group: None }
+    );
+
+    stream_send(&input, &mut channel, 2, start("POST", "events")).await;
+    stream_send(&input, &mut channel, 2, InnerMessage::RequestEnd {}).await;
+    assert!(matches!(
+      stream_frame(&mut output, &mut channel, 2).await,
+      InnerMessage::Response { status: 200, .. }
+    ));
+    for _ in 0..protocol::RESPONSE_WINDOW {
+      assert!(matches!(
+        stream_frame(&mut output, &mut channel, 2).await,
+        InnerMessage::Chunk { .. }
+      ));
+    }
+    // Leave the event stream out of credit. A denied command must complete
+    // independently, and a later read can still use the same Noise channel.
+    stream_send(&input, &mut channel, 3, start("POST", "start_rpc_runtime")).await;
+    stream_send(&input, &mut channel, 3, InnerMessage::RequestEnd {}).await;
+    assert!(matches!(
+      stream_frame(&mut output, &mut channel, 3).await,
+      InnerMessage::Error { .. }
+    ));
+    for id in [4, 5] {
+      stream_send(&input, &mut channel, id, start("GET", "health")).await;
+      stream_send(&input, &mut channel, id, InnerMessage::RequestEnd {}).await;
+      assert!(matches!(
+        stream_frame(&mut output, &mut channel, id).await,
+        InnerMessage::Response { status: 200, .. }
+      ));
+      assert!(matches!(
+        stream_frame(&mut output, &mut channel, id).await,
+        InnerMessage::Chunk { .. }
+      ));
+      assert!(matches!(
+        stream_frame(&mut output, &mut channel, id).await,
+        InnerMessage::End {}
+      ));
+      stream_send(&input, &mut channel, id, InnerMessage::Window { credits: 1 }).await;
+    }
+    // Revocation must terminate even a completely silent, stalled subscription.
+    crate::onboarding::remove_device(state, &device.public_key()).unwrap();
+    assert!(matches!(
+      tokio::time::timeout(Duration::from_secs(4), read_inner(&mut output, &mut channel))
+        .await
+        .unwrap(),
+      InnerMessage::Error { .. }
+    ));
+    assert!(task.await.unwrap().is_err());
+    api.abort();
+  }
+
+  #[tokio::test]
+  async fn a_cancelled_stream_cannot_reuse_its_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = paired_host(directory.path());
+    let device = NoiseIdentity::generate().unwrap();
+    let current = now().unwrap();
+    crate::onboarding::authorize_device(&config.paired.state_file, &device.public_key(), current / 30, current)
+      .unwrap();
+    let (task, input, mut output, mut channel) = open_host(&config, &device).await;
+    let start = InnerMessage::DeviceRequest {
+      method: "GET".into(),
+      path: "/api/v1/health".into(),
+    };
+    stream_send(&input, &mut channel, 1, start.clone()).await;
+    stream_send(&input, &mut channel, 1, InnerMessage::Cancel {}).await;
+    stream_send(&input, &mut channel, 2, InnerMessage::DiscoveryRequest {}).await;
+    assert!(matches!(
+      stream_frame(&mut output, &mut channel, 2).await,
+      InnerMessage::DiscoveryResponse { .. }
+    ));
+    stream_send(&input, &mut channel, 1, start).await;
+    assert!(matches!(
+      read_inner(&mut output, &mut channel).await,
+      InnerMessage::Error { .. }
+    ));
+    assert!(task.await.unwrap().is_err());
   }
 
   async fn authenticate_wire(
@@ -978,10 +932,13 @@ mod tests {
       incoming
         .send(
           channel
-            .encrypt(&InnerMessage::DeviceRequest {
-              method: "POST".into(),
-              path: format!("/api/v1/{command}"),
-            })
+            .encrypt(
+              &InnerMessage::DeviceRequest {
+                method: "POST".into(),
+                path: format!("/api/v1/{command}"),
+              }
+              .on_stream(1),
+            )
             .unwrap(),
         )
         .await
@@ -1023,22 +980,26 @@ mod tests {
           },
           InnerMessage::RequestEnd {},
         ] {
-          incoming.send(channel.encrypt(&message).unwrap()).await.unwrap();
+          incoming
+            .send(channel.encrypt(&message.on_stream(1)).unwrap())
+            .await
+            .unwrap();
         }
         if !allow_control && command == "respond_session_interaction" {
           assert!(matches!(
-            read_inner(&mut frames, &mut channel).await,
+            stream_frame(&mut frames, &mut channel, 1).await,
             InnerMessage::Error { .. }
           ));
-          assert!(task.await.unwrap().is_err());
+          drop(incoming);
+          task.await.unwrap().unwrap();
           assert_eq!(forwarded.lock().unwrap().len(), before);
           continue;
         }
         assert!(matches!(
-          read_inner(&mut frames, &mut channel).await,
+          stream_frame(&mut frames, &mut channel, 1).await,
           InnerMessage::Response { status: 200, .. }
         ));
-        let InnerMessage::Chunk { data } = read_inner(&mut frames, &mut channel).await else {
+        let InnerMessage::Chunk { data } = stream_frame(&mut frames, &mut channel, 1).await else {
           panic!("Expected interaction response");
         };
         let response: Value = serde_json::from_slice(&protocol::decode(&data, protocol::CHUNK_SIZE).unwrap()).unwrap();
@@ -1058,7 +1019,7 @@ mod tests {
           assert_eq!(forwarded.lock().unwrap().len(), before);
         }
         assert!(matches!(
-          read_inner(&mut frames, &mut channel).await,
+          stream_frame(&mut frames, &mut channel, 1).await,
           InnerMessage::End {}
         ));
         drop(incoming);
@@ -1083,23 +1044,27 @@ mod tests {
       incoming
         .send(
           channel
-            .encrypt(&InnerMessage::DeviceRequest {
-              method: "POST".into(),
-              path: "/api/v1/start_rpc_runtime".into(),
-            })
+            .encrypt(
+              &InnerMessage::DeviceRequest {
+                method: "POST".into(),
+                path: "/api/v1/start_rpc_runtime".into(),
+              }
+              .on_stream(1),
+            )
             .unwrap(),
         )
         .await
         .unwrap();
       incoming
-        .send(channel.encrypt(&InnerMessage::RequestEnd {}).unwrap())
+        .send(channel.encrypt(&InnerMessage::RequestEnd {}.on_stream(1)).unwrap())
         .await
         .unwrap();
-      let InnerMessage::Error { message } = read_inner(&mut frames, &mut channel).await else {
+      let InnerMessage::Error { message } = stream_frame(&mut frames, &mut channel, 1).await else {
         panic!("Runtime request should fail before any local API request");
       };
       assert!(message.contains("Runtime") || message.contains("runtime"));
-      assert!(task.await.unwrap().is_err());
+      drop(incoming);
+      task.await.unwrap().unwrap();
     }
     config.allow_control = true;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1115,23 +1080,26 @@ mod tests {
     incoming
       .send(
         channel
-          .encrypt(&InnerMessage::DeviceRequest {
-            method: "POST".into(),
-            path: "/api/v1/start_rpc_runtime".into(),
-          })
+          .encrypt(
+            &InnerMessage::DeviceRequest {
+              method: "POST".into(),
+              path: "/api/v1/start_rpc_runtime".into(),
+            }
+            .on_stream(1),
+          )
           .unwrap(),
       )
       .await
       .unwrap();
     incoming
-      .send(channel.encrypt(&InnerMessage::RequestEnd {}).unwrap())
+      .send(channel.encrypt(&InnerMessage::RequestEnd {}.on_stream(1)).unwrap())
       .await
       .unwrap();
     assert!(matches!(
-      read_inner(&mut frames, &mut channel).await,
+      stream_frame(&mut frames, &mut channel, 1).await,
       InnerMessage::Response { status: 200, .. }
     ));
-    let InnerMessage::Chunk { data } = read_inner(&mut frames, &mut channel).await else {
+    let InnerMessage::Chunk { data } = stream_frame(&mut frames, &mut channel, 1).await else {
       panic!("Expected runtime response");
     };
     assert_eq!(
@@ -1139,7 +1107,7 @@ mod tests {
       json!({"connected":true})
     );
     assert!(matches!(
-      read_inner(&mut frames, &mut channel).await,
+      stream_frame(&mut frames, &mut channel, 1).await,
       InnerMessage::End {}
     ));
     drop(incoming);
@@ -1244,7 +1212,7 @@ mod tests {
       )
       .await
     });
-    incoming.send(initiator.start().unwrap()).await.unwrap();
+    incoming.send(initiator.start().unwrap().into()).await.unwrap();
     let error = task.await.unwrap().unwrap_err();
     assert!(error.contains("signaling device"));
     assert!(
@@ -1303,12 +1271,14 @@ mod tests {
     );
     let (peer, offer) = WebRtcPeer::offer(Vec::new()).await.unwrap();
     let (task, incoming, mut frames, mut signal) = open_host_with_direct(&config, &device, Some(manager)).await;
-    incoming
-      .send(signal.encrypt(&InnerMessage::DirectOffer { sdp: offer }).unwrap())
-      .await
-      .unwrap();
-    let InnerMessage::DirectAnswer { sdp } = read_inner(&mut frames, &mut signal).await else {
-      panic!("Expected authenticated direct answer");
+    stream_send(&incoming, &mut signal, 1, InnerMessage::DirectConfigRequest {}).await;
+    assert!(matches!(
+      stream_frame(&mut frames, &mut signal, 1).await,
+      InnerMessage::DirectConfig { .. }
+    ));
+    stream_send(&incoming, &mut signal, 2, InnerMessage::DirectOffer { sdp: offer }).await;
+    let InnerMessage::DirectAnswer { sdp } = stream_frame(&mut frames, &mut signal, 2).await else {
+      panic!("Expected direct answer")
     };
     drop(incoming);
     task.await.unwrap().unwrap();
@@ -1316,86 +1286,73 @@ mod tests {
     peer.accept_answer(&sdp).await.unwrap();
     // The direct pump must accept the complete supported upload size without
     // overflowing its small queue when the sender can deliver records quickly.
-    let mut upload = peer.open_record().await.unwrap();
-    let mut initiator = NoiseInitiator::new(&device, &host.public_key()).unwrap();
-    upload.send(initiator.start().unwrap()).await.unwrap();
-    let mut upload_channel = initiator.finish(&upload.receive().await.unwrap().unwrap()).unwrap();
-    upload
-      .send(
-        upload_channel
-          .encrypt(&InnerMessage::DeviceRequest {
-            method: "POST".into(),
-            path: "/api/v1/list_sessions".into(),
-          })
-          .unwrap(),
-      )
-      .await
-      .unwrap();
-    for chunk in vec![42; protocol::MAX_BODY].chunks(protocol::CHUNK_SIZE) {
-      upload
-        .send(
-          upload_channel
-            .encrypt(&InnerMessage::RequestBody {
-              data: protocol::encode(chunk),
-            })
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+    async fn read_from(transport: &mut BoxTransport, channel: &mut SecureChannel, id: u32) -> InnerMessage {
+      let InnerMessage::Stream { stream_id, frame } =
+        channel.decrypt(&transport.receive().await.unwrap().unwrap()).unwrap()
+      else {
+        panic!("Expected direct stream response");
+      };
+      assert_eq!(stream_id, id);
+      *frame
     }
-    upload
-      .send(upload_channel.encrypt(&InnerMessage::RequestEnd {}).unwrap())
-      .await
-      .unwrap();
-    assert!(matches!(
-      upload_channel
-        .decrypt(&upload.receive().await.unwrap().unwrap())
-        .unwrap(),
-      InnerMessage::Response { status: 200, .. }
-    ));
-    let InnerMessage::Chunk { data } = upload_channel
-      .decrypt(&upload.receive().await.unwrap().unwrap())
-      .unwrap()
-    else {
-      panic!("Expected upload response");
-    };
-    let received: Value = serde_json::from_slice(&protocol::decode(&data, protocol::CHUNK_SIZE).unwrap()).unwrap();
-    assert_eq!(received["length"], protocol::MAX_BODY);
-    upload
-      .send(upload_channel.encrypt(&InnerMessage::Window { credits: 1 }).unwrap())
-      .await
-      .unwrap();
-    assert!(matches!(
-      upload_channel
-        .decrypt(&upload.receive().await.unwrap().unwrap())
-        .unwrap(),
-      InnerMessage::End {}
-    ));
-    upload.close().await;
     let mut transport = peer.open_record().await.unwrap();
     let mut initiator = NoiseInitiator::new(&device, &host.public_key()).unwrap();
     transport.send(initiator.start().unwrap()).await.unwrap();
     let mut channel = initiator.finish(&transport.receive().await.unwrap().unwrap()).unwrap();
+    for frame in
+      tokn_hub_client_core::exchange::RequestFrames::new("POST", "/api/v1/list_sessions", &vec![42; protocol::MAX_BODY])
+        .unwrap()
+    {
+      transport
+        .send(channel.encrypt(&frame.on_stream(1)).unwrap())
+        .await
+        .unwrap();
+    }
+    assert!(matches!(
+      read_from(&mut transport, &mut channel, 1).await,
+      InnerMessage::Response { status: 200, .. }
+    ));
+    let InnerMessage::Chunk { data } = read_from(&mut transport, &mut channel, 1).await else {
+      panic!("Expected upload response");
+    };
+    let received: Value = serde_json::from_slice(&protocol::decode(&data, protocol::CHUNK_SIZE).unwrap()).unwrap();
+    assert_eq!(received["length"], protocol::MAX_BODY);
     transport
       .send(
         channel
-          .encrypt(&InnerMessage::DeviceRequest {
-            method: "GET".into(),
-            path: "/api/v1/events".into(),
-          })
+          .encrypt(&InnerMessage::Window { credits: 1 }.on_stream(1))
           .unwrap(),
       )
       .await
       .unwrap();
+    assert!(matches!(
+      read_from(&mut transport, &mut channel, 1).await,
+      InnerMessage::End {}
+    ));
+    // Direct negotiation is relay-only, even for an already authorized direct session.
     transport
-      .send(channel.encrypt(&InnerMessage::RequestEnd {}).unwrap())
+      .send(
+        channel
+          .encrypt(&InnerMessage::DirectConfigRequest {}.on_stream(2))
+          .unwrap(),
+      )
       .await
       .unwrap();
     assert!(matches!(
-      channel.decrypt(&transport.receive().await.unwrap().unwrap()).unwrap(),
+      read_from(&mut transport, &mut channel, 2).await,
+      InnerMessage::Error { .. }
+    ));
+    for frame in tokn_hub_client_core::exchange::RequestFrames::new("GET", "/api/v1/events", &[]).unwrap() {
+      transport
+        .send(channel.encrypt(&frame.on_stream(3)).unwrap())
+        .await
+        .unwrap();
+    }
+    assert!(matches!(
+      read_from(&mut transport, &mut channel, 3).await,
       InnerMessage::Response { status: 200, .. }
     ));
-    let InnerMessage::Chunk { data } = channel.decrypt(&transport.receive().await.unwrap().unwrap()).unwrap() else {
+    let InnerMessage::Chunk { data } = read_from(&mut transport, &mut channel, 3).await else {
       panic!("Expected direct SSE");
     };
     assert!(
@@ -1404,7 +1361,11 @@ mod tests {
         .contains("event: ready")
     );
     transport
-      .send(channel.encrypt(&InnerMessage::Window { credits: 1 }).unwrap())
+      .send(
+        channel
+          .encrypt(&InnerMessage::Window { credits: 1 }.on_stream(3))
+          .unwrap(),
+      )
       .await
       .unwrap();
     crate::onboarding::remove_device(&state_file, &device.public_key()).unwrap();

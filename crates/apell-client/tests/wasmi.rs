@@ -2,7 +2,10 @@
 //! services below implement its SDK contract; the peer is a real loopback WS
 //! host speaking SPAKE2 and Noise, without provider credentials or agent work.
 use apell_runtime::{HostError, HostEvents, HostServices, RuntimeHandle, ServiceFuture};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{
+  SinkExt, StreamExt,
+  stream::{SplitSink, SplitStream},
+};
 use serde_json::{Value, json};
 use std::{
   collections::BTreeMap,
@@ -14,7 +17,7 @@ use std::{
   },
   time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{Mutex as AsyncMutex, watch};
+use tokio::sync::{Mutex as AsyncMutex, Notify, watch};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 use tokn_hub_client_core::{
   account::{DEVICE_TOKEN, VIEWER_START},
@@ -66,7 +69,8 @@ fn guest() -> Vec<u8> {
 }
 
 struct Socket {
-  io: AsyncMutex<ClientSocket>,
+  read: AsyncMutex<SplitStream<ClientSocket>>,
+  write: AsyncMutex<SplitSink<ClientSocket, Message>>,
   stop: watch::Sender<bool>,
 }
 #[derive(Default)]
@@ -79,6 +83,7 @@ struct Services {
   presence: Mutex<Option<PresenceResult>>,
   presence_requests: AtomicUsize,
   account_approved: AtomicBool,
+  fail_next_secret_write: AtomicBool,
 }
 impl Services {
   fn socket(&self, handle: &str) -> Result<Arc<Socket>, String> {
@@ -100,10 +105,12 @@ impl Services {
           .await
           .map_err(|_| "Fixture connection failed")?;
         let id = format!("fixture-{}", self.next.fetch_add(1, Ordering::SeqCst));
+        let (write, read) = io.split();
         self.sockets.lock().unwrap().insert(
           id.clone(),
           Arc::new(Socket {
-            io: AsyncMutex::new(io),
+            read: AsyncMutex::new(read),
+            write: AsyncMutex::new(write),
             stop: watch::channel(false).0,
           }),
         );
@@ -116,7 +123,7 @@ impl Services {
           return Err("Fixture socket closed".into());
         }
         socket
-          .io
+          .write
           .lock()
           .await
           .send(Message::Binary(bytes.into()))
@@ -127,7 +134,7 @@ impl Services {
       "websocket.receive" => {
         let socket = self.socket(text("socket_handle")?)?;
         let mut stopping = socket.stop.subscribe();
-        let mut io = socket.io.lock().await;
+        let mut io = socket.read.lock().await;
         loop {
           if *stopping.borrow() {
             return Ok(json!({"data":null}));
@@ -136,7 +143,7 @@ impl Services {
             _ = stopping.changed() => return Ok(json!({"data":null})),
             frame = io.next() => match frame {
               Some(Ok(Message::Binary(bytes))) => return Ok(json!({"data":protocol::encode(&bytes)})),
-              Some(Ok(Message::Ping(_))) => { io.flush().await.map_err(|_|"Fixture ping failed")?; },
+              Some(Ok(Message::Ping(_))) => { socket.write.lock().await.flush().await.map_err(|_|"Fixture ping failed")?; },
               Some(Ok(Message::Pong(_))) => {},
               Some(Ok(Message::Close(_))) | None => return Ok(json!({"data":null})),
               _ => return Err("Fixture receive failed".into()),
@@ -148,12 +155,15 @@ impl Services {
         let socket = self.sockets.lock().unwrap().remove(text("socket_handle")?);
         if let Some(socket) = socket {
           socket.stop.send_replace(true);
-          let _ = socket.io.lock().await.close(None).await;
+          let _ = socket.write.lock().await.close().await;
         }
         Ok(Value::Null)
       }
       "secrets.get" => Ok(json!({"value":self.secrets.lock().unwrap().get(text("key")?).cloned()})),
       "secrets.set" => {
+        if self.fail_next_secret_write.swap(false, Ordering::SeqCst) {
+          return Err("Fixture preference write failed".into());
+        }
         self
           .secrets
           .lock()
@@ -322,7 +332,7 @@ impl Services {
     let sockets = std::mem::take(&mut *self.sockets.lock().unwrap());
     for (_, socket) in sockets {
       socket.stop.send_replace(true);
-      let _ = socket.io.lock().await.close(None).await;
+      let _ = socket.write.lock().await.close().await;
     }
   }
 }
@@ -334,6 +344,13 @@ impl HostServices for Adapter {
   }
 }
 
+#[derive(Default)]
+struct PeerSignals {
+  push_event: Notify,
+  stall_next_handshake: AtomicBool,
+  handshake_stalled: Notify,
+  stalled_socket_closed: Notify,
+}
 struct Peer {
   hub: String,
   key: String,
@@ -342,6 +359,7 @@ struct Peer {
   drop_ack: Arc<AtomicBool>,
   revoked: Arc<AtomicBool>,
   discovery: Arc<Mutex<Option<DiscoveryGroup>>>,
+  signals: Arc<PeerSignals>,
   task: tokio::task::JoinHandle<()>,
 }
 impl Drop for Peer {
@@ -376,6 +394,8 @@ impl Peer {
     let mutations = Arc::new(AtomicUsize::new(0));
     let drop_ack = Arc::new(AtomicBool::new(false));
     let revoked = Arc::new(AtomicBool::new(false));
+    let signals = Arc::new(PeerSignals::default());
+    let server_signals = signals.clone();
     let (counter, lost, revocation, seed, group) = (
       mutations.clone(),
       drop_ack.clone(),
@@ -396,6 +416,7 @@ impl Peer {
           revocation.clone(),
           group.clone(),
         );
+        let signals = server_signals.clone();
         clients.spawn(async move {
           let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
           let first = record(&mut socket).await.unwrap();
@@ -416,112 +437,122 @@ impl Peer {
           }
           let (response, mut channel) = NoiseResponder::new(&identity).unwrap().accept(&first).unwrap();
           assert_eq!(paired.lock().unwrap().as_deref(), Some(channel.remote_public_key()));
-          socket.send(Message::Binary(response.into())).await.unwrap();
-          let header = channel.decrypt(&record(&mut socket).await.unwrap()).unwrap();
-          if matches!(header, InnerMessage::DiscoveryRequest {}) {
-            let response = InnerMessage::DiscoveryResponse {
-              group: discovery.lock().unwrap().clone(),
-            };
-            socket
-              .send(Message::Binary(channel.encrypt(&response).unwrap().into()))
-              .await
-              .unwrap();
+          if signals.stall_next_handshake.swap(false, Ordering::SeqCst) {
+            signals.handshake_stalled.notify_one();
+            assert!(record(&mut socket).await.is_err());
+            signals.stalled_socket_closed.notify_one();
             return;
           }
-          let mut first_frame = Some(header);
-          let mut path = String::new();
-          let mut body = Vec::new();
+          socket.send(Message::Binary(response.into())).await.unwrap();
+          let mut requests = BTreeMap::<u32, (String, Vec<u8>)>::new();
+          let mut previous = 0;
+          let mut live_stream = None;
           loop {
-            let frame = match first_frame.take() {
-              Some(frame) => frame,
-              None => channel.decrypt(&record(&mut socket).await.unwrap()).unwrap(),
+            let bytes = tokio::select! {
+              result = record(&mut socket) => match result {
+                Ok(bytes) => bytes,
+                Err(_) => break,
+              },
+              _ = signals.push_event.notified(), if live_stream.is_some() => {
+                let event = InnerMessage::Chunk {
+                  data: protocol::encode(b"event: session-updated\ndata: {\"session_key\":\"after-reattach\"}\n\n"),
+                };
+                let bytes = channel.encrypt(&event.on_stream(live_stream.unwrap())).unwrap();
+                if socket.send(Message::Binary(bytes.into())).await.is_err() {
+                  break;
+                }
+                continue;
+              }
             };
-            match frame {
-              InnerMessage::DeviceRequest {
-                path: requested,
-                method,
-              } => {
-                if requested == "/api/v1/events" {
+            let InnerMessage::Stream { stream_id, frame } = channel.decrypt(&bytes).unwrap() else {
+              panic!("Expected a multiplexed request");
+            };
+            let mut reply = Vec::new();
+            match *frame {
+              InnerMessage::DiscoveryRequest {} => {
+                assert!(stream_id > previous);
+                previous = stream_id;
+                reply.push(InnerMessage::DiscoveryResponse {
+                  group: discovery.lock().unwrap().clone(),
+                });
+              }
+              InnerMessage::DeviceRequest { method, path } => {
+                assert!(stream_id > previous);
+                previous = stream_id;
+                if path == "/api/v1/events" {
                   assert_eq!(method, "POST");
                 }
-                path = requested;
+                requests.insert(stream_id, (path, Vec::new()));
               }
-              InnerMessage::RequestBody { data } => body.extend(protocol::decode(&data, MAX_CHUNK).unwrap()),
-              InnerMessage::RequestEnd {} => break,
+              InnerMessage::RequestBody { data } => {
+                requests
+                  .get_mut(&stream_id)
+                  .unwrap()
+                  .1
+                  .extend(protocol::decode(&data, MAX_CHUNK).unwrap());
+              }
+              InnerMessage::RequestEnd {} => {
+                let (path, body) = requests.remove(&stream_id).unwrap();
+                if path == "/api/v1/submit_session_input" {
+                  counter.fetch_add(1, Ordering::SeqCst);
+                  assert_eq!(
+                    serde_json::from_slice::<Value>(&body).unwrap()["request"]["prompt"],
+                    "fixture prompt once"
+                  );
+                  if lost.load(Ordering::SeqCst) {
+                    return;
+                  }
+                }
+                let status = if revoked.load(Ordering::SeqCst) { 401 } else { 200 };
+                let live = path == "/api/v1/events" && status == 200;
+                let payload = if status == 401 {
+                  serde_json::to_vec(&json!({"error":"Device revoked"})).unwrap()
+                } else if live {
+                  live_stream = Some(stream_id);
+                  assert!(
+                    !serde_json::from_slice::<Value>(&body).unwrap()["subscription_prefix"]
+                      .as_str()
+                      .unwrap()
+                      .is_empty()
+                  );
+                  b"event: ready\ndata: {}\n\nevent: session-updated\ndata: {\"session_key\":\"fixture\"}\n\n".to_vec()
+                } else if path == "/api/v1/health" {
+                  serde_json::to_vec(&json!({"version":protocol::VIEWER_API_VERSION})).unwrap()
+                } else {
+                  serde_json::to_vec(&json!({"fixture":"response","path":path,"padding":"x".repeat(70_000)})).unwrap()
+                };
+                reply.push(InnerMessage::Response {
+                  status,
+                  content_type: Some(if live { "text/event-stream" } else { "application/json" }.into()),
+                });
+                assert!(payload.chunks(MAX_CHUNK).len() <= protocol::RESPONSE_WINDOW);
+                reply.extend(payload.chunks(MAX_CHUNK).map(|chunk| InnerMessage::Chunk {
+                  data: protocol::encode(chunk),
+                }));
+                if !live {
+                  reply.push(InnerMessage::End {});
+                }
+              }
+              InnerMessage::Window { credits: 1 } => {}
+              InnerMessage::Cancel {} => {
+                requests.remove(&stream_id);
+                if live_stream == Some(stream_id) {
+                  live_stream = None;
+                }
+              }
               other => panic!("Invalid peer request {other:?}"),
             }
-          }
-          if path == "/api/v1/submit_session_input" {
-            counter.fetch_add(1, Ordering::SeqCst);
-            assert_eq!(
-              serde_json::from_slice::<Value>(&body).unwrap()["request"]["prompt"],
-              "fixture prompt once"
-            );
-            if lost.load(Ordering::SeqCst) {
-              return;
-            }
-          }
-          let status = if revoked.load(Ordering::SeqCst) { 401 } else { 200 };
-          let stream = path == "/api/v1/events";
-          if stream {
-            assert!(
-              !serde_json::from_slice::<Value>(&body).unwrap()["subscription_prefix"]
-                .as_str()
-                .unwrap()
-                .is_empty()
-            );
-          }
-          let payload = if status == 401 {
-            serde_json::to_vec(&json!({"error":"Device revoked"})).unwrap()
-          } else if stream {
-            b"event: ready\ndata: {}\n\nevent: session-updated\ndata: {\"session_key\":\"fixture\"}\n\n".to_vec()
-          } else {
-            serde_json::to_vec(&if path == "/api/v1/health" {
-              json!({"version":2})
-            } else {
-              json!({"fixture":"response","path":path,"padding":"x".repeat(70_000)})
-            })
-            .unwrap()
-          };
-          let header = InnerMessage::Response {
-            status,
-            content_type: Some(
-              if stream && status == 200 {
-                "text/event-stream"
-              } else {
-                "application/json"
+            for frame in reply {
+              if socket
+                .send(Message::Binary(
+                  channel.encrypt(&frame.on_stream(stream_id)).unwrap().into(),
+                ))
+                .await
+                .is_err()
+              {
+                return;
               }
-              .into(),
-            ),
-          };
-          socket
-            .send(Message::Binary(channel.encrypt(&header).unwrap().into()))
-            .await
-            .unwrap();
-          for chunk in payload.chunks(MAX_CHUNK) {
-            socket
-              .send(Message::Binary(
-                channel
-                  .encrypt(&InnerMessage::Chunk {
-                    data: protocol::encode(chunk),
-                  })
-                  .unwrap()
-                  .into(),
-              ))
-              .await
-              .unwrap();
-            let Ok(record) = record(&mut socket).await else { return };
-            assert!(matches!(
-              channel.decrypt(&record).unwrap(),
-              InnerMessage::Window { credits: 1 }
-            ));
-          }
-          if stream && status == 200 {
-            let _ = record(&mut socket).await;
-          } else {
-            let _ = socket
-              .send(Message::Binary(channel.encrypt(&InnerMessage::End {}).unwrap().into()))
-              .await;
+            }
           }
         });
       }
@@ -534,6 +565,7 @@ impl Peer {
       drop_ack,
       revoked,
       discovery,
+      signals,
       task,
     }
   }
@@ -688,6 +720,7 @@ async fn interpreted_guest_pairs_streams_reuses_view_connections_and_never_repla
     .unwrap();
   assert_eq!(status["hosts"].as_array().unwrap().len(), 1);
   assert!(status["selected_host_id"].is_null());
+  let previous_sockets = services.next.load(Ordering::SeqCst);
   // Four views finishing startup together still claim one run connection.
   let simultaneous = futures_util::future::join_all((0..4).map(|_| {
     invoke(
@@ -845,14 +878,57 @@ async fn interpreted_guest_pairs_streams_reuses_view_connections_and_never_repla
   let stream = chunk(&run, &mut events, "hub-client-stream-chunk").await;
   let bytes = protocol::decode(stream["data"].as_str().unwrap(), MAX_CHUNK).unwrap();
   assert!(std::str::from_utf8(&bytes).unwrap().contains("event: session-updated"));
-  // Losing a mutation acknowledgement must never cause guest reconnect to send it again.
-  peer.drop_ack.store(true, Ordering::SeqCst);
-  assert!(invoke(&run,"hub_client_request",json!({"connection_id":id,"command":"submit_session_input","payload":{"request":{"prompt":"fixture prompt once"}},"response_id":"lost-ack"})).await.unwrap_err().message.contains("not replayed"));
-  tokio::time::sleep(Duration::from_millis(50)).await;
-  assert_eq!(peer.mutations.load(Ordering::SeqCst), 1);
+  let open_params = json!({"hub_url":peer.hub,"host_id":HOST_ID,"host_public_key":peer.key});
+  services.fail_next_secret_write.store(true, Ordering::SeqCst);
+  let reattach_error = invoke(&run, "hub_client_open", open_params.clone()).await.unwrap_err();
+  assert!(reattach_error.message.contains("Fixture preference write failed"));
+  let snapshot = invoke(&run, "snapshot", json!({})).await.unwrap();
+  assert_eq!(snapshot["connections"].as_array().unwrap().len(), 1);
+  assert_eq!(snapshot["connections"][0]["connection_id"], id);
+  peer.signals.push_event.notify_one();
+  let followup = chunk(&run, &mut events, "hub-client-stream-chunk").await;
+  assert_eq!(followup["channel_id"], stream["channel_id"]);
+  assert_eq!(followup["generation"], stream["generation"]);
+  let bytes = protocol::decode(followup["data"].as_str().unwrap(), MAX_CHUNK).unwrap();
+  assert!(std::str::from_utf8(&bytes).unwrap().contains("after-reattach"));
+  assert_eq!(
+    services.next.load(Ordering::SeqCst) - previous_sockets,
+    1,
+    "concurrent opens, discovery, commands and the live stream share one authenticated socket"
+  );
+  // Start a workspace without a live listener so only the command can dial the replacement session.
   invoke(&run, "hub_client_close", json!({"connection_id":id}))
     .await
     .unwrap();
+  let workspace = invoke(&run, "hub_client_open", open_params).await.unwrap();
+  let id = workspace["connection_id"].as_str().unwrap().to_owned();
+  // Losing a mutation acknowledgement must never cause guest reconnect to send it again.
+  peer.drop_ack.store(true, Ordering::SeqCst);
+  assert!(invoke(&run,"hub_client_request",json!({"connection_id":id,"command":"submit_session_input","payload":{"request":{"prompt":"fixture prompt once"}},"response_id":"lost-ack"})).await.unwrap_err().message.contains("not replayed"));
+  peer.signals.stall_next_handshake.store(true, Ordering::SeqCst);
+  let reader = run.clone();
+  let command_id = id.clone();
+  let reconnect = tokio::spawn(async move {
+    invoke(
+      &reader,
+      "hub_client_request",
+      json!({"connection_id":command_id,"command":"list_sessions","payload":{},"response_id":"stalled-read"}),
+    )
+    .await
+  });
+  tokio::time::timeout(Duration::from_secs(5), peer.signals.handshake_stalled.notified())
+    .await
+    .expect("the command reached the replacement Noise handshake");
+  tokio::time::timeout(Duration::from_secs(3), async {
+    invoke(&run, "hub_client_close", json!({"connection_id":id}))
+      .await
+      .unwrap();
+    assert!(reconnect.await.unwrap().is_err());
+    peer.signals.stalled_socket_closed.notified().await;
+  })
+  .await
+  .expect("disconnect must cancel the command and close the stalled socket");
+  assert_eq!(peer.mutations.load(Ordering::SeqCst), 1);
 
   run.stop().await;
   services.close().await;

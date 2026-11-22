@@ -36,11 +36,20 @@ The standard `Noise_IK_25519_ChaChaPoly_BLAKE2s` protocol is implemented by
 viewing device's key and checks its authorization. Both endpoints derive their
 traffic keys after the handshake.
 
-Each request/SSE stream has a fresh channel. Noise records, queues, channels,
-and request bodies are bounded; requests up to 1 MiB are fragmented, and
-response credits are encrypted. Tampering, reordering, replay, or a bad pin
-ends the channel. Disconnection never retries HTTP requests or agent input;
-a lost response can mean delivery is uncertain.
+A viewer authenticates each physical machine connection once. Commands, live
+events and discovery use numbered streams inside that channel. Browser and
+desktop clients also negotiate their direct path through the authenticated
+relay. The first request on the new physical path performs a fresh handshake.
+Passkey ceremonies have a dedicated channel binding.
+
+Each connection admits up to 16 concurrent streams. New stream IDs increase
+monotonically. Each response has its own eight-record credit window. A slow
+reader can pause a transfer while other commands continue. Requests up to
+1 MiB are fragmented into bounded records. The connector checks device trust
+and route permissions as it admits work and monitors active connections for
+revocation. Physical disconnection ends its streams. A lost command response
+is reported as uncertain, and only a read-only event listener reconnects
+automatically.
 
 Keep HTTPS termination for remote operation. Proxy WebSocket upgrades on
 `/hub/v1/tunnel` and `/hub/v1/secure/*`, and apply upgrade rate limits. Secure

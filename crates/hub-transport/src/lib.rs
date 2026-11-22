@@ -12,11 +12,12 @@ pub const RECORD_CHANNEL_LABEL: &str = "tokn-record-v1";
 pub type TransportResult<T> = Result<T, String>;
 pub type BoxTransport = Box<dyn RecordTransport>;
 
-/// One independently ordered exchange, with one encrypted record per message.
+/// One ordered channel, with one encrypted record per message.
 /// A failed send must never be retried on another carrier: delivery is uncertain.
 #[async_trait]
 pub trait RecordTransport: Send {
   async fn send(&mut self, record: Vec<u8>) -> TransportResult<()>;
+  /// Wait for a record or closure. Callers bound handshake and response times.
   async fn receive(&mut self) -> TransportResult<Option<Vec<u8>>>;
   async fn close(&mut self);
 }

@@ -75,7 +75,7 @@ export function SessionModelPicker({ model, provider, input_busy = false, select
       <span>{label}</span><ChevronIcon aria-hidden="true" />
     </button> : <span className="session-model__static" title={reason}>
       <span className="session-model__name">{label}</span>{mode === "session" && !selected_model && identity && (model.state?.source === "recorded" || model.state?.source === "catalog")
-        ? <span className="session-model__recorded">{model.state.source === "recorded" ? "Recorded" : "Catalog"}</span> : null}
+        ? <span className="session-model__recorded">{model.state.source === "recorded" ? "Recorded" : "Model list"}</span> : null}
     </span>}
     {selected_model ? <button className="text-button session-model__retry" type="button" disabled={input_busy} onClick={on_clear}>{mode === "creation" ? "Use runtime default" : "Use current model"}</button> : null}
     {!model.can_open && !model.checking ? <small className="session-model__reason" title={reason}>{reason}</small> : null}

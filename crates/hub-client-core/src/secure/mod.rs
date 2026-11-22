@@ -10,5 +10,5 @@ mod noise;
 pub use identity::{NoiseIdentity, decode_public_key};
 pub use noise::{
   HostAuthOperation, InnerMessage, MAX_AUTH_PAYLOAD, MAX_CHUNK, MAX_DIRECT_SDP, MAX_ICE_SERVERS, MAX_PLAINTEXT,
-  MAX_RECORD, MAX_REQUEST_BODY, NoiseInitiator, NoiseResponder, SecureChannel, validate_ice_servers,
+  MAX_RECORD, MAX_REQUEST_BODY, MAX_STREAMS, NoiseInitiator, NoiseResponder, SecureChannel, validate_ice_servers,
 };

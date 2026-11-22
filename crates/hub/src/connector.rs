@@ -324,7 +324,8 @@ async fn connect_once(
     .await
     .map_err(|_| "Hub authentication timed out")??;
   let (outgoing, mut outgoing_rx) = mpsc::channel::<Frame>(64);
-  let mut secure_channels: HashMap<u64, (tokio::task::AbortHandle, mpsc::Sender<Vec<u8>>)> = HashMap::new();
+  let request_bytes = Arc::new(tokio::sync::Semaphore::new(protocol::MAX_REQUESTS * protocol::MAX_BODY));
+  let mut secure_channels: HashMap<u64, (tokio::task::AbortHandle, mpsc::Sender<bytes::Bytes>)> = HashMap::new();
   let mut tasks = JoinSet::new();
   let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
   let mut last_received = Instant::now();
@@ -359,7 +360,7 @@ async fn connect_once(
                   continue;
                 }
                 let secure = secure.clone();
-                let (incoming, received) = mpsc::channel(protocol::MAX_BODY / protocol::CHUNK_SIZE + 4);
+                let (incoming, received) = mpsc::channel(protocol::REQUEST_RECORD_SLOTS);
                 let outgoing = outgoing.clone();
                 let config = config.clone();
                 let client = client.clone();
@@ -375,7 +376,7 @@ async fn connect_once(
               Frame::SecureData { channel_id, data } if ready => {
                 let record = protocol::decode(&data, protocol::MAX_SECURE_RECORD)?;
                 if let Some((_, incoming)) = secure_channels.get(&channel_id) {
-                  if record.is_empty() || incoming.try_send(record).is_err() {
+                  if record.is_empty() || protocol::budget_record(record, &request_bytes).is_none_or(|record| incoming.try_send(record).is_err()) {
                     if let Some((task, _)) = secure_channels.remove(&channel_id) { task.abort(); }
                     enqueue(&outgoing, Frame::SecureClose { channel_id }).await?;
                   }

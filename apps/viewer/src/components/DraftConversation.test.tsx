@@ -163,12 +163,12 @@ describe("draft conversation", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Chosen provider/ }));
     fireEvent.click(screen.getByRole("button", { name: "Close model selection" }));
     fireEvent.click(screen.getByRole("button", { name: /Model: Chosen/ }));
-    await screen.findByText(/The model catalog changed/);
+    await screen.findByText(/The list of available models changed/);
     expect(load).toHaveBeenCalledTimes(2);
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: /Chosen provider/ }));
     expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
-    expect(screen.queryByText(/The model catalog changed/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/The list of available models changed/)).not.toBeInTheDocument();
     expect(input.on_send).not.toHaveBeenCalled();
   });
 

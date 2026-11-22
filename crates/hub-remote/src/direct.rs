@@ -1,16 +1,10 @@
 //! Selection of physical record carriers; viewer commands never get retried here.
-use crate::{
-  Connection,
-  exchange::{self, Exchange},
-};
+use crate::{Connection, exchange::Exchange, pinned_relay, session::Session};
 use serde::Serialize;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{Mutex, watch};
-use tokn_hub_client_core::{
-  protocol,
-  secure::{InnerMessage, NoiseInitiator},
-};
-use tokn_hub_transport::{BoxTransport, WebRtcPeer};
+use tokn_hub_client_core::{protocol, secure::InnerMessage};
+use tokn_hub_transport::WebRtcPeer;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,40 +29,44 @@ impl Default for TransportState {
   }
 }
 
+#[derive(Default)]
+struct Channels {
+  direct: Option<(WebRtcPeer, Arc<Session>)>,
+  relay: Option<Arc<Session>>,
+}
+
 pub(crate) struct DirectRoute {
-  peer: Mutex<Option<WebRtcPeer>>,
+  channels: Mutex<Channels>,
   pub changes: watch::Sender<TransportState>,
 }
 
 impl Default for DirectRoute {
   fn default() -> Self {
     Self {
-      peer: Mutex::new(None),
+      channels: Mutex::default(),
       changes: watch::channel(TransportState::default()).0,
     }
   }
 }
 
 impl DirectRoute {
-  pub async fn open(&self, connection: &Connection) -> Result<BoxTransport, String> {
-    let peer = self.peer.lock().await.clone();
-    if let Some(peer) = peer {
-      // Falling back before opening an exchange is safe: no command has been
-      // encrypted or sent. A failed exchange itself is never replayed.
-      if !peer.is_closed() {
-        if let Ok(transport) = peer.open_record().await {
-          return Ok(transport);
-        }
+  pub async fn session(&self, connection: &Connection) -> Result<Arc<Session>, String> {
+    let mut channels = self.channels.lock().await;
+    if let Some((peer, session)) = &channels.direct {
+      if !peer.is_closed() && !session.stopped().is_cancelled() {
+        return Ok(session.clone());
       }
-      if peer.is_closed() {
-        self
-          .fallback(connection, "Direct connection lost; using the encrypted Hub relay")
-          .await;
-      }
-      // Local admission can be exhausted by independent exchanges. Route
-      // this new request through the relay without disrupting existing work.
     }
-    exchange::relay_transport(&connection.endpoint).await
+    // Serialize first use (and recovery) so simultaneous requests perform
+    // exactly one handshake. Only unsent work can select a new carrier.
+    pinned_relay::session(
+      &mut channels.relay,
+      &connection.endpoint,
+      &connection.identity,
+      &connection.info.host_public_key,
+      &connection.cancellation,
+    )
+    .await
   }
 
   fn publish(&self, connection: &Connection, state: TransportState) {
@@ -76,22 +74,9 @@ impl DirectRoute {
     connection.transport_event(state);
   }
 
-  async fn fallback(&self, connection: &Connection, reason: &str) {
-    let peer = self.peer.lock().await.take();
-    self.publish(
-      connection,
-      TransportState {
-        kind: TransportKind::Relay,
-        reason: Some(reason.into()),
-      },
-    );
-    if let Some(peer) = peer {
-      peer.close().await;
-    }
-  }
-
   pub async fn close(&self) {
-    if let Some(peer) = self.peer.lock().await.take() {
+    let channels = std::mem::take(&mut *self.channels.lock().await);
+    if let Some((peer, _)) = channels.direct {
       peer.close().await;
     }
   }
@@ -114,46 +99,33 @@ impl Drop for Candidate {
   }
 }
 
-async fn signal(connection: &Connection, message: InnerMessage) -> Result<InnerMessage, String> {
-  let mut transport = exchange::relay_transport(&connection.endpoint).await?;
-  let mut initiator = NoiseInitiator::new(&connection.identity, &connection.info.host_public_key)?;
-  transport.send(initiator.start()?).await?;
-  let mut channel = initiator.finish(&exchange::read_record(&mut transport).await?)?;
-  transport.send(channel.encrypt(&message)?).await?;
-  let reply = channel.decrypt(&exchange::read_record(&mut transport).await?)?;
-  transport.close().await;
-  match reply {
-    InnerMessage::Error { message } => Err(message),
-    reply => Ok(reply),
-  }
-}
-
-async fn candidate(connection: &Connection) -> Result<Candidate, String> {
-  let InnerMessage::DirectConfig { ice_servers } = signal(connection, InnerMessage::DirectConfigRequest {}).await?
+async fn candidate(connection: &Connection) -> Result<(Candidate, Arc<Session>), String> {
+  let relay = connection.direct.session(connection).await?;
+  let InnerMessage::DirectConfig { ice_servers } = relay.request_reply(InnerMessage::DirectConfigRequest {}).await?
   else {
     return Err("Host does not support direct connections".into());
   };
   let (peer, offer) = WebRtcPeer::offer(ice_servers).await?;
   let peer = Candidate(Some(peer));
-  let InnerMessage::DirectAnswer { sdp } = signal(connection, InnerMessage::DirectOffer { sdp: offer }).await? else {
+  let InnerMessage::DirectAnswer { sdp } = relay.request_reply(InnerMessage::DirectOffer { sdp: offer }).await? else {
     return Err("Host did not answer direct connection negotiation".into());
   };
   peer.peer().accept_answer(&sdp).await?;
-  let health = Exchange::open(
+  let session = Session::authenticate(
     peer.peer().open_record().await?,
     &connection.identity,
     &connection.info.host_public_key,
-    "GET",
-    "/api/v1/health",
-    &[],
+    connection.cancellation.clone(),
   )
-  .await?
-  .json()
   .await?;
+  let health = Exchange::open(&session, "GET", "/api/v1/health", &[])
+    .await?
+    .json()
+    .await?;
   if health.get("version").and_then(serde_json::Value::as_u64) != Some(protocol::VIEWER_API_VERSION) {
     return Err("Direct machine uses an unsupported viewer API version. Update the machine's viewer.".into());
   }
-  Ok(peer)
+  Ok((peer, session))
 }
 
 pub(crate) async fn upgrade(connection: Arc<Connection>) {
@@ -179,7 +151,7 @@ async fn upgrade_once(connection: Arc<Connection>) {
     result = tokio::time::timeout(Duration::from_secs(20), candidate(&connection)) =>
       result.map_err(|_| "Direct negotiation timed out".to_owned()).and_then(|result| result),
   };
-  let mut candidate = match result {
+  let (mut candidate, session) = match result {
     Ok(peer) => peer,
     Err(_) => {
       if !connection.cancellation.is_cancelled() {
@@ -194,14 +166,16 @@ async fn upgrade_once(connection: Arc<Connection>) {
       return;
     }
   };
-  // Keep the peer alive until the machine is closed, independently of Hub
-  // connectivity. Each request captures its own carrier and Noise channel.
-  let mut installed = connection.direct.peer.lock().await;
+  // Publish the exact channel that passed the probe. Requests already on
+  // the relay retain their senders until their responses have drained.
+  let mut installed = connection.direct.channels.lock().await;
   if connection.cancellation.is_cancelled() {
     return;
   }
   let peer = candidate.0.take().expect("candidate owns peer");
-  *installed = Some(peer.clone());
+  let session_closed = session.stopped();
+  installed.direct = Some((peer.clone(), session));
+  installed.relay.take();
   drop(installed);
   connection.direct.publish(
     &connection,
@@ -212,26 +186,31 @@ async fn upgrade_once(connection: Arc<Connection>) {
   );
   let closed = peer.closed();
   let retiring = peer.retiring();
-  tokio::select! {
-    _ = connection.cancellation.cancelled() => connection.direct.close().await,
-    _ = retiring.cancelled() => {
-      connection.direct.peer.lock().await.take();
-      connection.direct.publish(&connection, TransportState {
+  let draining = tokio::select! {
+    _ = connection.cancellation.cancelled() => false,
+    _ = retiring.cancelled() => true,
+    _ = closed.cancelled() => false,
+    _ = session_closed.cancelled() => false,
+  };
+  connection.direct.channels.lock().await.direct.take();
+  if !connection.cancellation.is_cancelled() {
+    connection.direct.publish(
+      &connection,
+      TransportState {
         kind: TransportKind::Relay,
-        reason: Some("Refreshing the direct connection; using the encrypted Hub relay".into()),
-      });
-      let cancellation = connection.cancellation.clone();
-      tokio::spawn(async move {
-        tokio::select! {
-          _ = cancellation.cancelled() => peer.close().await,
-          _ = peer.close_when_idle() => {},
-        }
-      });
-    },
-    _ = closed.cancelled() => {
-      if !connection.cancellation.is_cancelled() {
-        connection.direct.fallback(&connection, "Direct connection lost; using the encrypted Hub relay").await;
+        reason: Some("Direct connection ended; using the encrypted Hub relay".into()),
+      },
+    );
+  }
+  if draining {
+    let cancellation = connection.cancellation.clone();
+    tokio::spawn(async move {
+      tokio::select! {
+        _ = cancellation.cancelled() => peer.close().await,
+        _ = peer.close_when_idle() => {},
       }
-    },
+    });
+  } else {
+    peer.close().await;
   }
 }

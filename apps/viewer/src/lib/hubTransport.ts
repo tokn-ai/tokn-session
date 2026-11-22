@@ -1,6 +1,8 @@
 /** Carriers move bounded ordered ciphertext records; Noise owns authentication. */
 export interface RecordTransport {
   send(record: Uint8Array): void;
+  waitWritable(): Promise<void>;
+  setReceiveWindow(records: number): void;
   read(timeout?: number): Promise<Uint8Array>;
   close(error?: Error): void;
 }
@@ -14,6 +16,7 @@ export type SocketFactory = (url: string) => WebSocket;
 export const browserSocket: SocketFactory = (url) => new WebSocket(url);
 export const MAX_RECORD = 65_535;
 const MAX_QUEUE = 16;
+const MAX_QUEUED_BYTES = 8 * 1024 * 1024;
 const MAX_BUFFER = 2 * 1024 * 1024;
 const CONNECT_TIMEOUT = 15_000;
 const MAX_SDP = 32 * 1024;
@@ -27,6 +30,8 @@ type RecordEndpoint = Pick<WebSocket, "binaryType" | "bufferedAmount" | "onmessa
 /** Both adapters enforce the same bounds, cancellation, and single-reader rule. */
 class BoundedRecords implements RecordTransport {
   private queue: Uint8Array[] = [];
+  private queuedBytes = 0;
+  private receiveWindow = MAX_QUEUE;
   private pending?: { resolve: (record: Uint8Array) => void; reject: (error: Error) => void };
   private failure?: Error;
   private timer?: ReturnType<typeof setTimeout>;
@@ -45,8 +50,12 @@ class BoundedRecords implements RecordTransport {
       if (this.pending) {
         const { resolve } = this.pending; this.pending = undefined;
         clearTimeout(this.timer); resolve(record);
-      } else if (this.queue.length >= MAX_QUEUE) this.close(new Error("Encrypted response queue exceeds its limit."));
-      else this.queue.push(record);
+      } else if (this.queue.length >= this.receiveWindow || this.queuedBytes + record.length > MAX_QUEUED_BYTES) {
+        this.close(new Error("Encrypted response queue exceeds its limit."));
+      } else {
+        this.queue.push(record);
+        this.queuedBytes += record.length;
+      }
     };
     endpoint.onerror = () => this.close(new Error("Encrypted connection failed; request delivery may be uncertain."));
     endpoint.onclose = () => this.close(new Error("Encrypted connection closed; request delivery may be uncertain."));
@@ -82,14 +91,28 @@ class BoundedRecords implements RecordTransport {
     this.endpoint.send(record);
   }
 
+  setReceiveWindow(records: number): void { this.receiveWindow = records; }
+
+  async waitWritable(): Promise<void> {
+    const deadline = Date.now() + 10_000;
+    while (!this.failure && this.endpoint.bufferedAmount > MAX_BUFFER - MAX_RECORD) {
+      if (Date.now() >= deadline) {
+        this.close(new Error("Encrypted write timed out; request delivery may be uncertain."));
+        break;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    if (this.failure) throw this.failure;
+  }
+
   read(timeout = 90_000): Promise<Uint8Array> {
     const next = this.queue.shift();
-    if (next) return Promise.resolve(next);
+    if (next) { this.queuedBytes -= next.length; return Promise.resolve(next); }
     if (this.failure) return Promise.reject(this.failure);
     if (this.pending) return Promise.reject(new Error("Concurrent encrypted record reads are forbidden."));
     return new Promise((resolve, reject) => {
       this.pending = { resolve, reject };
-      this.timer = setTimeout(() => this.close(new Error("Encrypted response timed out; requests are not retried.")), timeout);
+      if (timeout > 0) this.timer = setTimeout(() => this.close(new Error("Encrypted response timed out; requests are not retried.")), timeout);
     });
   }
 
@@ -98,7 +121,7 @@ class BoundedRecords implements RecordTransport {
     this.failure = error; clearTimeout(this.timer);
     this.opening?.(error);
     this.signal.removeEventListener("abort", this.abort);
-    this.pending?.reject(error); this.pending = undefined; this.queue = [];
+    this.pending?.reject(error); this.pending = undefined; this.queue = []; this.queuedBytes = 0;
     this.endpoint.onmessage = this.endpoint.onerror = this.endpoint.onclose = this.endpoint.onopen = null;
     this.endpoint.close();
   }
@@ -113,7 +136,7 @@ export class RelayCarrier implements RecordCarrier {
     await records.waitForOpen(() => socket.readyState === WebSocket.OPEN, "the Hub");
     return records;
   }
-  close(): void { /* Each exchange closes its own relay socket. */ }
+  close(): void { /* Owners close their record transports. */ }
 }
 
 export interface DirectPeer extends RecordCarrier {
@@ -131,7 +154,7 @@ function validateSdp(sdp: string): void {
   if (!sdp || new TextEncoder().encode(sdp).length > MAX_SDP) throw new Error("Direct connection description exceeds its limit.");
 }
 
-/** One peer per machine, with a fresh reliable channel for every Noise exchange. */
+/** The viewer reuses an authenticated reliable channel on this peer. */
 export class WebRtcPeer implements DirectPeer {
   private peer: RTCPeerConnection;
   private initial?: RTCDataChannel;

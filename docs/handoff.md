@@ -683,9 +683,12 @@ starts explicitly on each app launch. See [desktop hosting](hub-pairing.md#host-
 Remote app/browser clients use the Hub for discovery, pairing and encrypted
 WebRTC negotiation, then prefer direct connections with encrypted Hub relay
 fallback. `hub-transport` supplies a bounded record interface for future native
-tunnels; each WebRTC DataChannel retains fresh Noise IK and existing host/device
-authorization. Direct peers survive Hub reconnects; path changes migrate live
-streams without replaying commands. No public STUN service is enabled by default;
+tunnels. Web, remote desktop, the local viewer proxy and Apell share concurrent
+viewer requests and live events on one authenticated channel per active
+physical path. Device grants are checked for every request. Discovery and
+direct negotiation reuse the relay channel. Switching to a direct channel
+authenticates its pinned host once. Direct peers survive Hub reconnects, and
+event streams can resume without resubmitting commands. No public STUN service is enabled by default;
 host `--stun-server` settings persist and reach authenticated clients. The panel
 shows Direct/Relayed separately from encryption. See [transports](hub-transports.md).
 Hub serves the browser UI and forwards encrypted records when needed; endpoints run the shared Rust pairing/Noise
