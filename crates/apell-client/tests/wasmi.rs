@@ -437,7 +437,15 @@ impl Peer {
               None => channel.decrypt(&record(&mut socket).await.unwrap()).unwrap(),
             };
             match frame {
-              InnerMessage::DeviceRequest { path: requested, .. } => path = requested,
+              InnerMessage::DeviceRequest {
+                path: requested,
+                method,
+              } => {
+                if requested == "/api/v1/events" {
+                  assert_eq!(method, "POST");
+                }
+                path = requested;
+              }
               InnerMessage::RequestBody { data } => body.extend(protocol::decode(&data, MAX_CHUNK).unwrap()),
               InnerMessage::RequestEnd {} => break,
               other => panic!("Invalid peer request {other:?}"),
@@ -455,13 +463,21 @@ impl Peer {
           }
           let status = if revoked.load(Ordering::SeqCst) { 401 } else { 200 };
           let stream = path == "/api/v1/events";
+          if stream {
+            assert!(
+              !serde_json::from_slice::<Value>(&body).unwrap()["subscription_prefix"]
+                .as_str()
+                .unwrap()
+                .is_empty()
+            );
+          }
           let payload = if status == 401 {
             serde_json::to_vec(&json!({"error":"Device revoked"})).unwrap()
           } else if stream {
             b"event: ready\ndata: {}\n\nevent: session-updated\ndata: {\"session_key\":\"fixture\"}\n\n".to_vec()
           } else {
             serde_json::to_vec(&if path == "/api/v1/health" {
-              json!({"version":1})
+              json!({"version":2})
             } else {
               json!({"fixture":"response","path":path,"padding":"x".repeat(70_000)})
             })

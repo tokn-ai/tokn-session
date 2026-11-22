@@ -50,9 +50,10 @@ afterEach(() => { cleanup(); localStorage.clear(); vi.useRealTimers(); });
 describe("background update interests", () => {
   it("responds to shared Settings choices without restarting for unrelated display preferences", async () => {
     const connection = transport();
-    const { result } = renderHook(() => useBackgroundUpdates(connection.invoke, connection.listen, connection.release, ["visible"]));
+    const { result } = renderHook(() => useBackgroundUpdates(connection.invoke, connection.listen, connection.release, ["visible"], "viewer"));
     await act(async () => {});
     const first = connection.requests()[0];
+    expect(first.subscription_id).toMatch(/^viewer:/);
     await act(async () => updateViewerPreferences({ sidebar_order: "project", show_lifecycle: true, conversation_update_level: "all" }));
     expect(connection.requests()).toHaveLength(1);
     expect(connection.release).not.toHaveBeenCalled();

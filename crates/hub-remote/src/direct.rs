@@ -6,7 +6,10 @@ use crate::{
 use serde::Serialize;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{Mutex, watch};
-use tokn_hub_client_core::secure::{InnerMessage, NoiseInitiator};
+use tokn_hub_client_core::{
+  protocol,
+  secure::{InnerMessage, NoiseInitiator},
+};
 use tokn_hub_transport::{BoxTransport, WebRtcPeer};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -147,8 +150,8 @@ async fn candidate(connection: &Connection) -> Result<Candidate, String> {
   .await?
   .json()
   .await?;
-  if health.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
-    return Err("Direct machine uses an unsupported viewer API version".into());
+  if health.get("version").and_then(serde_json::Value::as_u64) != Some(protocol::VIEWER_API_VERSION) {
+    return Err("Direct machine uses an unsupported viewer API version. Update the machine's viewer.".into());
   }
   Ok(peer)
 }

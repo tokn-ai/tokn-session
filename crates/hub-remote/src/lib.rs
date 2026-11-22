@@ -316,8 +316,8 @@ impl RemoteManager {
       direct: direct::DirectRoute::default(),
     };
     let health = connection.request("health", json!({})).await?;
-    if health.get("version").and_then(Value::as_u64) != Some(1) {
-      return Err("Machine uses an unsupported viewer API version".into());
+    if health.get("version").and_then(Value::as_u64) != Some(protocol::VIEWER_API_VERSION) {
+      return Err("Machine uses an unsupported viewer API version. Update the machine's viewer.".into());
     }
     if let Ok(group) = discovery_group(&hub, &connection.identity, &host).await {
       let host_id = host.host_id;
@@ -645,6 +645,9 @@ impl Connection {
   }
 
   async fn request(&self, command: &str, payload: Value) -> Result<Value, String> {
+    if command == "events" {
+      return Err("Use the live event listener for event streams".into());
+    }
     if command.is_empty() || command.len() > 64 || !command.bytes().all(|ch| ch.is_ascii_lowercase() || ch == b'_') {
       return Err("Invalid viewer command".into());
     }

@@ -518,7 +518,7 @@ mod tests {
                   content_type: Some("application/json".into()),
                 },
                 InnerMessage::Chunk {
-                  data: protocol::encode(br#"{"version":1}"#),
+                  data: protocol::encode(br#"{"version":2}"#),
                 },
                 InnerMessage::End {},
               ] {
@@ -598,7 +598,7 @@ mod tests {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(body, br#"{"version":1}"#.as_slice());
+    assert_eq!(body, br#"{"version":2}"#.as_slice());
     assert_eq!(pairing_count.load(Ordering::SeqCst), 2);
     assert_eq!(noise_count.load(Ordering::SeqCst), 1);
     server.abort();

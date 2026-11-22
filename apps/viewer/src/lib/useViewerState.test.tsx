@@ -17,7 +17,8 @@ import {
   listenForSessionUpdates,
   listenForSessionNotifications,
   listenForSubscriptionLoss,
-  loadSessionUpdates,
+  openSession,
+  releaseSession,
   inspectSessionEvent,
   loadToolDetails,
   renewSessionSubscriptions,
@@ -55,9 +56,9 @@ vi.mock("./tauri", () => ({
   renewBackgroundSubscriptions: vi.fn(() => Promise.resolve()),
   listenForBackgroundUpdates: vi.fn(() => Promise.resolve(vi.fn())),
   updateSessionView: vi.fn(() => Promise.resolve()),
-  loadSessionUpdates: vi.fn(() => Promise.reject(new Error("Unknown viewer command"))),
-  loadGroupDetails: vi.fn((request) => loadSessionUpdates(request)),
-  loadToolDetails: vi.fn((request) => loadEventDetail(request)),
+  releaseSession: vi.fn(async () => {}),
+  openSession: vi.fn(() => Promise.reject(new Error("Unknown viewer command"))),
+  loadToolDetails: vi.fn((request, send) => loadEventDetail(request, send)),
   inspectSessionEvent: vi.fn((request) => loadEventDetail(request)),
   renewSessionSubscriptions: vi.fn(() => Promise.resolve()),
   listenForSessionUpdates: vi.fn(() => Promise.resolve(vi.fn())),
@@ -89,11 +90,19 @@ beforeEach(() => {
   vi.mocked(listenForBackgroundUpdates).mockReset().mockResolvedValue(vi.fn());
   vi.mocked(loadToolDetails).mockClear();
   vi.mocked(inspectSessionEvent).mockReset().mockImplementation((request) => loadEventDetail(request));
-  vi.mocked(loadSessionUpdates).mockReset().mockRejectedValue(new Error("Unknown viewer command"));
+  // Build atomic-open fixtures from the same pages used by the timeline and
+  // disclosure tests. A disconnected follow exercises indexed refresh/retry.
+  vi.mocked(releaseSession).mockClear();
+  let revision = 0;
+  vi.mocked(openSession).mockReset().mockImplementation(async (request, send) => {
+    const page = await loadEventPage({ session_key: request.session_key, direction: "backward",
+      ...(request.history_cursor ? { cursor: request.history_cursor, window_mode: "earlier" } : { window_mode: "retained" }) }, send);
+    return { ...semanticSnapshot(request, { follow_error: "Follow disconnected", ...page }), revision: String(++revision) };
+  });
   vi.mocked(listenForSessionUpdates).mockReset().mockResolvedValue(vi.fn());
   vi.mocked(listenForSessionNotifications).mockReset().mockResolvedValue(vi.fn());
   vi.mocked(listenForSubscriptionLoss).mockReset().mockResolvedValue(vi.fn());
-  vi.mocked(renewSessionSubscriptions).mockReset().mockImplementation(async (ids) => ({ renewed_ids: ids, missing_ids: [], updates: [] }));
+  vi.mocked(renewSessionSubscriptions).mockReset().mockImplementation(async (ids) => ({ renewed_ids: ids, missing_ids: [] }));
   vi.mocked(updateSessionView).mockReset().mockResolvedValue(undefined);
   vi.mocked(listenForRelayChanges).mockReset().mockResolvedValue(vi.fn());
   vi.mocked(acknowledgeSessionAttention).mockReset().mockResolvedValue({ changed: false });
@@ -427,17 +436,17 @@ describe("sidebar view preference", () => {
     vi.mocked(listSessions)
       .mockResolvedValueOnce({ sessions: [session("settings-open")], next_cursor: null, source_errors: [], pending_providers: [] })
       .mockResolvedValueOnce({ sessions: [session("settings-other")], next_cursor: null, source_errors: [], pending_providers: [] });
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, toolEventPage()));
+    vi.mocked(openSession).mockImplementation(async (request) => semanticSnapshot(request, toolEventPage()));
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "settings-open");
     await waitFor(() => expect(result.current.events).toEqual(toolEventPage().events));
-    const historyRequests = vi.mocked(loadSessionUpdates).mock.calls.length;
+    const historyRequests = vi.mocked(openSession).mock.calls.length;
     act(() => updateViewerPreferences({ sidebar_order: "project", show_lifecycle: true }));
     await waitFor(() => expect(result.current.sessions[0]?.session_key).toBe("settings-other"));
     expect(result.current.sessionOrder).toBe("project");
     expect(result.current.selectedSession?.session_key).toBe("settings-open");
     expect(result.current.events).toEqual(toolEventPage().events);
-    expect(loadSessionUpdates).toHaveBeenCalledTimes(historyRequests);
+    expect(openSession).toHaveBeenCalledTimes(historyRequests);
     expect(subscribeBackgroundUpdates).toHaveBeenCalledOnce();
   });
 
@@ -525,8 +534,8 @@ describe("retained session turns", () => {
 
 describe("useViewerState Relay updates", () => {
   it("keeps the last good page visible while a followed session fails and clears its warning on recovery", async () => {
-    let emit: ((change: RelayChange) => void) | undefined;
-    vi.mocked(listenForRelayChanges).mockImplementation((handler) => { emit = handler; return Promise.resolve(vi.fn()); });
+    let emit!: (update: import("./types").SessionUpdate) => void;
+    vi.mocked(listenForSessionUpdates).mockImplementation(async (handler) => { emit = handler; return () => {}; });
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
     let followError: string | null = null;
     vi.mocked(loadEventPage).mockImplementation(async () => ({ ...toolEventPage(), follow_error: followError }));
@@ -535,14 +544,15 @@ describe("useViewerState Relay updates", () => {
     await waitFor(() => expect(result.current.events).toEqual(toolEventPage().events));
     const lastGood = result.current.events;
 
+    const request = vi.mocked(openSession).mock.calls[0][0];
     followError = "invalid UTF-8 in session source";
-    act(() => emit?.({ session_key: "live", reset: false }));
+    act(() => emit({ ...semanticSnapshot(request, { ...toolEventPage(), follow_error: followError }), revision: "2" }));
     await waitFor(() => expect(result.current.followError).toBe(followError));
     expect(result.current.events).toEqual(lastGood);
     expect(result.current.eventsError).toBeNull();
 
     followError = null;
-    act(() => emit?.({ session_key: "live", reset: false }));
+    act(() => emit({ ...semanticSnapshot(request, { ...toolEventPage(), follow_error: null }), revision: "3" }));
     await waitFor(() => expect(result.current.followError).toBeNull());
     expect(result.current.events).toEqual(lastGood);
   });
@@ -1311,7 +1321,7 @@ describe("useViewerState refresh after message input", () => {
     const host = viewerHost();
     restore_host = installViewerHost({ ...host, capabilities: { ...host.capabilities, runtime_management: true } });
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, toolEventPage()));
+    vi.mocked(openSession).mockImplementation(async (request) => semanticSnapshot(request, toolEventPage()));
     const { container } = render(<ViewerPage remote machine_label="Remote machine" machine_key="remote" />);
     fireEvent.click(await screen.findByRole("button", { name: /session live/ }));
     const input = await screen.findByRole("textbox", { name: "Message this session" });
@@ -1322,7 +1332,7 @@ describe("useViewerState refresh after message input", () => {
     timeline.scrollTop = 77;
     await act(async () => { fireEvent.wheel(timeline, { deltaY: -1 }); fireEvent.scroll(timeline); });
     const subscriptions = vi.mocked(listenForSessionUpdates).mock.calls.length;
-    const reads = vi.mocked(loadSessionUpdates).mock.calls.length;
+    const reads = vi.mocked(openSession).mock.calls.length;
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
     fireEvent.click(screen.getByRole("button", { name: /^Runtimes/ }));
     expect(screen.getByRole("heading", { name: "Runtimes" })).toBeInTheDocument();
@@ -1330,7 +1340,7 @@ describe("useViewerState refresh after message input", () => {
     expect(timeline.scrollTop).toBe(77);
     expect(input).toHaveValue("Keep this conversation draft");
     expect(listenForSessionUpdates).toHaveBeenCalledTimes(subscriptions);
-    expect(loadSessionUpdates).toHaveBeenCalledTimes(reads);
+    expect(openSession).toHaveBeenCalledTimes(reads);
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
     expect(screen.getByRole("textbox", { name: "Message this session" })).toBe(input);
     expect(input).toHaveValue("Keep this conversation draft");
@@ -2176,7 +2186,10 @@ describe("useViewerState expanded tool detail", () => {
       source_errors: [],
       pending_providers: [],
     });
-    vi.mocked(loadEventPage).mockResolvedValue(toolEventPage());
+    vi.mocked(openSession).mockImplementation(async (request) => {
+      const snapshot = semanticSnapshot(request, toolEventPage());
+      return request.resume ? { ...snapshot, snapshot: false, base_revision: request.resume.revision, items: [], item_order: null } : snapshot;
+    });
     vi.mocked(loadEventDetail)
       .mockImplementationOnce(() => oldA.promise)
       .mockImplementationOnce(() => freshA.promise);
@@ -2191,7 +2204,7 @@ describe("useViewerState expanded tool detail", () => {
     await waitFor(() => expect(result.current.eventsOwnerKey).toBe("codex:b"));
     act(() => result.current.selectSession("codex:a"));
     await waitFor(() => expect(result.current.eventsOwnerKey).toBe("codex:a"));
-    act(() => result.current.toggleEventExpanded("event.v1.1"));
+    // Reopening also restores the disclosure and its pending detail read.
     await waitFor(() => expect(loadEventDetail).toHaveBeenCalledTimes(2));
 
     await act(async () => {
@@ -2830,7 +2843,7 @@ describe("useViewerState subagent discovery", () => {
   });
 });
 
-function semanticSnapshot(request: import("./types").SessionUpdatesRequest, page: EventPageResponse & { scope?: import("./types").SessionUpdateScope }): import("./types").SessionUpdate {
+function semanticSnapshot(request: import("./types").OpenSessionRequest, page: EventPageResponse & { scope?: import("./types").SessionUpdateScope }): import("./types").SessionUpdate {
   const { events, ...state } = page;
   return { subscription_id: request.subscription_id, session_key: request.session_key, level: request.level,
     generation: "fixture", base_revision: null, revision: "1", snapshot: true,
@@ -2843,7 +2856,7 @@ describe("semantic session delivery", () => {
     let emit!: (update: import("./types").SessionUpdate) => void;
     vi.mocked(listenForSessionUpdates).mockImplementation(async (handler) => { emit = handler; return () => {}; });
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("levels")], next_cursor: null, source_errors: [], pending_providers: [] });
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, {
+    vi.mocked(openSession).mockImplementation(async (request) => semanticSnapshot(request, {
       ...toolEventPage(), events: [{ ...toolEventPage().events[0], event_key: request.level, summary: request.level }],
       scope: request.scope,
     }));
@@ -2853,10 +2866,10 @@ describe("semantic session delivery", () => {
     act(() => result.current.setConversationUpdateLevel(level));
     await waitFor(() => expect(result.current.events[0]?.event_key).toBe(level));
     expect(result.current.conversationUpdateLevel).toBe(level);
-    const request = vi.mocked(loadSessionUpdates).mock.calls.slice().reverse().find(([request]) => request.level === level && !request.unsubscribe)![0];
+    const request = vi.mocked(openSession).mock.calls.slice().reverse().find(([request]) => request.level === level)![0];
     expect(request.scope).toEqual({ history: "recent_turns", group_keys: [] });
     if (level !== "steps") {
-      expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) => request.level === "steps" && request.unsubscribe)).toBe(true);
+      expect(releaseSession).toHaveBeenCalledWith(expect.objectContaining({ subscription_id: vi.mocked(openSession).mock.calls[0][0].subscription_id }), expect.any(Function));
       expect(readViewerPreferences().conversation_update_level).toBe(level);
     }
     // Each preset remains live, including Final. A late other-level update
@@ -2867,10 +2880,10 @@ describe("semantic session delivery", () => {
 
   it("retires an in-flight old-level baseline and retains loaded history scope", async () => {
     const pending = deferred<import("./types").SessionUpdate>();
-    let oldRequest!: import("./types").SessionUpdatesRequest;
+    let oldRequest!: import("./types").OpenSessionRequest;
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("race-level")], next_cursor: null, source_errors: [], pending_providers: [] });
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => {
-      if (request.level === "steps" && !request.unsubscribe) { oldRequest = request; return pending.promise; }
+    vi.mocked(openSession).mockImplementation(async (request) => {
+      if (request.level === "steps") { oldRequest = request; return pending.promise; }
       return semanticSnapshot(request, { ...toolEventPage(), events: [{ ...toolEventPage().events[0], event_key: request.level }],
         previous_cursor: "older", scope: request.scope });
     });
@@ -2882,14 +2895,14 @@ describe("semantic session delivery", () => {
     await act(async () => pending.resolve(semanticSnapshot(oldRequest, toolEventPage())));
     expect(result.current.events[0]?.event_key).toBe("messages");
     expect(result.current.eventsError).toBeNull();
-    expect(vi.mocked(loadSessionUpdates).mock.calls.filter(([request]) => request.level === "steps" && request.unsubscribe)).toHaveLength(2);
+    expect(vi.mocked(releaseSession).mock.calls.filter(([request]) => request.subscription_id === oldRequest.subscription_id)).toHaveLength(2);
     act(() => result.current.loadOlderEvents());
-    await waitFor(() => expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) => request.level === "messages"
+    await waitFor(() => expect(vi.mocked(openSession).mock.calls.some(([request]) => request.level === "messages"
       && request.history_cursor === "older" && request.scope?.history === "retained")).toBe(true));
     await waitFor(() => expect(result.current.olderLoading).toBe(false));
     act(() => result.current.setConversationUpdateLevel("all"));
     await waitFor(() => expect(result.current.events[0]?.event_key).toBe("all"));
-    expect(vi.mocked(loadSessionUpdates).mock.calls.slice().reverse().find(([request]) => request.level === "all")![0].scope?.history).toBe("retained");
+    expect(vi.mocked(openSession).mock.calls.slice().reverse().find(([request]) => request.level === "all")![0].scope?.history).toBe("retained");
   });
 
   it("keeps a compact intermediate preview while opening the Final conversation", async () => {
@@ -2897,7 +2910,7 @@ describe("semantic session delivery", () => {
     localStorage.setItem("tokn.viewer.conversation-update-level", "final");
     vi.mocked(listenForBackgroundUpdates).mockImplementation(async (handler) => { emit = handler; return () => {}; });
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("final-preview")], next_cursor: null, source_errors: [], pending_providers: [] });
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, {
+    vi.mocked(openSession).mockImplementation(async (request) => semanticSnapshot(request, {
       ...toolEventPage(), events: [{ ...toolEventPage().events[0], type: "message", role: "assistant", delivery: "final", summary: "Earlier final." }],
     }));
     const { result } = renderHook(() => useViewerState());
@@ -2911,35 +2924,14 @@ describe("semantic session delivery", () => {
     expect(result.current.sessions[0].latest_assistant_preview).toBe("Newest intermediate.");
   });
 
-  it.each(["final", "messages", "all"] as const)("never silently loads unfiltered legacy rows for %s", async (level) => {
-    localStorage.setItem("tokn.viewer.conversation-update-level", level);
-    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("legacy-level")], next_cursor: null, source_errors: [], pending_providers: [] });
-    vi.mocked(loadEventPage).mockResolvedValue(toolEventPage());
+  it("surfaces a rejected open without fetching an alternate timeline", async () => {
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("unavailable")], next_cursor: null, source_errors: [], pending_providers: [] });
+    vi.mocked(openSession).mockRejectedValue(new Error("Unknown viewer command"));
     const { result } = renderHook(() => useViewerState());
-    await selectListedSession(result, "legacy-level");
-    await waitFor(() => expect(result.current.eventsError).toContain("Delivery-level selection is unavailable"));
+    await selectListedSession(result, "unavailable");
+    await waitFor(() => expect(result.current.eventsError).toContain("Unknown viewer command"));
     expect(loadEventPage).not.toHaveBeenCalled();
     expect(result.current.events).toEqual([]);
-    act(() => result.current.setConversationUpdateLevel("steps"));
-    await waitFor(() => expect(result.current.events).toEqual(toolEventPage().events));
-    expect(result.current.eventsError).toBeNull();
-  });
-
-  it("keeps supported semantic levels usable after an unsupported Messages variant", async () => {
-    vi.mocked(listSessions).mockResolvedValue({ sessions: [session("old-semantic")], next_cursor: null, source_errors: [], pending_providers: [] });
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => {
-      if (request.level === "messages" && !request.unsubscribe) throw new Error("unknown variant messages");
-      return semanticSnapshot(request, { ...toolEventPage(), events: [{ ...toolEventPage().events[0], event_key: request.level }] });
-    });
-    const { result } = renderHook(() => useViewerState());
-    await selectListedSession(result, "old-semantic");
-    await waitFor(() => expect(result.current.events[0]?.event_key).toBe("steps"));
-    act(() => result.current.setConversationUpdateLevel("messages"));
-    await waitFor(() => expect(result.current.eventsError).toContain("Delivery-level selection is unavailable"));
-    act(() => result.current.setConversationUpdateLevel("final"));
-    await waitFor(() => expect(result.current.events[0]?.event_key).toBe("final"));
-    expect(result.current.eventsError).toBeNull();
-    expect(loadEventPage).not.toHaveBeenCalled();
   });
 
   it("restores a valid conversation preference and rejects legacy details as a user preset", () => {
@@ -2953,7 +2945,7 @@ describe("semantic session delivery", () => {
   });
   it("applies a shared Settings level before loading its projection without losing the open session", async () => {
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("settings-level")], next_cursor: null, source_errors: [], pending_providers: [] });
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, {
+    vi.mocked(openSession).mockImplementation(async (request) => semanticSnapshot(request, {
       ...toolEventPage(), events: [{ ...toolEventPage().events[0], event_key: request.level }],
     }));
     const { result } = renderHook(() => useViewerState());
@@ -2963,7 +2955,7 @@ describe("semantic session delivery", () => {
     await waitFor(() => expect(result.current.events[0]?.event_key).toBe("messages"));
     expect(result.current.selectedSessionKey).toBe("settings-level");
     expect(result.current.conversationUpdateLevel).toBe("messages");
-    expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) => request.level === "steps" && request.unsubscribe)).toBe(true);
+    expect(releaseSession).toHaveBeenCalledWith(expect.objectContaining({ subscription_id: vi.mocked(openSession).mock.calls[0][0].subscription_id }), expect.any(Function));
     expect(subscribeBackgroundUpdates).toHaveBeenCalledOnce();
   });
   it("updates a never-opened sidebar session from compact events without loading history", async () => {
@@ -2980,7 +2972,7 @@ describe("semantic session delivery", () => {
     expect(result.current.sessions[0].latest_assistant_preview).toBe("Examining the source.");
     expect(result.current.sessions[0].is_running).toBe(true);
     expect(result.current.sessions[0].question_attention?.available_count).toBe(1);
-    expect(loadSessionUpdates).not.toHaveBeenCalled();
+    expect(openSession).not.toHaveBeenCalled();
     expect(loadEventPage).not.toHaveBeenCalled();
     expect(loadTrajectoryEventPage).not.toHaveBeenCalled();
   });
@@ -3019,7 +3011,7 @@ describe("semantic session delivery", () => {
     vi.mocked(listenForBackgroundUpdates).mockImplementation(async (handler) => { emit = handler; return () => {}; });
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("answered")], next_cursor: null, source_errors: [], pending_providers: [] });
     const page = { ...toolEventPage(), outstanding_questions: [] };
-    if (semantic) vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    if (semantic) vi.mocked(openSession).mockImplementation(async (request) => semanticSnapshot(request, page));
     else vi.mocked(loadEventPage).mockResolvedValue(page);
     const { result } = renderHook(() => useViewerState());
     await waitFor(() => expect(result.current.sessions).toHaveLength(1));
@@ -3044,7 +3036,7 @@ describe("semantic session delivery", () => {
     vi.mocked(listenForBackgroundUpdates).mockImplementation(async (handler) => { emit = handler; return () => {}; });
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("reset")], next_cursor: null, source_errors: [], pending_providers: [] });
     const page = { ...toolEventPage(), events: [], total_events: 0, outstanding_questions: [], source_revision: "source:2" };
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    vi.mocked(openSession).mockImplementation(async (request) => semanticSnapshot(request, page));
     const { result } = renderHook(() => useViewerState());
     await waitFor(() => expect(result.current.sessions).toHaveLength(1));
     await waitFor(() => expect(subscribeBackgroundUpdates).toHaveBeenCalledOnce());
@@ -3068,7 +3060,7 @@ describe("semantic session delivery", () => {
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("active"), session("other")], next_cursor: null, source_errors: [], pending_providers: [] });
     const base = toolEventPage();
     const page = { ...base, events: [{ ...base.events[0], type: "message", role: "assistant", tool: null, summary: "Newest semantic reply." }] };
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    vi.mocked(openSession).mockImplementation(async (request) => semanticSnapshot(request, page));
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "active");
     await waitFor(() => expect(result.current.eventsLoading).toBe(false));
@@ -3093,7 +3085,7 @@ describe("semantic session delivery", () => {
     const base = toolEventPage();
     const full = { ...base.events[0], event_key: "event.v1.1", type: "message", role: "assistant", provider: "codex" as const, phase: "finished", tool: null, summary: "Last full response." };
     const page = { ...base, events: [full, { ...full, event_key: "event.v1.2", phase: "delta", summary: " working" }, { ...full, event_key: "event.v1.3", phase: "delta", summary: "..." }] };
-    if (semantic) vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    if (semantic) vi.mocked(openSession).mockImplementation(async (request) => semanticSnapshot(request, page));
     else vi.mocked(loadEventPage).mockResolvedValue(page);
     const { result } = renderHook(() => useViewerState());
     await waitFor(() => expect(result.current.sessions).toHaveLength(1));
@@ -3133,7 +3125,7 @@ describe("semantic session delivery", () => {
     const page = { ...base, events: [{ ...base.events[0], event_key: "event.v1.2", type: "message", role: "assistant", tool: null, summary: "Main conversation reply." }] };
     const message = { ...page.events[0], event_key: "window.v1.source.event.v1.5", type: "message", role: "assistant", tool: null,
       summary: "Latest assistant line inside work.\nDetails" };
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => {
+    vi.mocked(openSession).mockImplementation(async (request) => {
       const update = semanticSnapshot(request, page);
       update.items.push({ item_id: message.event_key, kind: "assistant_message", level: "steps", summary: message });
       update.semantic_order = [page.events[0].event_key, message.event_key];
@@ -3145,7 +3137,7 @@ describe("semantic session delivery", () => {
     await waitFor(() => expect(row.querySelector(".session-row__preview")).toHaveTextContent("Latest assistant line inside work."));
     expect(row.querySelector(".session-row__title")).toHaveTextContent("folded");
     expect(view.container.querySelector(".conversation__timeline")).not.toHaveTextContent("Latest assistant line inside work.");
-    expect(loadSessionUpdates).toHaveBeenCalledOnce();
+    expect(openSession).toHaveBeenCalledOnce();
     expect(loadTrajectoryEventPage).not.toHaveBeenCalled();
     expect(loadEventDetail).not.toHaveBeenCalled();
   });
@@ -3156,14 +3148,14 @@ describe("semantic session delivery", () => {
     const base = toolEventPage();
     const page = { ...base, events: [{ ...base.events[0], type: "message", role: "assistant", tool: null,
       summary: "Latest answer.\nFull details belong in the conversation." }] };
-    if (semantic) vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    if (semantic) vi.mocked(openSession).mockImplementation(async (request) => semanticSnapshot(request, page));
     else vi.mocked(loadEventPage).mockResolvedValue(page);
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "preview");
     await waitFor(() => expect(result.current.events).toEqual(page.events));
     await waitFor(() => expect(result.current.sessions[0].latest_assistant_preview).toBe("Latest answer."));
     expect(result.current.selectedSession?.latest_assistant_preview).toBe("Latest answer.");
-    expect(loadSessionUpdates).toHaveBeenCalledOnce();
+    expect(openSession).toHaveBeenCalledOnce();
     expect(loadEventPage).toHaveBeenCalledTimes(semantic ? 0 : 1);
     act(() => result.current.selectSession("other"));
     await waitFor(() => expect(result.current.selectedSessionKey).toBe("other"));
@@ -3178,11 +3170,11 @@ describe("semantic session delivery", () => {
     const indexed = { ...session("live"), is_running: false };
     vi.mocked(listSessions).mockResolvedValue({ sessions: [indexed], next_cursor: null, source_errors: [], pending_providers: [] });
     const page = { ...toolEventPage(), is_running: true, source_revision: "source:10" };
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    vi.mocked(openSession).mockImplementation(async (request) => semanticSnapshot(request, page));
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "live");
     await waitFor(() => expect(result.current.events).toEqual(page.events));
-    const request = vi.mocked(loadSessionUpdates).mock.calls.find(([request]) => request.level === "steps")![0];
+    const request = vi.mocked(openSession).mock.calls.find(([request]) => request.level === "steps")![0];
     act(() => emit?.({ ...semanticSnapshot(request, page), revision: "2" }));
     await waitFor(() => expect(result.current.sessions[0].is_running).toBe(true));
     const pending = deferred<ListSessionsResponse>();
@@ -3236,17 +3228,17 @@ describe("semantic session delivery", () => {
     vi.mocked(listenForSessionUpdates).mockImplementation((handler) => { emit = handler; return Promise.resolve(vi.fn()); });
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
     const page = toolEventPage();
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, request.level === "steps" ? page : { ...page, events: [], total_events: 0 }));
+    vi.mocked(openSession).mockImplementation(async (request) => semanticSnapshot(request, request.level === "steps" ? page : { ...page, events: [], total_events: 0 }));
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "live");
     await waitFor(() => expect(result.current.events).toEqual(page.events));
-    const request = vi.mocked(loadSessionUpdates).mock.calls.find(([request]) => request.level === "steps")![0];
+    const request = vi.mocked(openSession).mock.calls.find(([request]) => request.level === "steps")![0];
     const update = semanticSnapshot(request, page);
     act(() => emit?.({ ...update, snapshot: false, base_revision: "1", revision: "2", item_order: null,
       items: [{ ...update.items[0], summary: { ...page.events[0], summary: "pushed progress" } }] }));
     await waitFor(() => expect(result.current.events[0].summary).toBe("pushed progress"));
     expect(loadEventPage).not.toHaveBeenCalled();
-    expect(vi.mocked(loadSessionUpdates).mock.calls.filter(([request]) => request.level === "steps")).toHaveLength(1);
+    expect(vi.mocked(openSession).mock.calls.filter(([request]) => request.level === "steps")).toHaveLength(1);
   });
 
   it("expands and refreshes work children from all delivery without child RPCs", async () => {
@@ -3256,16 +3248,16 @@ describe("semantic session delivery", () => {
     const page = trajectoryEventPage();
     const child = trajectoryChildPage().events[0];
     page.events[0] = { ...page.events[0], child_keys: [child.event_key] };
-    const makeUpdate = (request: import("./types").SessionUpdatesRequest): import("./types").SessionUpdate => ({ ...semanticSnapshot(request, page),
+    const makeUpdate = (request: import("./types").OpenSessionRequest): import("./types").SessionUpdate => ({ ...semanticSnapshot(request, page),
       items: [{ item_id: child.event_key, kind: "tool_summary", level: "steps", summary: child }],
       groups: [{ item_id: page.events[0].event_key, kind: "work_summary", level: "steps", summary: page.events[0] }] });
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => makeUpdate(request));
+    vi.mocked(openSession).mockImplementation(async (request) => makeUpdate(request));
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "live");
     await waitFor(() => expect(result.current.events).toEqual(page.events));
     act(() => result.current.toggleEventExpanded(page.events[0].event_key));
     await waitFor(() => expect(result.current.trajectoryPages.get("live")?.get(page.events[0].event_key)?.events).toEqual([child]));
-    const request = vi.mocked(loadSessionUpdates).mock.calls.find(([request]) => request.level === "steps")![0];
+    const request = vi.mocked(openSession).mock.calls.find(([request]) => request.level === "steps")![0];
     act(() => emit?.({ ...makeUpdate(request), snapshot: false, base_revision: "1", revision: "2", item_order: null, groups: [],
       items: [{ item_id: child.event_key, kind: "tool_summary", level: "steps", summary: { ...child, summary: "cached progress" } }] }));
     await waitFor(() => expect(result.current.trajectoryPages.get("live")?.get(page.events[0].event_key)?.events[0].summary).toBe("cached progress"));
@@ -3279,17 +3271,17 @@ describe("semantic session delivery", () => {
     vi.mocked(listenForSessionIndexChanges).mockImplementation((handler) => { indexChange = handler; return Promise.resolve(vi.fn()); });
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
     const page = toolEventPage();
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    vi.mocked(openSession).mockImplementation(async (request) => semanticSnapshot(request, page));
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "live");
     await waitFor(() => expect(result.current.events).toEqual(page.events));
     const catalogCalls = vi.mocked(listSessions).mock.calls.length;
-    const updateCalls = vi.mocked(loadSessionUpdates).mock.calls.length;
+    const updateCalls = vi.mocked(openSession).mock.calls.length;
     act(() => indexChange?.({ changed: true, catalog_refresh_required: false,
       attention_session_keys: ["live"], updated_session_keys: ["live"] }));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
     expect(listSessions).toHaveBeenCalledTimes(catalogCalls + (available ? 0 : 1));
-    expect(loadSessionUpdates).toHaveBeenCalledTimes(updateCalls);
+    expect(openSession).toHaveBeenCalledTimes(updateCalls);
     expect(loadEventPage).not.toHaveBeenCalled();
   });
 
@@ -3298,9 +3290,9 @@ describe("semantic session delivery", () => {
     const page = toolEventPage();
     const catchup = deferred<import("./types").SessionUpdate>();
     let firstRequests = 0;
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => {
-      if (request.level === "steps" && !request.unsubscribe && request.session_key === "one" && ++firstRequests > 1) return catchup.promise;
-      return semanticSnapshot(request, request.level === "steps" && !request.unsubscribe
+    vi.mocked(openSession).mockImplementation(async (request) => {
+      if (request.level === "steps" && request.session_key === "one" && ++firstRequests > 1) return catchup.promise;
+      return semanticSnapshot(request, request.level === "steps"
         ? { ...page, events: [{ ...page.events[0], summary: request.session_key }] } : { ...page, events: [], total_events: 0 });
     });
     const { result } = renderHook(() => useViewerState());
@@ -3316,24 +3308,24 @@ describe("semantic session delivery", () => {
       last_event: "old-final", at_end: true });
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
     const page = { ...toolEventPage(), previous_cursor: "older" };
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    vi.mocked(openSession).mockImplementation(async (request) => semanticSnapshot(request, page));
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "live");
     await waitFor(() => expect(result.current.events).toEqual(page.events));
-    expect(loadSessionUpdates).toHaveBeenCalledOnce();
+    expect(openSession).toHaveBeenCalledOnce();
     expect(loadEventPage).not.toHaveBeenCalled();
     await waitFor(() => expect(result.current.eventsLoading).toBe(false));
     await act(async () => {
       for (const [callback, delay] of timers.mock.calls) if (delay === 30_000 && typeof callback === "function") callback();
     });
     expect(renewSessionSubscriptions).toHaveBeenCalled();
-    expect(loadSessionUpdates).toHaveBeenCalledOnce();
+    expect(openSession).toHaveBeenCalledOnce();
   });
 
   it("loads display payload and inspection independently for the same event", async () => {
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
     const page = toolEventPage();
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    vi.mocked(openSession).mockImplementation(async (request) => semanticSnapshot(request, page));
     vi.mocked(loadToolDetails).mockResolvedValueOnce(toolDetail("display payload"));
     vi.mocked(inspectSessionEvent).mockResolvedValueOnce({ ...toolDetail("inspection"), native: { source: "native record" } });
     const { result } = renderHook(() => useViewerState());
@@ -3354,7 +3346,7 @@ describe("semantic session delivery", () => {
     vi.mocked(listenForSubscriptionLoss).mockImplementation((handler) => { lose = handler; return Promise.resolve(vi.fn()); });
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
     const page = toolEventPage();
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    vi.mocked(openSession).mockImplementation(async (request) => semanticSnapshot(request, page));
     vi.mocked(loadToolDetails).mockResolvedValueOnce(toolDetail("display without native"));
     const inspection = deferred<EventDetail>();
     vi.mocked(inspectSessionEvent).mockReturnValueOnce(inspection.promise)
@@ -3364,10 +3356,10 @@ describe("semantic session delivery", () => {
     await waitFor(() => expect(result.current.events).toEqual(page.events));
     act(() => result.current.toggleEventExpanded(page.events[0].event_key));
     await waitFor(() => expect(result.current.expandedDetail?.tool_output?.sections[0].text).toBe("display without native"));
-    const request = vi.mocked(loadSessionUpdates).mock.calls.find(([request]) => request.level === "steps")![0];
+    const request = vi.mocked(openSession).mock.calls.find(([request]) => request.level === "steps")![0];
     // Recovery stays pending so the lost live lease cannot choose the display
     // cache as a substitute for independently requested source inspection.
-    vi.mocked(loadSessionUpdates).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(openSession).mockImplementation(() => new Promise(() => {}));
     act(() => lose?.({ subscription_ids: [request.subscription_id] }));
     act(() => result.current.selectEvent(page.events[0].event_key));
     await waitFor(() => expect(inspectSessionEvent).toHaveBeenCalledOnce());
@@ -3394,7 +3386,7 @@ describe("semantic session delivery", () => {
     vi.mocked(listenForSessionUpdates).mockImplementation((handler) => { emit = handler; return Promise.resolve(vi.fn()); });
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("live")], next_cursor: null, source_errors: [], pending_providers: [] });
     const page = toolEventPage();
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, page));
+    vi.mocked(openSession).mockImplementation(async (request) => semanticSnapshot(request, page));
     vi.mocked(inspectSessionEvent).mockResolvedValueOnce(toolDetail("inspected"))
       .mockResolvedValueOnce(toolDetail("updated inspection"));
     const { result } = renderHook(() => useViewerState());
@@ -3403,13 +3395,12 @@ describe("semantic session delivery", () => {
     expect(inspectSessionEvent).not.toHaveBeenCalled();
     act(() => result.current.selectEvent(page.events[0].event_key));
     await waitFor(() => expect(result.current.detail?.tool_output?.sections[0].text).toBe("inspected"));
-    const request = vi.mocked(loadSessionUpdates).mock.calls.find(([request]) => request.level === "steps")![0];
+    const request = vi.mocked(openSession).mock.calls.find(([request]) => request.level === "steps")![0];
     const initial = semanticSnapshot(request, page);
     act(() => emit?.({ ...initial, snapshot: false, base_revision: "1", revision: "2", item_order: null,
       items: [{ ...initial.items[0], summary: { ...page.events[0], summary: "changed" } }] }));
     await waitFor(() => expect(result.current.detail?.tool_output?.sections[0].text).toBe("updated inspection"));
     expect(loadToolDetails).not.toHaveBeenCalled();
-    expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) => request.level === "details")).toBe(false);
   });
 
   it("loads one complete inner group on demand without fetching its details", async () => {
@@ -3420,7 +3411,7 @@ describe("semantic session delivery", () => {
     const other = { ...group, event_key: "activity:other", child_keys: ["other"] };
     const work = { ...tool, event_key: "work", type: "trajectory", child_keys: [group.event_key, other.event_key] };
     let revision = 0;
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => ({
+    vi.mocked(openSession).mockImplementation(async (request) => ({
       ...semanticSnapshot(request, { ...base, events: [work] }), revision: String(++revision),
       items: [group, other, ...(request.scope?.group_keys.includes(group.event_key) ? [tool] : [])]
         .map((summary) => ({ item_id: summary.event_key, kind: "tool_summary", level: "steps", summary })),
@@ -3430,31 +3421,31 @@ describe("semantic session delivery", () => {
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "live");
     await waitFor(() => expect(result.current.events).toEqual([work]));
-    expect(vi.mocked(loadSessionUpdates).mock.calls[0][0].scope?.group_keys).toEqual([]);
+    expect(vi.mocked(openSession).mock.calls[0][0].scope?.group_keys).toEqual([]);
     act(() => result.current.loadActivityGroup(group.event_key));
     await waitFor(() => expect(result.current.trajectoryPages.get("live")?.get(group.event_key)?.events).toEqual([tool]));
     expect(result.current.trajectoryPages.get("live")?.get(other.event_key)).toBeUndefined();
     act(() => result.current.loadOlderEvents());
-    await waitFor(() => expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) =>
+    await waitFor(() => expect(vi.mocked(openSession).mock.calls.some(([request]) =>
       request.history_cursor === "older-turn" && request.scope?.history === "retained")).toBe(true));
     expect(loadEventPage).not.toHaveBeenCalled();
     expect(loadTrajectoryEventPage).not.toHaveBeenCalled();
     expect(loadEventDetail).not.toHaveBeenCalled();
-    expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) => request.level === "all")).toBe(false);
+    expect(vi.mocked(openSession).mock.calls.some(([request]) => request.level === "all")).toBe(false);
   });
 
   it("releases the previous timeline without a final history read and opens the next at steps", async () => {
     vi.mocked(listSessions).mockResolvedValue({ sessions: [session("one"), session("two")], next_cursor: null, source_errors: [], pending_providers: [] });
-    vi.mocked(loadSessionUpdates).mockImplementation(async (request) => semanticSnapshot(request, request.level === "steps" && !request.unsubscribe
+    vi.mocked(openSession).mockImplementation(async (request) => semanticSnapshot(request, request.level === "steps"
       ? toolEventPage() : { ...toolEventPage(), events: [], total_events: 0 }));
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "one");
     await waitFor(() => expect(result.current.events).toEqual(toolEventPage().events));
     act(() => result.current.selectSession("two"));
-    await waitFor(() => expect(vi.mocked(loadSessionUpdates).mock.calls.some(([request]) => request.session_key === "two" && request.level === "steps")).toBe(true));
-    const requests = vi.mocked(loadSessionUpdates).mock.calls.map(([request]) => request);
-    expect(requests.some((request) => request.session_key === "one" && request.level === "steps" && request.unsubscribe)).toBe(true);
-    expect(requests.some((request) => request.session_key === "one" && request.level === "final" && !request.unsubscribe)).toBe(false);
+    await waitFor(() => expect(vi.mocked(openSession).mock.calls.some(([request]) => request.session_key === "two" && request.level === "steps")).toBe(true));
+    const requests = vi.mocked(openSession).mock.calls.map(([request]) => request);
+    expect(releaseSession).toHaveBeenCalledWith(expect.objectContaining({ session_key: "one" }), expect.any(Function));
+    expect(requests.some((request) => request.session_key === "one" && request.level === "final")).toBe(false);
     expect(vi.mocked(subscribeBackgroundUpdates).mock.calls.filter(([request]) => !request.unsubscribe)).toHaveLength(1);
   });
 

@@ -20,7 +20,6 @@ use tower_http::{
   services::{ServeDir, ServeFile},
 };
 
-mod live;
 mod shared;
 
 #[derive(Clone)]
@@ -31,9 +30,9 @@ struct ApiState {
   requests: Arc<Semaphore>,
   subscribers: Arc<Semaphore>,
   shutdown: CancellationToken,
-  origins: Vec<String>,
-  shared_background: Arc<std::sync::Mutex<std::collections::HashMap<String, shared::BackgroundIdentity>>>,
 }
+
+const VIEWER_PROTOCOL_VERSION: u32 = 2;
 
 type ApiError = (StatusCode, Json<Value>);
 fn error(status: StatusCode, message: impl Into<String>) -> ApiError {
@@ -53,20 +52,14 @@ pub fn router(
     token: token.map(Arc::new),
     requests: Arc::new(Semaphore::new(16)),
     subscribers: Arc::new(Semaphore::new(32)),
-    shared_background: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     shutdown,
-    origins: origins
-      .iter()
-      .filter_map(|value| value.to_str().ok().map(str::to_owned))
-      .collect(),
   };
   Router::new()
     .route(
       "/api/v1/health",
-      get(|| async { Json(json!({"version": 1, "live_updates": true})) }),
+      get(|| async { Json(json!({"version": VIEWER_PROTOCOL_VERSION})) }),
     )
-    .route("/api/v1/live", get(live::upgrade))
-    .route("/api/v1/events", get(event_stream))
+    .route("/api/v1/events", get(general_events).post(scoped_events))
     .route(
       "/api/v1/shared",
       post(shared::command).layer(DefaultBodyLimit::max(1024 * 1024 + 64 * 1024)),
@@ -103,9 +96,6 @@ async fn api_not_found() -> ApiError {
 }
 
 async fn authenticate(State(state): State<ApiState>, request: Request, next: Next) -> Response {
-  if request.uri().path() == "/api/v1/live" {
-    return next.run(request).await;
-  }
   if let Some(token) = &state.token {
     let supplied = request
       .headers()
@@ -303,9 +293,6 @@ fn dispatch(service: &ViewerService, command: &str, payload: Value) -> Result<Va
     command,
     "list_session_children"
       | "load_event_page"
-      | "load_session_updates"
-      | "load_session_backward"
-      | "subscribe_session"
       | "inspect_session_event"
       | "load_event_detail"
       | "load_trajectory_event_page"
@@ -341,9 +328,8 @@ fn dispatch(service: &ViewerService, command: &str, payload: Value) -> Result<Va
     "list_sessions" => call!(list_sessions),
     "list_session_children" => call!(list_session_children),
     "load_event_page" => call!(load_event_page),
-    "load_session_updates" => call!(load_session_updates),
-    "load_session_backward" => call!(load_session_backward),
-    "subscribe_session" => call!(subscribe_session),
+    "open_session" => call!(open_session),
+    "release_session" => call!(release_session),
     "subscribe_background_updates" => call!(subscribe_background),
     "load_session_details" => call!(load_session_details),
     "inspect_session_event" => call!(inspect_session_event),
@@ -401,10 +387,58 @@ fn dispatch(service: &ViewerService, command: &str, payload: Value) -> Result<Va
   result.map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Could not encode viewer response"))
 }
 
-async fn event_stream(
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StreamSubscription {
+  subscription_prefix: String,
+}
+
+async fn general_events(State(state): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
+  event_stream(state, None)
+}
+
+async fn scoped_events(
   State(state): State<ApiState>,
-  axum::extract::Query(options): axum::extract::Query<std::collections::HashMap<String, String>>,
+  Json(request): Json<StreamSubscription>,
 ) -> Result<impl IntoResponse, ApiError> {
+  event_stream(state, Some(request.into_prefix()?))
+}
+
+impl StreamSubscription {
+  fn into_prefix(self) -> Result<String, ApiError> {
+    let prefix = self.subscription_prefix;
+    if prefix.is_empty()
+      || prefix.len() > 64
+      || !prefix
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    {
+      return Err(error(StatusCode::BAD_REQUEST, "Invalid subscription prefix"));
+    }
+    Ok(prefix)
+  }
+}
+
+fn stream_event(mut event: ViewerEvent, prefix: Option<&str>) -> Option<ViewerEvent> {
+  if matches!(
+    event.event.as_str(),
+    "session-updated" | "background-session-updated" | "session-subscription-invalidated"
+  ) {
+    let id = event.payload["subscription_id"].as_str()?;
+    if id.split_once(':')?.0 != prefix? {
+      return None;
+    }
+    if event.event == "session-subscription-invalidated"
+      || (event.event == "session-updated" && event.payload["snapshot"] == true)
+    {
+      event.event = "session-subscriptions-lost".into();
+      event.payload = json!({"subscription_ids":[id]});
+    }
+  }
+  Some(event)
+}
+
+fn event_stream(state: ApiState, subscription_prefix: Option<String>) -> Result<impl IntoResponse, ApiError> {
   let permit = state
     .subscribers
     .clone()
@@ -418,8 +452,7 @@ async fn event_stream(
       let received = tokio::select! { biased; _ = state.shutdown.cancelled() => break, event = receiver.recv() => event };
       match received {
         Ok(event) => {
-          if event.event == "session-updated" && options.get("session_updates").is_some_and(|value| value == "false") { continue; }
-          if event.event == "background-session-updated" && options.get("background_updates").is_some_and(|value| value == "false") { continue; }
+          let Some(event) = stream_event(event, subscription_prefix.as_deref()) else { continue };
           yield Ok(Event::default().event(event.event).data(event.payload.to_string()));
         },
         Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -688,40 +721,74 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn direct_websocket_clients_can_exclude_duplicate_background_events_from_sse() {
+  async fn event_streams_filter_viewer_interests_and_signal_resets_without_sending_history() {
     use http_body_util::BodyExt;
+    async fn next_frame(body: &mut Body) -> String {
+      let bytes = body.frame().await.unwrap().unwrap().into_data().unwrap();
+      String::from_utf8(bytes.to_vec()).unwrap()
+    }
     let data = tempfile::tempdir().unwrap();
     let service = ViewerService::native(data.path().join("index.sqlite")).unwrap();
     let (events, _) = broadcast::channel(16);
     let app = router(service, events.clone(), None, vec![], CancellationToken::new());
-    let response = app
-      .oneshot(
-        Request::builder()
-          .uri("/api/v1/events?background_updates=false")
-          .body(Body::empty())
-          .unwrap(),
-      )
+    let scoped = |prefix: &str| {
+      Request::post("/api/v1/events")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({"subscription_prefix":prefix}).to_string()))
+        .unwrap()
+    };
+    for invalid in ["", "other:viewer", &"x".repeat(65)] {
+      assert_eq!(
+        app.clone().oneshot(scoped(invalid)).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+      );
+    }
+    let mut mine = app.clone().oneshot(scoped("viewer")).await.unwrap().into_body();
+    let mut other = app.clone().oneshot(scoped("viewer2")).await.unwrap().into_body();
+    let mut general = app
+      .oneshot(Request::get("/api/v1/events").body(Body::empty()).unwrap())
       .await
-      .unwrap();
-    let mut body = response.into_body();
-    let ready = body.frame().await.unwrap().unwrap().into_data().unwrap();
-    assert!(std::str::from_utf8(&ready).unwrap().contains("event: ready"));
-    events
-      .send(ViewerEvent {
-        event: "background-session-updated".into(),
-        payload: json!({"subscription_id":"sidebar"}),
-      })
-      .unwrap();
-    events
-      .send(ViewerEvent {
-        event: "session-notification".into(),
-        payload: json!({"session_key":"one"}),
-      })
-      .unwrap();
-    let next = body.frame().await.unwrap().unwrap().into_data().unwrap();
-    let next = std::str::from_utf8(&next).unwrap();
-    assert!(next.contains("event: session-notification"));
-    assert!(!next.contains("background-session-updated"));
+      .unwrap()
+      .into_body();
+    for stream in [&mut mine, &mut other, &mut general] {
+      assert!(next_frame(stream).await.starts_with("event: ready\n"));
+    }
+    for (name, payload) in [
+      (
+        "session-updated",
+        json!({"subscription_id":"viewer2:timeline","snapshot":false}),
+      ),
+      (
+        "background-session-updated",
+        json!({"subscription_id":"viewer:sidebar"}),
+      ),
+      (
+        "session-updated",
+        json!({"subscription_id":"viewer:timeline","snapshot":true,"items":["x".repeat(65536)]}),
+      ),
+      ("session-notification", json!({"session_key":"one"})),
+    ] {
+      events
+        .send(ViewerEvent {
+          event: name.into(),
+          payload,
+        })
+        .unwrap();
+    }
+    assert!(next_frame(&mut other).await.starts_with("event: session-updated\n"));
+    assert!(
+      next_frame(&mut mine)
+        .await
+        .starts_with("event: background-session-updated\n")
+    );
+    let reset = next_frame(&mut mine).await;
+    assert_eq!(
+      reset,
+      "event: session-subscriptions-lost\ndata: {\"subscription_ids\":[\"viewer:timeline\"]}\n\n"
+    );
+    for stream in [&mut mine, &mut other, &mut general] {
+      assert!(next_frame(stream).await.starts_with("event: session-notification\n"));
+    }
   }
 
   #[tokio::test]
@@ -857,6 +924,58 @@ mod tests {
     }
   }
 
+  async fn post_json(app: &Router, command: &str, payload: Value) -> Value {
+    let response = app
+      .clone()
+      .oneshot(
+        Request::post(format!("/api/v1/{command}"))
+          .header(header::CONTENT_TYPE, "application/json")
+          .body(Body::from(payload.to_string()))
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+    let status = response.status();
+    let value: Value = serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap()).unwrap();
+    assert_eq!(status, StatusCode::OK, "{command}: {value}");
+    value
+  }
+
+  async fn assert_grant_can_resume(app: &Router, session_key: &str) {
+    let scoped = |command, payload| {
+      json!({
+        "principal":"viewer", "session_keys":[session_key], "command":command, "payload":payload
+      })
+    };
+    let open = json!({"session_key":session_key,"subscription_id":"first"});
+    let cold = post_json(app, "shared", scoped("open_session", json!({"request":open}))).await;
+    assert_eq!(cold["snapshot"], true);
+    assert!(!cold["items"].as_array().unwrap().is_empty());
+    assert_eq!(cold["subscription_id"], "first");
+    let renewal = post_json(
+      app,
+      "shared",
+      scoped("renew_session_subscriptions", json!({"ids":["first","gone"]})),
+    )
+    .await;
+    assert_eq!(renewal, json!({"renewed_ids":["first"],"missing_ids":["gone"]}));
+    let release = post_json(app, "shared", scoped("release_session", json!({"request":open}))).await;
+    assert_eq!(release, json!({"subscription_id":"first","unsubscribed":true}));
+    let mut next = json!({"session_key":session_key,"subscription_id":"second","resume":{
+      "subscription_id":"first","generation":cold["generation"],"revision":cold["revision"]
+    }});
+    let warm = post_json(app, "shared", scoped("open_session", json!({"request":next}))).await;
+    assert_eq!(warm["snapshot"], false);
+    assert_eq!(warm["base_revision"], cold["revision"]);
+    assert_eq!(warm["subscription_id"], "second");
+    assert_eq!(warm["items"], json!([]));
+    // The same session key and revision from an independent viewer cannot
+    // establish continuity across the privileged and shared projections.
+    next["resume"]["subscription_id"] = json!("second");
+    let owner = post_json(app, "open_session", json!({"request":next})).await;
+    assert_eq!(owner["snapshot"], true);
+  }
+
   #[tokio::test]
   async fn http_matches_core_and_sse_reports_live_updates() {
     use http_body_util::BodyExt;
@@ -930,6 +1049,7 @@ mod tests {
       direct
     );
     let key = direct["sessions"][0]["session_key"].as_str().unwrap();
+    assert_grant_can_resume(&app, key).await;
     for request in [
       json!({"view_id":"remote-view", "revision":1, "session_key":key, "candidate_session_keys":[key]}),
       json!({"view_id":"remote-view", "revision":2, "session_key":null, "candidate_session_keys":[]}),

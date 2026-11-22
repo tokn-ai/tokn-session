@@ -654,7 +654,7 @@ async fn authenticator_pairing_registers_only_encrypted_hosts_and_persists_trust
       }),
     )
     .route(
-      "/api/v1/load_session_updates",
+      "/api/v1/open_session",
       post(move |axum::Json(payload): axum::Json<serde_json::Value>| {
         forwarded_updates.lock().unwrap().push(payload);
         let response = local_updates_response.clone();
@@ -797,7 +797,7 @@ async fn authenticator_pairing_registers_only_encrypted_hosts_and_persists_trust
     &recipient,
     &paired.host_public_key,
     "POST",
-    "/api/v1/load_session_updates",
+    "/api/v1/open_session",
     &serde_json::to_vec(&updates_request).unwrap(),
   )
   .await;

@@ -68,11 +68,11 @@ fn seed_machine(database: &Path, key_file: &Path, host_id: &str) -> Result<(), B
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let directory = tempfile::tempdir()?;
   let viewer = Router::new()
-    .route("/api/v1/health", get(|| async { Json(json!({"version":1})) }))
+    .route("/api/v1/health", get(|| async { Json(json!({"version":2})) }))
     .route("/api/v1/list_sessions", post(|Json(payload): Json<Value>| async move {
       Json(json!({"sessions":[{"text":"Synthetic encrypted history"}],"received_bytes":payload["large"].as_str().map(str::len).unwrap_or(0)}))
     }))
-    .route("/api/v1/events", get(|| async {
+    .route("/api/v1/events", post(|| async {
       Sse::new(futures_util::stream::iter([Ok::<_, Infallible>(Event::default().event("ready").data("{}"))])
         .chain(futures_util::stream::pending())).keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(10)))
     }));

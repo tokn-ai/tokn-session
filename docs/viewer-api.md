@@ -132,16 +132,16 @@ See [message input behavior](../apps/viewer/README.md#sending-messages).
 
 ## API contract
 
-`GET /api/v1/health` returns `{"version":1}`.
+`GET /api/v1/health` returns `{"version":2}`. Clients check this protocol revision before starting an event stream.
 Commands are `POST /api/v1/<command>` with the same snake_case payload as the
 Tauri adapter, normally `{"request":{...}}`. Commands without a request take
 `{}`. Responses use the shared viewer-core models. Supported commands:
 
 - `list_sessions`, `list_session_children`
-- `subscribe_session`, `renew_session_subscriptions`, `load_session_backward`
+- `open_session`, `release_session`, `renew_session_subscriptions`
 - `load_session_details`, `inspect_session_event`
 - `subscribe_background_updates`, `renew_background_subscriptions`
-- `load_session_updates`, `load_event_page`, `load_trajectory_event_page`, `load_event_detail`
+- `load_event_page`, `load_trajectory_event_page`, `load_event_detail`
 - `acknowledge_session_attention`
 - `update_session_view`
 - `get_session_index_progress`, `retry_session_index`, `get_relay_status`
@@ -155,11 +155,14 @@ does not grant access. The API allows at most 16 concurrent command requests,
 32 SSE clients, and 1 MiB request bodies. Error responses contain `error`;
 invalid JSON/body-limit responses may be plain text.
 
-Modern viewers use `subscribe_session`, `load_session_backward`, and
-`session-updated` events for semantic delivery. Levels are `final`, `messages`
-(including intermediate assistant replies), `steps`, and `all`; the legacy
-`details` level remains accepted. Backward loading defaults to `steps` and the
-latest three turns. `load_session_updates` remains a compatibility command.
+`open_session` accepts `session_key`, `subscription_id`, an optional delivery
+level (`final`, `messages`, `steps` or `all`), an optional `scope` and an optional
+`history_cursor`. It starts live delivery and returns the initial three-turn
+window in one response. Pass the cached `{subscription_id, generation, revision}`
+in `resume` to receive changes against a retained baseline. The response is a
+snapshot when the baseline is unavailable. The same command can add older
+turns or expand a group. `release_session` takes the current subscription ID and
+session key. A released projection can still satisfy a later resume.
 The history compatibility API requests `load_event_page` with `window_mode: "retained"` and
 `direction: "backward"` to receive the complete resident history window,
 initially the latest three turns. `window_mode: "earlier"` with its `previous_cursor`
@@ -176,8 +179,7 @@ and generation-scoped; clients must not construct or modify them.
 the supplied loaded root/child keys. The acknowledgement contains identity,
 generation, decimal revision, and `subscribed`, with no history. Send
 `unsubscribe:true` to release. `renew_background_subscriptions` takes `ids`
-and only renews leases. On direct WebSockets the equivalent frame kind is
-`subscribe_background`; ping renews connection-owned interests. Shared grants
+and only renews leases. Shared grants
 clamp `all` to their exact granted keys.
 
 `background-session-updated` contains `subscription_id`, `generation`,
@@ -187,7 +189,7 @@ text is limited to 240 characters. A null message revision means unknown, not
 cleared; a non-null revision with a null message means known empty. `removed`
 retires a deleted session. No tool payloads or native records are included.
 Scope changes and reconnects establish fresh live interests without history
-requests; initial/older screens still use backward loading.
+requests. Initial and older timeline windows use `open_session`.
 
 `update_session_view` takes `view_id`, a monotonically increasing `revision`,
 an optional selected `session_key`, and up to 128 `candidate_session_keys` from
@@ -212,17 +214,23 @@ to the same owner. Repeating an identical request returns its cached receipt;
 changing its target, text or delivery mode is rejected. A disconnected caller does not cancel
 delivery already in progress. Never automatically retry an unknown outcome.
 
-`GET /api/v1/events` is SSE with a `ready` handshake and 15-second heartbeats.
-Named events match Tauri: `session-updated`, `background-session-updated`, `session-notification`,
-`relay-changed`, `relay-status`, `session-index-changed`, and
-`session-index-progress`. Session updates carry changed semantic objects;
-legacy relay/index events retain invalidation/recovery behavior. A lagging subscriber disconnects.
-Direct browser clients use `session_updates=false&background_updates=false`
-on SSE when receiving those events over WebSocket, avoiding duplicate transfer.
-The browser retries, then reloads the catalog and selected timeline so missed
-notifications cannot leave stale data indefinitely. Reconnects also refresh index progress and Relay status, establish a fresh progress
-revision baseline after restarts, and reject stale in-flight responses. Event pages
-include `follow_error` while followers retry, preserving last-good cards with a
+`POST /api/v1/events` opens one SSE connection for a browser, desktop remote
+viewer, or Apell applet. The JSON body supplies `subscription_prefix`, a random
+ID for this viewer connection. Each timeline or sidebar subscription uses
+`<subscription_prefix>:<unique ID>`. The host forwards matching
+`session-updated` and `background-session-updated` events. When a timeline
+changes source generation during publication, `session-subscriptions-lost`
+names the subscription to reopen. An explicit reader reset sends the owner a
+`relay-changed` event and shared viewers a targeted `session-subscriptions-lost`.
+Owner streams also receive `session-notification`, `relay-status`,
+`session-index-changed`, and `session-index-progress`. Owners can use
+`GET /api/v1/events` to monitor general events alone.
+
+Streams begin with `ready`. Owner streams use 15-second heartbeats. Shared
+viewers receive a catalog refresh notice every five seconds for their granted
+sessions. A lagging subscriber disconnects. On reconnect the viewer revalidates the selected
+timeline, renews sidebar interests, and refreshes catalog and status data.
+Event pages include `follow_error` while followers retry, preserving last-good cards with a
 visible stale-data warning until recovery. The browser shows its
 connection state and preserves last-received data during temporary outages.
 Ctrl-C closes event streams and stops background readers.

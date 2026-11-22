@@ -488,12 +488,11 @@ mod tests {
         .index_managed_pi_session(&key, Some(&locator.session_id), &project.project_id)
         .unwrap()
         .unwrap();
-      let request = serde_json::from_value::<crate::updates::SessionUpdatesRequest>(json!({
+      let request = serde_json::from_value::<crate::updates::OpenSessionRequest>(json!({
         "subscription_id":"created-pi", "session_key":key, "level":"steps",
       }))
       .unwrap();
-      reader.subscribe_session(request.clone()).unwrap();
-      let page = reader.load_session_backward(request).unwrap();
+      let page = reader.open_session(request).unwrap();
       assert_eq!(page.session_key, expected);
       assert!(page.snapshot);
     })

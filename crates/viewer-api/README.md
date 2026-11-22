@@ -1,6 +1,6 @@
 # tokn-viewer-api
 
-HTTP, WebSocket, and SSE adapter for `tokn-viewer-core`, with optional static
+HTTP and SSE adapter for `tokn-viewer-core`, with optional static
 hosting of the shared browser viewer. The package includes a Rust library and
 the `tokn-viewer-api` executable.
 

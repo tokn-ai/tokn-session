@@ -497,6 +497,14 @@ mod tests {
     }
   }
 
+  fn proof(update: &crate::updates::SessionUpdate) -> Option<crate::updates::SessionResume> {
+    Some(crate::updates::SessionResume {
+      subscription_id: update.subscription_id.clone(),
+      generation: update.generation.clone(),
+      revision: update.revision.clone(),
+    })
+  }
+
   async fn window(service: &ViewerService, key: &str, cursor: Option<String>) -> EventPage {
     let service = service.clone();
     let session_key = key.to_owned();
@@ -523,7 +531,7 @@ mod tests {
 
   #[tokio::test]
   async fn all_delivery_keeps_source_fragments_and_eager_details_without_resending_unchanged_records() {
-    use crate::updates::{SessionUpdatesRequest, UpdateLevel};
+    use crate::updates::{OpenSessionRequest, UpdateLevel};
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("all.jsonl");
     std::fs::write(&path, include_str!("../../tests/fixtures/pi/basic_session.jsonl")).unwrap();
@@ -557,57 +565,30 @@ mod tests {
       source_path: path.clone(),
     })
     .unwrap();
-    let request = SessionUpdatesRequest {
+    let request = OpenSessionRequest {
       subscription_id: "all-test".into(),
       session_key: key,
       level: UpdateLevel::All,
-      cursor: None,
-      detail_keys: vec![],
+      resume: None,
       scope: None,
       history_cursor: None,
-      unsubscribe: false,
     };
     let load = |request| {
       let service = service.clone();
       async move {
-        tokio::task::spawn_blocking(move || service.load_session_updates(request))
+        tokio::task::spawn_blocking(move || service.open_session(request))
           .await
           .unwrap()
           .unwrap()
       }
     };
-    let live_request = SessionUpdatesRequest {
+    let live_request = OpenSessionRequest {
       subscription_id: "live-only-test".into(),
       level: UpdateLevel::Steps,
       ..request.clone()
     };
-    let live_service = service.clone();
-    let subscribe_request = live_request.clone();
-    let ack = tokio::task::spawn_blocking(move || {
-      live_service.subscribe_session_owned(subscribe_request, Some("old-socket".into()))
-    })
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(ack["revision"], "0");
-    assert!(ack.get("items").is_none(), "subscribing must not send history");
-    let reclaim_service = service.clone();
-    let reclaim_request = live_request.clone();
-    let reclaimed = tokio::task::spawn_blocking(move || {
-      reclaim_service.subscribe_session_owned(reclaim_request, Some("new-socket".into()))
-    })
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(reclaimed["generation"], ack["generation"]);
-    service.release_session_subscriptions("old-socket");
-    let backward_service = service.clone();
-    let backward = tokio::task::spawn_blocking(move || backward_service.load_session_backward(live_request.clone()))
-      .await
-      .unwrap()
-      .unwrap();
+    let backward = load(live_request).await;
     assert!(backward.snapshot);
-    assert_eq!(backward.generation, ack["generation"]);
     assert_eq!(backward.state["scope"]["history"], "recent_turns");
     assert!(
       backward
@@ -629,25 +610,15 @@ mod tests {
     let group_key = descriptor["item_id"].as_str().unwrap().to_owned();
     let mut scope: crate::updates::UpdateScope = serde_json::from_value(backward.state["scope"].clone()).unwrap();
     scope.group_keys.push(group_key);
-    let details_request = SessionUpdatesRequest {
+    let details_request = OpenSessionRequest {
       subscription_id: "live-only-test".into(),
       level: UpdateLevel::Steps,
-      cursor: Some(backward.revision.clone()),
+      resume: proof(&backward),
       scope: Some(scope),
       ..request.clone()
     };
-    let group_service = service.clone();
-    let group = tokio::task::spawn_blocking(move || {
-      group_service.load_session_details(crate::delivery::SessionDetailsRequest::Group {
-        request: details_request,
-      })
-    })
-    .await
-    .unwrap()
-    .unwrap();
-    let crate::delivery::SessionDetails::Group(group) = group else {
-      panic!("Expected complete group rows");
-    };
+    let group = load(details_request).await;
+    assert!(!group.snapshot);
     let membership: std::collections::HashSet<_> = backward
       .items
       .iter()
@@ -661,6 +632,11 @@ mod tests {
         .iter()
         .all(|key| membership.contains(key.as_str().unwrap()))
     );
+    let mut request = request;
+    request.scope = Some(crate::updates::UpdateScope {
+      history: crate::updates::HistoryScope::Retained,
+      ..Default::default()
+    });
     let first = load(request.clone()).await;
     let records: Vec<_> = first.items.iter().filter(|item| item["kind"] == "event").collect();
     let source_types: Vec<_> = records
@@ -713,9 +689,6 @@ mod tests {
     .await
     .unwrap()
     .unwrap();
-    let crate::delivery::SessionDetails::Tool(tool) = tool else {
-      panic!("Expected tool display payload");
-    };
     assert!(tool.native.is_none());
     let inspect_service = service.clone();
     let inspect = tokio::task::spawn_blocking(move || inspect_service.inspect_session_event(inspect_request))
@@ -736,7 +709,8 @@ mod tests {
       let keys = group["summary"]["child_keys"].as_array().unwrap();
       assert!(!keys.is_empty());
       for key in keys {
-        assert!(key.as_str().unwrap().starts_with("window.v1."));
+        let id = key.as_str().unwrap();
+        assert!(id.strip_prefix("activity:").unwrap_or(id).starts_with("window.v1."));
         assert!(
           first
             .items
@@ -745,15 +719,15 @@ mod tests {
         );
       }
     }
-    let unchanged = load(SessionUpdatesRequest {
-      cursor: Some(first.revision.clone()),
+    let unchanged = load(OpenSessionRequest {
+      resume: proof(&first),
       ..request.clone()
     })
     .await;
     assert!(unchanged.items.is_empty());
     assert!(unchanged.event_order.is_none());
     assert_eq!(unchanged.revision, first.revision);
-    let steps = load(SessionUpdatesRequest {
+    let steps = load(OpenSessionRequest {
       subscription_id: "steps-test".into(),
       level: UpdateLevel::Steps,
       ..request.clone()
@@ -774,8 +748,8 @@ mod tests {
       .unwrap();
     let next = tokio::time::timeout(Duration::from_secs(4), async {
       loop {
-        let update = load(SessionUpdatesRequest {
-          cursor: Some(first.revision.clone()),
+        let update = load(OpenSessionRequest {
+          resume: proof(&first),
           ..request.clone()
         })
         .await;
@@ -843,6 +817,62 @@ mod tests {
     let shared = service.scoped_to_sessions(&[key.clone()]).unwrap();
     let initial = window(&shared, &key, None).await;
     assert!(initial.follow_error.is_none());
+    let open = |service: ViewerService, id: &str, resume: Option<crate::updates::SessionResume>| {
+      let request = crate::updates::OpenSessionRequest {
+        subscription_id: id.into(),
+        session_key: key.clone(),
+        level: Default::default(),
+        history_cursor: None,
+        scope: None,
+        resume,
+      };
+      tokio::task::spawn_blocking(move || service.open_session(request))
+    };
+    let guest = open(shared.clone(), "guest-view", None).await.unwrap().unwrap();
+    assert!(
+      open(service.clone(), "guest-view", proof(&guest))
+        .await
+        .unwrap()
+        .is_err()
+    );
+    service
+      .release_session(crate::updates::SessionReleaseRequest {
+        subscription_id: "guest-view".into(),
+        session_key: key.clone(),
+      })
+      .unwrap();
+    assert!(
+      service
+        .renew_session_subscriptions(&["guest-view".into()])
+        .unwrap()
+        .renewed_ids
+        .is_empty()
+    );
+    assert_eq!(
+      shared
+        .renew_session_subscriptions(&["guest-view".into()])
+        .unwrap()
+        .renewed_ids,
+      ["guest-view"]
+    );
+    let owner = open(service.clone(), "owner-view", None).await.unwrap().unwrap();
+    service
+      .release_session(crate::updates::SessionReleaseRequest {
+        subscription_id: "owner-view".into(),
+        session_key: key.clone(),
+      })
+      .unwrap();
+    let foreign_resume = open(shared.clone(), "other-guest-view", proof(&owner))
+      .await
+      .unwrap()
+      .unwrap();
+    assert!(foreign_resume.snapshot);
+    assert_ne!(foreign_resume.generation, owner.generation);
+    let restored = open(service.clone(), "owner-reopened", proof(&owner))
+      .await
+      .unwrap()
+      .unwrap();
+    assert!(!restored.snapshot);
 
     std::fs::OpenOptions::new()
       .append(true)
@@ -873,6 +903,26 @@ mod tests {
       initial.events.len(),
       "last-good history remains visible"
     );
+    let publisher = service.clone();
+    let changed_key = key.clone();
+    let updates = tokio::task::spawn_blocking(move || publisher.publish_session_updates(Some(&changed_key)))
+      .await
+      .unwrap();
+    let owner = updates.iter().find(|u| u.subscription_id == "owner-reopened").unwrap();
+    assert!(
+      owner.state["follow_error"]
+        .as_str()
+        .unwrap()
+        .contains(path.to_str().unwrap())
+    );
+    for id in ["guest-view", "other-guest-view"] {
+      let guest = updates.iter().find(|u| u.subscription_id == id).unwrap();
+      assert_eq!(
+        guest.state["follow_error"],
+        "Live updates are temporarily unavailable; retrying."
+      );
+      assert!(!serde_json::to_string(guest).unwrap().contains(path.to_str().unwrap()));
+    }
     let shared_legacy = shared.clone();
     let legacy = tokio::task::spawn_blocking(move || {
       shared_legacy.load_event_page(EventPageRequest {
@@ -894,6 +944,7 @@ mod tests {
 
   #[tokio::test]
   async fn retained_history_survives_prepend_append_and_reopen_with_correct_details() {
+    use crate::updates::{OpenSessionRequest, SessionReleaseRequest, SessionResume, SessionUpdate};
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("window.jsonl");
     let header = json!({"type":"session", "id":"window", "timestamp":"2026-01-01", "cwd":"/tmp"}).to_string() + "\n";
@@ -952,43 +1003,76 @@ mod tests {
       ["prompt 5", "prompt 6", "prompt 7"]
     );
     let stable = initial.events.last().unwrap().event_key.clone();
-    let scoped_request = crate::updates::SessionUpdatesRequest {
+    let scoped_request = crate::updates::OpenSessionRequest {
       subscription_id: "scoped-history-test".into(),
       session_key: key.clone(),
       level: crate::updates::UpdateLevel::Steps,
-      cursor: None,
-      detail_keys: vec![],
+      resume: None,
       scope: Some(crate::updates::UpdateScope {
         history: crate::updates::HistoryScope::RecentTurns,
         ..Default::default()
       }),
       history_cursor: None,
-      unsubscribe: false,
     };
-    let first_service = service.clone();
-    let first_request = scoped_request.clone();
-    let first = tokio::task::spawn_blocking(move || first_service.load_session_updates(first_request))
-      .await
-      .unwrap()
-      .unwrap();
+    let open = |request: OpenSessionRequest, resume: Option<SessionResume>| {
+      let service = service.clone();
+      async move {
+        tokio::task::spawn_blocking(move || service.open_session(OpenSessionRequest { resume, ..request }))
+          .await
+          .unwrap()
+          .unwrap()
+      }
+    };
+    let first = open(scoped_request.clone(), None).await;
+    assert!(first.snapshot);
     assert_eq!(first.items.len(), 3, "opening projects three recent turns");
-    let history_service = service.clone();
-    let history_cursor = initial.previous_cursor.clone();
-    let history = tokio::task::spawn_blocking(move || {
-      history_service.load_session_updates(crate::updates::SessionUpdatesRequest {
-        cursor: Some(first.revision),
-        history_cursor,
-        scope: Some(crate::updates::UpdateScope {
-          history: crate::updates::HistoryScope::Retained,
-          ..Default::default()
-        }),
-        ..scoped_request
-      })
-    })
-    .await
-    .unwrap()
-    .unwrap();
+    let earlier_request = OpenSessionRequest {
+      scope: Some(crate::updates::UpdateScope {
+        history: crate::updates::HistoryScope::Retained,
+        ..Default::default()
+      }),
+      ..scoped_request
+    };
+    let history = open(
+      OpenSessionRequest {
+        history_cursor: initial.previous_cursor.clone(),
+        ..earlier_request.clone()
+      },
+      proof(&first),
+    )
+    .await;
+    assert!(!history.snapshot);
+    assert_eq!(history.items.len(), 3, "only the three additional turns cross the wire");
     assert_eq!(history.item_order.as_ref().unwrap().len(), 6);
+    service
+      .release_session(SessionReleaseRequest {
+        subscription_id: history.subscription_id.clone(),
+        session_key: key.clone(),
+      })
+      .unwrap();
+    let resumed_request = OpenSessionRequest {
+      subscription_id: "new-view".into(),
+      ..earlier_request
+    };
+    let warm = open(resumed_request.clone(), proof(&history)).await;
+    assert_eq!(warm.generation, history.generation);
+    assert_eq!(warm.revision, history.revision);
+    assert!(!warm.snapshot && warm.items.is_empty() && warm.item_order.is_none());
+    assert_eq!(warm.state["total_events"], 6);
+    let full_request = OpenSessionRequest {
+      subscription_id: "uncached".into(),
+      ..resumed_request.clone()
+    };
+    let full = open(full_request.clone(), None).await;
+    assert_eq!(full.items.len(), 6);
+    let wire_bytes = |update: &SessionUpdate| serde_json::to_vec(update).unwrap().len();
+    assert!(wire_bytes(&warm) < wire_bytes(&full));
+    service
+      .release_session(SessionReleaseRequest {
+        subscription_id: warm.subscription_id.clone(),
+        session_key: key.clone(),
+      })
+      .unwrap();
     let earlier = window(&service, &key, initial.previous_cursor).await;
     assert_eq!(earlier.events.len(), 6);
     assert_eq!(earlier.events.last().unwrap().event_key, stable);
@@ -1034,6 +1118,28 @@ mod tests {
     })
     .await
     .unwrap();
+    let changed = open(resumed_request.clone(), proof(&warm)).await;
+    assert_eq!(changed.base_revision.as_deref(), Some(warm.revision.as_str()));
+    assert!(!changed.snapshot);
+    assert_eq!(changed.items.len(), 1, "reopening sends only the appended prompt");
+    assert_eq!(changed.items[0]["summary"]["summary"], "prompt 8");
+    assert_eq!(changed.state["total_events"], 7);
+    let full_after_append = open(full_request, None).await;
+    assert_eq!(full_after_append.items.len(), 7);
+    assert!(wire_bytes(&changed) < wire_bytes(&full_after_append));
+    eprintln!(
+      "Pi fixture, uncompressed response bytes: unchanged {} vs snapshot {}, one append {} vs snapshot {}",
+      wire_bytes(&warm),
+      wire_bytes(&full),
+      wire_bytes(&changed),
+      wire_bytes(&full_after_append),
+    );
+    service
+      .release_session(SessionReleaseRequest {
+        subscription_id: changed.subscription_id.clone(),
+        session_key: key.clone(),
+      })
+      .unwrap();
     let legacy_service = service.clone();
     let legacy_key = key.clone();
     let legacy = tokio::task::spawn_blocking(move || {
@@ -1064,6 +1170,29 @@ mod tests {
     })
     .await
     .unwrap();
+    // A reader can change generation before the runtime observes an explicit
+    // reset hint. Its ordinary follow update still requires a new baseline.
+    let publisher = service.clone();
+    let changed_key = key.clone();
+    let updates = tokio::task::spawn_blocking(move || publisher.publish_session_updates(Some(&changed_key)))
+      .await
+      .unwrap();
+    let refreshed = updates
+      .iter()
+      .find(|update| update.subscription_id == full_after_append.subscription_id)
+      .unwrap();
+    assert!(refreshed.snapshot);
+    assert_ne!(refreshed.generation, full_after_append.generation);
+    let replacement = open(resumed_request, proof(&changed)).await;
+    assert!(replacement.snapshot);
+    assert_ne!(replacement.generation, changed.generation);
+    let prompts: Vec<_> = replacement
+      .items
+      .iter()
+      .filter(|item| item["kind"] == "user_message")
+      .map(|item| item["summary"]["summary"].as_str().unwrap())
+      .collect();
+    assert_eq!(prompts, ["prompt 99"]);
     assert!(
       service
         .load_event_detail(LoadEventDetailRequest {

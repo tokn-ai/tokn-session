@@ -1,11 +1,12 @@
 import { credentialJson, creationOptions, decodeBase64Url, encodeBase64Url, requestOptions } from "./hub";
 import type { CryptoApi, DeviceIdentity, NoiseChannel } from "./hubCrypto";
 import { canonicalHubUrl, validateHost, type SavedHubHost } from "./hubDeviceStore";
-import { eventFrameLimit, parseEvent, type ConnectionState, type UnlistenFn, type ViewerClient } from "./transport";
+import { VIEWER_API_VERSION, eventFrameLimit, parseEvent, type ConnectionState, type UnlistenFn, type ViewerClient } from "./transport";
 import { browserDirectPeer, browserSocket, disconnected, PeerRetiredError, RelayCarrier, type DirectPeer, type DirectPeerFactory, type RecordCarrier, type RecordTransport } from "./hubTransport";
 import type { DiscoveryGroup, TransportState } from "./types";
 import { validateDiscoveryGroup } from "./hubDiscovery";
 import type { SocketFactory } from "./hubTransport";
+import { createUuid } from "./id";
 export type { SocketFactory } from "./hubTransport";
 
 const MAX_BODY = 1024 * 1024;
@@ -127,6 +128,7 @@ export async function authenticateHubHost(hub_url: string, host: SavedHubHost, i
 
 export class EncryptedHubClient implements ViewerClient {
   readonly endpoint: string;
+  readonly subscription_prefix = createUuid();
   private lifetime = new AbortController();
   private sockets = new Set<AbortController>();
   private listeners = new Map<string, Set<Handler>>();
@@ -152,7 +154,7 @@ export class EncryptedHubClient implements ViewerClient {
     signal?.addEventListener("abort", abort, { once: true });
     try {
       const health = await client.exchange("GET", "health");
-      if ((health as { version?: number }).version !== 1) throw new Error("Machine uses an unsupported viewer API version.");
+      if ((health as { version?: number }).version !== VIEWER_API_VERSION) throw new Error("Machine uses an unsupported viewer API version. Update the machine's viewer.");
       void client.preferDirect();
       return client;
     } catch (error) { client.close(); throw error; }
@@ -213,7 +215,7 @@ export class EncryptedHubClient implements ViewerClient {
       await peer.accept(answer.sdp);
       // An ICE connection alone grants no trust: authenticate the host/device again.
       const health = await this.exchange("GET", "health", undefined, peer);
-      if ((health as { version?: number }).version !== 1) throw new Error("Direct machine uses an unsupported viewer API version.");
+      if ((health as { version?: number }).version !== VIEWER_API_VERSION) throw new Error("Direct machine uses an unsupported viewer API version. Update the machine's viewer.");
       if (this.lifetime.signal.aborted) throw aborted();
       this.direct = peer; this.setTransport({ kind: "direct" });
       this.event_request?.close();
@@ -289,7 +291,10 @@ export class EncryptedHubClient implements ViewerClient {
     try { return receiveMessage(request.channel, await request.socket.read(timeout)); }
     catch (error) { if (request.carrier === this.direct) this.fallback(error); throw error; }
   }
-  invoke<T>(command: string, payload: unknown = {}): Promise<T> { return this.exchange("POST", command, payload) as Promise<T>; }
+  invoke<T>(command: string, payload: unknown = {}): Promise<T> {
+    if (command === "events") return Promise.reject(new Error("Use the live event listener for event streams."));
+    return this.exchange("POST", command, payload) as Promise<T>;
+  }
   setStateListener(handler: (state: ConnectionState) => void): void { this.on_state = handler; }
   setTransportListener(handler: (transport: TransportState) => void): void { this.on_transport = handler; handler(this.transport); }
   private emit(name: string, payload: unknown): void { for (const handler of this.listeners.get(name) ?? []) handler({ payload }); }
@@ -311,7 +316,7 @@ export class EncryptedHubClient implements ViewerClient {
           this.on_state(attempted ? "reconnecting" : "connecting"); attempted = true;
           let request: Awaited<ReturnType<EncryptedHubClient["request"]>> | undefined;
           try {
-            request = await this.request("GET", "events");
+            request = await this.request("POST", "events", { subscription_prefix: this.subscription_prefix });
             this.event_request = request;
             if (request.response.status !== 200) throw new Error("Live viewer connection was rejected.");
             const decoder = new TextDecoder();
@@ -330,7 +335,7 @@ export class EncryptedHubClient implements ViewerClient {
                 if (!frame) continue;
                 if (frame.event === "ready") {
                   this.on_state("connected");
-                  if (connected) { this.emit("transport-reconnected", {}); this.emit("relay-changed", { session_key: null, reset: true }); }
+                  if (connected) this.emit("transport-reconnected", {});
                   connected = true; ready();
                 } else this.emit(frame.event, frame.payload);
               }

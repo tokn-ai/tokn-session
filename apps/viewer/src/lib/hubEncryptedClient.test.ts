@@ -48,7 +48,7 @@ function harness(respond: (socket: TestSocket, message: Record<string, unknown>)
   if (message.type === "request_end") {
     const events = socket.request?.path === "/api/v1/events";
     socket.push({ type: "response", status: 200, content_type: events ? "text/event-stream" : "application/json" });
-    socket.push({ type: "chunk", data: bytes(events ? "event: ready\ndata: {}\n\n" : '{"version":1}') });
+    socket.push({ type: "chunk", data: bytes(events ? "event: ready\ndata: {}\n\n" : '{"version":2}') });
     if (!events) socket.push({ type: "end" });
   }
 }) {
@@ -59,7 +59,7 @@ function harness(respond: (socket: TestSocket, message: Record<string, unknown>)
 function viewerReply(socket: TestSocket): void {
   const events = socket.request?.path === "/api/v1/events";
   socket.push({ type: "response", status: 200, content_type: events ? "text/event-stream" : "application/json" });
-  socket.push({ type: "chunk", data: bytes(events ? "event: ready\ndata: {}\n\n" : '{"version":1}') });
+  socket.push({ type: "chunk", data: bytes(events ? "event: ready\ndata: {}\n\n" : '{"version":2}') });
   if (!events) socket.push({ type: "end" });
 }
 function directHarness(options: { reject_input?: boolean; wrong_pin?: boolean; hold_health?: boolean } = {}) {
@@ -87,6 +87,19 @@ function directHarness(options: { reject_input?: boolean; wrong_pin?: boolean; h
   return { relay, direct, factory, peer, interrupt: () => fail(new Error("Direct connection was interrupted.")) };
 }
 afterEach(() => { vi.useRealTimers(); });
+
+it("stops at health when the machine cannot serve scoped streams", async () => {
+  const { factory, sockets } = harness((socket, message) => {
+    if (message.type !== "request_end") return;
+    socket.push({ type: "response", status: 200, content_type: "application/json" });
+    socket.push({ type: "chunk", data: bytes('{"version":1}') });
+    socket.push({ type: "end" });
+  });
+  await expect(EncryptedHubClient.connect("https://hub.example", host, identity, crypto(), undefined, factory))
+    .rejects.toThrow("unsupported viewer API version");
+  expect(sockets.map((socket) => socket.request?.path)).toEqual(["/api/v1/health"]);
+  expect(sockets[0].closed).toBe(true);
+});
 
 it("pairs directly through Hub and returns only a host-confirmed machine pin", async () => {
   const { factory, sockets } = harness();
@@ -159,6 +172,10 @@ it("parses fragmented SSE and closes live streams and pending requests when swit
   const client = await EncryptedHubClient.connect("https://hub.example", host, identity, crypto(), undefined, factory);
   const changed = vi.fn();
   const stop = await client.listen("session-updated", changed);
+  expect(sockets[1].request).toMatchObject({ method: "POST", path: "/api/v1/events" });
+  expect(sockets[1].messages).toContainEqual({
+    type: "request_body", data: bytes(JSON.stringify({ subscription_prefix: client.subscription_prefix })),
+  });
   sockets[1].push({ type: "chunk", data: bytes('event: session-updated\ndata: {"revision":') });
   sockets[1].push({ type: "chunk", data: bytes('"1"}\n\n') });
   await vi.waitFor(() => expect(changed).toHaveBeenCalledWith({ payload: { revision: "1" } }));

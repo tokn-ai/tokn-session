@@ -279,8 +279,8 @@ async fn verify_health(connection: &Rc<Connection>) -> Result<(), String> {
   watchdog.timeout(15)?;
   match select(Box::pin(connection.health()), Box::pin(watchdog.cancellation())).await {
     Either::Left((result, _)) => {
-      if result?.get("version").and_then(Value::as_u64) != Some(1) {
-        return Err("Machine uses an unsupported viewer API".into());
+      if result?.get("version").and_then(Value::as_u64) != Some(protocol::VIEWER_API_VERSION) {
+        return Err("Machine uses an unsupported viewer API version. Update the machine's viewer.".into());
       }
       Ok(())
     }
@@ -363,6 +363,9 @@ fn validate_response_id(value: &str) -> Result<(), String> {
   Ok(())
 }
 fn prepare_request(command: &str, payload: &Value) -> Result<(&'static str, String, Vec<u8>), String> {
+  if command == "events" {
+    return Err("Use the live event listener for event streams".into());
+  }
   if command.is_empty() || command.len() > 64 || !command.bytes().all(|byte| byte.is_ascii_lowercase() || byte == b'_')
   {
     return Err("Invalid viewer command".into());
@@ -398,6 +401,7 @@ pub async fn listen(id: &str) -> Result<Value, String> {
 }
 async fn pump(connection: Rc<Connection>, epoch: u64) {
   let mut attempt = 0u64;
+  let subscription = json!({"subscription_prefix":connection.id}).to_string();
   while !connection.closed.get() && connection.stream_epoch.get() == epoch {
     connection.state(if attempt == 0 { "connecting" } else { "reconnecting" });
     let generation = format!("{epoch}-{attempt}");
@@ -413,7 +417,9 @@ async fn pump(connection: Rc<Connection>, epoch: u64) {
       json!({"connection_id":connection.id,"generation":generation,"channel_id":channel_id}),
     );
     let result = async {
-      let mut exchange = connection.exchange("GET", "/api/v1/events", &[], None).await?;
+      let mut exchange = connection
+        .exchange("POST", "/api/v1/events", subscription.as_bytes(), None)
+        .await?;
       // A replacement listener can retire this generation while its socket or
       // handshake is opening. Drop that exact exchange before touching the new
       // generation's socket handle or waiting for its first response chunk.

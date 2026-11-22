@@ -448,13 +448,14 @@ explicit publication step.
 versions already on crates.io. `--list` checks only; `--dry-run` verifies without
 uploading; the default publishes pending crates through Cargo.
 
-Session delivery separates live subscription from loading. Direct browsers use
-connection-scoped WebSocket interests and live diffs, with backward HTTP for
-initial/older screens, details HTTP for complete groups/tool display payloads,
-and dedicated inspection HTTP for source/native records. Tauri exposes the
-same commands through its event bridge. Opening defaults to steps for the latest
-three turns with collapsed inner groups and never backfills saved reading anchors before
-first paint. Heartbeats renew identity leases without fetching data.
+Viewer protocol revision 2 uses one `open_session` request for a baseline and live
+interest. A cached timeline can resume by previous subscription ID, generation
+and revision. A proof that matches a retained projection yields a delta. A
+cache miss yields a snapshot in the same response. Direct web, Hub web, Apell
+and remote desktop each use one scoped SSE stream per machine connection.
+Desktop Local uses the same commands through Tauri. Opening defaults to the
+latest three user turns at Steps. Groups, tool display payloads and source
+inspection remain independently demand-loaded.
 Cold source startup runs outside the shared subscription lock, and initial
 source windows now contain three user turns plus dependency/attention context.
 Codex window readers scan backward to explicit turn starts, normalize only the
@@ -464,14 +465,13 @@ prefixes retain metadata/version/guard verification without normalizing their
 omitted bodies. Legacy formats without turn starts and thread-spawn filtering
 retain full-reader fallbacks. Other providers still normalize full histories.
 Use `profile_local_codex_open` to compare full decoding with lazy reader startup.
-Snapshot baselines and publication share revisions; reconnects and replacements recover
-through backward reads. Old-socket cleanup cannot remove reclaimed interests.
+Baseline capture and publication share revisions. Reconnects revalidate the cached projection.
+The host retains up to eight released projections, evicting them before active interests.
 
 Frontend replicas retain eight recent sessions. Independent group/tool/inspect
 coverage tracks missing, loading, complete, stale, and failed resources; loaded
 groups receive live appends after collapse. Display details and inspection are
-separate caches. Legacy servers and the existing Hub HTTP tunnel retain SSE
-compatibility; Hub allows the new loading commands. Shared-session authorization
+separate caches. Shared-session authorization
 continues through scoped commands and exact-key event filtering. Compact attention notifications
 avoid redundant catalog/timeline reads. See [session delivery](viewer-session-updates.md)
 for ownership, recovery, limits, and remaining source/projection costs.
@@ -489,13 +489,12 @@ selectors, and a connection badge, keeping the session sidebar focused
 on navigation and remaining available when it is collapsed. The scope defaults to
 All sessions on the connected machine; Sidebar sessions limits it to loaded
 root/child rows. One independent leased interest carries bounded latest-assistant
-and activity projections over WebSocket, Tauri, or Hub/SSE; registration,
-scope changes, and reconnects never load unopened history. Delivery presets are
-`final`, `messages`, `steps`, and `all`, with `details` retained for compatibility.
+and activity projections over SSE or Tauri. Registration, scope changes and
+reconnects never load unopened history. Delivery presets are `final`, `messages`,
+`steps` and `all`.
 Background delivery defaults to Messages; Final filters intermediate previews
 while keeping question/activity state live. The open conversation defaults to
-Steps and offers all four presets, each with independent cache coverage and
-a backward baseline when switching. Both level preferences persist locally.
+Steps. Switching presets revalidates the cache for the requested level. Both level preferences persist locally.
 Migration 9 stores compact latest-message metadata from existing normalization
 jobs without requeueing bodies; a second viewer follows SQLite projections.
 The frontend retains up to 2,048 compact previews separately from eight rich
@@ -504,7 +503,7 @@ Final keeps compact intermediate previews authoritative. Late page
 responses cannot replace newer compact updates. Scope changes retain text but
 retire old activity authority. Unknown projections preserve previews; committed
 empty/reset/removal projections clear them. Accepted first-screen pages seed
-previews, including legacy hosts. Shared grants receive only their exact sessions,
+previews. Shared grants receive only their exact sessions,
 without the owner's read markers or unshared descendant activity.
 Ordinary known-file appends keep sidebar metadata refresh separate from compact
 topology recovery. Body updates publish only the changed sessions and canonical
@@ -527,13 +526,12 @@ latest work segment remains running; earlier durations stop at the separator.
 Parent running state owns delegated activity: a stopped parent blocks descendant
 running propagation, even when child histories lack completion records.
 Healthy, acknowledged live replicas own sidebar running state; lost, expired,
-or errored interests yield to the index while retaining readable cards. All
-retained interests renew even without a selected conversation. Renewal reports
-missing identities, and backward baselines recover them after pauses/reconnects;
-targeted recovery leaves healthy sessions alone. Source revisions and captured
-request generations reject delayed/retired snapshots across delivery levels.
-Cache eviction explicitly releases interests; late reads cannot revive a released
-socket registration.
+or errored interests yield to the index while retaining readable cards.
+Switching sessions releases the previous timeline. The compact sidebar interest
+continues independently. Renewal reports missing interests, and a targeted open
+with the cached revision recovers an active timeline. Source revisions and
+request generations reject stale snapshots across delivery levels. A late read
+cannot revive a released subscription.
 Live work shows a spinner. Provider filters and session metadata live in disclosures.
 Desktop sidebar collapse preserves navigation state and removes hidden controls
 from keyboard focus; mobile retains the modal session drawer. The latest-activity
@@ -736,9 +734,8 @@ and [Hub administration](hub.md). Remote connections
 require HTTPS termination; the host API stays on loopback. Browser builds need
 the `wasm32-unknown-unknown` Rust target and pinned `wasm-bindgen-cli` 0.2.126;
 `pnpm build` generates bindings before bundling them.
-The shared Hub viewer-route allowlist includes subscription, backward loading,
-resource details, independent inspection, lease renewal, and legacy session
-updates. Encrypted tunnel tests cover forwarding request bodies.
+The Hub viewer-route allowlist includes session open and release, scoped event streams,
+resource details, inspection and lease renewal. Encrypted tunnel tests cover forwarding request bodies.
 
 ## Viewer core and remote API
 
@@ -749,8 +746,7 @@ opening a different Hub only browses its saved machines. Navigation preferences
 store Hub origins and UUIDs, while device identities remain in their existing
 trust stores. Local initialization is lazy, retryable, and independent of Hub
 access; failed or canceled opens keep the last successful selection. Viewer
-requests and events capture their machine transport, including pagination and
-compatibility fallbacks, so delayed local work cannot target a newly opened host.
+requests, pagination and events capture their machine transport so delayed work cannot target a newly opened host.
 Hub mode uses `hub-remote` through async Tauri commands/events; browser Hub mode
 uses WebRTC with encrypted WebSocket fallback. Both select one machine and share the same
 viewer command interface, host-scoped caches, cancellation, and live updates.
@@ -786,7 +782,7 @@ pages expose `follow_error` while retaining last-good cards during follower retr
 
 ## Session snapshots
 
-The viewer now retains a one-user-turn initial history window in an
+The viewer now retains a three-user-turn initial history window in an
 eight-session LRU, with two lower-priority activity preloads scoped by each
 view's project/filter candidates. Explicit earlier loads and appended turns
 remain until session eviction. View leases protect selected sessions; a 64 MiB

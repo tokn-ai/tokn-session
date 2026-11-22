@@ -183,7 +183,7 @@ describe("session display replicas", () => {
     expect(cache.stale(delayed)).toBe(true);
   });
 
-  it("fences unseen late request generations and leaves source generation unchanged by details", () => {
+  it("fences unseen late request generations across levels", () => {
     const cache = new SessionDisplayCache();
     const started = cache.sourceGeneration("one");
     const initial = snapshot(cache, "one");
@@ -192,8 +192,6 @@ describe("session display replicas", () => {
     const delayed = { ...initial, ...final, state: { ...initial.state, is_running: false, source_revision: "unseen-old:99" } };
     expect(cache.acceptsSnapshot(delayed, started)).toBe(false);
     expect(cache.acceptsSnapshot({ ...delayed, state: { ...delayed.state, source_revision: "new:1" } }, started)).toBe(true);
-    const details = cache.request("one", "details");
-    cache.apply({ ...initial, ...details, state: { ...initial.state, source_revision: "details:20", is_running: false } });
     expect(cache.sourceGeneration("one")).toBe("new");
     expect(cache.liveRunning("one")).toBe(true);
   });
@@ -477,7 +475,7 @@ describe("session display replicas", () => {
     const cache = new SessionDisplayCache(); const initial = snapshot(cache, "one"); cache.apply(initial);
     const final = cache.request("one", "final");
     cache.apply({ ...initial, ...final, revision: "9", items: [], item_order: [] });
-    expect(cache.request("one").cursor).toBe("1"); expect(cache.request("one", "final").cursor).toBe("9");
+    expect(cache.request("one").resume?.revision).toBe("1"); expect(cache.request("one", "final").resume?.revision).toBe("9");
   });
 
   it("preserves references when a catch-up snapshot contains identical messages", () => {
@@ -499,13 +497,12 @@ describe("session display replicas", () => {
     const initial = snapshot(cache, "old");
     cache.apply(initial);
     cache.includeHistory("old"); cache.includeGroup("old", "group-old");
-    const steps = cache.request("old", "steps"), final = cache.request("old", "final"), messages = cache.request("old", "messages"), details = cache.request("old", "details");
+    const steps = cache.request("old", "steps"), final = cache.request("old", "final"), messages = cache.request("old", "messages");
     cache.apply({ ...initial, ...steps });
     cache.apply({ ...initial, ...final });
-    cache.apply({ ...initial, ...messages });
     // A pending interest has no replica yet and still needs remote release.
-    cache.apply({ ...initial, ...details, snapshot: false, base_revision: "1", revision: "2" });
-    const expected = cache.requests().map((request) => ({ ...request, unsubscribe: true }));
+    cache.apply({ ...initial, ...messages, snapshot: false, base_revision: "1", revision: "2" });
+    const expected = cache.requests().map(({ session_key, subscription_id }) => ({ session_key, subscription_id }));
     cache.select("retained");
     cache.apply(snapshot(cache, "retained"));
     for (let index = 0; index < 7; index++) cache.apply(snapshot(cache, `next-${index}`));
@@ -522,7 +519,7 @@ describe("session display replicas", () => {
 
   it("can drop a subscription while retaining display content", () => {
     const cache = new SessionDisplayCache(); const initial = snapshot(cache, "one"); cache.apply(initial);
-    const release = cache.release("one", "all"); expect(release?.unsubscribe).toBe(true);
+    const release = cache.release("one", "all"); expect(release?.subscription_id).toBe(initial.subscription_id);
     expect(cache.accepts(initial)).toBe(false); expect(cache.get("one")).not.toBeNull();
     expect(cache.request("one").subscription_id).not.toBe(initial.subscription_id);
   });
@@ -611,7 +608,6 @@ describe("session display replicas", () => {
     expect(cache.trajectoryGroup("one", a.event_key)).toBeNull();
     cache.includeGroup("one", a.event_key);
     expect(cache.request("one", "steps").scope).toEqual({ history: "recent_turns", turn_key: "user", group_keys: [a.event_key] });
-    expect(cache.request("one", "details", ["a"]).scope?.group_keys).toEqual([]);
     const update = { ...initial, snapshot: false, base_revision: "1", revision: "2", groups: [], item_order: null,
       items: ["a", "b"].map((id) => ({ item_id: id, kind: "tool_summary" as const, level: "steps" as const, summary: summary(id) })) };
     cache.apply(update);
