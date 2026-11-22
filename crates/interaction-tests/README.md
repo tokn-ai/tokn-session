@@ -51,6 +51,7 @@ Codex covers choice/free-text answers, command approval, duplicate admission,
 explicit and atomic steering, interruption, and explicit resume. Its strict
 idle-only Start and Queue operations reject honestly because the supported
 native RPC contracts do not guarantee those delivery modes.
+
 OpenCode's native V1 and V2 configuration readers differ. The scenario supplies
 configuration accepted by both, which V2 migrates internally. The adapter keeps
 the legacy-history check and reports an explicit unsupported reason if native
@@ -59,6 +60,19 @@ V2-only configuration prevents that check; a captured rejection covers this case
 The local model server implements Chat Completions and Responses streaming,
 with explicit gates for running-state tests. Exhausting
 its response script is an error; no request falls back to an external provider.
+
+## Codex managed checkpoint smoke
+
+Run this smoke in a disposable Linux environment with a Codex executable that
+advertises the experimental `requiredHumanApproval` capability. Configure that
+environment's managed `requirements.toml` with a `prompt-user` rule for `touch`.
+The test launches Codex in a temporary folder with a loopback model and checks
+that one command runs after Allow once and no command runs after Decline or Cancel.
+
+```sh
+export TOKN_CODEX_HUMAN_APPROVAL_EXECUTABLE="$(command -v codex)"
+cargo test -p tokn-interaction-tests --test codex real_codex_managed_command_checkpoints -- --ignored
+```
 
 ## Current DSH package smoke
 

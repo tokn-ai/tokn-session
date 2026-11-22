@@ -92,6 +92,7 @@ struct Inner {
 #[derive(Clone)]
 struct Host {
   resolver: resolver::RuntimeResolver,
+  codex_human_command_reviewer: Option<crate::CodexHumanCommandReviewer>,
 }
 
 impl RpcRuntimeManager {
@@ -193,7 +194,16 @@ impl RpcRuntimeManager {
       .await
   }
 
+  #[cfg(test)]
   pub(crate) fn new(path: Option<PathBuf>, interactions: InteractionService) -> Self {
+    Self::new_with_codex_human_command_reviewer(path, interactions, None)
+  }
+
+  pub(crate) fn new_with_codex_human_command_reviewer(
+    path: Option<PathBuf>,
+    interactions: InteractionService,
+    reviewer: Option<crate::CodexHumanCommandReviewer>,
+  ) -> Self {
     let parent = path.as_ref().and_then(|path| path.parent());
     let lease_directory = parent.map(|path| path.join("rpc-leases"));
     let ownership = crate::session_ownership::SessionOwnership::new(parent.map(|path| path.join("session-leases")));
@@ -205,6 +215,7 @@ impl RpcRuntimeManager {
     };
     let host = Host {
       resolver: resolver.clone(),
+      codex_human_command_reviewer: reviewer,
     };
     Self(Arc::new(Inner {
       resolver,

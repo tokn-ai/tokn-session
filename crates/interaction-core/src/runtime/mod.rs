@@ -80,6 +80,15 @@ pub trait RuntimeHost: Send + Sync + 'static {
     runtime_id: &'a str,
     profile: &'a Self::Profile,
   ) -> AdapterFuture<'a, Result<Arc<dyn RuntimeHandle>, String>>;
+  /// Open a temporary runtime for model metadata without session activation.
+  /// Hosts can omit capabilities reserved for an explicitly activated runtime.
+  fn open_metadata<'a>(
+    &'a self,
+    runtime_id: &'a str,
+    profile: &'a Self::Profile,
+  ) -> AdapterFuture<'a, Result<Arc<dyn RuntimeHandle>, String>> {
+    self.open(runtime_id, profile)
+  }
   fn redact_error(&self, error: &str, profile: &Self::Profile) -> String;
 }
 

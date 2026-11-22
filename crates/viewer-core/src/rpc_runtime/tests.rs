@@ -8,6 +8,7 @@ use std::{
 };
 use tokio::{sync::watch, task::JoinSet};
 mod http_peer;
+mod human_review;
 mod resolution;
 mod workflow_tests;
 

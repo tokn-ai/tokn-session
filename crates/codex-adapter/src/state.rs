@@ -1,5 +1,9 @@
 use super::*;
 
+fn human_frame(native: &Value) -> bool {
+  native["method"] == wire::COMMAND_EXECUTION_REQUEST_APPROVAL && native["params"]["kind"] == "humanCommand"
+}
+
 impl Inner {
   pub(super) fn ensure_open(&self) -> Result<(), InteractionError> {
     if self.transport.is_closed() {
@@ -97,6 +101,7 @@ impl Inner {
     if self.disconnected.swap(true, Ordering::AcqRel) {
       return;
     }
+    self.human_commands.cancel_all();
     let interactions = std::mem::take(
       &mut self
         .snapshot
@@ -112,7 +117,7 @@ impl Inner {
     }
     self.publish(None, RuntimeEventKind::Disconnected { reason });
   }
-  pub(super) async fn receive(&self, message: Incoming) {
+  pub(super) async fn receive(self: &Arc<Self>, message: Incoming) {
     if self.disconnected.load(Ordering::Acquire) {
       if let Incoming::Response {
         reply,
@@ -145,8 +150,20 @@ impl Inner {
         let _ = reply.send(result);
       }
       Incoming::Disconnected { reason } => self.disconnect(reason),
-      Incoming::Native(native) => self.publish(None, RuntimeEventKind::Native(native)),
+      Incoming::Native(native) => {
+        if human_frame(&native) {
+          self.disconnect("Codex sent a malformed human checkpoint envelope".into());
+          let _ = self.transport.close().await;
+        } else {
+          self.publish(None, RuntimeEventKind::Native(native));
+        }
+      }
       Incoming::Notification { method, params, native } => {
+        if human_frame(&native) {
+          self.disconnect("Codex sent a human checkpoint without a request ID".into());
+          let _ = self.transport.close().await;
+          return;
+        }
         self.notification(&method, &params);
         let id = params
           .get("threadId")
@@ -166,6 +183,15 @@ impl Inner {
         params,
         native,
       } => {
+        if method == wire::COMMAND_EXECUTION_REQUEST_APPROVAL && params["kind"] == "humanCommand" {
+          self.human_request(id, params).await;
+          return;
+        }
+        if self.human_commands.contains(&id) {
+          self.disconnect("Codex reused a human checkpoint request ID for a different request".into());
+          let _ = self.transport.close().await;
+          return;
+        }
         match mapping::interaction(&id, &method, &params, native.clone()) {
           Ok(interaction) => {
             let duplicate = {
@@ -301,6 +327,7 @@ impl Inner {
     Ok(value)
   }
   pub(super) fn notification(&self, method: &str, params: &Value) {
+    self.human_commands.notification(method, params);
     if method == "thread/started" {
       if let Ok(record) = self.accept_thread(&params["thread"], None) {
         self.publish(record.state.session_id.clone(), RuntimeEventKind::State(record.state));

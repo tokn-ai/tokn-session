@@ -35,8 +35,10 @@ lists retain their advertised limits.
 
 New model-provider selectors, lifecycle timestamps, generated-image metadata,
 and other optional fields remain available through `extra` or native item JSON.
-The generic adapter does not advertise `requiredHumanApproval`; managed
-`humanCommand` checkpoints require a dedicated human-presentation contract.
+`InitializeCapabilities::required_human_approval` is an explicit client trust
+assertion. The generic adapter path leaves it off; an opted-in managed host
+reviewer handles `humanCommand` checkpoints through a dedicated presentation
+contract. Parsing the fields alone never enables that capability.
 
 This crate performs no I/O, starts no process, and does not attach or resume a
 thread. Transports and runtime ownership belong to `tokn-codex-adapter`.

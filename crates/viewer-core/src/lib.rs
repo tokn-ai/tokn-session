@@ -34,4 +34,8 @@ pub mod updates;
 mod watcher;
 pub mod workspace;
 pub use service::ViewerService;
+pub use tokn_codex_adapter::{
+  HumanCommandApproval as CodexHumanCommandApproval, HumanCommandCancellation as CodexHumanCommandCancellation,
+  HumanCommandDecision as CodexHumanCommandDecision, HumanCommandReviewer as CodexHumanCommandReviewer,
+};
 use tokn_session_relay::{RelayConfig, RelayRecord};

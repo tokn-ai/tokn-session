@@ -70,6 +70,7 @@ async fn all_shared_providers_discover_the_same_plan_for_availability_catalog_an
   install_environment(&manager, bin.path());
   let host = Host {
     resolver: manager.0.resolver.clone(),
+    codex_human_command_reviewer: None,
   };
   for provider in [
     Provider::Codex,

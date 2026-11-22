@@ -15,12 +15,12 @@ revision or executable that actually produced them.
 
 Historical generated images now accept durable `fileId` references without
 inventing a local path. Canonical/legacy fanout deduplicates identical references
-while retaining changed files and newly observed paths. `humanCommand` and
-unknown future command-approval kinds reject because this client does not
-advertise the new required-human-approval guarantee.
+while retaining changed files and newly observed paths. `humanCommand` uses the
+[desktop's native review dialog](viewer-rpc-runtimes.md#profiles-and-storage) on
+managed Codex runtimes. Unknown command-approval kinds still reject.
 
-Affected crates: `codex`, `codex-adapter`; protocol/source documentation records
-the newer inspected schema. Existing app-server sends, questions, turn controls,
+Affected crates: `codex`, `codex-rpc-protocol`, `codex-adapter`, and `viewer-core`,
+plus the desktop Viewer. Existing app-server sends, questions, turn controls,
 rollout identity/ordinals, and local catalog formats remain compatible.
 Explicit model-provider catalog filtering, account-scoped discovery, moderation
 presentation, and file-backed audio remain separate feature work; native data

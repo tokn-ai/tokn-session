@@ -327,6 +327,17 @@ impl Transport {
     self.write_value(json!({"id":id,"result":result}), true).await
   }
 
+  pub(super) async fn respond_unless_cancelled(
+    &self,
+    id: &RpcId,
+    result: Value,
+    cancellation: &watch::Receiver<bool>,
+  ) -> Result<(), InteractionError> {
+    self
+      .write_value_checked(json!({"id":id,"result":result}), true, Some(cancellation))
+      .await
+  }
+
   pub(super) async fn respond_error(&self, id: &RpcId, code: i64, message: &str) -> Result<(), InteractionError> {
     self
       .write_value(json!({"id":id,"error":{"code":code,"message":message}}), true)
@@ -334,6 +345,15 @@ impl Transport {
   }
 
   async fn write_value(&self, value: Value, mutation: bool) -> Result<(), InteractionError> {
+    self.write_value_checked(value, mutation, None).await
+  }
+
+  async fn write_value_checked(
+    &self,
+    value: Value,
+    mutation: bool,
+    cancellation: Option<&watch::Receiver<bool>>,
+  ) -> Result<(), InteractionError> {
     let bytes = serde_json::to_vec(&value).map_err(|_| InteractionError::invalid("Invalid Codex RPC request"))?;
     if bytes.len() > framing::MAX_FRAME_BYTES {
       return Err(InteractionError::invalid("Codex RPC request exceeds the 34 MiB limit"));
@@ -347,6 +367,9 @@ impl Transport {
     let Some(writer) = writer.as_mut() else {
       return Err(InteractionError::unavailable("Codex RPC input is closed"));
     };
+    if cancellation.is_some_and(|cancel| *cancel.borrow() || cancel.has_changed().is_err()) {
+      return Ok(());
+    }
     let mut guard = WriteGuard {
       transport: self,
       complete: false,
@@ -721,6 +744,69 @@ mod tests {
     assert!(matches!(incoming.recv().await, Some(Incoming::Disconnected { reason }) if reason.contains("cancelled")));
     assert_eq!(
       transport.rpc("thread/read", json!({}), false).await.unwrap_err().kind,
+      ErrorKind::Unavailable
+    );
+    transport.close().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn resolved_human_response_waiting_for_writer_is_not_sent() {
+    let (transport, _incoming, reader, _writer) = connection();
+    let writer = transport.writer.lock().await;
+    let (cancel, cancelled) = watch::channel(false);
+    let caller = transport.clone();
+    let (started, waiting) = oneshot::channel();
+    let response = tokio::spawn(async move {
+      let _ = started.send(());
+      caller
+        .respond_unless_cancelled(
+          &RpcId::String("original".into()),
+          json!({"decision":"accept"}),
+          &cancelled,
+        )
+        .await
+    });
+    waiting.await.unwrap();
+    cancel.send_replace(true);
+    drop(writer);
+    response.await.unwrap().unwrap();
+    let mut reader = RpcReader::new(reader);
+    assert!(
+      tokio::time::timeout(Duration::from_millis(30), reader.read_frame())
+        .await
+        .is_err()
+    );
+    assert!(!transport.is_closed());
+    transport.close().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn failed_human_response_write_is_uncertain_and_closes_without_replay() {
+    let (adapter, mut native) = tokio::io::duplex(1);
+    let (reader, writer) = tokio::io::split(adapter);
+    let (transport, _incoming) = Transport::stdio(reader, writer, None, Duration::from_secs(2));
+    let (_cancel, cancellation) = watch::channel(false);
+    let caller = transport.clone();
+    let response = tokio::spawn(async move {
+      caller
+        .respond_unless_cancelled(
+          &RpcId::String("original".into()),
+          json!({"decision":"accept"}),
+          &cancellation,
+        )
+        .await
+    });
+    let mut byte = [0];
+    native.read_exact(&mut byte).await.unwrap();
+    drop(native);
+    assert_eq!(response.await.unwrap().unwrap_err().kind, ErrorKind::Uncertain);
+    assert!(transport.is_closed());
+    assert_eq!(
+      transport
+        .respond(&RpcId::String("original".into()), json!({"decision":"accept"}))
+        .await
+        .unwrap_err()
+        .kind,
       ErrorKind::Unavailable
     );
     transport.close().await.unwrap();
