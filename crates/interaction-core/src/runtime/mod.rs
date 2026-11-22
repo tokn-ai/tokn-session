@@ -162,16 +162,34 @@ struct BindingOwner {
   instance_id: String,
   _lease: SessionLease,
 }
+
+/// Own the lock's lifetime independently of descriptors inherited by a
+/// concurrent fork before exec. Closing only our descriptor cannot release a
+/// lock while another descriptor shares its open-file description.
+struct RuntimeLease(File);
+
+impl RuntimeLease {
+  fn acquire(path: &Path) -> Result<Self, String> {
+    tokn_session_storage::acquire_private_lock(path).map(Self)
+  }
+}
+
+impl Drop for RuntimeLease {
+  fn drop(&mut self) {
+    let _ = self.0.unlock();
+  }
+}
+
 struct Record {
   info: RuntimeInfo,
   handle: Arc<dyn RuntimeHandle>,
-  _lease: Option<File>,
+  _lease: Option<RuntimeLease>,
   pump: tokio::task::JoinHandle<()>,
 }
 struct QuarantinedRecord {
   info: RuntimeInfo,
   _handle: Option<Arc<dyn RuntimeHandle>>,
-  _lease: Option<File>,
+  _lease: Option<RuntimeLease>,
 }
 impl Drop for Record {
   fn drop(&mut self) {
@@ -332,9 +350,7 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
       .map(|directory| directory.join(format!("{profile_id}.lock")));
     let result = tokio::task::spawn_blocking(move || {
       let _guard = guard;
-      let _lease = lease_path
-        .map(|path| tokn_session_storage::acquire_private_lock(&path))
-        .transpose()?;
+      let _lease = lease_path.map(|path| RuntimeLease::acquire(&path)).transpose()?;
       edit()
     })
     .await
@@ -465,7 +481,7 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     let lease = if let Some(directory) = &self.0.lease_directory {
       let path = directory.join(format!("{}.lock", request.profile_id));
       Some(
-        tokio::task::spawn_blocking(move || tokn_session_storage::acquire_private_lock(&path))
+        tokio::task::spawn_blocking(move || RuntimeLease::acquire(&path))
           .await
           .map_err(|_| "Could not acquire runtime ownership")??,
       )
@@ -595,7 +611,7 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
   async fn retire_unregistered(
     &self,
     handle: Arc<dyn RuntimeHandle>,
-    lease: Option<File>,
+    lease: Option<RuntimeLease>,
     profile: &H::Profile,
     reason: String,
   ) -> String {
@@ -608,7 +624,7 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
   fn retain_unconfirmed_start(
     &self,
     handle: Option<Arc<dyn RuntimeHandle>>,
-    lease: Option<File>,
+    lease: Option<RuntimeLease>,
     profile: &H::Profile,
   ) {
     // Some adapters consume their child while attempting cleanup. A second close

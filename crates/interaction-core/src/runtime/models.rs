@@ -186,7 +186,7 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
     let lease = if let Some(directory) = &self.0.lease_directory {
       let path = directory.join(format!("{profile_id}.lock"));
       Some(
-        tokio::task::spawn_blocking(move || tokn_session_storage::acquire_private_lock(&path))
+        tokio::task::spawn_blocking(move || RuntimeLease::acquire(&path))
           .await
           .map_err(|_| InteractionError::unavailable("Could not reserve model runtime ownership"))?
           .map_err(InteractionError::unavailable)?,

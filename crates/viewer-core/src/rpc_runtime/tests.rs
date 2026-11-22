@@ -803,8 +803,13 @@ async fn failed_managed_factory_quarantines_lease_without_a_handle_and_prevents_
   );
   first.shutdown().await;
   competing.request_id = uuid::Uuid::new_v4().to_string();
-  assert!(second.start(competing).await.is_err());
-  assert_eq!(second.inventory().runtimes[0].status, "cleanup_failed");
+  let error = second.start(competing).await.unwrap_err();
+  let inventory = second.inventory();
+  let fresh = inventory
+    .runtimes
+    .first()
+    .unwrap_or_else(|| panic!("fresh startup failed before factory quarantine: {error}"));
+  assert_eq!(fresh.status, "cleanup_failed");
   assert_eq!(
     std::fs::read_to_string(directory.path().join("pids"))
       .unwrap()
