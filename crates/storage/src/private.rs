@@ -30,23 +30,72 @@ pub(crate) fn validate_file(file: &File) -> Result<(), String> {
 }
 
 pub(crate) fn open_private(path: &Path, create: bool) -> Result<Option<File>, String> {
-  if metadata(path)?.is_some_and(|metadata| metadata.file_type().is_symlink()) {
-    return Err(format!("Private storage cannot be a symlink: {}", path.display()));
+  open_private_with_validation(path, create, |_| Ok(()))
+}
+
+const MAX_READ_REOPENS: usize = 2;
+
+// The boundary callback makes atomic replacement deterministic in unit tests;
+// production always uses the no-op above and still validates every opened file.
+fn open_private_with_validation(
+  path: &Path,
+  create: bool,
+  mut before_validation: impl FnMut(&File) -> Result<(), String>,
+) -> Result<Option<File>, String> {
+  for attempt in 0..=MAX_READ_REOPENS {
+    if metadata(path)?.is_some_and(|metadata| metadata.file_type().is_symlink()) {
+      return Err(format!("Private storage cannot be a symlink: {}", path.display()));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true).write(create).create(create).truncate(false);
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::OpenOptionsExt;
+      options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = match options.open(path) {
+      Ok(file) => file,
+      Err(error) if !create && error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+      Err(error) => return Err(format!("Could not open {}: {error}", path.display())),
+    };
+    before_validation(&file)?;
+    if let Err(error) = validate_file(&file) {
+      // An atomic JSON replacement can unlink the old inode after open but
+      // before fstat. Discard that descriptor; never relax its link check.
+      // Lock creation must not reopen an unlinked lock file.
+      if !create && attempt < MAX_READ_REOPENS && replaced_unlinked_file(path, &file)? {
+        continue;
+      }
+      return Err(error);
+    }
+    return Ok(Some(file));
   }
-  let mut options = OpenOptions::new();
-  options.read(true).write(create).create(create).truncate(false);
+  unreachable!("the final open either validates or returns its error")
+}
+
+fn replaced_unlinked_file(path: &Path, file: &File) -> Result<bool, String> {
   #[cfg(unix)]
   {
-    use std::os::unix::fs::OpenOptionsExt;
-    options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    use std::os::unix::fs::MetadataExt;
+    let opened = file.metadata().map_err(|error| error.to_string())?;
+    // Qualify only the unlink race, never unsafe modes, owners or hard links.
+    if !opened.is_file()
+      || opened.nlink() != 0
+      || opened.mode() & 0o777 != 0o600
+      || opened.uid() != unsafe { libc::geteuid() }
+    {
+      return Ok(false);
+    }
+    let Some(current) = metadata(path)? else {
+      return Ok(false);
+    };
+    Ok(current.dev() != opened.dev() || current.ino() != opened.ino())
   }
-  let file = match options.open(path) {
-    Ok(file) => file,
-    Err(error) if !create && error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-    Err(error) => return Err(format!("Could not open {}: {error}", path.display())),
-  };
-  validate_file(&file)?;
-  Ok(Some(file))
+  #[cfg(not(unix))]
+  {
+    let _ = (path, file);
+    Ok(false)
+  }
 }
 
 pub(crate) fn private_directory(path: &Path) -> Result<(), String> {
@@ -181,6 +230,103 @@ pub fn update_private_json<T: Serialize + DeserializeOwned>(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[cfg(unix)]
+  fn replace_private(path: &Path, bytes: &[u8]) {
+    let mut temporary = tempfile::NamedTempFile::new_in(path.parent().unwrap()).unwrap();
+    temporary.write_all(bytes).unwrap();
+    temporary.persist(path).unwrap();
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn atomic_replacement_between_open_and_validation_reopens_only_the_fresh_private_file() {
+    use std::os::unix::fs::MetadataExt;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("preferences.json");
+    update_private_json(&path, 128, |_: Option<Vec<u32>>| Ok(vec![1])).unwrap();
+    let mut opens = 0;
+    let file = open_private_with_validation(&path, false, |opened| {
+      opens += 1;
+      if opens == 1 {
+        replace_private(&path, b"[2]");
+        assert_eq!(opened.metadata().unwrap().nlink(), 0);
+        assert!(
+          validate_file(opened).is_err(),
+          "unlinked descriptors must still fail strict validation"
+        );
+      }
+      Ok(())
+    })
+    .unwrap()
+    .unwrap();
+    assert_eq!(opens, 2);
+    validate_file(&file).unwrap();
+    assert_eq!(serde_json::from_reader::<_, Vec<u32>>(file).unwrap(), vec![2]);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn replacement_reopens_are_bounded_and_never_reacquire_creation_or_lock_descriptions() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("preferences.json");
+    for create in [false, true] {
+      replace_private(&path, b"[1]");
+      let mut opens = 0;
+      let error = open_private_with_validation(&path, create, |_| {
+        opens += 1;
+        replace_private(&path, b"[2]");
+        Ok(())
+      })
+      .unwrap_err();
+      assert!(error.contains("mode 0600, and have no hard links"));
+      assert_eq!(opens, if create { 1 } else { MAX_READ_REOPENS + 1 });
+    }
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn replacement_cannot_hide_unsafe_original_modes_or_new_modes_links_and_symlinks() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    for fault in [
+      "original_mode",
+      "replacement_mode",
+      "replacement_hard_link",
+      "replacement_symlink",
+    ] {
+      let directory = tempfile::tempdir().unwrap();
+      let path = directory.path().join("preferences.json");
+      replace_private(&path, b"[1]");
+      if fault == "original_mode" {
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+      }
+      let mut opens = 0;
+      assert!(
+        open_private_with_validation(&path, false, |_| {
+          opens += 1;
+          if opens == 1 {
+            replace_private(&path, b"[2]");
+            match fault {
+              "replacement_mode" => fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap(),
+              "replacement_hard_link" => fs::hard_link(&path, directory.path().join("linked.json")).unwrap(),
+              "replacement_symlink" => {
+                let target = directory.path().join("target.json");
+                fs::rename(&path, &target).unwrap();
+                symlink(target, &path).unwrap();
+              }
+              _ => {}
+            }
+          }
+          Ok(())
+        })
+        .is_err(),
+        "{fault}"
+      );
+      if fault == "original_mode" {
+        assert_eq!(opens, 1, "unsafe original modes must not qualify for reopening");
+      }
+    }
+  }
 
   #[test]
   fn transaction_unlocks_while_an_inherited_description_remains_open() {
