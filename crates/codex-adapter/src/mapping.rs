@@ -75,6 +75,18 @@ pub(super) fn interaction(
   params: &Value,
   native: Value,
 ) -> Result<PendingInteraction, InteractionError> {
+  if method == "item/commandExecution/requestApproval" {
+    match params.get("kind") {
+      None => {} // Older native peers omitted the ordinary command kind.
+      Some(Value::String(kind)) if matches!(kind.as_str(), "command" | "writeStdin") => {}
+      Some(Value::String(_)) => {
+        // Human checkpoints require an explicit human-presentation capability.
+        // This generic response API cannot attest that a person approved it.
+        return Err(InteractionError::unsupported("Unsupported Codex command approval kind"));
+      }
+      Some(_) => return Err(InteractionError::invalid("Malformed Codex command approval kind")),
+    }
+  }
   if !valid_id(&interaction_id(id)) || serde_json::to_vec(&native).map_or(true, |bytes| bytes.len() > 256 * 1024) {
     return Err(InteractionError::invalid(
       "Codex interaction exceeds its identity or payload bound",

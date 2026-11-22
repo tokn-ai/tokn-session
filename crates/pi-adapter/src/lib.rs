@@ -286,13 +286,16 @@ impl PiAdapter {
             unreachable!("unsupported delivery was rejected")
           }
         };
-        self.inner.rpc(command, true).await?;
-        // Pi acknowledges acceptance without reporting which side of an idle
-        // race admitted the prompt. Do not invent a started/steered guarantee.
-        let disposition = match delivery {
-          DeliveryMode::Start => InputDisposition::Started,
-          DeliveryMode::Queue => InputDisposition::Queued,
-          _ => InputDisposition::Accepted,
+        let value = self.inner.rpc(command, true).await?;
+        let disposition = match wire::parse_input_disposition(&value).map_err(InteractionError::uncertain)? {
+          Some(wire::InputDisposition::Started) if *delivery != DeliveryMode::Queue => InputDisposition::Started,
+          Some(wire::InputDisposition::Queued) if *delivery != DeliveryMode::Start => InputDisposition::Queued,
+          Some(wire::InputDisposition::Handled) | None => InputDisposition::Accepted,
+          _ => {
+            return Err(InteractionError::uncertain(
+              "Pi returned an input disposition inconsistent with the requested delivery",
+            ));
+          }
         };
         Ok(Reply::Admission(InputReceipt {
           disposition,

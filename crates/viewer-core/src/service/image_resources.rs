@@ -35,6 +35,22 @@ impl ViewerService {
       {
         images::zcode::read_artifact(&locator.source_path, &locator.session_id, reference)?
       }
+      RecordedImageSource::Unavailable {
+        reference: Some(reference),
+      } if locator.provider == ViewerProvider::OpenCode
+        && image_owner(event) == Some((Provider::OpenCode, locator.session_id.as_str())) =>
+      {
+        let message_id = match event {
+          AgentEvent::Message(message) => message.message_id.as_deref(),
+          AgentEvent::ToolCall(tool) => tool.message_id.as_deref(),
+          _ => None,
+        }
+        .ok_or("Image has no native message owner")?;
+        tokn_session_opencode::OpenCodeSessionSource::new(Some(locator.source_path.clone()))
+          .read_blob_exact(&locator.session_id, message_id, reference, images::MAX_IMAGE_BYTES)?
+          .ok_or("Recorded image blob is unavailable")?
+          .data
+      }
       _ => images::read_source(image)?,
     };
     images::image_response(bytes, request.variant)
@@ -255,6 +271,13 @@ fn image_summary(image: &RecordedImage, owner: Option<(Provider, &str)>) -> Mess
       } if owner.is_some_and(|(provider, session)| {
         provider == Provider::ZCode && images::zcode::matches_reference(reference, session)
       }) =>
+      {
+        ImageAvailability::Available
+      }
+      RecordedImageSource::Unavailable {
+        reference: Some(reference),
+      } if owner.is_some_and(|(provider, _)| provider == Provider::OpenCode)
+        && tokn_session_opencode::media_reference_hash(reference).is_some() =>
       {
         ImageAvailability::Available
       }

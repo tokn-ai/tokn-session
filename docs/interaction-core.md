@@ -41,7 +41,10 @@ way to recover another process's pipes. OpenCode `launch` owns a loopback server
 with a fresh Basic credential and requires that child’s native readiness URL
 before connecting; `connect` uses an explicit endpoint and native directory/workspace. DSH `launch` owns a Web-profile child with an OS-assigned
 loopback port, obtains readiness from that child's native output, and verifies
-the actual HTTP/WebSocket API. `attach` uses a configured ApiProxy endpoint.
+the actual authenticated Gateway API without opening a browser. `attach` discovers
+Gateway or legacy ApiProxy before any session mutation. Gateway exchanges the
+launch token for a private API Cookie and waits for native event readiness;
+timed questions retain native wait claims and client-owned deadlines.
 DSH's SDK stdio protocol is separately described but cannot satisfy the richer
 interaction contract. Endpoint credentials and executable/launch configuration
 remain host-owned profiles. The viewer's separately authorized runtime-settings
@@ -168,8 +171,9 @@ OpenCode and DSH do not negotiate an attached server-instance nonce. A lost
 attached stream therefore requires an explicit fresh attachment and refreshed
 state/history, with no automatic mutation replay. OpenCode V1 histories remain
 read-only through the V2 adapter because the native coordinators have different
-conversation stores. DSH models come from non-activating `llm.models`, not
-`session.models`; catalog image capability is conservatively unknown/false.
+conversation stores. DSH models come from non-activating `session/modelCatalog`
+on Gateway or `llm.models` on legacy ApiProxy; catalog image capability is
+conservatively unknown/false.
 Native correlation metadata stays host-side; any eventual UI projection must
 allowlist fields and enforce existing viewing/control authorization.
 

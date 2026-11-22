@@ -114,6 +114,12 @@ impl HttpPeer {
           }
           let request: Value =
             serde_json::from_slice(&bytes[header_end..header_end + content_length]).unwrap_or(Value::Null);
+          if provider == Provider::Dsh && path == "/api/remote.mux" {
+            let _ = socket
+              .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+              .await;
+            return;
+          }
           let result = match provider {
             Provider::OpenCode => match path.as_str() {
               "/api/health" => json!({"healthy":true}),

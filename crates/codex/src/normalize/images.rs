@@ -79,7 +79,44 @@ pub(super) fn path_images(path: Option<&str>) -> Vec<RecordedImage> {
   }
 }
 
-pub(super) fn generated_images(result: Option<&str>, saved_path: Option<&str>) -> Vec<RecordedImage> {
+#[derive(Clone, Copy)]
+pub(super) enum GeneratedImage<'a> {
+  Inline(&'a str),
+  File(&'a str),
+}
+
+/// Native generation items prefer their durable file reference, including
+/// migration records that also carry an empty legacy result field.
+pub(super) fn generated_image(value: &Value) -> Option<GeneratedImage<'_>> {
+  generated_image_parts(value.get("result").and_then(Value::as_str), value.get("fileId"))
+}
+
+fn generated_image_parts<'a>(result: Option<&'a str>, file_id: Option<&'a Value>) -> Option<GeneratedImage<'a>> {
+  match file_id {
+    Some(value) => value.as_str().filter(|id| !id.is_empty()).map(GeneratedImage::File),
+    None => result.map(GeneratedImage::Inline),
+  }
+}
+
+pub(super) fn generated_images(image: Option<GeneratedImage<'_>>, saved_path: Option<&str>) -> Vec<RecordedImage> {
+  if let Some(GeneratedImage::File(reference)) = image {
+    let source = saved_path
+      .filter(|path| std::path::Path::new(path).is_absolute())
+      .map(|path| RecordedImageSource::LocalFile { path: path.into() })
+      .unwrap_or_else(|| RecordedImageSource::Unavailable {
+        reference: Some(reference.into()),
+      });
+    return vec![RecordedImage {
+      image_id: image_id(0),
+      mime_type: None,
+      name: None,
+      source,
+    }];
+  }
+  let result = match image {
+    Some(GeneratedImage::Inline(result)) => Some(result),
+    _ => None,
+  };
   let result = result.map(str::trim).filter(|result| !result.is_empty());
   let source = if let Some(result) = result {
     if result.starts_with("data:") {
@@ -227,17 +264,17 @@ impl GenerationDedup {
     if canonical {
       return false;
     }
-    let (source, call_id, status, result, saved_path) = match item {
+    let (source, call_id, status, image, saved_path) = match item {
       RolloutItem::ResponseItem(ResponseItem::ImageGenerationCall(image)) => (
         GenerationSource::Raw,
         image.id.as_deref(),
         image.status.as_deref(),
-        image.result.as_deref(),
+        generated_image_parts(image.result.as_deref(), image.extra.get("fileId")),
         image.extra.get("saved_path").and_then(Value::as_str),
       ),
       RolloutItem::EventMessage(event)
         if event.event_type.as_deref() == Some("image_generation_end")
-          && event.native.get("result").is_some_and(Value::is_string)
+          && generated_image(&event.native).is_some()
           && event
             .native
             .get("saved_path")
@@ -247,7 +284,7 @@ impl GenerationDedup {
           GenerationSource::Legacy,
           event.native.get("call_id").and_then(Value::as_str),
           event.native.get("status").and_then(Value::as_str),
-          event.native.get("result").and_then(Value::as_str),
+          generated_image(&event.native),
           event.native.get("saved_path").and_then(Value::as_str),
         )
       }
@@ -258,7 +295,7 @@ impl GenerationDedup {
           (Some("Extension"), Some("image_gen.generation")) => (GenerationSource::ExtensionItem, "savedPath"),
           _ => return false,
         };
-        if !native.get("result").is_some_and(Value::is_string)
+        if generated_image(native).is_none()
           || native
             .get(saved_path)
             .is_some_and(|value| !value.is_null() && !value.is_string())
@@ -269,7 +306,7 @@ impl GenerationDedup {
           source,
           native["id"].as_str(),
           native["status"].as_str(),
-          native["result"].as_str(),
+          generated_image(native),
           native[saved_path].as_str(),
         )
       }
@@ -288,12 +325,23 @@ impl GenerationDedup {
     // A nonempty result is the exact image body; a saved copy of that same
     // result may appear only in the end event. Compare the path only when it
     // is the sole available image source.
-    if let Some(result) = result.map(str::trim).filter(|result| !result.is_empty()) {
-      digest.update(b"result\0");
-      digest.update(result.as_bytes());
-    } else {
-      digest.update(b"path\0");
-      digest.update(saved_path.unwrap_or_default().as_bytes());
+    match image {
+      Some(GeneratedImage::File(id)) => {
+        digest.update(b"file\0");
+        digest.update(id.as_bytes());
+        // Do not discard a later observed local copy when the earlier file
+        // reference had no path. A durable ID alone cannot resolve that path.
+        digest.update(b"\0path\0");
+        digest.update(saved_path.unwrap_or_default().as_bytes());
+      }
+      Some(GeneratedImage::Inline(result)) if !result.trim().is_empty() => {
+        digest.update(b"result\0");
+        digest.update(result.trim().as_bytes());
+      }
+      _ => {
+        digest.update(b"path\0");
+        digest.update(saved_path.unwrap_or_default().as_bytes());
+      }
     }
     let fingerprint: [u8; 32] = digest.finalize().into();
     let source = 1 << source as u8;

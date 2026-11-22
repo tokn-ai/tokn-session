@@ -130,6 +130,7 @@ impl DeliveryError {
 pub enum Admission {
   Accepted,
   Started,
+  Queued,
   QueuedFollowUp,
   Steered,
   WithModel {
@@ -140,7 +141,9 @@ pub enum Admission {
 
 #[derive(Clone, Copy, Debug)]
 pub enum ModelInputDisposition {
+  Accepted,
   Started,
+  Queued,
   Steered,
 }
 

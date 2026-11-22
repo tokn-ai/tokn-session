@@ -212,16 +212,14 @@ impl ViewerRepository for NativeRepository {
 
   fn load_session(&self, locator: &SessionLocator) -> Result<LoadedSession, String> {
     match locator.provider {
+      ViewerProvider::Dsh => tokn_session_dsh::DshSessionSource::new(None)
+        .load_session_path_with_id(&locator.source_path, &locator.session_id),
       ViewerProvider::OpenCode | ViewerProvider::ZCode => AgentClient::load_session(
         locator.provider.source(),
         Some(locator.source_path.clone()),
         &locator.session_id,
       ),
-      ViewerProvider::Codex
-      | ViewerProvider::Pi
-      | ViewerProvider::WorkBuddy
-      | ViewerProvider::Dsh
-      | ViewerProvider::Qoder => {
+      ViewerProvider::Codex | ViewerProvider::Pi | ViewerProvider::WorkBuddy | ViewerProvider::Qoder => {
         let path = locator
           .source_path
           .to_str()

@@ -93,6 +93,8 @@ impl PiNormalizer {
         ]
       }
       PiSessionItem::Compaction(_)
+      | PiSessionItem::Usage(_)
+      | PiSessionItem::ContextEdit(_)
       | PiSessionItem::BranchSummary(_)
       | PiSessionItem::Custom(_)
       | PiSessionItem::CustomMessage(_)
@@ -194,6 +196,15 @@ fn normalize_message(
     _ => None,
   };
   let mut events = match message {
+    PiMessage::System(_) => vec![AgentEvent::Metadata(MetadataEvent {
+      provider: Provider::Pi,
+      session_id,
+      kind: MetadataKind::Configuration,
+      native_type: "message.system".into(),
+      summary: "system prompt updated".into(),
+      native: native.clone(),
+      timestamp: meta.timestamp,
+    })],
     PiMessage::User(message) => normalize_user_message(session_id, &meta, message),
     PiMessage::Assistant(message) => normalize_assistant_message(session_id, &meta, message, !outcome.is_empty()),
     PiMessage::ToolResult(message) => normalize_tool_result_message(session_id, &meta, message),

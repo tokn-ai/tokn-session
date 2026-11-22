@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Build the exact DSH revision outside the checkout. Native tests only use a
+# Build the retained legacy DSH capture revision outside the checkout. The
+# current Gateway smoke uses a separately identified published package.
+# Native tests only use a
 # locally scripted model and isolated home; dependency installation is separate.
 set -euo pipefail
 source_root="${1:?usage: prepare-dsh.sh /path/to/vendor/dsh /absolute/output}"

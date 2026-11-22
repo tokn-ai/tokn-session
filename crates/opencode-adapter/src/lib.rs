@@ -1,5 +1,8 @@
 //! Rust control adapter for OpenCode's native V2 server, not its historical V1 store.
 
+mod api;
+mod forms;
+mod live;
 mod managed;
 mod normalize;
 mod transport;
@@ -11,7 +14,7 @@ use std::{
   path::PathBuf,
   sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, Ordering},
   },
   time::Duration,
 };
@@ -61,7 +64,9 @@ struct Inner {
   directory: String,
   workspace_id: Option<String>,
   version: Option<String>,
+  dialect: api::Dialect,
   events: broadcast::Sender<RuntimeEvent>,
+  live: Arc<live::LiveState>,
   closed: AtomicBool,
   valid_instance: Arc<AtomicBool>,
   stop: watch::Sender<bool>,
@@ -102,7 +107,7 @@ impl OpenCodeAdapter {
       directory: options.directory,
       workspace_id: None,
       credentials: Some(Credentials {
-        username: "tokn".into(),
+        username: "opencode".into(),
         password,
       }),
     };
@@ -122,19 +127,13 @@ impl OpenCodeAdapter {
       options.workspace_id.clone(),
       options.credentials,
     )?;
-    let health: Value = transport.json(&["api", "health"]).await?;
-    if health["healthy"] != true {
-      return Err(InteractionError::unavailable(
-        "OpenCode native V2 endpoint is not healthy",
+    let (dialect, document, version) = api::discover(&transport).await?;
+    if dialect == api::Dialect::Current && options.workspace_id.is_some() {
+      return Err(InteractionError::unsupported(
+        "This OpenCode API does not expose workspace identity; use an explicitly directory-scoped runtime",
       ));
     }
-    let document: Value = transport.json(&["doc"]).await?;
-    let capabilities = capabilities(&document)?;
-    let version = transport
-      .json::<Value>(&["global", "health"])
-      .await
-      .ok()
-      .and_then(|value| value["version"].as_str().map(str::to_owned));
+    let capabilities = capabilities(&document, dialect)?;
     let descriptor = RuntimeDescriptor {
       runtime_id: options.runtime_id,
       instance_id: uuid::Uuid::new_v4().to_string(),
@@ -149,12 +148,13 @@ impl OpenCodeAdapter {
     let (events, _) = broadcast::channel(256);
     let (stop, receiver) = watch::channel(false);
     let valid_instance = Arc::new(AtomicBool::new(true));
+    let live = Arc::new(live::LiveState::new(descriptor.clone(), events.clone()));
     let event_task = start_events(
       transport.clone(),
       descriptor.clone(),
       options.directory.clone(),
       options.workspace_id.clone(),
-      events.clone(),
+      live.clone(),
       receiver,
       valid_instance.clone(),
     );
@@ -165,7 +165,9 @@ impl OpenCodeAdapter {
         directory: options.directory,
         workspace_id: options.workspace_id,
         version,
+        dialect,
         events,
+        live,
         closed: AtomicBool::new(false),
         valid_instance,
         stop,
@@ -268,6 +270,7 @@ impl OpenCodeAdapter {
         "OpenCode may have created a session, but returned an unexpected envelope location",
       ));
     }
+    self.inner.live.remember_info(&session.data);
     Ok(CreatedSession {
       target: SessionTarget {
         runtime_id: self.inner.descriptor.runtime_id.clone(),
@@ -337,12 +340,15 @@ impl OpenCodeAdapter {
       ));
     }
     self.check_location(&envelope.data.location)?;
+    self.inner.live.remember_info(&envelope.data);
     Ok(envelope.data)
   }
 
   async fn require_v2_session(&self, id: &str) -> Result<(), InteractionError> {
     self.session(id).await?;
-    if !self.inner.transport.legacy_messages(id).await?.is_empty() {
+    // Current server handlers resolve only session_v2; legacy V1 rows are not
+    // accepted by that namespace. Earlier V2 shared metadata with V1 instead.
+    if self.inner.dialect == api::Dialect::LegacyV2 && !self.inner.transport.legacy_messages(id).await?.is_empty() {
       return Err(InteractionError::unsupported(
         "This OpenCode session has legacy V1 history; it cannot be controlled by the native V2 adapter",
       ));
@@ -382,19 +388,23 @@ impl OpenCodeAdapter {
   }
 
   async fn state(&self, session: &str) -> Result<SessionState, InteractionError> {
+    let epoch = self.inner.live.epoch();
     let info = self.session(session).await?;
     // Verify compatibility before treating V2's process-local active map as authority.
-    if !self.inner.transport.legacy_messages(session).await?.is_empty() {
-      return Ok(SessionState {
+    if self.inner.dialect == api::Dialect::LegacyV2 && !self.inner.transport.legacy_messages(session).await?.is_empty()
+    {
+      let state = SessionState {
         session_id: Some(session.into()),
         status: ExecutionState::Unknown,
         model: info.model.as_ref().map(normalize::model),
         pending_inputs: None,
         revision: None,
-      });
+      };
+      self.inner.live.remember_state(&state, epoch);
+      return Ok(state);
     }
     let active: Envelope<BTreeMap<String, Value>> = self.inner.transport.json(&["api", "session", "active"]).await?;
-    Ok(SessionState {
+    let state = SessionState {
       session_id: Some(session.into()),
       status: if active.data.contains_key(session) {
         ExecutionState::Running
@@ -404,7 +414,9 @@ impl OpenCodeAdapter {
       model: info.model.as_ref().map(normalize::model),
       pending_inputs: None,
       revision: None,
-    })
+    };
+    self.inner.live.remember_state(&state, epoch);
+    Ok(state)
   }
 
   async fn models(&self) -> Result<Vec<ModelChoice>, InteractionError> {
@@ -429,6 +441,31 @@ impl OpenCodeAdapter {
 
   async fn pending(&self, session: &str) -> Result<Vec<PendingInteraction>, InteractionError> {
     self.session(session).await?;
+    if self.inner.dialect == api::Dialect::Current {
+      let forms: Envelope<Vec<wire::current::FormRequest>> =
+        self.inner.transport.json(&["api", "session", session, "form"]).await?;
+      let permissions: Envelope<Vec<wire::PermissionRequest>> = self
+        .inner
+        .transport
+        .json(&["api", "session", session, "permission"])
+        .await?;
+      if forms.data.iter().any(|form| form.session_id != session)
+        || permissions.data.iter().any(|request| request.session_id != session)
+      {
+        return Err(InteractionError::new(
+          ErrorKind::StaleTarget,
+          "OpenCode pending interaction belongs to another session",
+        ));
+      }
+      return Ok(
+        forms
+          .data
+          .into_iter()
+          .map(forms::project)
+          .chain(permissions.data.into_iter().map(normalize::permission))
+          .collect(),
+      );
+    }
     let questions: Envelope<Vec<wire::QuestionRequest>> = self
       .inner
       .transport
@@ -529,21 +566,47 @@ impl OpenCodeAdapter {
     };
     self.ensure_open()?;
     self.check_child().await?;
+    let body = if self.inner.dialect == api::Dialect::Current {
+      serde_json::to_value(wire::current::PromptRequest {
+        id: prompt.id.clone(),
+        prompt: prompt.prompt.clone(),
+        delivery,
+        resume: true,
+      })
+    } else {
+      serde_json::to_value(&prompt)
+    }
+    .expect("prompt serializes");
     let value = self
       .inner
       .transport
-      .post(
-        &["api", "session", session, "prompt"],
-        serde_json::to_value(&prompt).expect("prompt serializes"),
-      )
+      .post(&["api", "session", session, "prompt"], body)
       .await?;
-    let response: Envelope<wire::Admission> = serde_json::from_value(value)
-      .map_err(|_| InteractionError::uncertain("OpenCode prompt admission response is incompatible"))?;
-    if response.data.session_id != session
-      || response.data.id != native_id
-      || response.data.delivery != delivery
-      || response.data.prompt["text"] != prompt.prompt.text
-    {
+    let confirmed = if self.inner.dialect == api::Dialect::Current {
+      let response: Envelope<wire::current::Admission> = serde_json::from_value(value)
+        .map_err(|_| InteractionError::uncertain("OpenCode prompt admission response is incompatible"))?;
+      response.data.session_id == session
+        && response.data.id == native_id
+        && response.data.delivery == delivery
+        && response.data.kind == "user"
+        && response.data.payload["text"] == prompt.prompt.text
+        && response
+          .location
+          .as_ref()
+          .is_none_or(|location| self.check_location(location).is_ok())
+    } else {
+      let response: Envelope<wire::Admission> = serde_json::from_value(value)
+        .map_err(|_| InteractionError::uncertain("OpenCode prompt admission response is incompatible"))?;
+      response.data.session_id == session
+        && response.data.id == native_id
+        && response.data.delivery == delivery
+        && response.data.prompt["text"] == prompt.prompt.text
+        && response
+          .location
+          .as_ref()
+          .is_none_or(|location| self.check_location(location).is_ok())
+    };
+    if !confirmed {
       return Err(InteractionError::uncertain(
         "OpenCode admission does not match the submitted message",
       ));
@@ -575,6 +638,33 @@ impl OpenCodeAdapter {
     let native_id = request.native["id"]
       .as_str()
       .ok_or_else(|| InteractionError::unavailable("OpenCode interaction has no native ID"))?;
+    if self.inner.dialect == api::Dialect::Current && interaction_id.starts_with("form:") {
+      self.ensure_open()?;
+      self.check_child().await?;
+      match response {
+        InteractionResponse::Answers { answers } => {
+          let body = forms::answer_body(request, answers)?;
+          self
+            .inner
+            .transport
+            .post(&["api", "session", session, "form", native_id, "reply"], body)
+            .await?;
+        }
+        InteractionResponse::Reject => {
+          self
+            .inner
+            .transport
+            .delete(&["api", "session", session, "form", native_id])
+            .await?;
+        }
+        _ => {
+          return Err(InteractionError::invalid(
+            "Response type does not match the OpenCode form",
+          ));
+        }
+      }
+      return Ok(Reply::Acknowledged);
+    }
     let (kind, action, body) = match (&request.kind, response) {
       (InteractionKind::Question, InteractionResponse::Answers { answers }) => {
         ("question", "reply", normalize::answer_body(request, answers)?)
@@ -596,6 +686,11 @@ impl OpenCodeAdapter {
     };
     self.ensure_open()?;
     self.check_child().await?;
+    let body = if self.inner.dialect == api::Dialect::Current && kind == "permission" {
+      json!({"decision":body["reply"]})
+    } else {
+      body
+    };
     self
       .inner
       .transport
@@ -691,7 +786,7 @@ impl InteractionAdapter for OpenCodeAdapter {
   }
 }
 
-fn capabilities(document: &Value) -> Result<Capabilities, InteractionError> {
+fn capabilities(document: &Value, dialect: api::Dialect) -> Result<Capabilities, InteractionError> {
   let route = |path: &str, method: &str| document["paths"][path][method].is_object();
   if !route("/api/session/{sessionID}/prompt", "post") || !route("/api/event", "get") {
     return Err(InteractionError::unsupported(
@@ -699,6 +794,10 @@ fn capabilities(document: &Value) -> Result<Capabilities, InteractionError> {
     ));
   }
   let mut capabilities = Capabilities::default().with(Operation::Message).with(Operation::Queue);
+  let questions = match dialect {
+    api::Dialect::LegacyV2 => "question",
+    api::Dialect::Current => "form",
+  };
   capabilities.operations.insert(
     Operation::Steer,
     Capability::unavailable(
@@ -720,22 +819,22 @@ fn capabilities(document: &Value) -> Result<Capabilities, InteractionError> {
     ),
     (
       Operation::PendingInteractions,
-      [
-        "/api/session/{sessionID}/question",
-        "/api/session/{sessionID}/permission",
-      ]
-      .iter()
-      .all(|path| route(path, "get")),
+      route(&format!("/api/session/{{sessionID}}/{questions}"), "get")
+        && route("/api/session/{sessionID}/permission", "get"),
     ),
     (
       Operation::Respond,
-      [
-        "/api/session/{sessionID}/question/{requestID}/reply",
-        "/api/session/{sessionID}/question/{requestID}/reject",
-        "/api/session/{sessionID}/permission/{requestID}/reply",
-      ]
-      .iter()
-      .all(|path| route(path, "post")),
+      route("/api/session/{sessionID}/permission/{requestID}/reply", "post")
+        && match dialect {
+          api::Dialect::LegacyV2 => {
+            route("/api/session/{sessionID}/question/{requestID}/reply", "post")
+              && route("/api/session/{sessionID}/question/{requestID}/reject", "post")
+          }
+          api::Dialect::Current => {
+            route("/api/session/{sessionID}/form/{formID}/reply", "post")
+              && route("/api/session/{sessionID}/form/{formID}", "delete")
+          }
+        },
     ),
   ] {
     capabilities.operations.insert(
@@ -755,21 +854,14 @@ fn start_events(
   descriptor: RuntimeDescriptor,
   directory: String,
   workspace_id: Option<String>,
-  sender: broadcast::Sender<RuntimeEvent>,
+  live: Arc<live::LiveState>,
   mut stop: watch::Receiver<bool>,
   valid_instance: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
   tokio::spawn(async move {
-    let sequence = AtomicU64::new(0);
-    let emit = |session_id: Option<String>, kind| {
-      let _ = sender.send(RuntimeEvent {
-        runtime_id: descriptor.runtime_id.clone(),
-        instance_id: descriptor.instance_id.clone(),
-        session_id,
-        sequence: sequence.fetch_add(1, Ordering::Relaxed) + 1,
-        kind,
-      });
-    };
+    let emit = |session_id: Option<String>, kind| live.emit(session_id, kind);
+    let mut activity = tokio::time::interval(Duration::from_millis(250));
+    activity.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut delay = Duration::from_millis(250);
     loop {
       if *stop.borrow() {
@@ -780,8 +872,37 @@ fn start_events(
         Ok(mut response) => {
           delay = Duration::from_millis(250);
           let mut decoder = wire::SseDecoder::new(1024 * 1024);
+          type ActivityRead = std::pin::Pin<
+            Box<
+              dyn std::future::Future<Output = (u64, Result<Envelope<BTreeMap<String, Value>>, InteractionError>)>
+                + Send,
+            >,
+          >;
+          let mut activity_read: Option<ActivityRead> = None;
           loop {
-            let chunk = tokio::select! { _ = stop.changed() => return, chunk = response.chunk() => chunk };
+            let chunk = tokio::select! {
+              _ = stop.changed() => return,
+              _ = activity.tick(), if live.has_running() && activity_read.is_none() => {
+                let epoch = live.epoch();
+                let transport = transport.clone();
+                // Keep exactly one bounded read in flight while continuing to
+                // consume SSE. New lifecycle events can invalidate its epoch,
+                // and questions/permissions never wait behind HTTP latency.
+                activity_read = Some(Box::pin(async move {
+                  (epoch, transport.json(&["api", "session", "active"]).await)
+                }));
+                continue;
+              },
+              (epoch, result) = async { activity_read.as_mut().expect("active state read").await }, if activity_read.is_some() => {
+                activity_read = None;
+                match result {
+                  Ok(active) => live.active(&active.data, epoch),
+                  Err(_) => break Err("OpenCode passive activity state became unavailable".into()),
+                }
+                continue;
+              },
+              chunk = response.chunk() => chunk,
+            };
             let (payloads, ended) = match chunk {
               Ok(Some(chunk)) => (decoder.push(&chunk), false),
               Ok(None) => (decoder.finish(), true),
@@ -805,8 +926,17 @@ fn start_events(
               }) {
                 continue;
               }
-              let session_id = value["data"]["sessionID"].as_str().map(str::to_owned);
-              if session_id.is_some() && value.get("location").is_none() {
+              let session_id = value["data"]["sessionID"]
+                .as_str()
+                .or_else(|| value.pointer("/data/form/sessionID").and_then(Value::as_str))
+                .map(str::to_owned);
+              // Current durable execution events are process-global and omit
+              // location. Admit only their recognized lifecycle shape for an
+              // exact identity already checked against this runtime's scope.
+              if session_id.as_ref().is_some_and(|id| {
+                value.get("location").is_none()
+                  && !live.owns_unscoped_lifecycle(value["type"].as_str().unwrap_or_default(), id)
+              }) {
                 continue;
               }
               let native: wire::NativeEvent = match serde_json::from_value(value.clone()) {
@@ -816,6 +946,7 @@ fn start_events(
                   continue;
                 }
               };
+              live.event(&native);
               if let Some(kind) = normalize::event_kind(&native) {
                 emit(session_id.clone(), kind);
               }

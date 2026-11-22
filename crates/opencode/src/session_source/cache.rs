@@ -166,9 +166,9 @@ impl OpenCodeSessionCache {
   }
 }
 
-struct SourceBudget {
-  bytes: usize,
-  limit: Option<usize>,
+pub(super) struct SourceBudget {
+  pub(super) bytes: usize,
+  pub(super) limit: Option<usize>,
 }
 impl SourceBudget {
   fn add(&mut self, bytes: usize) -> Result<(), String> {
@@ -188,20 +188,21 @@ enum RawKind {
   Entry(String),
 }
 #[derive(PartialEq, Eq)]
-struct RawRecord {
-  id: String,
+pub(super) struct RawRecord {
+  pub(super) id: String,
   time: Option<i64>,
   data: String,
   kind: RawKind,
   parts: Vec<RawPart>,
 }
 #[derive(PartialEq, Eq)]
-struct RawPart {
+pub(super) struct RawPart {
   id: String,
   time: Option<i64>,
-  data: String,
+  pub(super) data: String,
+  pub(super) kind: Option<String>,
 }
-enum DecodedRecord {
+pub(super) enum DecodedRecord {
   Session(OpenCodeSessionRow),
   Message(OpenCodeMessageRow),
   Entry(OpenCodeSessionEntryRow),
@@ -220,7 +221,7 @@ impl RawRecord {
   fn source_id(&self) -> &str {
     self.id.split_once(':').unwrap().1
   }
-  fn decode(&self, session: &OpenCodeSessionRow) -> Result<DecodedRecord, String> {
+  pub(super) fn decode(&self, session: &OpenCodeSessionRow) -> Result<DecodedRecord, String> {
     Ok(match &self.kind {
       RawKind::Session => DecodedRecord::Session(session.clone()),
       RawKind::Message => DecodedRecord::Message(OpenCodeMessageRow {
@@ -239,7 +240,9 @@ impl RawRecord {
           })
           .collect::<Result<_, String>>()?,
       }),
-      RawKind::V2Message(kind) => DecodedRecord::V2Message(decode_v2_message(self.source_id(), kind, &self.data)?),
+      RawKind::V2Message(kind) => {
+        DecodedRecord::V2Message(decode_v2_message(self.source_id(), kind, &self.data, &self.parts)?)
+      }
       RawKind::Entry(kind) => DecodedRecord::Entry(OpenCodeSessionEntryRow {
         id: self.source_id().into(),
         native_type: kind.clone(),
@@ -328,7 +331,12 @@ fn read_message_rows(
     let (id, message_id, time, data) = row.map_err(|e| e.to_string())?;
     budget.add(id.len().saturating_add(message_id.len()).saturating_add(data.len()))?;
     if let Some(&index) = indices.get(&message_id) {
-      messages[index].parts.push(RawPart { id, time, data });
+      messages[index].parts.push(RawPart {
+        id,
+        time,
+        data,
+        kind: None,
+      });
     }
   }
   Ok(messages)
@@ -362,7 +370,7 @@ fn read_snapshot_rows(
   }];
   let v2 = source.v2_history(&transaction, capabilities, session_id)?;
   let mut timeline = if v2 {
-    read_v2_message_rows(&transaction, session_id, &mut budget)?
+    read_v2_message_rows(&transaction, capabilities, session_id, &mut budget)?
   } else {
     read_message_rows(&transaction, session_id, &mut budget)?
   };
@@ -402,8 +410,9 @@ fn read_snapshot_rows(
   Ok((session, raw))
 }
 
-fn read_v2_message_rows(
+pub(super) fn read_v2_message_rows(
   connection: &Connection,
+  capabilities: OpenCodeCapabilities,
   session_id: &str,
   budget: &mut SourceBudget,
 ) -> Result<Vec<RawRecord>, String> {
@@ -431,6 +440,40 @@ fn read_v2_message_rows(
       kind: RawKind::V2Message(kind),
       parts: Vec::new(),
     });
+  }
+  if capabilities.has_session_part {
+    let indices: HashMap<_, _> = result
+      .iter()
+      .enumerate()
+      .map(|(index, row)| (row.source_id().to_owned(), index))
+      .collect();
+    let mut statement = connection.prepare("select p.message_id,p.ordinal,p.type,p.time_created,p.data from session_part p join session_message m on m.id=p.message_id and m.session_id=p.session_id where p.session_id=?1 and m.type='assistant' order by p.message_id,p.ordinal").map_err(|error| error.to_string())?;
+    let rows = statement
+      .query_map([session_id], |row| {
+        Ok((
+          row.get::<_, String>(0)?,
+          row.get::<_, i64>(1)?,
+          row.get::<_, String>(2)?,
+          row.get::<_, Option<i64>>(3)?,
+          row.get::<_, String>(4)?,
+        ))
+      })
+      .map_err(|error| error.to_string())?;
+    for row in rows {
+      let (message, ordinal, kind, time, data) = row.map_err(|error| error.to_string())?;
+      if ordinal < 0 {
+        return Err("Invalid negative OpenCode session part ordinal".into());
+      }
+      budget.add(message.len().saturating_add(kind.len()).saturating_add(data.len()))?;
+      if let Some(&index) = indices.get(&message) {
+        result[index].parts.push(RawPart {
+          id: ordinal.to_string(),
+          time,
+          data,
+          kind: Some(kind),
+        });
+      }
+    }
   }
   Ok(result)
 }

@@ -106,6 +106,13 @@ impl SnapshotTailer {
         continue;
       }
       let mut version = versions(&header.path, false);
+      if self.root.provider == Provider::Dsh {
+        for dependency in tokn_session_dsh::storage_dependency_paths(&header.path)? {
+          if dependency != header.path {
+            version.extend(versions(&dependency, false));
+          }
+        }
+      }
       if self.root.provider == Provider::WorkBuddy {
         version.extend(versions(&self.root.path.join("workbuddy.db"), true));
       }
@@ -117,7 +124,7 @@ impl SnapshotTailer {
         Provider::WorkBuddy => tokn_session_workbuddy::WorkBuddySessionSource::new(Some(self.root.path.clone()))
           .load_session_records_path(&header.path, native, 128 * 1024 * 1024),
         Provider::Dsh => tokn_session_dsh::DshSessionSource::new(Some(self.root.path.clone()))
-          .load_session_records_path(&header.path, native, 128 * 1024 * 1024),
+          .load_session_records_path_with_id(&header.path, &header.id, native, 128 * 1024 * 1024),
         Provider::Qoder => tokn_session_qoder::QoderSessionSource::new(Some(self.root.path.clone()))
           .load_session_records_path(&header.path, native, 128 * 1024 * 1024),
         _ => unreachable!(),

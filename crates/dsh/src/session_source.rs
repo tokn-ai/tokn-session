@@ -24,12 +24,13 @@ impl DshSessionSource {
 
   pub fn list_sessions(&self) -> Result<Vec<SessionRef>, String> {
     let mut references = Vec::new();
-    for path in self.paths()? {
+    for relation in self.list_session_relations()? {
+      let path = relation.path;
       // Unlike silently dropping unreadable sessions, an actionable path error
       // makes unsupported versions and damaged compressed files discoverable.
       let mut count = 0;
       let mut summary = DshSessionSummary::default();
-      let header = visit_session_records(&path, |line, is_direct| {
+      let header = visit_session_records(&path, Some(&relation.id), |line, is_direct| {
         summary.observe(&line, is_direct);
         if is_direct && is_message(&line) {
           count += 1;
@@ -48,8 +49,9 @@ impl DshSessionSource {
   pub fn list_session_relations(&self) -> Result<Vec<SessionRef>, String> {
     let mut references = Vec::new();
     for path in self.paths()? {
-      references.push(read_relation(&path)?);
+      references.extend(read_relations(&path)?);
     }
+    deduplicate(&mut references);
     sort_refs(&mut references);
     Ok(references)
   }
@@ -60,16 +62,21 @@ impl DshSessionSource {
       complete: true,
     };
     collect_catalog(&self.session_root()?, &mut paths);
+    match select_generations(std::mem::take(&mut paths.paths)) {
+      Ok(selected) => paths.paths = selected,
+      Err(_) => paths.complete = false,
+    }
     let mut catalog = SessionRelationCatalog {
       references: Vec::new(),
       complete: paths.complete,
     };
     for path in paths.paths {
-      match read_relation(&path) {
-        Ok(reference) => catalog.references.push(reference),
+      match read_relations(&path) {
+        Ok(references) => catalog.references.extend(references),
         Err(_) => catalog.complete = false,
       }
     }
+    deduplicate(&mut catalog.references);
     sort_refs(&mut catalog.references);
     Ok(catalog)
   }
@@ -81,7 +88,9 @@ impl DshSessionSource {
   /// works for both JSONL and concatenated Zstandard logs.
   pub fn hydrate_session_header(&self, mut header: SessionHeader) -> Result<SessionHeader, String> {
     let mut summary = DshSessionSummary::default();
-    visit_session_records(&header.path, |line, is_direct| summary.observe(&line, is_direct))?;
+    visit_session_records(&header.path, Some(&header.id), |line, is_direct| {
+      summary.observe(&line, is_direct)
+    })?;
     header.title = summary.title;
     header.preview = summary.preview;
     Ok(header)
@@ -106,7 +115,7 @@ impl DshSessionSource {
       exact
     };
     match matches.as_slice() {
-      [reference] => self.load_session_path(&reference.path),
+      [reference] => self.load_session_path_with_id(&reference.path, &reference.id),
       [] => Err(format!("no dsh session found for `{id_or_path}`")),
       _ => Err(format!(
         "multiple dsh sessions match `{id_or_path}`; use an exact id or path"
@@ -115,27 +124,21 @@ impl DshSessionSource {
   }
 
   pub fn load_session_path(&self, path: &Path) -> Result<LoadedSession, String> {
-    let mut lines = Vec::new();
-    let mut summary = DshSessionSummary::default();
-    let header = visit_session_records(path, |line, is_direct| {
-      summary.observe(&line, is_direct);
-      if is_direct {
-        lines.push(line);
-      }
-    })?;
-    let mut reference = reference(path, &header);
-    reference.message_count = message_count(&lines);
-    reference.title = summary.title;
-    reference.preview = summary.preview;
-    let history_status = if header.origin.as_deref() == Some("subagent") && header.seed_length.unwrap_or(0) > 0 {
-      SessionHistoryStatus::FilteredSubagent
-    } else {
-      SessionHistoryStatus::Complete
-    };
+    let loaded = self.records(path, None, false, 128 * 1024 * 1024)?;
     Ok(LoadedSession {
-      reference,
-      events: normalize::normalize(&header, lines),
-      history_status,
+      reference: loaded.reference,
+      events: loaded.records.into_iter().flat_map(|record| record.events).collect(),
+      history_status: loaded.history_status,
+    })
+  }
+
+  /// Exact identity is required when several native sessions share a database.
+  pub fn load_session_path_with_id(&self, path: &Path, session_id: &str) -> Result<LoadedSession, String> {
+    let loaded = self.records(path, Some(session_id), false, 128 * 1024 * 1024)?;
+    Ok(LoadedSession {
+      reference: loaded.reference,
+      events: loaded.records.into_iter().flat_map(|record| record.events).collect(),
+      history_status: loaded.history_status,
     })
   }
 
@@ -148,24 +151,29 @@ impl DshSessionSource {
     include_native: bool,
     max_bytes: usize,
   ) -> Result<LoadedSessionRecords, String> {
-    use std::io::Read;
-    let mut bytes = Vec::new();
-    storage::reader(path)?
-      .take(max_bytes as u64 + 1)
-      .read_to_end(&mut bytes)
-      .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-    if bytes.len() > max_bytes {
-      return Err("DSH decoded source exceeds the snapshot size limit".into());
-    }
-    let complete = bytes
-      .iter()
-      .rposition(|byte| *byte == b'\n')
-      .map_or(0, |index| index + 1);
-    let mut rows = bytes[..complete].split(|byte| *byte == b'\n');
-    let first: DshSessionLine =
-      serde_json::from_slice(rows.next().unwrap_or_default()).map_err(|err| format!("invalid DSH header: {err}"))?;
-    let native_header = include_native.then(|| first.native().clone());
-    let header = header(first, path)?;
+    self.records(path, None, include_native, max_bytes)
+  }
+
+  pub fn load_session_records_path_with_id(
+    &self,
+    path: &Path,
+    session_id: &str,
+    include_native: bool,
+    max_bytes: usize,
+  ) -> Result<LoadedSessionRecords, String> {
+    self.records(path, Some(session_id), include_native, max_bytes)
+  }
+
+  fn records(
+    &self,
+    path: &Path,
+    session_id: Option<&str>,
+    include_native: bool,
+    max_bytes: usize,
+  ) -> Result<LoadedSessionRecords, String> {
+    let snapshot = storage::snapshot(path, session_id, max_bytes)?;
+    let header = snapshot.header;
+    let native_header = include_native.then_some(snapshot.native_header);
     let seed_length = if header.origin.as_deref() == Some("subagent") {
       header.seed_length.unwrap_or(0)
     } else {
@@ -174,12 +182,7 @@ impl DshSessionSource {
     let mut lines = Vec::new();
     let mut physical = Vec::new();
     let mut summary = DshSessionSummary::default();
-    for (index, row) in rows.enumerate() {
-      if row.iter().all(u8::is_ascii_whitespace) {
-        continue;
-      }
-      let line: DshSessionLine =
-        serde_json::from_slice(row).map_err(|err| format!("invalid DSH row {}: {err}", index + 2))?;
+    for (index, line) in snapshot.rows.into_iter().enumerate() {
       let native = include_native.then(|| line.native().clone());
       let start = lines.len();
       for line in storage::expand(line)? {
@@ -234,8 +237,9 @@ impl DshSessionSource {
   fn paths(&self) -> Result<Vec<PathBuf>, String> {
     let mut paths = Vec::new();
     collect(&self.session_root()?, &mut paths)?;
-    paths.sort();
-    Ok(paths)
+    let mut selected = select_generations(paths)?;
+    selected.sort();
+    Ok(selected)
   }
 }
 
@@ -256,6 +260,10 @@ fn session_root(
 }
 
 fn collect(root: &Path, paths: &mut Vec<PathBuf>) -> Result<(), String> {
+  if root.is_file() {
+    paths.push(root.to_owned());
+    return Ok(());
+  }
   let entries = match std::fs::read_dir(root) {
     Ok(entries) => entries,
     Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -266,7 +274,7 @@ fn collect(root: &Path, paths: &mut Vec<PathBuf>) -> Result<(), String> {
     let kind = entry.file_type().map_err(|err| err.to_string())?;
     if kind.is_dir() {
       collect(&entry.path(), paths)?;
-    } else if kind.is_file() && matches!(entry.file_name().to_str(), Some("session.jsonl" | "session.jsonl.zstd")) {
+    } else if kind.is_file() && is_source(&entry.path()) {
       paths.push(entry.path());
     }
   }
@@ -274,6 +282,10 @@ fn collect(root: &Path, paths: &mut Vec<PathBuf>) -> Result<(), String> {
 }
 
 fn collect_catalog(root: &Path, catalog: &mut FileSessionCatalog) {
+  if root.is_file() {
+    catalog.paths.push(root.to_owned());
+    return;
+  }
   let Ok(entries) = std::fs::read_dir(root) else {
     catalog.complete = false;
     return;
@@ -289,64 +301,67 @@ fn collect_catalog(root: &Path, catalog: &mut FileSessionCatalog) {
     };
     if kind.is_dir() {
       collect_catalog(&entry.path(), catalog);
-    } else if kind.is_file() && matches!(entry.file_name().to_str(), Some("session.jsonl" | "session.jsonl.zstd")) {
+    } else if kind.is_file() && is_source(&entry.path()) {
       catalog.paths.push(entry.path());
     }
   }
 }
 
 fn read_relation(path: &Path) -> Result<SessionRef, String> {
-  let mut reader = storage::reader(path)?;
-  let mut first = String::new();
-  reader
-    .read_line(&mut first)
-    .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-  Ok(reference(path, &header(storage::parse(&first, path, 1)?, path)?))
+  if crate::sqlite::is_marker(path) {
+    let value = crate::sqlite::header(path, None)?;
+    return Ok(reference(
+      path,
+      &header(serde_json::from_value(value).map_err(|error| error.to_string())?, path)?,
+    ));
+  }
+  Ok(reference(path, &crate::identity::read_file_header(path)?))
 }
 
 pub(crate) fn header(line: DshSessionLine, path: &Path) -> Result<DshSessionHeader, String> {
   let DshSessionItem::Session(header) = line.into_item() else {
     return Err(format!("invalid dsh session header in {}", path.display()));
   };
-  if header.version != 0 {
+  if header.version > 4 {
     return Err(format!(
-      "unsupported dsh session version {} in {} (expected 0)",
+      "unsupported dsh session version {} in {} (supported 0 through 4)",
       header.version,
       path.display()
     ));
   }
+  if header.version >= 2 && header.is_seeded.is_none() {
+    return Err("DSH version 2 through 4 header requires isSeeded".into());
+  }
+  if jsonl_generation(path).is_some_and(|(version, _)| version != header.version) {
+    return Err("DSH session filename generation does not match its header".into());
+  }
+  if header.id.is_empty()
+    || header.id.len() > 512
+    || header.id.trim() != header.id
+    || header.id.chars().any(char::is_control)
+    || header.created_at > 9_007_199_254_740_991
+    || header.delegation_depth > 9_007_199_254_740_991
+    || header.cwd.as_deref().is_some_and(|cwd| !native_absolute_path(cwd))
+  {
+    return Err("Invalid DSH session identity or metadata".into());
+  }
   Ok(header)
 }
 
-fn visit_session_records(path: &Path, mut visit: impl FnMut(DshSessionLine, bool)) -> Result<DshSessionHeader, String> {
-  let mut reader = storage::reader(path)?;
-  let mut buffer = String::new();
-  reader
-    .read_line(&mut buffer)
-    .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-  let header = header(storage::parse(&buffer, path, 1)?, path)?;
+fn visit_session_records(
+  path: &Path,
+  session_id: Option<&str>,
+  mut visit: impl FnMut(DshSessionLine, bool),
+) -> Result<DshSessionHeader, String> {
+  let snapshot = storage::snapshot(path, session_id, 128 * 1024 * 1024)?;
+  let header = snapshot.header;
   let seed_length = if header.origin.as_deref() == Some("subagent") {
     header.seed_length.unwrap_or(0)
   } else {
     0
   };
-  let mut index = 1;
-  loop {
-    buffer.clear();
-    index += 1;
-    if reader
-      .read_line(&mut buffer)
-      .map_err(|err| format!("failed to read {}:{index}: {err}", path.display()))?
-      == 0
-    {
-      break;
-    }
-    if buffer.trim().is_empty() {
-      continue;
-    }
-    for line in storage::expand(storage::parse(&buffer, path, index)?)
-      .map_err(|err| format!("{}:{index}: {err}", path.display()))?
-    {
+  for row in snapshot.rows {
+    for line in storage::expand(row)? {
       // seedLength is immutable fork ancestry, unlike end-seed, which also
       // appears on every resume and must not hide the session's own past turns.
       let is_direct = !line
@@ -360,6 +375,83 @@ fn visit_session_records(path: &Path, mut visit: impl FnMut(DshSessionLine, bool
   Ok(header)
 }
 
+fn is_source(path: &Path) -> bool {
+  jsonl_generation(path).is_some()
+    || path.file_name().is_some_and(|name| name == "sessions.sqlite")
+      && path
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == ".segments")
+}
+
+fn jsonl_generation(path: &Path) -> Option<(u64, bool)> {
+  let name = path.file_name()?.to_str()?;
+  let (raw, compressed) = name
+    .strip_suffix(".zstd")
+    .or_else(|| name.strip_suffix(".zst"))
+    .map_or((name, false), |raw| (raw, true));
+  if raw == "session.jsonl" {
+    return Some((0, compressed));
+  }
+  let digits = raw.strip_prefix("session.v")?.strip_suffix(".jsonl")?;
+  if digits.starts_with('0') || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+    return None;
+  }
+  let version = digits.parse::<u64>().ok()?;
+  (version > 0 && version <= 9_007_199_254_740_991).then_some((version, compressed))
+}
+
+fn select_generations(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>, String> {
+  let mut directories: std::collections::BTreeMap<PathBuf, Vec<(u64, bool, PathBuf)>> =
+    std::collections::BTreeMap::new();
+  let mut selected = Vec::new();
+  for path in paths {
+    if let Some((version, compressed)) = jsonl_generation(&path) {
+      directories
+        .entry(path.parent().unwrap_or(Path::new("")).to_owned())
+        .or_default()
+        .push((version, compressed, path));
+    } else {
+      selected.push(path);
+    }
+  }
+  for (_, mut generations) in directories {
+    let compressed = generations[0].1;
+    if generations.iter().any(|(_, encoding, _)| *encoding != compressed) {
+      return Err("DSH session directory contains conflicting JSONL encodings".into());
+    }
+    generations.sort_by_key(|(version, _, _)| std::cmp::Reverse(*version));
+    if generations.len() > 1 && generations[0].0 == generations[1].0 {
+      return Err("DSH session directory contains ambiguous duplicate generations".into());
+    }
+    selected.push(generations.remove(0).2);
+  }
+  Ok(selected)
+}
+
+fn read_relations(path: &Path) -> Result<Vec<SessionRef>, String> {
+  if crate::sqlite::is_database(path) {
+    crate::sqlite::headers(path)?
+      .into_iter()
+      .map(|native| {
+        let header = header(serde_json::from_value(native).map_err(|error| error.to_string())?, path)?;
+        Ok(reference(path, &header))
+      })
+      .collect()
+  } else {
+    Ok(vec![read_relation(path)?])
+  }
+}
+
+fn deduplicate(references: &mut Vec<SessionRef>) {
+  let routed: std::collections::HashSet<_> = references
+    .iter()
+    .filter(|reference| crate::sqlite::is_database(&reference.path))
+    .map(|reference| reference.id.clone())
+    .collect();
+  references.retain(|reference| crate::sqlite::is_database(&reference.path) || !routed.contains(&reference.id));
+}
+
 pub(crate) fn reference(path: &Path, header: &DshSessionHeader) -> SessionRef {
   SessionRef {
     model_baseline: None,
@@ -371,7 +463,7 @@ pub(crate) fn reference(path: &Path, header: &DshSessionHeader) -> SessionRef {
     },
     agent_path: None,
     agent_nickname: None,
-    agent_role: None,
+    agent_role: (header.origin.as_deref() == Some("subagent")).then(|| "subagent".into()),
     title: None,
     preview: None,
     path: path.to_path_buf(),
@@ -454,9 +546,41 @@ fn sort_refs(references: &mut [SessionRef]) {
   });
 }
 
+fn native_absolute_path(path: &str) -> bool {
+  if path.contains('\0') {
+    return false;
+  }
+  if path.starts_with('/') {
+    return true;
+  }
+  let bytes = path.as_bytes();
+  if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'/' | b'\\') {
+    return true;
+  }
+  if let Some(unc) = path.strip_prefix("\\\\") {
+    let mut parts = unc.split('\\');
+    return parts.next().is_some_and(|part| !part.is_empty()) && parts.next().is_some_and(|part| !part.is_empty());
+  }
+  false
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn only_canonical_generation_names_are_discovered() {
+    for (name, expected) in [
+      ("session.jsonl", Some((0, false))),
+      ("session.v4.jsonl.zstd", Some((4, true))),
+      ("session.v0.jsonl", None),
+      ("session.v04.jsonl", None),
+      ("session.V4.jsonl", None),
+      ("session.v4.jsonl.tmp", None),
+    ] {
+      assert_eq!(jsonl_generation(Path::new(name)), expected, "{name}");
+    }
+  }
 
   #[test]
   fn resolves_root_precedence_without_mutating_environment() {

@@ -119,6 +119,9 @@ async fn call(State(fake): State<Arc<Fake>>, Path(method): Path<String>, body: B
   let request: Value = serde_json::from_slice(&body).unwrap();
   fake.calls.lock().await.push(request.clone());
   if method == "respond" {
+    if fake.wrong_response_id.load(Ordering::Acquire) {
+      return axum::Json(json!({"unrecognized":true}));
+    }
     return axum::Json(json!({"accepted":true}));
   }
   let value = match method.as_str() {
@@ -304,6 +307,24 @@ fn question_frame() -> Value {
   )
 }
 
+fn tool_frame(session: &str, call: &str, name: &str, arguments: Value) -> Value {
+  frame(
+    "tool-event",
+    "session/event",
+    json!({"type":"session/event","sessionId":session,
+    "event":{"type":"tool/call","seq":4,"data":{"turn":1,"step":1,"callId":call,"name":name,"arguments":arguments.to_string()}}}),
+  )
+}
+
+fn approval_frame() -> Value {
+  frame(
+    "approval-rpc",
+    "approval/requested",
+    json!({"type":"approval/requested","sessionId":"session",
+    "approvalId":"audit-id","toolName":"shell","callId":"tool-call","reason":"Operation needs review"}),
+  )
+}
+
 async fn wait_pending(adapter: &DshAdapter, count: usize) -> Vec<PendingInteraction> {
   tokio::time::timeout(Duration::from_secs(2), async {
     loop {
@@ -435,7 +456,7 @@ async fn recovers_native_pending_questions_and_replies_with_their_correlation() 
   let adapter = attach(&server).await;
   let pending = wait_pending(&adapter, 1).await;
   assert_eq!(
-    pending[0].native["payload"]["questions"][0]["detail"],
+    pending[0].native["wire"]["payload"]["questions"][0]["detail"],
     "Native detail retained"
   );
   events::test_ingest(&adapter.inner, question_frame()).await.unwrap();
@@ -474,14 +495,18 @@ async fn recovers_native_pending_questions_and_replies_with_their_correlation() 
 
 #[tokio::test]
 async fn permission_approval_uses_audit_id_and_rejects_permanent_grants() {
-  let native = frame(
-    "approval-rpc",
-    "approval/requested",
-    json!({"type":"approval/requested","sessionId":"session","approvalId":"audit-id","toolName":"shell","callId":"tool-call"}),
-  );
-  let server = server(vec![native]).await;
+  let native = approval_frame();
+  let server = server(vec![
+    tool_frame("session", "tool-call", "shell", json!({"command":"printf fixture"})),
+    native.clone(),
+  ])
+  .await;
   let adapter = attach(&server).await;
-  wait_pending(&adapter, 1).await;
+  let pending = wait_pending(&adapter, 1).await;
+  assert_eq!(pending[0].native["wire"], native);
+  assert_eq!(pending[0].native["permission_decisions"], json!(["allow_once", "deny"]));
+  let details = pending[0].native["details"].as_str().unwrap();
+  assert!(details.contains("printf fixture") && details.contains("Operation needs review"));
   let error = adapter
     .execute(request(
       &adapter,
@@ -511,6 +536,180 @@ async fn permission_approval_uses_audit_id_and_rejects_permanent_grants() {
     server.fake.calls.lock().await[0]["result"]["value"],
     json!({"sessionId":"session","approvalId":"audit-id","outcome":"allowed-once"})
   );
+}
+
+#[tokio::test]
+async fn permission_input_arriving_late_upgrades_only_the_matching_native_session() {
+  let server = server(Vec::new()).await;
+  let adapter = attach(&server).await;
+  let mut events = adapter.subscribe();
+  let native = approval_frame();
+  events::test_ingest(&adapter.inner, native.clone()).await.unwrap();
+  events::test_ingest(
+    &adapter.inner,
+    tool_frame(
+      "another-session",
+      "tool-call",
+      "shell",
+      json!({"command":"private-other-operation"}),
+    ),
+  )
+  .await
+  .unwrap();
+  let missing = wait_pending(&adapter, 1).await;
+  assert_eq!(missing[0].native["permission_decisions"], json!(["deny"]));
+  assert!(
+    !missing[0].native["details"]
+      .to_string()
+      .contains("private-other-operation")
+  );
+  let command = || Command::Respond {
+    interaction_id: "approval-rpc".into(),
+    response: InteractionResponse::Permission {
+      decision: PermissionDecision::AllowOnce,
+    },
+  };
+  assert_eq!(
+    adapter.execute(request(&adapter, command())).await.unwrap_err().kind,
+    ErrorKind::Unsupported
+  );
+  assert!(server.fake.calls.lock().await.is_empty());
+
+  let input = tool_frame("session", "tool-call", "shell", json!({"command":"printf fixture"}));
+  events::test_ingest(&adapter.inner, input.clone()).await.unwrap();
+  let pending = wait_pending(&adapter, 1).await;
+  assert_eq!(pending[0].native["wire"], native);
+  assert_eq!(pending[0].native["permission_decisions"], json!(["allow_once", "deny"]));
+  assert!(pending[0].native["details"].to_string().contains("printf fixture"));
+  assert!(
+    events
+      .try_recv()
+      .is_ok_and(|event| matches!(event.kind,RuntimeEventKind::Native(wire) if wire==native))
+  );
+  assert!(
+    std::iter::from_fn(|| events.try_recv().ok())
+      .any(|event| matches!(event.kind,RuntimeEventKind::Native(wire) if wire==input))
+  );
+  // An identical reannouncement compares only native wire, independent of its
+  // original deny-only projection and the asynchronously upgraded display.
+  events::test_ingest(&adapter.inner, native).await.unwrap();
+  adapter.execute(request(&adapter, command())).await.unwrap();
+  assert_eq!(server.fake.calls.lock().await.len(), 1);
+  adapter.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn late_preview_and_reannouncement_preserve_an_uncertain_response_reservation() {
+  let server = server(Vec::new()).await;
+  let adapter = attach(&server).await;
+  let native = approval_frame();
+  events::test_ingest(&adapter.inner, native.clone()).await.unwrap();
+  server.fake.wrong_response_id.store(true, Ordering::Release);
+  let response = |decision| Command::Respond {
+    interaction_id: "approval-rpc".into(),
+    response: InteractionResponse::Permission { decision },
+  };
+  assert_eq!(
+    adapter
+      .execute(request(&adapter, response(PermissionDecision::Deny)))
+      .await
+      .unwrap_err()
+      .kind,
+    ErrorKind::Uncertain
+  );
+  events::test_ingest(
+    &adapter.inner,
+    tool_frame("session", "tool-call", "shell", json!({"command":"printf fixture"})),
+  )
+  .await
+  .unwrap();
+  events::test_ingest(&adapter.inner, native).await.unwrap();
+  let pending = wait_pending(&adapter, 1).await;
+  assert_eq!(pending[0].native["response_pending"], true);
+  assert_eq!(pending[0].native["permission_decisions"], json!(["allow_once", "deny"]));
+  assert_eq!(
+    adapter
+      .execute(request(&adapter, response(PermissionDecision::AllowOnce)))
+      .await
+      .unwrap_err()
+      .kind,
+    ErrorKind::Conflict
+  );
+  assert_eq!(
+    server.fake.calls.lock().await.len(),
+    1,
+    "No competing outcome may follow an unknown write"
+  );
+  adapter.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn completed_tool_calls_turns_and_removed_sessions_retire_approval_previews() {
+  for event in [
+    json!({"type":"tool/result","data":{"message":{"source":{"kind":"tool","callId":"tool-call"}}}}),
+    json!({"type":"turn/end","data":{"turn":1}}),
+    Value::Null,
+  ] {
+    let server = server(Vec::new()).await;
+    let adapter = attach(&server).await;
+    events::test_ingest(
+      &adapter.inner,
+      tool_frame("session", "tool-call", "shell", json!({"command":"printf fixture"})),
+    )
+    .await
+    .unwrap();
+    let terminal = if event.is_null() {
+      frame(
+        "removed",
+        "host/session-removed",
+        json!({"type":"host/session-removed","sessionId":"session"}),
+      )
+    } else {
+      frame(
+        "terminal",
+        "session/event",
+        json!({"type":"session/event","sessionId":"session","event":event}),
+      )
+    };
+    events::test_ingest(&adapter.inner, terminal).await.unwrap();
+    events::test_ingest(&adapter.inner, approval_frame()).await.unwrap();
+    assert_eq!(
+      wait_pending(&adapter, 1).await[0].native["permission_decisions"],
+      json!(["deny"])
+    );
+    adapter
+      .execute(request(
+        &adapter,
+        Command::Respond {
+          interaction_id: "approval-rpc".into(),
+          response: InteractionResponse::Permission {
+            decision: PermissionDecision::Deny,
+          },
+        },
+      ))
+      .await
+      .unwrap();
+    adapter.close().await.unwrap();
+  }
+}
+
+#[tokio::test]
+async fn oversized_or_different_tool_inputs_cannot_enable_approval() {
+  for (name, input) in [
+    ("different-tool", json!({"command":"printf fixture"})),
+    ("shell", json!({"command":"x".repeat(16*1024)})),
+  ] {
+    let server = server(Vec::new()).await;
+    let adapter = attach(&server).await;
+    events::test_ingest(&adapter.inner, tool_frame("session", "tool-call", name, input))
+      .await
+      .unwrap();
+    events::test_ingest(&adapter.inner, approval_frame()).await.unwrap();
+    let pending = wait_pending(&adapter, 1).await;
+    assert_eq!(pending[0].native["permission_decisions"], json!(["deny"]));
+    assert!(pending[0].native["details"].as_str().unwrap().len() < 16 * 1024);
+    adapter.close().await.unwrap();
+  }
 }
 
 #[tokio::test]

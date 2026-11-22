@@ -144,6 +144,8 @@ def emit(value):
 
 def reply(command, success=True, data=None):
     value = {'type': 'response', 'id': command['id'], 'command': command['type'], 'success': success}
+    if success and command['type'] == 'prompt' and (root / 'input-disposition').exists():
+        data = json.loads((root / 'input-disposition').read_text())
     if data is not None:
         value['data'] = data
     if not success:
@@ -407,7 +409,7 @@ if mode == 'ignore_eof':
     assert!(matches!(
       accepted,
       Admission::WithModel {
-        disposition: ModelInputDisposition::Started,
+        disposition: ModelInputDisposition::Accepted,
         result: MessageModelResult {
           outcome: MessageModelOutcome::Applied,
           ..
@@ -499,7 +501,7 @@ if mode == 'ignore_eof':
       .await
       .unwrap();
     assert!(
-      matches!(accepted, Admission::WithModel { disposition:ModelInputDisposition::Steered, result:MessageModelResult { outcome:MessageModelOutcome::IgnoredWhileRunning, state:SessionModelState { model:Some(ModelIdentity { model_id, .. }), .. } } } if model_id == "text")
+      matches!(accepted, Admission::WithModel { disposition:ModelInputDisposition::Accepted, result:MessageModelResult { outcome:MessageModelOutcome::IgnoredWhileRunning, state:SessionModelState { model:Some(ModelIdentity { model_id, .. }), .. } } } if model_id == "text")
     );
     assert_eq!(
       fixture.wait_log(|value| value["message"] == "steering").await["streamingBehavior"],
@@ -596,7 +598,7 @@ if mode == 'ignore_eof':
       assert!(matches!(
         result,
         Admission::WithModel {
-          disposition: ModelInputDisposition::Steered,
+          disposition: ModelInputDisposition::Accepted,
           result: MessageModelResult {
             outcome: MessageModelOutcome::IgnoredWhileRunning,
             ..
@@ -1153,7 +1155,7 @@ if mode == 'ignore_eof':
         .unwrap()
         .unwrap()
         .unwrap(),
-      Admission::Started
+      Admission::Accepted
     ));
     Fixture::wait_pid_reaped(previous_pid).await;
     let launches = fixture.launches();
@@ -1265,7 +1267,7 @@ if mode == 'ignore_eof':
         .submit_owned_input(&key, &uuid::Uuid::new_v4().to_string(), "after idle")
         .await
         .unwrap(),
-      Admission::Started
+      Admission::Accepted
     ));
     assert_eq!(fixture.snapshot().session_key.as_deref(), Some(key.as_str()));
     assert_eq!(fixture.prompts(), ["handled", "after idle"]);
@@ -1303,16 +1305,9 @@ if mode == 'ignore_eof':
     assert_eq!(
       admissions
         .iter()
-        .filter(|value| matches!(value, Admission::Started))
+        .filter(|value| matches!(value, Admission::Accepted))
         .count(),
-      1
-    );
-    assert_eq!(
-      admissions
-        .iter()
-        .filter(|value| matches!(value, Admission::Steered))
-        .count(),
-      1
+      2
     );
     assert_eq!(fixture.launches().len(), 2);
     let mut prompts = fixture.prompts();
@@ -1349,7 +1344,7 @@ if mode == 'ignore_eof':
         .unwrap()
         .unwrap()
         .unwrap(),
-      Admission::Started
+      Admission::Accepted
     ));
     assert_eq!(fixture.prompts(), ["handled", "after ready"]);
     fixture.manager.shutdown().await;
@@ -1431,7 +1426,7 @@ if mode == 'ignore_eof':
           .unwrap()
           .unwrap()
           .unwrap(),
-        Admission::Started
+        Admission::Accepted
       ));
       fixture.manager.shutdown().await;
       fixture.wait_reaped().await;
@@ -1656,7 +1651,7 @@ if mode == 'ignore_eof':
           .submit_owned_input_images(&key, &request_id, "", vec![attachment.clone()])
           .await
           .unwrap(),
-        Admission::Started
+        Admission::Accepted
       ));
     }
     let mut changed = attachment;
@@ -1723,7 +1718,7 @@ if mode == 'ignore_eof':
           .submit_owned_input_images(&key, &followup_id, "caption", vec![image(&image_id)])
           .await
           .unwrap(),
-        Admission::Steered
+        Admission::Accepted
       ));
     }
     let prompts: Vec<_> = fixture
@@ -2336,7 +2331,7 @@ if mode == 'ignore_eof':
         .submit_owned_input(&key, &message_id, "synthetic follow-up")
         .await
         .unwrap(),
-      Admission::Steered
+      Admission::Accepted
     ));
     assert!(matches!(
       fixture
@@ -2344,7 +2339,7 @@ if mode == 'ignore_eof':
         .submit_owned_input(&key, &message_id, "synthetic follow-up")
         .await
         .unwrap(),
-      Admission::Steered
+      Admission::Accepted
     ));
     let mismatch = fixture
       .manager
@@ -2375,7 +2370,7 @@ if mode == 'ignore_eof':
         .submit_owned_input(&key, &uuid::Uuid::new_v4().to_string(), "synthetic next turn")
         .await
         .unwrap(),
-      Admission::Started
+      Admission::Accepted
     ));
     assert_eq!(fixture.snapshot().session_key.as_deref(), Some(key.as_str()));
     assert_eq!(
@@ -2568,6 +2563,56 @@ if mode == 'ignore_eof':
   }
 
   #[tokio::test]
+  async fn native_prompt_dispositions_preserve_acceptance_without_inventing_turn_or_steering_proof() {
+    let fixture = Fixture::new("normal", "handled");
+    fixture.create().await;
+    let key = fixture.persisted().await.session_key.unwrap();
+    for (proof, text) in [
+      ("handled", "handled"),
+      ("started", "start proof"),
+      ("queued", "queue proof"),
+    ] {
+      std::fs::write(
+        fixture.folder().join("input-disposition"),
+        serde_json::to_vec(&json!({"disposition":proof})).unwrap(),
+      )
+      .unwrap();
+      let request_id = uuid::Uuid::new_v4().to_string();
+      let result = fixture
+        .manager
+        .submit_owned_input(&key, &request_id, text)
+        .await
+        .unwrap();
+      assert!(matches!(
+        (proof, result),
+        ("handled", Admission::Accepted) | ("started", Admission::Started) | ("queued", Admission::Queued)
+      ));
+      fixture
+        .manager
+        .submit_owned_input(&key, &request_id, text)
+        .await
+        .unwrap();
+    }
+    std::fs::write(
+      fixture.folder().join("input-disposition"),
+      r#"{"disposition":"future"}"#,
+    )
+    .unwrap();
+    let error = fixture
+      .manager
+      .submit_owned_input(&key, &uuid::Uuid::new_v4().to_string(), "unknown proof")
+      .await
+      .unwrap_err();
+    assert!(error.may_have_been_sent);
+    assert!(error.message.contains("invalid input disposition"));
+    assert_eq!(
+      fixture.prompts(),
+      ["handled", "handled", "start proof", "queue proof", "unknown proof"]
+    );
+    fixture.manager.shutdown().await;
+  }
+
+  #[tokio::test]
   async fn handled_prompt_settles_without_agent_events_and_rejected_follow_up_stays_running() {
     let handled = Fixture::new("normal", "handled");
     handled.create().await;
@@ -2638,7 +2683,7 @@ if mode == 'ignore_eof':
         .submit_owned_input(&key, &uuid::Uuid::new_v4().to_string(), "handled")
         .await
         .unwrap(),
-      Admission::Started
+      Admission::Accepted
     ));
     fixture
       .wait_for(|snapshot| snapshot.status == ManagedSessionStatus::Idle && snapshot.last_turn_error.is_none())

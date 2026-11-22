@@ -27,7 +27,7 @@ export function useSessionControl(session: SessionSummary | null, refresh_key = 
   on_completed?: (session_key: string) => void | Promise<void>) {
   const provider = session?.provider;
   const gated_input = provider === "codex" || provider === "dsh";
-  const live_activity = provider === "zcode" || provider === "qoder";
+  const live_activity = ["zcode", "qoder", "opencode", "dsh"].includes(provider ?? "");
   const enabled = !!session && (gated_input || live_activity) && !session.is_subagent;
   const session_key = enabled ? session.session_key : null;
   const scope = viewerStorageScope();

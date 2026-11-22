@@ -165,6 +165,79 @@ fn recorded_image_reads_are_bound_to_catalog_event_and_attachment_identity() {
 }
 
 #[test]
+fn opencode_blob_images_require_the_exact_message_owner_and_verified_bytes() {
+  let directory = tempfile::tempdir().unwrap();
+  let database = directory.path().join("opencode.sqlite");
+  let connection = rusqlite::Connection::open(&database).unwrap();
+  connection.execute_batch(
+    "create table session_v2(id text primary key,parent_id text,directory text,title text,model text,time_created integer,time_updated integer);
+     create table session_message(id text primary key,session_id text,type text,seq integer,time_created integer,time_updated integer,data text);
+     create table blob(hash text primary key,mime text,bytes integer,width integer,height integer,data blob,time_created integer);
+     create table blob_ref(session_id text,message_id text,hash text,seq integer,primary key(session_id,message_id,hash));
+     insert into session_v2 values('session',null,'/workspace',null,null,1,1);
+     insert into session_message values('user-message','session','user',0,1,1,'{}');
+     insert into session_message values('tool-message','session','assistant',1,1,1,'{}');"
+  ).unwrap();
+  let bytes = png();
+  let hash = format!("{:x}", Sha256::digest(&bytes));
+  connection
+    .execute(
+      "insert into blob values(?1,'image/png',?2,2,1,?3,1)",
+      rusqlite::params![hash, bytes.len() as i64, bytes],
+    )
+    .unwrap();
+  for (message, seq) in [("user-message", 0), ("tool-message", 1)] {
+    connection
+      .execute(
+        "insert into blob_ref values('session',?1,?2,?3)",
+        rusqlite::params![message, hash, seq],
+      )
+      .unwrap();
+  }
+  let mut message = image_message(MessageImageSource::Unavailable {
+    reference: Some(format!("media:{hash}")),
+  });
+  if let AgentEvent::Message(message) = &mut message {
+    message.provider = Provider::OpenCode;
+    message.session_id = Some("session".into());
+    message.message_id = Some("user-message".into());
+  }
+  let mut tool = output_tool(ToolRecordKind::Result, recorded_images(&message).to_vec(), None);
+  if let AgentEvent::ToolCall(tool) = &mut tool {
+    tool.provider = Provider::OpenCode;
+    tool.session_id = Some("session".into());
+    tool.message_id = Some("tool-message".into());
+  }
+  assert!(matches!(
+    event_images(&message)[0].availability,
+    ImageAvailability::Available
+  ));
+  let mut loaded = loaded_session(vec![message, tool]);
+  loaded.reference.id = "session".into();
+  loaded.reference.path = database;
+  let (service, key, other, _) = fixture_for(ViewerProvider::OpenCode, loaded);
+  let shared = service.scoped_to_sessions(std::slice::from_ref(&key)).unwrap();
+  for index in [0, 1] {
+    let mut request = read_request(&key);
+    request.event_key = encode_event_key(index);
+    let image = shared.load_session_image(request).unwrap();
+    assert_eq!(STANDARD.decode(image.data_base64).unwrap(), bytes);
+  }
+  assert!(service.load_session_image(read_request(&other)).is_err());
+  connection
+    .execute("delete from blob_ref where message_id='user-message'", [])
+    .unwrap();
+  assert!(service.load_session_image(read_request(&key)).is_err());
+  let mut request = read_request(&key);
+  request.event_key = encode_event_key(1);
+  assert!(service.load_session_image(request.clone()).is_ok());
+  connection
+    .execute("update blob_ref set seq=99 where message_id='tool-message'", [])
+    .unwrap();
+  assert!(service.load_session_image(request).is_err());
+}
+
+#[test]
 fn zcode_artifact_images_are_lazy_owner_scoped_resources_in_messages_and_tools() {
   let directory = tempfile::tempdir().unwrap();
   let cli = directory.path().join("storage/cli");

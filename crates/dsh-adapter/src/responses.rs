@@ -10,28 +10,55 @@ impl Inner {
     response: InteractionResponse,
   ) -> Result<Reply, InteractionError> {
     self.ensure_live()?;
-    let pending = self
-      .state
-      .lock()
-      .await
-      .pending
-      .get(interaction_id)
-      .cloned()
-      .ok_or_else(|| {
+    let (pending, mut result) = {
+      let mut state = self.state.lock().await;
+      let pending = state.pending.get(interaction_id).cloned().ok_or_else(|| {
         InteractionError::new(
           ErrorKind::Conflict,
           "DSH interaction is no longer pending or has not been recovered yet",
         )
       })?;
-    if session_id != pending.session_id.as_deref() {
-      return Err(InteractionError::new(
-        ErrorKind::StaleTarget,
-        "DSH interaction belongs to a different session",
-      ));
+      if session_id != pending.session_id.as_deref() {
+        return Err(InteractionError::new(
+          ErrorKind::StaleTarget,
+          "DSH interaction belongs to a different session",
+        ));
+      }
+      let result = response_result(&pending, response)?;
+      if !state.responding.insert(interaction_id.into()) {
+        return Err(InteractionError::new(
+          ErrorKind::Conflict,
+          "A DSH response was already sent or is still being dispatched",
+        ));
+      }
+      state.pending.get_mut(interaction_id).expect("pending response").native["response_pending"] = json!(true);
+      (pending, result)
+    };
+    if self.transport.is_gateway() {
+      result = if result["ok"] == true {
+        let value = if pending.kind == InteractionKind::Permission {
+          result["value"]["outcome"].clone()
+        } else {
+          result["value"]["answer"].clone()
+        };
+        json!({"kind":"result","value":value})
+      } else {
+        json!({"kind":"rejected","error":{"name":"AbortError","message":"The user cancelled the question"}})
+      };
     }
-    let result = response_result(&pending, response)?;
-    let receipt = self.transport.respond(interaction_id, result).await?;
+    let receipt = match self.transport.respond(interaction_id, result).await {
+      Ok(receipt) => receipt,
+      Err(error) => {
+        // Unknown writes keep their reservation. Neither a second UI action
+        // nor the local question countdown may dispatch a competing outcome.
+        if error.kind != ErrorKind::Uncertain {
+          self.release_response(interaction_id).await;
+        }
+        return Err(error);
+      }
+    };
     if !receipt.accepted {
+      self.release_response(interaction_id).await;
       return Err(InteractionError::new(
         ErrorKind::Conflict,
         format!(
@@ -42,7 +69,11 @@ impl Inner {
     }
     // Resolve locally after authoritative acceptance; the stream's matching
     // resolution remains safe and idempotent when it arrives before/after this.
-    if self.state.lock().await.pending.remove(interaction_id).is_some() {
+    let mut state = self.state.lock().await;
+    state.responding.remove(interaction_id);
+    let removed = state.pending.remove(interaction_id).is_some();
+    drop(state);
+    if removed {
       self.emit(
         pending.session_id,
         RuntimeEventKind::InteractionResolved {
@@ -52,9 +83,22 @@ impl Inner {
     }
     Ok(Reply::Acknowledged)
   }
+
+  async fn release_response(&self, interaction_id: &str) {
+    let mut state = self.state.lock().await;
+    state.responding.remove(interaction_id);
+    if let Some(pending) = state.pending.get_mut(interaction_id) {
+      pending
+        .native
+        .as_object_mut()
+        .expect("native interaction object")
+        .remove("response_pending");
+    }
+  }
 }
 
 fn response_result(pending: &PendingInteraction, response: InteractionResponse) -> Result<Value, InteractionError> {
+  let native = pending.native.get("wire").unwrap_or(&pending.native);
   match (pending.kind, response) {
     (InteractionKind::Question, InteractionResponse::Answers { answers }) => {
       if answers.len() != pending.questions.len() {
@@ -73,6 +117,11 @@ fn response_result(pending: &PendingInteraction, response: InteractionResponse) 
         let custom = answer.custom.as_deref().map(str::trim);
         if custom == Some("") {
           return Err(InteractionError::invalid("DSH custom answer must not be empty"));
+        }
+        if custom.is_some() && !question.allows_free_text {
+          return Err(InteractionError::invalid(
+            "DSH approval questions do not accept custom text",
+          ));
         }
         let mut selected = std::collections::BTreeSet::new();
         for label in &answer.answers {
@@ -104,7 +153,17 @@ fn response_result(pending: &PendingInteraction, response: InteractionResponse) 
     }
     (InteractionKind::Permission, InteractionResponse::Permission { decision }) => {
       let outcome = match decision {
-        PermissionDecision::AllowOnce => "allowed-once",
+        PermissionDecision::AllowOnce => {
+          if !pending.native["permission_decisions"]
+            .as_array()
+            .is_some_and(|decisions| decisions.iter().any(|decision| decision == "allow_once"))
+          {
+            return Err(InteractionError::unsupported(
+              "DSH approval requires an observed native tool input; deny this request or review it in DSH",
+            ));
+          }
+          "allowed-once"
+        }
         PermissionDecision::Deny => "rejected",
         PermissionDecision::AllowAlways => {
           return Err(InteractionError::unsupported(
@@ -113,11 +172,11 @@ fn response_result(pending: &PendingInteraction, response: InteractionResponse) 
         }
       };
       Ok(
-        json!({"ok":true,"value":{"sessionId":pending.session_id,"approvalId":pending.native["payload"]["approvalId"],"outcome":outcome}}),
+        json!({"ok":true,"value":{"sessionId":pending.session_id,"approvalId":native["payload"]["approvalId"],"outcome":outcome}}),
       )
     }
     (InteractionKind::Permission, InteractionResponse::Reject) => Ok(
-      json!({"ok":true,"value":{"sessionId":pending.session_id,"approvalId":pending.native["payload"]["approvalId"],"outcome":"rejected"}}),
+      json!({"ok":true,"value":{"sessionId":pending.session_id,"approvalId":native["payload"]["approvalId"],"outcome":"rejected"}}),
     ),
     _ => Err(InteractionError::invalid(
       "response type does not match the pending DSH interaction",

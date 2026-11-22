@@ -204,7 +204,7 @@ Codex/Pi/OpenCode/DSH RPC protocol crates, and native adapters including ZCode.
 The core owns instance-bound dispatch, capabilities, live pending
 interactions, cancellation-safe admissions, and bounded receipts; protocol and
 core crates do not import providers. Codex uses app-server stdio/WS(S), Pi uses
-stdio, OpenCode V2 HTTP/SSE, DSH ApiProxy HTTP with two WebSocket downlinks,
+stdio, OpenCode legacy/current V2 HTTP/SSE, DSH Gateway HTTP/WebSocket with legacy ApiProxy attachment,
 and ZCode app-server NDJSON. Adapters support owned launch. Where supported,
 explicit attachment never
 stops an external process. Native start-or-steer/queue admission is separate
@@ -214,6 +214,21 @@ honestly. Inspection never starts or resumes a session. See
 The viewer composes the shared core managers with native adapter factories and
 host verification; provider wire workflows stay in their adapters. The common
 RPC capability limits remain distinct from the exclusive managed Pi workflow.
+
+Upstream references were refreshed on 2026-11-22: Codex `357fe240c9`,
+Pi `9c46526885`, OpenCode `5756d59a68`, and DSH `2e39e70496`.
+Current OpenCode inbox/form/permission routes and DSH authenticated Gateway
+streams coexist with retained legacy contracts. Viewer live requests and native
+running state cover OpenCode and DSH. Timed DSH questions claim native waits and
+retain their deadlines. Pi admission preserves started/queued/handled results;
+legacy success proves acceptance only. Codex durable image references and
+required-human approval kinds have explicit handling. Source cursors restage
+changed projections once. See [compatibility details](upstream-compatibility.md)
+for affected crates, native evidence, and remaining optional features.
+Private JSON reads reopen a concurrently replaced inode through the same strict
+file checks; lock acquisition never retries an unlinked lock file. Runtime
+ownership guards explicitly unlock on release, so inherited descriptors cannot
+prolong a retired runtime's lease.
 
 Qoder adds a seventh historical provider and managed project-scoped ACP v1
 interaction. `qoder-adapter` depends on the core-independent `acp-protocol` wire
@@ -587,7 +602,7 @@ Desktop/TUI `<send_user_message_question_reply>` envelopes now also become
 answer cards, preserving `questionItemId` and deriving the request ID from its
 async identity tuple. Ordinary, malformed, or quoted messages remain text.
 Cards show recorded history; live answering is deferred.
-`vendor/codex` is pinned to upstream `2351d9e1b6` (2026-10-09).
+`vendor/codex` is pinned to upstream `357fe240c9` (2026-11-22).
 See [question semantics](event-ir.md#questions).
 
 Implemented CLI:
@@ -1552,8 +1567,8 @@ Event paging currently bounds the data sent across IPC, not all source-reader
 memory: a provider parser may still load the full selected session before
 producing a page. A one-entry normalized-session cache avoids reparsing between
 page and inspector requests and invalidates on source revision changes,
-including OpenCode's SQLite WAL/SHM sidecars. This cache is separate from the
-durable sidebar index checkpoint, which tracks OpenCode's database/WAL only.
+including OpenCode's database/WAL dependencies. This cache is separate from the
+durable sidebar index checkpoint, which tracks the same storage dependencies.
 Periodic sidebar reconciliation remains the fallback. Native incremental
 cataloging currently covers only Codex and Pi JSONL rollouts; OpenCode, ZCode,
 WorkBuddy, and DSH receive a ten-second provider-local header catalog until
@@ -1604,13 +1619,14 @@ subtype-specific unknown events.
   `$PI_CODING_AGENT_SESSION_DIR`, `$PI_CODING_AGENT_DIR/sessions`, then the
   platform home directory's `.pi/agent/sessions`. Pi environment overrides
   expand a leading `~` like the upstream agent.
-- DSH reads `session.jsonl` and `session.jsonl.zstd` recursively from
+- DSH reads legacy and versioned `session[.vN].jsonl[.zstd]` recursively from
   `$DSH_HOME/sessions` or `~/.dsh/sessions`, with `--session-dir` overriding it.
   `show` accepts paths and exact/unambiguous-prefix IDs; `browse` and tree scope
   also work. Compressed files support concatenated frames. Invalid JSON,
   corrupt/truncated frames, invalid packed runs, and unsupported format versions
-  are reported, never repaired. Relay follows these same logs; DSH SQLite,
-  create/append, and input are not implemented.
+  are reported, never repaired. Current `.segments/sessions.sqlite` traces use
+  the database path plus exact native session ID; Client/Viewer/Relay also track
+  its WAL. CLI create/append remain unavailable; Viewer input uses Gateway.
 - Codex reads JSONL and `.jsonl.zst` from `sessions` and `archived_sessions` below a valid,
   non-empty `$CODEX_HOME`, falling back to the platform home directory's
   `.codex`; `--session-dir` still overrides discovery directly.
@@ -1621,7 +1637,7 @@ subtype-specific unknown events.
   In-memory databases are rejected because historical discovery requires
   persisted sessions.
 - OpenCode opens its database with a WAL-aware read-only SQLite URI so active WAL data is visible without application writes; if that cannot open, it falls back to immutable read-only mode. Viewing sessions never runs migrations.
-- OpenCode validates the required `session`, `message`, and `part` tables and columns, then detects optional session columns from the actual SQLite schema.
+- OpenCode validates the detected storage generation: V1 `session`/`message`/`part`, earlier inline V2, or current `session_v2`/`session_message` with ordered `session_part` rows. It detects optional columns from the actual SQLite schema and rejects ambiguous ownership across metadata tables.
 - OpenCode accepts schemas both with and without the optional `session.model` column; it never runs migrations against the user database.
 - ZCode reads its extended OpenCode-compatible SQLite store from
   `--session-dir`, `$ZCODE_STORAGE_DIR/cli/db/db.sqlite`, or
@@ -1711,8 +1727,9 @@ lossless unknown values when Pi adds or changes a shape. `tokn-session-pi`
 owns their normalization into `AgentEvent`.
 
 OpenCode wire types live in `tokn-opencode-protocol`. Its `v1` module models
-the JSON payloads stored in the SQLite `message.data` and `part.data` columns,
-while `run` models JSONL from `opencode run --format json`. Both decode through
+the JSON payloads stored in the SQLite `message.data` and `part.data` columns;
+`v2` models current content chunks and `run` models JSONL from
+`opencode run --format json`. These decode through
 native-JSON-first wrappers: unknown tags and malformed known variants remain
 inspectable instead of preventing the rest of a session from loading. The
 OpenCode source crate still owns SQLite queries, relational row identity, and
@@ -1841,10 +1858,11 @@ Current browser keys:
 
 - OpenCode shell tools with nonzero `metadata.exit` are marked as errors even when OpenCode records the tool state as completed.
 - Tool kind classification and summary extraction live in `crates/core`; provider normalizers should use the shared helpers where possible.
-- OpenCode support currently uses the V1 `message` and `part` tables seen in
-  local data, not the newer `session_message` projection. The newer table
-  exists locally but is empty, and upstream has repeatedly reset its
-  projections, so it is not yet treated as an authoritative history source.
+- OpenCode reads V1 `message`/`part`, older inline V2, and current
+  `session_v2`/`session_message` with ordered `session_part` rows. Ownership is
+  exact: shared-table ambiguity rejects, while a current metadata row proves
+  V2 ownership before the first message. Blob media loads lazily through verified
+  session/message/sequence references; snapshots never hydrate blob bodies.
 - OpenCode V1 message roles, part types, nested tool states, and run-envelope
   types are decoded by `tokn-opencode-protocol`. Unknown and malformed shapes
   preserve their complete native JSON. The adapter retains SQLite row IDs and
@@ -1877,8 +1895,10 @@ Current browser keys:
   metadata; plugin attribution and surface operations accompany messages and
   reasoning as provenance. Unsupported/malformed records and content remain
   native unknown events. Only explicit
-  subagents form tree relationships; their `seedLength` excludes inherited
-  parent history, while resume markers never hide their own earlier turns.
+  subagents form tree relationships; legacy `seedLength` or validated tagged
+  seed boundaries exclude inherited parent history. Resume markers never hide
+  their own earlier turns. Physical generations 0–4 and native predecessor-linked
+  Segment SQLite frames are supported without repairing provider storage.
 - Codex `response_item.agent_message` and legacy
   `inter_agent_communication` records map to `agent_activity` with
   validated author/recipient paths and optional typed `communication` content.
@@ -1928,7 +1948,8 @@ OpenCode has the first live-output normalizer: `OpenCodeLiveNormalizer` parses `
 
 - No `attach` command yet.
 - WorkBuddy supports historical reads and Relay watching. WorkBuddy and DSH
-  have no CLI create/append. DSH Viewer input uses the native ApiProxy runtime.
+  have no CLI create/append. DSH Viewer input uses native Gateway, retaining
+  explicit legacy ApiProxy attachment.
 - Codex and Pi have normalization fixtures. OpenCode now has wire-format
   fixtures plus adapter/source regression tests; full SQLite-backed CLI golden
   tests are still missing.

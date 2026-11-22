@@ -1,4 +1,13 @@
-# Native OpenCode RPC capture
+# Native OpenCode RPC captures
+
+`native-v2-current.json` records unchanged OpenCode 2.3.0 source at
+`5756d59a68a3d16ce412280c3ab055031898cce2`, using its current CLI, `/api/info`
+and `/openapi.json` discovery, flat session inbox admissions, native forms,
+and permission decisions. It exercises the same end-to-end scenario below,
+including the independent first-session title request. Only the account-free
+loopback model is enabled; built-in local provider discovery endpoints are
+disabled so the capture cannot include a developer's local model inventory.
+The ordinary `replay_captured_native_opencode_current_v2` test replays it.
 
 `native-v2.json` records the real OpenCode source at
 `017a5977d2107092007623e507fc5c6eb337d3b2` (package version 1.18.8), launched
@@ -11,20 +20,23 @@ question/selected reply, permission/allow-once with `printf rpc-local-only`,
 stream-held steering and queued messages, and cancellation. It also checks native
 live question/permission events. The source build reports its version as `local`.
 
-Capture with `TOKN_OPENCODE_RPC_ROOT` from
+Capture the current source with `TOKN_OPENCODE_RPC_ROOT` from
 `scripts/rpc/prepare-opencode.sh`, then run the ignored
 `real_opencode_rpc_local_model_capture` test with `TOKN_CAPTURE_RPC_FIXTURES=1`.
-The ordinary `replay_captured_native_opencode_v2` test uses the same adapter and
-scenario against these exchanges without a native runtime or model server.
+The ordinary `replay_captured_native_opencode_v2` test retains the old source
+provenance and uses the same adapter and scenario against those exchanges
+without a native runtime or model server.
 
 Sanitization replaces temporary project/home/model-server paths and credentials,
-including URL-encoded and project-relative paths. Native correlation IDs,
+including URL-encoded and project-relative paths. Current server hostname and
+process ID are replaced with fixture values. Native correlation IDs,
 message order, event payloads, response schemas, and recorded timestamps remain.
 
-OpenCode's V2 configuration is not accepted by its legacy history endpoint. The
+The older OpenCode V2 configuration is not accepted by its legacy history endpoint. The
 adapter conservatively calls that endpoint before controlling an existing
 conversation, so this scenario uses supported legacy configuration that V2
 migrates. A separately captured native rejection is checked in
 `crates/opencode-adapter/tests/fixtures/native-legacy-config-rejection.json`.
 The adapter reports that limitation explicitly and never treats the failed check
-as proof of empty history.
+as proof of empty history. The current dialect has a dedicated V2 session
+metadata route and no longer exposes that legacy history endpoint.

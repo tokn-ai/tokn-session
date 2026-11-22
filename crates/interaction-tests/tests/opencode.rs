@@ -12,12 +12,14 @@ use tokio::{
 };
 use tokn_interaction_core::*;
 use tokn_interaction_tests::{
-  Fixture, ModelGate, ModelServer, ModelStep, RecordingProxy, ReplayServer, TestResult, Trace,
+  Fixture, ModelGate, ModelServer, ModelStep, RecordingProxy, ReplayServer, TestResult, Trace, WireRecord,
 };
 use tokn_opencode_adapter::{ConnectionOptions, OpenCodeAdapter};
 
-const REVISION: &str = "017a5977d2107092007623e507fc5c6eb337d3b2";
+const REVISION: &str = "5756d59a68a3d16ce412280c3ab055031898cce2";
+const LEGACY_REVISION: &str = "017a5977d2107092007623e507fc5c6eb337d3b2";
 const MODEL: &str = "rpc-test-model";
+const PASSWORD: &str = "local-rpc-fixture-password";
 
 struct NativeProcess {
   child: Child,
@@ -37,12 +39,14 @@ impl NativeProcess {
     let root = std::env::temp_dir().join(format!("tokn-rpc-opencode-{}", uuid::Uuid::new_v4()));
     let project = root.join("project");
     std::fs::create_dir_all(&project)?;
-    // V2 migrates this supported legacy config. The adapter's conservative V1
-    // history guard also invokes the legacy config parser, which currently
-    // rejects a V2-only `providers`/`permissions` config before reading history.
+    // The current native normalizer supports this legacy configuration shape.
+    // The old replay fixture intentionally retains the previous V2 wire/config.
     let config = json!({
-      "model":format!("local/{MODEL}"),"autoupdate":false,"share":"disabled","snapshot":false,
-      "provider":{"local":{"name":"Local RPC fixture model","npm":"@ai-sdk/openai-compatible","options":{"baseURL":model_url,"apiKey":"local-test-key"},"models":{MODEL:{"name":"RPC fixture model","tool_call":true,"modalities":{"input":["text"],"output":["text"]},"limit":{"context":32768,"output":1024}}}}},
+      "model":format!("local/{MODEL}"),"autoupdate":false,"share":"disabled","snapshot":false,"enabled_providers":["local"],
+      "provider":{
+        "local":{"name":"Local RPC fixture model","npm":"@ai-sdk/openai-compatible","options":{"baseURL":model_url,"apiKey":"local-test-key"},"models":{MODEL:{"name":"RPC fixture model","tool_call":true,"modalities":{"input":["text"],"output":["text"]},"limit":{"context":32768,"output":1024}}}},
+        "ollama":{"options":{"baseURL":""}},"lmstudio":{"options":{"baseURL":""}},"vllm":{"options":{"baseURL":""}}
+      },
       "permission":{"*":"deny","question":"allow","bash":"ask"}
     });
     std::fs::write(project.join("opencode.json"), serde_json::to_vec_pretty(&config)?)?;
@@ -69,10 +73,13 @@ impl NativeProcess {
       "OPENCODE_DISABLE_LSP_DOWNLOAD",
       "OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER",
       "OPENCODE_DISABLE_FFF",
+      "OPENCODE_DISABLE_FILEWATCHER",
+      "OPENCODE_DISABLE_CLAUDE_CODE",
     ] {
       environment.insert(flag.into(), "1".into());
     }
     environment.insert("OPENCODE_MODELS_PATH".into(), catalog.to_string_lossy().into_owned());
+    environment.insert("OPENCODE_PASSWORD".into(), PASSWORD.into());
     environment.insert(
       "OPENCODE_TEST_HOME".into(),
       root.join("home").to_string_lossy().into_owned(),
@@ -99,7 +106,7 @@ impl NativeProcess {
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let readiness = tokio::time::timeout(Duration::from_secs(45), async {
       while let Some(line) = lines.next_line().await? {
-        if let Some(url) = line.strip_prefix("opencode server listening on ") {
+        if let Some(url) = line.strip_prefix("server listening on ") {
           return Ok::<_, std::io::Error>(url.to_owned());
         }
       }
@@ -202,6 +209,9 @@ async fn wait_pending(
 async fn real_opencode_rpc_local_model_capture() -> TestResult {
   let (hold, gate) = ModelStep::gated_text("first stream finished");
   let model=ModelServer::start(vec![
+    // Current native independently generates the first session title. Both
+    // initial requests get harmless text regardless of their scheduling order.
+    ModelStep::text("Local RPC fixture conversation"),
     ModelStep::text("Hello from the local fixture model."),
     ModelStep::tool_call("question",json!({"questions":[{"question":"Choose a local test option","header":"Fixture","options":[{"label":"Alpha","description":"First option"},{"label":"Beta","description":"Second option"}]}]})),
     ModelStep::text("The selected answer was received."),
@@ -218,17 +228,23 @@ async fn real_opencode_rpc_local_model_capture() -> TestResult {
     endpoint: proxy.url(),
     directory: native.directory(),
     workspace_id: None,
-    credentials: None,
+    credentials: Some(tokn_opencode_adapter::Credentials {
+      username: "opencode".into(),
+      password: PASSWORD.into(),
+    }),
   })
   .await?;
   if let Err(error) = exercise(&adapter, Some(&model), Some(&gate)).await {
-    let saved = trace
-      .fixture("opencode", REVISION, "failed_real_run_debug_only")
-      .save(std::env::temp_dir().join("tokn-opencode-failed.json"));
+    // A cancelled read can leave an unfinished exchange. Keep a clearly marked
+    // debug trace outside the repository; it must never become a replay fixture.
+    let debug = trace.fixture("opencode", REVISION, "failed_real_run_debug_only");
+    let _ = std::fs::write(
+      std::env::temp_dir().join("tokn-opencode-failed.json"),
+      serde_json::to_vec_pretty(&debug)?,
+    );
     let _ = adapter.close().await;
     proxy.close().await;
     let _ = native.stop().await;
-    saved?;
     return Err(error);
   }
   adapter.close().await?;
@@ -245,13 +261,30 @@ async fn real_opencode_rpc_local_model_capture() -> TestResult {
     (&native_root, "/tmp/tokn-rpc-opencode"),
     (native_root.trim_start_matches('/'), "tmp/tokn-rpc-opencode"),
     (&model.url(), "http://127.0.0.1:12345/v1"),
+    (&native.endpoint, "http://127.0.0.1:12346"),
     (&std::env::temp_dir().to_string_lossy(), "/tmp"),
   ]);
+  sanitize_server_identity(&mut fixture);
   if std::env::var("TOKN_CAPTURE_RPC_FIXTURES").as_deref() == Ok("1") {
-    fixture.save(Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/opencode/native-v2.json"))?;
+    fixture.save(Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/opencode/native-v2-current.json"))?;
   }
   native.close().await?;
   Ok(())
+}
+
+fn sanitize_server_identity(fixture: &mut Fixture) {
+  for record in &mut fixture.records {
+    if let WireRecord::Http { path, response, .. } = record
+      && path.split('?').next() == Some("/api/info")
+    {
+      if response.get("hostname").is_some() {
+        response["hostname"] = json!("fixture-host");
+      }
+      if response.get("pid").is_some() {
+        response["pid"] = json!(0);
+      }
+    }
+  }
 }
 
 async fn wait_model(model: Option<&ModelServer>, count: usize) -> TestResult {
@@ -261,6 +294,7 @@ async fn wait_model(model: Option<&ModelServer>, count: usize) -> TestResult {
   Ok(())
 }
 async fn exercise(adapter: &OpenCodeAdapter, model: Option<&ModelServer>, gate: Option<&ModelGate>) -> TestResult {
+  let title_requests = usize::from(model.is_some());
   let mut events = adapter.subscribe();
   let target = adapter
     .create_session(
@@ -280,9 +314,15 @@ async fn exercise(adapter: &OpenCodeAdapter, model: Option<&ModelServer>, gate: 
       tokio::time::sleep(Duration::from_millis(40)).await;
     }
   }).await??;
-  assert!(
-    matches!(execute(&adapter,&target,"models",Command::Models).await?,Reply::Models(models) if models.iter().any(|choice|choice.model.model_id==MODEL))
-  );
+  // Current native model snapshots can precede asynchronous provider settlement.
+  tokio::time::timeout(Duration::from_secs(20), async {
+    loop {
+      if matches!(execute(adapter,&target,"models",Command::Models).await?,Reply::Models(models) if models.iter().any(|choice|choice.model.model_id==MODEL)) {
+        return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(());
+      }
+      tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+  }).await??;
   execute(
     &adapter,
     &target,
@@ -290,7 +330,23 @@ async fn exercise(adapter: &OpenCodeAdapter, model: Option<&ModelServer>, gate: 
     message("Return the deterministic greeting.", DeliveryMode::StartOrSteer),
   )
   .await?;
-  wait_model(model, 1).await?;
+  wait_model(model, 1 + title_requests).await?;
+  // Stop must become available from the native live stream before an
+  // observational State poll supplies the first running snapshot.
+  tokio::time::timeout(Duration::from_secs(10), async {
+    loop {
+      if matches!(
+        events.recv().await?.kind,
+        RuntimeEventKind::State(SessionState {
+          status: ExecutionState::Running,
+          ..
+        })
+      ) {
+        return Ok::<_, tokio::sync::broadcast::error::RecvError>(());
+      }
+    }
+  })
+  .await??;
   wait_idle(&adapter, &target).await?;
   execute(
     &adapter,
@@ -320,7 +376,7 @@ async fn exercise(adapter: &OpenCodeAdapter, model: Option<&ModelServer>, gate: 
     },
   )
   .await?;
-  wait_model(model, 3).await?;
+  wait_model(model, 3 + title_requests).await?;
   wait_idle(&adapter, &target).await?;
   execute(
     &adapter,
@@ -348,7 +404,7 @@ async fn exercise(adapter: &OpenCodeAdapter, model: Option<&ModelServer>, gate: 
     },
   )
   .await?;
-  wait_model(model, 5).await?;
+  wait_model(model, 5 + title_requests).await?;
   wait_idle(&adapter, &target).await?;
   execute(
     &adapter,
@@ -357,7 +413,7 @@ async fn exercise(adapter: &OpenCodeAdapter, model: Option<&ModelServer>, gate: 
     message("Hold a streaming response for steering.", DeliveryMode::StartOrSteer),
   )
   .await?;
-  wait_model(model, 6).await?;
+  wait_model(model, 6 + title_requests).await?;
   assert!(matches!(
     execute(
       &adapter,
@@ -386,7 +442,7 @@ async fn exercise(adapter: &OpenCodeAdapter, model: Option<&ModelServer>, gate: 
   }
   // Wait for both native follow-up requests rather than accepting a transient
   // idle snapshot between turns. Cancellation must reach the scripted stall.
-  wait_model(model, 8).await?;
+  wait_model(model, 8 + title_requests).await?;
   wait_idle(&adapter, &target).await?;
   let before = model.map(|model| model.requests().len()).unwrap_or(0);
   execute(
@@ -406,12 +462,12 @@ async fn exercise(adapter: &OpenCodeAdapter, model: Option<&ModelServer>, gate: 
     let requests = model.requests();
     assert_eq!(
       requests.len(),
-      9,
-      "one text, two question, two permission, three busy/follow-up, one stalled model request"
+      9 + title_requests,
+      "one title, one text, two question, two permission, three busy/follow-up, one stalled model request"
     );
-    assert!(requests[2].to_string().contains("Beta"));
-    assert!(requests[6].to_string().contains("Steering input."));
-    assert!(requests[7].to_string().contains("Queued input."));
+    assert!(requests[2 + title_requests].to_string().contains("Beta"));
+    assert!(requests[6 + title_requests].to_string().contains("Steering input."));
+    assert!(requests[7 + title_requests].to_string().contains("Queued input."));
     assert!(requests.iter().all(|request| request["model"] == MODEL));
   }
   Ok(())
@@ -419,9 +475,22 @@ async fn exercise(adapter: &OpenCodeAdapter, model: Option<&ModelServer>, gate: 
 
 #[tokio::test]
 async fn replay_captured_native_opencode_v2() -> TestResult {
-  let fixture = Fixture::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/opencode/native-v2.json"))?;
+  replay_capture("native-v2.json", LEGACY_REVISION).await
+}
+
+#[tokio::test]
+async fn replay_captured_native_opencode_current_v2() -> TestResult {
+  replay_capture("native-v2-current.json", REVISION).await
+}
+
+async fn replay_capture(name: &str, revision: &str) -> TestResult {
+  let fixture = Fixture::load(
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+      .join("fixtures/opencode")
+      .join(name),
+  )?;
   assert_eq!(fixture.provider, "opencode");
-  assert_eq!(fixture.upstream_revision, REVISION);
+  assert_eq!(fixture.upstream_revision, revision);
   let replay = ReplayServer::start(fixture).await?;
   let adapter = OpenCodeAdapter::connect(ConnectionOptions {
     runtime_id: "replay-opencode".into(),

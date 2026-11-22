@@ -29,7 +29,7 @@ pub(crate) enum SessionSourceClient {
 impl SessionSourceClient {
   pub(crate) fn list_session_headers(&self) -> Result<Vec<SessionHeader>, String> {
     let mut headers = match self {
-      Self::Dsh(source) => file_headers(source.list_session_relations()?),
+      Self::Dsh(source) => dsh_headers(source.list_session_relations()?),
       Self::Codex(source) => file_headers(source.list_session_relations()?),
       Self::OpenCode(source) => source.list_session_headers()?,
       Self::Pi(source) => file_headers(source.list_session_relations()?),
@@ -43,7 +43,12 @@ impl SessionSourceClient {
 
   pub(crate) fn list_session_header_catalog(&self) -> Result<SessionHeaderCatalog, String> {
     let mut catalog = match self {
-      Self::Dsh(source) => file_header_catalog(source.list_session_relation_catalog()?),
+      Self::Dsh(source) => {
+        let relations = source.list_session_relation_catalog()?;
+        let headers = dsh_headers(relations.references);
+        let complete = relations.complete && headers.iter().all(|header| header.updated_at_ms.is_some());
+        SessionHeaderCatalog { headers, complete }
+      }
       Self::Codex(source) => file_header_catalog(source.list_session_relation_catalog()?),
       Self::OpenCode(source) => source.list_session_header_catalog()?,
       Self::Pi(source) => file_header_catalog(source.list_session_relation_catalog()?),
@@ -252,7 +257,7 @@ impl SessionSourceClient {
 
   fn load_reference(&self, reference: &SessionRef) -> Result<LoadedSession, String> {
     match self {
-      Self::Dsh(source) => source.load_session_path(&reference.path),
+      Self::Dsh(source) => source.load_session_path_with_id(&reference.path, &reference.id),
       Self::Codex(source) => source.load_session_path(&reference.path),
       Self::OpenCode(source) => source.load_session_exact(&reference.id),
       Self::Pi(source) => source.load_session_path(&reference.path),
@@ -265,6 +270,37 @@ impl SessionSourceClient {
 
 fn file_headers(references: Vec<SessionRef>) -> Vec<SessionHeader> {
   references.into_iter().map(file_header).collect()
+}
+
+fn dsh_headers(references: Vec<SessionRef>) -> Vec<SessionHeader> {
+  let mut modified = HashMap::<PathBuf, (bool, Option<i64>)>::new();
+  references
+    .into_iter()
+    .map(|reference| {
+      let (shared_database, modified_at) = *modified.entry(reference.path.clone()).or_insert_with(|| {
+        let paths = tokn_session_dsh::storage_dependency_paths(&reference.path).unwrap_or_default();
+        let modified = paths
+          .iter()
+          .filter_map(|path| std::fs::metadata(path).ok()?.modified().ok().and_then(system_time_ms))
+          .max();
+        (paths.len() > 1, modified)
+      });
+      // Shared storage activity is an invalidation signal, not evidence that
+      // every trace changed. Header-only SQLite reads know creation time only.
+      let updated = if shared_database {
+        reference
+          .timestamp
+          .as_deref()
+          .and_then(|timestamp| timestamp.parse::<i64>().ok())
+      } else {
+        modified_at
+      };
+      let mut header = file_header(reference);
+      header.updated_at_ms = updated;
+      header.updated_at = updated.map(|value| value.to_string());
+      header
+    })
+    .collect()
 }
 
 fn file_header_catalog(relations: SessionRelationCatalog) -> SessionHeaderCatalog {

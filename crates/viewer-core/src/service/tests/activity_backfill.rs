@@ -67,12 +67,12 @@ fn outcome_recovery_cursors_are_scoped_to_the_affected_providers() {
   let path = directory.path().join("source.jsonl");
   std::fs::write(&path, "unchanged source").unwrap();
   for (provider, prefix) in [
-    (ViewerProvider::Codex, "source-revision.v1."),
-    (ViewerProvider::Pi, "source-revision.pi.v3."),
-    (ViewerProvider::OpenCode, "source-revision.opencode.v2."),
+    (ViewerProvider::Codex, "source-revision.codex.v2."),
+    (ViewerProvider::Pi, "source-revision.pi.v4."),
+    (ViewerProvider::OpenCode, "source-revision.opencode.v3."),
     (ViewerProvider::ZCode, "source-revision.zcode.v2."),
     (ViewerProvider::WorkBuddy, "source-revision.workbuddy.v2."),
-    (ViewerProvider::Dsh, "source-revision.dsh.v2."),
+    (ViewerProvider::Dsh, "source-revision.dsh.v3."),
   ] {
     assert!(
       source_cursor(provider, &path).unwrap().starts_with(prefix),
@@ -152,10 +152,10 @@ fn provider_outcome_upgrade_repairs_unchanged_activity_once_without_unread_repli
     let source = index_source_key_for_path(provider, &path).unwrap();
     let current_raw = source_cursor(provider, &path).unwrap();
     let old_raw = if provider == ViewerProvider::Pi {
-      current_raw.replacen("source-revision.pi.v3.", "source-revision.pi.v2.", 1)
+      current_raw.replacen("source-revision.pi.v4.", "source-revision.pi.v2.", 1)
     } else {
       // These providers previously used the physical-file v1 cursor.
-      source_cursor(ViewerProvider::Codex, &path).unwrap()
+      format!("source-revision.v1.{}", current_raw.splitn(4, '.').nth(3).unwrap())
     };
     assert_ne!(current_raw, old_raw);
     let metadata = session_metadata_from_header(
@@ -231,7 +231,7 @@ fn pi_outcome_upgrade_restages_unchanged_history_once_without_new_unread_replies
   // The initial Pi failure recovery must still accept the pre-upgrade v1
   // cursor, independently of other providers' normalization revisions.
   let current_raw = source_cursor(ViewerProvider::Pi, &path).unwrap();
-  let old_raw = current_raw.replacen("source-revision.pi.v3.", "source-revision.v1.", 1);
+  let old_raw = current_raw.replacen("source-revision.pi.v4.", "source-revision.v1.", 1);
   assert!(old_raw.starts_with("source-revision.v1."));
   assert_ne!(current_raw, old_raw);
   let metadata = session_metadata_from_header(

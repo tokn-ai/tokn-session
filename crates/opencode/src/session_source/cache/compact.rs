@@ -235,6 +235,7 @@ fn fingerprint(row: &RawRecord) -> [u8; 32] {
     text(&mut hash, &part.id);
     time(&mut hash, part.time);
     text(&mut hash, &part.data);
+    text(&mut hash, part.kind.as_deref().unwrap_or_default());
   }
   hash.finalize().into()
 }

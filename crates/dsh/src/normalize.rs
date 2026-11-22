@@ -16,10 +16,6 @@ mod turn_end;
 /// Historical log view, not a reconstruction of the compacted model surface.
 /// Assembled messages replace their redundant stream deltas for display, while
 /// unfinished steps still expose their partial text and reasoning.
-pub(crate) fn normalize(header: &SessionHeader, lines: Vec<DshSessionLine>) -> Vec<AgentEvent> {
-  normalize_batches(header, lines).into_iter().flatten().collect()
-}
-
 pub(crate) fn normalize_batches(header: &SessionHeader, lines: Vec<DshSessionLine>) -> Vec<Vec<AgentEvent>> {
   let mut state = Normalizer {
     session_id: header.id.clone(),
@@ -119,9 +115,48 @@ impl Normalizer {
         timestamp: time,
       })],
       SessionEvent::UserMessage(event) => {
+        if event.data.role != "user" {
+          return vec![self.unknown(native, time)];
+        }
         self.message(&event.data.id, &event.data.role, event.data.content, None, native, time)
       }
+      SessionEvent::SystemMessage(event) | SessionEvent::DeveloperMessage(event) => {
+        let role = if native["type"] == "system/message" {
+          "system"
+        } else {
+          "developer"
+        };
+        if event.data.message.role != role {
+          return vec![self.unknown(native, time)];
+        }
+        self.message(
+          &event.data.message.id,
+          &event.data.message.role,
+          event.data.message.content,
+          None,
+          native,
+          time,
+        )
+      }
+      SessionEvent::AssistantAttempt(event) => {
+        let mut events = vec![self.metadata(
+          MetadataKind::Stream,
+          "assistant attempt without a surface message".into(),
+          native.clone(),
+          time.clone(),
+        )];
+        if let Some(raw) = event.data.stream.iter().rev().find_map(|record| {
+          (record["type"] == "chunk" && record["chunk"]["type"] == "usage").then_some(&record["chunk"]["usage"])
+        }) && let Ok(usage) = serde_json::from_value(raw.clone())
+        {
+          events.push(self.usage((event.data.turn, event.data.step), None, usage, native, time));
+        }
+        events
+      }
       SessionEvent::AssistantMessage(event) => {
+        if event.data.message.role != "assistant" || event.data.interrupted == Some(false) {
+          return vec![self.unknown(native, time)];
+        }
         let step = (event.data.turn, event.data.step);
         let usage = event
           .data
@@ -141,11 +176,24 @@ impl Normalizer {
           &event.data.message.role,
           event.data.message.content,
           Some((event.data.turn, event.data.step)),
-          native,
+          native.clone(),
           time.clone(),
         );
         if let Some(usage) = usage {
           events.push(usage);
+        }
+        if event.data.interrupted == Some(true) {
+          for event in &mut events {
+            if let AgentEvent::Message(message) = event {
+              message.delivery = MessageDelivery::Unspecified;
+            }
+          }
+          events.push(self.metadata(
+            MetadataKind::Diagnostic,
+            "interrupted assistant output".into(),
+            native,
+            time,
+          ));
         }
         events
       }
@@ -167,6 +215,25 @@ impl Normalizer {
         )]
       }
       SessionEvent::ToolResult(event) => {
+        if event.data.message.role == "tool" {
+          let message = event.data.message;
+          let Some(call_id) = message.tool_call_id.filter(|id| {
+            !id.is_empty()
+              && message.source.kind == "tool"
+              && message.source.extra.get("callId").and_then(Value::as_str) == Some(id.as_str())
+          }) else {
+            return vec![self.unknown(native, time)];
+          };
+          if event.data.error.is_some() && message.is_error != Some(true) {
+            return vec![self.unknown(native, time)];
+          }
+          let call = self.calls.get(&(event.data.turn, event.data.step, call_id.clone()));
+          let mut result = self.tool(Some(event.data.turn), Some(call_id), call.map(|(name, _)| name.clone()), Some(message.id), call.map(|(_, input)| input.clone()), Some(json!({"content":native["data"]["message"]["content"],"meta":native["data"]["meta"],"error":native["data"]["error"]})), Some(message.is_error.unwrap_or(false)), Phase::Finished, time);
+          if let AgentEvent::ToolCall(result) = &mut result {
+            result.native = Some(native);
+          }
+          return vec![result];
+        }
         let mut events = Vec::new();
         for block in event.data.message.content {
           let ContentBlock::ToolResult(block) = block else {
@@ -308,7 +375,7 @@ impl Normalizer {
     let role = match role {
       "user" => Role::User,
       "assistant" => Role::Assistant,
-      "system" => Role::System,
+      "system" | "developer" => Role::System,
       _ => Role::Unknown,
     };
     let has_calls = blocks.iter().any(|block| matches!(block, ContentBlock::ToolCall(_)));
@@ -357,6 +424,18 @@ impl Normalizer {
             ));
           }
         }
+        ContentBlock::ToolAddition(_) | ContentBlock::ToolRemoval(_) => events.push(self.metadata(
+          MetadataKind::Configuration,
+          "developer tool set changed".into(),
+          native.clone(),
+          time.clone(),
+        )),
+        ContentBlock::File(_) => events.push(self.metadata(
+          MetadataKind::Context,
+          "attached file".into(),
+          native.clone(),
+          time.clone(),
+        )),
         _ => preserve_native = true,
       }
     }
@@ -542,6 +621,16 @@ impl Normalizer {
     };
     let raw = if native["type"] == "assistant/message" {
       &native["data"]["usage"]
+    } else if native["type"] == "assistant/attempt" {
+      native["data"]["stream"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .rev()
+        .find_map(|record| {
+          (record["type"] == "chunk" && record["chunk"]["type"] == "usage").then_some(&record["chunk"]["usage"])
+        })
+        .unwrap_or(&Value::Null)
     } else {
       &native["data"]["chunk"]["usage"]
     };

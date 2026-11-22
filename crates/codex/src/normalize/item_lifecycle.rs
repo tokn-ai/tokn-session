@@ -739,11 +739,11 @@ fn normalize_image_generation_item(
   {
     return None;
   }
-  let result = item.get("result")?.as_str()?.to_string();
+  let image = super::images::generated_image(item)?;
   let is_finished = matches!(phase, Phase::Finished);
   Some(vec![AgentEvent::ToolCall(ToolCallEvent {
     images: if is_finished {
-      super::images::generated_images(Some(&result), item.get(saved_path_field).and_then(Value::as_str))
+      super::images::generated_images(Some(image), item.get(saved_path_field).and_then(Value::as_str))
     } else {
       Vec::new()
     },
@@ -764,12 +764,13 @@ fn normalize_image_generation_item(
     output: is_finished.then(|| {
       json!({
         "status": status,
-        "result": result,
+        "result": item.get("result"),
+        "fileId": item.get("fileId"),
         "saved_path": item.get(saved_path_field).cloned().unwrap_or(Value::Null),
       })
     }),
     is_error: is_finished.then(|| matches!(status.as_str(), "failed" | "error")),
-    native: None,
+    native: Some(item.clone()),
     timestamp,
   })])
 }

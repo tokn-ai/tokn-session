@@ -37,8 +37,9 @@ impl Launch {
       .args(["serve", "--hostname", "127.0.0.1", "--port", &options.port.to_string()])
       .current_dir(&options.directory)
       .envs(&options.environment)
-      .env("OPENCODE_SERVER_USERNAME", "tokn")
+      .env("OPENCODE_SERVER_USERNAME", "opencode")
       .env("OPENCODE_SERVER_PASSWORD", password)
+      .env("OPENCODE_PASSWORD", password)
       .stdin(Stdio::null())
       .stdout(Stdio::piped())
       .stderr(Stdio::piped())
@@ -162,7 +163,9 @@ async fn drain(mut reader: impl AsyncRead + Unpin) {
 }
 
 fn readiness_url(line: &str, expected_port: u16) -> Option<String> {
-  let endpoint = line.strip_prefix("opencode server listening on ")?;
+  let endpoint = line
+    .strip_prefix("opencode server listening on ")
+    .or_else(|| line.strip_prefix("server listening on "))?;
   let url = Url::parse(endpoint).ok()?;
   let actual_port = url.port_or_known_default()?;
   if url.scheme() != "http"
@@ -191,6 +194,10 @@ mod tests {
       Some("http://127.0.0.1:4321/".into())
     );
     assert!(readiness_url("opencode server listening on http://127.0.0.1:4321", 0).is_some());
+    assert_eq!(
+      readiness_url("server listening on http://127.0.0.1:4321", 0),
+      Some("http://127.0.0.1:4321/".into())
+    );
     for line in [
       "http://127.0.0.1:4321",
       "prefix opencode server listening on http://127.0.0.1:4321",

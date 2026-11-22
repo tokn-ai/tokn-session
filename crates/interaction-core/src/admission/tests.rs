@@ -321,6 +321,39 @@ async fn message_receipts_bind_model_intent_and_retain_confirmed_reset_on_failur
 }
 
 #[tokio::test]
+async fn model_bound_acceptance_and_queue_preserve_result_without_claiming_started_or_steered() {
+  use crate::managed_sessions::{MessageModelOutcome, MessageModelResult, SessionModelState};
+  for disposition in [ModelInputDisposition::Accepted, ModelInputDisposition::Queued] {
+    let broker = InputBroker::default();
+    let request = request("native-proof");
+    let result = broker
+      .submit_with(request.clone(), async move {
+        Ok(Admission::WithModel {
+          disposition,
+          result: MessageModelResult {
+            outcome: MessageModelOutcome::Unchanged,
+            state: SessionModelState::live(None, "runtime"),
+          },
+        })
+      })
+      .await;
+    assert_eq!(result.status, InputDeliveryStatus::Accepted);
+    assert!(result.model_result.is_some());
+    assert!(
+      !result.message.contains("Started")
+        && !result.message.contains("steering")
+        && !result.message.contains("after the current turn")
+    );
+    assert_eq!(
+      result.message.contains("queued"),
+      matches!(disposition, ModelInputDisposition::Queued)
+    );
+    let repeated = broker.submit_with(request, async { panic!("must not replay") }).await;
+    assert_eq!(repeated.model_result, result.model_result);
+  }
+}
+
+#[tokio::test]
 async fn model_bound_steering_returns_actual_state_with_message_receipt() {
   use crate::managed_sessions::{MessageModelOutcome, MessageModelResult, SessionModelState};
   let broker = InputBroker::default();

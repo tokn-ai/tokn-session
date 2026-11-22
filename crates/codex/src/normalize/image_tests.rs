@@ -242,3 +242,80 @@ fn malformed_images_remain_discoverable_and_unknown_result_references_are_unavai
   );
   assert!(events.iter().any(|event| matches!(event, AgentEvent::Unknown(event) if event.native_type.as_deref() == Some("event_msg.image_generation_end") && event.native.as_ref().unwrap()["result"]["future"] == true)));
 }
+
+#[test]
+fn durable_generation_references_preserve_identity_metadata_and_native_paths() {
+  for historical in [false, true] {
+    let item = json!({"type":"Extension","kind":"image_gen.generation","id":"durable-image",
+      "status":"completed","fileId":"file-generated","result":"",
+      "inputImages":[{"path":"/fixture/input.png","sha256":"fixture-hash"}],
+      "imageMetadata":{"future":"preserved"}});
+    let events = normalize(vec![canonical_item(item.clone(), false)], true, historical);
+    let outputs = tools(&events);
+    assert_eq!(outputs.len(), 1);
+    assert!(
+      matches!(&outputs[0].images[0].source,RecordedImageSource::Unavailable { reference:Some(id) } if id=="file-generated")
+    );
+    assert_eq!(outputs[0].native.as_ref(), Some(&item));
+    assert_eq!(outputs[0].output.as_ref().unwrap()["fileId"], "file-generated");
+
+    let events = normalize(
+      vec![json!({"type":"event_msg","payload":{"type":"image_generation_end",
+      "call_id":"legacy-file","status":"completed","fileId":"file-generated","saved_path":"/fixture/generated.png"}})],
+      false,
+      historical,
+    );
+    assert!(
+      matches!(&tools(&events)[0].images[0].source,RecordedImageSource::LocalFile { path } if path.to_str()==Some("/fixture/generated.png"))
+    );
+  }
+}
+
+#[test]
+fn durable_generation_fanout_only_deduplicates_matching_sources() {
+  let legacy = |id: &str| {
+    json!({"type":"event_msg","payload":{"type":"image_generation_end",
+    "call_id":"file-call","status":"completed","fileId":id}})
+  };
+  let extension = |id: &str| {
+    canonical_item(
+      json!({"type":"Extension","kind":"image_gen.generation",
+    "id":"file-call","status":"completed","fileId":id}),
+      false,
+    )
+  };
+  assert_eq!(
+    tools(&normalize(vec![legacy("file-a"), extension("file-a")], false, true)).len(),
+    1
+  );
+  assert_eq!(
+    tools(&normalize(vec![extension("file-a"), legacy("file-a")], false, true)).len(),
+    1
+  );
+  for rows in [
+    vec![legacy("file-a"), legacy("file-a")],
+    vec![legacy("file-a"), extension("file-b")],
+    vec![
+      legacy("file-a"),
+      json!({"type":"event_msg","payload":{"type":"image_generation_end",
+      "call_id":"file-call","status":"completed","fileId":"file-a","saved_path":"/fixture/generated.png"}}),
+    ],
+  ] {
+    assert_eq!(tools(&normalize(rows, false, true)).len(), 2);
+  }
+}
+
+#[test]
+fn malformed_durable_generation_references_remain_unknown() {
+  for reference in [Value::Null, json!(42), json!("")] {
+    let row = json!({"type":"event_msg","payload":{"type":"image_generation_end",
+      "call_id":"malformed-file","status":"completed","fileId":reference,"result":""}});
+    let events = normalize(vec![row.clone()], false, true);
+    assert!(tools(&events).is_empty());
+    assert!(
+      events
+        .iter()
+        .any(|event| matches!(event,AgentEvent::Unknown(event) if event.native.as_ref()==Some(&row["payload"])))
+    );
+  }
+}

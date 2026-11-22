@@ -60,6 +60,24 @@ The local model server implements Chat Completions and Responses streaming,
 with explicit gates for running-state tests. Exhausting
 its response script is an error; no request falls back to an external provider.
 
+## Current DSH package smoke
+
+The retained DSH capture uses its original ApiProxy revision. A separate ignored
+test exercises the current Gateway against published `@deepseek-ai/dsh@0.2.2-rc.5`:
+
+```sh
+npm install --prefix /tmp/tokn-rpc-dsh-current --ignore-scripts --omit=dev @deepseek-ai/dsh@0.2.2-rc.5
+export TOKN_DSH_CURRENT_ROOT=/tmp/tokn-rpc-dsh-current/node_modules/@deepseek-ai/dsh
+# TOKN_RPC_NODE must identify Node >=24.9.
+cargo test -p tokn-interaction-tests --test dsh_current -- --ignored --nocapture
+```
+
+This is a real managed runtime with an isolated profile, cleared environment,
+dummy key, telemetry disabled, no browser opening, and a loopback-only scripted
+model. It verifies creation, streaming, timed questions, steering, queueing, and
+cancellation. Its published package version and inspected Git revision are
+identified separately; it does not relabel or overwrite a recorded fixture.
+
 ## Capture and replay
 
 ```sh

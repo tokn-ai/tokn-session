@@ -119,6 +119,13 @@ fn bounded(value: Option<String>) -> Option<String> {
 }
 
 fn revision(header: &SessionHeader, provider: Provider) -> Revision {
+  if provider == Provider::Dsh {
+    return tokn_session_dsh::storage_dependency_paths(&header.path)
+      .unwrap_or_else(|_| vec![header.path.clone()])
+      .iter()
+      .flat_map(|path| versions(path, false))
+      .collect();
+  }
   versions(&header.path, matches!(provider, Provider::OpenCode | Provider::ZCode))
 }
 

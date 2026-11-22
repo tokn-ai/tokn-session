@@ -19,7 +19,7 @@ pub(super) fn parse(data: &Value) -> Option<Ending<'_>> {
   let outcome = match reason.get("kind")?.as_str()? {
     "completed" => LifecycleOutcome::Completed,
     "aborted" if valid_cancel_cause(&reason["reason"]) => LifecycleOutcome::Cancelled,
-    "interrupted" => LifecycleOutcome::Interrupted,
+    "interrupted" | "forked" => LifecycleOutcome::Interrupted,
     "blocked" => LifecycleOutcome::Blocked,
     "max-tokens" => LifecycleOutcome::TokenLimit,
     "error" if reason.get("error").is_some() => {

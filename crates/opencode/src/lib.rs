@@ -8,6 +8,6 @@ mod session_source;
 
 pub use live::OpenCodeLiveNormalizer;
 pub use session_source::{
-  CachedSessionRecords, CompactRecord, CompactSessionRecords, OpenCodeCompactCache, OpenCodeHistoryFormat,
-  OpenCodeScanReader, OpenCodeSessionCache, OpenCodeSessionSource,
+  CachedSessionRecords, CompactRecord, CompactSessionRecords, OpenCodeBlob, OpenCodeCompactCache,
+  OpenCodeHistoryFormat, OpenCodeScanReader, OpenCodeSessionCache, OpenCodeSessionSource, media_reference_hash,
 };

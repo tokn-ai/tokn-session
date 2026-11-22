@@ -77,7 +77,7 @@ impl Launch {
     let mut command = Command::new(&options.program);
     command
       .args(&options.launcher_args)
-      .args(["--profile", "web", "--host", "127.0.0.1", "--port", "0"])
+      .args(["--profile", "web", "--host", "127.0.0.1", "--port", "0", "--no-open"])
       .current_dir(&options.cwd)
       .envs(&options.env)
       .stdin(Stdio::null())
@@ -279,7 +279,10 @@ fn readiness_url(line: &str) -> Option<String> {
     || url.host_str() != Some("127.0.0.1")
     || url.port().is_none_or(|port| port == 0)
     || !matches!(url.path(), "" | "/")
-    || url.query().is_some()
+    || url.query().is_some_and(|_| {
+      let pairs: Vec<_> = url.query_pairs().collect();
+      pairs.len() != 1 || pairs[0].0 != "token" || pairs[0].1.is_empty()
+    })
     || url.fragment().is_some()
     || !url.username().is_empty()
     || url.password().is_some()
@@ -299,6 +302,10 @@ mod tests {
       readiness_url("dsh web: http://127.0.0.1:54321"),
       Some("http://127.0.0.1:54321/".into())
     );
+    assert_eq!(
+      readiness_url("dsh web: http://127.0.0.1:54321/?token=fixture"),
+      Some("http://127.0.0.1:54321/?token=fixture".into())
+    );
     for line in [
       "http://127.0.0.1:54321",
       "log dsh web: http://127.0.0.1:54321",
@@ -306,6 +313,8 @@ mod tests {
       "dsh web: http://127.0.0.1:0",
       "dsh web: http://example.com:54321",
       "dsh web: http://127.0.0.1:54321/path",
+      "dsh web: http://127.0.0.1:54321/?token=one&token=two",
+      "dsh web: http://127.0.0.1:54321/?untrusted=value",
     ] {
       assert!(readiness_url(line).is_none(), "{line}");
     }

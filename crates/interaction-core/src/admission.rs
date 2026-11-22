@@ -309,7 +309,9 @@ impl InputBroker {
       let (outcome, model_result) = match outcome {
         Ok(Admission::WithModel { disposition, result }) => (
           Ok(match disposition {
+            ModelInputDisposition::Accepted => Admission::Accepted,
             ModelInputDisposition::Started => Admission::Started,
+            ModelInputDisposition::Queued => Admission::Queued,
             ModelInputDisposition::Steered => Admission::Steered,
           }),
           Some(result),
@@ -330,6 +332,7 @@ impl InputBroker {
           InputDeliveryStatus::Accepted,
           "Message queued after the current turn.".into(),
         ),
+        Ok(Admission::Queued) => (InputDeliveryStatus::Accepted, "Message queued by the agent.".into()),
         Ok(Admission::Steered) => (
           InputDeliveryStatus::Accepted,
           "Message accepted as steering for the active turn.".into(),

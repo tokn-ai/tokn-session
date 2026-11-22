@@ -196,11 +196,20 @@ impl SessionReader {
     }
     let path = &self.snapshot.entry.header.path;
     let mut version = versions(path, self.database.is_some());
+    let mut is_database = self.database.is_some();
+    if self.snapshot.entry.provider == Provider::Dsh {
+      for dependency in tokn_session_dsh::storage_dependency_paths(path)? {
+        if dependency != *path {
+          is_database = true;
+          version.extend(versions(&dependency, false));
+        }
+      }
+    }
     if self.snapshot.entry.provider == Provider::WorkBuddy {
       let database = tokn_session_workbuddy::WorkBuddySessionSource::new(Some(self.root.clone())).database_path()?;
       version.extend(versions(&database, true));
     }
-    if self.database.is_none()
+    if !is_database
       && version[0]
         .as_ref()
         .is_some_and(|v| v.length > crate::service_protocol::MAX_MATERIALIZED_SOURCE_BYTES as u64)
@@ -392,11 +401,8 @@ impl SessionReader {
     let loaded = match entry.provider {
       Provider::WorkBuddy => tokn_session_workbuddy::WorkBuddySessionSource::new(Some(self.root.clone()))
         .load_session_records_path(&entry.header.path, self.native, max_bytes)?,
-      Provider::Dsh => tokn_session_dsh::DshSessionSource::new(Some(self.root.clone())).load_session_records_path(
-        &entry.header.path,
-        self.native,
-        max_bytes,
-      )?,
+      Provider::Dsh => tokn_session_dsh::DshSessionSource::new(Some(self.root.clone()))
+        .load_session_records_path_with_id(&entry.header.path, &entry.header.id, self.native, max_bytes)?,
       Provider::Qoder => tokn_session_qoder::QoderSessionSource::new(Some(self.root.clone()))
         .load_session_records_path(&entry.header.path, self.native, max_bytes)?,
       _ => unreachable!(),

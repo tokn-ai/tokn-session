@@ -30,8 +30,9 @@ struct Range {
 pub(crate) fn normalize(session_id: &str, raw: &Value) -> Option<Option<Vec<AgentEvent>>> {
   let kind = raw["type"].as_str()?;
   let checkpoint = kind == "user/message"
-    && raw.pointer("/data/source/kind").and_then(Value::as_str) == Some("plugin")
-    && raw.pointer("/data/source/plugin").and_then(Value::as_str) == Some("compact");
+    && (raw.pointer("/data/source/kind").and_then(Value::as_str) == Some("compact-checkpoint")
+      || raw.pointer("/data/source/kind").and_then(Value::as_str) == Some("plugin")
+        && raw.pointer("/data/source/plugin").and_then(Value::as_str) == Some("compact"));
   if !checkpoint && !matches!(kind, "compaction/start" | "compaction/summary" | "compaction/end") {
     return None;
   }

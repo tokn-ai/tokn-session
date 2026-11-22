@@ -47,6 +47,11 @@ impl ViewerService {
     if input.provider == ViewerProvider::OpenCode {
       self.verify_opencode_control(&decode_session_key(&canonical)?)?;
     }
+    if input.provider == ViewerProvider::Dsh
+      && (header.parent_session_id.is_some() || header.agent_role.as_deref() == Some("subagent"))
+    {
+      return Err("Control DSH subagents through their parent session".into());
+    }
     if input.provider == ViewerProvider::Codex
       && (header.parent_session_id.as_deref().is_some_and(|id| !id.is_empty())
         || header
@@ -90,8 +95,10 @@ impl ViewerService {
     let is_running = snapshot
       .as_ref()
       .filter(|snapshot| {
-        matches!(target.input.provider, ViewerProvider::ZCode | ViewerProvider::Qoder)
-          && snapshot.connected
+        matches!(
+          target.input.provider,
+          ViewerProvider::ZCode | ViewerProvider::Qoder | ViewerProvider::OpenCode | ViewerProvider::Dsh
+        ) && snapshot.connected
           && !snapshot.recovery_required
       })
       .and_then(|snapshot| {

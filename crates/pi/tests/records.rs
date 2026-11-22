@@ -169,3 +169,63 @@ fn compaction_fixture_preserves_the_earlier_conversation() {
   assert!(matches!(&session.events[1], AgentEvent::Message(e) if e.text == "Keep this conversation visible."));
   assert!(matches!(&session.events[2], AgentEvent::Compaction(e) if e.compaction_id.as_deref() == Some("compact-1")));
 }
+
+#[test]
+fn standalone_usage_has_its_own_record_scope_and_category_without_creating_a_turn() {
+  let events = normalize(
+    json!({"type":"usage","kind":"cache_warm","provider":"fixture","model":"model","usage":usage(),"note":"extension override"}),
+  );
+  let [AgentEvent::Metadata(metadata), AgentEvent::Usage(event)] = &events[..] else {
+    panic!("expected diagnostic and operation accounting: {events:?}")
+  };
+  assert_eq!(metadata.native["kind"], "cache_warm");
+  assert_eq!(metadata.native["note"], "extension override");
+  assert_eq!(event.kind, UsageKind::OperationTotal);
+  assert_eq!(event.record_id.as_deref(), Some("entry-1"));
+  assert!(event.message_id.is_none() && event.turn_id.is_none());
+  assert_eq!(event.input_tokens, 33);
+  assert_eq!(event.native, usage());
+}
+
+#[test]
+fn context_edits_preserve_the_original_transcript_and_native_replacement() {
+  let mut normalizer = PiNormalizer::new();
+  let mut events = Vec::new();
+  for native in [
+    json!({"type":"session","id":"pi-1"}),
+    json!({"type":"message","id":"m1","message":{"role":"user","content":"original text"}}),
+    json!({"type":"context_edit","id":"e1","parentId":"m1","timestamp":"2026-01-01T00:00:00Z","targetId":"m1","replacement":null}),
+    json!({"type":"context_edit","id":"e2","parentId":"e1","timestamp":"2026-01-01T00:00:01Z","targetId":"m1","replacement":{"content":"model-only replacement"}}),
+  ] {
+    events.extend(normalizer.normalize(serde_json::from_value(native).unwrap()));
+  }
+  assert!(matches!(&events[1], AgentEvent::Message(event) if event.text == "original text"));
+  assert!(matches!(&events[2], AgentEvent::Metadata(event) if event.native["replacement"].is_null()));
+  assert!(
+    matches!(&events[3], AgentEvent::Metadata(event) if event.native["replacement"]["content"] == "model-only replacement")
+  );
+  assert_eq!(
+    events
+      .iter()
+      .filter(|event| matches!(event, AgentEvent::Message(_)))
+      .count(),
+    1
+  );
+  assert!(matches!(
+    &normalize(json!({"type":"context_edit","targetId":"m1"}))[..],
+    [AgentEvent::Unknown(_)]
+  ));
+}
+
+#[test]
+fn system_prompt_and_tools_are_configuration_metadata() {
+  let events = normalize(
+    json!({"type":"message","message":{"role":"system","content":"instructions","sections":{"name":"section"},"toolsAdded":[{"name":"inspect"}],"toolsRemoved":[],"timestamp":1}}),
+  );
+  let [AgentEvent::Metadata(event)] = &events[..] else {
+    panic!("expected system configuration: {events:?}")
+  };
+  assert_eq!(event.native_type, "message.system");
+  assert_eq!(event.native["message"]["content"], "instructions");
+  assert_eq!(event.native["message"]["toolsAdded"][0]["name"], "inspect");
+}

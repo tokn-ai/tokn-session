@@ -91,6 +91,23 @@ impl Transport {
       .map_err(|_| InteractionError::unavailable("OpenCode returned an incompatible V2 response"))
   }
 
+  /// Dialect discovery may try another read-only endpoint only when the first
+  /// endpoint is absent, never after authentication or transport failures.
+  pub async fn optional_json(&self, path: &[&str]) -> Result<Option<Value>, InteractionError> {
+    let response = self
+      .request(&self.client, Method::GET, path)
+      .send()
+      .await
+      .map_err(|_| transport_error(false))?;
+    if matches!(
+      response.status(),
+      StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+    ) {
+      return Ok(None);
+    }
+    read_response(response, false).await.map(Some)
+  }
+
   pub async fn legacy_messages(&self, session: &str) -> Result<Vec<Value>, InteractionError> {
     // Legacy V1 and V2 share session metadata but not conversation projections.
     let request = self
@@ -110,6 +127,10 @@ impl Transport {
 
   pub async fn post(&self, path: &[&str], body: Value) -> Result<Value, InteractionError> {
     self.send(Method::POST, path, Some(body), true).await
+  }
+
+  pub async fn delete(&self, path: &[&str]) -> Result<Value, InteractionError> {
+    self.send(Method::DELETE, path, None, true).await
   }
 
   async fn send(

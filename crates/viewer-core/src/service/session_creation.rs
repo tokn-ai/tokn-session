@@ -735,6 +735,7 @@ impl HistoryPublisher {
         .as_ref()
         != Some(&expected_cwd)
       || header.parent_session_id.is_some()
+      || (provider == ViewerProvider::Dsh && header.agent_role.as_deref() == Some("subagent"))
       || header
         .agent_path
         .as_deref()
@@ -775,6 +776,7 @@ impl HistoryPublisher {
       .as_ref()
       != Some(&receipt.working_directory)
       || fresh.parent_session_id.is_some()
+      || (provider == ViewerProvider::Dsh && fresh.agent_role.as_deref() == Some("subagent"))
       || fresh
         .agent_path
         .as_deref()
@@ -798,7 +800,8 @@ impl HistoryPublisher {
     {
       return Err("Another local source already claims the created session's native identity".into());
     }
-    let shared_database = matches!(provider, ViewerProvider::OpenCode | ViewerProvider::ZCode);
+    let dsh_database = provider == ViewerProvider::Dsh && tokn_session_dsh::storage_dependency_paths(&path)?.len() > 1;
+    let shared_database = matches!(provider, ViewerProvider::OpenCode | ViewerProvider::ZCode) || dsh_database;
     if !shared_database
       && previous
         .as_ref()
@@ -823,6 +826,12 @@ impl HistoryPublisher {
       ViewerProvider::ZCode => {
         tokn_session_zcode::ZCodeSessionSource::new(Some(path.clone())).list_session_headers()?
       }
+      ViewerProvider::Dsh if dsh_database => self
+        .repository
+        .list_session_headers(provider)?
+        .into_iter()
+        .filter(|candidate| candidate.path == path)
+        .collect(),
       _ => vec![header],
     };
     let ready = self

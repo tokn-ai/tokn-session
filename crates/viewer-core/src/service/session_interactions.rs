@@ -23,7 +23,10 @@ impl ViewerService {
       interactions: Vec::new(),
     };
     // Recorded Codex questions and managed Pi dialogs retain their existing UI.
-    if !matches!(target.input.provider, ViewerProvider::ZCode | ViewerProvider::Qoder) {
+    if !matches!(
+      target.input.provider,
+      ViewerProvider::ZCode | ViewerProvider::Qoder | ViewerProvider::OpenCode | ViewerProvider::Dsh
+    ) {
       return Ok(result);
     }
     let Some(binding) = self.sessions.runtimes.binding(&target.session_key) else {
@@ -72,7 +75,10 @@ impl ViewerService {
       Ok(target) => target,
       Err(message) => return Ok(rejected(&message)),
     };
-    if !matches!(target.input.provider, ViewerProvider::ZCode | ViewerProvider::Qoder) {
+    if !matches!(
+      target.input.provider,
+      ViewerProvider::ZCode | ViewerProvider::Qoder | ViewerProvider::OpenCode | ViewerProvider::Dsh
+    ) {
       return Ok(rejected("This provider uses its existing interaction controls"));
     }
     let broker_target = InputTarget {

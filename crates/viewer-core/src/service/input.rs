@@ -184,6 +184,11 @@ impl ViewerService {
     if locator.provider == ViewerProvider::OpenCode {
       self.verify_opencode_control(&locator)?;
     }
+    if locator.provider == ViewerProvider::Dsh
+      && (header.parent_session_id.is_some() || header.agent_role.as_deref() == Some("subagent"))
+    {
+      return Err("Control DSH subagents through their parent session".into());
+    }
     if matches!(locator.provider, ViewerProvider::ZCode | ViewerProvider::Qoder) && header.parent_session_id.is_some() {
       return Err(format!(
         "Control {:?} subagents through their parent session",
@@ -250,7 +255,7 @@ mod tests {
 
   impl ViewerRepository for HeaderRepository {
     fn list_session_headers(&self, provider: ViewerProvider) -> Result<Vec<SessionHeader>, String> {
-      Ok(if provider == ViewerProvider::Codex {
+      Ok(if matches!(provider, ViewerProvider::Codex | ViewerProvider::Dsh) {
         vec![self.0.lock().unwrap().clone()]
       } else {
         vec![]
@@ -290,6 +295,34 @@ mod tests {
     repository.0.lock().unwrap().agent_path = None;
     repository.0.lock().unwrap().id = "replaced".into();
     assert!(service.resolve_input_target(&key).unwrap_err().contains("has changed"));
+  }
+
+  #[tokio::test]
+  async fn dsh_subagent_origin_without_parent_cannot_gain_root_controls() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("session.jsonl");
+    std::fs::write(&path, "fixture").unwrap();
+    let header: SessionHeader =
+      serde_json::from_value(json!({"id":"child", "path":path,"agent_role":"subagent"})).unwrap();
+    let key = encode_session_key(&locator_for_header(ViewerProvider::Dsh, &header)).unwrap();
+    let service = ViewerService::new(Arc::new(HeaderRepository(Mutex::new(header))));
+    service.refresh_provider_catalog(ViewerProvider::Dsh).unwrap();
+    assert!(
+      service
+        .resolve_input_target(&key)
+        .unwrap_err()
+        .contains("parent session")
+    );
+    assert!(
+      service
+        .control_target(key)
+        .await
+        .err()
+        .unwrap()
+        .contains("parent session")
+    );
+    assert!(service.list_rpc_runtimes().await.unwrap().runtimes.is_empty());
+    service.shutdown_managed_sessions().await;
   }
 
   #[tokio::test]

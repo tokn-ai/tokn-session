@@ -57,7 +57,9 @@ pub(crate) fn normalize(session_id: Option<String>, native: Value, timestamp: Op
   }
   let accounting = native
     .get("usage")
-    .filter(|usage| !usage.is_null() && matches!(native["type"].as_str(), Some("compaction" | "branch_summary")))
+    .filter(|usage| {
+      !usage.is_null() && matches!(native["type"].as_str(), Some("compaction" | "branch_summary" | "usage"))
+    })
     .map(|raw| {
       usage(
         session_id.clone(),
@@ -121,6 +123,21 @@ fn classify(native: &Value) -> Option<(MetadataKind, String)> {
       native["summary"].as_str()?;
       native["fromId"].as_str()?;
       (MetadataKind::Context, "branch summary".into())
+    }
+    "usage" => {
+      let category = native["kind"].as_str()?;
+      native["provider"].as_str()?;
+      native["model"].as_str()?;
+      native["usage"].as_object()?;
+      (MetadataKind::Diagnostic, format!("usage: {category}"))
+    }
+    "context_edit" => {
+      native["targetId"].as_str()?;
+      let replacement = native.get("replacement")?;
+      if !replacement.is_null() && replacement.get("content").is_none() {
+        return None;
+      }
+      (MetadataKind::Context, "model context edited".into())
     }
     "custom" => {
       let name = native["customType"].as_str()?;

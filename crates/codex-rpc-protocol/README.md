@@ -2,8 +2,9 @@
 
 Native Codex app-server wire contracts, separate from the persisted rollout
 format in `tokn-codex-protocol`. Based on upstream source
-`2351d9e1b608e6f9d9a3699b71d7eb39ee41cfa4` and the generated experimental schema
-from installed `codex-cli 0.163.0-alpha.11`.
+`357fe240c91563c1e6c9690bb27a2e609282d615`. The independent native capture still
+uses installed `codex-cli 0.163.0-alpha.11` and records its original inspected
+source revision; this source audit does not relabel or regenerate that capture.
 
 `RpcMessage` classifies requests, successful responses, errors and notifications
 while retaining the original JSON. String and integer IDs remain distinct.
@@ -31,6 +32,11 @@ native item data. Approvals preserve `availableDecisions`, including
 policy-amendment objects; parsing them does not grant any permission. Omitted
 legacy model modalities use Codex's text-and-image default; explicit modality
 lists retain their advertised limits.
+
+New model-provider selectors, lifecycle timestamps, generated-image metadata,
+and other optional fields remain available through `extra` or native item JSON.
+The generic adapter does not advertise `requiredHumanApproval`; managed
+`humanCommand` checkpoints require a dedicated human-presentation contract.
 
 This crate performs no I/O, starts no process, and does not attach or resume a
 thread. Transports and runtime ownership belong to `tokn-codex-adapter`.

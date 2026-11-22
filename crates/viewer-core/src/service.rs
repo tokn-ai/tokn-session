@@ -4079,6 +4079,12 @@ fn source_revision_for(provider: ViewerProvider, source_path: &Path) -> Option<S
     source_path.to_path_buf()
   };
   let mut paths = vec![primary_path.clone()];
+  if provider == ViewerProvider::Dsh {
+    paths = tokn_session_dsh::storage_dependency_paths(source_path).ok()?;
+    if paths.is_empty() {
+      return None;
+    }
+  }
   if provider == ViewerProvider::Codex
     && let Some(plain_path) = codex_plain_sibling(&primary_path)
   {
@@ -4118,13 +4124,13 @@ fn source_cursor(provider: ViewerProvider, source_path: &Path) -> Result<String,
   // normalization can change running or question state. Codex's existing
   // explicit turn endings already terminate activity, so keep its cursor.
   let prefix = match provider {
-    ViewerProvider::Pi => "source-revision.pi.v3",
-    ViewerProvider::OpenCode => "source-revision.opencode.v2",
+    ViewerProvider::Pi => "source-revision.pi.v4",
+    ViewerProvider::OpenCode => "source-revision.opencode.v3",
     ViewerProvider::ZCode => "source-revision.zcode.v2",
     ViewerProvider::Qoder => "source-revision.qoder.v1",
     ViewerProvider::WorkBuddy => "source-revision.workbuddy.v2",
-    ViewerProvider::Dsh => "source-revision.dsh.v2",
-    ViewerProvider::Codex => "source-revision.v1",
+    ViewerProvider::Dsh => "source-revision.dsh.v3",
+    ViewerProvider::Codex => "source-revision.codex.v2",
   };
   Ok(format!("{prefix}.{files}"))
 }
@@ -4418,6 +4424,8 @@ fn session_summary_with_child_count(
   is_subagent: bool,
   attention: SessionAttention,
 ) -> Result<SessionSummary, String> {
+  let is_subagent =
+    is_subagent || (provider == ViewerProvider::Dsh && header.agent_role.as_deref() == Some("subagent"));
   let locator = locator_for_header(provider, &header);
   let project = header.cwd.as_deref().and_then(path_name).map(str::to_string);
   let title = normalize_session_text(header.title, MAX_SESSION_TITLE_CHARS);

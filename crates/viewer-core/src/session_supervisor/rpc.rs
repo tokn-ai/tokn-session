@@ -383,7 +383,7 @@ fn admission(reply: Reply) -> Result<Admission, DeliveryError> {
     Reply::Admission(receipt) => Ok(match receipt.disposition {
       InputDisposition::Started => Admission::Started,
       InputDisposition::Steered => Admission::Steered,
-      InputDisposition::Queued => Admission::QueuedFollowUp,
+      InputDisposition::Queued => Admission::Queued,
       InputDisposition::Accepted => Admission::Accepted,
     }),
     Reply::Pending => Err(DeliveryError::uncertain(

@@ -12,6 +12,9 @@ tokn-session-pi = "0.1.1"
 session histories from the default provider location or a supplied directory.
 The adapter retains reasoning, tools, usage, compaction, extension metadata,
 and unfamiliar native records.
+Standalone usage entries retain their native category and operation accounting.
+System prompt/tool changes and append-only context edits remain metadata; context
+edits never replace the original human-facing transcript.
 
 `verify_session_identity` checks a bounded, complete native header against an
 expected session ID and canonical working directory. It returns canonical native
