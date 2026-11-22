@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState, type ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import App from "../App";
@@ -114,8 +114,11 @@ it("preserves the open machine and its data through gallery, profile and browser
   fireEvent.click(screen.getByRole("button", { name: "Account menu for studio" }));
   fireEvent.click(screen.getByRole("menuitem", { name: "Sign out" }));
   expect(await screen.findByLabelText("Email address")).toBeVisible();
-  expect(close).toHaveBeenCalledOnce();
-  expect(service.dispose).toHaveBeenCalledOnce();
+  // The signed-out form can render before the old picker's queued cleanup.
+  await waitFor(() => {
+    expect(close).toHaveBeenCalledOnce();
+    expect(service.dispose).toHaveBeenCalledOnce();
+  });
   await traverseHistory(-1);
   expect(await screen.findByRole("link", { name: "Sign in" })).toBeVisible();
   await traverseHistory(-1); // The previous machine entry belongs to the signed-out session.
