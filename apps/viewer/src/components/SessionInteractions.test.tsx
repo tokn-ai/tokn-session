@@ -43,6 +43,15 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+it("lets users decline a native form that requires controls this viewer does not support", async () => {
+  vi.mocked(listSessionInteractions).mockResolvedValue(snapshot([{ ...permission, kind: "editor", title: "Native form", permission_decisions: [] }]));
+  render(<SessionInteractions session={{ ...session, provider: "opencode" }} />);
+  await ready();
+  expect(screen.queryByRole("button", { name: "Allow once" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Decline request" }));
+  await waitFor(() => expect(respondSessionInteraction).toHaveBeenCalledWith(expect.objectContaining({ response: { type: "reject" } }), machine.invoke));
+});
+
 it("submits complete questions with multiple choices, notes and secret input using the runtime fence", async () => {
   vi.mocked(listSessionInteractions).mockResolvedValue(snapshot([question]));
   render(<SessionInteractions session={session} />);
@@ -69,7 +78,7 @@ it("submits complete questions with multiple choices, notes and secret input usi
   await waitFor(() => expect(screen.queryByRole("region", { name: "Pending requests" })).not.toBeInTheDocument());
 });
 
-it.each(["zcode", "qoder"] as const)("shows %s operation details and only permission decisions supplied by the host", async (provider) => {
+it.each(["zcode", "qoder", "opencode", "dsh"] as const)("shows %s operation details and only permission decisions supplied by the host", async (provider) => {
   vi.mocked(listSessionInteractions).mockResolvedValue(snapshot([{ ...permission, permission_decisions: ["deny"] }]));
   render(<SessionInteractions session={{ ...session, provider }} />); await ready();
   expect(screen.getByText(/printf 'fixture'/).textContent).toBe(permission.details);

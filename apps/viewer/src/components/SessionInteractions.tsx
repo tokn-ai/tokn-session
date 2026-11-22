@@ -12,7 +12,7 @@ export function SessionInteractions({ session, refresh_key = 0, on_accepted }: {
   refresh_key?: number;
   on_accepted?: (session_key: string) => void;
 }) {
-  const enabled = !!session && (session.provider === "zcode" || session.provider === "qoder") && !session.is_subagent;
+  const enabled = !!session && ["zcode", "qoder", "opencode", "dsh"].includes(session.provider) && !session.is_subagent;
   const requests = useSessionInteractions(enabled ? session.session_key : null, refresh_key, on_accepted);
   const drafts = useRef(new Map<string, Record<string, QuestionDraft>>());
   useEffect(() => {
@@ -126,6 +126,8 @@ function InteractionCard({ interaction, submission, unavailable, initial_drafts,
         <button className="text-button" type="button" disabled={disabled} onClick={() => on_respond({ type: "reject" })}>Decline</button>
         <button className="question-answer__submit" type="submit" disabled={disabled || !valid}>Submit answers</button>
       </> : null}
+      {interaction.kind !== "permission" && interaction.kind !== "question"
+        ? <button className="text-button" type="button" disabled={disabled} onClick={() => on_respond({ type: "reject" })}>Decline request</button> : null}
     </footer>
   </form>;
 }

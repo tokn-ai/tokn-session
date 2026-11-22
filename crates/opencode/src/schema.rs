@@ -5,6 +5,9 @@ use rusqlite::Connection;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct OpenCodeCapabilities {
   pub(crate) has_v1: bool,
+  pub(crate) has_session: bool,
+  pub(crate) session_v2: Option<SessionColumns>,
+  pub(crate) has_session_part: bool,
   pub(crate) has_v2: bool,
   pub(crate) has_session_entry: bool,
   pub(crate) has_session_agent: bool,
@@ -14,21 +17,55 @@ pub(crate) struct OpenCodeCapabilities {
   pub(crate) has_session_workspace_id: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SessionColumns {
+  title: bool,
+  model: bool,
+  agent: bool,
+  workspace: bool,
+  deleted: bool,
+}
+impl SessionColumns {
+  fn detect(columns: &BTreeSet<String>) -> Self {
+    Self {
+      title: columns.contains("title"),
+      model: columns.contains("model"),
+      agent: columns.contains("agent"),
+      workspace: columns.contains("workspace_id"),
+      deleted: columns.contains("time_deleted"),
+    }
+  }
+}
+
 impl OpenCodeCapabilities {
   pub(crate) fn detect(connection: &Connection) -> Result<Self, String> {
     let session = table_columns(connection, "session")?;
+    let session_v2 = table_columns(connection, "session_v2")?;
+    let session_part = table_columns(connection, "session_part")?;
     let message = table_columns(connection, "message")?;
     let part = table_columns(connection, "part")?;
     let session_entry = table_columns(connection, "session_entry")?;
     let session_message = table_columns(connection, "session_message")?;
 
     let mut missing = Vec::new();
-    require_columns(
-      &mut missing,
-      "session",
-      &session,
-      &["id", "parent_id", "directory", "time_created", "time_updated"],
-    );
+    for (table, columns) in [("session", &session), ("session_v2", &session_v2)] {
+      if !columns.is_empty() || (table == "session" && session_v2.is_empty()) {
+        require_columns(
+          &mut missing,
+          table,
+          columns,
+          &["id", "parent_id", "directory", "time_created", "time_updated"],
+        );
+      }
+    }
+    if !session_part.is_empty() {
+      require_columns(
+        &mut missing,
+        "session_part",
+        &session_part,
+        &["message_id", "session_id", "ordinal", "type", "time_created", "data"],
+      );
+    }
     if !session_entry.is_empty() {
       require_columns(
         &mut missing,
@@ -37,7 +74,7 @@ impl OpenCodeCapabilities {
         &["id", "session_id", "type", "time_created", "data"],
       );
     }
-    if !message.is_empty() || !part.is_empty() || session_message.is_empty() {
+    if !message.is_empty() || !part.is_empty() || (session_message.is_empty() && session_v2.is_empty()) {
       require_columns(
         &mut missing,
         "message",
@@ -51,7 +88,7 @@ impl OpenCodeCapabilities {
         &["id", "message_id", "session_id", "time_created", "data"],
       );
     }
-    if !session_message.is_empty() {
+    if !session_message.is_empty() || !session_v2.is_empty() {
       require_columns(
         &mut missing,
         "session_message",
@@ -68,6 +105,9 @@ impl OpenCodeCapabilities {
 
     Ok(Self {
       has_v1: !message.is_empty() && !part.is_empty(),
+      has_session: !session.is_empty(),
+      session_v2: (!session_v2.is_empty()).then(|| SessionColumns::detect(&session_v2)),
+      has_session_part: !session_part.is_empty(),
       has_v2: !session_message.is_empty(),
       has_session_entry: !session_entry.is_empty(),
       has_session_agent: session.contains("agent"),
@@ -76,6 +116,25 @@ impl OpenCodeCapabilities {
       has_session_time_deleted: session.contains("time_deleted"),
       has_session_workspace_id: session.contains("workspace_id"),
     })
+  }
+
+  pub(crate) fn session_layouts(self, current: bool) -> Vec<(&'static str, Self)> {
+    let mut layouts = Vec::new();
+    if self.has_session {
+      layouts.push(("session", self));
+    }
+    if current {
+      if let Some(columns) = self.session_v2 {
+        let mut capabilities = self;
+        capabilities.has_session_title = columns.title;
+        capabilities.has_session_model = columns.model;
+        capabilities.has_session_agent = columns.agent;
+        capabilities.has_session_workspace_id = columns.workspace;
+        capabilities.has_session_time_deleted = columns.deleted;
+        layouts.push(("session_v2", capabilities));
+      }
+    }
+    layouts
   }
 
   pub(crate) fn session_projection(self) -> &'static str {
@@ -96,9 +155,13 @@ impl OpenCodeCapabilities {
   }
 }
 
-fn table_columns(connection: &Connection, table: &str) -> Result<BTreeSet<String>, String> {
+pub(super) fn table_columns(connection: &Connection, table: &str) -> Result<BTreeSet<String>, String> {
   let pragma = match table {
     "session" => "pragma table_info(session)",
+    "session_v2" => "pragma table_info(session_v2)",
+    "session_part" => "pragma table_info(session_part)",
+    "blob" => "pragma table_info(blob)",
+    "blob_ref" => "pragma table_info(blob_ref)",
     "message" => "pragma table_info(message)",
     "part" => "pragma table_info(part)",
     "session_entry" => "pragma table_info(session_entry)",

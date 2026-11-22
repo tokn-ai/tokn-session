@@ -405,9 +405,17 @@ impl ManagedSessions {
       .await
       .map(|admission| match admission {
         Admission::WithModel {
+          disposition: ModelInputDisposition::Accepted,
+          ..
+        } => Admission::Accepted,
+        Admission::WithModel {
           disposition: ModelInputDisposition::Started,
           ..
         } => Admission::Started,
+        Admission::WithModel {
+          disposition: ModelInputDisposition::Queued,
+          ..
+        } => Admission::Queued,
         Admission::WithModel {
           disposition: ModelInputDisposition::Steered,
           ..

@@ -1,5 +1,6 @@
 //! Attached DSH ApiProxy interactions. Closing detaches; it never stops the host.
 mod events;
+mod gateway;
 mod managed;
 mod responses;
 mod transport;
@@ -76,7 +77,9 @@ impl ApiProxyConfig {
 #[derive(Default)]
 struct StreamState {
   pending: BTreeMap<String, PendingInteraction>,
+  responding: std::collections::BTreeSet<String>,
   sessions: BTreeMap<String, SessionState>,
+  tool_calls: events::ToolCallCache,
 }
 
 struct Inner {
@@ -91,6 +94,7 @@ struct Inner {
   shutdown: watch::Sender<bool>,
   tasks: StdMutex<Vec<JoinHandle<()>>>,
   managed: StdMutex<Option<managed::OwnedRuntime>>,
+  gateway: Option<gateway::Gateway>,
 }
 
 pub struct DshAdapter {
@@ -218,12 +222,30 @@ impl DshAdapter {
     let heartbeat_interval = config.heartbeat_interval;
     let heartbeat_timeout = config.heartbeat_timeout;
     let runtime_id = config.runtime_id.clone();
+    let request_timeout = config.request_timeout;
     let transport = Transport::new(config)?;
-    let mux = transport.stream("api/events.mux").await?;
-    let host = transport.stream("api/events.host").await?;
-    let _: api::HostDescription = transport
-      .call(&uuid::Uuid::new_v4().to_string(), "host.describe", json!({}), false)
-      .await?;
+    let mut modern = transport.gateway_stream().await?;
+    let legacy = if let Some(socket) = modern.as_mut() {
+      let client_id = gateway::handshake(socket, request_timeout).await?;
+      *transport.client_id.lock().expect("DSH client identity lock") = Some(client_id);
+      let _: api::SessionList = transport
+        .call(&uuid::Uuid::new_v4().to_string(), "session.list", json!({}), false)
+        .await?;
+      None
+    } else {
+      let mux = transport.stream("api/events.mux").await?;
+      let host = transport.stream("api/events.host").await?;
+      let _: api::HostDescription = transport
+        .call(&uuid::Uuid::new_v4().to_string(), "host.describe", json!({}), false)
+        .await?;
+      Some((mux, host))
+    };
+    let (gateway, gateway_commands) = if modern.is_some() {
+      let (gateway, commands) = gateway::Gateway::new(request_timeout);
+      (Some(gateway), Some(commands))
+    } else {
+      (None, None)
+    };
     let (events, _) = broadcast::channel(256);
     let (shutdown, _) = watch::channel(false);
     let mut capabilities = Capabilities::default()
@@ -257,23 +279,35 @@ impl DshAdapter {
       shutdown,
       tasks: StdMutex::new(Vec::new()),
       managed: StdMutex::new(None),
+      gateway,
     });
-    let tasks = vec![
-      events::spawn(
+    let tasks = if let Some(socket) = modern {
+      vec![gateway::spawn(
         inner.clone(),
-        mux,
-        max_frame_bytes,
+        socket,
+        gateway_commands.expect("Gateway commands"),
         heartbeat_interval,
         heartbeat_timeout,
-      ),
-      events::spawn(
-        inner.clone(),
-        host,
-        max_frame_bytes,
-        heartbeat_interval,
-        heartbeat_timeout,
-      ),
-    ];
+      )]
+    } else {
+      let (mux, host) = legacy.expect("legacy DSH streams");
+      vec![
+        events::spawn(
+          inner.clone(),
+          mux,
+          max_frame_bytes,
+          heartbeat_interval,
+          heartbeat_timeout,
+        ),
+        events::spawn(
+          inner.clone(),
+          host,
+          max_frame_bytes,
+          heartbeat_interval,
+          heartbeat_timeout,
+        ),
+      ]
+    };
     inner.tasks.lock().expect("DSH task lock").extend(tasks);
     Ok(Self { inner })
   }
@@ -310,6 +344,17 @@ impl DshAdapter {
     let session_id = request.target.session_id.as_deref();
     match request.command {
       Command::Metadata => {
+        if inner.transport.is_gateway() {
+          let _: api::SessionList = inner.transport.call(rpc_id, "session.list", json!({}), false).await?;
+          return Ok(Reply::Metadata(Metadata {
+            name: Some("DeepSeek Harness Gateway".into()),
+            version: None,
+            model: None,
+            commands: Vec::new(),
+            agents: Vec::new(),
+            providers: Vec::new(),
+          }));
+        }
         let host: api::HostDescription = inner.transport.call(rpc_id, "host.describe", json!({}), false).await?;
         Ok(Reply::Metadata(Metadata {
           name: Some("DeepSeek Harness ApiProxy".into()),
@@ -323,6 +368,9 @@ impl DshAdapter {
       Command::State => {
         let session_id = require_session(session_id)?;
         inner.ensure_live()?;
+        if let Some(gateway) = &inner.gateway {
+          gateway.observe(session_id).await?;
+        }
         let list: api::SessionList = inner.transport.call(rpc_id, "session.list", json!({}), false).await?;
         inner.ensure_live()?;
         let found = list
@@ -335,15 +383,33 @@ impl DshAdapter {
         } else {
           inner.state.lock().await.sessions.get(session_id).cloned()
         };
+        let passive = if inner.transport.is_gateway() {
+          Some(
+            inner
+              .transport
+              .call::<tokn_dsh_rpc_protocol::gateway::SessionState>(
+                rpc_id,
+                "session.state",
+                json!({"sessionId":session_id}),
+                false,
+              )
+              .await?,
+          )
+        } else {
+          None
+        };
         let state = SessionState {
           session_id: Some(session_id.into()),
-          status: if found.running {
+          status: if passive.as_ref().map_or(found.running, |state| state.running) {
             ExecutionState::Running
           } else {
             ExecutionState::Idle
           },
           model: cached.as_ref().and_then(|state| state.model.clone()),
-          pending_inputs: cached.as_ref().and_then(|state| state.pending_inputs),
+          pending_inputs: passive
+            .as_ref()
+            .and_then(|state| state.queue.as_ref().map(|queue| queue.len() as u64))
+            .or_else(|| cached.as_ref().and_then(|state| state.pending_inputs)),
           revision: None,
         };
         inner.ensure_live()?;
@@ -409,6 +475,9 @@ impl DshAdapter {
         }
         if content.is_empty() {
           return Err(InteractionError::invalid("DSH message must contain text or images"));
+        }
+        if let Some(gateway) = &inner.gateway {
+          gateway.observe(session_id).await?;
         }
         let result: Value = inner
           .transport
@@ -519,6 +588,7 @@ impl InteractionAdapter for DshAdapter {
         task.abort();
         let _ = task.await;
       }
+      self.inner.state.lock().await.tool_calls.clear();
       result
     })
   }
@@ -559,5 +629,7 @@ fn error(mutation: bool, message: impl Into<String>) -> InteractionError {
   }
 }
 
+#[cfg(test)]
+mod gateway_tests;
 #[cfg(test)]
 mod tests;

@@ -41,9 +41,12 @@ assert!(matches!(line.item(), DshSessionItem::Event(_)));
 - Preserve unknown message sources, content blocks, stream chunks, and reason
   variants.
 
-DSH currently marks its session format as version `0`, with no compatibility
-promise before release. Its event vocabulary is also merge-extensible through
-plugins. Consumers performing authoritative reconstruction must apply DSH's
+The current pinned DSH format is version `4`; older version 0–3 records retain
+their native shapes. Header types cover both the older `seedLength` and newer
+`isSeeded` forms. Current tool-role results, system/developer messages, compact
+assistant attempts and canonical surface coordinates are modeled without
+rewriting the stored representation. The event vocabulary is merge-extensible
+through plugins. Consumers performing authoritative reconstruction must apply DSH's
 `ignorable` policy; this crate only decodes and preserves the wire data.
 
 "Lossless" refers to JSON structure. It does not preserve source whitespace,

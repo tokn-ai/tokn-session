@@ -40,6 +40,7 @@ impl Fixture {
           "get_available_models" => {
             json!({"models":[{"provider":"test","id":"model-1","name":"Test model","input":["text","image"],"baseUrl":"private-endpoint","headers":{"authorization":"secret"}}]})
           }
+          "prompt" | "follow_up" => server_state.lock().unwrap()["input_response"].clone(),
           _ => Value::Null,
         };
         let response =
@@ -118,6 +119,67 @@ fn input(text: &str) -> MessageInput {
   MessageInput {
     text: text.into(),
     ..MessageInput::default()
+  }
+}
+
+#[tokio::test]
+async fn native_admission_disposition_is_truthful_and_unknown_results_are_not_replayed() {
+  for (delivery, native, expected) in [
+    (DeliveryMode::Start, "started", InputDisposition::Started),
+    (DeliveryMode::Start, "handled", InputDisposition::Accepted),
+    (DeliveryMode::StartOrSteer, "queued", InputDisposition::Queued),
+    (DeliveryMode::Queue, "handled", InputDisposition::Accepted),
+    (DeliveryMode::Queue, "queued", InputDisposition::Queued),
+  ] {
+    let fixture = Fixture::new();
+    fixture.state.lock().unwrap()["input_response"] = json!({"disposition":native});
+    let command = Command::Message {
+      input: input("native proof"),
+      delivery,
+    };
+    let Reply::Admission(receipt) = fixture.execute("native-proof", command.clone()).await.unwrap() else {
+      panic!("expected admission")
+    };
+    assert_eq!(receipt.disposition, expected);
+    fixture.execute("native-proof", command).await.unwrap();
+    assert_eq!(
+      fixture
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| matches!(request["type"].as_str(), Some("prompt" | "follow_up")))
+        .count(),
+      1
+    );
+  }
+  for native in ["future", "queued"] {
+    let fixture = Fixture::new();
+    fixture.state.lock().unwrap()["input_response"] = json!({"disposition":native});
+    let command = Command::Message {
+      input: input("uncertain proof"),
+      delivery: DeliveryMode::Start,
+    };
+    for _ in 0..2 {
+      assert_eq!(
+        fixture
+          .execute("unknown-proof", command.clone())
+          .await
+          .unwrap_err()
+          .kind,
+        ErrorKind::Uncertain
+      );
+    }
+    assert_eq!(
+      fixture
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request["type"] == "prompt")
+        .count(),
+      1
+    );
   }
 }
 

@@ -141,7 +141,7 @@ it("keeps ZCode composer availability independent of its Stop lookup", async () 
   expect(result.current.blocked).toBe(false);
 });
 
-it.each(["zcode", "qoder"] as const)("shows Stop from native %s activity before any historical output and clears it on completion", async (provider) => {
+it.each(["zcode", "qoder", "opencode", "dsh"] as const)("shows Stop from native %s activity before any historical output and clears it on completion", async (provider) => {
   vi.mocked(getSessionControl).mockResolvedValue(status({ provider, can_select: false, is_running: false }));
   const view = render(<Controls selected={{ ...session, provider, is_running: false }} />);
   await waitFor(() => expect(machine.changes.size).toBe(1));

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Build the exact vendored Pi revision outside the checkout, without fetching
-# live provider catalogs or loading a developer's Pi configuration.
+# Build the recorded Pi fixture revision outside the checkout, without fetching
+# live provider catalogs or loading a developer's Pi configuration. Keep this
+# pin with the retained capture; it need not match the current vendor checkout.
 set -euo pipefail
 source_root="${1:?usage: prepare-pi.sh /path/to/vendor/pi /absolute/output}"
 output_root="${2:?usage: prepare-pi.sh /path/to/vendor/pi /absolute/output}"

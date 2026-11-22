@@ -973,8 +973,10 @@ async fn unregistered_uncertain_cleanup_remains_visible_and_holds_profile_lease_
     profile_id: profile.profile_id.clone(),
     expected_revision: profile.revision,
   };
-  let lease =
-    tokn_session_storage::acquire_private_lock(&lease_directory.join(format!("{}.lock", profile.profile_id))).unwrap();
+  let lease = RuntimeLease::acquire(&lease_directory.join(format!("{}.lock", profile.profile_id))).unwrap();
+  // A concurrent fork inherits this same open-file description until exec.
+  // Keep its deterministic equivalent alive across the owning host's shutdown.
+  let inherited = lease.0.try_clone().unwrap();
   let handle = first
     .0
     .host
@@ -1016,7 +1018,11 @@ async fn unregistered_uncertain_cleanup_remains_visible_and_holds_profile_lease_
   first.shutdown().await;
   assert!(first.inventory().runtimes.is_empty());
   request.request_id = uuid::Uuid::new_v4().to_string();
-  second.start(request).await.unwrap();
+  second
+    .start(request)
+    .await
+    .expect("shutdown must unlock its lease even while an inherited descriptor remains open");
+  assert!(inherited.metadata().is_ok());
   assert_eq!(shared.opens.load(Ordering::SeqCst), 2);
   second.shutdown().await;
 }

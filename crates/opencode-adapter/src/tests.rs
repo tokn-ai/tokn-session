@@ -7,6 +7,7 @@ use tokio::{
 
 #[derive(Default)]
 struct ServerState {
+  current: AtomicBool,
   legacy: AtomicBool,
   corrupt_admission: AtomicBool,
   fail_mutation: AtomicBool,
@@ -14,8 +15,17 @@ struct ServerState {
   wrong_created_id: AtomicBool,
   malformed_creation: AtomicBool,
   disconnect: AtomicBool,
+  idle: AtomicBool,
+  native_events: StdMutex<Vec<Value>>,
+  active_gate: StdMutex<Option<Arc<ReadGate>>>,
   admissions: StdMutex<BTreeMap<String, Value>>,
   requests: StdMutex<Vec<(String, String, Value)>>,
+}
+
+#[derive(Default)]
+struct ReadGate {
+  captured: tokio::sync::Notify,
+  release: tokio::sync::Notify,
 }
 
 struct Server {
@@ -57,6 +67,26 @@ fn document() -> Value {
     document["paths"][path] = json!({"post":{}});
   }
   document
+}
+
+fn current_document() -> Value {
+  let mut document = document();
+  document["paths"]
+    .as_object_mut()
+    .unwrap()
+    .retain(|path, _| !path.contains("question"));
+  document["paths"]["/api/session/{sessionID}/form"] = json!({"get":{}});
+  document["paths"]["/api/session/{sessionID}/form/{formID}/reply"] = json!({"post":{}});
+  document["paths"]["/api/session/{sessionID}/form/{formID}"] = json!({"delete":{}});
+  document["paths"]["/api/session/{sessionID}/inbox"] = json!({"get":{}});
+  document
+}
+
+fn current_form() -> Value {
+  json!({"id":"frm_1", "sessionID":"ses_1", "title":"Questions", "metadata":{"kind":"question"}, "fields":[{
+    "key":"opaque-field", "type":"string", "title":"Choice", "description":"Pick one",
+    "options":[{"value":"opaque-native-value","label":"One","description":"First"}],"custom":true
+  }]})
 }
 
 impl Server {
@@ -116,7 +146,11 @@ impl Server {
             .unwrap()
             .push((method.into(), target.into(), body.clone()));
           if path == "/api/event" {
-            let native = json!({"id":"evt_future","type":"future.event","data":{"sessionID":"ses_1","extra":true},"location":location(),"extension":42});
+            let native = if state.current.load(Ordering::Relaxed) {
+              json!({"id":"evt_form","type":"form.created","data":{"form":current_form()},"location":location()})
+            } else {
+              json!({"id":"evt_future","type":"future.event","data":{"sessionID":"ses_1","extra":true},"location":location(),"extension":42})
+            };
             if socket
               .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
               .await
@@ -132,6 +166,14 @@ impl Server {
             }
             while !state.disconnect.load(Ordering::Relaxed) {
               tokio::time::sleep(Duration::from_millis(25)).await;
+              let events = std::mem::take(&mut *state.native_events.lock().unwrap());
+              for native in events {
+                let output = format!("data: {native}\n\n");
+                let chunk = format!("{:x}\r\n{output}\r\n", output.len());
+                if socket.write_all(chunk.as_bytes()).await.is_err() {
+                  return;
+                }
+              }
               if socket.write_all(b"3\r\n:\n\n\r\n").await.is_err() {
                 return;
               }
@@ -139,6 +181,16 @@ impl Server {
             return;
           }
           let (status, value) = response(&state, method, path, body);
+          let active_gate = if path == "/api/session/active" {
+            state.active_gate.lock().unwrap().take()
+          } else {
+            None
+          };
+          if let Some(gate) = active_gate {
+            // Capture the native snapshot before delaying its HTTP response.
+            gate.captured.notify_one();
+            gate.release.notified().await;
+          }
           let content_type = "application/json";
           let output = value.to_string();
           let head = format!(
@@ -176,6 +228,17 @@ impl Server {
       .cloned()
       .collect()
   }
+
+  fn active_reads(&self) -> usize {
+    self
+      .state
+      .requests
+      .lock()
+      .unwrap()
+      .iter()
+      .filter(|(method, path, _)| method == "GET" && path.starts_with("/api/session/active?"))
+      .count()
+  }
 }
 
 fn response(state: &ServerState, method: &str, path: &str, body: Value) -> (u16, Value) {
@@ -183,7 +246,10 @@ fn response(state: &ServerState, method: &str, path: &str, body: Value) -> (u16,
   let session =
     || json!({"id":"ses_1","title":"Test","location":location(),"model":{"id":"model-1","providerID":"provider-1"}});
   let result = match (method, path) {
+    ("GET", "/api/health") if state.current.load(Ordering::Relaxed) => return (404, json!({"message":"not found"})),
     ("GET", "/api/health") => json!({"healthy":true}),
+    ("GET", "/api/info") => json!({"version":"2.3.0","pid":1,"urls":[],"paths":{"tmp":"/fixture/tmp"}}),
+    ("GET", "/openapi.json") => current_document(),
     ("GET", "/global/health") => json!({"healthy":true,"version":"1.18.8"}),
     ("GET", "/doc") => document(),
     ("GET", "/api/model") => envelope(
@@ -193,7 +259,13 @@ fn response(state: &ServerState, method: &str, path: &str, body: Value) -> (u16,
     ("GET", "/api/provider") => envelope(json!([{"id":"provider-1"}])),
     ("GET", "/api/command") => envelope(json!([{"id":"review"}])),
     ("GET", "/api/session/ses_1") => json!({"data":session()}),
-    ("GET", "/api/session/active") => json!({"data":{"ses_1":{"type":"running"}}}),
+    ("GET", "/api/session/active") => {
+      if state.idle.load(Ordering::Acquire) {
+        json!({"data":{}})
+      } else {
+        json!({"data":{"ses_1":{"type":"running"}}})
+      }
+    }
     ("GET", "/session/ses_1/message") => {
       if state.legacy.load(Ordering::Relaxed) {
         json!([{"info":{"role":"user"},"parts":[]}])
@@ -204,12 +276,22 @@ fn response(state: &ServerState, method: &str, path: &str, body: Value) -> (u16,
     ("GET", "/api/session/ses_1/question") => {
       json!({"data":[{"id":"que_1","sessionID":"ses_1","questions":[{"question":"Pick one", "header":"Choice", "options":[{"label":"One","description":"First"}]}]}]})
     }
+    ("GET", "/api/session/ses_1/form") => json!({"data":[current_form()]}),
     ("GET", "/api/session/ses_1/permission") => {
       json!({"data":[{"id":"per_1","sessionID":"ses_1","action":"write","resources":["file.rs"]}]})
     }
     ("POST", "/api/session/ses_1/prompt") => {
       if state.fail_mutation.load(Ordering::Relaxed) {
         return (503, json!({"message":"internal"}));
+      }
+      if state.current.load(Ordering::Relaxed) {
+        if state.corrupt_admission.load(Ordering::Relaxed) {
+          return (200, json!({"data":{"id":"wrong"}}));
+        }
+        return (
+          200,
+          json!({"data":{"id":body["id"],"sessionID":"ses_1","type":"user","payload":{"text":body["text"]},"delivery":body["delivery"],"time":{"created":1}}}),
+        );
       }
       let mut admissions = state.admissions.lock().unwrap();
       let id = body["id"].as_str().unwrap().to_owned();
@@ -235,8 +317,10 @@ fn response(state: &ServerState, method: &str, path: &str, body: Value) -> (u16,
       "/api/session/ses_1/interrupt"
       | "/api/session/ses_1/question/que_1/reply"
       | "/api/session/ses_1/question/que_1/reject"
+      | "/api/session/ses_1/form/frm_1/reply"
       | "/api/session/ses_1/permission/per_1/reply",
     ) => return (204, Value::Null),
+    ("DELETE", "/api/session/ses_1/form/frm_1") => return (204, Value::Null),
     ("POST", "/api/session") => {
       if state.fail_mutation.load(Ordering::Relaxed) {
         return (503, json!({"message":"internal"}));
@@ -326,6 +410,272 @@ fn request(adapter: &OpenCodeAdapter, id: &str, command: Command) -> Interaction
     },
     command,
   }
+}
+
+#[tokio::test]
+async fn native_activity_monitor_is_passive_preserves_models_and_stops_reading_when_idle() {
+  for current in [false, true] {
+    let server = Server::start().await;
+    server.state.current.store(current, Ordering::Release);
+    server.state.idle.store(true, Ordering::Release);
+    let adapter = server.adapter().await;
+    let mut events = adapter.subscribe();
+    let Reply::State(initial) = adapter
+      .execute(request(&adapter, "baseline", Command::State))
+      .await
+      .unwrap()
+    else {
+      panic!("missing state")
+    };
+    assert_eq!(initial.status, ExecutionState::Idle);
+    server.state.idle.store(false, Ordering::Release);
+    let mut started = json!({"id":"started","type":if current {"session.execution.started"} else {"session.next.step.started"},"data":{"sessionID":"ses_1"}});
+    if !current {
+      started["location"] = location();
+    }
+    server.state.native_events.lock().unwrap().push(started);
+    let running = tokio::time::timeout(Duration::from_secs(2), async {
+      loop {
+        if let RuntimeEventKind::State(state) = events.recv().await.unwrap().kind {
+          if state.status == ExecutionState::Running {
+            return state;
+          }
+        }
+      }
+    })
+    .await
+    .unwrap();
+    assert_eq!(running.model, initial.model);
+    server.state.idle.store(true, Ordering::Release);
+    let idle = tokio::time::timeout(Duration::from_secs(2), async {
+      loop {
+        if let RuntimeEventKind::State(state) = events.recv().await.unwrap().kind {
+          if state.status == ExecutionState::Idle {
+            return state;
+          }
+        }
+      }
+    })
+    .await
+    .unwrap();
+    assert_eq!(idle.model, initial.model);
+    let completed = server.active_reads();
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(server.active_reads(), completed, "idle sessions do not keep polling");
+    assert!(
+      server.mutations().is_empty(),
+      "observing activity cannot activate sessions"
+    );
+    adapter.close().await.unwrap();
+  }
+}
+
+#[tokio::test]
+async fn pending_activity_read_never_blocks_permissions_or_overwrites_a_newer_execution() {
+  let server = Server::start().await;
+  server.state.current.store(true, Ordering::Release);
+  server.state.idle.store(true, Ordering::Release);
+  let adapter = server.adapter().await;
+  let mut events = adapter.subscribe();
+  adapter
+    .execute(request(&adapter, "baseline", Command::State))
+    .await
+    .unwrap();
+  let gate = Arc::new(ReadGate::default());
+  *server.state.active_gate.lock().unwrap() = Some(gate.clone());
+  let started = |id: &str| json!({"id":id,"type":"session.execution.started","data":{"sessionID":"ses_1"}});
+  server.state.native_events.lock().unwrap().push(started("first"));
+  tokio::time::timeout(Duration::from_secs(2), gate.captured.notified())
+    .await
+    .unwrap();
+  // That pending read captured an empty native map. A new execution and its
+  // permission request must remain observable while the old HTTP reply waits.
+  server.state.idle.store(false, Ordering::Release);
+  server.state.native_events.lock().unwrap().extend([
+    started("newer"),
+    json!({"id":"permission","type":"permission.asked","data":{"id":"per_delayed","sessionID":"ses_1","action":"shell","resources":["printf fixture"]},"location":location()}),
+  ]);
+  tokio::time::timeout(Duration::from_secs(2), async {
+    loop {
+      if let RuntimeEventKind::InteractionRequested(pending) = events.recv().await.unwrap().kind {
+        if pending.interaction_id == "permission:per_delayed" {
+          break;
+        }
+      }
+    }
+  })
+  .await
+  .unwrap();
+  tokio::time::sleep(Duration::from_millis(300)).await;
+  assert_eq!(server.active_reads(), 2, "at most one monitor request can be in flight");
+  gate.release.notify_one();
+  // Seeing a fresh subsequent read proves the delayed reply was processed.
+  tokio::time::timeout(Duration::from_secs(2), async {
+    while server.active_reads() < 3 {
+      tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+  })
+  .await
+  .unwrap();
+  while let Ok(event) = events.try_recv() {
+    assert!(
+      !matches!(
+        event.kind,
+        RuntimeEventKind::State(SessionState {
+          status: ExecutionState::Idle,
+          ..
+        })
+      ),
+      "an empty snapshot from before the newer execution cannot publish Idle"
+    );
+  }
+  assert!(adapter.inner.live.has_running());
+  assert!(server.mutations().is_empty());
+  adapter.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn current_dialect_uses_flat_inbox_admission_native_forms_and_decisions_without_legacy_calls() {
+  let server = Server::start().await;
+  server.state.current.store(true, Ordering::Relaxed);
+  server.state.legacy.store(true, Ordering::Relaxed);
+  let adapter = server.adapter().await;
+  let mut events = adapter.subscribe();
+  assert!(adapter.descriptor().capabilities.supports(Operation::Respond));
+  assert!(matches!(
+    adapter
+      .execute(request(
+        &adapter,
+        "current-message",
+        message("Modern prompt", DeliveryMode::StartOrSteer)
+      ))
+      .await
+      .unwrap(),
+    Reply::Admission(_)
+  ));
+  let reply = adapter
+    .execute(request(&adapter, "current-pending", Command::PendingInteractions))
+    .await
+    .unwrap();
+  let Reply::Interactions(pending) = reply else {
+    panic!("pending interactions expected")
+  };
+  let form = pending.iter().find(|item| item.interaction_id == "form:frm_1").unwrap();
+  assert_eq!(form.kind, InteractionKind::Question);
+  adapter
+    .execute(request(
+      &adapter,
+      "answer-form",
+      Command::Respond {
+        interaction_id: form.interaction_id.clone(),
+        response: InteractionResponse::Answers {
+          answers: vec![QuestionAnswer {
+            question_id: form.questions[0].question_id.clone(),
+            answers: vec!["One".into()],
+            custom: None,
+          }],
+        },
+      },
+    ))
+    .await
+    .unwrap();
+  adapter
+    .execute(request(
+      &adapter,
+      "reject-form",
+      Command::Respond {
+        interaction_id: form.interaction_id.clone(),
+        response: InteractionResponse::Reject,
+      },
+    ))
+    .await
+    .unwrap();
+  adapter
+    .execute(request(
+      &adapter,
+      "allow-current",
+      Command::Respond {
+        interaction_id: "permission:per_1".into(),
+        response: InteractionResponse::Permission {
+          decision: PermissionDecision::AllowOnce,
+        },
+      },
+    ))
+    .await
+    .unwrap();
+  tokio::time::timeout(Duration::from_secs(2), async {
+    loop {
+      if let RuntimeEvent {
+        session_id,
+        kind: RuntimeEventKind::InteractionRequested(interaction),
+        ..
+      } = events.recv().await.unwrap()
+      {
+        assert_eq!(session_id.as_deref(), Some("ses_1"));
+        assert_eq!(interaction.interaction_id, "form:frm_1");
+        break;
+      }
+    }
+  })
+  .await
+  .unwrap();
+  let requests = server.state.requests.lock().unwrap();
+  assert!(
+    !requests
+      .iter()
+      .any(|(_, path, _)| path.starts_with("/session/") || path.starts_with("/doc"))
+  );
+  assert!(requests.iter().any(|(method, path, body)| method == "POST"
+    && path.starts_with("/api/session/ses_1/prompt")
+    && body["text"] == "Modern prompt"
+    && body.get("prompt").is_none()));
+  assert!(requests.iter().any(|(method, path, body)| method == "POST"
+    && path.starts_with("/api/session/ses_1/form/frm_1/reply")
+    && *body == json!({"answer":{"opaque-field":"opaque-native-value"}})));
+  assert!(
+    requests
+      .iter()
+      .any(|(method, path, _)| method == "DELETE" && path.starts_with("/api/session/ses_1/form/frm_1"))
+  );
+  assert!(requests.iter().any(|(method, path, body)| method == "POST"
+    && path.starts_with("/api/session/ses_1/permission/per_1/reply")
+    && *body == json!({"decision":"once"})));
+  drop(requests);
+  server.state.corrupt_admission.store(true, Ordering::Relaxed);
+  let before = server.mutations().len();
+  let error = adapter
+    .execute(request(
+      &adapter,
+      "uncertain-modern",
+      message("Do not replay", DeliveryMode::Queue),
+    ))
+    .await
+    .unwrap_err();
+  assert_eq!(error.kind, ErrorKind::Uncertain);
+  assert_eq!(server.mutations().len(), before + 1);
+  adapter.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn current_dialect_rejects_an_explicit_workspace_fence_it_cannot_attest() {
+  let server = Server::start().await;
+  server.state.current.store(true, Ordering::Relaxed);
+  let result = OpenCodeAdapter::connect(ConnectionOptions {
+    runtime_id: "workspace-test".into(),
+    endpoint: server.endpoint.clone(),
+    directory: "/test/project".into(),
+    workspace_id: Some("wrk_expected".into()),
+    credentials: None,
+  })
+  .await;
+  assert!(matches!(
+    result,
+    Err(InteractionError {
+      kind: ErrorKind::Unsupported,
+      ..
+    })
+  ));
+  assert!(server.mutations().is_empty());
 }
 
 fn message(text: &str, delivery: DeliveryMode) -> Command {
@@ -648,6 +998,12 @@ async fn attached_disconnect_invalidates_instance_before_future_mutations() {
 
 #[test]
 fn rejects_legacy_only_catalog_and_credential_bearing_urls() {
-  assert!(capabilities(&json!({"paths":{"/session/{sessionID}/prompt_async":{"post":{}}}})).is_err());
+  assert!(
+    capabilities(
+      &json!({"paths":{"/session/{sessionID}/prompt_async":{"post":{}}}}),
+      api::Dialect::LegacyV2
+    )
+    .is_err()
+  );
   assert!(Transport::new("http://user:secret@localhost:4096/", "/test/project".into(), None, None).is_err());
 }

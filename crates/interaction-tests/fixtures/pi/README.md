@@ -1,9 +1,11 @@
 # Native Pi RPC fixture
 
 `session.json` records actual stdin/stdout of Pi **0.82.1**, compiled from the
-vendored revision `fdbedcad8aeb7c1e2ebd3b85f16e60e5fab0b2c3`. The agent uses a
+previously vendored revision `fdbedcad8aeb7c1e2ebd3b85f16e60e5fab0b2c3`. The agent uses a
 fresh temporary home, an explicit local model definition, and a test extension
 whose tool asks a native `ctx.ui.select` question. No hosted provider is used.
+This capture and its preparation script remain pinned to that revision; updating
+the source checkout does not relabel these frames as a newer native capture.
 
 The same adapter workflow runs during capture and ordinary replay:
 

@@ -771,6 +771,35 @@ async fn approval_responses_never_widen_native_decisions() {
 }
 
 #[tokio::test]
+async fn unadvertised_human_checkpoints_and_unknown_approval_kinds_fail_closed() {
+  let (adapter, mut peer) = attach_bound().await;
+  for kind in ["humanCommand", "futureCommand"] {
+    peer
+      .send(
+        json!({"id":kind,"method":"item/commandExecution/requestApproval","params":{
+          "threadId":"thread-one","turnId":"turn-one","itemId":"checkpoint","kind":kind,
+          "command":"printf fixture","availableDecisions":["accept","decline","cancel"]
+        }}),
+      )
+      .await;
+    let response = peer.next().await;
+    assert_eq!(response["id"], kind);
+    assert_eq!(response["error"]["code"], -32601);
+  }
+  let pending = adapter
+    .execute(request(
+      &adapter,
+      "pending",
+      Some("thread-one"),
+      Command::PendingInteractions,
+    ))
+    .await
+    .unwrap();
+  assert!(matches!(pending,Reply::Interactions(pending) if pending.is_empty()));
+  adapter.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn unsupported_server_requests_receive_method_error_without_disconnect() {
   let (adapter, mut peer) = attach().await;
   peer

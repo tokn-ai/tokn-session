@@ -31,6 +31,9 @@ impl<'de> Deserialize<'de> for MessageData {
       Some("assistant") => serde_json::from_value(native.clone()).map(MessageItem::Assistant),
       Some("model-switched") => serde_json::from_value(native.clone()).map(MessageItem::ModelSwitched),
       Some("agent-switched") => serde_json::from_value(native.clone()).map(MessageItem::AgentSwitched),
+      Some("skill") => serde_json::from_value(native.clone()).map(MessageItem::Skill),
+      Some("location-switched") => serde_json::from_value(native.clone()).map(MessageItem::LocationSwitched),
+      Some("idle") => serde_json::from_value(native.clone()).map(MessageItem::Idle),
       Some("system" | "synthetic") => serde_json::from_value(native.clone()).map(MessageItem::Text),
       Some("shell") => serde_json::from_value(native.clone()).map(MessageItem::Shell),
       Some("compaction") => serde_json::from_value(native.clone()).map(MessageItem::Compaction),
@@ -63,6 +66,9 @@ pub enum MessageItem {
   ModelSwitched(ModelSwitched),
   AgentSwitched(AgentSwitched),
   Text(TextMessage),
+  Skill(TextMessage),
+  LocationSwitched(LocationSwitched),
+  Idle(Idle),
   Shell(Shell),
   Compaction(Compaction),
   Unknown(UnknownItem),
@@ -70,6 +76,7 @@ pub enum MessageItem {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FileAttachment {
+  #[serde(default)]
   pub uri: String,
   pub mime: String,
   #[serde(default)]
@@ -150,10 +157,11 @@ pub struct TextMessage {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Shell {
   pub id: String,
-  #[serde(rename = "callID")]
+  #[serde(rename = "shellID", alias = "callID")]
   pub call_id: String,
   pub command: String,
-  pub output: String,
+  #[serde(default)]
+  pub output: Value,
   pub time: Time,
   #[serde(flatten)]
   pub extra: ExtraFields,
@@ -162,9 +170,30 @@ pub struct Shell {
 pub struct Compaction {
   pub id: String,
   pub reason: String,
+  #[serde(default)]
   pub summary: String,
+  #[serde(default)]
   pub recent: String,
   pub time: Time,
+  #[serde(flatten)]
+  pub extra: ExtraFields,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LocationSwitched {
+  pub id: String,
+  pub location: Value,
+  pub time: Time,
+  #[serde(flatten)]
+  pub extra: ExtraFields,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Idle {
+  pub id: String,
+  pub outcome: String,
+  pub time: Time,
+  #[serde(default)]
+  pub error: Option<Value>,
   #[serde(flatten)]
   pub extra: ExtraFields,
 }
@@ -223,6 +252,7 @@ pub enum ContentItem {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TextContent {
+  #[serde(default)]
   pub id: String,
   pub text: String,
   #[serde(flatten)]

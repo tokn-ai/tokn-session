@@ -73,11 +73,13 @@ pub enum PiSessionItem {
   Session(SessionHeader),
   ModelChange(ModelChangeItem),
   ThinkingLevelChange(ThinkingLevelChangeItem),
+  Usage(UsageItem),
   Message(MessageItem),
   Compaction(CompactionItem),
   BranchSummary(BranchSummaryItem),
   Custom(CustomItem),
   CustomMessage(CustomMessageItem),
+  ContextEdit(ContextEditItem),
   Label(LabelItem),
   SessionInfo(SessionInfoItem),
   Leaf(LeafItem),
@@ -92,11 +94,13 @@ impl PiSessionItem {
       Self::Session(_) => Some("session"),
       Self::ModelChange(_) => Some("model_change"),
       Self::ThinkingLevelChange(_) => Some("thinking_level_change"),
+      Self::Usage(_) => Some("usage"),
       Self::Message(_) => Some("message"),
       Self::Compaction(_) => Some("compaction"),
       Self::BranchSummary(_) => Some("branch_summary"),
       Self::Custom(_) => Some("custom"),
       Self::CustomMessage(_) => Some("custom_message"),
+      Self::ContextEdit(_) => Some("context_edit"),
       Self::Label(_) => Some("label"),
       Self::SessionInfo(_) => Some("session_info"),
       Self::Leaf(_) => Some("leaf"),
@@ -171,8 +175,50 @@ pub struct MessageItem {
   pub extra: ExtraFields,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageItem {
+  #[serde(default)]
+  pub id: Option<String>,
+  #[serde(default)]
+  pub parent_id: Option<String>,
+  #[serde(default)]
+  pub timestamp: Option<String>,
+  #[serde(default)]
+  pub kind: Option<String>,
+  #[serde(default)]
+  pub provider: Option<String>,
+  #[serde(default)]
+  pub model: Option<String>,
+  #[serde(default)]
+  pub usage: Option<Value>,
+  #[serde(default)]
+  pub note: Option<String>,
+  #[serde(flatten)]
+  pub extra: ExtraFields,
+}
+
+/// An append-only change to model context, not a rewrite of transcript history.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextEditItem {
+  #[serde(default)]
+  pub id: Option<String>,
+  #[serde(default)]
+  pub parent_id: Option<String>,
+  #[serde(default)]
+  pub timestamp: Option<String>,
+  #[serde(default)]
+  pub target_id: Option<String>,
+  #[serde(default)]
+  pub replacement: Option<Value>,
+  #[serde(flatten)]
+  pub extra: ExtraFields,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
+  System(SystemMessage),
   User(UserMessage),
   Assistant(AssistantMessage),
   ToolResult(ToolResultMessage),
@@ -195,12 +241,30 @@ impl Serialize for Message {
     S: Serializer,
   {
     match self {
+      Self::System(message) => message.serialize(serializer),
       Self::User(message) => message.serialize(serializer),
       Self::Assistant(message) => message.serialize(serializer),
       Self::ToolResult(message) => message.serialize(serializer),
       Self::Unknown(item) => item.native.serialize(serializer),
     }
   }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemMessage {
+  #[serde(default)]
+  pub content: UserContent,
+  #[serde(default)]
+  pub sections: Option<Value>,
+  #[serde(default)]
+  pub tools_added: Option<Value>,
+  #[serde(default)]
+  pub tools_removed: Option<Value>,
+  #[serde(default)]
+  pub timestamp: Option<u64>,
+  #[serde(flatten)]
+  pub extra: ExtraFields,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -422,6 +486,8 @@ pub struct CompactionItem {
   pub usage: Option<Value>,
   #[serde(default)]
   pub from_hook: Option<bool>,
+  #[serde(default)]
+  pub system_message: Option<SystemMessage>,
   #[serde(flatten)]
   pub extra: ExtraFields,
 }
@@ -578,11 +644,13 @@ fn decode_session_item(native_type: Option<String>, native: Value) -> PiSessionI
     Some("session") => decode_item(native_type, native, PiSessionItem::Session),
     Some("model_change") => decode_item(native_type, native, PiSessionItem::ModelChange),
     Some("thinking_level_change") => decode_item(native_type, native, PiSessionItem::ThinkingLevelChange),
+    Some("usage") => decode_item(native_type, native, PiSessionItem::Usage),
     Some("message") => decode_item(native_type, native, PiSessionItem::Message),
     Some("compaction") => decode_item(native_type, native, PiSessionItem::Compaction),
     Some("branch_summary") => decode_item(native_type, native, PiSessionItem::BranchSummary),
     Some("custom") => decode_item(native_type, native, PiSessionItem::Custom),
     Some("custom_message") => decode_item(native_type, native, PiSessionItem::CustomMessage),
+    Some("context_edit") => decode_item(native_type, native, PiSessionItem::ContextEdit),
     Some("label") => decode_item(native_type, native, PiSessionItem::Label),
     Some("session_info") => decode_item(native_type, native, PiSessionItem::SessionInfo),
     Some("leaf") => decode_item(native_type, native, PiSessionItem::Leaf),
@@ -599,6 +667,7 @@ fn decode_session_item(native_type: Option<String>, native: Value) -> PiSessionI
 fn decode_message(native: Value) -> Message {
   let native_type = native.get("role").and_then(Value::as_str).map(str::to_string);
   match native_type.as_deref() {
+    Some("system") => decode_nested(native_type, native, Message::System),
     Some("user") => decode_nested(native_type, native, Message::User),
     Some("assistant") => decode_nested(native_type, native, Message::Assistant),
     Some("toolResult") => decode_nested(native_type, native, Message::ToolResult),

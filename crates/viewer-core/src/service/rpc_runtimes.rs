@@ -143,6 +143,11 @@ impl ViewerService {
     if current.id != locator.session_id {
       return Err("Session history identity changed; refresh the catalog".into());
     }
+    if locator.provider == ViewerProvider::Dsh
+      && (current.parent_session_id.is_some() || current.agent_role.as_deref() == Some("subagent"))
+    {
+      return Err("Control DSH subagents through their parent session".into());
+    }
     if locator.provider == ViewerProvider::ZCode && current.parent_session_id.is_some() {
       return Err("Control ZCode subagents through their parent session".into());
     }

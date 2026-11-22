@@ -197,6 +197,14 @@ async fn replay(State(inner): State<Arc<Inner>>, mut request: Request<Body>) -> 
     .get("upgrade")
     .is_some_and(|value| value == "websocket")
   {
+    if !inner
+      .fixture
+      .records
+      .iter()
+      .any(|record| matches!(record, WireRecord::Event { channel, .. } if channel == &path))
+    {
+      return (StatusCode::NOT_FOUND, "Unrecorded native WebSocket route").into_response();
+    }
     let (mut parts, _) = request.into_parts();
     return match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
       Ok(upgrade) => upgrade

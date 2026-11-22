@@ -203,7 +203,8 @@ static choice lists, and free-text/secret markers. It does not infer current
 pending state, selected answers, or submission controls from history. Replies
 retain their original user-message or tool-result representation.
 
-Source of truth: `vendor/codex` at `2351d9e1b6`, particularly
+The question mapping was established against Codex `2351d9e1b6` and checked
+against the refreshed `357fe240c9` source, particularly
 `protocol/src/items.rs`, `protocol/src/request_user_input.rs`,
 `core/src/tools/handlers/request_user_input_async.rs`, and `rollout/src/policy.rs`
 under `codex-rs/`.
@@ -279,8 +280,8 @@ without inventing lifecycle identities. Tool cancellations and diagnostic prose
 do not end the containing response.
 
 The additive Codex completion-error, nonterminal error-code, and optional abort-ID
-shapes were checked against upstream checkout `cf7e9cfe6a`, newer than the pinned
-`2351d9e1b6` source. The tolerant decoder accepts them without a vendor update.
+shapes were checked against upstream checkout `cf7e9cfe6a` and remain accepted
+at the refreshed `357fe240c9` reference through the tolerant decoder.
 
 Codex turn context, world state, inter-agent communication metadata,
 and rollbacks are metadata. Compaction summaries are

@@ -11,6 +11,9 @@ Start-or-steer uses Pi's native `prompt` admission. Strict active-only steering
 is unavailable because Pi's standalone `steer` cannot atomically reject a settled
 runtime. Model intent is unavailable: Pi offers separate setter/prompt requests,
 not an atomic model-on-send operation. Callers must consult capabilities.
+Newer native replies report `started`, `queued`, or extension `handled` admission.
+The adapter preserves that distinction; a queue acknowledgement does not prove
+steering consumption. Older replies without a disposition confirm acceptance only.
 
 Incoming native notifications are preserved, including streaming messages and
 tool progress. Pending dialogs are scoped to a runtime instance and native

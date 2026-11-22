@@ -41,6 +41,9 @@ impl SourceVersion {
     // SQLite writes may change only the WAL. JSONL providers have just one
     // dependency here; authoritative readers validate their full lineage.
     let mut paths = vec![locator.source_path.clone()];
+    if locator.provider == ViewerProvider::Dsh {
+      paths = tokn_session_dsh::storage_dependency_paths(&locator.source_path).unwrap_or(paths);
+    }
     if matches!(
       locator.provider,
       ViewerProvider::OpenCode | ViewerProvider::ZCode | ViewerProvider::WorkBuddy

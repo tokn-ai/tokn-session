@@ -65,10 +65,11 @@ impl OpenCodeNormalizer {
                 .filter_map(|part| (part["type"] == "text").then(|| part["text"].as_str()).flatten())
                 .collect::<Vec<_>>()
                 .join("\n");
-              let output = if status == Some("pending") {
+              let metadata = state.get("metadata").or_else(|| state.get("structured"));
+              let output = if matches!(status, Some("pending" | "streaming")) {
                 None
               } else {
-                Some(json!({"output":text,"metadata":state.get("structured"),"error":state.get("error")}))
+                Some(json!({"output":text,"metadata":metadata,"error":state.get("error")}))
               };
               let mut images = state
                 .get("attachments")
@@ -93,7 +94,7 @@ impl OpenCodeNormalizer {
                 message_id: Some(id.clone()),
                 parent_id: None,
                 record_kind: match status {
-                  Some("pending") => ToolRecordKind::Invocation,
+                  Some("pending" | "streaming") => ToolRecordKind::Invocation,
                   Some("running") => ToolRecordKind::Progress,
                   _ => ToolRecordKind::Snapshot,
                 },
@@ -104,7 +105,7 @@ impl OpenCodeNormalizer {
                 transport: Some(ToolTransport::Native),
                 summary: tool_summary_for_io(Some(&tool.name), input.as_ref(), output.as_ref()),
                 phase: match status {
-                  Some("pending") => Phase::Started,
+                  Some("pending" | "streaming") => Phase::Started,
                   Some("running") => Phase::Updated,
                   Some("completed" | "error") => Phase::Finished,
                   _ => Phase::Updated,
@@ -114,13 +115,16 @@ impl OpenCodeNormalizer {
                 images: v2_images(&images, &tool.id),
                 is_error: match status {
                   Some("error") => Some(true),
-                  Some("completed") => Some(metadata_exit_is_error(state.get("structured"))),
+                  Some("completed") => Some(metadata_exit_is_error(metadata)),
                   _ => None,
                 },
                 native: Some(content.native().clone()),
                 timestamp: Some(tool.time.created.to_string()),
               }));
-              if !matches!(status, Some("pending" | "running" | "completed" | "error")) {
+              if !matches!(
+                status,
+                Some("pending" | "streaming" | "running" | "completed" | "error")
+              ) {
                 events.push(self.v2_unknown("tool.state", content.native(), time));
               }
             }
@@ -172,9 +176,50 @@ impl OpenCodeNormalizer {
         Phase::Finished,
         time,
       )),
+      MessageItem::Skill(message) => events.push(AgentEvent::Metadata(MetadataEvent {
+        provider: self.provider,
+        session_id: Some(self.session_id.clone()),
+        kind: MetadataKind::Context,
+        native_type: "message.v2.skill".into(),
+        summary: format!(
+          "skill: {}",
+          message.extra.get("name").and_then(Value::as_str).unwrap_or(&message.id)
+        ),
+        native: native.clone(),
+        timestamp: timestamp(time),
+      })),
+      MessageItem::LocationSwitched(_) => events.push(AgentEvent::Metadata(MetadataEvent {
+        provider: self.provider,
+        session_id: Some(self.session_id.clone()),
+        kind: MetadataKind::Configuration,
+        native_type: "message.v2.location-switched".into(),
+        summary: "session location changed".into(),
+        native: native.clone(),
+        timestamp: timestamp(time),
+      })),
+      MessageItem::Idle(message) => {
+        if matches!(message.outcome.as_str(), "succeeded" | "failed" | "interrupted") {
+          events.push(AgentEvent::Metadata(MetadataEvent {
+            provider: self.provider,
+            session_id: Some(self.session_id.clone()),
+            kind: MetadataKind::Context,
+            native_type: "message.v2.idle".into(),
+            summary: format!("turn {}", message.outcome),
+            native: native.clone(),
+            timestamp: timestamp(time),
+          }));
+        } else {
+          events.push(self.v2_unknown("idle", native, time));
+        }
+      }
       MessageItem::Shell(message) => {
         let input = json!({"command":message.command});
-        let output = json!({"output":message.output});
+        let output = match &message.output {
+          Value::Object(_) => message.output.clone(),
+          _ => json!({"output":message.output}),
+        };
+        let status = message.extra.get("status").and_then(Value::as_str);
+        let finished = message.time.completed.is_some() || matches!(status, Some("exited" | "timeout" | "killed"));
         events.push(AgentEvent::ToolCall(ToolCallEvent {
           provider: self.provider,
           session_id: Some(self.session_id.clone()),
@@ -188,26 +233,45 @@ impl OpenCodeNormalizer {
           tool_kind: tool_kind_for_optional_name(Some("shell")),
           transport: Some(ToolTransport::Native),
           summary: tool_summary_for_io(Some("shell"), Some(&input), Some(&output)),
-          phase: if message.time.completed.is_some() {
-            Phase::Finished
-          } else {
-            Phase::Updated
-          },
+          phase: if finished { Phase::Finished } else { Phase::Updated },
           input: Some(input),
           output: Some(output),
           images: Vec::new(),
-          is_error: None,
+          is_error: if matches!(status, Some("timeout" | "killed")) {
+            Some(true)
+          } else {
+            message.extra.get("exit").and_then(Value::as_i64).map(|exit| exit != 0)
+          },
           native: Some(native.clone()),
           timestamp: timestamp(time),
         }));
       }
       MessageItem::Compaction(message) => {
-        let mut compact =
-          CompactionEvent::new(self.provider, Some(self.session_id.clone()), CompactionState::Completed);
+        let state = match message.extra.get("status").and_then(Value::as_str) {
+          None | Some("completed") => CompactionState::Completed,
+          Some("running") => CompactionState::Started,
+          Some("failed") => CompactionState::Failed,
+          _ => {
+            events.push(self.v2_unknown("compaction", native, time));
+            return events;
+          }
+        };
+        let mut compact = CompactionEvent::new(self.provider, Some(self.session_id.clone()), state);
         compact.compaction_id = Some(id.clone());
         compact.timestamp = timestamp(time);
         compact.reason = Some(message.reason.clone());
-        compact.summary = Some(message.summary.clone());
+        compact.summary = (!message.summary.is_empty()).then(|| message.summary.clone());
+        compact.summary_opaque =
+          native.pointer("/native/messages").is_some() || native.get("providerContext").is_some();
+        compact.context.first_kept_entry_id = native
+          .pointer("/metadata/keepID")
+          .and_then(Value::as_str)
+          .map(str::to_owned);
+        if state == CompactionState::Failed {
+          if let Some(error) = native.get("error") {
+            events.extend(self.normalize_error(&id, native, error, time));
+          }
+        }
         compact.source_refs = vec![id];
         events.push(AgentEvent::Compaction(compact));
       }
@@ -289,6 +353,19 @@ fn v2_images(files: &[FileAttachment], owner: &str) -> Vec<MessageImage> {
     .enumerate()
     .filter(|(_, file)| file.mime.starts_with("image/") || file.uri.starts_with("data:image/"))
     .map(|(index, file)| {
+      if file.uri.is_empty() {
+        return MessageImage {
+          image_id: format!("{owner}:file:{index}"),
+          mime_type: Some(file.mime.clone()),
+          name: file.name.clone(),
+          source: file
+            .extra
+            .get("data")
+            .and_then(Value::as_str)
+            .map(|data| MessageImageSource::Base64 { data: data.into() })
+            .unwrap_or(MessageImageSource::Unavailable { reference: None }),
+        };
+      }
       MessageImage::from_url(
         format!("{owner}:file:{index}"),
         file.uri.clone(),

@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+mod blob;
+pub use blob::{OpenCodeBlob, media_reference_hash};
 mod cache;
 pub use cache::{
   CachedSessionRecords, CompactRecord, CompactSessionRecords, OpenCodeCompactCache, OpenCodeSessionCache,
@@ -49,8 +51,8 @@ pub struct OpenCodeSessionSource {
   flavor: SessionDatabaseFlavor,
 }
 
-/// Per-session conversation ownership. The metadata table is shared by V1/V2,
-/// so an empty session cannot establish which native loop created it.
+/// Per-session conversation ownership. Older V1/V2 share metadata, making an
+/// empty legacy row ambiguous. Current `session_v2` metadata proves V2 ownership.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OpenCodeHistoryFormat {
@@ -341,7 +343,7 @@ impl OpenCodeSessionSource {
     let session = load_session_row(&connection, capabilities, session_id, self.flavor)?
       .ok_or_else(|| format!("no {} session found for `{session_id}`", self.flavor.name()))?;
     if self.v2_history(connection, capabilities, session_id)? {
-      return load_v2_records(connection, session, database_path, include_native);
+      return load_v2_records(connection, capabilities, session, database_path, include_native);
     }
     let title = native_title(session.title.clone());
     let messages = load_messages(&connection, &session.id, self.flavor.name())?;
@@ -428,11 +430,16 @@ impl OpenCodeSessionSource {
       ));
     }
 
-    let matches: Vec<_> = self
-      .list_session_relations()?
-      .into_iter()
-      .filter(|session| session.id == id_or_path || session.id.starts_with(id_or_path))
-      .collect();
+    let sessions = self.list_session_relations()?;
+    let exact: Vec<_> = sessions.iter().filter(|session| session.id == id_or_path).collect();
+    let matches: Vec<_> = if exact.is_empty() {
+      sessions
+        .iter()
+        .filter(|session| session.id.starts_with(id_or_path))
+        .collect()
+    } else {
+      exact
+    };
 
     match matches.as_slice() {
       [session] => Ok((session.path.clone(), session.id.clone())),
@@ -531,6 +538,35 @@ fn read_session_catalog(
   flavor: SessionDatabaseFlavor,
   allow_partial: bool,
 ) -> Result<(Vec<SessionCatalogRow>, bool), String> {
+  let mut result = Vec::new();
+  let mut complete = true;
+  let mut ids = std::collections::HashSet::new();
+  for (table, layout) in capabilities.session_layouts(matches!(flavor, SessionDatabaseFlavor::OpenCode)) {
+    let (rows, part_complete) = read_session_catalog_table(table, connection, layout, flavor, allow_partial)?;
+    complete &= part_complete;
+    for row in rows {
+      if !ids.insert(row.id.clone()) {
+        if !allow_partial {
+          return Err("OpenCode session ID exists in both metadata tables; refusing ambiguous ownership".into());
+        }
+        complete = false;
+        result.retain(|existing: &SessionCatalogRow| existing.id != row.id);
+        continue;
+      }
+      result.push(row);
+    }
+  }
+  result.sort_by(|a, b| b.time_created.cmp(&a.time_created).then_with(|| b.id.cmp(&a.id)));
+  Ok((result, complete))
+}
+
+fn read_session_catalog_table(
+  table: &str,
+  connection: &Connection,
+  capabilities: OpenCodeCapabilities,
+  flavor: SessionDatabaseFlavor,
+  allow_partial: bool,
+) -> Result<(Vec<SessionCatalogRow>, bool), String> {
   let source_name = flavor.name();
   let condition = if flavor.supports_soft_delete(capabilities) {
     "where time_deleted is null"
@@ -540,7 +576,7 @@ fn read_session_catalog(
   let mut statement = connection
     .prepare(&format!(
       "select {}
-       from session {condition}
+       from {table} {condition}
        order by time_created desc, id desc",
       capabilities.session_catalog_projection()
     ))
@@ -698,6 +734,25 @@ fn load_session_row(
   session_id: &str,
   flavor: SessionDatabaseFlavor,
 ) -> Result<Option<OpenCodeSessionRow>, String> {
+  let mut result = None;
+  for (table, layout) in capabilities.session_layouts(matches!(flavor, SessionDatabaseFlavor::OpenCode)) {
+    if let Some(row) = load_session_row_table(table, connection, layout, session_id, flavor)? {
+      if result.is_some() {
+        return Err("OpenCode session ID exists in both metadata tables; refusing ambiguous ownership".into());
+      }
+      result = Some(row);
+    }
+  }
+  Ok(result)
+}
+
+fn load_session_row_table(
+  table: &str,
+  connection: &Connection,
+  capabilities: OpenCodeCapabilities,
+  session_id: &str,
+  flavor: SessionDatabaseFlavor,
+) -> Result<Option<OpenCodeSessionRow>, String> {
   let source_name = flavor.name();
   let condition = if flavor.supports_soft_delete(capabilities) {
     " and time_deleted is null"
@@ -707,7 +762,7 @@ fn load_session_row(
   connection
     .query_row(
       &format!(
-        "select {} from session where id = ?1{condition}",
+        "select {} from {table} where id = ?1{condition}",
         capabilities.session_projection()
       ),
       params![session_id],
@@ -940,7 +995,15 @@ fn history_format(
       .map_err(|error| format!("Could not verify OpenCode history format: {error}"))
   };
   let v1 = capabilities.has_v1 && exists("message")?;
-  let v2 = capabilities.has_v2 && exists("session_message")?;
+  let current_owner = capabilities.session_v2.is_some()
+    && connection
+      .query_row(
+        "select exists(select 1 from session_v2 where id=?1)",
+        [session_id],
+        |row| row.get::<_, bool>(0),
+      )
+      .map_err(|error| error.to_string())?;
+  let v2 = current_owner || capabilities.has_v2 && exists("session_message")?;
   Ok(match (v1, v2) {
     (false, false) => OpenCodeHistoryFormat::Empty,
     (true, false) => OpenCodeHistoryFormat::V1,
@@ -949,10 +1012,32 @@ fn history_format(
   })
 }
 
-fn decode_v2_message(id: &str, kind: &str, data: &str) -> Result<tokn_opencode_protocol::v2::MessageData, String> {
+fn decode_v2_message(
+  id: &str,
+  kind: &str,
+  data: &str,
+  parts: &[cache::RawPart],
+) -> Result<tokn_opencode_protocol::v2::MessageData, String> {
   let mut data: Value =
     serde_json::from_str(data).map_err(|error| format!("invalid OpenCode V2 message `{id}`: {error}"))?;
   if let Some(object) = data.as_object_mut() {
+    if kind == "assistant" && !parts.is_empty() {
+      let mut content = Vec::with_capacity(parts.len());
+      for part in parts {
+        let mut value: Value =
+          serde_json::from_str(&part.data).map_err(|error| format!("invalid OpenCode V2 content: {error}"))?;
+        if let (Some(object), Some(kind)) = (value.as_object_mut(), part.kind.as_ref()) {
+          object.insert("type".into(), Value::String(kind.clone()));
+        }
+        content.push(value);
+      }
+      match object.get("content") {
+        Some(Value::Array(inline)) => content.extend(inline.iter().cloned()),
+        None | Some(Value::Null) => {}
+        Some(_) => return Err("OpenCode V2 inline content is malformed".into()),
+      }
+      object.insert("content".into(), Value::Array(content));
+    }
     object.insert("id".into(), Value::String(id.into()));
     object.insert("type".into(), Value::String(kind.into()));
   }
@@ -978,6 +1063,7 @@ fn v2_preview(connection: &Connection, session_id: &str) -> Result<Option<String
 
 fn load_v2_records(
   connection: &Connection,
+  capabilities: OpenCodeCapabilities,
   session: OpenCodeSessionRow,
   database_path: PathBuf,
   native: bool,
@@ -991,26 +1077,16 @@ fn load_v2_records(
       .map_err(|error| error.to_string())?,
     events: normalizer.normalize_session(&session),
   }];
-  let mut statement = connection
-    .prepare("select id, type, time_created, data from session_message where session_id = ?1 order by seq")
-    .map_err(|error| error.to_string())?;
-  let rows = statement
-    .query_map([&session.id], |row| {
-      Ok((
-        row.get::<_, String>(0)?,
-        row.get::<_, String>(1)?,
-        row.get::<_, Option<i64>>(2)?,
-        row.get::<_, String>(3)?,
-      ))
-    })
-    .map_err(|error| error.to_string())?;
-  for row in rows {
-    let (id, kind, _time, data) = row.map_err(|error| error.to_string())?;
-    let decoded = decode_v2_message(&id, &kind, &data)?;
+  let mut budget = cache::SourceBudget { bytes: 0, limit: None };
+  for row in cache::read_v2_message_rows(connection, capabilities, &session.id, &mut budget)? {
+    let decoded = row.decode(&session)?;
+    let cache::DecodedRecord::V2Message(message) = decoded else {
+      unreachable!()
+    };
     records.push(NormalizedRecord {
-      record_id: format!("v2:{id}"),
-      native: native.then(|| decoded.native().clone()),
-      events: normalizer.normalize_v2_message(&decoded),
+      record_id: row.id,
+      native: native.then(|| message.native().clone()),
+      events: normalizer.normalize_v2_message(&message),
     });
   }
   let title = native_title(session.title);

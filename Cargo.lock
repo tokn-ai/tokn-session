@@ -6744,8 +6744,10 @@ dependencies = [
 name = "tokn-session-dsh"
 version = "0.1.1"
 dependencies = [
+ "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokn-dsh-protocol",
  "tokn-session-core",

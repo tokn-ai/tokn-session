@@ -47,13 +47,26 @@ pub(crate) fn question(native: wire::QuestionRequest) -> PendingInteraction {
 }
 
 pub(crate) fn permission(native: wire::PermissionRequest) -> PendingInteraction {
+  let mut projected = serde_json::to_value(&native).expect("native permission is serializable");
+  projected["permission_decisions"] = json!(["allow_once", "deny"]);
+  let mut details = serde_json::to_string_pretty(&json!({
+    "action":native.action, "resources":native.resources,
+    "message":native.extra.get("message").and_then(Value::as_str),
+  }))
+  .expect("permission details serialize");
+  let mut end = details.len().min(16 * 1024);
+  while !details.is_char_boundary(end) {
+    end -= 1;
+  }
+  details.truncate(end);
+  projected["details"] = json!(details);
   PendingInteraction {
     interaction_id: format!("permission:{}", native.id),
     session_id: Some(native.session_id.clone()),
     kind: InteractionKind::Permission,
     title: native.action.clone(),
     questions: vec![],
-    native: serde_json::to_value(native).expect("native permission is serializable"),
+    native: projected,
   }
 }
 
@@ -107,11 +120,21 @@ pub(crate) fn event_kind(event: &wire::NativeEvent) -> Option<RuntimeEventKind> 
       .ok()
       .map(question)
       .map(RuntimeEventKind::InteractionRequested),
-    "permission.v2.asked" => serde_json::from_value(event.data.clone())
+    "permission.v2.asked" | "permission.asked" => serde_json::from_value(event.data.clone())
       .ok()
       .map(permission)
       .map(RuntimeEventKind::InteractionRequested),
-    "question.v2.replied" | "question.v2.rejected" | "permission.v2.replied" => {
+    "form.created" => serde_json::from_value::<wire::current::FormRequest>(event.data["form"].clone())
+      .ok()
+      .filter(|form| form.session_id != "global")
+      .map(crate::forms::project)
+      .map(RuntimeEventKind::InteractionRequested),
+    "form.replied" | "form.cancelled" => event.data["id"]
+      .as_str()
+      .map(|id| RuntimeEventKind::InteractionResolved {
+        interaction_id: format!("form:{id}"),
+      }),
+    "question.v2.replied" | "question.v2.rejected" | "permission.v2.replied" | "permission.replied" => {
       let prefix = if event.kind.starts_with("question.") {
         "question"
       } else {
@@ -192,5 +215,21 @@ mod tests {
     ] {
       assert!(answer_body(&request, vec![answer]).is_err());
     }
+  }
+
+  #[test]
+  fn permission_projection_exposes_per_use_decisions_and_bounded_operation_details_only() {
+    let native = serde_json::from_value(json!({
+      "id":"per_native", "sessionID":"ses_native", "action":"bash", "resources":["printf fixture"],
+      "message":"Run this command", "metadata":{"credential":"private-native-metadata"}
+    }))
+    .unwrap();
+    let request = permission(native);
+    assert_eq!(request.native["permission_decisions"], json!(["allow_once", "deny"]));
+    let details = request.native["details"].as_str().unwrap();
+    assert!(details.contains("printf fixture"));
+    assert!(details.contains("Run this command"));
+    assert!(!details.contains("private-native-metadata"));
+    assert_eq!(request.native["metadata"]["credential"], "private-native-metadata");
   }
 }

@@ -173,3 +173,24 @@ fn decode_message(message: Value) -> Message {
   };
   item.message.expect("message should be present")
 }
+
+#[test]
+fn recognizes_usage_context_edits_and_system_state_without_losing_native_fields() {
+  for native in [
+    json!({"type":"usage","id":"u1","kind":"cache_warm","provider":"fixture","model":"model","usage":{"input":4,"output":0},"note":"extension override"}),
+    json!({"type":"context_edit","id":"e1","targetId":"m1","replacement":null}),
+    json!({"type":"context_edit","id":"e2","targetId":"m2","replacement":{"content":[{"type":"text","text":"replacement"}],"future":true}}),
+    json!({"type":"message","id":"m1","message":{"role":"system","content":"instructions","sections":{"tools":null},"toolsAdded":[{"name":"inspect"}],"timestamp":1}}),
+    json!({"type":"compaction","id":"c1","systemMessage":{"role":"system","content":"instructions","timestamp":2}}),
+  ] {
+    let line: PiSessionLine = serde_json::from_value(native.clone()).unwrap();
+    assert!(!matches!(line.item(), PiSessionItem::Unknown(_)));
+    if let PiSessionItem::Message(item) = line.item() {
+      assert!(matches!(item.message, Some(Message::System(_))));
+    }
+    if let PiSessionItem::Compaction(item) = line.item() {
+      assert!(item.system_message.is_some());
+    }
+    assert_eq!(serde_json::to_value(line).unwrap(), native);
+  }
+}

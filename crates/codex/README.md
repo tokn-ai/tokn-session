@@ -1,5 +1,10 @@
 # tokn-session-codex
 
+Generated-image history accepts inline results and durable native `fileId`
+references, including migration records with both fields. Explicit saved paths
+remain recorded paths; an opaque file ID remains unavailable rather than being
+converted to a guessed filesystem path. No image is fetched during normalization.
+
 Read-only discovery and normalization of persisted Codex rollout JSONL and
 Zstandard-compressed `.jsonl.zst` files into
 `tokn_session_core::AgentEvent`.

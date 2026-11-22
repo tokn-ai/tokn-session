@@ -827,12 +827,12 @@ fn normalize_response_item(
     }
     ResponseItem::ImageGenerationCall(item) => {
       let (record_kind, phase, is_error) = standalone_tool_call_lifecycle(item.status.as_deref());
-      let native = (is_error == Some(true)).then(|| json_value(&item));
+      let item_native = json_value(&item);
+      let image = images::generated_image(&item_native);
+      let native =
+        (is_error == Some(true) || matches!(image, Some(images::GeneratedImage::File(_)))).then(|| item_native.clone());
       vec![AgentEvent::ToolCall(ToolCallEvent {
-        images: images::generated_images(
-          item.result.as_deref(),
-          item.extra.get("saved_path").and_then(Value::as_str),
-        ),
+        images: images::generated_images(image, item.extra.get("saved_path").and_then(Value::as_str)),
         provider: Provider::Codex,
         session_id,
         turn_id: None,
@@ -1314,10 +1314,10 @@ fn normalize_image_generation_end(
   payload: &Value,
   timestamp: Option<String>,
 ) -> Vec<AgentEvent> {
-  let (Some(call_id), Some(status), Some(result)) = (
+  let (Some(call_id), Some(status), Some(image)) = (
     string_field(payload, "call_id"),
     string_field(payload, "status"),
-    payload.get("result").and_then(Value::as_str),
+    images::generated_image(payload),
   ) else {
     return vec![unknown_event(
       session_id,
@@ -1341,7 +1341,7 @@ fn normalize_image_generation_end(
     )];
   }
   vec![AgentEvent::ToolCall(ToolCallEvent {
-    images: images::generated_images(Some(result), payload.get("saved_path").and_then(Value::as_str)),
+    images: images::generated_images(Some(image), payload.get("saved_path").and_then(Value::as_str)),
     provider: Provider::Codex,
     session_id,
     turn_id: None,
@@ -1359,7 +1359,10 @@ fn normalize_image_generation_end(
       .get("revised_prompt")
       .and_then(Value::as_str)
       .map(|prompt| Value::String(prompt.into())),
-    output: Some(json!({"status":status, "result":result, "saved_path":payload.get("saved_path")})),
+    output: Some(json!({
+      "status":status, "result":payload.get("result"), "fileId":payload.get("fileId"),
+      "saved_path":payload.get("saved_path"),
+    })),
     is_error: Some(status != "completed"),
     native: Some(payload.clone()),
     timestamp,

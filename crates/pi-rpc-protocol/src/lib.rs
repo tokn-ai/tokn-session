@@ -10,6 +10,25 @@ pub const MAX_DIALOG_TEXT_BYTES: usize = 16 * 1024;
 pub const MAX_DIALOG_OPTIONS: usize = 128;
 pub const MAX_ID_BYTES: usize = 256;
 
+/// Native admission proof, available in newer Pi RPC success replies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputDisposition {
+  Started,
+  Queued,
+  Handled,
+}
+
+/// Older Pi replies omit data. They confirm acceptance, without a disposition.
+pub fn parse_input_disposition(data: &Value) -> Result<Option<InputDisposition>, String> {
+  if data.is_null() {
+    return Ok(None);
+  }
+  serde_json::from_value(data.get("disposition").cloned().unwrap_or(Value::Null))
+    .map(Some)
+    .map_err(|_| "Pi returned an invalid input disposition".into())
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Request {
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -417,6 +436,24 @@ fn boolean(value: &Value, field: &str) -> Result<bool, String> {
 mod tests {
   use super::*;
   use serde_json::json;
+
+  #[test]
+  fn input_dispositions_distinguish_native_proof_from_legacy_acceptance() {
+    for (native, expected) in [
+      ("started", InputDisposition::Started),
+      ("queued", InputDisposition::Queued),
+      ("handled", InputDisposition::Handled),
+    ] {
+      assert_eq!(
+        parse_input_disposition(&json!({"disposition":native,"future":true})),
+        Ok(Some(expected))
+      );
+    }
+    assert_eq!(parse_input_disposition(&Value::Null), Ok(None));
+    for data in [json!({}), json!({"disposition":"future"}), json!({"disposition":false})] {
+      assert!(parse_input_disposition(&data).is_err());
+    }
+  }
 
   #[test]
   fn native_wire_names_and_unknown_records_are_preserved() {

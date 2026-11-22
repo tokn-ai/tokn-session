@@ -96,7 +96,10 @@ pub struct SessionHeader {
   #[serde(default)]
   pub seed_length: Option<u64>,
   #[serde(default)]
+  pub is_seeded: Option<bool>,
+  #[serde(default)]
   pub origin: Option<String>,
+  #[serde(default)]
   pub delegation_depth: u64,
   #[serde(default)]
   pub agent_preset: Option<String>,
@@ -111,8 +114,11 @@ pub enum SessionEvent {
   StepStart(EventRecord<StepData>),
   StepEnd(EventRecord<StepData>),
   UserMessage(EventRecord<UserMessage>),
+  SystemMessage(EventRecord<PromptMessageData>),
+  DeveloperMessage(EventRecord<PromptMessageData>),
   AssistantChunk(EventRecord<AssistantChunkData>),
   AssistantMessage(EventRecord<AssistantMessageData>),
+  AssistantAttempt(EventRecord<AssistantAttemptData>),
   ToolCall(EventRecord<ToolCallData>),
   ToolResult(EventRecord<ToolResultData>),
   TodoWrite(EventRecord<TodoWriteData>),
@@ -129,8 +135,11 @@ impl SessionEvent {
       Self::StepStart(_) => "step/start",
       Self::StepEnd(_) => "step/end",
       Self::UserMessage(_) => "user/message",
+      Self::SystemMessage(_) => "system/message",
+      Self::DeveloperMessage(_) => "developer/message",
       Self::AssistantChunk(_) => "assistant/chunk",
       Self::AssistantMessage(_) => "assistant/message",
+      Self::AssistantAttempt(_) => "assistant/attempt",
       Self::ToolCall(_) => "tool/call",
       Self::ToolResult(_) => "tool/result",
       Self::TodoWrite(_) => "todo/write",
@@ -147,8 +156,10 @@ impl SessionEvent {
       Self::StepStart(item) => item.seq,
       Self::StepEnd(item) => item.seq,
       Self::UserMessage(item) => item.seq,
+      Self::SystemMessage(item) | Self::DeveloperMessage(item) => item.seq,
       Self::AssistantChunk(item) => item.seq,
       Self::AssistantMessage(item) => item.seq,
+      Self::AssistantAttempt(item) => item.seq,
       Self::ToolCall(item) => item.seq,
       Self::ToolResult(item) => item.seq,
       Self::TodoWrite(item) => item.seq,
@@ -165,8 +176,10 @@ impl SessionEvent {
       Self::StepStart(item) => item.time,
       Self::StepEnd(item) => item.time,
       Self::UserMessage(item) => item.time,
+      Self::SystemMessage(item) | Self::DeveloperMessage(item) => item.time,
       Self::AssistantChunk(item) => item.time,
       Self::AssistantMessage(item) => item.time,
+      Self::AssistantAttempt(item) => item.time,
       Self::ToolCall(item) => item.time,
       Self::ToolResult(item) => item.time,
       Self::TodoWrite(item) => item.time,
@@ -237,7 +250,9 @@ impl Serialize for SurfaceOp {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SurfaceReplace {
   pub op: String,
+  #[serde(rename = "startSeq", alias = "start")]
   pub start: u64,
+  #[serde(rename = "endSeq", alias = "end")]
   pub end: u64,
   #[serde(flatten)]
   pub extra: ExtraFields,
@@ -284,6 +299,32 @@ pub struct AssistantMessageData {
   pub message: AssistantMessage,
   #[serde(default)]
   pub usage: Option<TokenUsage>,
+  /// Compact, timed native stream; unknown records stay inspectable.
+  #[serde(default)]
+  pub stream: Vec<Value>,
+  #[serde(default)]
+  pub interrupted: Option<bool>,
+  #[serde(flatten)]
+  pub extra: ExtraFields,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptMessageData {
+  pub turn: u64,
+  pub step: u64,
+  pub message: UserMessage,
+  #[serde(default)]
+  pub header_seq: Option<u64>,
+  #[serde(flatten)]
+  pub extra: ExtraFields,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssistantAttemptData {
+  pub turn: u64,
+  pub step: u64,
+  pub stream: Vec<Value>,
   #[serde(flatten)]
   pub extra: ExtraFields,
 }
@@ -424,6 +465,10 @@ pub struct ToolResultMessage {
   pub role: String,
   pub content: Vec<ContentBlock>,
   pub source: TaggedValue,
+  #[serde(default, rename = "toolCallId")]
+  pub tool_call_id: Option<String>,
+  #[serde(default, rename = "isError")]
+  pub is_error: Option<bool>,
   #[serde(flatten)]
   pub extra: ExtraFields,
 }
@@ -433,6 +478,9 @@ pub enum ContentBlock {
   Text(TextBlock),
   Reasoning(TextBlock),
   Image(ImageBlock),
+  File(FileBlock),
+  ToolAddition(ToolChangeBlock),
+  ToolRemoval(ToolChangeBlock),
   ToolCall(ToolCallBlock),
   ToolResult(ToolResultBlock),
   Unknown(UnknownItem),
@@ -449,6 +497,9 @@ impl<'de> Deserialize<'de> for ContentBlock {
       Some("text") => decode_nested(native_type, native, Self::Text),
       Some("reasoning") => decode_nested(native_type, native, Self::Reasoning),
       Some("image") => decode_nested(native_type, native, Self::Image),
+      Some("file") => decode_nested(native_type, native, Self::File),
+      Some("tool-addition") => decode_nested(native_type, native, Self::ToolAddition),
+      Some("tool-removal") => decode_nested(native_type, native, Self::ToolRemoval),
       Some("tool-call") => decode_nested(native_type, native, Self::ToolCall),
       Some("tool-result") => decode_nested(native_type, native, Self::ToolResult),
       _ => Self::Unknown(UnknownItem::new(native_type, native, None)),
@@ -465,6 +516,8 @@ impl Serialize for ContentBlock {
       Self::Text(value) => value.serialize(serializer),
       Self::Reasoning(value) => value.serialize(serializer),
       Self::Image(value) => value.serialize(serializer),
+      Self::File(value) => value.serialize(serializer),
+      Self::ToolAddition(value) | Self::ToolRemoval(value) => value.serialize(serializer),
       Self::ToolCall(value) => value.serialize(serializer),
       Self::ToolResult(value) => value.serialize(serializer),
       Self::Unknown(value) => value.native.serialize(serializer),
@@ -486,6 +539,25 @@ pub struct ImageBlock {
   #[serde(rename = "type")]
   pub native_type: String,
   pub attachment: Value,
+  #[serde(flatten)]
+  pub extra: ExtraFields,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileBlock {
+  #[serde(rename = "type")]
+  pub native_type: String,
+  pub attachment: Value,
+  #[serde(flatten)]
+  pub extra: ExtraFields,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolChangeBlock {
+  #[serde(rename = "type")]
+  pub native_type: String,
+  pub tool_name: String,
   #[serde(flatten)]
   pub extra: ExtraFields,
 }
@@ -737,8 +809,11 @@ fn decode_event(native_type: Option<String>, native: Value) -> DshSessionItem {
     Some("step/start") => decode_event_record(native_type, native, SessionEvent::StepStart),
     Some("step/end") => decode_event_record(native_type, native, SessionEvent::StepEnd),
     Some("user/message") => decode_event_record(native_type, native, SessionEvent::UserMessage),
+    Some("system/message") => decode_event_record(native_type, native, SessionEvent::SystemMessage),
+    Some("developer/message") => decode_event_record(native_type, native, SessionEvent::DeveloperMessage),
     Some("assistant/chunk") => decode_event_record(native_type, native, SessionEvent::AssistantChunk),
     Some("assistant/message") => decode_event_record(native_type, native, SessionEvent::AssistantMessage),
+    Some("assistant/attempt") => decode_event_record(native_type, native, SessionEvent::AssistantAttempt),
     Some("tool/call") => decode_event_record(native_type, native, SessionEvent::ToolCall),
     Some("tool/result") => decode_event_record(native_type, native, SessionEvent::ToolResult),
     Some("todo/write") => decode_event_record(native_type, native, SessionEvent::TodoWrite),
@@ -758,8 +833,11 @@ fn is_core_event(native_type: &str) -> bool {
       | "step/start"
       | "step/end"
       | "user/message"
+      | "system/message"
+      | "developer/message"
       | "assistant/chunk"
       | "assistant/message"
+      | "assistant/attempt"
       | "tool/call"
       | "tool/result"
       | "todo/write"

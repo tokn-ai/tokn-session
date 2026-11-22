@@ -49,7 +49,10 @@ Supported commands:
   and remains native-only through this adapter.
 - Command/file approval supports approve-once and deny, respecting native
   `availableDecisions`. A generic permanent grant cannot be expressed faithfully
-  and rejects. Unknown server requests receive a method-not-supported RPC error.
+  and rejects. Native `humanCommand` checkpoints and unknown command approval
+  kinds reject: this generic response API does not attest fresh human approval
+  and does not advertise `requiredHumanApproval`. Unknown server requests
+  receive a method-not-supported RPC error.
 
 Responses and notifications update one ordered pump. Epoch guards keep delayed
 query snapshots from replacing newer live state. Identical pending-request

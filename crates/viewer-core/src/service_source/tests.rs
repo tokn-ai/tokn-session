@@ -702,6 +702,112 @@ fn assembled_dsh_output_resets_prior_stream_batches() {
 }
 
 #[test]
+fn dsh_shared_sqlite_catalog_and_wal_only_appends_keep_exact_trace_identity() {
+  use serde_json::json;
+  use tokn_session_client::{AgentClient, Source};
+  let root = TempDir::new().unwrap();
+  let directory = root.path().join(".segments");
+  std::fs::create_dir(&directory).unwrap();
+  let path = directory.join("sessions.sqlite");
+  let database = rusqlite::Connection::open(&path).unwrap();
+  database.execute_batch("PRAGMA journal_mode=wal; PRAGMA wal_autocheckpoint=0;
+    PRAGMA application_id=1146310723; PRAGMA user_version=1;
+    CREATE TABLE traces(trace_uuid TEXT PRIMARY KEY,header TEXT,tail_segment_uuid TEXT,inherited_count INTEGER);
+    CREATE TABLE segments(segment_uuid TEXT PRIMARY KEY,parent_segment_uuid TEXT,parent_end_seq INTEGER,base_seq INTEGER);
+    CREATE TABLE frames(segment_uuid TEXT,start_seq INTEGER,end_seq INTEGER,codec INTEGER,payload BLOB,PRIMARY KEY(segment_uuid,start_seq));").unwrap();
+  let message = |id: &str, seq: u64, text: &str| {
+    json!({"type":"user/message","seq":seq,"time":seq,"surfaceOp":"append","data":{"id":format!("{id}-{seq}"),"role":"user","source":{"kind":"user"},"content":[{"type":"text","text":text}]}}).to_string().into_bytes()
+  };
+  for id in ["one", "two"] {
+    let header = json!({"version":4,"id":id,"createdAt":1,"isSeeded":false,"delegationDepth":0});
+    database
+      .execute(
+        "INSERT INTO traces VALUES(?1,?2,?1,0)",
+        rusqlite::params![id, header.to_string()],
+      )
+      .unwrap();
+    database
+      .execute("INSERT INTO segments VALUES(?1,NULL,NULL,0)", [id])
+      .unwrap();
+    database
+      .execute(
+        "INSERT INTO frames VALUES(?1,0,1,0,?2)",
+        rusqlite::params![id, message(id, 0, id)],
+      )
+      .unwrap();
+  }
+  database.execute_batch("PRAGMA wal_checkpoint(truncate)").unwrap();
+  let catalog = AgentClient::list_session_header_catalog(Source::Dsh, Some(root.path().into())).unwrap();
+  assert!(catalog.complete);
+  assert_eq!(catalog.headers.len(), 2);
+  assert!(catalog.headers.iter().all(|header| header.path == path));
+  assert_eq!(
+    tokn_session_dsh::read_session_header_exact(&path, "two").unwrap().id,
+    "two"
+  );
+  let reader = |id: &str| {
+    SessionReader::new(
+      CatalogEntry {
+        key: format!("dsh-{id}"),
+        provider: Provider::Dsh,
+        header: catalog.headers.iter().find(|header| header.id == id).unwrap().clone(),
+      },
+      true,
+      root.path().into(),
+    )
+    .unwrap()
+  };
+  let mut one = reader("one");
+  let mut two = reader("two");
+  assert_eq!(CodexHistoryFixture::messages(&one), ["one"]);
+  assert_eq!(CodexHistoryFixture::messages(&two), ["two"]);
+  let metadata = crate::service_metadata::PresentationCache::default();
+  let entries = [one.snapshot.entry.clone(), two.snapshot.entry.clone()];
+  metadata.reconcile(&entries);
+  metadata.step();
+  let before = metadata.decorate(&entries);
+  assert_eq!(before[0].header.preview.as_deref(), Some("one"));
+  assert_eq!(before[1].header.preview.as_deref(), Some("two"));
+  assert!(before.iter().all(|entry| entry.header.title.is_none()));
+  let database_before = std::fs::read(&path).unwrap();
+  let mut appended = message("one", 1, "WAL append");
+  appended.push(b'\n');
+  appended.extend_from_slice(json!({"type":"session/title","seq":2,"time":2,"data":{"title":"WAL title","messageSeqs":[0,1],"source":{"kind":"user"}}}).to_string().as_bytes());
+  database
+    .execute("INSERT INTO frames VALUES('one',1,3,0,?1)", [appended])
+    .unwrap();
+  assert_eq!(
+    std::fs::read(&path).unwrap(),
+    database_before,
+    "the commit must remain only in WAL"
+  );
+  assert!(one.poll().unwrap());
+  assert_eq!(CodexHistoryFixture::messages(&one), ["one", "WAL append"]);
+  assert!(
+    one
+      .snapshot
+      .records
+      .iter()
+      .all(|record| record.session.session_id == "one")
+  );
+  assert!(
+    !two.poll().unwrap(),
+    "another trace's WAL commit must not replace this trace's snapshot"
+  );
+  assert_eq!(CodexHistoryFixture::messages(&two), ["two"]);
+  assert!(!one.poll().unwrap(), "the committed frame must not replay");
+  for entry in &entries {
+    metadata.refresh_followed(entry);
+  }
+  metadata.step();
+  let after = metadata.decorate(&entries);
+  assert_eq!(after[0].header.title.as_deref(), Some("WAL title"));
+  assert_eq!(after[0].header.preview.as_deref(), Some("one"));
+  assert_eq!(after[1].header.title, None);
+  assert_eq!(after[1].header.preview.as_deref(), Some("two"));
+}
+
+#[test]
 fn workbuddy_catalog_wal_updates_followed_presentation() {
   use tokn_session_client::{AgentClient, Source};
   let root = TempDir::new().unwrap();

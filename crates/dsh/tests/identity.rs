@@ -89,3 +89,35 @@ fn rejects_incomplete_oversized_or_invalid_owning_headers() {
       .contains("Invalid expected")
   );
 }
+
+#[test]
+fn foreign_platform_absolute_directories_are_retained_but_relative_cwds_never_prove_ownership() {
+  let directory = tempfile::tempdir().unwrap();
+  let path = directory.path().join("session.v4.jsonl");
+  for (cwd, valid) in [
+    ("/project/fixture", true),
+    ("C:\\project\\fixture", true),
+    ("D:/project/fixture", true),
+    ("\\\\server\\share\\fixture", true),
+    ("relative", false),
+    ("C:relative", false),
+    ("\\relative", false),
+    ("/project\0bad", false),
+  ] {
+    let header = serde_json::json!({"type":"session","version":4,"id":"fixture","createdAt":1,"isSeeded":false,"cwd":cwd,"delegationDepth":0});
+    fs::write(&path, format!("{header}\n")).unwrap();
+    let result = read_session_header_exact(&path, "fixture");
+    assert_eq!(result.is_ok(), valid, "{cwd:?}");
+    if valid {
+      assert_eq!(result.unwrap().cwd.as_deref(), Some(cwd));
+    }
+  }
+  fs::write(&path,"{\"type\":\"session\",\"version\":4,\"id\":\"fixture\",\"createdAt\":1,\"isSeeded\":false,\"origin\":\"subagent\"}\n").unwrap();
+  assert_eq!(
+    read_session_header_exact(&path, "fixture")
+      .unwrap()
+      .agent_role
+      .as_deref(),
+    Some("subagent")
+  );
+}

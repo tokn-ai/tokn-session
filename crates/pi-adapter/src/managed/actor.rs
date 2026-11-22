@@ -425,6 +425,21 @@ impl Actor {
             model_result,
           } => {
             let initial = reply.is_none();
+            let disposition = if success {
+              match wire::parse_input_disposition(value.get("data").unwrap_or(&Value::Null)) {
+                Ok(disposition) => disposition,
+                Err(error) => {
+                  let failure = with_model_result(DeliveryError::uncertain(error.clone()), model_result);
+                  self.recent.complete(&request_id, Err(failure.clone()));
+                  if let Some(reply) = reply {
+                    let _ = reply.send(Err(failure));
+                  }
+                  return Err(error);
+                }
+              }
+            } else {
+              None
+            };
             if initial {
               self
                 .update(|receipt| {
@@ -439,17 +454,19 @@ impl Actor {
             let result = if success {
               Ok(if let Some(result) = model_result {
                 Admission::WithModel {
-                  disposition: if busy {
-                    ModelInputDisposition::Steered
-                  } else {
-                    ModelInputDisposition::Started
+                  disposition: match disposition {
+                    Some(wire::InputDisposition::Started) => ModelInputDisposition::Started,
+                    Some(wire::InputDisposition::Queued) => ModelInputDisposition::Queued,
+                    Some(wire::InputDisposition::Handled) | None => ModelInputDisposition::Accepted,
                   },
                   result,
                 }
-              } else if busy {
-                Admission::Steered
               } else {
-                Admission::Started
+                match disposition {
+                  Some(wire::InputDisposition::Started) => Admission::Started,
+                  Some(wire::InputDisposition::Queued) => Admission::Queued,
+                  Some(wire::InputDisposition::Handled) | None => Admission::Accepted,
+                }
               })
             } else {
               let failure = DeliveryError::not_sent(error.clone());
@@ -462,10 +479,15 @@ impl Actor {
             if !success && initial {
               return Err(error);
             }
-            if success && !busy {
+            if success && (disposition == Some(wire::InputDisposition::Started) || (disposition.is_none() && !busy)) {
               self.confirm_new_turn().await?;
             }
-            if !success && !busy {
+            if (!success && !busy)
+              || matches!(
+                disposition,
+                Some(wire::InputDisposition::Handled | wire::InputDisposition::Queued)
+              )
+            {
               self.awaiting_new_turn = false;
             }
             if !success {

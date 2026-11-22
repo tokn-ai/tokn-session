@@ -1206,6 +1206,94 @@ async fn dsh_publication_requires_matching_native_header_before_indexing() {
 }
 
 #[tokio::test]
+async fn dsh_shared_sqlite_publication_preserves_existing_trace_and_cursor_without_activation() {
+  let directory = tempfile::tempdir().unwrap();
+  let root = directory.path().join("dsh");
+  std::fs::create_dir_all(root.join(".segments")).unwrap();
+  let database = root.join(".segments/sessions.sqlite");
+  let connection = rusqlite::Connection::open(&database).unwrap();
+  connection.execute_batch("PRAGMA application_id=1146310723; PRAGMA user_version=1;
+    CREATE TABLE traces(trace_uuid TEXT PRIMARY KEY,header TEXT,tail_segment_uuid TEXT,inherited_count INTEGER);
+    CREATE TABLE segments(segment_uuid TEXT PRIMARY KEY,parent_segment_uuid TEXT,parent_end_seq INTEGER,base_seq INTEGER);
+    CREATE TABLE frames(segment_uuid TEXT,start_seq INTEGER,end_seq INTEGER,codec INTEGER,payload BLOB,PRIMARY KEY(segment_uuid,start_seq));").unwrap();
+  let service = service(ViewerProvider::Dsh, root);
+  let project = project(&service, &directory.path().join("project"));
+  let header = |id: &str, cwd: &str| {
+    json!({"version":4,"id":id,"createdAt":1,"isSeeded":false,"cwd":cwd,"delegationDepth":0}).to_string()
+  };
+  connection
+    .execute("INSERT INTO segments VALUES('existing',NULL,NULL,0)", [])
+    .unwrap();
+  connection
+    .execute(
+      "INSERT INTO traces VALUES('existing',?1,'existing',0)",
+      [header("existing", &project.folder_path)],
+    )
+    .unwrap();
+  let old_key = publisher(&service)
+    .publish(&receipt(&project, LiveProvider::Dsh, "existing"))
+    .unwrap()
+    .unwrap();
+  let source = index_source_key_for_path(ViewerProvider::Dsh, &database).unwrap();
+  let original_cursor = service.session_index.source_state(&source).unwrap().unwrap().cursor;
+  connection
+    .execute("INSERT INTO segments VALUES('created',NULL,NULL,0)", [])
+    .unwrap();
+  connection
+    .execute(
+      "INSERT INTO traces VALUES('created',?1,'created',0)",
+      [header("created", "/another/project")],
+    )
+    .unwrap();
+  let mut created = receipt(&project, LiveProvider::Dsh, "created");
+  created.created = None;
+  created.phase = CreationPhase::NativeCreateUncertain;
+  created.first_input = FirstInputState::NotAttempted;
+  let host = Host {
+    runtimes: service.sessions.runtimes.clone(),
+    history: publisher(&service),
+  };
+  assert!(host.publish_history(&created).await.is_err());
+  assert_eq!(service.session_index.list_present_sessions().unwrap().len(), 1);
+  assert_eq!(
+    service.session_index.source_state(&source).unwrap().unwrap().cursor,
+    original_cursor
+  );
+  connection
+    .execute(
+      "UPDATE traces SET header=?1 WHERE trace_uuid='created'",
+      [header("created", &project.folder_path)],
+    )
+    .unwrap();
+  let key = host.publish_history(&created).await.unwrap().unwrap();
+  assert_ne!(old_key, key);
+  assert_eq!(decode_session_key(&key).unwrap().source_path, database);
+  let published_cursor = service.session_index.source_state(&source).unwrap().unwrap().cursor;
+  assert_eq!(
+    host.publish_history(&created).await.unwrap().as_deref(),
+    Some(key.as_str())
+  );
+  assert_eq!(
+    service.session_index.source_state(&source).unwrap().unwrap().cursor,
+    published_cursor
+  );
+  let rows = service.session_index.list_present_sessions().unwrap();
+  assert_eq!(
+    rows.len(),
+    2,
+    "one shared-database publication must not retire another trace"
+  );
+  assert!(rows.iter().any(|row| row.key.session_id == "existing"));
+  assert!(rows.iter().any(|row| row.key.session_id == "created"));
+  assert!(
+    service.sessions.runtimes.inventory().runtimes.is_empty(),
+    "history publication must not activate a runtime or replay input"
+  );
+  assert_eq!(created.phase, CreationPhase::NativeCreateUncertain);
+  assert_eq!(created.first_input, FirstInputState::NotAttempted);
+}
+
+#[tokio::test]
 async fn publication_preserves_other_sessions_in_shared_sqlite_sources() {
   for (provider, session_tables) in [
     (LiveProvider::OpenCode,

@@ -9,11 +9,15 @@ an agent, resume history, or send a prompt.
 ## Profiles and storage
 
 Profiles support managed Codex/Pi/OpenCode/ZCode/Qoder/DSH processes, attached Codex WS(S),
-OpenCode V2 HTTP/SSE, and DSH HTTP/WebSocket servers. Pi attachment needs explicit
+OpenCode legacy/current V2 HTTP/SSE, and DSH Gateway/legacy ApiProxy servers. Pi attachment needs explicit
 IO handles and is not available through profiles. Managed profiles require an
 absolute executable and working folder; attached OpenCode also requires its
 native working folder. Endpoint URLs exclude embedded credentials, queries,
 and fragments. OpenCode/DSH managed launch arguments are fixed by their adapters.
+For current DSH, the profile's private bearer-token field holds its launch token;
+the adapter exchanges it for the native API Cookie. Managed DSH reads the owned
+child's tokenized readiness URL and suppresses browser opening. Current OpenCode
+rejects an explicit workspace binding when its directory cannot attest that ID.
 
 Native storage defaults to `~/.tokn/sessions/viewer/rpc-runtimes.json`, beside
 the configured viewer index, with private permissions, bounded size, atomic
@@ -77,8 +81,10 @@ history. Executable paths, environment values and credentials remain host-side.
 
 Reads expose environment variable names and credential kinds, never their
 values. Writes can retain, replace, or clear saved environment/authentication.
-Attached OpenCode supports Basic authentication; attached Codex/DSH support
-Bearer authentication. Managed credentials use environment variables. Public
+Attached OpenCode supports Basic authentication; attached Codex and legacy DSH
+support Bearer authentication. Current DSH exchanges its saved launch token for
+the native API Cookie. Managed OpenCode credentials use environment variables;
+managed DSH reads its owned child's launch token. Public
 arguments must not contain secrets. Validation checks schema and local path
 readiness without running executables or probing endpoints. Saving a profile
 does not require its executable or folder to exist yet.

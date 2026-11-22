@@ -5,16 +5,118 @@ use std::path::Path;
 use serde_json::{Value, json};
 use tokn_dsh_protocol::{DshSessionItem, DshSessionLine};
 
+pub(crate) struct Snapshot {
+  pub header: tokn_dsh_protocol::SessionHeader,
+  pub native_header: Value,
+  pub rows: Vec<DshSessionLine>,
+}
+
+pub(crate) fn snapshot(path: &Path, expected_id: Option<&str>, max_bytes: usize) -> Result<Snapshot, String> {
+  let (native_header, rows, stored_cut) = if crate::sqlite::is_database(path) || crate::sqlite::is_marker(path) {
+    let snapshot = crate::sqlite::snapshot(path, expected_id, max_bytes)?;
+    (snapshot.header, snapshot.rows, Some(snapshot.inherited_count))
+  } else {
+    let mut bytes = Vec::new();
+    reader(path)?
+      .take(max_bytes as u64 + 1)
+      .read_to_end(&mut bytes)
+      .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    if bytes.len() > max_bytes {
+      return Err("DSH decoded source exceeds the snapshot size limit".into());
+    }
+    let complete = bytes
+      .iter()
+      .rposition(|byte| *byte == b'\n')
+      .map_or(0, |index| index + 1);
+    let mut lines = bytes[..complete].split(|byte| *byte == b'\n');
+    let native_header: Value = serde_json::from_slice(lines.next().unwrap_or_default())
+      .map_err(|error| format!("invalid dsh JSON header: {error}"))?;
+    let mut rows = Vec::new();
+    for (index, line) in lines.enumerate() {
+      if line.iter().all(u8::is_ascii_whitespace) {
+        continue;
+      }
+      if rows.len() >= 1_000_000 {
+        return Err("DSH snapshot exceeds its event count limit".into());
+      }
+      rows.push(
+        serde_json::from_slice(line)
+          .map_err(|error| format!("invalid dsh JSON at {}:{}: {error}", path.display(), index + 2))?,
+      );
+    }
+    (native_header, rows, None)
+  };
+  let mut header = crate::session_source::header(
+    serde_json::from_value(native_header.clone()).map_err(|error| error.to_string())?,
+    path,
+  )?;
+  if expected_id.is_some_and(|expected| expected != header.id) {
+    return Err("DSH history has a different session identity".into());
+  }
+  let rows = rows
+    .into_iter()
+    .map(serde_json::from_value)
+    .collect::<Result<Vec<DshSessionLine>, _>>()
+    .map_err(|error| error.to_string())?;
+  let mut event_count = 0u64;
+  let mut inherited_cut = None;
+  for row in &rows {
+    for event in expand(row.clone())? {
+      let native = event.native();
+      if header.version >= 2 {
+        if native["seq"].as_u64() != Some(event_count)
+          || native["time"]
+            .as_i64()
+            .is_none_or(|time| !(-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&time))
+        {
+          return Err("Invalid DSH event envelope or sequence gap".into());
+        }
+        if native["type"] == "session/end-seed" && native["data"]["inherited"] == true {
+          inherited_cut = Some(event_count);
+        }
+      }
+      event_count += 1;
+      if event_count > 1_000_000 {
+        return Err("DSH snapshot exceeds its event count limit".into());
+      }
+    }
+  }
+  if header.version >= 2 {
+    header.seed_length = match (header.is_seeded, inherited_cut) {
+      (Some(true), Some(cut)) => Some(cut),
+      (Some(false), None) => None,
+      _ => return Err("DSH seeded header and inherited end-seed marker disagree".into()),
+    };
+  }
+  if header.seed_length.is_some_and(|cut| cut > event_count)
+    || stored_cut.is_some_and(|cut| cut != header.seed_length.unwrap_or(0))
+  {
+    return Err("DSH inherited event count does not match its history".into());
+  }
+  Ok(Snapshot {
+    header,
+    native_header,
+    rows,
+  })
+}
+
 /// Snapshot the byte length, so a concurrently appended session cannot make a
 /// historical read follow forever. Truncated/corrupt frames are reported, not
 /// repaired; the harness owns its storage.
 pub(crate) fn reader(path: &Path) -> Result<Box<dyn BufRead>, String> {
   let file = File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
   let len = file.metadata().map_err(|err| err.to_string())?.len();
+  if len > 128 * 1024 * 1024 {
+    return Err("DSH source exceeds the input size limit".into());
+  }
   let input = file.take(len);
-  if path.to_str().is_some_and(|name| name.ends_with(".jsonl.zstd")) {
-    let decoder =
+  if path
+    .extension()
+    .is_some_and(|extension| extension == "zstd" || extension == "zst")
+  {
+    let mut decoder =
       zstd::stream::read::Decoder::new(input).map_err(|err| format!("failed to decode {}: {err}", path.display()))?;
+    decoder.window_log_max(23).map_err(|error| error.to_string())?;
     // Decoder reads all concatenated frames by default, as written by DSH.
     Ok(Box::new(BufReader::new(decoder)))
   } else {
@@ -30,6 +132,48 @@ pub(crate) fn parse(line: &str, path: &Path, index: usize) -> Result<DshSessionL
 /// ordinary events pass through, but a malformed packed run must never silently
 /// lose its members. Validate before emitting any of them.
 pub(crate) fn expand(line: DshSessionLine) -> Result<Vec<DshSessionLine>, String> {
+  let mut line = line;
+  if let Some(sources) = line.native().get("sourceEventSeqs")
+    && sources
+      .as_array()
+      .is_some_and(|sources| sources.iter().any(Value::is_array))
+  {
+    let seq = line.native()["seq"].as_u64().ok_or("Invalid DSH source event owner")?;
+    let mut expanded = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let sources = sources.as_array().ok_or("Invalid DSH source event ranges")?;
+    let has_ranges = sources.iter().any(Value::is_array);
+    for source in sources {
+      let (start, end) = if let Some(range) = source.as_array() {
+        if range.len() != 2 {
+          return Err("Invalid DSH source event range".into());
+        }
+        (
+          range[0].as_u64().ok_or("Invalid DSH source event range")?,
+          range[1].as_u64().ok_or("Invalid DSH source event range")?,
+        )
+      } else {
+        let source = source.as_u64().ok_or("Invalid DSH source event coordinate")?;
+        (source, source)
+      };
+      if end < start
+        || end >= seq
+        || end - start >= 1_000_000
+        || expanded.len().saturating_add((end - start + 1) as usize) > 1_000_000
+      {
+        return Err("DSH source event range exceeds its owner or size limit".into());
+      }
+      for source in start..=end {
+        if !seen.insert(source) || has_ranges && expanded.last().is_some_and(|last| *last >= source) {
+          return Err("Invalid duplicate or unordered DSH source event ranges".into());
+        }
+        expanded.push(source);
+      }
+    }
+    let mut native = line.into_native();
+    native["sourceEventSeqs"] = json!(expanded);
+    line = serde_json::from_value(native).map_err(|error| error.to_string())?;
+  }
   let native = line.native();
   let tag = native.get("type").and_then(Value::as_str).unwrap_or("");
   if !matches!(tag, "text-chunks" | "reasoning-chunks" | "tool-call-chunks") {

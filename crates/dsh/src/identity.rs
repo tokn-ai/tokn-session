@@ -12,7 +12,7 @@ use tokn_session_core::SessionHeader;
 const MAX_HEADER_BYTES: u64 = 64 * 1024;
 const MAX_COMPRESSED_INPUT_BYTES: u64 = 1024 * 1024;
 
-/// Read and verify the owning version-zero DSH session row at this exact path.
+/// Read and verify one owning DSH header, including a trace in native SQLite.
 ///
 /// Plain JSONL and concatenated Zstandard frames are supported, including frame
 /// boundaries within the header. The first row must be complete (newline
@@ -27,6 +27,19 @@ pub fn read_session_header_exact(path: &Path, expected_session_id: &str) -> Resu
   {
     return Err("Invalid expected DSH session identity".into());
   }
+  if crate::sqlite::is_database(path) || crate::sqlite::is_marker(path) {
+    let value = crate::sqlite::header(path, Some(expected_session_id))?;
+    let native = session_source::header(serde_json::from_value(value).map_err(|error| error.to_string())?, path)?;
+    return presentation(path, &native);
+  }
+  let native = read_file_header(path)?;
+  if native.id != expected_session_id {
+    return Err("DSH history has a different session identity".into());
+  }
+  presentation(path, &native)
+}
+
+pub(crate) fn read_file_header(path: &Path) -> Result<tokn_dsh_protocol::SessionHeader, String> {
   let file = File::open(path).map_err(|error| format!("Could not inspect DSH history {}: {error}", path.display()))?;
   let metadata = file.metadata().map_err(|error| error.to_string())?;
   if !metadata.is_file() {
@@ -57,16 +70,22 @@ pub fn read_session_header_exact(path: &Path, expected_session_id: &str) -> Resu
   if !line.ends_with('\n') {
     return Err("DSH session header is not complete".into());
   }
-  let native = session_source::header(storage::parse(&line, path, 1)?, path)?;
-  if native.id != expected_session_id {
-    return Err("DSH history has a different session identity".into());
-  }
-  let reference = session_source::reference(path, &native);
-  let updated_at_ms = metadata
-    .modified()
-    .ok()
-    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-    .and_then(|duration| i64::try_from(duration.as_millis()).ok());
+  session_source::header(storage::parse(&line, path, 1)?, path)
+}
+
+fn presentation(path: &Path, native: &tokn_dsh_protocol::SessionHeader) -> Result<SessionHeader, String> {
+  let reference = session_source::reference(path, native);
+  // Native immutable trace headers do not have an activity timestamp. Shared
+  // database/WAL writes are invalidation evidence, never activity of this trace.
+  let updated_at_ms = if crate::sqlite::is_database(path) || crate::sqlite::is_marker(path) {
+    i64::try_from(native.created_at).ok()
+  } else {
+    std::fs::metadata(path)
+      .ok()
+      .and_then(|metadata| metadata.modified().ok())
+      .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+      .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+  };
   Ok(SessionHeader {
     id: reference.id,
     parent_session_id: reference.parent_session_id,

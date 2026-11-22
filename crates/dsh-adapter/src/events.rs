@@ -2,6 +2,7 @@ use crate::Inner;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::{
+  collections::{BTreeMap, BTreeSet, VecDeque},
   sync::{Arc, atomic::Ordering},
   time::Duration,
 };
@@ -15,6 +16,179 @@ use tokn_interaction_core::*;
 
 const MAX_SESSIONS: usize = 4096;
 const MAX_PENDING: usize = 128;
+const MAX_TOOL_CALLS: usize = 256;
+const MAX_TOOL_ARGUMENT_BYTES: usize = 12 * 1024;
+
+type ToolKey = (String, String);
+#[derive(Clone, PartialEq)]
+struct ToolPreview {
+  name: String,
+  // None also remembers an oversized/unrepresentable call so a reannouncement
+  // cannot later substitute smaller input under the same live call identity.
+  arguments: Option<String>,
+}
+
+#[derive(Default)]
+pub(crate) struct ToolCallCache {
+  calls: BTreeMap<ToolKey, ToolPreview>,
+  order: VecDeque<ToolKey>,
+}
+impl ToolCallCache {
+  pub(crate) fn clear(&mut self) {
+    self.calls.clear();
+    self.order.clear();
+  }
+
+  fn remove(&mut self, key: &ToolKey) {
+    self.calls.remove(key);
+    self.order.retain(|previous| previous != key);
+  }
+
+  fn clear_session(&mut self, session: &str) {
+    self.calls.retain(|(owner, _), _| owner != session);
+    self.order.retain(|(owner, _)| owner != session);
+  }
+
+  fn observe(&mut self, key: ToolKey, data: &Value, protected: &BTreeSet<ToolKey>) -> Result<(), String> {
+    let Some(name) = data["name"].as_str().filter(|name| valid_tool_id(name)) else {
+      return Ok(());
+    };
+    let arguments = data["arguments"]
+      .as_str()
+      .filter(|arguments| {
+        arguments.len() <= MAX_TOOL_ARGUMENT_BYTES
+          && serde_json::from_str::<Value>(arguments).is_ok_and(|value| value.is_object())
+      })
+      .map(str::to_owned);
+    let preview = ToolPreview {
+      name: name.into(),
+      arguments,
+    };
+    if let Some(previous) = self.calls.get(&key) {
+      if previous.arguments.is_some() && previous != &preview {
+        return Err("DSH changed an observed live tool call".into());
+      }
+      return Ok(());
+    }
+    if self.calls.len() >= MAX_TOOL_CALLS {
+      let Some(oldest) = self.order.iter().find(|key| !protected.contains(*key)).cloned() else {
+        return Ok(());
+      };
+      self.remove(&oldest);
+    }
+    self.order.push_back(key.clone());
+    self.calls.insert(key, preview);
+    Ok(())
+  }
+}
+
+fn valid_tool_id(value: &str) -> bool {
+  !value.is_empty() && value.len() <= 512 && value.trim() == value && !value.chars().any(char::is_control)
+}
+
+fn approval_payload(pending: &PendingInteraction) -> &Value {
+  let wire = &pending.native["wire"];
+  if wire["type"] == "item" {
+    &wire["value"]["request"]
+  } else {
+    &wire["payload"]
+  }
+}
+
+fn approval_key(pending: &PendingInteraction) -> Option<ToolKey> {
+  if pending.kind != InteractionKind::Permission {
+    return None;
+  }
+  let call = approval_payload(pending)["callId"]
+    .as_str()
+    .filter(|call| valid_tool_id(call))?;
+  Some((pending.session_id.clone()?, call.into()))
+}
+
+fn permission_display(pending: &mut PendingInteraction, preview: Option<&ToolPreview>) {
+  let payload = approval_payload(pending);
+  let reason = payload["reason"].as_str().unwrap_or("");
+  let mut end = reason.len().min(2 * 1024);
+  while !reason.is_char_boundary(end) {
+    end -= 1;
+  }
+  let reason = &reason[..end];
+  let operation = preview
+    .filter(|preview| payload["toolName"] == preview.name)
+    .and_then(|preview| {
+      preview
+        .arguments
+        .as_ref()
+        .map(|arguments| (preview.name.as_str(), arguments.as_str()))
+    });
+  let details = if let Some((name, arguments)) = operation {
+    format!("Tool: {name}\nInput:\n{arguments}\n\nReason: {reason}")
+  } else {
+    format!(
+      "The native tool input was not observed or cannot be displayed safely. Approval is disabled; deny this request or review it in DSH.\n\nReason: {reason}"
+    )
+  };
+  let decisions = if operation.is_some() {
+    serde_json::json!(["allow_once", "deny"])
+  } else {
+    serde_json::json!(["deny"])
+  };
+  pending.native["details"] = serde_json::json!(details);
+  pending.native["permission_decisions"] = decisions;
+}
+
+fn observe_tools(
+  state: &mut crate::StreamState,
+  session: &str,
+  event: &Value,
+) -> Result<Vec<PendingInteraction>, String> {
+  let call = match event["type"].as_str() {
+    Some("tool/call") => {
+      let Some(call) = event["data"]["callId"].as_str().filter(|call| valid_tool_id(call)) else {
+        return Ok(Vec::new());
+      };
+      let key = (session.into(), call.into());
+      let protected = state.pending.values().filter_map(approval_key).collect();
+      state.tool_calls.observe(key.clone(), &event["data"], &protected)?;
+      Some(key)
+    }
+    Some("tool/result") => {
+      let call = event["data"]["message"]["source"]["callId"]
+        .as_str()
+        .or_else(|| event["data"]["callId"].as_str());
+      let Some(call) = call else {
+        return Ok(Vec::new());
+      };
+      let key = (session.into(), call.into());
+      state.tool_calls.remove(&key);
+      Some(key)
+    }
+    Some("turn/end") => {
+      state.tool_calls.clear_session(session);
+      None
+    }
+    _ => return Ok(Vec::new()),
+  };
+  let mut updates = Vec::new();
+  for pending in state
+    .pending
+    .values_mut()
+    .filter(|pending| pending.session_id.as_deref() == Some(session))
+  {
+    let Some(key) = approval_key(pending) else {
+      continue;
+    };
+    if call.as_ref().is_some_and(|call| call != &key) {
+      continue;
+    }
+    let before = pending.native.clone();
+    permission_display(pending, state.tool_calls.calls.get(&key));
+    if pending.native != before {
+      updates.push(pending.clone());
+    }
+  }
+  Ok(updates)
+}
 
 pub(crate) fn spawn(
   inner: Arc<Inner>,
@@ -88,10 +262,14 @@ pub(crate) fn spawn(
 }
 
 async fn ingest(inner: &Inner, frame: api::Request) -> Result<(), String> {
+  let native = serde_json::to_value(&frame).map_err(|error| error.to_string())?;
+  ingest_native(inner, frame, native).await
+}
+
+pub(crate) async fn ingest_native(inner: &Inner, frame: api::Request, native: Value) -> Result<(), String> {
   if frame.rpc_id.is_empty() || frame.rpc_id.len() > 512 || frame.rpc_id.chars().any(char::is_control) {
     return Err("invalid DSH event correlation identity".into());
   }
-  let native = serde_json::to_value(&frame).map_err(|error| error.to_string())?;
   let payload = &frame.payload;
   if payload.get("type").and_then(Value::as_str) != Some(frame.method.as_str()) {
     return Err("DSH event method does not match its payload type".into());
@@ -109,7 +287,7 @@ async fn ingest(inner: &Inner, frame: api::Request) -> Result<(), String> {
   match frame.method.as_str() {
     "question/requested" | "approval/requested" => {
       let session_id = session_id.ok_or("DSH interaction has no session identity")?;
-      let interaction = if frame.method == "question/requested" {
+      let mut interaction = if frame.method == "question/requested" {
         let questions: Vec<api::Question> =
           serde_json::from_value(payload.get("questions").cloned().ok_or("DSH question has no items")?)
             .map_err(|_| "invalid DSH question items")?;
@@ -118,10 +296,25 @@ async fn ingest(inner: &Inner, frame: api::Request) -> Result<(), String> {
         }
         let mut ids = std::collections::BTreeSet::new();
         let mut normalized = Vec::new();
+        let mut details = Vec::new();
         for question in questions {
           if question.id.is_empty() || !ids.insert(question.id.clone()) || question.options.len() > 128 {
             return Err("invalid DSH question identity or options".into());
           }
+          if let Some(detail) = question
+            .extra
+            .get("detail")
+            .and_then(Value::as_str)
+            .filter(|detail| !detail.trim().is_empty())
+          {
+            details.push(format!("{}\n{}", question.question, detail));
+          }
+          let allows_free_text = question
+            .extra
+            .get("intent")
+            .and_then(|intent| intent.get("kind"))
+            .and_then(Value::as_str)
+            != Some("approval");
           normalized.push(QuestionItem {
             question_id: question.id,
             prompt: question.question,
@@ -133,8 +326,8 @@ async fn ingest(inner: &Inner, frame: api::Request) -> Result<(), String> {
                 description: option.description,
               })
               .collect(),
-            allows_free_text: true,
-            allows_option_notes: false,
+            allows_free_text,
+            allows_option_notes: allows_free_text && question.multi_select,
             is_secret: false,
             multiple: question.multi_select,
           });
@@ -145,7 +338,7 @@ async fn ingest(inner: &Inner, frame: api::Request) -> Result<(), String> {
           kind: InteractionKind::Question,
           title: "Question".into(),
           questions: normalized,
-          native,
+          native: serde_json::json!({"wire":native,"details":(!details.is_empty()).then(|| details.join("\n\n"))}),
         }
       } else {
         if payload.get("approvalId").and_then(Value::as_str).is_none() {
@@ -161,12 +354,18 @@ async fn ingest(inner: &Inner, frame: api::Request) -> Result<(), String> {
             .unwrap_or("Permission requested")
             .into(),
           questions: Vec::new(),
-          native,
+          native: serde_json::json!({"wire":native}),
         }
       };
       let mut state = inner.state.lock().await;
+      if interaction.kind == InteractionKind::Permission {
+        let preview = approval_key(&interaction).and_then(|key| state.tool_calls.calls.get(&key));
+        permission_display(&mut interaction, preview);
+      }
       if let Some(existing) = state.pending.get(&frame.rpc_id) {
-        if existing.native != interaction.native {
+        // Display metadata can gain a late operation preview or reserve an
+        // uncertain response. Only the immutable native request proves replay.
+        if existing.native["wire"] != interaction.native["wire"] {
           return Err("DSH replay changed a pending request identity".into());
         }
         return Ok(());
@@ -192,13 +391,15 @@ async fn ingest(inner: &Inner, frame: api::Request) -> Result<(), String> {
             payload.get("questionRpcId").and_then(Value::as_str) == Some(id.as_str())
           } else {
             interaction.kind == InteractionKind::Permission
-              && interaction.native["payload"]["approvalId"] == payload["approvalId"]
+              && interaction.native.get("wire").unwrap_or(&interaction.native)["payload"]["approvalId"]
+                == payload["approvalId"]
           };
           matches.then(|| id.clone())
         })
         .collect();
       for id in &resolved {
         state.pending.remove(id);
+        state.responding.remove(id);
       }
       drop(state);
       for interaction_id in resolved {
@@ -214,6 +415,11 @@ async fn ingest(inner: &Inner, frame: api::Request) -> Result<(), String> {
       if !state.sessions.contains_key(&session_id) && state.sessions.len() >= MAX_SESSIONS {
         return Err("DSH live session limit exceeded; refresh attachment".into());
       }
+      let updates = if frame.method == "session/event" {
+        observe_tools(&mut state, &session_id, &payload["event"])?
+      } else {
+        Vec::new()
+      };
       let current = state
         .sessions
         .entry(session_id.clone())
@@ -270,13 +476,20 @@ async fn ingest(inner: &Inner, frame: api::Request) -> Result<(), String> {
       let snapshot = current.clone();
       drop(state);
       if changed {
-        inner.emit(Some(session_id), RuntimeEventKind::State(snapshot));
+        inner.emit(Some(session_id.clone()), RuntimeEventKind::State(snapshot));
+      }
+      for pending in updates {
+        inner.emit(
+          Some(session_id.clone()),
+          RuntimeEventKind::InteractionRequested(pending),
+        );
       }
     }
     "host/session-removed" => {
       if let Some(session_id) = session_id {
         let mut state = inner.state.lock().await;
         state.sessions.remove(&session_id);
+        state.tool_calls.clear_session(&session_id);
         let removed: Vec<_> = state
           .pending
           .iter()
@@ -285,6 +498,7 @@ async fn ingest(inner: &Inner, frame: api::Request) -> Result<(), String> {
           .collect();
         for id in &removed {
           state.pending.remove(id);
+          state.responding.remove(id);
         }
         drop(state);
         for interaction_id in removed {
