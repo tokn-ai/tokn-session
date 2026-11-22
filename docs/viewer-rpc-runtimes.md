@@ -49,6 +49,15 @@ canonical paths and executable metadata without launching agents; native
 compatibility is checked on connection. Discovered configurations are scoped to
 their project and pin executable metadata, so a replaced binary requires fresh
 resolution. The bounded transient inventory is not a saved-profile registry.
+
+For a Codex app-server launched by the desktop Viewer, a managed `prompt-user`
+rule opens a native command review dialog when the local app is in the
+foreground. Review the command, working directory and any additional permissions
+before choosing **Allow once**, **Decline**, or **Cancel**. Each choice applies to
+that pending request. The desktop handles the decision locally, including when
+the machine is shared. A request the dialog cannot present in full is declined.
+Attached Codex servers and headless hosts do not opt in to this protocol.
+
 ZCode requires a configured Agent CLI launcher with `app-server --stdio`
 support. The runtime verifies that the app-server uses the Viewer’s ZCode
 history database, normally `~/.zcode/cli/db/db.sqlite` or the database under

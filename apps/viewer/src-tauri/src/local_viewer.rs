@@ -94,16 +94,24 @@ impl StartedViewer {
 fn prepare(
   index_path: PathBuf,
   settings_path: Result<PathBuf, String>,
+  reviewer: Option<tokn_viewer_core::CodexHumanCommandReviewer>,
 ) -> Result<(ViewerService, Result<relay::RelaySettings, String>), String> {
   if let Some(parent) = index_path.parent() {
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
   }
-  let service = ViewerService::native(index_path)?;
+  let service = match reviewer {
+    Some(reviewer) => ViewerService::native_with_codex_human_command_reviewer(index_path, reviewer)?,
+    None => ViewerService::native(index_path)?,
+  };
   let settings = settings_path.and_then(|path| crate::relay_settings::load(&path));
   Ok((service, settings))
 }
 
 async fn start(app: AppHandle) -> Result<StartedViewer, String> {
+  #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+  let reviewer = Some(crate::human_command::reviewer(&app));
+  #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+  let reviewer = None;
   let legacy_settings = app
     .path()
     .app_config_dir()
@@ -112,7 +120,7 @@ async fn start(app: AppHandle) -> Result<StartedViewer, String> {
   let (service, settings) = tokio::task::spawn_blocking(move || {
     let settings_path = legacy_settings
       .and_then(|legacy| crate::relay_settings::resolve(&tokn_session_storage::SessionPaths::discover()?, &legacy));
-    prepare(session_index_path()?, settings_path)
+    prepare(session_index_path()?, settings_path, reviewer)
   })
   .await
   .map_err(|error| format!("Local session initialization task failed: {error}"))??;
@@ -178,7 +186,7 @@ mod tests {
 
   async fn test_start(index_path: PathBuf) -> Result<StartedViewer, String> {
     let settings_path = index_path.with_extension("settings.json");
-    let (service, _) = tokio::task::spawn_blocking(move || prepare(index_path, Ok(settings_path)))
+    let (service, _) = tokio::task::spawn_blocking(move || prepare(index_path, Ok(settings_path), None))
       .await
       .map_err(|error| error.to_string())??;
     // Exercise real SQLite creation without installing watchers on the test

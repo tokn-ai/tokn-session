@@ -49,10 +49,26 @@ Supported commands:
   and remains native-only through this adapter.
 - Command/file approval supports approve-once and deny, respecting native
   `availableDecisions`. A generic permanent grant cannot be expressed faithfully
-  and rejects. Native `humanCommand` checkpoints and unknown command approval
-  kinds reject: this generic response API does not attest fresh human approval
-  and does not advertise `requiredHumanApproval`. Unknown server requests
+  and rejects. Native `humanCommand` checkpoints stay outside this generic
+  response API. Unknown command approval kinds reject. Unknown server requests
   receive a method-not-supported RPC error.
+
+Hosts with a trusted human presentation channel can explicitly use
+`CodexAdapter::spawn_with_human_command_reviewer`. The callback receives exact native command, cwd,
+reason, environment, additional permissions and original thread/turn/item/approval
+identities. It returns AllowOnce, Decline or Cancel. `requiredHumanApproval` is
+advertised only by that opted-in owned stdio process; default spawn, attached
+transports and metadata probes do not claim human review. This native capability
+is a client trust assertion, not proof of user presence. The host must present
+the operation to a person and must not route it through model-controlled content
+or the serializable generic Respond API.
+
+Human requests never enter generic pending interactions or native runtime event
+payloads. Each callback carries a cancellation signal; exact native resolution,
+thread closure and disconnect retire it. The broker bounds concurrent reviews,
+declines unsupported shapes, preserves original RPC IDs, and never replays an
+uncertain response. An identical native replay does not present a second dialog;
+a new RPC envelope reusing an approval identity is declined independently.
 
 Responses and notifications update one ordered pump. Epoch guards keep delayed
 query snapshots from replacing newer live state. Identical pending-request

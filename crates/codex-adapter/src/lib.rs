@@ -1,8 +1,11 @@
 //! Codex app-server interaction through its public bidirectional RPC boundary.
 mod framing;
+mod human;
 mod mapping;
 mod state;
 mod transport;
+
+pub use human::{HumanCommandApproval, HumanCommandCancellation, HumanCommandDecision, HumanCommandReviewer};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -89,6 +92,7 @@ struct Inner {
   pump: Mutex<Option<JoinHandle<()>>>,
   disconnected: AtomicBool,
   initialize: Mutex<Value>,
+  human_commands: human::HumanCommands,
 }
 struct Snapshot {
   epoch: u64,
@@ -133,7 +137,7 @@ impl CodexAdapter {
   {
     validate_options(&options)?;
     let (transport, incoming) = Transport::stdio(reader, writer, None, options.request_timeout);
-    Self::initialize(options, Ownership::Attached, transport, incoming).await
+    Self::initialize(options, Ownership::Attached, transport, incoming, None).await
   }
 
   /// Attach to an explicitly configured WebSocket app-server, with optional bearer auth.
@@ -144,10 +148,28 @@ impl CodexAdapter {
   ) -> Result<Self, InteractionError> {
     validate_options(&options)?;
     let (transport, incoming) = Transport::websocket(endpoint, bearer, options.request_timeout).await?;
-    Self::initialize(options, Ownership::Attached, transport, incoming).await
+    Self::initialize(options, Ownership::Attached, transport, incoming, None).await
   }
 
   pub async fn spawn(options: EndpointOptions, launch: LaunchOptions) -> Result<Self, InteractionError> {
+    Self::spawn_inner(options, launch, None).await
+  }
+
+  /// Opt into native human checkpoints only when a trusted host-owned reviewer
+  /// presents every request. Metadata probes and automation use plain `spawn`.
+  pub async fn spawn_with_human_command_reviewer(
+    options: EndpointOptions,
+    launch: LaunchOptions,
+    reviewer: HumanCommandReviewer,
+  ) -> Result<Self, InteractionError> {
+    Self::spawn_inner(options, launch, Some(reviewer)).await
+  }
+
+  async fn spawn_inner(
+    options: EndpointOptions,
+    launch: LaunchOptions,
+    reviewer: Option<HumanCommandReviewer>,
+  ) -> Result<Self, InteractionError> {
     validate_options(&options)?;
     if launch.executable.as_os_str().is_empty() || !launch.working_directory.is_absolute() {
       return Err(InteractionError::invalid(
@@ -176,7 +198,7 @@ impl CodexAdapter {
       .take()
       .ok_or_else(|| InteractionError::unavailable("Codex stdin is unavailable"))?;
     let (transport, incoming) = Transport::stdio(reader, writer, Some(child), options.request_timeout);
-    Self::initialize(options, Ownership::Managed, transport, incoming).await
+    Self::initialize(options, Ownership::Managed, transport, incoming, reviewer).await
   }
 
   async fn initialize(
@@ -184,6 +206,7 @@ impl CodexAdapter {
     ownership: Ownership,
     transport: Arc<Transport>,
     mut incoming: mpsc::Receiver<Incoming>,
+    reviewer: Option<HumanCommandReviewer>,
   ) -> Result<Self, InteractionError> {
     let inner = Arc::new(Inner {
       descriptor: RuntimeDescriptor {
@@ -200,6 +223,11 @@ impl CodexAdapter {
       pump: Mutex::new(None),
       disconnected: AtomicBool::new(false),
       initialize: Mutex::new(Value::Null),
+      human_commands: human::HumanCommands::new(if ownership == Ownership::Managed {
+        reviewer
+      } else {
+        None
+      }),
     });
     let weak = Arc::downgrade(&inner);
     let pump = tokio::spawn(async move {
@@ -222,7 +250,11 @@ impl CodexAdapter {
         "initialize",
         json!({
           "clientInfo":{"name":"tokn_session","title":"Tokn Session","version":env!("CARGO_PKG_VERSION")},
-          "capabilities":{"experimentalApi":true}
+          "capabilities":wire::InitializeCapabilities {
+            experimental_api: true,
+            required_human_approval: adapter.inner.human_commands.enabled(),
+            ..Default::default()
+          }
         }),
         false,
       )
@@ -772,7 +804,10 @@ impl InteractionAdapter for CodexAdapter {
     self.inner.events.subscribe()
   }
   fn close(&self) -> AdapterFuture<'_, Result<(), InteractionError>> {
-    Box::pin(async { self.inner.transport.close().await })
+    Box::pin(async {
+      self.inner.human_commands.cancel_all();
+      self.inner.transport.close().await
+    })
   }
 }
 impl Drop for Inner {
@@ -783,5 +818,7 @@ impl Drop for Inner {
   }
 }
 
+#[cfg(test)]
+mod human_tests;
 #[cfg(test)]
 mod tests;

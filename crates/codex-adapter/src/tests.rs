@@ -68,7 +68,7 @@ async fn attach_bound() -> (CodexAdapter, Peer) {
   (adapter, peer)
 }
 
-fn request(adapter: &CodexAdapter, id: &str, session: Option<&str>, command: Command) -> InteractionRequest {
+pub(super) fn request(adapter: &CodexAdapter, id: &str, session: Option<&str>, command: Command) -> InteractionRequest {
   let descriptor = adapter.descriptor();
   InteractionRequest {
     request_id: id.into(),
@@ -784,7 +784,11 @@ async fn unadvertised_human_checkpoints_and_unknown_approval_kinds_fail_closed()
       .await;
     let response = peer.next().await;
     assert_eq!(response["id"], kind);
-    assert_eq!(response["error"]["code"], -32601);
+    if kind == "humanCommand" {
+      assert_eq!(response["result"], json!({"decision":"decline"}));
+    } else {
+      assert_eq!(response["error"]["code"], -32601);
+    }
   }
   let pending = adapter
     .execute(request(

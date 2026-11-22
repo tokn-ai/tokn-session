@@ -221,8 +221,10 @@ Current OpenCode inbox/form/permission routes and DSH authenticated Gateway
 streams coexist with retained legacy contracts. Viewer live requests and native
 running state cover OpenCode and DSH. Timed DSH questions claim native waits and
 retain their deadlines. Pi admission preserves started/queued/handled results;
-legacy success proves acceptance only. Codex durable image references and
-required-human approval kinds have explicit handling. Source cursors restage
+legacy success proves acceptance only. Codex durable image references remain
+visible in history. The local desktop's owned Codex app-server can request a
+native one-time `humanCommand` decision. The dialog and its live response stay
+in the desktop host, separate from generic interaction APIs. Source cursors restage
 changed projections once. See [compatibility details](upstream-compatibility.md)
 for affected crates, native evidence, and remaining optional features.
 Private JSON reads reopen a concurrently replaced inode through the same strict

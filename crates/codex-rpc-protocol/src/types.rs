@@ -32,6 +32,10 @@ pub struct ClientInfo {
 pub struct InitializeCapabilities {
   #[serde(default)]
   pub experimental_api: bool,
+  /// Present humanCommand requests to a person and return one-time decisions.
+  /// This capability is a client assertion, not user-presence attestation.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub required_human_approval: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub opt_out_notification_methods: Option<Vec<String>>,
   #[serde(flatten)]
@@ -394,6 +398,10 @@ pub struct CommandExecutionRequestApprovalParams {
   pub cwd: Option<String>,
   #[serde(default)]
   pub reason: Option<String>,
+  #[serde(default)]
+  pub environment_id: Option<String>,
+  #[serde(default)]
+  pub additional_permissions: Option<Value>,
   /// Native decisions can contain policy-amendment objects. Retain their exact
   /// shape; clients must allowlist rather than silently widening approval scope.
   #[serde(default)]
@@ -427,6 +435,35 @@ pub struct ApprovalResponse {
 mod tests {
   use super::*;
   use serde_json::json;
+
+  #[test]
+  fn human_checkpoint_capability_is_explicit_and_details_are_lossless() {
+    assert!(
+      serde_json::to_value(InitializeCapabilities::default())
+        .unwrap()
+        .get("requiredHumanApproval")
+        .is_none()
+    );
+    let capabilities = serde_json::to_value(InitializeCapabilities {
+      experimental_api: true,
+      required_human_approval: true,
+      ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(capabilities["requiredHumanApproval"], true);
+    let native = json!({"threadId":"thread","turnId":"turn","itemId":"item",
+      "kind":"humanCommand","approvalId":"approval","command":"printf fixture","cwd":"/workspace",
+      "environmentId":"environment","additionalPermissions":{"network":{"enabled":true}},
+      "availableDecisions":["accept","decline","cancel"],"future":true});
+    let params: CommandExecutionRequestApprovalParams = serde_json::from_value(native.clone()).unwrap();
+    assert_eq!(params.environment_id.as_deref(), Some("environment"));
+    assert_eq!(params.additional_permissions, Some(json!({"network":{"enabled":true}})));
+    assert_eq!(params.extra["kind"], "humanCommand");
+    let encoded = serde_json::to_value(params).unwrap();
+    for key in ["environmentId", "additionalPermissions", "kind", "future"] {
+      assert_eq!(encoded[key], native[key]);
+    }
+  }
 
   #[test]
   fn inputs_follow_native_field_exceptions() {

@@ -698,22 +698,34 @@ impl ViewerService {
   }
 
   pub fn native(index_path: impl AsRef<Path>) -> Result<Self, String> {
-    let session_index = SessionIndex::open(index_path.as_ref())
-      .map_err(|error| format!("failed to open the viewer session index: {error}"))?;
+    Self::native_with_optional_codex_human_command_reviewer(index_path.as_ref(), None)
+  }
+
+  /// Opt in to local host review of Codex commands requiring a human decision.
+  /// Only managed Codex runtimes receive this callback. It is never exposed as
+  /// a frontend or remote interaction response route.
+  pub fn native_with_codex_human_command_reviewer(
+    index_path: impl AsRef<Path>,
+    reviewer: crate::CodexHumanCommandReviewer,
+  ) -> Result<Self, String> {
+    Self::native_with_optional_codex_human_command_reviewer(index_path.as_ref(), Some(reviewer))
+  }
+
+  fn native_with_optional_codex_human_command_reviewer(
+    index_path: &Path,
+    reviewer: Option<crate::CodexHumanCommandReviewer>,
+  ) -> Result<Self, String> {
+    let session_index =
+      SessionIndex::open(index_path).map_err(|error| format!("failed to open the viewer session index: {error}"))?;
     let mut service = Self::with_repository(Arc::new(NativeRepository::default()), Arc::new(session_index));
-    service.indexer_lock = Some(crate::indexer::IndexerLock::new(index_path.as_ref())?);
+    service.indexer_lock = Some(crate::indexer::IndexerLock::new(index_path)?);
     let image_root = index_path
-      .as_ref()
       .parent()
       .unwrap_or_else(|| Path::new("."))
       .join("viewer/images");
     // An unusable attachment directory must not prevent opening text history.
     // Uploads report the storage error through their own action state.
-    let session_directory = index_path
-      .as_ref()
-      .parent()
-      .unwrap_or_else(|| Path::new("."))
-      .join("viewer");
+    let session_directory = index_path.parent().unwrap_or_else(|| Path::new(".")).join("viewer");
     let session_directory = if session_directory.is_absolute() {
       session_directory
     } else {
@@ -721,8 +733,11 @@ impl ViewerService {
         .map_err(|error| error.to_string())?
         .join(session_directory)
     };
-    service.sessions =
-      crate::session_supervisor::SessionSupervisor::new(Some(session_directory), service.interactions.clone())?;
+    service.sessions = crate::session_supervisor::SessionSupervisor::new_with_codex_human_command_reviewer(
+      Some(session_directory),
+      service.interactions.clone(),
+      reviewer,
+    )?;
     let _ = service.creation_manager();
     service.images = crate::images::ImageStore::persistent(image_root.clone())
       .unwrap_or_else(|_| crate::images::ImageStore::configured(image_root));

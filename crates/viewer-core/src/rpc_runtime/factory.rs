@@ -75,22 +75,28 @@ fn bearer(profile: &RpcResolvedProfile) -> Option<&str> {
     None
   }
 }
-pub(super) async fn open(id: &str, profile: &RpcResolvedProfile) -> Result<Handle, String> {
+pub(super) async fn open(
+  id: &str,
+  profile: &RpcResolvedProfile,
+  reviewer: Option<crate::CodexHumanCommandReviewer>,
+) -> Result<Handle, String> {
   let owned = profile.profile.mode == RpcRuntimeMode::Managed;
   let result = match profile.profile.provider {
     Provider::Codex => {
       let options = tokn_codex_adapter::EndpointOptions::new(id);
       let adapter = if owned {
-        tokn_codex_adapter::CodexAdapter::spawn(
-          options,
-          tokn_codex_adapter::LaunchOptions {
-            executable: path(profile)?,
-            working_directory: cwd(profile)?,
-            arguments: profile.profile.arguments.iter().map(OsString::from).collect(),
-            environment: env(profile),
-          },
-        )
-        .await
+        let launch = tokn_codex_adapter::LaunchOptions {
+          executable: path(profile)?,
+          working_directory: cwd(profile)?,
+          arguments: profile.profile.arguments.iter().map(OsString::from).collect(),
+          environment: env(profile),
+        };
+        match reviewer {
+          Some(reviewer) => {
+            tokn_codex_adapter::CodexAdapter::spawn_with_human_command_reviewer(options, launch, reviewer).await
+          }
+          None => tokn_codex_adapter::CodexAdapter::spawn(options, launch).await,
+        }
       } else {
         tokn_codex_adapter::CodexAdapter::connect(options, endpoint(profile)?, bearer(profile)).await
       };
@@ -497,7 +503,19 @@ impl core_runtime::RuntimeHost for Host {
     profile: &'a Self::Profile,
   ) -> AdapterFuture<'a, Result<Arc<dyn core_runtime::RuntimeHandle>, String>> {
     Box::pin(async move {
-      open(runtime_id, profile)
+      open(runtime_id, profile, self.codex_human_command_reviewer.clone())
+        .await
+        .map(|handle| Arc::new(handle) as Arc<dyn core_runtime::RuntimeHandle>)
+    })
+  }
+
+  fn open_metadata<'a>(
+    &'a self,
+    runtime_id: &'a str,
+    profile: &'a Self::Profile,
+  ) -> AdapterFuture<'a, Result<Arc<dyn core_runtime::RuntimeHandle>, String>> {
+    Box::pin(async move {
+      open(runtime_id, profile, None)
         .await
         .map(|handle| Arc::new(handle) as Arc<dyn core_runtime::RuntimeHandle>)
     })

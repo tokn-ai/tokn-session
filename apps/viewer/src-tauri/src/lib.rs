@@ -4,6 +4,8 @@ mod device_preferences;
 mod external_host;
 #[cfg(desktop)]
 mod hub_passkey;
+#[cfg(all(desktop, any(target_os = "linux", target_os = "macos", windows)))]
+mod human_command;
 #[cfg(desktop)]
 mod local_host;
 #[cfg(desktop)]
@@ -24,8 +26,10 @@ pub use tokn_viewer_core::{model, relay, service};
 
 #[cfg(desktop)]
 pub fn run() {
-  tauri::Builder::default()
-    .plugin(tauri_plugin_opener::init())
+  let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+  #[cfg(any(target_os = "macos", windows))]
+  let builder = builder.plugin(tauri_plugin_dialog::init());
+  builder
     .setup(|app| {
       app.manage(local_viewer::LocalViewer::default());
       let paths = tokn_session_storage::SessionPaths::discover()?;

@@ -202,7 +202,7 @@ impl<H: RuntimeHost> RuntimeCoordinator<H> {
       .map_err(|_| InteractionError::unavailable("Could not recheck model runtime configuration"))?
       .map_err(InteractionError::unavailable)?;
     self.ensure_open().map_err(InteractionError::unavailable)?;
-    let handle = match tokio::time::timeout(PROBE_TIMEOUT, self.0.host.open(&runtime_id, &resolved)).await {
+    let handle = match tokio::time::timeout(PROBE_TIMEOUT, self.0.host.open_metadata(&runtime_id, &resolved)).await {
       Ok(Ok(handle)) => handle,
       failed => {
         if descriptor.ownership == Ownership::Managed {

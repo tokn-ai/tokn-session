@@ -404,6 +404,175 @@ async fn replay_real_codex_rpc_conversation() -> TestResult {
   Ok(())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires a disposable host with a managed prompt-user rule for touch and a compatible Codex app-server"]
+async fn real_codex_managed_command_checkpoints() -> TestResult {
+  use std::{collections::BTreeMap, ffi::OsString};
+  use tokn_codex_adapter::{HumanCommandDecision, HumanCommandReviewer, LaunchOptions};
+
+  let executable = PathBuf::from(std::env::var("TOKN_CODEX_HUMAN_APPROVAL_EXECUTABLE")?);
+  if !executable.is_absolute() {
+    return Err("TOKN_CODEX_HUMAN_APPROVAL_EXECUTABLE must be absolute".into());
+  }
+  let temp = tempfile::tempdir()?;
+  let codex_home = temp.path().join("codex");
+  let work = std::fs::canonicalize(temp.path())?.join("workspace");
+  std::fs::create_dir(&codex_home)?;
+  std::fs::create_dir(&work)?;
+  let markers = ["allowed.marker", "declined.marker", "canceled.marker"];
+  let command = |marker| ModelStep::tool_call("exec_command", json!({"cmd":format!("touch {marker}")}));
+  let model = ModelServer::start(vec![
+    command(markers[0]),
+    ModelStep::text("fixture approved"),
+    command(markers[1]),
+    ModelStep::text("fixture declined"),
+    command(markers[2]),
+  ])
+  .await?;
+  std::fs::write(
+    codex_home.join("config.toml"),
+    format!(
+      r#"model="fixture-model"
+model_provider="fixture"
+approval_policy="on-request"
+approvals_reviewer="user"
+sandbox_mode="danger-full-access"
+[analytics]
+enabled=false
+[model_providers.fixture]
+name="Local fixture"
+base_url={base_url:?}
+wire_api="responses"
+requires_openai_auth=false
+request_max_retries=0
+stream_max_retries=0
+supports_websockets=false
+"#,
+      base_url = model.url()
+    ),
+  )?;
+
+  let (review_tx, mut reviews) = tokio::sync::mpsc::channel(1);
+  let reviewer: HumanCommandReviewer = Arc::new(move |request| {
+    let review_tx = review_tx.clone();
+    Box::pin(async move {
+      let (decision, answer) = tokio::sync::oneshot::channel();
+      if review_tx.send((request, decision)).await.is_err() {
+        return HumanCommandDecision::Decline;
+      }
+      answer.await.unwrap_or(HumanCommandDecision::Decline)
+    })
+  });
+  // Clear the child environment before applying the disposable local settings.
+  let assignment = |name, path: &Path| {
+    let mut variable = OsString::from(format!("{name}="));
+    variable.push(path);
+    variable
+  };
+  let adapter = CodexAdapter::spawn_with_human_command_reviewer(
+    options(),
+    LaunchOptions {
+      executable: "/usr/bin/env".into(),
+      working_directory: work.clone(),
+      arguments: vec![
+        "-i".into(),
+        assignment("HOME", temp.path()),
+        assignment("CODEX_HOME", &codex_home),
+        assignment("TMPDIR", temp.path()),
+        "PATH=/usr/bin:/bin".into(),
+        "NO_PROXY=127.0.0.1,localhost".into(),
+        "RUST_LOG=error".into(),
+        executable.into_os_string(),
+      ],
+      environment: BTreeMap::new(),
+    },
+    reviewer,
+  )
+  .await?;
+  let target = adapter
+    .create_thread(ThreadOptions {
+      cwd: Some(work.clone()),
+      ..ThreadOptions::default()
+    })
+    .await?;
+  let mut events = adapter.subscribe();
+  let mut approval_ids = std::collections::BTreeSet::new();
+  for (marker, decision, done) in [
+    (markers[0], HumanCommandDecision::AllowOnce, Some("fixture approved")),
+    (markers[1], HumanCommandDecision::Decline, Some("fixture declined")),
+    (markers[2], HumanCommandDecision::Cancel, None),
+  ] {
+    admission(
+      &adapter,
+      &target,
+      marker,
+      "Run the fixture command",
+      DeliveryMode::StartOrSteer,
+    )
+    .await?;
+    let (review, answer) = match tokio::time::timeout(Duration::from_secs(20), reviews.recv()).await {
+      Ok(Some(review)) => review,
+      _ => {
+        let mut recent = std::collections::VecDeque::new();
+        while let Ok(event) = events.try_recv() {
+          if recent.len() == 8 {
+            recent.pop_front();
+          }
+          recent.push_back(event.kind);
+        }
+        let requests = model.requests();
+        let outputs: Vec<_> = requests
+          .last()
+          .and_then(|request| request["input"].as_array())
+          .into_iter()
+          .flatten()
+          .filter(|item| item["type"] == "function_call_output")
+          .map(|item| &item["output"])
+          .collect();
+        return Err(format!(
+          "Codex did not request the {marker} checkpoint. Check the managed prompt-user rule and tool availability. Model requests: {}; tool outputs: {outputs:?}; last events: {recent:?}",
+          requests.len(),
+        ).into());
+      }
+    };
+    assert_eq!(Some(review.thread_id.as_str()), target.session_id.as_deref());
+    assert!(review.command.contains(marker));
+    assert_eq!(Path::new(&review.cwd), work);
+    assert!(approval_ids.insert(review.approval_id));
+    assert!(
+      !work.join(marker).exists(),
+      "command ran before the checkpoint decision"
+    );
+    match adapter
+      .execute(request(&target, "pending-checkpoint", Command::PendingInteractions))
+      .await?
+    {
+      Reply::Interactions(pending) => assert!(pending.is_empty()),
+      _ => panic!("unexpected generic interaction reply"),
+    }
+    answer
+      .send(decision)
+      .map_err(|_| "Codex checkpoint was already retired")?;
+    if let Some(done) = done {
+      completed(&mut events, done).await?;
+    } else {
+      next_matching(&mut events, |event| {
+        matches!(&event.kind, RuntimeEventKind::Native(value)
+          if value["method"] == "turn/completed" && value["params"]["turn"]["status"] == "interrupted")
+      })
+      .await?;
+    }
+    assert_eq!(
+      work.join(marker).exists(),
+      matches!(decision, HumanCommandDecision::AllowOnce)
+    );
+  }
+  assert_eq!(model.requests().len(), 5);
+  adapter.close().await?;
+  Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires TOKN_CODEX_RPC_EXECUTABLE at the documented native version; local model server only"]
 async fn capture_real_codex_rpc_conversation() -> TestResult {

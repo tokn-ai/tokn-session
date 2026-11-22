@@ -128,15 +128,24 @@ pub(crate) struct SessionSupervisor {
 
 impl SessionSupervisor {
   pub(crate) fn new(directory: Option<PathBuf>, interactions: InteractionService) -> Result<Self, String> {
+    Self::new_with_codex_human_command_reviewer(directory, interactions, None)
+  }
+
+  pub(crate) fn new_with_codex_human_command_reviewer(
+    directory: Option<PathBuf>,
+    interactions: InteractionService,
+    reviewer: Option<crate::CodexHumanCommandReviewer>,
+  ) -> Result<Self, String> {
     let ownership = SessionOwnership::new(directory.as_ref().map(|path| path.join("session-leases")))?;
     let managed = ManagedSessions::new_with_session_ownership(
       directory.as_ref().map(|path| path.join("managed-sessions.json")),
       ownership.clone(),
     )
     .unwrap_or_else(ManagedSessions::disabled);
-    let runtimes = RpcRuntimeManager::new(
+    let runtimes = RpcRuntimeManager::new_with_codex_human_command_reviewer(
       directory.as_ref().map(|path| path.join("rpc-runtimes.json")),
       interactions,
+      reviewer,
     )
     .with_session_ownership(ownership.clone())?;
     Ok(Self {
