@@ -151,7 +151,7 @@ export class BrowserHubAccess implements HubAccessBackend {
     const client = await EncryptedHubClient.connect(this.hub_url, host, this.store.identity, this.crypto, signal);
     try {
       let group: DiscoveryGroup | null | undefined;
-      try { group = await readHubDiscoveryGroup(this.hub_url, host, this.store.identity, this.crypto, signal); }
+      try { group = await client.discoveryGroup(signal); }
       catch { this.checkActive(signal); }
       this.checkActive(signal);
       if (group !== undefined) await this.store.rememberDiscoveryGroup(host, group);

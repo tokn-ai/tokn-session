@@ -1,19 +1,25 @@
+mod session;
+
+use self::session::{Session, Stream};
 use crate::{
   bridge, emit, host,
   storage::{self, Store},
 };
-use futures_util::future::{Either, select};
+use futures_util::{
+  future::{AbortHandle, Abortable, Either, select},
+  lock::Mutex,
+};
 use serde_json::{Value, json};
 use std::{
   cell::{Cell, RefCell},
-  collections::{BTreeMap, BTreeSet},
+  collections::BTreeMap,
   rc::Rc,
 };
 use tokn_hub_client_core::{
   discovery::DiscoveryGroup,
   exchange::{RequestFrames, ResponseState},
   protocol,
-  secure::{InnerMessage, NoiseInitiator, SecureChannel},
+  secure::InnerMessage,
 };
 
 const MAX_CONNECTIONS: usize = 8;
@@ -27,9 +33,11 @@ struct Connection {
   endpoint: String,
   closed: Cell<bool>,
   requests: Cell<usize>,
-  sockets: RefCell<BTreeSet<String>>,
+  ready: Cell<bool>,
+  opening: Mutex<()>,
+  session: Mutex<Option<Rc<Session>>>,
+  connecting: RefCell<Option<AbortHandle>>,
   stream_epoch: Cell<u64>,
-  stream_socket: RefCell<Option<String>>,
   stream_channel: RefCell<Option<String>>,
 }
 impl Connection {
@@ -51,113 +59,83 @@ impl Connection {
       emit("hub-client-state", json!({"connection_id":self.id,"state":state}));
     }
   }
-  async fn exchange(
-    self: &Rc<Self>,
-    method: &str,
-    path: &str,
-    body: &[u8],
-    limit: Option<usize>,
-  ) -> Result<Exchange, String> {
+  async fn session(&self) -> Result<Rc<Session>, String> {
+    let mut active = self.session.lock().await;
     if self.closed.get() {
       return Err("Machine disconnected".into());
     }
-    let frames = RequestFrames::new(method, path, body)?;
-    let socket = host::Socket::open(&self.endpoint).await?;
-    self.sockets.borrow_mut().insert(socket.handle.clone());
-    let mut exchange = Exchange {
-      socket,
-      channel: None,
-      response: None,
-      owner: self.clone(),
-    };
+    if let Some(session) = active.as_ref().filter(|session| session.is_live()) {
+      return Ok(session.clone());
+    }
+    let (dial, cancellation) = AbortHandle::new_pair();
+    *self.connecting.borrow_mut() = Some(dial);
+    let session = Abortable::new(
+      Session::connect(&self.endpoint, &self.store.identity, &self.host_key),
+      cancellation,
+    )
+    .await;
+    self.connecting.borrow_mut().take();
+    let session = session.map_err(|_| "Machine disconnected")??;
     if self.closed.get() {
       return Err("Machine disconnected".into());
     }
-    let mut initiator = NoiseInitiator::new_with_entropy(&self.store.identity, &self.host_key, host::entropy().await?)?;
-    exchange.socket.send(initiator.start()?).await?;
-    let mut channel = initiator.finish(&exchange.socket.receive().await?)?;
-    for frame in frames {
-      exchange.socket.send(channel.encrypt(&frame)?).await?;
-    }
-    let header = channel.decrypt(&exchange.socket.receive().await?)?;
-    exchange.response = Some(ResponseState::from_header(header, limit)?);
-    exchange.channel = Some(channel);
-    Ok(exchange)
+    *active = Some(session.clone());
+    Ok(session)
   }
-  async fn health(self: &Rc<Self>) -> Result<Value, String> {
+  async fn exchange(&self, method: &str, path: &str, body: &[u8], limit: Option<usize>) -> Result<Exchange, String> {
+    let mut frames = RequestFrames::new(method, path, body)?;
+    let mut stream = self
+      .session()
+      .await?
+      .open(frames.next().ok_or("Missing machine request header")?)
+      .await?;
+    for frame in frames {
+      stream.send(frame).await?;
+    }
+    let response = ResponseState::from_header(stream.receive().await?, limit)?;
+    Ok(Exchange { stream, response })
+  }
+  async fn health(&self) -> Result<(u16, Value), String> {
     let mut exchange = self.exchange("GET", "/api/v1/health", &[], Some(64 * 1024)).await?;
-    if exchange.response.as_ref().unwrap().status != 200 {
-      return Err("Machine refused this device".into());
+    if exchange.response.status != 200 {
+      return Ok((exchange.response.status, Value::Null));
     }
     let mut body = Vec::new();
     while let Some(chunk) = exchange.next().await? {
       body.extend_from_slice(&chunk);
       exchange.ack().await?;
     }
-    serde_json::from_slice(&body).map_err(|_| "Invalid machine health response".into())
+    Ok((
+      200,
+      serde_json::from_slice(&body).map_err(|_| "Invalid machine health response")?,
+    ))
   }
   async fn discovery_group(self: &Rc<Self>) -> Result<Option<DiscoveryGroup>, String> {
-    let socket = host::Socket::open(&self.endpoint).await?;
-    self.sockets.borrow_mut().insert(socket.handle.clone());
-    let exchange = Exchange {
-      socket,
-      channel: None,
-      response: None,
-      owner: self.clone(),
-    };
-    let mut initiator = NoiseInitiator::new_with_entropy(&self.store.identity, &self.host_key, host::entropy().await?)?;
-    exchange.socket.send(initiator.start()?).await?;
-    let mut channel = initiator.finish(&exchange.socket.receive().await?)?;
-    exchange
-      .socket
-      .send(channel.encrypt(&InnerMessage::DiscoveryRequest {})?)
-      .await?;
-    match channel.decrypt(&exchange.socket.receive().await?)? {
-      InnerMessage::DiscoveryResponse { group } => {
-        if let Some(group) = &group {
-          group.validate()?;
-        }
-        exchange.socket.close().await;
-        Ok(group)
-      }
+    let mut stream = self.session().await?.open(InnerMessage::DiscoveryRequest {}).await?;
+    match stream.receive().await? {
+      InnerMessage::DiscoveryResponse { group } => Ok(group),
       InnerMessage::Error { message } => Err(message),
       _ => Err("Machine returned invalid discovery metadata".into()),
     }
   }
-  async fn stop_stream(&self) {
+  fn stop_stream(&self) {
     self.stream_epoch.set(self.stream_epoch.get().wrapping_add(1));
     let channel = self.stream_channel.borrow_mut().take();
     if let Some(channel) = channel {
       bridge::cancel(&channel);
     }
-    let handle = self.stream_socket.borrow_mut().take();
-    if let Some(handle) = handle {
-      let _ = host::call::<Value>("websocket.close", json!({"socket_handle":handle})).await;
-    }
   }
 }
 struct Exchange {
-  socket: host::Socket,
-  channel: Option<SecureChannel>,
-  response: Option<ResponseState>,
-  owner: Rc<Connection>,
+  stream: Stream,
+  response: ResponseState,
 }
 impl Exchange {
   async fn next(&mut self) -> Result<Option<Vec<u8>>, String> {
-    if self.owner.closed.get() {
-      return Err("Machine disconnected".into());
-    }
-    let message = self.channel.as_mut().unwrap().decrypt(&self.socket.receive().await?)?;
-    self.response.as_mut().unwrap().next(message)
+    self.response.next(self.stream.receive().await?)
   }
   async fn ack(&mut self) -> Result<(), String> {
-    let frame = self.response.as_mut().unwrap().acknowledge()?;
-    self.socket.send(self.channel.as_mut().unwrap().encrypt(&frame)?).await
-  }
-}
-impl Drop for Exchange {
-  fn drop(&mut self) {
-    self.owner.sockets.borrow_mut().remove(&self.socket.handle);
+    self.stream.send(self.response.acknowledge()?).await
   }
 }
 struct Permit(Rc<Connection>);
@@ -178,7 +156,7 @@ impl Drop for Permit {
 fn get(id: &str) -> Result<Rc<Connection>, String> {
   CONNECTIONS
     .with(|connections| connections.borrow().get(id).cloned())
-    .filter(|connection| !connection.closed.get())
+    .filter(|connection| connection.ready.get() && !connection.closed.get())
     .ok_or("Machine connection is closed".into())
 }
 pub fn inventory() -> Vec<Value> {
@@ -186,6 +164,7 @@ pub fn inventory() -> Vec<Value> {
     connections
       .borrow()
       .values()
+      .filter(|connection| connection.ready.get())
       .map(|connection| connection.descriptor())
       .collect()
   })
@@ -205,86 +184,111 @@ pub async fn open(params: Value) -> Result<Value, String> {
   {
     return Err("Machine key differs from its remembered identity".into());
   }
-  let existing = CONNECTIONS.with(|connections| {
-    connections
-      .borrow()
-      .values()
-      .find(|connection| {
-        !connection.closed.get()
-          && connection.store.hub == store.hub
-          && connection.host_id == host_id
-          && connection.host_key == saved.host_public_key
-      })
-      .cloned()
-  });
-  if let Some(connection) = existing {
-    // A reattached view keeps the run's connection and trust. Verify that the
-    // host still admits this device before handing the existing descriptor out.
-    let result = verify_health(&connection).await;
-    if let Err(error) = result {
-      close(&connection.id).await;
-      return Err(error);
+  // Publish the pending connection internally before the first network await.
+  // Concurrent views share one handshake, but only verified connections appear
+  // in inventory or accept commands.
+  let connection = CONNECTIONS.with(|connections| -> Result<Rc<Connection>, String> {
+    let mut connections = connections.borrow_mut();
+    if let Some(existing) = connections.values().find(|connection| {
+      !connection.closed.get()
+        && connection.store.hub == store.hub
+        && connection.host_id == host_id
+        && connection.host_key == saved.host_public_key
+    }) {
+      return Ok(existing.clone());
     }
+    if connections.len() >= MAX_CONNECTIONS {
+      return Err("Too many connected machines".into());
+    }
+    let connection = Rc::new(Connection {
+      id: apell_guest::create_id(),
+      endpoint: storage::endpoint(&store.hub, host_id)?,
+      store: store.clone(),
+      host_id: host_id.into(),
+      host_key: saved.host_public_key,
+      closed: Cell::new(false),
+      ready: Cell::new(false),
+      opening: Mutex::new(()),
+      requests: Cell::new(0),
+      session: Mutex::new(None),
+      connecting: RefCell::new(None),
+      stream_epoch: Cell::new(0),
+      stream_channel: RefCell::new(None),
+    });
+    connections.insert(connection.id.clone(), connection.clone());
+    Ok(connection)
+  })?;
+  let reattach = connection.ready.get();
+  let _opening = connection.opening.lock().await;
+  if connection.closed.get() {
+    return Err("Machine disconnected".into());
+  }
+  if !reattach && connection.ready.get() {
+    return Ok(connection.descriptor());
+  }
+  if let Err(error) = verify_health(&connection).await {
+    if !connection.ready.get()
+      || matches!(error, HealthFailure::Rejected(_))
+      || connection
+        .session
+        .lock()
+        .await
+        .as_ref()
+        .is_none_or(|session| !session.is_live())
+    {
+      close(&connection.id).await;
+    }
+    return Err(match error {
+      HealthFailure::Rejected(reason) | HealthFailure::Temporary(reason) => reason,
+    });
+  }
+  let result = async {
+    refresh_discovery(&connection).await?;
     if connection.closed.get() {
       return Err("Machine disconnected".into());
     }
-    refresh_discovery(&connection).await?;
     store.select(host_id).await?;
-    return Ok(connection.descriptor());
-  }
-  if CONNECTIONS.with(|connections| connections.borrow().len()) >= MAX_CONNECTIONS {
-    return Err("Too many connected machines".into());
-  }
-  let connection = Rc::new(Connection {
-    id: apell_guest::create_id(),
-    endpoint: storage::endpoint(&store.hub, host_id)?,
-    store: store.clone(),
-    host_id: host_id.into(),
-    host_key: saved.host_public_key,
-    closed: Cell::new(false),
-    requests: Cell::new(0),
-    sockets: RefCell::new(BTreeSet::new()),
-    stream_epoch: Cell::new(0),
-    stream_socket: RefCell::new(None),
-    stream_channel: RefCell::new(None),
-  });
-  verify_health(&connection).await?;
-  refresh_discovery(&connection).await?;
-  store.select(host_id).await?;
-  CONNECTIONS.with(|connections| {
-    let mut connections = connections.borrow_mut();
-    // Another view can finish opening the same machine while this health check
-    // is pending. Reuse its verified live connection rather than leaking a run.
-    if let Some(existing) = connections.values().find(|existing| {
-      !existing.closed.get()
-        && existing.store.hub == connection.store.hub
-        && existing.host_id == connection.host_id
-        && existing.host_key == connection.host_key
-    }) {
-      return Ok(existing.descriptor());
+    if connection.closed.get() {
+      return Err("Machine disconnected".into());
     }
-    // Startup yielded to health and persistence. Other opens may have filled
-    // the bounded registry meanwhile; never admit a ninth live connection.
-    if connections.len() >= MAX_CONNECTIONS {
-      return Err("Too many connected machines".to_owned());
-    }
-    let descriptor = connection.descriptor();
-    connections.insert(connection.id.clone(), connection);
-    Ok(descriptor)
-  })
+    connection.ready.set(true);
+    Ok(connection.descriptor())
+  }
+  .await;
+  if result.is_err() && !connection.ready.get() {
+    close(&connection.id).await;
+  }
+  result
 }
 
-async fn verify_health(connection: &Rc<Connection>) -> Result<(), String> {
-  let watchdog = bridge::Channel::new(format!("health-{}", apell_guest::create_id()))?;
-  watchdog.timeout(15)?;
+enum HealthFailure {
+  Rejected(String),
+  Temporary(String),
+}
+
+async fn verify_health(connection: &Connection) -> Result<(), HealthFailure> {
+  let watchdog =
+    bridge::Channel::new(format!("health-{}", apell_guest::create_id())).map_err(HealthFailure::Temporary)?;
+  watchdog.timeout(15).map_err(HealthFailure::Temporary)?;
   match select(Box::pin(connection.health()), Box::pin(watchdog.cancellation())).await {
     Either::Left((result, _)) => {
-      if result?.get("version").and_then(Value::as_u64) != Some(1) {
-        return Err("Machine uses an unsupported viewer API".into());
+      let (status, body) = result.map_err(HealthFailure::Temporary)?;
+      if matches!(status, 401 | 403) {
+        return Err(HealthFailure::Rejected("Machine refused this device".into()));
+      }
+      if status != 200 {
+        return Err(HealthFailure::Temporary(format!(
+          "Machine health check returned HTTP {status}"
+        )));
+      }
+      if body.get("version").and_then(Value::as_u64) != Some(protocol::VIEWER_API_VERSION) {
+        return Err(HealthFailure::Rejected(
+          "Machine uses an unsupported viewer API version. Update the machine's viewer.".into(),
+        ));
       }
       Ok(())
     }
-    Either::Right(_) => Err("Machine health check timed out".into()),
+    Either::Right(_) => Err(HealthFailure::Temporary("Machine health check timed out".into())),
   }
 }
 
@@ -320,7 +324,7 @@ pub async fn request(params: Value) -> Result<Value, String> {
     let mut exchange = connection
       .exchange(method, &path, &body, Some(128 * 1024 * 1024))
       .await?;
-    let response = exchange.response.as_ref().unwrap();
+    let response = &exchange.response;
     if response
       .content_type
       .as_deref()
@@ -363,6 +367,9 @@ fn validate_response_id(value: &str) -> Result<(), String> {
   Ok(())
 }
 fn prepare_request(command: &str, payload: &Value) -> Result<(&'static str, String, Vec<u8>), String> {
+  if command == "events" {
+    return Err("Use the live event listener for event streams".into());
+  }
   if command.is_empty() || command.len() > 64 || !command.bytes().all(|byte| byte.is_ascii_lowercase() || byte == b'_')
   {
     return Err("Invalid viewer command".into());
@@ -384,7 +391,7 @@ fn prepare_request(command: &str, payload: &Value) -> Result<(&'static str, Stri
 }
 pub async fn listen(id: &str) -> Result<Value, String> {
   let connection = get(id)?;
-  connection.stop_stream().await;
+  connection.stop_stream();
   let epoch = connection.stream_epoch.get();
   emit(
     "hub-client-transport",
@@ -398,6 +405,7 @@ pub async fn listen(id: &str) -> Result<Value, String> {
 }
 async fn pump(connection: Rc<Connection>, epoch: u64) {
   let mut attempt = 0u64;
+  let subscription = json!({"subscription_prefix":connection.id}).to_string();
   while !connection.closed.get() && connection.stream_epoch.get() == epoch {
     connection.state(if attempt == 0 { "connecting" } else { "reconnecting" });
     let generation = format!("{epoch}-{attempt}");
@@ -412,16 +420,15 @@ async fn pump(connection: Rc<Connection>, epoch: u64) {
       "hub-client-stream-reset",
       json!({"connection_id":connection.id,"generation":generation,"channel_id":channel_id}),
     );
-    let result = async {
-      let mut exchange = connection.exchange("GET", "/api/v1/events", &[], None).await?;
-      // A replacement listener can retire this generation while its socket or
-      // handshake is opening. Drop that exact exchange before touching the new
-      // generation's socket handle or waiting for its first response chunk.
+    let cancelled = bridge.cancellation();
+    let operation = async {
+      let mut exchange = connection
+        .exchange("POST", "/api/v1/events", subscription.as_bytes(), None)
+        .await?;
       if connection.closed.get() || connection.stream_epoch.get() != epoch {
         return Ok(());
       }
-      *connection.stream_socket.borrow_mut() = Some(exchange.socket.handle.clone());
-      let response = exchange.response.as_ref().unwrap();
+      let response = &exchange.response;
       if response.status != 200
         || !response
           .content_type
@@ -444,8 +451,11 @@ async fn pump(connection: Rc<Connection>, epoch: u64) {
         exchange.ack().await?;
       }
       Err::<(), String>("Machine closed live updates".into())
-    }
-    .await;
+    };
+    let result = match select(Box::pin(operation), Box::pin(cancelled)).await {
+      Either::Left((result, _)) => result,
+      Either::Right(_) => Err("Live updates detached".into()),
+    };
     drop(bridge);
     if connection.closed.get() || connection.stream_epoch.get() != epoch {
       return;
@@ -466,10 +476,12 @@ pub async fn close(id: &str) {
   let connection = CONNECTIONS.with(|connections| connections.borrow_mut().remove(id));
   if let Some(connection) = connection {
     connection.closed.set(true);
-    connection.stop_stream().await;
-    let sockets = connection.sockets.borrow().iter().cloned().collect::<Vec<_>>();
-    for socket in sockets {
-      let _ = host::call::<Value>("websocket.close", json!({"socket_handle":socket})).await;
+    if let Some(dial) = connection.connecting.borrow_mut().take() {
+      dial.abort();
+    }
+    connection.stop_stream();
+    if let Some(session) = connection.session.lock().await.take() {
+      session.stop("Machine disconnected".into());
     }
   }
 }

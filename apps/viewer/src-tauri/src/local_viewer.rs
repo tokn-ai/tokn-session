@@ -149,6 +149,8 @@ async fn start(app: AppHandle) -> Result<StartedViewer, String> {
 async fn forward_events(mut events: broadcast::Receiver<ViewerEvent>, app: AppHandle) {
   loop {
     match events.recv().await {
+      // Only the grant stream can route this internal address to its reader.
+      Ok(event) if event.event == "session-subscription-invalidated" => continue,
       Ok(event) => {
         if matches!(event.event.as_str(), "managed-session-changed" | "relay-status") {
           crate::runtime_management::changed(&app);

@@ -22,10 +22,9 @@ use crate::{BoxTransport, MAX_RECORD, RECORD_CHANNEL_LABEL, RecordTransport, Tra
 
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(15);
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
-const READ_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_SDP: usize = 32 * 1024;
 const RECORD_QUEUE: usize = 16;
-// The native request limit is 32, with one SSE and one health exchange.
+// Bound physical channels independently of the streams multiplexed on them.
 const MAX_CHANNELS: usize = 34;
 // The upstream peer retains closed data-channel descriptors until peer close.
 // Bound the lifetime total as well as simultaneous channels.
@@ -34,8 +33,8 @@ const MAX_BUFFERED: usize = 4 * MAX_RECORD;
 const PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const RETIREMENT_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// One authenticated machine's direct carrier. Every request opens a separate
-/// channel; each channel must perform its own Noise handshake above this layer.
+/// Direct carrier for a machine. Endpoints authenticate each opened record
+/// channel and can multiplex viewer requests over its lifetime.
 #[derive(Clone)]
 pub struct WebRtcPeer {
   inner: Arc<PeerInner>,
@@ -492,19 +491,16 @@ impl RecordTransport for DataChannelTransport {
     if let Some(error) = self.error.lock().unwrap().clone() {
       return Err(error);
     }
-    let result = timeout(READ_TIMEOUT, async {
-      tokio::select! {
-        biased;
-        record = self.incoming.recv() => Ok(record),
-        _ = self.closed.cancelled() => match self.error.lock().unwrap().clone() {
-          Some(error) => Err(error),
-          None => Ok(self.incoming.try_recv().ok()),
-        },
-      }
-    })
-    .await
-    .map_err(|_| "WebRTC record receive timed out".to_string())?;
-    result
+    // Healthy persistent channels may be quiet. Handshake and response
+    // deadlines belong to their individual exchanges; ICE detects peer loss.
+    tokio::select! {
+      biased;
+      record = self.incoming.recv() => Ok(record),
+      _ = self.closed.cancelled() => match self.error.lock().unwrap().clone() {
+        Some(error) => Err(error),
+        None => Ok(self.incoming.try_recv().ok()),
+      },
+    }
   }
 
   async fn close(&mut self) {

@@ -116,7 +116,7 @@ impl Harness {
     let event_attempts = Arc::new(AtomicUsize::new(0));
     let attempts = event_attempts.clone();
     let viewer = Router::new()
-      .route("/api/v1/health", get(|| async { Json(json!({"version":1})) }))
+      .route("/api/v1/health", get(|| async { Json(json!({"version":2})) }))
       .route(
         "/api/v1/list_sessions",
         post(|Json(payload): Json<serde_json::Value>| async move {
@@ -125,9 +125,10 @@ impl Harness {
       )
       .route(
         "/api/v1/events",
-        get(move || {
+        post(move |Json(subscription): Json<serde_json::Value>| {
           let attempts = attempts.clone();
           async move {
+            assert!(uuid::Uuid::parse_str(subscription["subscription_prefix"].as_str().unwrap()).is_ok());
             if attempts.fetch_add(1, Ordering::SeqCst) < event_failures {
               return (StatusCode::SERVICE_UNAVAILABLE, "Temporary stream failure").into_response();
             }

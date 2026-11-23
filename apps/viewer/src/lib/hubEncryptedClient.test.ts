@@ -27,20 +27,28 @@ class TestSocket {
   onerror: ((event: Event) => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
   closed = false;
+  handshakes = 0;
+  stream_id?: number;
+  streams = new Map<number, Record<string, unknown>>();
+  envelopes: Record<string, unknown>[] = [];
   messages: Record<string, unknown>[] = [];
   request?: Record<string, unknown>;
   constructor(readonly url: string, private respond: (socket: TestSocket, message: Record<string, unknown>) => void) { queueMicrotask(() => this.onopen?.(new Event("open"))); }
   send(record: Uint8Array) {
     const wire = decode(record);
-    if (wire === "noise") { this.push("noise-reply"); return; }
+    if (wire === "noise") { this.handshakes++; this.push("noise-reply"); return; }
     if (wire === "pair") { this.push("host-pair"); return; }
     if (wire === "confirm") { this.push("host-ack"); return; }
-    const message = JSON.parse(wire) as Record<string, unknown>;
+    const envelope = JSON.parse(wire) as Record<string, unknown>;
+    this.envelopes.push(envelope);
+    this.stream_id = envelope.type === "stream" ? Number(envelope.stream_id) : undefined;
+    const message = this.stream_id ? envelope.frame as Record<string, unknown> : envelope;
     this.messages.push(message);
-    if (message.type === "device_request") this.request = message;
+    if (this.stream_id && message.type === "device_request") this.streams.set(this.stream_id, message);
+    this.request = this.stream_id ? this.streams.get(this.stream_id) : undefined;
     this.respond(this, message);
   }
-  push(value: unknown) { const data = encode(value); const buffer = new ArrayBuffer(data.length); new Uint8Array(buffer).set(data); this.onmessage?.(new MessageEvent("message", { data: buffer })); }
+  push(value: unknown, stream_id = this.stream_id) { const data = encode(stream_id ? { type: "stream", stream_id, frame: value } : value); const buffer = new ArrayBuffer(data.length); new Uint8Array(buffer).set(data); this.onmessage?.(new MessageEvent("message", { data: buffer })); }
   close() { this.closed = true; }
   fail() { this.onclose?.(new Event("close")); }
 }
@@ -48,7 +56,7 @@ function harness(respond: (socket: TestSocket, message: Record<string, unknown>)
   if (message.type === "request_end") {
     const events = socket.request?.path === "/api/v1/events";
     socket.push({ type: "response", status: 200, content_type: events ? "text/event-stream" : "application/json" });
-    socket.push({ type: "chunk", data: bytes(events ? "event: ready\ndata: {}\n\n" : '{"version":1}') });
+    socket.push({ type: "chunk", data: bytes(events ? "event: ready\ndata: {}\n\n" : '{"version":2}') });
     if (!events) socket.push({ type: "end" });
   }
 }) {
@@ -59,14 +67,14 @@ function harness(respond: (socket: TestSocket, message: Record<string, unknown>)
 function viewerReply(socket: TestSocket): void {
   const events = socket.request?.path === "/api/v1/events";
   socket.push({ type: "response", status: 200, content_type: events ? "text/event-stream" : "application/json" });
-  socket.push({ type: "chunk", data: bytes(events ? "event: ready\ndata: {}\n\n" : '{"version":1}') });
+  socket.push({ type: "chunk", data: bytes(events ? "event: ready\ndata: {}\n\n" : '{"version":2}') });
   if (!events) socket.push({ type: "end" });
 }
-function directHarness(options: { reject_input?: boolean; wrong_pin?: boolean; hold_health?: boolean } = {}) {
+function directHarness(options: { reject_input?: boolean; wrong_pin?: boolean; hold_health?: boolean; hold_relay_input?: boolean } = {}) {
   const relay = harness((socket, message) => {
     if (message.type === "direct_config_request") socket.push({ type: "direct_config", ice_servers: ["stun:stun.example:3478"] });
     else if (message.type === "direct_offer") socket.push({ type: "direct_answer", sdp: "answer" });
-    else if (message.type === "request_end") viewerReply(socket);
+    else if (message.type === "request_end" && !(options.hold_relay_input && socket.request?.path === "/api/v1/submit_session_input")) viewerReply(socket);
   });
   const direct = harness((socket, message) => {
     if (message.type !== "request_end") return;
@@ -80,13 +88,26 @@ function directHarness(options: { reject_input?: boolean; wrong_pin?: boolean; h
     open: async (signal) => {
       const records = await carrier.open(signal);
       if (!options.wrong_pin) return records;
-      return { ...records, send: (record) => records.send(record), close: (error) => records.close(error), read: async () => encode("wrong-noise-reply") };
+      return { ...records, setReceiveWindow: (count) => records.setReceiveWindow(count), waitWritable: () => records.waitWritable(), send: (record) => records.send(record), close: (error) => records.close(error), read: async () => encode("wrong-noise-reply") };
     },
   };
   const factory: DirectPeerFactory = vi.fn((_servers, _signal, failed) => { fail = failed; return peer; });
-  return { relay, direct, factory, peer, interrupt: () => fail(new Error("Direct connection was interrupted.")) };
+  return { relay, direct, factory, peer, interrupt: (error = new Error("Direct connection was interrupted.")) => fail(error) };
 }
 afterEach(() => { vi.useRealTimers(); });
+
+it("stops at health when the machine cannot serve scoped streams", async () => {
+  const { factory, sockets } = harness((socket, message) => {
+    if (message.type !== "request_end") return;
+    socket.push({ type: "response", status: 200, content_type: "application/json" });
+    socket.push({ type: "chunk", data: bytes('{"version":1}') });
+    socket.push({ type: "end" });
+  });
+  await expect(EncryptedHubClient.connect("https://hub.example", host, identity, crypto(), undefined, factory))
+    .rejects.toThrow("unsupported viewer API version");
+  expect(sockets.map((socket) => socket.request?.path)).toEqual(["/api/v1/health"]);
+  expect(sockets[0].closed).toBe(true);
+});
 
 it("pairs directly through Hub and returns only a host-confirmed machine pin", async () => {
   const { factory, sockets } = harness();
@@ -131,14 +152,21 @@ it("keeps passkey start and finish on one encrypted channel bound to its own dev
   expect(sockets[0].closed).toBe(true);
 });
 
-it("fragments bounded requests and acknowledges response chunks", async () => {
-  const { factory, sockets } = harness();
+it("fragments bounded requests and acknowledges response chunks on the same channel", async () => {
+  const { factory, sockets } = harness((socket, message) => {
+    if (message.type === "request_end") {
+      socket.push({ type: "response", status: 200, content_type: "application/json" });
+      socket.push({ type: "chunk", data: bytes('{"version":2}') });
+    }
+    if (message.type === "window") socket.push({ type: "end" });
+  });
   const client = await EncryptedHubClient.connect("https://hub.example", host, identity, crypto(), undefined, factory);
   await client.invoke("submit_session_input", { text: "x".repeat(70_000) });
-  const socket = sockets[1];
+  const socket = sockets[0];
+  expect(sockets).toHaveLength(1);
   expect(socket.messages.filter((message) => message.type === "request_body")).toHaveLength(3);
   expect(socket.messages).toContainEqual({ type: "window", credits: 1 });
-  expect(socket.closed).toBe(true);
+  expect(socket.closed).toBe(false);
   client.close();
 });
 
@@ -159,8 +187,12 @@ it("parses fragmented SSE and closes live streams and pending requests when swit
   const client = await EncryptedHubClient.connect("https://hub.example", host, identity, crypto(), undefined, factory);
   const changed = vi.fn();
   const stop = await client.listen("session-updated", changed);
-  sockets[1].push({ type: "chunk", data: bytes('event: session-updated\ndata: {"revision":') });
-  sockets[1].push({ type: "chunk", data: bytes('"1"}\n\n') });
+  expect(sockets[0].request).toMatchObject({ method: "POST", path: "/api/v1/events" });
+  expect(sockets[0].messages).toContainEqual({
+    type: "request_body", data: bytes(JSON.stringify({ subscription_prefix: client.subscription_prefix })),
+  });
+  sockets[0].push({ type: "chunk", data: bytes('event: session-updated\ndata: {"revision":') });
+  sockets[0].push({ type: "chunk", data: bytes('"1"}\n\n') });
   await vi.waitFor(() => expect(changed).toHaveBeenCalledWith({ payload: { revision: "1" } }));
   stop(); client.close();
   expect(sockets.every((socket) => socket.closed)).toBe(true);
@@ -170,7 +202,8 @@ it("parses fragmented SSE and closes live streams and pending requests when swit
 it("rejects relay record floods instead of retaining an unbounded response", async () => {
   const { factory } = harness((socket, message) => {
     if (message.type !== "request_end") return;
-    for (let index = 0; index < 20; index++) socket.push({ type: "chunk", data: bytes("x") });
+    socket.push({ type: "response", status: 200, content_type: "application/json" });
+    for (let index = 0; index < 200; index++) socket.push({ type: "chunk", data: bytes("x") });
   });
   const client = new EncryptedHubClient("https://hub.example", host, identity, crypto(), factory);
   await expect(client.invoke("list_sessions")).rejects.toThrow("queue exceeds");
@@ -188,8 +221,14 @@ it("authenticates direct health before upgrading, then captures the direct carri
   viewerReply(links.direct.sockets[0]);
   await vi.waitFor(() => expect(path).toHaveBeenLastCalledWith({ kind: "direct" }));
   await client.invoke("list_sessions");
-  expect(links.direct.sockets[1].request?.path).toBe("/api/v1/list_sessions");
+  expect(links.direct.sockets).toHaveLength(1);
+  expect(links.direct.sockets[0].request?.path).toBe("/api/v1/list_sessions");
   expect(links.relay.sockets.filter((socket) => socket.request?.path === "/api/v1/list_sessions")).toHaveLength(1);
+  expect(links.relay.sockets.map((socket) => socket.handshakes)).toEqual([1]);
+  expect(links.direct.sockets.map((socket) => socket.handshakes)).toEqual([1]);
+  expect(links.relay.sockets[0].envelopes.filter((envelope) =>
+    ["direct_config_request", "direct_offer"].includes(String((envelope.frame as Record<string, unknown>).type)),
+  )).toHaveLength(2);
   expect(links.factory).toHaveBeenCalledWith(["stun:stun.example:3478"], expect.any(AbortSignal), expect.any(Function));
   expect(links.peer.accept).toHaveBeenCalledWith("answer");
   client.close(); expect(links.peer.close).toHaveBeenCalled();
@@ -201,7 +240,7 @@ it("keeps encrypted relay access when the direct host pin cannot authenticate", 
   const path = vi.fn(); client.setTransportListener(path);
   await vi.waitFor(() => expect(path).toHaveBeenLastCalledWith({ kind: "relay", reason: "bad pin" }));
   await client.invoke("list_sessions");
-  expect(links.relay.sockets[links.relay.sockets.length - 1]?.request?.path).toBe("/api/v1/list_sessions");
+  expect(links.relay.sockets.flatMap((socket) => socket.messages)).toContainEqual({ type: "device_request", method: "POST", path: "/api/v1/list_sessions" });
   expect(links.peer.close).toHaveBeenCalled(); client.close();
 });
 
@@ -214,7 +253,7 @@ it.each(["submit_session_input", "submit_session_question_answers"])("falls back
   expect(links.relay.sockets.some((socket) => socket.request?.path === `/api/v1/${command}`)).toBe(false);
   expect(path).toHaveBeenLastCalledWith({ kind: "relay", reason: expect.stringContaining("delivery may be uncertain") });
   await client.invoke("list_sessions");
-  expect(links.relay.sockets[links.relay.sockets.length - 1]?.request?.path).toBe("/api/v1/list_sessions"); client.close();
+  expect(links.relay.sockets.flatMap((socket) => socket.messages)).toContainEqual({ type: "device_request", method: "POST", path: "/api/v1/list_sessions" }); client.close();
 });
 
 it("restarts only the read-only live stream and emits recovery after a direct path fails", async () => {
@@ -237,9 +276,11 @@ it("retries direct negotiation in the background and cancels scheduled retries w
   const path = vi.fn(); client.setTransportListener(path);
   await vi.waitFor(() => expect(path).toHaveBeenLastCalledWith({ kind: "relay", reason: "ICE attempt failed" }));
   await client.invoke("list_sessions");
-  expect(links.relay.sockets[links.relay.sockets.length - 1]?.request?.path).toBe("/api/v1/list_sessions");
+  expect(links.relay.sockets.flatMap((socket) => socket.messages)).toContainEqual({ type: "device_request", method: "POST", path: "/api/v1/list_sessions" });
   await vi.advanceTimersByTimeAsync(30_000);
   expect(path).toHaveBeenLastCalledWith({ kind: "direct" }); expect(links.factory).toHaveBeenCalledTimes(2);
+  expect(links.relay.sockets.map((socket) => socket.handshakes)).toEqual([1]);
+  expect(links.direct.sockets.map((socket) => socket.handshakes)).toEqual([1]);
   links.interrupt(); client.close(); await vi.advanceTimersByTimeAsync(60_000);
   expect(links.factory).toHaveBeenCalledTimes(2);
 });
@@ -249,7 +290,7 @@ it("routes an unsent request through relay when its direct peer retires", async 
   const client = await EncryptedHubClient.connect("https://hub.example", host, identity, crypto(), undefined, links.relay.factory, links.factory);
   const path = vi.fn(); client.setTransportListener(path);
   await vi.waitFor(() => expect(path).toHaveBeenLastCalledWith({ kind: "direct" }));
-  vi.spyOn(links.peer, "open").mockRejectedValueOnce(new PeerRetiredError());
+  links.interrupt(new PeerRetiredError());
   await client.invoke("submit_session_input", { text: "send once" });
   expect(links.direct.sockets.some((socket) => socket.request?.path === "/api/v1/submit_session_input")).toBe(false);
   expect(links.relay.sockets.filter((socket) => socket.request?.path === "/api/v1/submit_session_input")).toHaveLength(1);
@@ -265,5 +306,127 @@ it("applies one request deadline including the wait for response headers", async
   const rejected = expect(result).rejects.toThrow("timed out; delivery may be uncertain");
   await vi.waitFor(() => expect(sockets[0].messages).toContainEqual({ type: "request_end" }));
   await vi.advanceTimersByTimeAsync(120_000); await rejected;
-  expect(sockets).toHaveLength(1); expect(sockets[0].closed).toBe(true); client.close();
+  expect(sockets).toHaveLength(1); expect(sockets[0].closed).toBe(false);
+  expect(sockets[0].messages).toContainEqual({ type: "cancel" }); client.close();
+});
+
+it("uses one handshake for health, discovery, an event stream and interleaved commands", async () => {
+  const { factory, sockets } = harness((socket, message) => {
+    if (message.type === "discovery_request") socket.push({ type: "discovery_response", group: null });
+    if (message.type === "request_end" && ["/api/v1/events", "/api/v1/health"].includes(String(socket.request?.path))) viewerReply(socket);
+  });
+  const client = await EncryptedHubClient.connect("https://hub.example", host, identity, crypto(), undefined, factory);
+  const event = vi.fn();
+  await client.listen("session-updated", event);
+  await expect(client.discoveryGroup(new AbortController().signal)).resolves.toBeNull();
+  const listing = client.invoke("list_sessions");
+  const progress = client.invoke("get_session_index_progress");
+  const socket = sockets[0];
+  await vi.waitFor(() => expect(socket.messages.filter((message) => message.type === "request_end")).toHaveLength(4));
+  expect(sockets).toHaveLength(1);
+  expect(socket.handshakes).toBe(1);
+  const opening = socket.envelopes.filter((envelope) => ["device_request", "discovery_request"].includes(
+    String((envelope.frame as Record<string, unknown>).type),
+  ));
+  expect(opening.map((envelope) => envelope.stream_id)).toEqual([1, 2, 3, 4, 5]);
+  const header = { type: "response", status: 200, content_type: "application/json" };
+  socket.push(header, 5);
+  socket.push(header, 4);
+  socket.push({ type: "chunk", data: bytes('{"progress":1}') }, 5);
+  socket.push({ type: "chunk", data: bytes("event: session-updated\ndata: 12\n\n") }, 2);
+  socket.push({ type: "end" }, 5);
+  await expect(progress).resolves.toEqual({ progress: 1 });
+  socket.push({ type: "chunk", data: bytes('["s1"]') }, 4);
+  socket.push({ type: "end" }, 4);
+  await expect(listing).resolves.toEqual(["s1"]);
+  expect(event).toHaveBeenCalledExactlyOnceWith({ payload: 12 });
+  client.close();
+});
+
+it("shares a handshake in flight and limits the number of concurrent streams", async () => {
+  const { factory, sockets } = harness(() => {});
+  const client = new EncryptedHubClient("https://hub.example", host, identity, crypto(), factory);
+  const results = Promise.allSettled(Array.from({ length: 16 }, () => client.invoke("list_sessions")));
+  await vi.waitFor(() => expect(sockets[0]?.streams.size).toBe(16));
+  await expect(client.invoke("list_sessions")).rejects.toThrow("Too many active");
+  expect(sockets).toHaveLength(1);
+  expect(sockets[0].handshakes).toBe(1);
+  sockets[0].fail();
+  expect((await results).every((result) => result.status === "rejected")).toBe(true);
+  expect(sockets[0].streams.size).toBe(16);
+  client.close();
+});
+
+it("discards a late discovery response after cancellation and keeps concurrent commands alive", async () => {
+  const { factory, sockets } = harness(() => {});
+  const client = new EncryptedHubClient("https://hub.example", host, identity, crypto(), factory);
+  const abort = new AbortController();
+  const discovery = client.discoveryGroup(abort.signal);
+  const listing = client.invoke("list_sessions");
+  await vi.waitFor(() => expect(sockets[0]?.messages).toContainEqual({ type: "request_end" }));
+  abort.abort();
+  await expect(discovery).rejects.toThrow("disconnected");
+  const socket = sockets[0];
+  await vi.waitFor(() => expect(socket.envelopes).toContainEqual({ type: "stream", stream_id: 1, frame: { type: "cancel" } }));
+  socket.push({ type: "discovery_response", group: null }, 1);
+  socket.push({ type: "response", status: 200, content_type: "application/json" }, 2);
+  socket.push({ type: "chunk", data: bytes('["s2"]') }, 2);
+  socket.push({ type: "end" }, 2);
+  await expect(listing).resolves.toEqual(["s2"]);
+  expect(socket.closed).toBe(false);
+  expect(socket.handshakes).toBe(1);
+  client.close();
+});
+
+it("accepts concurrent full response windows in one carrier burst", async () => {
+  const { factory, sockets } = harness(() => {});
+  const client = new EncryptedHubClient("https://hub.example", host, identity, crypto(), factory);
+  const requests = Array.from({ length: 16 }, () => client.invoke("list_sessions"));
+  await vi.waitFor(() => expect(sockets[0].messages.filter((frame) => frame.type === "request_end")).toHaveLength(16));
+  const socket = sockets[0];
+  for (const id of socket.streams.keys()) {
+    socket.push({ type: "response", status: 200, content_type: "application/json" }, id);
+    for (const text of ['"', "1", "2", "3", "4", "5", "6", '"']) socket.push({ type: "chunk", data: bytes(text) }, id);
+    socket.push({ type: "end" }, id);
+  }
+  expect(await Promise.all(requests)).toEqual(Array(16).fill("123456"));
+  expect(socket.handshakes).toBe(1);
+  client.close();
+});
+
+
+it("moves events to the verified direct channel while an existing relay command finishes once", async () => {
+  const links = directHarness({ hold_health: true, hold_relay_input: true });
+  const client = await EncryptedHubClient.connect("https://hub.example", host, identity, crypto(), undefined, links.relay.factory, links.factory);
+  const reconnected = vi.fn();
+  await client.listen("transport-reconnected", reconnected);
+  const result = client.invoke("submit_session_input", { text: "one prompt" });
+  const relay = links.relay.sockets[0];
+  await vi.waitFor(() => expect(relay.request?.path).toBe("/api/v1/submit_session_input"));
+  const commandId = relay.stream_id;
+  await vi.waitFor(() => expect(links.direct.sockets[0].request?.path).toBe("/api/v1/health"));
+  viewerReply(links.direct.sockets[0]);
+  await vi.waitFor(() => expect(reconnected).toHaveBeenCalledOnce());
+  expect(relay.closed).toBe(false);
+  relay.push({ type: "response", status: 200, content_type: "application/json" }, commandId);
+  relay.push({ type: "chunk", data: bytes('{"accepted":true}') }, commandId);
+  relay.push({ type: "end" }, commandId);
+  await expect(result).resolves.toEqual({ accepted: true });
+  expect(relay.closed).toBe(true);
+  expect(relay.messages.filter((frame) => frame.path === "/api/v1/submit_session_input")).toHaveLength(1);
+  expect(links.direct.sockets[0].messages.some((frame) => frame.path === "/api/v1/submit_session_input")).toBe(false);
+  client.close();
+});
+
+it("replaces a silent encrypted carrier after a missing live heartbeat", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const { factory, sockets } = harness();
+  const client = await EncryptedHubClient.connect("https://hub.example", host, identity, crypto(), undefined, factory);
+  const reconnected = vi.fn();
+  await client.listen("transport-reconnected", reconnected);
+  await vi.advanceTimersByTimeAsync(46_001);
+  expect(sockets.map((socket) => socket.handshakes)).toEqual([1, 1]);
+  expect(sockets[0].closed).toBe(true);
+  expect(reconnected).toHaveBeenCalledOnce();
+  client.close();
 });

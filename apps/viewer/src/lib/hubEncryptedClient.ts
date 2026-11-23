@@ -1,18 +1,19 @@
-import { credentialJson, creationOptions, decodeBase64Url, encodeBase64Url, requestOptions } from "./hub";
+import { credentialJson, creationOptions, decodeBase64Url, requestOptions } from "./hub";
 import type { CryptoApi, DeviceIdentity, NoiseChannel } from "./hubCrypto";
 import { canonicalHubUrl, validateHost, type SavedHubHost } from "./hubDeviceStore";
-import { eventFrameLimit, parseEvent, type ConnectionState, type UnlistenFn, type ViewerClient } from "./transport";
+import { VIEWER_API_VERSION, eventFrameLimit, parseEvent, type ConnectionState, type UnlistenFn, type ViewerClient } from "./transport";
 import { browserDirectPeer, browserSocket, disconnected, PeerRetiredError, RelayCarrier, type DirectPeer, type DirectPeerFactory, type RecordCarrier, type RecordTransport } from "./hubTransport";
 import type { DiscoveryGroup, TransportState } from "./types";
 import { validateDiscoveryGroup } from "./hubDiscovery";
 import type { SocketFactory } from "./hubTransport";
+import { createUuid } from "./id";
+import { HUB_CHUNK_BYTES, MAX_HUB_STREAMS, HubSession, type HubStream, type HubFrame } from "./hubSession";
 export type { SocketFactory } from "./hubTransport";
 
 const MAX_BODY = 1024 * 1024;
-const MAX_CHUNK = 32 * 1024;
 const MAX_RESPONSE = 128 * 1024 * 1024;
 const REQUEST_TIMEOUT = 120_000;
-type Message = { type: string; [field: string]: unknown };
+type Message = HubFrame;
 type Handler = (event: { payload: unknown }) => void;
 export interface PasskeyProvider {
   create(options: Parameters<typeof creationOptions>[0], signal: AbortSignal): Promise<Record<string, unknown>>;
@@ -89,13 +90,17 @@ export async function readHubDiscoveryGroup(hub_url: string, host: SavedHubHost,
     opened.socket.send(opened.channel.encrypt_json(JSON.stringify({ type: "discovery_request" })));
     const message = receiveMessage(opened.channel, await opened.socket.read(5000));
     if (controller.signal.aborted) throw aborted();
-    if (message.type !== "discovery_response" || !("group" in message)) throw new Error("Machine returned invalid discovery metadata.");
-    return message.group === null ? null : validateDiscoveryGroup(message.group);
+    return discoveryGroupFrom(message);
   } finally {
     opened?.socket.close(); opened?.channel.free();
     clearTimeout(deadline); signal.removeEventListener("abort", abort);
   }
 }
+function discoveryGroupFrom(message: HubFrame): DiscoveryGroup | null {
+  if (message.type !== "discovery_response" || !("group" in message)) throw new Error("Machine returned invalid discovery metadata.");
+  return message.group === null ? null : validateDiscoveryGroup(message.group);
+}
+
 function receiveMessage(channel: NoiseChannel, record: Uint8Array): Message {
   const message = JSON.parse(channel.decrypt_json(record)) as Message;
   if (message.type === "error") throw new Error(String(message.message));
@@ -127,8 +132,10 @@ export async function authenticateHubHost(hub_url: string, host: SavedHubHost, i
 
 export class EncryptedHubClient implements ViewerClient {
   readonly endpoint: string;
+  readonly subscription_prefix = createUuid();
   private lifetime = new AbortController();
-  private sockets = new Set<AbortController>();
+  private sessions = new Map<RecordCarrier, Promise<HubSession>>();
+  private opening = 0;
   private listeners = new Map<string, Set<Handler>>();
   private close_handlers = new Set<() => void>();
   private started?: Promise<void>;
@@ -137,7 +144,7 @@ export class EncryptedHubClient implements ViewerClient {
   private direct?: DirectPeer;
   private negotiating = false;
   private direct_retry?: ReturnType<typeof setTimeout>;
-  private event_request?: { close: () => void };
+  private event_request?: { stream: HubStream; carrier: RecordCarrier };
   private transport: TransportState = { kind: "relay" };
   private on_transport: (transport: TransportState) => void = () => {};
   constructor(private hub_url: string, readonly host: SavedHubHost, private identity: DeviceIdentity, private crypto: CryptoApi, factory: SocketFactory = browserSocket, private direct_factory: DirectPeerFactory | undefined = browserDirectPeer) {
@@ -152,27 +159,23 @@ export class EncryptedHubClient implements ViewerClient {
     signal?.addEventListener("abort", abort, { once: true });
     try {
       const health = await client.exchange("GET", "health");
-      if ((health as { version?: number }).version !== 1) throw new Error("Machine uses an unsupported viewer API version.");
+      if ((health as { version?: number }).version !== VIEWER_API_VERSION) throw new Error("Machine uses an unsupported viewer API version. Update the machine's viewer.");
       void client.preferDirect();
       return client;
     } catch (error) { client.close(); throw error; }
     finally { signal?.removeEventListener("abort", abort); }
   }
-  private async negotiate(message: Message): Promise<Message> {
-    const controller = new AbortController();
-    const abort = () => controller.abort();
-    this.lifetime.signal.addEventListener("abort", abort, { once: true });
-    const timer = setTimeout(abort, 15_000);
-    let connection: Awaited<ReturnType<typeof openChannel>> | undefined;
-    try {
-      if (this.lifetime.signal.aborted) throw aborted();
-      connection = await openChannel(this.host, this.identity, this.crypto, controller.signal, this.relay);
-      connection.socket.send(connection.channel.encrypt_json(JSON.stringify(message)));
-      return receiveMessage(connection.channel, await connection.socket.read(15_000));
-    } finally {
-      clearTimeout(timer); this.lifetime.signal.removeEventListener("abort", abort);
-      controller.abort(); connection?.socket.close(); connection?.channel.free();
-    }
+  private async control(header: HubFrame, carrier: RecordCarrier, timeout: number, signal = this.lifetime.signal): Promise<HubFrame> {
+    if (signal.aborted) throw aborted();
+    const deadline = Date.now() + timeout;
+    const session = await this.session(carrier);
+    if (signal.aborted || this.lifetime.signal.aborted) throw aborted();
+    if (Date.now() >= deadline) throw new Error("Machine control request timed out.");
+    const stream = session.open(header, new Uint8Array(), deadline);
+    const abort = () => stream.close();
+    signal.addEventListener("abort", abort, { once: true });
+    try { return await stream.next(); }
+    finally { signal.removeEventListener("abort", abort); stream.close(); }
   }
   private setTransport(transport: TransportState): void {
     this.transport = transport; this.on_transport(transport);
@@ -180,9 +183,10 @@ export class EncryptedHubClient implements ViewerClient {
   private fallback(error: unknown): void {
     if (this.lifetime.signal.aborted || !this.direct) return;
     const peer = this.direct; this.direct = undefined;
+    this.removeSession(peer, error instanceof PeerRetiredError);
     if (error instanceof PeerRetiredError) peer.retire(); else peer.close();
     this.setTransport({ kind: "relay", reason: error instanceof Error ? error.message : "Direct connection was interrupted." });
-    this.event_request?.close();
+    if (this.event_request?.carrier === peer) this.event_request.stream.close();
     this.scheduleDirect();
   }
   private scheduleDirect(): void {
@@ -199,7 +203,7 @@ export class EncryptedHubClient implements ViewerClient {
     clearTimeout(this.direct_retry); this.direct_retry = undefined; this.negotiating = true;
     let peer: DirectPeer | undefined;
     try {
-      const config = await this.negotiate({ type: "direct_config_request" });
+      const config = await this.control({ type: "direct_config_request" }, this.relay, 15_000);
       if (config.type !== "direct_config" || !Array.isArray(config.ice_servers) || config.ice_servers.length > 8
         || !config.ice_servers.every((url) => typeof url === "string" && /^stun:[^\s@\u0000-\u001f\u007f]+$/.test(url) && new TextEncoder().encode(url).length <= 512)) {
         throw new Error("Machine returned invalid direct connection settings.");
@@ -208,60 +212,87 @@ export class EncryptedHubClient implements ViewerClient {
         if (this.direct === peer) this.fallback(error);
       });
       const offer = await peer.offer();
-      const answer = await this.negotiate({ type: "direct_offer", sdp: offer });
+      const answer = await this.control({ type: "direct_offer", sdp: offer }, this.relay, 15_000);
       if (answer.type !== "direct_answer" || typeof answer.sdp !== "string") throw new Error("Machine returned an invalid direct connection answer.");
       await peer.accept(answer.sdp);
       // An ICE connection alone grants no trust: authenticate the host/device again.
       const health = await this.exchange("GET", "health", undefined, peer);
-      if ((health as { version?: number }).version !== 1) throw new Error("Direct machine uses an unsupported viewer API version.");
+      if ((health as { version?: number }).version !== VIEWER_API_VERSION) throw new Error("Direct machine uses an unsupported viewer API version. Update the machine's viewer.");
       if (this.lifetime.signal.aborted) throw aborted();
+      if (!this.sessions.has(peer)) throw new Error("Direct connection closed during verification.");
       this.direct = peer; this.setTransport({ kind: "direct" });
-      this.event_request?.close();
+      if (this.event_request?.carrier === this.relay) this.event_request.stream.close();
+      this.removeSession(this.relay, true);
     } catch (error) {
+      if (peer) this.removeSession(peer, false);
       peer?.close();
       if (!this.lifetime.signal.aborted) this.setTransport({ kind: "relay", reason: error instanceof Error ? error.message : "Direct connection could not be established." });
     } finally {
       this.negotiating = false; this.scheduleDirect();
     }
   }
+  private session(carrier: RecordCarrier): Promise<HubSession> {
+    if (this.lifetime.signal.aborted) throw aborted();
+    const existing = this.sessions.get(carrier);
+    if (existing) return existing;
+    const opening = openChannel(this.host, this.identity, this.crypto, this.lifetime.signal, carrier)
+      .then(({ socket, channel }) => new HubSession(socket, channel, (error) => {
+        if (this.sessions.get(carrier) !== opening) return;
+        this.sessions.delete(carrier);
+        if (this.direct === carrier) this.fallback(error);
+      })).catch((error: unknown) => {
+        if (this.sessions.get(carrier) === opening) this.sessions.delete(carrier);
+        throw error;
+      });
+    this.sessions.set(carrier, opening);
+    return opening;
+  }
+
+  private removeSession(carrier: RecordCarrier, drain: boolean): void {
+    const session = this.sessions.get(carrier);
+    this.sessions.delete(carrier);
+    void session?.then((session) => drain ? session.retire() : session.close(), () => {});
+  }
+
+  async discoveryGroup(signal: AbortSignal): Promise<DiscoveryGroup | null> {
+    return discoveryGroupFrom(await this.control({ type: "discovery_request" }, this.direct ?? this.relay, 5000, signal));
+  }
+
   private async request(method: string, command: string, payload?: unknown, carrier: RecordCarrier = this.direct ?? this.relay) {
     if (this.lifetime.signal.aborted) throw aborted();
+    if (this.opening >= MAX_HUB_STREAMS) throw new Error("Too many active viewer requests.");
     const body = payload === undefined ? new Uint8Array() : new TextEncoder().encode(JSON.stringify(payload));
     if (body.length > MAX_BODY) throw new Error("Viewer request exceeds 1 MiB.");
     if (!/^[a-z_]+$/.test(command)) throw new Error("Invalid viewer command.");
-    if (this.sockets.size >= 24) throw new Error("Too many active viewer requests.");
-    const controller = new AbortController();
-    this.sockets.add(controller);
-    const abort = () => controller.abort();
-    this.lifetime.signal.addEventListener("abort", abort, { once: true });
-    let socket: RecordTransport | undefined;
-    let channel: NoiseChannel | undefined;
-    let selected_carrier = carrier;
-    const timer = command === "events" ? undefined : setTimeout(() => {
-      socket?.close(new Error("Viewer request timed out; delivery may be uncertain.")); controller.abort();
-    }, REQUEST_TIMEOUT);
-    const close = () => { clearTimeout(timer); controller.abort(); socket?.close(); channel?.free(); channel = undefined; this.sockets.delete(controller); this.lifetime.signal.removeEventListener("abort", abort); };
+    const deadline = Date.now() + REQUEST_TIMEOUT;
+    this.opening++;
+    let session: HubSession;
     try {
-      try {
-        ({ socket, channel } = await openChannel(this.host, this.identity, this.crypto, controller.signal, selected_carrier));
-      } catch (error) {
-        if (!(error instanceof PeerRetiredError)) throw error;
-        if (selected_carrier === this.direct) this.fallback(error);
-        // Retirement fails before a channel exists, so no request was sent.
-        selected_carrier = this.relay;
-        ({ socket, channel } = await openChannel(this.host, this.identity, this.crypto, controller.signal, selected_carrier));
+      try { session = await this.session(carrier); }
+      catch (error) {
+        if (!(error instanceof PeerRetiredError) || carrier === this.relay) throw error;
+        // The carrier retired before any command was sent.
+        if (carrier === this.direct) this.fallback(error);
+        carrier = this.relay;
+        session = await this.session(carrier);
       }
-      socket.send(channel.encrypt_json(JSON.stringify({ type: "device_request", method, path: `/api/v1/${command}` })));
-      for (let offset = 0; offset < body.length; offset += MAX_CHUNK) {
-        socket.send(channel.encrypt_json(JSON.stringify({ type: "request_body", data: encodeBase64Url(body.slice(offset, offset + MAX_CHUNK).buffer) })));
-      }
-      socket.send(channel.encrypt_json(JSON.stringify({ type: "request_end" })));
-      const response = receiveMessage(channel, await socket.read(REQUEST_TIMEOUT));
+    } finally { this.opening--; }
+    if (this.lifetime.signal.aborted) throw aborted();
+    if (command === "events" && carrier !== (this.direct ?? this.relay)) throw new Error("Machine connection changed.");
+    if (Date.now() >= deadline) throw new Error("Viewer request timed out.");
+    const stream = session.open({ type: "device_request", method, path: `/api/v1/${command}` }, body, command === "events" ? undefined : deadline);
+    if (command === "events") this.event_request = { stream, carrier };
+    try {
+      const response = await stream.next(REQUEST_TIMEOUT);
       if (response.type !== "response" || typeof response.status !== "number") throw new Error("Machine returned an invalid response.");
       const type = typeof response.content_type === "string" ? response.content_type.split(";")[0].trim() : "";
       if (!(response.status === 204 && !type) && type !== (command === "events" ? "text/event-stream" : "application/json")) throw new Error("Machine returned an unsupported response type.");
-      return { socket, channel, response, close, carrier: selected_carrier };
-    } catch (error) { close(); if (selected_carrier === this.direct) this.fallback(error); throw error; }
+      return { stream, response, carrier };
+    } catch (error) {
+      stream.close();
+      if (this.event_request?.stream === stream) this.event_request = undefined;
+      throw error;
+    }
   }
   private async exchange(method: string, command: string, payload?: unknown, carrier?: RecordCarrier): Promise<unknown> {
     const request = await this.request(method, command, payload, carrier);
@@ -270,26 +301,25 @@ export class EncryptedHubClient implements ViewerClient {
     let total = 0;
     try {
       while (true) {
-        const message = await this.receive(request);
+        const message = await request.stream.next();
         if (message.type === "end") break;
         if (message.type !== "chunk" || typeof message.data !== "string") throw new Error("Machine returned an unexpected encrypted message.");
         const bytes = new Uint8Array(decodeBase64Url(message.data));
         total += bytes.length;
-        if (bytes.length > MAX_CHUNK || total > MAX_RESPONSE) throw new Error("Viewer response exceeds its size limit.");
+        if (bytes.length > HUB_CHUNK_BYTES || total > MAX_RESPONSE) throw new Error("Viewer response exceeds its size limit.");
         body += decoder.decode(bytes, { stream: true });
-        request.socket.send(request.channel.encrypt_json(JSON.stringify({ type: "window", credits: 1 })));
+        await request.stream.acknowledge();
       }
       body += decoder.decode();
       const result: unknown = request.response.status === 204 && !body ? undefined : JSON.parse(body);
       if (Number(request.response.status) < 200 || Number(request.response.status) >= 300) throw new Error((result as { error?: string }).error ?? `Viewer returned ${request.response.status}`);
       return result;
-    } finally { request.close(); }
+    } finally { request.stream.close(); }
   }
-  private async receive(request: Awaited<ReturnType<EncryptedHubClient["request"]>>, timeout?: number): Promise<Message> {
-    try { return receiveMessage(request.channel, await request.socket.read(timeout)); }
-    catch (error) { if (request.carrier === this.direct) this.fallback(error); throw error; }
+  invoke<T>(command: string, payload: unknown = {}): Promise<T> {
+    if (command === "events") return Promise.reject(new Error("Use the live event listener for event streams."));
+    return this.exchange("POST", command, payload) as Promise<T>;
   }
-  invoke<T>(command: string, payload: unknown = {}): Promise<T> { return this.exchange("POST", command, payload) as Promise<T>; }
   setStateListener(handler: (state: ConnectionState) => void): void { this.on_state = handler; }
   setTransportListener(handler: (transport: TransportState) => void): void { this.on_transport = handler; handler(this.transport); }
   private emit(name: string, payload: unknown): void { for (const handler of this.listeners.get(name) ?? []) handler({ payload }); }
@@ -309,19 +339,19 @@ export class EncryptedHubClient implements ViewerClient {
         let attempted = false;
         while (!this.lifetime.signal.aborted) {
           this.on_state(attempted ? "reconnecting" : "connecting"); attempted = true;
+          const carrier = this.direct ?? this.relay;
           let request: Awaited<ReturnType<EncryptedHubClient["request"]>> | undefined;
           try {
-            request = await this.request("GET", "events");
-            this.event_request = request;
+            request = await this.request("POST", "events", { subscription_prefix: this.subscription_prefix }, carrier);
             if (request.response.status !== 200) throw new Error("Live viewer connection was rejected.");
             const decoder = new TextDecoder();
             let buffer = "";
             while (!this.lifetime.signal.aborted) {
-              const message = await this.receive(request, 45_000);
+              const message = await request.stream.next(45_000);
               if (message.type === "end") break;
               if (message.type !== "chunk" || typeof message.data !== "string") throw new Error("Unexpected live response message.");
               const bytes = new Uint8Array(decodeBase64Url(message.data));
-              if (bytes.length > MAX_CHUNK) throw new Error("Live response chunk exceeds its limit.");
+              if (bytes.length > HUB_CHUNK_BYTES) throw new Error("Live response chunk exceeds its limit.");
               buffer += decoder.decode(bytes, { stream: true }).replace(/\r/g, "");
               let end: number;
               while ((end = buffer.indexOf("\n\n")) !== -1) {
@@ -330,20 +360,20 @@ export class EncryptedHubClient implements ViewerClient {
                 if (!frame) continue;
                 if (frame.event === "ready") {
                   this.on_state("connected");
-                  if (connected) { this.emit("transport-reconnected", {}); this.emit("relay-changed", { session_key: null, reset: true }); }
+                  if (connected) this.emit("transport-reconnected", {});
                   connected = true; ready();
                 } else this.emit(frame.event, frame.payload);
               }
               if (buffer.length > eventFrameLimit(buffer)) throw new Error("Live event exceeds its size limit.");
-              request.socket.send(request.channel.encrypt_json(JSON.stringify({ type: "window", credits: 1 })));
+              await request.stream.acknowledge();
             }
-          } catch (error) {
-            if (request?.carrier === this.direct) this.fallback(error);
+          } catch {
             // Only this read-only stream reconnects; requests are never replayed.
           }
-          finally { if (this.event_request === request) this.event_request = undefined; request?.close(); }
+          finally { if (this.event_request?.stream === request?.stream) this.event_request = undefined; request?.stream.close(); }
           if (!this.lifetime.signal.aborted) {
             this.on_state("reconnecting");
+            if (carrier !== (this.direct ?? this.relay)) continue;
             await new Promise<void>((resolve) => {
               const finish = () => { clearTimeout(timer); this.lifetime.signal.removeEventListener("abort", finish); resolve(); };
               const timer = setTimeout(finish, 1000);
@@ -361,6 +391,7 @@ export class EncryptedHubClient implements ViewerClient {
     if (this.lifetime.signal.aborted) return;
     for (const handler of this.close_handlers) handler();
     clearTimeout(this.direct_retry); this.direct_retry = undefined;
+    for (const carrier of this.sessions.keys()) this.removeSession(carrier, false);
     this.close_handlers.clear(); this.lifetime.abort(); this.direct?.close(); this.direct = undefined; this.relay.close(); this.listeners.clear();
   }
 }

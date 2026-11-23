@@ -7,15 +7,6 @@ use super::*;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-const BACKGROUND_IDENTITY_LEASE: Duration = Duration::from_secs(90);
-const MAX_BACKGROUND_IDENTITIES: usize = 1024;
-
-pub(super) struct BackgroundIdentity {
-  principal: String,
-  subscription_id: String,
-  accessed: std::time::Instant,
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SharedRequest {
@@ -33,12 +24,21 @@ pub(super) async fn command(State(state): State<ApiState>, Json(mut share): Json
     Ok(service) => service,
     Err(_) => return error(StatusCode::BAD_REQUEST, "Invalid session share").into_response(),
   };
+  // Two grants for the same recipient can overlap without having the same
+  // visibility. Their subscriptions, pushes and renewal IDs stay independent.
+  share.principal = grant_namespace(&share.principal, &share.session_keys);
   if share.command == "events" {
-    return events(state, share.session_keys, share.principal).await;
+    let prefix = serde_json::from_value::<StreamSubscription>(share.payload)
+      .map_err(|_| error(StatusCode::BAD_REQUEST, "Missing stream subscription"))
+      .and_then(StreamSubscription::into_prefix);
+    return match prefix {
+      Ok(prefix) => events(state, share.session_keys, share.principal, prefix).await,
+      Err(error) => error.into_response(),
+    };
   }
   let subscription_id = matches!(
     share.command.as_str(),
-    "load_session_updates" | "subscribe_background_updates"
+    "open_session" | "release_session" | "subscribe_background_updates"
   )
   .then(|| {
     share
@@ -48,25 +48,11 @@ pub(super) async fn command(State(state): State<ApiState>, Json(mut share): Json
       .cloned()
   })
   .flatten();
+  let renewal_prefix =
+    (share.command == "renew_session_subscriptions").then(|| format!("share_timeline_{}:", share.principal));
   if let Err(message) = prepare(&mut share) {
     return error(StatusCode::FORBIDDEN, message).into_response();
   }
-  let background_identity = (share.command == "subscribe_background_updates").then(|| {
-    (
-      share.payload["request"]["subscription_id"].as_str().unwrap().to_owned(),
-      share.principal.clone(),
-      share.payload["request"]["unsubscribe"] == true,
-    )
-  });
-  let renew_background_ids = (share.command == "renew_background_subscriptions").then(|| {
-    share.payload["ids"]
-      .as_array()
-      .unwrap()
-      .iter()
-      .filter_map(Value::as_str)
-      .map(str::to_owned)
-      .collect::<Vec<_>>()
-  });
   let permit = match state.requests.clone().try_acquire_owned() {
     Ok(permit) => permit,
     Err(_) => return error(StatusCode::TOO_MANY_REQUESTS, "Viewer is busy; retry shortly").into_response(),
@@ -74,7 +60,7 @@ pub(super) async fn command(State(state): State<ApiState>, Json(mut share): Json
   let result = tokio::task::spawn_blocking(move || {
     let _permit = permit;
     match share.command.as_str() {
-      "health" => Ok(json!({ "version": 1 })),
+      "health" => Ok(json!({"version": VIEWER_PROTOCOL_VERSION})),
       "get_session_input_status" => Ok(json!({
         "available": false, "message": "This session share is read-only", "max_length": 0,
         "images_available": false, "images_stageable": false, "max_images": 0, "max_image_bytes": 0,
@@ -124,40 +110,19 @@ pub(super) async fn command(State(state): State<ApiState>, Json(mut share): Json
   .await;
   match result {
     Ok(Ok(mut value)) => {
-      if let Some((scoped_id, principal, unsubscribe)) = background_identity {
-        let mut identities = match state.shared_background.lock() {
-          Ok(identities) => identities,
-          Err(_) => {
-            return error(
-              StatusCode::INTERNAL_SERVER_ERROR,
-              "Shared subscriptions are unavailable",
-            )
-            .into_response();
-          }
-        };
-        identities.retain(|_, identity| identity.accessed.elapsed() < BACKGROUND_IDENTITY_LEASE);
-        if unsubscribe {
-          identities.remove(&scoped_id);
-        } else if let Some(id) = subscription_id.as_ref().and_then(Value::as_str) {
-          if identities.len() >= MAX_BACKGROUND_IDENTITIES && !identities.contains_key(&scoped_id) {
-            return error(StatusCode::TOO_MANY_REQUESTS, "Too many shared subscriptions").into_response();
-          }
-          identities.insert(
-            scoped_id,
-            BackgroundIdentity {
-              principal,
-              subscription_id: id.into(),
-              accessed: std::time::Instant::now(),
-            },
-          );
-        }
-      }
-      if let Some(ids) = renew_background_ids
-        && let Ok(mut identities) = state.shared_background.lock()
-      {
-        for id in ids {
-          if let Some(identity) = identities.get_mut(&id) {
-            identity.accessed = std::time::Instant::now();
+      if let Some(prefix) = renewal_prefix {
+        for field in ["renewed_ids", "missing_ids"] {
+          if let Some(ids) = value.get_mut(field).and_then(Value::as_array_mut) {
+            for id in ids {
+              let Some(client_id) = id.as_str().and_then(|s| s.strip_prefix(&prefix)) else {
+                return error(
+                  StatusCode::INTERNAL_SERVER_ERROR,
+                  "Invalid subscription acknowledgement",
+                )
+                .into_response();
+              };
+              *id = json!(client_id);
+            }
           }
         }
       }
@@ -186,6 +151,7 @@ fn prepare(share: &mut SharedRequest) -> Result<(), &'static str> {
     "health" | "list_sessions" | "get_relay_status" | "get_session_index_progress" => Ok(()),
     "list_session_children"
     | "load_event_page"
+    | "inspect_session_event"
     | "load_event_detail"
     | "load_trajectory_event_page"
     | "acknowledge_session_attention"
@@ -207,30 +173,31 @@ fn prepare(share: &mut SharedRequest) -> Result<(), &'static str> {
         .ok_or("Missing session key")?;
       check(key)
     }
-    "load_session_updates" => {
-      let request = request
-        .and_then(Value::as_object_mut)
-        .ok_or("Missing subscription request")?;
+    "load_session_details" => {
+      let request = request.ok_or("Missing tool detail request")?;
+      if request["kind"] != "tool" {
+        return Err("Invalid tool detail request");
+      }
       check(
-        request
-          .get("session_key")
-          .and_then(Value::as_str)
+        request["request"]["session_key"]
+          .as_str()
           .ok_or("Missing session key")?,
-      )?;
-      let id = request
-        .get("subscription_id")
-        .and_then(Value::as_str)
-        .ok_or("Missing subscription identity")?;
-      if id.is_empty() || id.len() > 128 {
-        return Err("Invalid subscription identity");
+      )
+    }
+    "open_session" | "release_session" => {
+      let request = request.ok_or("Missing subscription request")?;
+      check(request["session_key"].as_str().ok_or("Missing session key")?)?;
+      let scope_identity = |request: &mut Value| -> Result<(), &'static str> {
+        let id = request["subscription_id"]
+          .as_str()
+          .ok_or("Missing subscription identity")?;
+        request["subscription_id"] = json!(subscription_id(&share.principal, id)?);
+        Ok(())
+      };
+      scope_identity(request)?;
+      if let Some(resume) = request.get_mut("resume").filter(|value| !value.is_null()) {
+        scope_identity(resume)?;
       }
-      let digest = Sha256::digest(format!("subscription\0{}\0{id}", share.principal).as_bytes());
-      let mut scoped_id = String::from("share_");
-      for byte in digest {
-        use std::fmt::Write;
-        let _ = write!(scoped_id, "{byte:02x}");
-      }
-      request.insert("subscription_id".into(), Value::String(scoped_id));
       Ok(())
     }
     "subscribe_background_updates" => {
@@ -259,17 +226,22 @@ fn prepare(share: &mut SharedRequest) -> Result<(), &'static str> {
       request.insert("subscription_id".into(), json!(background_id(&share.principal, id)?));
       Ok(())
     }
-    "renew_background_subscriptions" => {
+    "renew_background_subscriptions" | "renew_session_subscriptions" => {
+      let namespace = if share.command == "renew_background_subscriptions" {
+        background_id
+      } else {
+        subscription_id
+      };
       let ids = share
         .payload
         .get_mut("ids")
         .and_then(Value::as_array_mut)
         .ok_or("Missing subscription identities")?;
       if ids.len() > 24 {
-        return Err("Too many background subscriptions");
+        return Err("Too many subscriptions");
       }
       for id in ids {
-        *id = json!(background_id(
+        *id = json!(namespace(
           &share.principal,
           id.as_str().ok_or("Invalid subscription identity")?
         )?);
@@ -306,50 +278,63 @@ fn prepare(share: &mut SharedRequest) -> Result<(), &'static str> {
   }
 }
 
-fn background_id(principal: &str, id: &str) -> Result<String, &'static str> {
+fn grant_namespace(principal: &str, keys: &[String]) -> String {
+  let mut keys: Vec<_> = keys.iter().map(String::as_str).collect();
+  keys.sort_unstable();
+  keys.dedup();
+  let mut digest = Sha256::new();
+  for part in std::iter::once(principal).chain(keys) {
+    digest.update((part.len() as u64).to_be_bytes());
+    digest.update(part.as_bytes());
+  }
+  format!("{:x}", digest.finalize())
+}
+
+fn scoped_id(namespace: &str, principal: &str, id: &str) -> Result<String, &'static str> {
   if id.is_empty() || id.len() > 128 {
     return Err("Invalid subscription identity");
   }
-  let digest = Sha256::digest(format!("background-subscription\0{principal}\0{id}").as_bytes());
-  let mut scoped_id = String::from("share_bg_");
-  for byte in digest {
-    use std::fmt::Write;
-    let _ = write!(scoped_id, "{byte:02x}");
-  }
-  Ok(scoped_id)
+  Ok(format!("share_{namespace}_{principal}:{id}"))
 }
 
-fn background_event(state: &ApiState, event: ViewerEvent, keys: &[String], principal: &str) -> Option<Value> {
-  if event.event != "background-session-updated"
-    || !event.payload["session_key"]
-      .as_str()
-      .is_some_and(|key| keys.iter().any(|allowed| allowed == key))
-  {
-    return None;
-  }
-  let identities = state.shared_background.lock().ok()?;
-  let identity = identities.get(event.payload["subscription_id"].as_str()?)?;
-  if identity.principal != principal || identity.accessed.elapsed() >= BACKGROUND_IDENTITY_LEASE {
-    return None;
-  }
-  let mut payload = event.payload;
-  payload["subscription_id"] = json!(identity.subscription_id);
-  // Guest previews describe this session. Owner read markers and activity
-  // aggregated from potentially unshared descendants remain private.
-  payload["has_unread"] = json!(false);
-  payload["unread_final_count"] = json!(0);
-  payload["has_running_descendant"] = json!(false);
-  Some(payload)
+fn subscription_id(principal: &str, id: &str) -> Result<String, &'static str> {
+  scoped_id("timeline", principal, id)
 }
 
-async fn events(state: ApiState, keys: Vec<String>, principal: String) -> Response {
+fn background_id(principal: &str, id: &str) -> Result<String, &'static str> {
+  scoped_id("bg", principal, id)
+}
+
+fn shared_event(mut event: ViewerEvent, keys: &[String], principal: &str, prefix: &str) -> Option<ViewerEvent> {
+  let family = match event.event.as_str() {
+    "session-updated" | "session-subscription-invalidated" => "timeline",
+    "background-session-updated" => "bg",
+    _ => return None,
+  };
+  let key = event.payload["session_key"].as_str()?;
+  if !keys.iter().any(|allowed| allowed == key) {
+    return None;
+  }
+  // The core reserves the share_ namespace for grant-scoped services.
+  let id = event.payload["subscription_id"]
+    .as_str()?
+    .strip_prefix(&format!("share_{family}_{principal}:"))?;
+  event.payload["subscription_id"] = json!(id);
+  if family == "bg" {
+    event.payload["has_unread"] = json!(false);
+    event.payload["unread_final_count"] = json!(0);
+    event.payload["has_running_descendant"] = json!(false);
+  }
+  stream_event(event, Some(prefix))
+}
+
+async fn events(state: ApiState, keys: Vec<String>, principal: String, prefix: String) -> Response {
   let permit = match state.subscribers.clone().try_acquire_owned() {
     Ok(permit) => permit,
     Err(_) => return error(StatusCode::TOO_MANY_REQUESTS, "Too many viewer subscriptions").into_response(),
   };
   let mut receiver = state.events.subscribe();
-  // Host-wide events stay hidden. Only the grant's own compact background
-  // interests join the existing fixed-cadence shared-session invalidations.
+  // Only grant-owned subscriptions join the fixed-cadence catalog invalidations.
   let stream = async_stream::stream! {
     let _permit = permit;
     yield Ok::<_, Infallible>(Event::default().event("ready").data("{}"));
@@ -363,8 +348,8 @@ async fn events(state: ApiState, keys: Vec<String>, principal: String) -> Respon
         },
         received = receiver.recv() => {
           let Ok(event) = received else { break; };
-          if let Some(payload) = background_event(&state, event, &keys, &principal) {
-            yield Ok(Event::default().event("background-session-updated").data(payload.to_string()));
+          if let Some(event) = shared_event(event, &keys, &principal, &prefix) {
+            yield Ok(Event::default().event(event.event).data(event.payload.to_string()));
           }
         },
       }
@@ -390,19 +375,36 @@ mod tests {
 
   #[test]
   fn subscriptions_are_scoped_to_both_session_and_principal() {
-    let payload = json!({"request":{"session_key":"allowed","subscription_id":"same"}});
-    let mut first = request("load_session_updates", payload.clone());
-    let mut second = request("load_session_updates", payload);
+    let payload = json!({"request":{"session_key":"allowed","subscription_id":"same",
+      "resume":{"subscription_id":"previous","generation":"baseline","revision":"2"}}});
+    let mut first = request("open_session", payload.clone());
+    let mut second = request("open_session", payload);
     second.principal = "another".into();
     prepare(&mut first).unwrap();
     prepare(&mut second).unwrap();
+    assert_ne!(
+      first.payload["request"]["resume"]["subscription_id"],
+      second.payload["request"]["resume"]["subscription_id"]
+    );
+    let mut renewal = request("renew_session_subscriptions", json!({"ids":["previous"]}));
+    prepare(&mut renewal).unwrap();
+    assert_eq!(
+      first.payload["request"]["resume"]["subscription_id"],
+      renewal.payload["ids"][0]
+    );
+    let keys = vec!["one".to_owned(), "two".to_owned()];
+    assert_eq!(
+      grant_namespace("guest", &keys),
+      grant_namespace("guest", &["two".into(), "one".into()])
+    );
+    assert_ne!(grant_namespace("guest", &keys), grant_namespace("guest", &keys[..1]));
     assert_ne!(
       first.payload["request"]["subscription_id"],
       second.payload["request"]["subscription_id"]
     );
     assert!(
       prepare(&mut request(
-        "load_session_updates",
+        "open_session",
         json!({"request":{"session_key":"hidden","subscription_id":"same"}})
       ))
       .is_err()
@@ -443,67 +445,60 @@ mod tests {
   }
 
   #[test]
-  fn shared_background_events_require_the_grant_principal_session_and_lease() {
-    let data = tempfile::tempdir().unwrap();
-    let state = ApiState {
-      service: ViewerService::native(data.path().join("index.sqlite")).unwrap(),
-      events: broadcast::channel(16).0,
-      token: None,
-      requests: Arc::new(Semaphore::new(16)),
-      subscribers: Arc::new(Semaphore::new(32)),
-      shutdown: CancellationToken::new(),
-      origins: vec![],
-      shared_background: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-    };
-    let id = background_id("recipient", "mine").unwrap();
-    state.shared_background.lock().unwrap().insert(
-      id.clone(),
-      BackgroundIdentity {
-        principal: "recipient".into(),
-        subscription_id: "mine".into(),
-        accessed: std::time::Instant::now(),
-      },
-    );
-    let event = |name: &str, key: &str, id: &str| ViewerEvent {
-      event: name.into(),
-      payload: json!({"subscription_id":id,"session_key":key,"latest_assistant_message":{"preview":"Hello"}}),
-    };
+  fn shared_events_require_the_exact_grant_session_family_and_viewer() {
     let keys = vec!["allowed".to_owned()];
-    let allowed = background_event(
-      &state,
-      event("background-session-updated", "allowed", &id),
+    let timeline = subscription_id("grant", "screen:timeline").unwrap();
+    let background = background_id("grant", "screen:sidebar").unwrap();
+    let event = |name: &str, id: &str, key: &str| ViewerEvent {
+      event: name.into(),
+      payload: json!({"subscription_id":id,"session_key":key,"has_unread":true,"unread_final_count":3,
+        "has_running_descendant":true,"snapshot":false}),
+    };
+    let bg = shared_event(
+      event("background-session-updated", &background, "allowed"),
       &keys,
-      "recipient",
+      "grant",
+      "screen",
     )
     .unwrap();
-    assert_eq!(allowed["subscription_id"], "mine");
-    assert_eq!(allowed["has_unread"], false);
-    assert_eq!(allowed["unread_final_count"], 0);
-    assert_eq!(allowed["has_running_descendant"], false);
-    for (name, key, identity, principal) in [
-      ("session-notification", "allowed", id.as_str(), "recipient"),
-      ("background-session-updated", "hidden", id.as_str(), "recipient"),
-      ("background-session-updated", "allowed", "foreign", "recipient"),
-      ("background-session-updated", "allowed", id.as_str(), "another"),
-    ] {
-      assert!(background_event(&state, event(name, key, identity), &keys, principal).is_none());
-    }
-    state.shared_background.lock().unwrap().get_mut(&id).unwrap().accessed -= BACKGROUND_IDENTITY_LEASE;
-    assert!(
-      background_event(
-        &state,
-        event("background-session-updated", "allowed", &id),
-        &keys,
-        "recipient"
-      )
-      .is_none()
+    assert_eq!(bg.payload["subscription_id"], "screen:sidebar");
+    assert_eq!(bg.payload["has_unread"], false);
+    assert_eq!(bg.payload["unread_final_count"], 0);
+    assert_eq!(bg.payload["has_running_descendant"], false);
+    let rich = event("session-updated", &timeline, "allowed");
+    assert!(shared_event(rich.clone(), &keys, "other", "screen").is_none());
+    assert!(shared_event(rich.clone(), &keys, "grant", "other-screen").is_none());
+    assert_eq!(
+      shared_event(rich.clone(), &keys, "grant", "screen").unwrap().payload["subscription_id"],
+      "screen:timeline"
     );
+    let mut reset = rich;
+    reset.payload["snapshot"] = json!(true);
+    let notice = shared_event(reset, &keys, "grant", "screen").unwrap();
+    assert_eq!(notice.event, "session-subscriptions-lost");
+    assert_eq!(notice.payload, json!({"subscription_ids":["screen:timeline"]}));
+    let invalidated = event("session-subscription-invalidated", &timeline, "allowed");
+    assert!(stream_event(invalidated.clone(), None).is_none());
+    assert!(stream_event(invalidated.clone(), Some("screen")).is_none());
+    assert!(shared_event(invalidated.clone(), &keys, "grant", "other-screen").is_none());
+    let invalidated = shared_event(invalidated, &keys, "grant", "screen").unwrap();
+    assert_eq!(invalidated.event, notice.event);
+    assert_eq!(invalidated.payload, notice.payload);
+    for (name, key, id) in [
+      ("session-notification", "allowed", background.as_str()),
+      ("session-updated", "hidden", timeline.as_str()),
+      ("session-updated", "allowed", background.as_str()),
+      ("background-session-updated", "allowed", timeline.as_str()),
+    ] {
+      assert!(shared_event(event(name, id, key), &keys, "grant", "screen").is_none());
+    }
   }
 
   #[test]
   fn scope_covers_every_key_bearing_command_and_disallows_control() {
     for command in [
       "load_event_page",
+      "inspect_session_event",
       "load_event_detail",
       "load_trajectory_event_page",
       "acknowledge_session_attention",
@@ -667,19 +662,19 @@ mod tests {
         "subscribe_background_updates",
         true,
         json!({
-          "request":{"scope":"all","subscription_id":"mine"}
+          "request":{"scope":"all","subscription_id":"screen:mine"}
         }),
       ))
       .await
       .unwrap();
     assert_eq!(subscribed.status(), StatusCode::OK);
     let value: Value = serde_json::from_slice(&subscribed.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(value["subscription_id"], "mine");
+    assert_eq!(value["subscription_id"], "screen:mine");
     assert_eq!(value["revision"], "0");
     assert_eq!(value["scope"], "sidebar");
     assert!(value.get("items").is_none());
     let mut stream = app
-      .oneshot(request("events", true, json!({})))
+      .oneshot(request("events", true, json!({"subscription_prefix":"screen"})))
       .await
       .unwrap()
       .into_body();
@@ -698,7 +693,7 @@ mod tests {
     events
       .send(ViewerEvent {
         event: "background-session-updated".into(),
-        payload: json!({"subscription_id":background_id("recipient", "mine").unwrap(),
+        payload: json!({"subscription_id":background_id(&grant_namespace("recipient", std::slice::from_ref(&key)), "screen:mine").unwrap(),
         "session_key":key,"latest_assistant_message":{"preview":"Checking schema"},
         "has_unread":true,"unread_final_count":3,"has_running_descendant":true}),
       })
@@ -712,7 +707,7 @@ mod tests {
       .unwrap();
     let next = std::str::from_utf8(&next).unwrap();
     assert!(next.contains("event: background-session-updated"));
-    assert!(next.contains("\"subscription_id\":\"mine\""));
+    assert!(next.contains("\"subscription_id\":\"screen:mine\""));
     assert!(next.contains("Checking schema"));
     assert!(next.contains("\"has_unread\":false"));
     assert!(!next.contains("share_bg_"));

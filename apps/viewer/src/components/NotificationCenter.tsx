@@ -292,7 +292,7 @@ export function describeSessionIndexProgress(
         }
         : {
           label: "Session index is up to date",
-          detail: "All known provider catalogs are current.",
+          detail: "The session list is up to date.",
           tone: "neutral",
         };
   }

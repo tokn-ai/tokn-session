@@ -22,7 +22,6 @@ import type {
   SessionSubscriptionLoss,
   SessionSubscriptionReconnect,
   SessionSubscriptionRenewal,
-  SessionSubscriptionRenewalResult,
   SubmitSessionInputRequest,
   SubmitSessionInputResponse,
   TrajectoryEventPageResponse,
@@ -315,79 +314,21 @@ export function listenForSessionIndexProgress(
   return subscribe<SessionIndexProgress>("session-index-progress", (event) => handler(event.payload));
 }
 
-// Compatibility leases belong to the same captured machine as their requests.
-const legacySubscriptions = new WeakMap<CommandInvoker, Map<string, import("./types").SessionUpdatesRequest>>();
-
-function legacySubscriptionsFor(send: CommandInvoker): Map<string, import("./types").SessionUpdatesRequest> {
-  let subscriptions = legacySubscriptions.get(send);
-  if (!subscriptions) {
-    subscriptions = new Map();
-    legacySubscriptions.set(send, subscriptions);
-  }
-  return subscriptions;
+/** The host installs live interest and returns the snapshot or catch-up in one operation. */
+export function openSession(request: import("./types").OpenSessionRequest, send: CommandInvoker = invoke): Promise<import("./types").SessionUpdate> {
+  return send("open_session", { request });
 }
-
-function unknownDelivery(error: unknown): boolean {
-  return /unknown.*command|unknown.*variant|command.*not found|unknown viewer api route|unavailable for a session share/i.test(String(error));
+export async function releaseSession({ session_key, subscription_id }: import("./types").ReleaseSessionRequest, send: CommandInvoker = invoke): Promise<void> {
+  await send("release_session", { request: { session_key, subscription_id } });
 }
-
-async function loadLegacyUpdate(request: import("./types").SessionUpdatesRequest, send: CommandInvoker): Promise<import("./types").SessionUpdate> {
-  const update = await send<import("./types").SessionUpdate>("load_session_updates", { request });
-  const subscriptions = legacySubscriptionsFor(send);
-  if (request.unsubscribe) subscriptions.delete(request.subscription_id);
-  else subscriptions.set(request.subscription_id, { ...request, cursor: update.revision });
-  while (subscriptions.size > 24) subscriptions.delete(subscriptions.keys().next().value!);
-  return update;
+export function loadToolDetails(request: LoadEventDetailRequest, send: CommandInvoker = invoke): Promise<EventDetail> {
+  return send("load_session_details", { request: { kind: "tool", request } });
 }
-
-/** Compatibility facade: modern transports subscribe live, then read backward. */
-export async function loadSessionUpdates(request: import("./types").SessionUpdatesRequest, send: CommandInvoker = invoke): Promise<import("./types").SessionUpdate> {
-  try {
-    await send("subscribe_session", { request });
-    if (request.unsubscribe) return { ...request, generation: "released", revision: "0", base_revision: null, snapshot: true,
-      items: [], groups: [], removed_items: [], item_order: [], state: { total_events: 0, history_status: "complete", previous_cursor: null, next_cursor: null } };
-    return await send("load_session_backward", { request });
-  } catch (error) {
-    if (!unknownDelivery(error)) throw error;
-    return loadLegacyUpdate(request, send);
-  }
+export function inspectSessionEvent(request: LoadEventDetailRequest, send: CommandInvoker = invoke): Promise<EventDetail> {
+  return send("inspect_session_event", { request });
 }
-export async function loadGroupDetails(request: import("./types").SessionUpdatesRequest, send: CommandInvoker = invoke): Promise<import("./types").SessionUpdate> {
-  try {
-    await send("subscribe_session", { request });
-    return await send("load_session_details", { request: { kind: "group", request } });
-  } catch (error) {
-    if (!unknownDelivery(error)) throw error;
-    return loadLegacyUpdate(request, send);
-  }
-}
-export async function loadToolDetails(request: LoadEventDetailRequest, send: CommandInvoker = invoke): Promise<EventDetail> {
-  try { return await send("load_session_details", { request: { kind: "tool", request } }); }
-  catch (error) { if (!unknownDelivery(error)) throw error; return loadEventDetail(request, send); }
-}
-export async function inspectSessionEvent(request: LoadEventDetailRequest, send: CommandInvoker = invoke): Promise<EventDetail> {
-  try { return await send("inspect_session_event", { request }); }
-  catch (error) { if (!unknownDelivery(error)) throw error; return loadEventDetail(request, send); }
-}
-export async function renewSessionSubscriptions(ids: string[], send: CommandInvoker = invoke): Promise<SessionSubscriptionRenewalResult> {
-  try {
-    const result = await send<SessionSubscriptionRenewal | null | undefined>("renew_session_subscriptions", { ids });
-    // Older modern hosts return no acknowledgement. Local lease expiry still
-    // forces a baseline after a long pause instead of trusting this fallback.
-    return { renewed_ids: result?.renewed_ids ?? ids, missing_ids: result?.missing_ids ?? [], updates: [] };
-  }
-  catch (error) {
-    if (!unknownDelivery(error)) throw error;
-    const subscriptions = legacySubscriptionsFor(send);
-    const known = ids.filter((id) => subscriptions.has(id));
-    const updates = await Promise.all(known.map(async (id) => {
-      const update = await send<import("./types").SessionUpdate>("load_session_updates", { request: subscriptions.get(id)! });
-      const request = subscriptions.get(id);
-      if (request) subscriptions.set(id, { ...request, cursor: update.revision });
-      return update;
-    }));
-    return { renewed_ids: known, missing_ids: ids.filter((id) => !subscriptions.has(id)), updates };
-  }
+export function renewSessionSubscriptions(ids: string[], send: CommandInvoker = invoke): Promise<SessionSubscriptionRenewal> {
+  return send("renew_session_subscriptions", { ids });
 }
 
 export function listenForSubscriptionLoss(handler: (loss: SessionSubscriptionLoss) => void, subscribe: EventSubscriber = listen): Promise<UnlistenFn> {

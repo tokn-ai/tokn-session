@@ -1,11 +1,12 @@
 import { isDesktopHost, invokeHost, listenHost, viewerCapabilities, viewerHost } from "./platform";
-import { LiveSessionSocket } from "./liveSessionSocket";
-import type { BackgroundUpdatesRequest, SessionUpdatesRequest, TransportState } from "./types";
+import { createUuid } from "./id";
+import type { TransportState } from "./types";
 export type UnlistenFn = () => void;
 export type CommandInvoker = <T>(command: string, payload?: Record<string, unknown>) => Promise<T>;
 export type EventSubscriber = <T>(event: string, handler: (event: { payload: T }) => void) => Promise<UnlistenFn>;
 type Handler = (event: { payload: unknown }) => void;
 export type ConnectionState = "connecting" | "connected" | "reconnecting";
+export const VIEWER_API_VERSION = 2;
 const MAX_EVENT_FRAME_LENGTH = 2 * 1024 * 1024;
 // Full session updates can include multiple bounded tool/native payloads.
 // Other notifications retain the smaller frame limit.
@@ -17,6 +18,7 @@ export const isDesktop = isDesktopHost;
 
 export interface ViewerClient {
   readonly endpoint: string;
+  readonly subscription_prefix?: string;
   invoke<T>(command: string, payload?: unknown): Promise<T>;
   listen<T>(name: string, handler: (event: { payload: T }) => void): Promise<UnlistenFn>;
   setStateListener(handler: (state: ConnectionState) => void): void;
@@ -29,11 +31,11 @@ export interface ViewerClient {
 // One selected machine owns requests and subscriptions. Closing it aborts both,
 // so late responses from an old machine cannot enter the next viewer instance.
 export class RemoteClient {
+  readonly subscription_prefix = createUuid();
   private listeners = new Map<string, Set<Handler>>();
   private lifetime = new AbortController();
   private requests = new Set<AbortController>();
   private started?: Promise<void>;
-  private live?: LiveSessionSocket;
   private closed = false;
   private closeHandlers = new Set<() => void>();
   private onState: (state: ConnectionState) => void = () => {};
@@ -50,14 +52,8 @@ export class RemoteClient {
     if (signal?.aborted) client.close();
     signal?.addEventListener("abort", abort, { once: true });
     try {
-      const health = await client.fetchJson("health") as { version?: number; live_updates?: boolean };
-      if (health.version !== 1) throw new Error("This server uses an unsupported viewer API version.");
-      // Existing Hub and paired HTTP tunnels cannot upgrade an upstream WebSocket.
-      if (health.live_updates && !/\/(?:hosts|paired)\//.test(url.pathname)) client.live = new LiveSessionSocket(client.endpoint, token, (event, payload) => {
-        client.emit(event, payload);
-        const targeted = payload && typeof payload === "object" && ("subscription_ids" in payload || "background_subscription_ids" in payload);
-        if (event === "transport-reconnected" && !targeted) client.emit("relay-changed", { session_key: null, reset: true });
-      });
+      const health = await client.fetchJson("health") as { version?: number };
+      if (health.version !== VIEWER_API_VERSION) throw new Error("This server uses an unsupported viewer API version.");
       return client;
     } catch (error) { client.close(); throw error; }
     finally { signal?.removeEventListener("abort", abort); }
@@ -88,20 +84,8 @@ export class RemoteClient {
     } finally { clearTimeout(timeout); this.requests.delete(controller); }
   }
   invoke<T>(command: string, payload: unknown = {}): Promise<T> {
-    if (command === "subscribe_session" && this.live) return this.live.subscribe((payload as { request: SessionUpdatesRequest }).request) as Promise<T>;
-    if (command === "subscribe_background_updates" && this.live) return this.live.subscribeBackground((payload as { request: BackgroundUpdatesRequest }).request) as Promise<T>;
-    if (command === "renew_session_subscriptions" && this.live) return this.live.renew((payload as { ids: string[] }).ids) as Promise<T>;
-    if (command === "renew_background_subscriptions" && this.live) return this.live.renewBackground((payload as { ids: string[] }).ids) as Promise<T>;
-    let request: SessionUpdatesRequest | undefined;
-    if (this.live && (command === "load_session_backward" || command === "load_session_details")) {
-      const value = payload as { request: SessionUpdatesRequest | { kind: string; request: SessionUpdatesRequest } };
-      request = "kind" in value.request ? value.request.request : value.request;
-    }
-    const registration = request ? this.live?.interestVersion(request.subscription_id) : undefined;
-    return this.fetchJson(command, payload).then((result) => {
-      if (request?.subscription_id) this.live?.remember(request, registration);
-      return result as T;
-    });
+    if (command === "events") return Promise.reject(new Error("Use the live event listener for event streams."));
+    return this.fetchJson(command, payload) as Promise<T>;
   }
   async listen<T>(name: string, handler: (event: { payload: T }) => void): Promise<UnlistenFn> {
     if (this.closed) throw new Error("Machine disconnected");
@@ -110,7 +94,7 @@ export class RemoteClient {
     handlers.add(observer);
     this.listeners.set(name, handlers);
     this.started ??= new Promise<void>((resolve, reject) => { void this.pump(resolve, reject); });
-    try { await this.started; if ((name === "session-updated" || name === "background-session-updated") && this.live) await this.live.connect(); }
+    try { await this.started; }
     catch (error) { handlers.delete(observer); throw error; }
     return () => { handlers.delete(observer); };
   }
@@ -128,8 +112,11 @@ export class RemoteClient {
       this.lifetime.signal.addEventListener("abort", abort, { once: true });
       let watchdog = setTimeout(abort, 20_000);
       try {
-        const response = await fetch(`${this.endpoint}/api/v1/events${this.live ? "?session_updates=false&background_updates=false" : ""}`, {
-          headers: this.headers(), signal: connection.signal, credentials: "omit", redirect: "error",
+        const response = await fetch(`${this.endpoint}/api/v1/events`, {
+          method: "POST",
+          headers: { ...this.headers(), "Content-Type": "application/json" },
+          body: JSON.stringify({ subscription_prefix: this.subscription_prefix }),
+          signal: connection.signal, credentials: "omit", redirect: "error",
         });
         if (!response.ok || !response.body) throw new Error(`Live connection failed (${response.status})`);
         const reader = response.body.getReader();
@@ -152,7 +139,6 @@ export class RemoteClient {
                 this.onState("connected");
                 if (connected) {
                   this.emit("transport-reconnected", {});
-                  this.emit("relay-changed", { session_key: null, reset: true });
                 }
                 connected = true; ready();
               } else this.emit(parsed.event, parsed.payload);
@@ -188,10 +174,6 @@ export class RemoteClient {
   // fetch captures the old endpoint and credentials before close clears them.
   async release(command: string, payload?: Record<string, unknown>): Promise<void> {
     if (this.closed) return;
-    if (command === "subscribe_background_updates" && this.live) {
-      if (this.live.isConnected()) await this.live.subscribeBackground((payload as { request: BackgroundUpdatesRequest }).request);
-      return;
-    }
     await fetch(`${this.endpoint}/api/v1/${command}`, {
       method: "POST",
       headers: { ...this.headers(), "Content-Type": "application/json" },
@@ -206,7 +188,6 @@ export class RemoteClient {
     for (const handler of this.closeHandlers) handler();
     this.closeHandlers.clear();
     this.closed = true;
-    this.live?.close();
     this.lifetime.abort();
     for (const request of this.requests) request.abort();
     this.listeners.clear();
@@ -250,6 +231,7 @@ export async function listen<T>(event: string, handler: (event: { payload: T }) 
 
 /** Capture one machine so deferred updates and cleanup cannot target its successor. */
 export function captureTransport(): {
+  subscription_prefix?: string;
   invoke: CommandInvoker;
   listen: EventSubscriber;
   release: (command: string, payload?: Record<string, unknown>) => Promise<void>;
@@ -266,6 +248,7 @@ export function captureTransport(): {
   const send: CommandInvoker = <T>(command: string, payload?: Record<string, unknown>) =>
     client ? client.invoke<T>(command, payload) : Promise.reject(new Error("Connect to a machine first"));
   return {
+    subscription_prefix: client?.subscription_prefix,
     invoke: send,
     listen: (event, handler) => client ? client.listen(event, handler) : Promise.reject(new Error("Connect to a machine first")),
     release: (command, payload) => client?.release(command, payload) ?? Promise.resolve(),

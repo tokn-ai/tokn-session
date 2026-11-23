@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, type MouseEvent, type ReactNode, type RefObject } from "react";
+import { useId, useLayoutEffect, useRef, type MouseEvent, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { CloseIcon } from "./Icons";
 import "./AccountDialog.css";
@@ -24,7 +24,7 @@ export function AccountDialog({ title, description, children, busy = false, on_c
   const backdrop_pressed = useRef(false);
   const title_id = useId();
   const description_id = useId();
-  useEffect(() => {
+  useLayoutEffect(() => {
     const element = dialog.current;
     element?.showModal();
     initial_focus?.current?.focus();

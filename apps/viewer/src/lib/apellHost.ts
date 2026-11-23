@@ -80,7 +80,6 @@ export function createApellHost(bridge: AppletBridge): ViewerHost {
               emit("hub-client-state", { connection_id: frame.connection_id, state: "connected" });
               if (stream.connected) {
                 emit("hub-client-event", { connection_id: frame.connection_id, event: "transport-reconnected", payload: {} });
-                emit("hub-client-event", { connection_id: frame.connection_id, event: "relay-changed", payload: { session_key: null, reset: true } });
               }
               stream.connected = true; clearTimeout(stream.timer); stream.resolve();
             } else emit("hub-client-event", { connection_id: frame.connection_id, ...event });

@@ -203,7 +203,7 @@ export function Conversation({
                 {providerLabel(session.provider)}
               </span>
               {model.state?.model ? <span className="conversation__model" title={`${model.state.model.model_provider ?? session.provider} · ${model.state.model.model_id}`}>
-                {modelLabel(model.state.model)}{model.state.source === "recorded" ? " · Recorded" : model.state.source === "catalog" ? " · Catalog" : ""}
+                {modelLabel(model.state.model)}{model.state.source === "recorded" ? " · Recorded" : model.state.source === "catalog" ? " · Model list" : ""}
               </span> : null}
             </div>
             <details className="conversation__metadata" key={session.session_key}>

@@ -518,7 +518,7 @@ async fn accepted_agent_input_is_not_replayed_after_tunnel_reconnect() {
   wait_for(|| tunnels.online(&host_id)).await;
   let (mut socket, mut channel) = device_request(&endpoint, &recipient, &host_key, "GET", "/api/v1/health", &[]).await;
   assert!(matches!(
-    channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
+    device_reply(&mut channel, &next_binary(&mut socket).await.unwrap(), 1),
     InnerMessage::Response { status: 200, .. }
   ));
   assert!(
@@ -567,15 +567,30 @@ async fn encrypted_socket(
   (socket, handshake.finish(&reply).unwrap())
 }
 
-async fn send_inner(
+async fn send_request(
   socket: &mut TestSocket,
   channel: &mut crate::secure::SecureChannel,
-  message: &crate::secure::InnerMessage,
+  id: u32,
+  method: &str,
+  path: &str,
+  body: &[u8],
 ) {
-  socket
-    .send(ClientMessage::Binary(channel.encrypt(message).unwrap().into()))
-    .await
-    .unwrap();
+  for frame in tokn_hub_client_core::exchange::RequestFrames::new(method, path, body).unwrap() {
+    socket
+      .send(ClientMessage::Binary(
+        channel.encrypt(&frame.on_stream(id)).unwrap().into(),
+      ))
+      .await
+      .unwrap();
+  }
+}
+
+fn device_reply(channel: &mut crate::secure::SecureChannel, record: &[u8], id: u32) -> crate::secure::InnerMessage {
+  let crate::secure::InnerMessage::Stream { stream_id, frame } = channel.decrypt(record).unwrap() else {
+    panic!("Expected encrypted device reply");
+  };
+  assert_eq!(id, stream_id);
+  *frame
 }
 
 async fn device_request(
@@ -586,28 +601,8 @@ async fn device_request(
   path: &str,
   body: &[u8],
 ) -> (TestSocket, crate::secure::SecureChannel) {
-  use crate::secure::InnerMessage;
   let (mut socket, mut channel) = encrypted_socket(endpoint, identity, host_public_key).await;
-  send_inner(
-    &mut socket,
-    &mut channel,
-    &InnerMessage::DeviceRequest {
-      method: method.into(),
-      path: path.into(),
-    },
-  )
-  .await;
-  for part in body.chunks(protocol::CHUNK_SIZE) {
-    send_inner(
-      &mut socket,
-      &mut channel,
-      &InnerMessage::RequestBody {
-        data: protocol::encode(part),
-      },
-    )
-    .await;
-  }
-  send_inner(&mut socket, &mut channel, &InnerMessage::RequestEnd {}).await;
+  send_request(&mut socket, &mut channel, 1, method, path, body).await;
   (socket, channel)
 }
 
@@ -654,7 +649,7 @@ async fn authenticator_pairing_registers_only_encrypted_hosts_and_persists_trust
       }),
     )
     .route(
-      "/api/v1/load_session_updates",
+      "/api/v1/open_session",
       post(move |axum::Json(payload): axum::Json<serde_json::Value>| {
         forwarded_updates.lock().unwrap().push(payload);
         let response = local_updates_response.clone();
@@ -711,15 +706,7 @@ async fn authenticator_pairing_registers_only_encrypted_hosts_and_persists_trust
   endpoint.set_path(&format!("/hub/v1/secure/{host_id}"));
   let recipient = NoiseIdentity::generate().unwrap();
   let (mut socket, mut channel) = encrypted_socket(&endpoint, &recipient, &host_identity.public_key()).await;
-  send_inner(
-    &mut socket,
-    &mut channel,
-    &InnerMessage::DeviceRequest {
-      method: "GET".into(),
-      path: "/api/v1/health".into(),
-    },
-  )
-  .await;
+  send_request(&mut socket, &mut channel, 1, "GET", "/api/v1/health", &[]).await;
   assert!(matches!(
     channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
     InnerMessage::Error { .. }
@@ -772,7 +759,7 @@ async fn authenticator_pairing_registers_only_encrypted_hosts_and_persists_trust
   )
   .await;
   assert!(matches!(
-    channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
+    device_reply(&mut channel, &next_binary(&mut socket).await.unwrap(), 1),
     InnerMessage::Response { status: 200, .. }
   ));
   assert_eq!(
@@ -780,7 +767,10 @@ async fn authenticator_pairing_registers_only_encrypted_hosts_and_persists_trust
     1,
     "saved device authorization survives connector restart"
   );
-  drop(socket);
+  while !matches!(
+    device_reply(&mut channel, &next_binary(&mut socket).await.unwrap(), 1),
+    InnerMessage::End {}
+  ) {}
 
   let updates_request = serde_json::json!({
     "request": {
@@ -792,17 +782,17 @@ async fn authenticator_pairing_registers_only_encrypted_hosts_and_persists_trust
       "unsubscribe": false
     }
   });
-  let (mut socket, mut channel) = device_request(
-    &endpoint,
-    &recipient,
-    &paired.host_public_key,
+  send_request(
+    &mut socket,
+    &mut channel,
+    2,
     "POST",
-    "/api/v1/load_session_updates",
+    "/api/v1/open_session",
     &serde_json::to_vec(&updates_request).unwrap(),
   )
   .await;
   assert!(matches!(
-    channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
+    device_reply(&mut channel, &next_binary(&mut socket).await.unwrap(), 2),
     InnerMessage::Response { status: 200, .. }
   ));
   let mut response = Vec::new();
@@ -814,7 +804,7 @@ async fn authenticator_pairing_registers_only_encrypted_hosts_and_persists_trust
         .any(|part| part == b"Updated reply"),
       "session updates remain encrypted through the Hub"
     );
-    match channel.decrypt(&record).unwrap() {
+    match device_reply(&mut channel, &record, 2) {
       InnerMessage::Chunk { data } => response.extend(protocol::decode(&data, protocol::CHUNK_SIZE).unwrap()),
       InnerMessage::End {} => break,
       message => panic!("expected encrypted session update response, got {message:?}"),
@@ -825,37 +815,28 @@ async fn authenticator_pairing_registers_only_encrypted_hosts_and_persists_trust
     updates_response
   );
   assert_eq!(*updates_requests.lock().unwrap(), vec![updates_request]);
-  drop(socket);
 
-  let (mut socket, mut channel) = device_request(
-    &endpoint,
-    &recipient,
-    &paired.host_public_key,
+  send_request(
+    &mut socket,
+    &mut channel,
+    3,
     "POST",
     "/api/v1/submit_session_input",
     &[],
   )
   .await;
   assert!(matches!(
-    channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
+    device_reply(&mut channel, &next_binary(&mut socket).await.unwrap(), 3),
     InnerMessage::Error { .. }
   ));
-  drop(socket);
-  let (mut socket, mut channel) = device_request(
-    &endpoint,
-    &recipient,
-    &paired.host_public_key,
-    "GET",
-    "/api/v1/events",
-    &[],
-  )
-  .await;
+
+  send_request(&mut socket, &mut channel, 4, "GET", "/api/v1/events", &[]).await;
   assert!(matches!(
-    channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
+    device_reply(&mut channel, &next_binary(&mut socket).await.unwrap(), 4),
     InnerMessage::Response { .. }
   ));
   assert!(matches!(
-    channel.decrypt(&next_binary(&mut socket).await.unwrap()).unwrap(),
+    device_reply(&mut channel, &next_binary(&mut socket).await.unwrap(), 4),
     InnerMessage::Chunk { .. }
   ));
   std::fs::write(&state_file, "{}").unwrap();
@@ -878,6 +859,7 @@ async fn blind_channels_accept_opaque_bytes_and_cancel_only_the_saturated_channe
     capacity: Weak::new(),
     outgoing,
     secure_channels: Mutex::new(HashMap::new()),
+    response_bytes: Arc::new(Semaphore::new(1024 * 1024)),
     next_id: std::sync::atomic::AtomicU64::new(1),
     allow_control: false,
     connector_version: None,

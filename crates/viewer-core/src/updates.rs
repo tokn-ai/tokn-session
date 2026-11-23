@@ -2,13 +2,12 @@
 //! store holds only subscribed display objects and replaces snapshots on gaps.
 use crate::{
   ViewerService,
-  model::{EventPageRequest, HistoryWindowMode, LoadEventDetailRequest, PageDirection},
-  relay::RelayChange,
+  model::{EventPageRequest, HistoryWindowMode, PageDirection},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-  collections::{BTreeMap, HashMap},
+  collections::{BTreeMap, HashMap, HashSet},
   sync::Arc,
   time::{Duration, Instant},
 };
@@ -17,6 +16,7 @@ mod scope;
 pub use scope::{HistoryScope, UpdateScope};
 
 const MAX_SUBSCRIPTIONS: usize = 24;
+const MAX_DORMANT: usize = 8;
 const LEASE: Duration = Duration::from_secs(90);
 const MEMORY_TARGET: usize = 64 * 1024 * 1024;
 
@@ -27,28 +27,44 @@ pub enum UpdateLevel {
   Messages,
   #[default]
   Steps,
-  /// Legacy detail subscriptions remain readable for older clients. New
-  /// consumers fetch details independently of semantic delivery levels.
-  Details,
   All,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct SessionUpdatesRequest {
+pub struct OpenSessionRequest {
   pub subscription_id: String,
   pub session_key: String,
   #[serde(default)]
   pub level: UpdateLevel,
-  pub cursor: Option<String>,
   /// One-shot retained-history expansion, separate from the revision cursor.
   #[serde(default)]
   pub history_cursor: Option<String>,
   #[serde(default)]
-  pub detail_keys: Vec<String>,
-  #[serde(default)]
   pub scope: Option<UpdateScope>,
-  #[serde(default)]
-  pub unsubscribe: bool,
+  pub resume: Option<SessionResume>,
+}
+
+/// Identifies exactly the projection the client still holds. A revision alone
+/// can coincide across sessions, delivery levels and host restarts.
+#[derive(Clone, Debug, Deserialize)]
+pub struct SessionResume {
+  pub subscription_id: String,
+  pub generation: String,
+  pub revision: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SessionReleaseRequest {
+  pub subscription_id: String,
+  pub session_key: String,
+}
+
+type SessionScope = Option<Arc<HashSet<String>>>;
+
+struct Opening {
+  session_key: String,
+  level: UpdateLevel,
+  session_scope: SessionScope,
 }
 
 /// Identity-only acknowledgement. Missing leases require registration and a
@@ -83,8 +99,8 @@ pub struct SessionUpdate {
 }
 
 struct Subscription {
-  owner: Option<String>,
-  request: SessionUpdatesRequest,
+  session_scope: SessionScope,
+  request: OpenSessionRequest,
   generation: String,
   revision: u64,
   items: BTreeMap<String, Value>,
@@ -93,11 +109,16 @@ struct Subscription {
   event_order: Vec<String>,
   state: Value,
   accessed: Instant,
+  bytes: usize,
 }
 
 #[derive(Default)]
 pub(crate) struct UpdateStore {
   subscriptions: HashMap<String, Subscription>,
+  opening: HashMap<String, Arc<Opening>>,
+  // Released projections share the active memory budget. They neither hold
+  // a source lease nor receive publications while the user is elsewhere.
+  dormant: HashMap<String, Subscription>,
 }
 
 fn classify(summary: &Value) -> (&'static str, UpdateLevel) {
@@ -134,36 +155,196 @@ fn weight(value: &Value) -> usize {
   }
 }
 
+fn default_history_scope(request: &mut OpenSessionRequest) {
+  request.scope.get_or_insert_with(|| UpdateScope {
+    history: if request.history_cursor.is_some() {
+      HistoryScope::Retained
+    } else {
+      HistoryScope::RecentTurns
+    },
+    ..Default::default()
+  });
+}
+
+fn source_generation(page: &Value) -> Option<&str> {
+  page["source_revision"]
+    .as_str()?
+    .rsplit_once(':')
+    .map(|(generation, _)| generation)
+}
+
 impl UpdateStore {
+  fn begin_open(&mut self, request: &OpenSessionRequest, session_scope: &SessionScope) -> Result<Arc<Opening>, String> {
+    let ticket = Arc::new(Opening {
+      session_key: request.session_key.clone(),
+      level: request.level,
+      session_scope: session_scope.clone(),
+    });
+    self.expire_leases(Instant::now());
+    let id = &request.subscription_id;
+    if self.subscriptions.get(id).is_some_and(|s| {
+      s.request.session_key != ticket.session_key
+        || s.request.level != ticket.level
+        || s.session_scope != ticket.session_scope
+    }) || self.opening.get(id).is_some_and(|s| {
+      s.session_key != ticket.session_key || s.level != ticket.level || s.session_scope != ticket.session_scope
+    }) {
+      return Err("Subscription identity changed; use a new subscription id".into());
+    }
+    if (!self.opening.contains_key(id) && self.opening.len() >= MAX_SUBSCRIPTIONS)
+      || (!self.subscriptions.contains_key(id) && self.subscriptions.len() >= MAX_SUBSCRIPTIONS)
+    {
+      return Err("Too many session subscriptions".into());
+    }
+    self.opening.insert(id.clone(), ticket.clone());
+    Ok(ticket)
+  }
+
+  fn finish_open(&mut self, id: &str, ticket: &Arc<Opening>) -> Result<(), String> {
+    if !self.opening.get(id).is_some_and(|current| Arc::ptr_eq(current, ticket)) {
+      return Err("Session open was superseded".into());
+    }
+    self.opening.remove(id);
+    Ok(())
+  }
+
+  fn open(
+    &mut self,
+    request: &OpenSessionRequest,
+    session_scope: &SessionScope,
+    resume: Option<&SessionResume>,
+  ) -> (&mut Subscription, Option<String>) {
+    let id = request.subscription_id.clone();
+    // Only reclaim an active interest under its own identity. A late release
+    // or an unrelated viewer using another active ID must remain independent.
+    let subscription = self.subscriptions.entry(id).or_insert_with(|| {
+      if let Some(proof) = resume
+        && self
+          .dormant
+          .get(&proof.subscription_id)
+          .is_some_and(|s| s.session_scope == *session_scope && s.matches_resume(request, proof))
+      {
+        return self
+          .dormant
+          .remove(&proof.subscription_id)
+          .expect("verified dormant entry");
+      }
+      Subscription::new(request, session_scope.clone())
+    });
+    let cursor = resume
+      .filter(|proof| subscription.matches_resume(request, proof))
+      .map(|proof| proof.revision.clone());
+    (subscription, cursor)
+  }
+
+  fn release(&mut self, id: &str) {
+    if let Some(mut subscription) = self.subscriptions.remove(id)
+      && subscription.revision != 0
+    {
+      subscription.accessed = Instant::now();
+      self.dormant.insert(id.to_owned(), subscription);
+      if self.dormant.len() > MAX_DORMANT {
+        Self::evict_oldest(&mut self.dormant);
+      }
+    }
+  }
+
   fn expire_leases(&mut self, now: Instant) {
-    self
+    let expired: Vec<_> = self
       .subscriptions
-      .retain(|_, subscription| now.saturating_duration_since(subscription.accessed) < LEASE);
+      .iter()
+      .filter(|(_, subscription)| now.saturating_duration_since(subscription.accessed) >= LEASE)
+      .map(|(id, _)| id.clone())
+      .collect();
+    for id in expired {
+      self.release(&id);
+    }
+  }
+
+  fn evict_oldest(entries: &mut HashMap<String, Subscription>) {
+    if let Some(key) = entries
+      .iter()
+      .min_by_key(|(_, sub)| sub.accessed)
+      .map(|(key, _)| key.clone())
+    {
+      entries.remove(&key);
+    }
   }
 
   fn enforce_budget(&mut self) {
     while self
       .subscriptions
       .values()
-      .map(|subscription| subscription.items.values().map(weight).sum::<usize>() + weight(&subscription.state))
+      .chain(self.dormant.values())
+      .map(|s| s.bytes)
       .sum::<usize>()
       > MEMORY_TARGET
     {
-      let Some(oldest) = self
-        .subscriptions
-        .iter()
-        .min_by_key(|(_, subscription)| subscription.accessed)
-        .map(|(key, _)| key.clone())
-      else {
-        break;
-      };
-      self.subscriptions.remove(&oldest);
+      if self.dormant.is_empty() {
+        Self::evict_oldest(&mut self.subscriptions);
+      } else {
+        Self::evict_oldest(&mut self.dormant);
+      }
     }
   }
 }
 
 impl Subscription {
+  fn new(request: &OpenSessionRequest, session_scope: SessionScope) -> Self {
+    Self {
+      session_scope,
+      request: request.clone(),
+      generation: uuid::Uuid::new_v4().to_string(),
+      revision: 0,
+      items: BTreeMap::new(),
+      order: Vec::new(),
+      semantic_order: Vec::new(),
+      event_order: Vec::new(),
+      state: Value::Null,
+      accessed: Instant::now(),
+      bytes: 0,
+    }
+  }
+
+  fn matches_resume(&self, request: &OpenSessionRequest, resume: &SessionResume) -> bool {
+    self.revision != 0
+      && self.request.subscription_id == resume.subscription_id
+      && self.request.session_key == request.session_key
+      && self.request.level == request.level
+      && self.generation == resume.generation
+      && self.revision.to_string() == resume.revision
+  }
+
+  fn measure_bytes(&mut self) {
+    self.bytes = self.request.subscription_id.len()
+      + self.request.session_key.len()
+      + self
+        .session_scope
+        .iter()
+        .flat_map(|scope| scope.iter())
+        .map(String::len)
+        .sum::<usize>()
+      + weight(&self.state)
+      + self
+        .items
+        .iter()
+        .map(|(key, value)| key.len() + weight(value))
+        .sum::<usize>()
+      + self
+        .order
+        .iter()
+        .chain(&self.semantic_order)
+        .chain(&self.event_order)
+        .map(|key| key.len() + std::mem::size_of::<String>())
+        .sum::<usize>();
+  }
+
   fn failure(&mut self, error: String) -> Option<SessionUpdate> {
+    let error = if self.session_scope.is_some() {
+      "Session updates are temporarily unavailable".to_owned()
+    } else {
+      error
+    };
     let id = "notification:source-error".to_string();
     let item = json!({"item_id":id,"kind":"notification","level":"final","notification":{"type":"source_error","message":error}});
     if self.items.get(&id) == Some(&item) {
@@ -173,6 +354,7 @@ impl Subscription {
     self.revision += 1;
     self.state["error"] = json!(error);
     self.items.insert(id, item.clone());
+    self.measure_bytes();
     Some(SessionUpdate {
       subscription_id: self.request.subscription_id.clone(),
       session_key: self.request.session_key.clone(),
@@ -213,13 +395,7 @@ impl Subscription {
     cursor: Option<&str>,
   ) -> SessionUpdate {
     let (page, semantic, events) = if let Some(scope) = &mut self.request.scope {
-      scope::project(
-        page,
-        semantic,
-        events,
-        scope,
-        self.request.level >= UpdateLevel::Details,
-      )
+      scope::project(page, semantic, events, scope, self.request.level == UpdateLevel::All)
     } else {
       (page, semantic, events)
     };
@@ -321,6 +497,7 @@ impl Subscription {
     self.items = items;
     self.order = order;
     self.state = state;
+    self.measure_bytes();
     SessionUpdate {
       subscription_id: self.request.subscription_id.clone(),
       session_key: self.request.session_key.clone(),
@@ -356,6 +533,16 @@ struct Projection {
 }
 
 impl ViewerService {
+  /// Grant adapters namespace subscription identities before dispatch.
+  /// Unrestricted clients must never publish under one of their return addresses.
+  pub(crate) fn valid_subscription_id(&self, id: &str) -> bool {
+    if id.starts_with("share_") {
+      // The adapter prefixes the caller's bounded ID with its grant digest.
+      return self.session_scope.is_some() && id.len() <= 208;
+    }
+    !id.is_empty() && id.len() <= 128
+  }
+
   fn prepare_projection(
     &self,
     session_key: &str,
@@ -408,96 +595,34 @@ impl ViewerService {
     })
   }
 
-  fn prepare_details(&self, request: &SessionUpdatesRequest) -> Result<Vec<(String, Value)>, String> {
-    let mut details = Vec::new();
-    if request.level == UpdateLevel::Details {
-      for key in &request.detail_keys {
-        let detail = self.load_event_detail(LoadEventDetailRequest {
-          session_key: request.session_key.clone(),
-          event_key: key.clone(),
-        })?;
-        details.push((key.clone(), serde_json::to_value(detail).map_err(|e| e.to_string())?));
-      }
+  pub fn release_session(&self, request: SessionReleaseRequest) -> Result<Value, String> {
+    if !self.valid_subscription_id(&request.subscription_id) {
+      return Err("Invalid session subscription identity".into());
     }
-    Ok(details)
-  }
-
-  pub fn subscribe_session(&self, request: SessionUpdatesRequest) -> Result<Value, String> {
-    self.subscribe_session_owned(request, None)
-  }
-
-  pub fn subscribe_session_owned(
-    &self,
-    request: SessionUpdatesRequest,
-    owner: Option<String>,
-  ) -> Result<Value, String> {
-    self.validate_session_key(&request.session_key)?;
-    if request.subscription_id.is_empty()
-      || request.subscription_id.len() > 128
-      || request.detail_keys.len() > 16
-      || request.scope.as_ref().is_some_and(|scope| scope.group_keys.len() > 128)
-    {
-      return Err("Invalid session subscription".into());
-    }
+    self.check_session_scope(&request.session_key)?;
     let mut store = self.updates.lock().map_err(|_| "Update store lock poisoned")?;
-    if request.unsubscribe {
-      if store
-        .subscriptions
-        .get(&request.subscription_id)
-        .is_some_and(|subscription| owner.is_none() || subscription.owner == owner)
-      {
-        store.subscriptions.remove(&request.subscription_id);
-      }
-      return Ok(json!({"subscription_id":request.subscription_id,"unsubscribed":true}));
+    let id = &request.subscription_id;
+    if store
+      .opening
+      .get(id)
+      .is_some_and(|s| s.session_key == request.session_key && s.session_scope == self.session_scope)
+    {
+      store.opening.remove(id);
     }
-    store.expire_leases(Instant::now());
-    if !store.subscriptions.contains_key(&request.subscription_id) && store.subscriptions.len() >= MAX_SUBSCRIPTIONS {
-      return Err("Too many session subscriptions".into());
+    if store
+      .subscriptions
+      .get(id)
+      .is_some_and(|s| s.request.session_key == request.session_key && s.session_scope == self.session_scope)
+    {
+      store.release(id);
     }
-    let id = request.subscription_id.clone();
-    let subscription = store.subscriptions.entry(id.clone()).or_insert_with(|| Subscription {
-      owner: None,
-      request: request.clone(),
-      generation: uuid::Uuid::new_v4().to_string(),
-      revision: 0,
-      items: BTreeMap::new(),
-      order: Vec::new(),
-      semantic_order: Vec::new(),
-      event_order: Vec::new(),
-      state: Value::Null,
-      accessed: Instant::now(),
-    });
-    if subscription.request.session_key != request.session_key {
-      return Err("Subscription identity changed; use a new subscription id".into());
-    }
-    if subscription.request.level != request.level {
-      subscription.revision = 0;
-      subscription.generation = uuid::Uuid::new_v4().to_string();
-      subscription.items.clear();
-      subscription.order.clear();
-      subscription.semantic_order.clear();
-      subscription.event_order.clear();
-      subscription.state = Value::Null;
-    }
-    if owner.is_some() {
-      subscription.owner = owner;
-    }
-    subscription.request = request;
-    subscription.accessed = Instant::now();
-    Ok(json!({"subscription_id":id,"generation":subscription.generation,"revision":subscription.revision.to_string()}))
+    Ok(json!({"subscription_id": id, "unsubscribed": true}))
   }
 
   pub fn renew_session_subscriptions(&self, ids: &[String]) -> Result<SessionSubscriptionRenewal, String> {
-    self.renew_session_subscriptions_owned(ids, None)
-  }
-
-  /// Connection renewals only extend leases still owned by that connection.
-  /// A previous owner cannot revive or prolong a reclaimed subscription.
-  pub fn renew_session_subscriptions_owned(
-    &self,
-    ids: &[String],
-    owner: Option<&str>,
-  ) -> Result<SessionSubscriptionRenewal, String> {
+    if ids.len() > MAX_SUBSCRIPTIONS || ids.iter().any(|id| !self.valid_subscription_id(id)) {
+      return Err("Invalid session subscription renewal".into());
+    }
     let mut store = self.updates.lock().map_err(|_| "Update store lock poisoned")?;
     let now = Instant::now();
     store.expire_leases(now);
@@ -508,7 +633,7 @@ impl ViewerService {
         continue;
       }
       if let Some(subscription) = store.subscriptions.get_mut(id)
-        && owner.is_none_or(|owner| subscription.owner.as_deref() == Some(owner))
+        && subscription.session_scope == self.session_scope
       {
         subscription.accessed = now;
         renewal.renewed_ids.push(id.clone());
@@ -519,130 +644,92 @@ impl ViewerService {
     Ok(renewal)
   }
 
-  pub fn release_session_subscriptions(&self, owner: &str) {
-    if let Ok(mut store) = self.updates.lock() {
-      store
-        .subscriptions
-        .retain(|_, subscription| subscription.owner.as_deref() != Some(owner));
-    }
-  }
-
-  pub fn load_session_backward(&self, mut request: SessionUpdatesRequest) -> Result<SessionUpdate, String> {
-    // Backward reads always return a complete selected projection. Revision
-    // cursors belong to live diffs, not pagination or cache coverage.
-    request.cursor = None;
-    if request.scope.is_none() {
-      request.scope = Some(UpdateScope {
-        history: if request.history_cursor.is_some() {
-          HistoryScope::Retained
-        } else {
-          HistoryScope::RecentTurns
-        },
-        ..Default::default()
-      });
-    }
-    self.load_session_updates(request)
-  }
-
-  pub fn load_session_updates(&self, request: SessionUpdatesRequest) -> Result<SessionUpdate, String> {
-    self.validate_session_key(&request.session_key)?;
-    if request.subscription_id.is_empty()
-      || request.subscription_id.len() > 128
-      || request.detail_keys.len() > 16
-      || request.scope.as_ref().is_some_and(|scope| scope.group_keys.len() > 128)
+  pub fn open_session(&self, mut request: OpenSessionRequest) -> Result<SessionUpdate, String> {
+    let resume = request.resume.take();
+    if !self.valid_subscription_id(&request.subscription_id)
+      || request.scope.as_ref().is_some_and(|s| s.group_keys.len() > 128)
+      || resume.as_ref().is_some_and(|r| {
+        !self.valid_subscription_id(&r.subscription_id) || r.generation.len() > 128 || r.revision.len() > 20
+      })
     {
-      return Err("Invalid session subscription".into());
+      return Err("Invalid session open request".into());
     }
-    if request.unsubscribe || (request.level == UpdateLevel::Details && request.detail_keys.is_empty()) {
-      let mut store = self.updates.lock().map_err(|_| "Update store lock poisoned")?;
-      if store
-        .subscriptions
-        .get(&request.subscription_id)
-        .is_some_and(|subscription| subscription.request.session_key == request.session_key)
-      {
-        store.subscriptions.remove(&request.subscription_id);
+    self.check_session_scope(&request.session_key)?;
+    default_history_scope(&mut request);
+
+    // Reserve the identity before the cold source read. Release or a newer
+    // request can cancel this ticket without waiting for another session's I/O.
+    let ticket = self
+      .updates
+      .lock()
+      .map_err(|_| "Update store lock poisoned")?
+      .begin_open(&request, &self.session_scope)?;
+    let warmed = self.validate_session_key(&request.session_key).and_then(|()| {
+      let locator = crate::model::decode_session_key(&request.session_key)?;
+      if self.relay.covers(locator.provider) {
+        self.relay.load(&locator)?;
       }
-      return Ok(SessionUpdate {
-        subscription_id: request.subscription_id,
-        session_key: request.session_key,
-        level: request.level,
-        generation: uuid::Uuid::new_v4().to_string(),
-        base_revision: None,
-        revision: "0".into(),
-        snapshot: true,
-        items: Vec::new(),
-        groups: Vec::new(),
-        semantic_order: Some(Vec::new()),
-        event_order: Some(Vec::new()),
-        removed_items: Vec::new(),
-        item_order: Some(Vec::new()),
-        state: json!({"total_events":0,"previous_cursor":null,"next_cursor":null,"history_status":"complete","attention_revision":null,"outstanding_questions":[]}),
-      });
-    }
-    // Cold source reads can take seconds. Warm the reader without holding the
-    // shared subscription lock, so opening one session cannot block live
-    // publication or subscription changes for every other session. Projection
-    // below still advances to the current snapshot under that lock.
-    let locator = crate::model::decode_session_key(&request.session_key)?;
-    if self.relay.covers(locator.provider) {
-      self.relay.load(&locator)?;
-    }
-    // Serialize registration and publication: no source update can fall into
-    // the gap between producing the initial snapshot and registering interest.
+      Ok(())
+    });
     let mut store = self.updates.lock().map_err(|_| "Update store lock poisoned")?;
+    store.finish_open(&request.subscription_id, &ticket)?;
+    warmed?;
     store.expire_leases(Instant::now());
     if !store.subscriptions.contains_key(&request.subscription_id) && store.subscriptions.len() >= MAX_SUBSCRIPTIONS {
-      let oldest = store
-        .subscriptions
-        .iter()
-        .min_by_key(|(_, value)| value.accessed)
-        .map(|(key, _)| key.clone())
-        .unwrap();
-      store.subscriptions.remove(&oldest);
+      return Err("Too many session subscriptions".into());
     }
+    // Snapshot and registration share this lock with publication. Later
+    // changes necessarily diff against the same state returned to the reader.
     let projection = self.prepare_projection(
       &request.session_key,
       request.level == UpdateLevel::All,
       request.history_cursor.as_deref(),
     )?;
-    let details = if request.level == UpdateLevel::All {
-      projection.details
-    } else {
-      self.prepare_details(&request)?
-    };
-    let subscription = store
-      .subscriptions
-      .entry(request.subscription_id.clone())
-      .or_insert_with(|| Subscription {
-        owner: None,
-        request: request.clone(),
-        generation: uuid::Uuid::new_v4().to_string(),
-        revision: 0,
-        items: BTreeMap::new(),
-        order: Vec::new(),
-        semantic_order: Vec::new(),
-        event_order: Vec::new(),
-        state: Value::Null,
-        accessed: Instant::now(),
-      });
-    let reset = subscription.revision == 0
-      || subscription.request.session_key != request.session_key
-      || subscription.request.level != request.level;
-    subscription.request = request.clone();
+    let (subscription, cursor) = store.open(&request, &self.session_scope, resume.as_ref());
+    let generation = source_generation(&projection.page);
+    // Repository-only embeddings have no source generation to validate cached
+    // detail and inspection identities after a replacement.
+    let reset =
+      subscription.revision == 0 || generation.is_none() || source_generation(&subscription.state) != generation;
+    subscription.request = request;
     subscription.accessed = Instant::now();
     let update = subscription.update_with_events(
       projection.page,
       projection.semantic,
-      details,
+      projection.details,
       projection.events,
       reset,
-      request.cursor.as_deref(),
+      cursor.as_deref(),
     );
     store.enforce_budget();
     Ok(update)
   }
 
-  pub(crate) fn publish_session_updates(&self, change: &RelayChange) -> Vec<SessionUpdate> {
+  pub(crate) fn invalidate_session_subscriptions(&self, key: Option<&str>) -> Vec<SessionReleaseRequest> {
+    let Ok(mut store) = self.updates.lock() else {
+      return Vec::new();
+    };
+    store.expire_leases(Instant::now());
+    let affected = |sub: &Subscription| key.is_none_or(|key| key == sub.request.session_key);
+    store.dormant.retain(|_, sub| !affected(sub));
+    let mut guest_interests = Vec::new();
+    store.subscriptions.retain(|id, sub| {
+      if !affected(sub) {
+        return true;
+      }
+      // Owners receive the relay reset. A grant sees only its exact interests.
+      if sub.session_scope.is_some() {
+        guest_interests.push(SessionReleaseRequest {
+          subscription_id: id.clone(),
+          session_key: sub.request.session_key.clone(),
+        });
+      }
+      false
+    });
+    guest_interests
+  }
+
+  pub(crate) fn publish_session_updates(&self, key: Option<&str>) -> Vec<SessionUpdate> {
     let Ok(mut store) = self.updates.lock() else {
       return Vec::new();
     };
@@ -651,46 +738,36 @@ impl ViewerService {
     let all_sessions: std::collections::HashSet<_> = store
       .subscriptions
       .values()
-      .filter(|subscription| subscription.request.level == UpdateLevel::All)
+      .filter(|subscription| subscription.session_scope.is_none() && subscription.request.level == UpdateLevel::All)
       .map(|subscription| subscription.request.session_key.clone())
       .collect();
     let mut projections = HashMap::new();
     for subscription in store.subscriptions.values_mut() {
-      if change
-        .session_key
-        .as_ref()
-        .is_some_and(|key| key != &subscription.request.session_key)
-      {
+      if key.is_some_and(|key| key != subscription.request.session_key) {
         continue;
       }
-      // A newly registered live interest has no baseline until its backward
-      // snapshot is accepted. That snapshot reads the latest source under this
-      // same lock; queued publication then diffs against it without a gap.
-      if subscription.revision == 0 {
-        continue;
-      }
-      // Project each changed session once, regardless of how many levels or
-      // clients subscribe to it. Full payloads are built only when an all-level subscriber needs them.
-      let projection = projections
-        .entry(subscription.request.session_key.clone())
-        .or_insert_with(|| {
-          self
-            .prepare_projection(
-              &subscription.request.session_key,
-              all_sessions.contains(&subscription.request.session_key),
-              None,
-            )
-            .map(Arc::new)
-        });
-      let (projection, details) = match projection.clone().and_then(|projection| {
-        let details = if subscription.request.level == UpdateLevel::All {
-          Ok(projection.details.clone())
-        } else {
-          self.prepare_details(&subscription.request)
-        }?;
-        Ok((projection, details))
-      }) {
-        Ok(value) => value,
+      // A grant can hide related sessions and host diagnostics. Reproject
+      // its updates with the original grant, including while the owner worker
+      // publishes. Unrestricted clients can reuse their richer projection.
+      let key = &subscription.request.session_key;
+      let projection = if subscription.session_scope.is_some() {
+        let mut service = self.clone();
+        service.session_scope = subscription.session_scope.clone();
+        service
+          .prepare_projection(key, subscription.request.level == UpdateLevel::All, None)
+          .map(Arc::new)
+      } else {
+        projections
+          .entry(key.clone())
+          .or_insert_with(|| {
+            self
+              .prepare_projection(key, all_sessions.contains(key), None)
+              .map(Arc::new)
+          })
+          .clone()
+      };
+      let projection = match projection {
+        Ok(projection) => projection,
         Err(error) => {
           if let Some(update) = subscription.failure(error) {
             result.push(update);
@@ -699,16 +776,21 @@ impl ViewerService {
         }
       };
       let cursor = subscription.revision.to_string();
+      let reset = source_generation(&subscription.state) != source_generation(&projection.page);
       let update = subscription.update_with_events(
         projection.page.clone(),
         projection.semantic.clone(),
-        details,
+        if subscription.request.level == UpdateLevel::All {
+          projection.details.clone()
+        } else {
+          Vec::new()
+        },
         if subscription.request.level == UpdateLevel::All {
           projection.events.clone()
         } else {
           Vec::new()
         },
-        change.reset,
+        reset,
         Some(&cursor),
       );
       if update.snapshot || update.revision != cursor {
@@ -726,16 +808,14 @@ mod tests {
 
   fn subscription(level: UpdateLevel) -> Subscription {
     Subscription {
-      owner: None,
-      request: SessionUpdatesRequest {
+      session_scope: None,
+      request: OpenSessionRequest {
         subscription_id: "view".into(),
         session_key: "session".into(),
         level,
-        cursor: None,
-        detail_keys: Vec::new(),
+        resume: None,
         scope: None,
         history_cursor: None,
-        unsubscribe: false,
       },
       generation: "initial".into(),
       revision: 0,
@@ -745,6 +825,7 @@ mod tests {
       event_order: Vec::new(),
       state: Value::Null,
       accessed: Instant::now(),
+      bytes: 0,
     }
   }
 
@@ -763,7 +844,6 @@ mod tests {
       UpdateLevel::Final,
       UpdateLevel::Messages,
       UpdateLevel::Steps,
-      UpdateLevel::Details,
       UpdateLevel::All,
     ] {
       for scoped in [false, true] {
@@ -857,37 +937,111 @@ mod tests {
   }
 
   #[test]
-  fn connection_renewal_cannot_prolong_or_release_another_owners_reclaimed_lease() {
+  fn releasing_an_open_in_progress_prevents_late_registration() {
     let root = tempfile::tempdir().unwrap();
     let service = ViewerService::native(root.path().join("index.sqlite")).unwrap();
-    let mut reclaimed = subscription(UpdateLevel::Steps);
-    reclaimed.owner = Some("new-connection".into());
-    reclaimed.accessed = Instant::now() - LEASE / 2;
-    let previous_access = reclaimed.accessed;
+    let request = subscription(UpdateLevel::Steps).request;
+    let first = service.updates.lock().unwrap().begin_open(&request, &None).unwrap();
     service
-      .updates
-      .lock()
-      .unwrap()
-      .subscriptions
-      .insert("view".into(), reclaimed);
-
-    let old = service
-      .renew_session_subscriptions_owned(&["view".into()], Some("old-connection"))
+      .release_session(SessionReleaseRequest {
+        subscription_id: request.subscription_id.clone(),
+        session_key: request.session_key.clone(),
+      })
       .unwrap();
-    assert!(old.renewed_ids.is_empty());
-    assert_eq!(old.missing_ids, ["view"]);
-    service.release_session_subscriptions("old-connection");
+    let mut store = service.updates.lock().unwrap();
+    let successor = store.begin_open(&request, &None).unwrap();
+    assert!(store.finish_open(&request.subscription_id, &first).is_err());
+    assert!(store.finish_open(&request.subscription_id, &successor).is_ok());
+    assert!(store.opening.is_empty());
+    assert!(store.subscriptions.is_empty());
+  }
+
+  #[test]
+  fn dormant_baselines_yield_to_live_leases_and_require_exact_revision() {
+    let mut store = UpdateStore::default();
+    let mut first = subscription(UpdateLevel::Steps);
+    first.revision = 5;
+    first.bytes = MEMORY_TARGET / 2;
+    let mut request = first.request.clone();
+    store.subscriptions.insert("view".into(), first);
+    store.release("view");
+    request.subscription_id = "reopen".into();
+    let stale = SessionResume {
+      subscription_id: "view".into(),
+      generation: "initial".into(),
+      revision: "4".into(),
+    };
+    let (opened, cursor) = store.open(&request, &None, Some(&stale));
+    assert!(cursor.is_none());
+    assert_ne!(opened.generation, "initial");
+    opened.bytes = MEMORY_TARGET;
+    store.enforce_budget();
+    assert!(store.dormant.is_empty());
+    assert!(store.subscriptions.contains_key("reopen"));
+  }
+
+  #[test]
+  fn scoped_projection_failures_hide_reader_diagnostics() {
+    let mut guest = subscription(UpdateLevel::Steps);
+    guest.session_scope = Some(Arc::new(HashSet::from(["session".into()])));
+    let update = guest.failure("private host diagnostic".into()).unwrap();
+    let wire = serde_json::to_string(&update).unwrap();
+    assert!(!wire.contains("private host diagnostic"));
+    assert_eq!(update.state["error"], "Session updates are temporarily unavailable");
+  }
+
+  #[tokio::test]
+  async fn source_resets_emit_one_owner_signal_and_only_active_grant_invalidations() {
+    let root = tempfile::tempdir().unwrap();
+    let service = ViewerService::native(root.path().join("index.sqlite")).unwrap();
+    let (events, mut received) = tokio::sync::broadcast::channel(16);
+    {
+      let mut store = service.updates.lock().unwrap();
+      for (id, key, guest, dormant) in [
+        ("owner", "replaced", false, false),
+        ("guest", "replaced", true, false),
+        ("away", "replaced", true, true),
+        ("other", "unchanged", false, false),
+        ("other-away", "unchanged", false, true),
+      ] {
+        let mut sub = subscription(UpdateLevel::All);
+        sub.request.session_key = key.into();
+        sub.request.subscription_id = id.into();
+        sub.revision = 3;
+        sub.session_scope = guest.then(|| Arc::new(HashSet::from([key.to_owned()])));
+        store.subscriptions.insert(id.into(), sub);
+        if dormant {
+          store.release(id);
+        }
+      }
+    }
+    let change = |session_key| crate::relay::RelayChange {
+      session_key,
+      reset: true,
+    };
+    crate::runtime::publish_relay_change(service.clone(), &events, change(Some("replaced".into()))).await;
+    let guest = received.try_recv().unwrap();
+    assert_eq!(guest.event, "session-subscription-invalidated");
     assert_eq!(
-      service.updates.lock().unwrap().subscriptions["view"].accessed,
-      previous_access
+      guest.payload,
+      json!({"subscription_id":"guest","session_key":"replaced"})
     );
-
-    let current = service
-      .renew_session_subscriptions_owned(&["view".into()], Some("new-connection"))
-      .unwrap();
-    assert_eq!(current.renewed_ids, ["view"]);
-    assert!(current.missing_ids.is_empty());
-    assert_eq!(service.renew_session_subscriptions(&["view".into()]).unwrap(), current);
+    let owner = received.try_recv().unwrap();
+    assert_eq!(owner.event, "relay-changed");
+    assert_eq!(owner.payload, json!({"session_key":"replaced","reset":true}));
+    assert!(received.try_recv().is_err());
+    {
+      let store = service.updates.lock().unwrap();
+      assert_eq!(store.subscriptions.len(), 1);
+      assert!(store.subscriptions.contains_key("other"));
+      assert_eq!(store.dormant.len(), 1);
+      assert!(store.dormant.contains_key("other-away"));
+    }
+    crate::runtime::publish_relay_change(service.clone(), &events, change(None)).await;
+    assert_eq!(received.try_recv().unwrap().event, "relay-changed");
+    assert!(received.try_recv().is_err());
+    let store = service.updates.lock().unwrap();
+    assert!(store.subscriptions.is_empty() && store.dormant.is_empty());
   }
 
   #[test]
@@ -1064,7 +1218,7 @@ mod tests {
 
   #[test]
   fn details_are_delivered_and_removed_at_item_scope() {
-    let mut state = subscription(UpdateLevel::Details);
+    let mut state = subscription(UpdateLevel::All);
     let first = state.update(
       page(vec![], vec![]),
       vec![],

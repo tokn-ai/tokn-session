@@ -70,7 +70,7 @@ it("loads a history response larger than one guest ABI message without a guest-s
     chunk(encoded('"}'));
     return { response_id: id, status: 200, content_type: "application/json" };
   });
-  const result = await value.host.invoke<{ history: string }>("hub_client_request", { connection_id: "connection", command: "load_session_backward" });
+  const result = await value.host.invoke<{ history: string }>("hub_client_request", { connection_id: "connection", command: "open_session" });
   expect(result.history).toHaveLength(9 * 1024 * 1024);
   expect(value.send.mock.calls.filter(([name]) => name === "ack_bridge_chunk")).toHaveLength(290);
 });

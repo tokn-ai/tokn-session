@@ -8,44 +8,43 @@ projections: they control filtering as well as payload richness. Existing
 not describe the frontend's mixed cache contents. `final` selects user messages,
 final assistant replies, and attention; `messages` also selects intermediate
 assistant replies; `steps` adds activity summaries; `all` includes every source
-event. The older `details` preset remains compatible, but new clients load
-detail resources independently.
+event. Display details and source inspection load independently.
 
 ## Loading and live delivery
 
-Direct browser clients register per-session interests over `/api/v1/live`.
-The first WebSocket frame authenticates with the existing bearer token; tokens
-never enter URLs. Same-origin and explicitly configured origins are allowed.
-The socket forwards only its registered session updates. Other clients' tool
-payloads are filtered before transfer. Catalog/index/attention notifications
-remain on SSE; modern clients exclude session and background updates from that
-stream when the WebSocket carries them.
+The viewer opens one event stream per machine connection. Direct browsers,
+remote desktop, Hub web and Apell use `POST /api/v1/events` with a fresh
+connection prefix. The host sends general notifications plus timeline and
+sidebar updates whose IDs belong to that prefix. Desktop Local receives the
+same event families through Tauri. Clients establish listeners before reading
+the catalog so they can buffer events that precede a command response.
 
-`subscribe_session` returns only identity, generation, and revision. It does
-not read or send session history. Initial registration has revision zero and
-publication waits for its backward baseline. `load_session_backward` returns
-a snapshot at the requested level, defaulting to `steps` with the latest three turns
-and collapsed inner groups (`recent_turns` scope). The older `latest_turn` scope
-remains available for callers explicitly requesting one turn. History pagination uses a separate `history_cursor`;
-explicit earlier loading expands the retained range. Subscribing and publishing
-share the update-store lock with backward loading, so changes cannot escape
-between snapshot capture and baseline registration. Frontend replicas buffer
-live changes arriving before the HTTP snapshot, discard older revisions, and
-recover gaps with another backward read.
+`open_session` registers live interest and returns a coherent timeline in
+one command. A cold open defaults to Steps and the latest three turns with
+collapsed groups. Opening a cached session paints its existing cards immediately
+and sends the previous subscription ID, generation and revision in `resume`.
+When the host can identify that exact projection, it sends changed items,
+removals, changed ordering and current state. An unchanged reopen sends zero
+timeline items. A missing or invalid baseline produces a snapshot in the same
+response. A separate `history_cursor` extends the retained history window.
+Opening a group changes the requested group membership through the same command.
 
-Opening never walks saved reading anchors through old history before first
-paint. Recently opened sessions display their cached screen during catch-up.
-Readers explicitly load older history. The returned turn anchor pins live
-appends so new prompts extend an open view rather than dropping its first turn.
-Outstanding older questions retain attention context.
+The host captures the baseline under the same lock used for live publication.
+The client validates queued events against the response's generation and revision.
+After a connection interruption it reopens its retained interest with its last
+accepted revision. A reader reset sends one `relay-changed` invalidation to
+the owner and a targeted notice to affected shared viewers. A replacement
+discovered during normal publication also produces a small resync notice on
+SSE. Recovering a timeline reads history only for the open session. Operations
+that submit agent input are independent of reconnect and recovery.
 
-The WebSocket carries live diffs only. Source replacements that require a
-snapshot produce a small resync notice; backward HTTP performs recovery.
-Reconnection restores open-session interests and refetches their display
-baselines. Socket heartbeats renew leases
-without fetching data. Connection ownership prevents delayed cleanup from
-an old socket removing interests reclaimed by its replacement. Changing a
-subscription's level establishes a new baseline through backward loading.
+`release_session` retires a selected interest when the viewer switches away.
+The host keeps up to eight released projections within its existing memory
+budget. Changes to an inactive session do not produce timeline pushes for it.
+A host restart or eviction discards the corresponding resume baseline. Readers
+can explicitly request older history. The first open never searches older
+pages for a saved scroll anchor. New turns extend the retained window, and
+older outstanding questions retain their attention context.
 
 ## Background messages and session coverage
 
@@ -61,7 +60,7 @@ authoritative clearing/removal stay live at both levels. Intermediate-only
 changes do not consume final subscription revisions; activity changes alongside
 an intermediate reply omit message coverage so the previous preview survives.
 
-`subscribe_background_updates` (WebSocket `subscribe_background`) registers
+`subscribe_background_updates` registers
 identity, scope, and background level only. Registration, scope/level changes, and reconnection never
 read history or send a history snapshot. The first live update can advance from
 revision zero without a backward baseline. Each subscription has its own
@@ -70,7 +69,6 @@ with unchanged projections suppressed. Heartbeats renew its 90-second lease.
 Deduplication compares message and activity fields, so a tool-only source
 checkpoint does not repeat an unchanged preview. Unknown staged bodies preserve
 the last known message digest.
-Disconnect releases only interests owned by that connection.
 Expired leases fail renewal so a suspended desktop window can establish a fresh
 interest when it wakes. Read acknowledgements retain the existing durable
 notification/catalog authority; compact snapshots cannot restore a cleared dot.
@@ -93,29 +91,17 @@ at Messages/Steps/All own their previews while subscribed, because their source
 pipeline can be ahead of indexing. Subscription changes retain bounded preview text while
 retiring live activity authority; stale IDs/generations are ignored. Gaps and
 reconnects establish a fresh live interest without loading unopened history.
-The scope and level preferences are stored locally. The bottom status bar shows a compact
-live-updates entry; its popup separates session scope, background delivery,
-and open-conversation delivery. The conversation offers `final`, `messages`,
-`steps` (the default), and `all`; changes load the requested projection's
-backward baseline and retain per-resource cache coverage. Unsupported
-hosts show a warning there while open sessions continue through the existing path.
-Legacy desktop External reader mode has no compact metadata feed and reports
-background updates unavailable; native Local/Automatic mode and encrypted remote
-connections to modern hosts support it.
-Messages subscriptions omit the new level field for older-host compatibility.
-Final requires an explicit matching acknowledgement; unsupported hosts report
-the failure without silently reverting to Messages.
-Legacy full-page conversation loading remains available at Steps. Missing
-non-Steps presets report a conversation error rather than showing unfiltered rows.
+The scope and level preferences persist locally. The live-updates popup
+controls the background subscription and the open conversation independently.
+Changing conversation levels sends a single open for the requested projection.
+The desktop External reader has no compact metadata feed and reports background
+updates unavailable. Local and Automatic readers support compact updates.
 
 ## Explicit resources and cache coverage
 
-`load_session_details` accepts a tagged resource request:
-
-- `group`: explicit inner-group interests and the display revision cursor;
-  delivers complete child-summary membership in a coherent update envelope.
-- `tool`: an event key; returns its display payload without provider-native
-  records.
+`open_session` with `scope.group_keys` requests complete group membership
+at the active projection's revision. `load_session_details` with kind `tool`
+takes an event key and returns its display payload.
 
 `inspect_session_event` independently returns normalized/source inspection
 and opted-in native records. It applies the existing redaction and payload
@@ -133,36 +119,23 @@ collapsed payloads wait until requested. Obsolete in-flight results cannot
 replace newer coverage. Resource payloads have a 32 MiB/256-entry cache budget,
 in addition to the existing bounded display replicas.
 
-## Adapters, compatibility, and limits
+## Adapters and limits
 
-Tauri exposes the same subscribe/backward/details/inspect commands through
-its native event bridge. Renewal commands carry identities only. The React
-`loadSessionUpdates` compatibility facade translates snapshot requests into
-live registration plus backward loading; it no longer issues data heartbeats.
-Older servers fall back to the previous update/page commands and revision-based
-lease renewal. Legacy trajectory
-pages still assemble complete groups atomically before rendering.
+Viewer protocol revision 2 uses the same open, release, resource and renewal
+commands on Tauri and HTTP. The Hub transports HTTP-shaped commands and SSE
+through the encrypted connection. Shared grants restrict access to their
+explicit session keys and namespace subscription IDs per recipient and grant.
+Shared viewers receive live updates to their own subscriptions and a catalog
+refresh notice every five seconds. Read markers and activity from unshared
+descendants stay private.
 
-The existing Hub and paired HTTP tunnels do not upgrade an upstream WebSocket. They keep
-SSE compatibility and support the new HTTP commands through the route
-allowlist. Shared grants clamp background scope to their exact granted session
-keys, namespace subscription identities by principal, and filter events before
-transfer. Owner read markers and unshared descendant activity stay private.
-Scoped fixed-cadence invalidations remain compatible.
+The host admits up to 24 active timeline subscriptions with 90-second leases.
+Active and released timeline projections share a 64 MiB target. The host evicts
+released projections first. Renewal returns `renewed_ids` and `missing_ids`
+without reading histories. Expiry, gaps and source failures suspend live
+ownership of sidebar state while preserving the last displayed cards.
+Targeted recovery revalidates only affected interests.
 
-Subscriptions expire after 90 seconds and are bounded to 24 entries/64 MiB.
-Renewal acknowledges `renewed_ids` and `missing_ids` without loading bodies;
-expired interests cannot be revived by renewal. Desktop, HTTP, and WebSocket
-clients recover missing identities through registration and a backward baseline.
-WebSocket pongs acknowledge only the connection's still-owned interests.
-Rich `renewed_ids`/`missing_ids` remain separate from compact
-`renewed_background_ids`/`missing_background_ids` inventories.
-All retained frontend interests renew independently of the selected conversation.
-Lost, expired, and source-error leases relinquish sidebar running ownership while
-keeping cached cards available. Focus/resume checks leases; targeted recovery
-leaves healthy sessions alone. Backward responses recheck their captured source
-generation at application, and retired or unseen cross-generation pushes require
-a fresh baseline before replacing authoritative state.
 Compact background interests have an independent 24-entry limit, up to 4,096
 sidebar keys/256 KiB per interest, and 10,000 in-memory deduplication entries.
 Evicted fingerprints spill to a private temporary SQLite file with a bounded
@@ -170,8 +143,7 @@ page cache, so large follower scans do not replay unchanged messages. The spill
 contains session keys and digests, never message text, and is removed on shutdown.
 Frontend display replicas retain eight recent sessions with a 64 MiB target,
 protecting the selected session. Eviction releases every active delivery level;
-late HTTP reads and subscription acknowledgements cannot restore released socket
-ownership. Session activity does not promote its LRU
+late opens cannot restore a released interest. Session activity does not promote its LRU
 position. Each level has independent revision coverage; receiving final events
 does not advance steps coverage. Source events at `all` remain separate from
 folded display objects. Native inspection is independently opt-in.

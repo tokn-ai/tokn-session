@@ -35,6 +35,12 @@ resident. New turns accumulate; this is not a sliding three-turn limit. A
 source replacement creates new identities and preserves the loaded turn span
 where possible. An evicted session reopens with the initial window.
 
+Switching away releases the live timeline subscription. The viewer retains
+its display and revision. The host keeps up to eight released display projections
+within the timeline cache's 64 MiB budget, separate from the source reader cache.
+Reopening paints the saved display immediately. One request then returns the
+changes since that revision or a fresh snapshot if the baseline is unavailable.
+
 Loaded normalized source records outside the delivered window live in an anonymous
 temporary disk journal, with compact offsets, fingerprints, turn boundaries and
 dependency positions in memory. Concurrent subscribers share the reader and

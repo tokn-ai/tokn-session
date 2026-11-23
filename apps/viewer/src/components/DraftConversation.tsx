@@ -225,7 +225,7 @@ export function DraftConversation({ draft, projects, workspace_available, worksp
           {draft.snapshot?.last_turn_error ? <p className="draft-conversation__error">{draft.snapshot.last_turn_error}</p> : null}
           {draft.error && draft.error !== draft.snapshot?.message ? <p className="draft-conversation__error" role="alert">{draft.error}</p> : null}
           {draft.image_error ? <p className="draft-conversation__error" role="alert">{draft.image_error}</p> : null}
-          {draft.model && !model_current && !model.loading && !draft.locked ? <p className="draft-conversation__error" role="alert">The model catalog changed. Choose a model again or use runtime default before sending.</p> : null}
+          {draft.model && !model_current && !model.loading && !draft.locked ? <p className="draft-conversation__error" role="alert">The list of available models changed. Choose a model again or use runtime default before sending.</p> : null}
           {!!draft.images.length && agent && !images_allowed ? <p className="draft-conversation__error" role="alert">{draft.model ? "This model cannot accept these images. Remove them or choose a model with image support." : `${agent_name} cannot accept these images. Remove them or choose an agent with image support.`}</p> : null}
           {draft.snapshot?.session && on_open_session ? <button className="text-button" type="button" onClick={on_open_session}>Open saved conversation</button> : null}
         </div>

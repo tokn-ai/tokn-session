@@ -57,7 +57,7 @@ struct ClientState {
 struct ActiveHost {
   host: SavedHost,
   connection_id: String,
-  endpoint: Url,
+  relay: Arc<tokn_hub_remote::PinnedRelay>,
   cancelled: CancellationToken,
 }
 
@@ -87,11 +87,18 @@ impl ClientState {
     let endpoint = secure_client::secure_endpoint(&self.hub_url, host_id, self.insecure_loopback)?;
     let mut active = self.active.lock().map_err(|_| "Host selection is unavailable")?;
     self.store.select_host(host_id)?;
+    let cancelled = self.shutdown.child_token();
+    let relay = Arc::new(tokn_hub_remote::PinnedRelay::new(
+      endpoint,
+      self.identity.clone(),
+      host.host_public_key.clone(),
+      cancelled.clone(),
+    ));
     let next = ActiveHost {
       host,
       connection_id: protocol::encode(&rand::random::<[u8; 24]>()),
-      endpoint,
-      cancelled: self.shutdown.child_token(),
+      relay,
+      cancelled,
     };
     let selection = next.selection();
     if let Some(previous) = active.replace(next) {
@@ -113,7 +120,7 @@ pub async fn run_paired(config: PairedClientConfig, shutdown: CancellationToken)
     return Err("The secure viewer client must bind to a numeric loopback address".into());
   }
   // Validate the Hub before creating any local state; routing IDs are public.
-  secure_client::secure_endpoint(&config.hub_url, "validate", config.insecure_loopback)?;
+  secure_client::relay_origin(&config.hub_url, config.insecure_loopback)?;
   let store = Arc::new(ClientStore::load_or_create(&config.state_dir, &config.hub_url)?);
   let identity = Arc::new(NoiseIdentity::load_or_create(&store.identity_file())?);
   let listener = tokio::net::TcpListener::bind(config.bind)
@@ -307,9 +314,7 @@ async fn proxy(
   *request.uri_mut() = uri;
   secure_client::proxy_paired(
     PairedRequest {
-      endpoint: target.endpoint,
-      host_public_key: target.host.host_public_key,
-      identity: state.identity,
+      relay: target.relay,
       requests: state.requests,
       shutdown: target.cancelled,
     },
@@ -502,32 +507,41 @@ mod tests {
               let (reply, mut channel) = NoiseResponder::new(&host).unwrap().accept(&first).unwrap();
               assert_eq!(authorized.lock().unwrap().as_deref(), Some(channel.remote_public_key()));
               socket.send(Message::Binary(reply.into())).await.unwrap();
-              let request = socket.recv().await.unwrap().unwrap().into_data();
-              assert_eq!(
-                channel.decrypt(&request).unwrap(),
-                InnerMessage::DeviceRequest {
-                  method: "GET".into(),
-                  path: "/api/v1/health".into()
+              while let Some(Ok(Message::Binary(record))) = socket.recv().await {
+                let InnerMessage::Stream { stream_id, frame } = channel.decrypt(&record).unwrap() else {
+                  panic!("Expected stream")
+                };
+                match *frame {
+                  InnerMessage::Window { .. } => continue,
+                  InnerMessage::DeviceRequest { method, path } => {
+                    assert_eq!(method, "GET");
+                    assert_eq!(path, "/api/v1/health");
+                  }
+                  _ => panic!("Expected health request"),
                 }
-              );
-              let end = socket.recv().await.unwrap().unwrap().into_data();
-              assert_eq!(channel.decrypt(&end).unwrap(), InnerMessage::RequestEnd {});
-              for message in [
-                InnerMessage::Response {
-                  status: 200,
-                  content_type: Some("application/json".into()),
-                },
-                InnerMessage::Chunk {
-                  data: protocol::encode(br#"{"version":1}"#),
-                },
-                InnerMessage::End {},
-              ] {
-                socket
-                  .send(Message::Binary(channel.encrypt(&message).unwrap().into()))
-                  .await
-                  .unwrap();
+                let end = socket.recv().await.unwrap().unwrap().into_data();
+                assert_eq!(
+                  channel.decrypt(&end).unwrap(),
+                  InnerMessage::RequestEnd {}.on_stream(stream_id)
+                );
+                for frame in [
+                  InnerMessage::Response {
+                    status: 200,
+                    content_type: Some("application/json".into()),
+                  },
+                  InnerMessage::Chunk {
+                    data: protocol::encode(br#"{"version":2}"#),
+                  },
+                  InnerMessage::End {},
+                ] {
+                  socket
+                    .send(Message::Binary(
+                      channel.encrypt(&frame.on_stream(stream_id)).unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
+                }
               }
-              while let Some(Ok(_)) = socket.recv().await {}
             })
           }
         }
@@ -585,20 +599,22 @@ mod tests {
     let selected = restarted
       .select(&restarted.store.selected_host().unwrap().unwrap())
       .unwrap();
-    let request = Request::builder()
-      .method("GET")
-      .uri("/api/v1/health")
-      .body(Body::empty())
-      .unwrap();
-    let response = proxy(
-      State(restarted),
-      Path((selected.connection_id, "health".into())),
-      request,
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(body, br#"{"version":1}"#.as_slice());
+    for _ in 0..2 {
+      let request = Request::builder()
+        .method("GET")
+        .uri("/api/v1/health")
+        .body(Body::empty())
+        .unwrap();
+      let response = proxy(
+        State(restarted.clone()),
+        Path((selected.connection_id.clone(), "health".into())),
+        request,
+      )
+      .await;
+      assert_eq!(response.status(), StatusCode::OK);
+      let body = response.into_body().collect().await.unwrap().to_bytes();
+      assert_eq!(body, br#"{"version":2}"#.as_slice());
+    }
     assert_eq!(pairing_count.load(Ordering::SeqCst), 2);
     assert_eq!(noise_count.load(Ordering::SeqCst), 1);
     server.abort();

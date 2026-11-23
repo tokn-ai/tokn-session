@@ -4,6 +4,69 @@ use crate::{
   secure::{InnerMessage, MAX_CHUNK, MAX_REQUEST_BODY},
 };
 
+#[derive(PartialEq, Eq)]
+enum Expected {
+  Header,
+  Body,
+  Discovery,
+  DirectConfig,
+  DirectAnswer,
+  Ended,
+}
+
+/// Validate response order and credits as records arrive, including while a
+/// consumer is paused. Each logical stream has its own instance.
+pub struct StreamResponse {
+  expected: Expected,
+  unacknowledged: usize,
+}
+
+impl StreamResponse {
+  pub fn new(first: &InnerMessage) -> Result<Self, String> {
+    let expected = match first {
+      InnerMessage::DeviceRequest { .. } => Expected::Header,
+      InnerMessage::DiscoveryRequest {} => Expected::Discovery,
+      InnerMessage::DirectConfigRequest {} => Expected::DirectConfig,
+      InnerMessage::DirectOffer { .. } => Expected::DirectAnswer,
+      _ => return Err("Invalid encrypted stream request".into()),
+    };
+    Ok(Self {
+      expected,
+      unacknowledged: 0,
+    })
+  }
+
+  /// Returns true when the stream has received its terminal record.
+  pub fn accept(&mut self, frame: &InnerMessage) -> Result<bool, String> {
+    self.expected = match (&self.expected, frame) {
+      (Expected::Ended, _) => return Err("Encrypted stream already ended".into()),
+      (_, InnerMessage::Error { .. })
+      | (Expected::Discovery, InnerMessage::DiscoveryResponse { .. })
+      | (Expected::DirectConfig, InnerMessage::DirectConfig { .. })
+      | (Expected::DirectAnswer, InnerMessage::DirectAnswer { .. })
+      | (Expected::Body, InnerMessage::End {}) => Expected::Ended,
+      (Expected::Header, InnerMessage::Response { .. }) => Expected::Body,
+      (Expected::Body, InnerMessage::Chunk { .. }) => {
+        if self.unacknowledged >= protocol::RESPONSE_WINDOW {
+          return Err("Machine exceeded its encrypted stream credit".into());
+        }
+        self.unacknowledged += 1;
+        Expected::Body
+      }
+      _ => return Err("Unexpected encrypted stream response".into()),
+    };
+    Ok(self.expected == Expected::Ended)
+  }
+
+  pub fn acknowledge(&mut self, credits: usize) -> Result<(), String> {
+    self.unacknowledged = self
+      .unacknowledged
+      .checked_sub(credits)
+      .ok_or("Invalid encrypted stream credit")?;
+    Ok(())
+  }
+}
+
 /// Borrow a bounded request body and emit one protocol message at a time. The
 /// caller encrypts/writes each message without allocating a second body copy.
 pub struct RequestFrames<'a> {
@@ -208,5 +271,37 @@ mod tests {
     assert!(window.next(chunk()).is_err());
     window.acknowledge().unwrap();
     window.next(chunk()).unwrap();
+  }
+
+  #[test]
+  fn concurrent_streams_have_independent_response_types_and_credit() {
+    let open = InnerMessage::DeviceRequest {
+      method: "GET".into(),
+      path: "/api/v1/health".into(),
+    };
+    let mut http = StreamResponse::new(&open).unwrap();
+    let mut discovery = StreamResponse::new(&InnerMessage::DiscoveryRequest {}).unwrap();
+    let header = InnerMessage::Response {
+      status: 200,
+      content_type: Some("application/json".into()),
+    };
+    assert!(http.accept(&chunk()).is_err());
+    assert!(!http.accept(&header).unwrap());
+    for _ in 0..protocol::RESPONSE_WINDOW {
+      assert!(!http.accept(&chunk()).unwrap());
+    }
+    assert!(http.accept(&chunk()).is_err());
+    assert!(discovery.accept(&header).is_err());
+    assert!(
+      discovery
+        .accept(&InnerMessage::DiscoveryResponse { group: None })
+        .unwrap()
+    );
+    assert!(discovery.accept(&InnerMessage::End {}).is_err());
+    http.acknowledge(1).unwrap();
+    assert!(!http.accept(&chunk()).unwrap());
+    assert!(http.accept(&InnerMessage::End {}).unwrap());
+    assert!(open.clone().on_stream(0).validate().is_err());
+    assert!(open.on_stream(1).on_stream(2).validate().is_err());
   }
 }

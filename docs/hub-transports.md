@@ -8,14 +8,14 @@ requests to that relay. Background negotiation retries after 30 seconds while
 the machine remains open; reopening starts a new attempt immediately.
 
 The Hub carries discovery, pairing/passkey ceremonies, and encrypted connection
-negotiation. SDP and configured ICE servers travel inside fresh pinned-host
-Noise IK channels. The host authorizes the device before allocating a peer.
+negotiation. SDP and configured ICE servers travel through the active
+authenticated relay connection. The host authorizes the device before allocating a peer.
 Established direct peers belong to the connector's lifetime and survive a Hub
 tunnel disconnect. The Hub still serves trusted browser code.
 
-WebRTC adds DTLS, but application encryption remains Noise IK on **every**
-ordered, reliable DataChannel. Each channel carries one existing HTTP exchange,
-including its authenticated body and bounded response credits. A peer is bound
+The selected WebRTC DataChannel is ordered and reliable. One Noise IK
+handshake authenticates it. Viewer requests and the live event stream then
+share it, using independent stream IDs, cancellation and response credits. A peer is bound
 to the device key that authenticated negotiation. Host pins, browser session
 expiry, per-request authorization, periodic revocation checks, route and control
 restrictions apply on both carriers. Pairing/authentication stays on the Hub
@@ -26,15 +26,16 @@ carry bounded ordered byte records. Relay and WebRTC adapters implement that
 contract; encryption, authorization and viewer semantics sit above it. A future
 native tunnel can replace the carrier without changing the security protocol.
 Peers, channels, record queues, send buffers and negotiation times are bounded.
-Peers retire after 512 exchanges to bound upstream channel descriptor retention.
+Peers retire after 512 physical DataChannels to bound channel descriptor retention.
+Normal viewer commands reuse the current DataChannel.
 Existing requests drain before the old peer closes; new work uses the relay until
 a replacement has authenticated. Closing the machine cancels both active and
 retiring peers.
 Each encrypted record is at most 65,535 bytes, and response/request chunks remain
 32 KiB. Peers reject a negotiated SCTP message limit too small for those records.
 
-Once direct health has passed a fresh Noise/device authorization exchange, new
-requests use that peer. In-flight requests keep their original carrier. Live
+Once the direct health check succeeds, new requests reuse its authenticated
+channel. In-flight requests keep their original carrier. Live
 event streams restart on a path change and use the existing viewer recovery
 events. Failed or uncertain commands are reported to the caller and **never
 automatically replayed** through another carrier.

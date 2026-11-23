@@ -25,6 +25,29 @@ fn emit<T: serde::Serialize>(events: &broadcast::Sender<ViewerEvent>, event: &st
   Ok(())
 }
 
+pub(crate) async fn publish_relay_change(
+  service: ViewerService,
+  events: &broadcast::Sender<ViewerEvent>,
+  change: crate::relay::RelayChange,
+) {
+  let timeline_events = events.clone();
+  let key = change.session_key.clone();
+  let reset = change.reset;
+  let _ = tokio::task::spawn_blocking(move || {
+    if reset {
+      for interest in service.invalidate_session_subscriptions(key.as_deref()) {
+        let _ = emit(&timeline_events, "session-subscription-invalidated", interest);
+      }
+    } else {
+      for update in service.publish_session_updates(key.as_deref()) {
+        let _ = emit(&timeline_events, "session-updated", update);
+      }
+    }
+  })
+  .await;
+  let _ = emit(events, "relay-changed", change);
+}
+
 /// Establish a silent compact baseline before the first index reconciliation.
 /// This reads only SQLite projections and prevents an initial sibling-index
 /// change from replaying every historical card as if it were a live update.
@@ -239,15 +262,7 @@ impl ViewerRuntime {
           },
           Err(_) => return,
         };
-        let service = update_service.clone();
-        let source_change = change.clone();
-        if let Ok(updates) = tokio::task::spawn_blocking(move || service.publish_session_updates(&source_change)).await
-        {
-          for update in updates {
-            let _ = emit(&relay_events, "session-updated", update);
-          }
-        }
-        let _ = emit(&relay_events, "relay-changed", change);
+        publish_relay_change(update_service.clone(), &relay_events, change).await;
         emit_changed_relay_status(&relay_events, &mut last_status, relay.status());
       }
     }));

@@ -992,12 +992,11 @@ export interface ExpandedActivityState {
   is_loading: boolean;
 }
 
-export type UpdateLevel = "final" | "messages" | "steps" | "details" | "all";
-export type ConversationUpdateLevel = Exclude<UpdateLevel, "details">;
+export type ConversationUpdateLevel = "final" | "messages" | "steps" | "all";
 export interface SessionUpdateItem {
   item_id: string;
   kind: "user_message" | "assistant_message" | "notification" | "tool_summary" | "detail" | "work_summary" | "event";
-  level: UpdateLevel;
+  level: ConversationUpdateLevel | "details";
   summary?: EventSummary;
   event_key?: string;
   detail?: EventDetail;
@@ -1007,7 +1006,7 @@ export interface SessionUpdateItem {
 export interface SessionUpdate {
   subscription_id: string;
   session_key: string;
-  level: UpdateLevel;
+  level: ConversationUpdateLevel;
   generation: string;
   base_revision: string | null;
   revision: string;
@@ -1025,24 +1024,20 @@ export interface SessionUpdateScope {
   turn_key?: string | null;
   group_keys: string[];
 }
-export interface SessionUpdatesRequest {
+export interface OpenSessionRequest {
+  resume?: { subscription_id: string; generation: string; revision: string };
   subscription_id: string;
   session_key: string;
-  level: UpdateLevel;
-  cursor: string | null;
-  detail_keys: string[];
+  level: ConversationUpdateLevel;
   scope?: SessionUpdateScope;
   history_cursor?: string | null;
-  unsubscribe?: boolean;
 }
+
+export type ReleaseSessionRequest = Pick<OpenSessionRequest, "subscription_id" | "session_key">;
 
 export interface SessionSubscriptionRenewal {
   renewed_ids: string[];
   missing_ids: string[];
-}
-
-export interface SessionSubscriptionRenewalResult extends SessionSubscriptionRenewal {
-  updates: SessionUpdate[];
 }
 
 export interface SessionSubscriptionLoss {

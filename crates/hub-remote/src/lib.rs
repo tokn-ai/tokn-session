@@ -3,12 +3,16 @@ mod direct;
 mod directory;
 pub use direct::{TransportKind, TransportState};
 mod exchange;
+mod pinned_relay;
+pub use exchange::Exchange;
+pub use pinned_relay::PinnedRelay;
 pub mod persistence;
+mod session;
 pub mod store;
 mod stream;
 pub use store::{ClientStore, SavedHost};
 
-use exchange::{Exchange, Socket, connect, receive, send};
+use exchange::{Socket, connect, receive, send};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
@@ -316,10 +320,10 @@ impl RemoteManager {
       direct: direct::DirectRoute::default(),
     };
     let health = connection.request("health", json!({})).await?;
-    if health.get("version").and_then(Value::as_u64) != Some(1) {
-      return Err("Machine uses an unsupported viewer API version".into());
+    if health.get("version").and_then(Value::as_u64) != Some(protocol::VIEWER_API_VERSION) {
+      return Err("Machine uses an unsupported viewer API version. Update the machine's viewer.".into());
     }
-    if let Ok(group) = discovery_group(&hub, &connection.identity, &host).await {
+    if let Ok(group) = connection.discovery().await {
       let host_id = host.host_id;
       let host_public_key = host.host_public_key;
       let store_copy = store.clone();
@@ -550,21 +554,10 @@ async fn discovery_group(
   host: &SavedHost,
 ) -> Result<Option<DiscoveryGroup>, String> {
   tokio::time::timeout(Duration::from_secs(5), async {
-    let mut socket = connect(&secure_endpoint(hub, &host.host_id)?).await?;
-    let mut initiator = NoiseInitiator::new(identity, &host.host_public_key)?;
-    send(&mut socket, initiator.start()?).await?;
-    let mut channel = initiator.finish(&receive(&mut socket).await?)?;
-    send(&mut socket, channel.encrypt(&InnerMessage::DiscoveryRequest {})?).await?;
-    match channel.decrypt(&receive(&mut socket).await?)? {
-      InnerMessage::DiscoveryResponse { group } => {
-        if let Some(group) = &group {
-          group.validate()?;
-        }
-        Ok(group)
-      }
-      InnerMessage::Error { message } => Err(message),
-      _ => Err("Machine returned invalid discovery metadata".into()),
-    }
+    let transport = exchange::relay_transport(&secure_endpoint(hub, &host.host_id)?).await?;
+    let session =
+      session::Session::authenticate(transport, identity, &host.host_public_key, CancellationToken::new()).await?;
+    session.discovery().await
   })
   .await
   .map_err(|_| "Machine discovery metadata timed out".to_owned())?
@@ -619,16 +612,17 @@ impl Connection {
   }
 
   async fn exchange(&self, method: &str, path: &str, body: &[u8]) -> Result<Exchange, String> {
-    let transport = self.direct.open(self).await?;
-    Exchange::open(
-      transport,
-      &self.identity,
-      &self.info.host_public_key,
-      method,
-      path,
-      body,
-    )
+    let session = self.direct.session(self).await?;
+    Exchange::open(&session, method, path, body).await
+  }
+
+  async fn discovery(&self) -> Result<Option<DiscoveryGroup>, String> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+      let session = self.direct.session(self).await?;
+      session.discovery().await
+    })
     .await
+    .map_err(|_| "Machine discovery metadata timed out")?
   }
 
   fn state(&self, state: &str) {
@@ -645,6 +639,9 @@ impl Connection {
   }
 
   async fn request(&self, command: &str, payload: Value) -> Result<Value, String> {
+    if command == "events" {
+      return Err("Use the live event listener for event streams".into());
+    }
     if command.is_empty() || command.len() > 64 || !command.bytes().all(|ch| ch.is_ascii_lowercase() || ch == b'_') {
       return Err("Invalid viewer command".into());
     }

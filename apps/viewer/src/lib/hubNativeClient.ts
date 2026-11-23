@@ -51,6 +51,7 @@ export async function nativeHubAuthenticate(hub_url: string, host: SavedHubHost,
 /** Native Rust owns sockets and private keys; the UI receives only JSON/events. */
 export class NativeHubClient implements ViewerClient {
   readonly endpoint: string;
+  get subscription_prefix(): string { return this.descriptor.connection_id; }
   private closed = false;
   private listeners = new Map<string, Set<(event: { payload: unknown }) => void>>();
   private close_handlers = new Set<() => void>();

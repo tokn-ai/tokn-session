@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
   collections::{BTreeMap, HashMap, HashSet},
+  sync::Arc,
   time::{Duration, Instant},
 };
 
@@ -58,7 +59,7 @@ pub struct BackgroundAssistantMessage {
 }
 
 struct Subscription {
-  owner: Option<String>,
+  session_scope: Option<Arc<HashSet<String>>>,
   scope: BackgroundScope,
   level: BackgroundUpdateLevel,
   keys: HashSet<String>,
@@ -279,13 +280,19 @@ impl BackgroundStore {
     self.subscriptions.retain(|_, value| value.accessed.elapsed() < LEASE);
   }
 
-  fn subscribe(&mut self, request: BackgroundUpdatesRequest, owner: Option<String>) -> Result<Value, String> {
+  fn subscribe(
+    &mut self,
+    request: BackgroundUpdatesRequest,
+    session_scope: Option<Arc<HashSet<String>>>,
+  ) -> Result<Value, String> {
     self.prune();
     let id = request.subscription_id;
-    if let Some(existing) = self.subscriptions.get(&id) {
-      if existing.owner != owner {
-        return Err("Background subscription belongs to another connection".into());
-      }
+    if self
+      .subscriptions
+      .get(&id)
+      .is_some_and(|existing| existing.session_scope != session_scope)
+    {
+      return Err("Background subscription belongs to another session scope".into());
     }
     if request.unsubscribe {
       self.subscriptions.remove(&id);
@@ -297,7 +304,7 @@ impl BackgroundStore {
     }
     let keys: HashSet<_> = request.session_keys.into_iter().collect();
     let subscription = self.subscriptions.entry(id.clone()).or_insert_with(|| Subscription {
-      owner,
+      session_scope,
       scope: request.scope,
       level: request.level,
       keys: keys.clone(),
@@ -434,16 +441,7 @@ impl BackgroundStore {
 
 impl ViewerService {
   pub fn subscribe_background(&self, request: BackgroundUpdatesRequest) -> Result<Value, String> {
-    self.subscribe_background_owned(request, None)
-  }
-
-  pub fn subscribe_background_owned(
-    &self,
-    request: BackgroundUpdatesRequest,
-    owner: Option<String>,
-  ) -> Result<Value, String> {
-    if request.subscription_id.is_empty()
-      || request.subscription_id.len() > 128
+    if !self.valid_subscription_id(&request.subscription_id)
       || request.session_keys.len() > MAX_SIDEBAR_KEYS
       || request.session_keys.iter().map(String::len).sum::<usize>() > 256 * 1024
       || (request.scope == BackgroundScope::All && !request.session_keys.is_empty())
@@ -464,11 +462,11 @@ impl ViewerService {
       .background
       .lock()
       .map_err(|_| "Background store lock poisoned")?
-      .subscribe(request, owner)
+      .subscribe(request, self.session_scope.clone())
   }
 
   pub fn renew_background_subscriptions(&self, ids: &[String]) -> Result<Value, String> {
-    if ids.len() > MAX_SUBSCRIPTIONS || ids.iter().any(|id| id.is_empty() || id.len() > 128) {
+    if ids.len() > MAX_SUBSCRIPTIONS || ids.iter().any(|id| !self.valid_subscription_id(id)) {
       return Err("Invalid background subscription renewal".into());
     }
     if ids.is_empty() {
@@ -480,7 +478,12 @@ impl ViewerService {
     let mut store = self.background.lock().map_err(|_| "Background store lock poisoned")?;
     store.prune();
     store.ensure_healthy()?;
-    if ids.iter().any(|id| !store.subscriptions.contains_key(id)) {
+    if ids.iter().any(|id| {
+      store
+        .subscriptions
+        .get(id)
+        .is_none_or(|sub| sub.session_scope != self.session_scope)
+    }) {
       return Err("Background subscription expired; subscribe again".into());
     }
     for id in ids {
@@ -489,53 +492,6 @@ impl ViewerService {
       }
     }
     Ok(json!({"renewed":true}))
-  }
-
-  /// Socket renewal acknowledges only live interests still owned by that
-  /// connection. Rich and compact subscriptions keep independent inventories.
-  pub fn renew_background_subscriptions_owned(
-    &self,
-    ids: &[String],
-    owner: Option<&str>,
-  ) -> Result<crate::updates::SessionSubscriptionRenewal, String> {
-    if ids.len() > MAX_SUBSCRIPTIONS || ids.iter().any(|id| id.is_empty() || id.len() > 128) {
-      return Err("Invalid background subscription renewal".into());
-    }
-    let mut renewal = crate::updates::SessionSubscriptionRenewal::default();
-    if ids.is_empty() {
-      return Ok(renewal);
-    }
-    if self.relay.status().settings.mode == crate::relay::RelayMode::External {
-      return Err("Background updates unavailable in External reader mode".into());
-    }
-    let mut store = self.background.lock().map_err(|_| "Background store lock poisoned")?;
-    store.prune();
-    store.ensure_healthy()?;
-    let now = Instant::now();
-    let mut seen = HashSet::new();
-    for id in ids {
-      if !seen.insert(id) {
-        continue;
-      }
-      if let Some(subscription) = store.subscriptions.get_mut(id)
-        && owner.is_none_or(|owner| subscription.owner.as_deref() == Some(owner))
-      {
-        subscription.accessed = now;
-        renewal.renewed_ids.push(id.clone());
-      } else {
-        renewal.missing_ids.push(id.clone());
-      }
-    }
-    Ok(renewal)
-  }
-
-  pub fn release_background_subscriptions(&self, owner: &str) {
-    if let Ok(mut store) = self.background.lock() {
-      store
-        .subscriptions
-        .retain(|_, value| value.owner.as_deref() != Some(owner));
-      store.prune();
-    }
   }
 
   pub(crate) fn has_background_subscriptions(&self) -> bool {
@@ -670,39 +626,6 @@ impl ViewerService {
 #[cfg(test)]
 mod tests {
   use super::*;
-
-  #[test]
-  fn owned_renewal_reports_expired_missing_and_reclaimed_compact_interests_without_body_reads() {
-    let root = tempfile::tempdir().unwrap();
-    let service = ViewerService::native(root.path().join("index.sqlite")).unwrap();
-    for (id, owner) in [("live", "mine"), ("expired", "mine"), ("reclaimed", "other")] {
-      service
-        .subscribe_background_owned(request(id, BackgroundScope::All, &[]), Some(owner.into()))
-        .unwrap();
-    }
-    let previous_access = {
-      let mut store = service.background.lock().unwrap();
-      store.subscriptions.get_mut("expired").unwrap().accessed = Instant::now() - LEASE;
-      store.subscriptions.get_mut("reclaimed").unwrap().accessed = Instant::now() - LEASE / 2;
-      store.subscriptions["reclaimed"].accessed
-    };
-    let renewal = service
-      .renew_background_subscriptions_owned(
-        &["live".into(), "expired".into(), "missing".into(), "reclaimed".into()],
-        Some("mine"),
-      )
-      .unwrap();
-    assert_eq!(renewal.renewed_ids, ["live"]);
-    assert_eq!(renewal.missing_ids, ["expired", "missing", "reclaimed"]);
-    let store = service.background.lock().unwrap();
-    assert!(!store.subscriptions.contains_key("expired"));
-    assert_eq!(store.subscriptions["reclaimed"].accessed, previous_access);
-    drop(store);
-    assert_eq!(
-      service.renew_background_subscriptions(&["live".into()]).unwrap(),
-      json!({"renewed":true})
-    );
-  }
 
   fn request(id: &str, scope: BackgroundScope, keys: &[&str]) -> BackgroundUpdatesRequest {
     BackgroundUpdatesRequest {
@@ -1170,14 +1093,14 @@ mod tests {
     store
       .subscribe(
         request("one", BackgroundScope::Sidebar, &["listed"]),
-        Some("socket:one".into()),
+        Some(Arc::new(HashSet::from(["listed".into()]))),
       )
       .unwrap();
     assert!(store.publish(notification("other", Some("Hidden"))).is_empty());
     assert_eq!(store.publish(notification("listed", Some("Visible"))).len(), 1);
     assert!(
       store
-        .subscribe(request("one", BackgroundScope::All, &[]), Some("socket:other".into()))
+        .subscribe(request("one", BackgroundScope::All, &[]), None)
         .is_err()
     );
     store.subscriptions.get_mut("one").unwrap().accessed = Instant::now() - LEASE;
@@ -1188,13 +1111,10 @@ mod tests {
   fn changing_scope_resets_generation() {
     let mut store = BackgroundStore::default();
     let before = store
-      .subscribe(request("one", BackgroundScope::All, &[]), Some("owner".into()))
+      .subscribe(request("one", BackgroundScope::All, &[]), None)
       .unwrap();
     let after = store
-      .subscribe(
-        request("one", BackgroundScope::Sidebar, &["listed"]),
-        Some("owner".into()),
-      )
+      .subscribe(request("one", BackgroundScope::Sidebar, &["listed"]), None)
       .unwrap();
     assert_ne!(before["generation"], after["generation"]);
     assert!(store.publish(notification("other", Some("Hidden"))).is_empty());
@@ -1240,6 +1160,20 @@ mod tests {
     let allowed = key("allowed");
     let outside = key("outside");
     let scoped = service.scoped_to_sessions(std::slice::from_ref(&allowed)).unwrap();
+    let full_id = format!("share_bg_{}:{}", "a".repeat(64), "v".repeat(128));
+    assert!(scoped.valid_subscription_id(&full_id));
+    assert!(!service.valid_subscription_id(&full_id));
+    assert!(!scoped.valid_subscription_id(&"v".repeat(129)));
+    assert!(
+      service
+        .subscribe_background(request("share_bg_reserved", BackgroundScope::All, &[]))
+        .is_err()
+    );
+    assert!(
+      service
+        .renew_background_subscriptions(&["share_bg_reserved".into()])
+        .is_err()
+    );
     assert!(
       scoped
         .subscribe_background(request("all", BackgroundScope::All, &[]))
@@ -1255,6 +1189,15 @@ mod tests {
         .subscribe_background(request("scoped", BackgroundScope::Sidebar, &[&allowed]))
         .is_ok()
     );
+    assert!(service.renew_background_subscriptions(&["scoped".into()]).is_err());
+    assert!(
+      service
+        .subscribe_background(BackgroundUpdatesRequest {
+          unsubscribe: true,
+          ..request("scoped", BackgroundScope::Sidebar, &[])
+        })
+        .is_err()
+    );
     assert!(
       scoped
         .publish_background_notification(&notification(&outside, Some("Private")))
@@ -1266,24 +1209,6 @@ mod tests {
         .len(),
       1
     );
-  }
-
-  #[test]
-  fn disconnect_cannot_release_another_connections_interests() {
-    let root = tempfile::tempdir().unwrap();
-    let service = ViewerService::native(root.path().join("index.sqlite")).unwrap();
-    service
-      .subscribe_background_owned(request("old", BackgroundScope::All, &[]), Some("old-socket".into()))
-      .unwrap();
-    service
-      .subscribe_background_owned(request("new", BackgroundScope::All, &[]), Some("new-socket".into()))
-      .unwrap();
-    service.release_background_subscriptions("old-socket");
-    let update = service.publish_background_notification(&notification("session", Some("Current")));
-    assert_eq!(update.len(), 1);
-    assert_eq!(update[0]["subscription_id"], "new");
-    service.release_background_subscriptions("new-socket");
-    assert!(!service.has_background_subscriptions());
   }
 
   #[test]

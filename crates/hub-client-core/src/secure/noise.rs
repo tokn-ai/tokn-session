@@ -18,6 +18,8 @@ pub const MAX_RECORD: usize = 65_535;
 pub const MAX_PLAINTEXT: usize = MAX_RECORD - 16;
 pub const MAX_CHUNK: usize = 32 * 1024;
 pub const MAX_REQUEST_BODY: usize = crate::protocol::MAX_BODY;
+/// Maximum in-flight requests on one authenticated viewer connection.
+pub const MAX_STREAMS: usize = 16;
 pub const MAX_AUTH_PAYLOAD: usize = 32 * 1024;
 pub const MAX_DIRECT_SDP: usize = 32 * 1024;
 pub const MAX_ICE_SERVERS: usize = 8;
@@ -32,13 +34,17 @@ pub enum HostAuthOperation {
   LoginFinish,
 }
 
-/// One HTTP exchange per Noise channel. Requests are authenticated before body
-/// assembly; aggregate body size, ordering, response credit, and route/scope
-/// checks belong to the endpoint's exchange state machine. No application data
-/// is accepted in the replayable first IK handshake message.
+/// Viewer exchanges share a Noise channel and carry independent response credits.
+/// Host authentication and direct negotiation have dedicated channel lifetimes.
+/// Application data starts only after completing the IK handshake.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InnerMessage {
+  Stream {
+    stream_id: u32,
+    frame: Box<InnerMessage>,
+  },
+  Cancel {},
   /// Host-owned passkey authentication, carried only inside a fresh Noise channel.
   AuthRequest {
     operation: HostAuthOperation,
@@ -89,8 +95,40 @@ pub enum InnerMessage {
 }
 
 impl InnerMessage {
+  pub fn on_stream(self, stream_id: u32) -> Self {
+    Self::Stream {
+      stream_id,
+      frame: Box::new(self),
+    }
+  }
+
   pub fn validate(&self) -> Result<(), String> {
     match self {
+      Self::Stream { stream_id, frame } => {
+        if *stream_id == 0
+          || !matches!(
+            frame.as_ref(),
+            Self::DeviceRequest { .. }
+              | Self::DiscoveryRequest {}
+              | Self::DiscoveryResponse { .. }
+              | Self::DirectConfigRequest {}
+              | Self::DirectConfig { .. }
+              | Self::DirectOffer { .. }
+              | Self::DirectAnswer { .. }
+              | Self::RequestBody { .. }
+              | Self::RequestEnd {}
+              | Self::Response { .. }
+              | Self::Chunk { .. }
+              | Self::End {}
+              | Self::Error { .. }
+              | Self::Window { .. }
+              | Self::Cancel {}
+          )
+        {
+          return Err("Invalid encrypted viewer stream".into());
+        }
+        frame.validate()?;
+      }
       Self::AuthRequest { payload, .. } | Self::AuthResponse { payload } => {
         if !payload.is_object()
           || serde_json::to_vec(payload)
@@ -155,7 +193,11 @@ impl InnerMessage {
           return Err("Invalid encrypted response window".into());
         }
       }
-      Self::DiscoveryRequest {} | Self::DirectConfigRequest {} | Self::RequestEnd {} | Self::End {} => {}
+      Self::DiscoveryRequest {}
+      | Self::DirectConfigRequest {}
+      | Self::RequestEnd {}
+      | Self::End {}
+      | Self::Cancel {} => {}
     }
     Ok(())
   }

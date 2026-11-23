@@ -1,7 +1,7 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { selectMachine } from "./transport";
-import type { BackgroundSessionUpdate, BackgroundUpdatesRequest, EventSummary, ListSessionsRequest, SessionSummary, SessionUpdate, SessionUpdatesRequest } from "./types";
+import type { BackgroundSessionUpdate, BackgroundUpdatesRequest, EventSummary, ListSessionsRequest, SessionSummary, SessionUpdate, OpenSessionRequest } from "./types";
 import { useViewerState } from "./useViewerState";
 
 const { nativeInvoke, handlers, observers } = vi.hoisted(() => ({
@@ -42,7 +42,7 @@ function row(session_key: string): SessionSummary {
     child_count: 0, message_count: null, event_count: 1, history_status: "complete", has_unread: false };
 }
 
-function baseline(request: SessionUpdatesRequest, running: boolean, revision: number): SessionUpdate {
+function baseline(request: OpenSessionRequest, running: boolean, revision: number): SessionUpdate {
   const summary: EventSummary = { event_key: "reply", type: "message", provider: "codex", timestamp: null,
     phase: "finished", role: "assistant", delivery: "final", title: "Assistant", summary: "Cached reply",
     summary_truncated: false, is_hidden: false, is_error: false, tool: null, usage: null, reasoning: null };
@@ -55,8 +55,8 @@ function baseline(request: SessionUpdatesRequest, running: boolean, revision: nu
 function host(initial: boolean, session_keys = ["live", "other"]) {
   let running = initial;
   let revision = 1;
-  let blocked: ((request: SessionUpdatesRequest) => Promise<SessionUpdate>) | undefined;
-  const subscriptions = new Map<string, SessionUpdatesRequest>();
+  let blocked: ((request: OpenSessionRequest) => Promise<SessionUpdate>) | undefined;
+  const subscriptions = new Map<string, OpenSessionRequest>();
   nativeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
     if (command === "list_sessions") {
       const request = payload?.request as ListSessionsRequest;
@@ -64,14 +64,14 @@ function host(initial: boolean, session_keys = ["live", "other"]) {
         .map((session) => ({ ...session, is_running: session.session_key === "live" && running }));
       return { sessions, next_cursor: null, source_errors: [], pending_providers: [] };
     }
-    if (command === "subscribe_session") {
-      const request = payload?.request as SessionUpdatesRequest;
-      if (request.unsubscribe) subscriptions.delete(request.subscription_id);
-      else subscriptions.set(request.subscription_id, request);
-      return { revision: "0" };
+    if (command === "release_session") {
+      const request = payload?.request as OpenSessionRequest;
+      subscriptions.delete(request.subscription_id);
+      return { subscription_id: request.subscription_id, unsubscribed: true };
     }
-    if (command === "load_session_backward") {
-      const request = payload?.request as SessionUpdatesRequest;
+    if (command === "open_session") {
+      const request = payload?.request as OpenSessionRequest;
+      subscriptions.set(request.subscription_id, request);
       if (blocked && request.session_key === "live") return blocked(request);
       return baseline(request, request.session_key === "live" && running, revision);
     }
@@ -92,7 +92,7 @@ function host(initial: boolean, session_keys = ["live", "other"]) {
     subscriptions,
     change(value: boolean) { running = value; revision++; },
     block(load: typeof blocked) { blocked = load; },
-    baseline(request: SessionUpdatesRequest) { return baseline(request, running, revision); },
+    baseline(request: OpenSessionRequest) { return baseline(request, running, revision); },
   };
 }
 
@@ -108,15 +108,84 @@ async function heartbeat(timers: ReturnType<typeof vi.spyOn>) {
   });
 }
 
+it("reuses the retained window and applies a live update that beats the reopen response", async () => {
+  const backend = host(false);
+  const { result } = renderHook(() => useViewerState());
+  await open(result, "live");
+  const first = [...backend.subscriptions.values()][0];
+  const cached = result.current.events;
+  await open(result, "other");
+
+  let reopened!: OpenSessionRequest;
+  let acknowledge!: (update: SessionUpdate) => void;
+  backend.block((request) => {
+    reopened = request;
+    return new Promise((resolve) => { acknowledge = resolve; });
+  });
+  act(() => result.current.selectSession("live"));
+  expect(result.current.events).toBe(cached);
+  await waitFor(() => expect(reopened?.resume).toEqual({
+    subscription_id: first.subscription_id, generation: "delivery", revision: "1",
+  }));
+  expect(reopened.subscription_id).not.toBe(first.subscription_id);
+  const snapshot = backend.baseline(reopened);
+  const ack = { ...snapshot, snapshot: false, base_revision: "1", items: [], item_order: null };
+  const delta = { ...ack, revision: "2", items: snapshot.items.map((item) => ({
+    ...item, summary: { ...item.summary!, summary: "A newer reply" },
+  })), state: { ...ack.state, source_revision: "source:2", is_running: true } };
+  act(() => handlers.get("session-updated")?.({ payload: delta }));
+  expect(result.current.events).toBe(cached);
+  await act(async () => acknowledge(ack));
+  await waitFor(() => expect(result.current.events[0]?.summary).toBe("A newer reply"));
+  expect(result.current.sessions.find((row) => row.session_key === "live")?.is_running).toBe(true);
+  expect(nativeInvoke.mock.calls.filter(([command]) => command === "open_session")).toHaveLength(3);
+});
+
+it("rebinds an unchanged projection after stream reconnect with one open and no duplicate rows", async () => {
+  const backend = host(true);
+  const { result } = renderHook(() => useViewerState());
+  await open(result, "live");
+  const before = result.current.events;
+  const first = [...backend.subscriptions.values()][0];
+  backend.block(async (request) => {
+    expect(request.resume).toEqual({ subscription_id: first.subscription_id, generation: "delivery", revision: "1" });
+    return { ...backend.baseline(request), snapshot: false, base_revision: "1", items: [], item_order: null };
+  });
+  await act(async () => handlers.get("transport-reconnected")?.({ payload: {} }));
+  expect(result.current.events).toBe(before);
+  expect(result.current.sessions.find((row) => row.session_key === "live")?.is_running).toBe(true);
+  expect(nativeInvoke.mock.calls.filter(([command]) => command === "open_session")).toHaveLength(2);
+});
+
+it("keeps the replacement lease healthy when an earlier open fails late", async () => {
+  const backend = host(true);
+  let rejectEarlier: ((error: Error) => void) | undefined;
+  backend.block((request) => {
+    if (rejectEarlier) return Promise.resolve(backend.baseline(request));
+    return new Promise((_resolve, reject) => { rejectEarlier = reject; });
+  });
+  const { result } = renderHook(() => useViewerState());
+  await waitFor(() => expect(result.current.sessions).toHaveLength(2));
+  act(() => result.current.selectSession("live"));
+  await waitFor(() => expect(rejectEarlier).toBeDefined());
+  await act(async () => handlers.get("transport-reconnected")?.({ payload: {} }));
+  await act(async () => rejectEarlier!(new Error("Session open was superseded")));
+  await waitFor(() => expect(result.current.events[0]?.summary).toBe("Cached reply"));
+  act(() => handlers.get("session-notification")?.({ payload: { session_key: "live", is_running: false } }));
+  expect(result.current.sessions.find((row) => row.session_key === "live")?.is_running).toBe(true);
+  expect(result.current.eventsError).toBeNull();
+  expect(nativeInvoke.mock.calls.filter(([command]) => command === "open_session")).toHaveLength(2);
+});
+
 it("renews healthy selected interests without body reads", async () => {
   const timers = vi.spyOn(window, "setInterval");
   const backend = host(true);
   const { result } = renderHook(() => useViewerState());
   await open(result, "live");
-  const reads = nativeInvoke.mock.calls.filter(([command]) => command === "load_session_backward").length;
+  const reads = nativeInvoke.mock.calls.filter(([command]) => command === "open_session").length;
   await heartbeat(timers);
   await waitFor(() => expect(nativeInvoke.mock.calls.some(([command]) => command === "renew_session_subscriptions")).toBe(true));
-  expect(nativeInvoke.mock.calls.filter(([command]) => command === "load_session_backward")).toHaveLength(reads);
+  expect(nativeInvoke.mock.calls.filter(([command]) => command === "open_session")).toHaveLength(reads);
   expect(backend.subscriptions.size).toBe(1);
 });
 
@@ -138,7 +207,7 @@ it.each([true, false])("refreshes index activity after compact ownership is lost
   expect(result.current.sessions.find((session) => session.session_key === "live")?.is_running).toBe(!initial);
   expect(result.current.sessions.find((session) => session.session_key === "live")?.latest_assistant_preview).toBe("Retained reply");
   expect(result.current.selectedSessionKey).toBeNull();
-  expect(nativeInvoke.mock.calls.some(([command]) => command === "load_session_backward")).toBe(false);
+  expect(nativeInvoke.mock.calls.some(([command]) => command === "open_session")).toBe(false);
 });
 
 it.each([true, false])("recovers expired source state while displaying the current index (cached=%s)", async (initial) => {
@@ -149,7 +218,7 @@ it.each([true, false])("recovers expired source state while displaying the curre
   backend.change(initial);
   const queued_revision = 2;
   backend.change(!initial); backend.subscriptions.clear();
-  let recovery_request: SessionUpdatesRequest | undefined;
+  let recovery_request: OpenSessionRequest | undefined;
   let complete!: (update: SessionUpdate) => void;
   const pending = new Promise<SessionUpdate>((resolve) => { complete = resolve; });
   backend.block((request) => { recovery_request = request; return pending; });
@@ -176,8 +245,8 @@ it("recovers a background reset without disturbing the selected conversation", a
   backend.change(false);
   expect(handlers.has("relay-changed")).toBe(true);
   act(() => handlers.get("relay-changed")?.({ payload: { session_key: "live", reset: true } }));
-  expect(nativeInvoke.mock.calls.filter(([command, payload]) => command === "load_session_backward"
-    && (payload?.request as SessionUpdatesRequest).session_key === "live")).toHaveLength(1);
+  expect(nativeInvoke.mock.calls.filter(([command, payload]) => command === "open_session"
+    && (payload?.request as OpenSessionRequest).session_key === "live")).toHaveLength(1);
   await waitFor(() => expect(result.current.sessions.find((session) => session.session_key === "live")?.is_running).toBe(false));
   expect(result.current.selectedSessionKey).toBe("other");
   expect(result.current.events).toBe(selected_events);
@@ -189,8 +258,8 @@ it("keeps healthy selected interests when retired or compact subscriptions recon
   await open(result, "live");
   const subscription_ids = [...backend.subscriptions].filter(([, request]) => request.session_key === "live").map(([id]) => id);
   await open(result, "other");
-  const selected_reads = () => nativeInvoke.mock.calls.filter(([command, payload]) => command === "load_session_backward"
-    && (payload?.request as SessionUpdatesRequest).session_key === "other").length;
+  const selected_reads = () => nativeInvoke.mock.calls.filter(([command, payload]) => command === "open_session"
+    && (payload?.request as OpenSessionRequest).session_key === "other").length;
   const reads = selected_reads();
   const selected_events = result.current.events;
   act(() => {
@@ -209,10 +278,8 @@ it("releases old live interests while retaining recent display pages", async () 
   for (const key of session_keys) await open(result, key);
   await waitFor(() => expect(backend.subscriptions.size).toBe(1));
   expect([...backend.subscriptions.values()].some((request) => request.session_key === "live")).toBe(false);
-  expect(nativeInvoke.mock.calls.some(([command, payload]) => command === "subscribe_session"
-    && (payload?.request as SessionUpdatesRequest).session_key === "live"
-    && (payload?.request as SessionUpdatesRequest).level === "steps"
-    && (payload?.request as SessionUpdatesRequest).unsubscribe)).toBe(true);
+  expect(nativeInvoke.mock.calls.some(([command, payload]) => command === "release_session"
+    && (payload?.request as OpenSessionRequest).session_key === "live")).toBe(true);
   expect(result.current.selectedSessionKey).toBe(session_keys[session_keys.length - 1]);
 });
 
@@ -222,7 +289,7 @@ it("retires an old recovery identity when its cold read completes after selectio
   const { result } = renderHook(() => useViewerState());
   await open(result, "live");
   backend.change(false); backend.subscriptions.clear();
-  let recovery_request: SessionUpdatesRequest | undefined;
+  let recovery_request: OpenSessionRequest | undefined;
   let complete!: (update: SessionUpdate) => void;
   const pending = new Promise<SessionUpdate>((resolve) => { complete = resolve; });
   backend.block((request) => {

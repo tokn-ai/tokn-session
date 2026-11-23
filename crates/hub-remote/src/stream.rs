@@ -23,6 +23,7 @@ async fn pump_with_startup_timeout(
   let deadline = tokio::time::Instant::now() + startup_timeout;
   let mut failure = "Machine disconnected".to_owned();
   let mut path = connection.direct.changes.subscribe();
+  let subscription = json!({"subscription_prefix":connection.info.connection_id}).to_string();
   while !connection.cancellation.is_cancelled() {
     let current_path = path.borrow_and_update().kind;
     connection.state(if attempted { "reconnecting" } else { "connecting" });
@@ -37,7 +38,7 @@ async fn pump_with_startup_timeout(
         }
       } => { continue; },
       result = async {
-        let opening = connection.exchange("GET","/api/v1/events",&[]);
+        let opening = connection.exchange("POST","/api/v1/events",subscription.as_bytes());
         let mut exchange = if connected {opening.await?} else {
           tokio::time::timeout_at(deadline, opening).await.map_err(|_|"Live connection timed out")??
         };
@@ -55,7 +56,6 @@ async fn pump_with_startup_timeout(
               connection.state("connected");
               if connected {
                 connection.event("transport-reconnected",json!({}));
-                connection.event("relay-changed",json!({"session_key":null,"reset":true}));
               }
               connected = true;
               if let Some(ready) = ready.take() {let _ = ready.send(Ok(()));}

@@ -474,7 +474,7 @@ fn details_and_all_delivery_contain_image_metadata_without_image_bytes() {
   assert!(!detail.contains(&encoded));
   assert!(!detail.contains("data:image/"));
   let update = service
-    .load_session_updates(
+    .open_session(
       serde_json::from_value(json!({
         "session_key":key, "subscription_id":"images", "level":"all", "cursor":null
       }))
@@ -590,7 +590,7 @@ fn assembled_tool_images_read_their_exact_source_and_keep_binary_out_of_projecti
   wrong.session_key = other;
   assert!(shared.load_session_image(wrong).is_err());
   let all = service
-    .load_session_updates(
+    .open_session(
       serde_json::from_value(json!({
         "session_key":key, "subscription_id":"tool-images", "level":"all", "cursor":null
       }))

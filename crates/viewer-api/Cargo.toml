@@ -3,13 +3,13 @@ name = "tokn-viewer-api"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "HTTP and WebSocket session viewer server with optional web UI hosting."
+description = "HTTP and SSE session viewer server with optional web UI hosting."
 repository.workspace = true
 readme = "README.md"
 license.workspace = true
 
 [dependencies]
-axum = { version = "0.8", features = ["ws"] }
+axum = "0.8"
 async-stream = "0.3"
 clap = { version = "4", features = ["derive", "env"] }
 serde.workspace = true
@@ -22,8 +22,6 @@ tokn-session-relay.workspace = true
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 
 [dev-dependencies]
-futures-util = "0.3"
-tokio-tungstenite = "0.29"
 http-body-util = "0.1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

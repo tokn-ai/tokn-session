@@ -220,7 +220,7 @@ describe("Sidebar session identity", () => {
   it("shows an explicit cold-index state instead of treating it as an empty catalog", () => {
     renderSidebar([], ["codex"]);
 
-    expect(screen.getByText("Building session catalog")).toBeInTheDocument();
+    expect(screen.getByText("Finding sessions")).toBeInTheDocument();
     expect(screen.getByText("Indexing Codex. Known sessions will appear here shortly."))
       .toBeInTheDocument();
     expect(screen.queryByText("No sessions found")).not.toBeInTheDocument();
@@ -229,7 +229,7 @@ describe("Sidebar session identity", () => {
   it("keeps indexed rows visible when a catalog refresh fails", () => {
     renderSidebar([session({ title: "Indexed session" })], [], "local index is temporarily unavailable");
 
-    expect(screen.getByRole("alert")).toHaveTextContent("Session catalog could not refresh");
+    expect(screen.getByRole("alert")).toHaveTextContent("Couldn’t refresh the session list");
     expect(screen.getByRole("alert")).toHaveTextContent("local index is temporarily unavailable");
     expect(screen.getByText("Indexed session")).toBeInTheDocument();
   });

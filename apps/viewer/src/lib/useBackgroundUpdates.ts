@@ -15,7 +15,7 @@ export function readBackgroundUpdateLevel(): BackgroundUpdateLevel {
 }
 
 export function useBackgroundUpdates(send: CommandInvoker, subscribe: EventSubscriber,
-  release: (command: string, payload: Record<string, unknown>) => Promise<void>, session_keys: string[]) {
+  release: (command: string, payload: Record<string, unknown>) => Promise<void>, session_keys: string[], subscription_prefix?: string) {
   const { preferences, updatePreferences } = useViewerPreferences();
   const scope = preferences.background_updates_scope;
   const level = preferences.background_update_level;
@@ -42,7 +42,8 @@ export function useBackgroundUpdates(send: CommandInvoker, subscribe: EventSubsc
     let stopUpdates: (() => void) | undefined;
     let stopReconnect: (() => void) | undefined;
     let stopLoss: (() => void) | undefined;
-    const request: BackgroundUpdatesRequest = { subscription_id: createUuid(), scope, session_keys: requestKeys,
+    const id = createUuid();
+    const request: BackgroundUpdatesRequest = { subscription_id: subscription_prefix ? `${subscription_prefix}:${id}` : id, scope, session_keys: requestKeys,
       ...(level === "final" ? { level } : {}) };
     if (cache.current.begin(request.subscription_id)) setAuthorityRevision((value) => value + 1);
     setRevision((value) => value + 1);
@@ -142,7 +143,7 @@ export function useBackgroundUpdates(send: CommandInvoker, subscribe: EventSubsc
       window.removeEventListener("focus", resume); document.removeEventListener("visibilitychange", resume);
       stopUpdates?.(); stopReconnect?.(); stopLoss?.(); retire();
     };
-  }, [connection, level, release, requestKeys, scope, send, subscribe]);
+  }, [connection, level, release, requestKeys, scope, send, subscribe, subscription_prefix]);
 
   const rememberPage = useCallback((session_key: string, preview: string | null, token: ReturnType<SessionPreviewCache["capture"]>) => {
     if (cache.current.rememberPage(session_key, preview, token)) setRevision((value) => value + 1);
