@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+case "$TOKN_OPENCODE_TEST_MODE" in
+  ready) printf '%s\n' 'opencode server listening on http://127.0.0.1:4321' ;;
+  silent) ;;
+  exit) exit 1 ;;
+  *) exit 2 ;;
+esac
+exec /bin/sleep 30

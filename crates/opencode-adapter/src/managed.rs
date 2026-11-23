@@ -237,42 +237,21 @@ mod tests {
   }
 
   #[cfg(unix)]
-  struct SyntheticExecutable(std::path::PathBuf);
-
-  #[cfg(unix)]
-  impl SyntheticExecutable {
-    fn new(script: &str) -> Self {
-      use std::os::unix::fs::PermissionsExt;
-      let path = std::env::temp_dir().join(format!("tokn-opencode-launch-{}", uuid::Uuid::new_v4()));
-      std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-      std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-      Self(path)
-    }
-
-    fn options(&self) -> LaunchOptions {
-      LaunchOptions {
-        runtime_id: "synthetic-opencode".into(),
-        executable: self.0.clone(),
-        directory: std::env::temp_dir().to_string_lossy().into_owned(),
-        port: 0,
-        environment: Default::default(),
-      }
-    }
-  }
-
-  #[cfg(unix)]
-  impl Drop for SyntheticExecutable {
-    fn drop(&mut self) {
-      let _ = std::fs::remove_file(&self.0);
+  fn fixture_options(mode: &str) -> LaunchOptions {
+    LaunchOptions {
+      runtime_id: "synthetic-opencode".into(),
+      // The launcher's first argument is "serve", the script read by the shell.
+      executable: "/bin/sh".into(),
+      directory: concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures").into(),
+      port: 0,
+      environment: [("TOKN_OPENCODE_TEST_MODE".into(), mode.into())].into(),
     }
   }
 
   #[cfg(unix)]
   #[tokio::test]
   async fn owned_launch_uses_child_readiness_url_for_port_zero_and_reaps_child() {
-    let executable =
-      SyntheticExecutable::new("printf 'opencode server listening on http://127.0.0.1:4321\\n'\nexec /bin/sleep 30");
-    let mut launch = Launch::start_with_timeout(&executable.options(), "test-secret", Duration::from_secs(2))
+    let mut launch = Launch::start_with_timeout(&fixture_options("ready"), "test-secret", Duration::from_secs(2))
       .await
       .unwrap();
     assert_eq!(launch.endpoint, "http://127.0.0.1:4321/");
@@ -285,11 +264,10 @@ mod tests {
   #[cfg(unix)]
   #[tokio::test]
   async fn owned_launch_requires_readiness_from_its_child() {
-    let executable = SyntheticExecutable::new("exec /bin/sleep 30");
-    let result = Launch::start_with_timeout(&executable.options(), "test-secret", Duration::from_millis(100)).await;
+    let result =
+      Launch::start_with_timeout(&fixture_options("silent"), "test-secret", Duration::from_millis(100)).await;
     assert!(result.err().unwrap().message.contains("readiness timed out"));
-    let executable = SyntheticExecutable::new("exit 1");
-    let result = Launch::start_with_timeout(&executable.options(), "test-secret", Duration::from_secs(2)).await;
+    let result = Launch::start_with_timeout(&fixture_options("exit"), "test-secret", Duration::from_secs(2)).await;
     assert!(result.is_err());
   }
 }
