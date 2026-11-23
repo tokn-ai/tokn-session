@@ -5,14 +5,12 @@ import type { ExpandedActivityState } from "./types";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { readReadingPosition, readingEventKey } from "./readingPosition";
 import { refreshEventWindow, loadCompleteTrajectory } from "./liveEvents";
-import { compareProjects } from "./sidebarOrder";
+import { SessionLists } from "./sessionLists";
 import { useViewerPreferences } from "./viewerPreferences";
 import { useSessionView } from "./useSessionView";
 import {
   acknowledgeSessionAttention as apiAcknowledgeSessionAttention,
   getSessionIndexProgress as apiGetSessionIndexProgress,
-  listSessionChildren as apiListSessionChildren,
-  listSessions as apiListSessions,
   listenForSessionIndexChanges as apiListenForSessionIndexChanges,
   listenForSessionIndexProgress as apiListenForSessionIndexProgress,
   listenForRelayChanges as apiListenForRelayChanges,
@@ -183,7 +181,7 @@ export function useViewerState(visible = true) {
   }, [ensureReaderCurrent, transport]);
   // Bind requests and listeners to the machine selected by this viewer.
   const {
-    acknowledgeSessionAttention, getSessionIndexProgress, listSessionChildren, listSessions,
+    acknowledgeSessionAttention, getSessionIndexProgress,
     openSession, releaseSession, loadEventPage, loadTrajectoryEventPage, requestSessionIndexRetry,
     loadToolDetails, inspectSessionEvent, renewSessionSubscriptions,
     listenForSessionIndexChanges, listenForSessionIndexProgress, listenForRelayChanges,
@@ -191,8 +189,6 @@ export function useViewerState(visible = true) {
   } = useMemo(() => ({
     acknowledgeSessionAttention: (request: Parameters<typeof apiAcknowledgeSessionAttention>[0]) => apiAcknowledgeSessionAttention(request, send),
     getSessionIndexProgress: () => apiGetSessionIndexProgress(send),
-    listSessionChildren: (request: Parameters<typeof apiListSessionChildren>[0]) => apiListSessionChildren(request, send),
-    listSessions: (request: Parameters<typeof apiListSessions>[0]) => apiListSessions(request, send),
     openSession: (request: Parameters<typeof apiOpenSession>[0]) => apiOpenSession(request, send),
     releaseSession: (request: Parameters<typeof apiReleaseSession>[0]) => apiReleaseSession(request, send),
     loadToolDetails: (request: Parameters<typeof apiLoadToolDetails>[0]) => apiLoadToolDetails(request, send),
@@ -220,6 +216,8 @@ export function useViewerState(visible = true) {
   const providerKey = PROVIDERS.filter((provider) => enabledProviders.has(provider)).join(",");
   const sessionQueryKey = `${sessionOrder}\u0000${providerKey}\u0000${debouncedSearch}`;
 
+  const lists = useMemo(() => new SessionLists(send, transport.release, transport.subscription_prefix), [send, transport]);
+  const previousListRows = useRef(new Map<string | null, SessionSummary[]>());
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sessionChildren, setSessionChildren] = useState<Map<string, SessionChildrenState>>(
     () => new Map(),
@@ -230,6 +228,7 @@ export function useViewerState(visible = true) {
   const sessionChildrenRef = useRef<Map<string, SessionChildrenState>>(new Map());
   const sessionChildrenGeneration = useRef(0);
   const sessionChildRequests = useRef(new Map<string, number>());
+  const nextChildRequest = useRef(0);
   const conversationUpdateLevel = preferences.conversation_update_level;
   const conversationUpdateLevelRef = useRef(conversationUpdateLevel);
   const projectionEpoch = useRef(0);
@@ -245,12 +244,9 @@ export function useViewerState(visible = true) {
   const [pendingProviders, setPendingProviders] = useState<ViewerProvider[]>([]);
   const [sessionsCursor, setSessionsCursor] = useState<string | null>(null);
   const [sessionsAttempt, setSessionsAttempt] = useState(0);
-  useEffect(() => {
-    if (backgroundUpdates.authority_revision > 0) setSessionsAttempt((attempt) => attempt + 1);
-  }, [backgroundUpdates.authority_revision]);
   const sessionsRequest = useRef(0);
   const sessionListInFlight = useRef<number | null>(null);
-  const sessionListRefreshQueued = useRef(false);
+  const createdSelectionRevision = useRef(0);
   const previousSessionFilterKey = useRef<string | null>(null);
   const previousSessionQueryKey = useRef<string | null>(null);
   const [sessionIndexListenerReady, setSessionIndexListenerReady] = useState(false);
@@ -265,10 +261,6 @@ export function useViewerState(visible = true) {
   const finishSessionListRequest = useCallback((requestId: number) => {
     if (sessionListInFlight.current !== requestId) return;
     sessionListInFlight.current = null;
-    if (sessionListRefreshQueued.current) {
-      sessionListRefreshQueued.current = false;
-      setSessionsAttempt((attempt) => attempt + 1);
-    }
   }, []);
 
   const [events, setEvents] = useState<EventSummary[]>([]);
@@ -330,7 +322,6 @@ export function useViewerState(visible = true) {
   const displayCache = useRef(new SessionDisplayCache(transport.subscription_prefix));
   const pushedPage = useRef<import("./types").EventPageResponse | null>(null);
   const semanticLive = useRef(new Set<string>());
-  const notificationsReady = useRef(false);
   const sessionUpdatesReady = useRef<Promise<void> | null>(null);
   const onSessionUpdate = useRef<(update: import("./types").SessionUpdate, lease_acknowledged?: boolean) => void>(() => {});
   const [subscriptionRevision, setSubscriptionRevision] = useState(0);
@@ -342,12 +333,9 @@ export function useViewerState(visible = true) {
     if (!mounted.current) return;
     const requests = displayCache.current.requests(ids);
     if (!requests.length) return;
-    const ownedRunning = requests.some((request) => semanticLive.current.has(request.session_key)
-      || displayCache.current.get(request.session_key, request.level)?.is_running !== undefined);
     displayCache.current.suspendLive(ids);
     for (const request of requests) semanticLive.current.delete(request.session_key);
     setSubscriptionRevision((revision) => revision + 1);
-    if (ownedRunning) setSessionsAttempt((attempt) => attempt + 1);
   }, []);
   const loadAcknowledgedUpdate = useCallback(async (request: import("./types").OpenSessionRequest) => {
     const epoch = readerLifetime.current;
@@ -532,6 +520,8 @@ export function useViewerState(visible = true) {
   useEffect(() => {
     mounted.current = true;
     const releaseInterests = () => {
+      lists.clear();
+      previousListRows.current.clear();
       for (const { session_key, subscription_id, level } of displayCache.current.requests()) {
         displayCache.current.release(session_key, level);
         void transport.release("release_session", { request: { session_key, subscription_id } }).catch(() => {});
@@ -559,7 +549,6 @@ export function useViewerState(visible = true) {
       sessionIndexConnectionEpoch.current += 1;
       sessionIndexRetryInFlight.current = false;
       sessionListInFlight.current = null;
-      sessionListRefreshQueued.current = false;
       eventRefreshInFlight.current = false;
       liveUpdateQueued.current = false;
       for (const timer of inputRefreshTimers.current) window.clearTimeout(timer);
@@ -634,9 +623,7 @@ export function useViewerState(visible = true) {
       }
       if (scope?.background_subscription_ids) return;
       const epoch = ++sessionIndexConnectionEpoch.current;
-      // The catalog may have changed while disconnected. Each open timeline
-      // independently reconciles its retained projection with the host.
-      setSessionsAttempt((attempt) => attempt + 1);
+      lists.reconnect();
       sessionIndexProgressRevision.current = null;
       setSessionIndexProgressLoading(true);
       void readSnapshot(epoch);
@@ -703,8 +690,7 @@ export function useViewerState(visible = true) {
     let disposed = false;
     let unlisten: (() => void) | undefined;
 
-    void listenForSessionIndexChanges((change) => {
-      if (change.catalog_refresh_required !== false || !notificationsReady.current) setSessionsAttempt((attempt) => attempt + 1);
+    const changes = listenForSessionIndexChanges((change) => {
       const selectedSessionKey = selectedSessionKeyRef.current;
       if (selectedSessionKey && !semanticLive.current.has(selectedSessionKey) && (
         change.updated_session_keys?.includes(selectedSessionKey)
@@ -718,31 +704,47 @@ export function useViewerState(visible = true) {
         if (eventRefreshInFlight.current) liveUpdateQueued.current = true;
         else setEventsAttempt((attempt) => attempt + 1);
       }
-    })
-      .then((stop) => {
-        if (disposed) {
-          stop();
-          return;
-        }
-        unlisten = stop;
-        // Do not begin the first catalog read until its change subscription is
-        // live. Otherwise an index commit between the read and registration
-        // can leave an initially empty sidebar stale until the next refresh.
-        setSessionIndexListenerReady(true);
-      })
-      // Browser-based tests and the static Vite preview do not expose Tauri's
-      // event bridge. Listings continue to work without background refreshes.
-      .catch(() => {
-        if (!disposed) {
-          setSessionIndexListenerReady(true);
-        }
-      });
-
+    }).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch(() => {});
+    let stopList: (() => void) | undefined;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let connected = false;
+    const listenLists = async () => {
+      try {
+        const stop = await subscribe<import("./types").SessionListUpdate>("session-list-updated", ({ payload }) => lists.push(payload));
+        if (disposed) { stop(); return; }
+        stopList = stop;
+        if (connected) lists.reconnect();
+        connected = true;
+      } catch {
+        if (disposed) return;
+        // Commands can still supply an initial list while event registration
+        // retries. Revalidate the retained prefix after the listener attaches.
+        connected = true;
+        retry = setTimeout(() => { void listenLists(); }, 3_000);
+      }
+    };
+    void Promise.all([changes, listenLists()]).then(() => {
+      if (!disposed) setSessionIndexListenerReady(true);
+    });
+    let renewing = false;
+    const renew = async () => {
+      if (renewing || disposed) return;
+      renewing = true;
+      try { await lists.renew(); } finally { renewing = false; }
+    };
+    const timer = window.setInterval(renew, 30_000);
+    window.addEventListener("focus", renew);
+    document.addEventListener("visibilitychange", renew);
     return () => {
       disposed = true;
+      clearTimeout(retry);
+      window.clearInterval(timer);
+      window.removeEventListener("focus", renew);
+      document.removeEventListener("visibilitychange", renew);
+      stopList?.();
       unlisten?.();
     };
-  }, []);
+  }, [lists, subscribe]);
 
   const acknowledgeAcceptedAttention = useCallback((sessionKey: string, attentionRevision: string | null | undefined) => {
     if (!attentionRevision) {
@@ -752,14 +754,6 @@ export function useViewerState(visible = true) {
       session_key: sessionKey,
       attention_revision: attentionRevision,
     })
-      .then((response) => {
-        if (!response.changed) {
-          return;
-        }
-        // Refresh the sidebar only after SQLite committed the seen cursor.
-        // A failed acknowledgement must leave the visible dot intact.
-        setSessionsAttempt((attempt) => attempt + 1);
-      })
       .catch(() => {});
   }, []);
 
@@ -962,9 +956,9 @@ export function useViewerState(visible = true) {
       sessionChildrenRef.current = children; setSessionChildren(children);
     }).then((unlisten) => {
       if (disposed) unlisten();
-      else { stop = unlisten; notificationsReady.current = true; }
+      else stop = unlisten;
     }).catch(() => {});
-    return () => { disposed = true; notificationsReady.current = false; stop?.(); };
+    return () => { disposed = true; stop?.(); };
   }, []);
 
   useEffect(() => {
@@ -1090,7 +1084,6 @@ export function useViewerState(visible = true) {
     let unlisten: (() => void) | undefined;
     void listenForRelayChanges((change) => {
       if (disposed) return;
-      if (change.session_key === null || change.reset) setSessionsAttempt((attempt) => attempt + 1);
       if (change.reset) {
         const affected = displayCache.current.requests().filter((request) => !change.session_key || request.session_key === change.session_key);
         suspendSubscriptions(affected.map((request) => request.subscription_id));
@@ -1390,12 +1383,44 @@ export function useViewerState(visible = true) {
   );
 
   const clearSessionChildren = useCallback(() => {
+    lists.clear(true);
+    for (const key of previousListRows.current.keys()) if (key !== null) previousListRows.current.delete(key);
     sessionChildrenGeneration.current += 1;
     sessionChildRequests.current.clear();
     const next = new Map<string, SessionChildrenState>();
     sessionChildrenRef.current = next;
     setSessionChildren(next);
+  }, [lists]);
+
+  // A notification or accepted timeline may already have patched a visible
+  // row. Preserve that row when a list edit only changed one of its neighbors.
+  const listRows = useCallback((parent: string | null, rows: SessionSummary[]) => {
+    const previous = new Map(previousListRows.current.get(parent)?.map((row) => [row.session_key, row]));
+    previousListRows.current.set(parent, rows);
+    return (visible: SessionSummary[]) => {
+      const displayed = new Map(visible.map((row) => [row.session_key, row]));
+      return rows.map((row) => previous.get(row.session_key) === row ? displayed.get(row.session_key) ?? row : row);
+    };
   }, []);
+  const showRootPage = useCallback((page: import("./types").ListSessionsResponse) => {
+    setSessions(listRows(null, page.sessions));
+    setSessionsCursor(page.next_cursor);
+    setSourceErrors(page.source_errors);
+    setPendingProviders(page.pending_providers);
+    setSessionsError(null);
+  }, [listRows]);
+  lists.onPage = (parent, page) => {
+    if (!mounted.current) return;
+    if (parent === null) { showRootPage(page); return; }
+    const merge = listRows(parent, page.sessions);
+    updateSessionChildren(parent, (current) => ({ sessions: merge(current?.sessions ?? []),
+      next_cursor: page.next_cursor, is_loading: false, is_loading_more: false, error: null }));
+  };
+  lists.onError = (parent, error) => {
+    if (parent === null) setSessionsError(errorMessage(error));
+    else updateSessionChildren(parent, (previous) => ({ sessions: previous?.sessions ?? [],
+      next_cursor: previous?.next_cursor ?? null, is_loading: false, is_loading_more: false, error: errorMessage(error) }));
+  };
 
   const requestSessionChildPage = useCallback(
     (parentSessionKey: string, cursor: string | null, retry: boolean) => {
@@ -1409,12 +1434,12 @@ export function useViewerState(visible = true) {
         ) {
           return;
         }
-      } else if (current && (current.is_loading || current.is_loading_more || !retry)) {
+      } else if (current && (current.is_loading || current.is_loading_more || (!retry && lists.limit(parentSessionKey)))) {
         return;
       }
 
       const generation = sessionChildrenGeneration.current;
-      const requestId = (sessionChildRequests.current.get(parentSessionKey) ?? 0) + 1;
+      const requestId = ++nextChildRequest.current;
       sessionChildRequests.current.set(parentSessionKey, requestId);
       updateSessionChildren(parentSessionKey, (existing) => ({
         sessions: existing?.sessions ?? [],
@@ -1424,11 +1449,8 @@ export function useViewerState(visible = true) {
         error: null,
       }));
 
-      void listSessionChildren({
-        parent_session_key: parentSessionKey,
-        cursor: cursor ?? undefined,
-        limit: SESSION_PAGE_SIZE,
-      })
+      const limit = lists.limit(parentSessionKey) || Math.max(SESSION_PAGE_SIZE, current?.sessions.length ?? 0);
+      void lists.open(parentSessionKey, undefined, cursor ? limit + SESSION_PAGE_SIZE : limit)
         .then((response) => {
           if (
             sessionChildrenGeneration.current !== generation
@@ -1436,16 +1458,18 @@ export function useViewerState(visible = true) {
           ) {
             return;
           }
-          updateSessionChildren(parentSessionKey, (existing) => ({
-            // An activity card can optimistically materialize one exact child
-            // before this lazy page arrives. Merge both initial and later
-            // pages so that navigation never makes that child disappear.
-            sessions: mergeSessions(existing?.sessions ?? [], response.sessions),
-            next_cursor: response.next_cursor,
-            is_loading: false,
-            is_loading_more: false,
-            error: null,
-          }));
+          const previous = previousListRows.current.get(parentSessionKey);
+          const merge = listRows(parentSessionKey, response.sessions);
+          updateSessionChildren(parentSessionKey, (existing) => {
+            const displayed = existing?.sessions ?? [];
+            const sessions = merge(displayed);
+            // Opening a verified child from a conversation may place it beyond
+            // this parent's loaded prefix. Preserve only that optimistic row.
+            const selected = displayed.find((row) => row.session_key === selectedSessionKeyRef.current);
+            if (selected && !previous?.some((row) => row.session_key === selected.session_key)
+              && !sessions.some((row) => row.session_key === selected.session_key)) sessions.push(selected);
+            return { sessions, next_cursor: response.next_cursor, is_loading: false, is_loading_more: false, error: null };
+          });
         })
         .catch((error: unknown) => {
           if (
@@ -1471,12 +1495,20 @@ export function useViewerState(visible = true) {
           }
         });
     },
-    [updateSessionChildren],
+    [listRows, lists, updateSessionChildren],
   );
 
   const loadSessionChildren = useCallback((parentSessionKey: string) => {
     requestSessionChildPage(parentSessionKey, null, false);
   }, [requestSessionChildPage]);
+
+  const releaseSessionChildren = useCallback((parentSessionKey: string) => {
+    lists.drop(parentSessionKey);
+    previousListRows.current.delete(parentSessionKey);
+    if (!sessionChildRequests.current.delete(parentSessionKey)) return;
+    const page = sessionChildrenRef.current.get(parentSessionKey);
+    if (page) updateSessionChildren(parentSessionKey, () => ({ ...page, is_loading: false, is_loading_more: false }));
+  }, [lists, updateSessionChildren]);
 
   const retrySessionChildren = useCallback((parentSessionKey: string) => {
     const current = sessionChildrenRef.current.get(parentSessionKey);
@@ -1567,7 +1599,6 @@ export function useViewerState(visible = true) {
     sessionOrderRef.current = order;
     sessionsRequest.current += 1;
     sessionListInFlight.current = null;
-    sessionListRefreshQueued.current = false;
     setSessionsLoading(true);
     setSessionsCursor(null);
     setSelectedSessionMetadata(selectedSession);
@@ -1603,6 +1634,8 @@ export function useViewerState(visible = true) {
     setMobileSidebarOpen(false);
   }, [applySessionSelection, requestSessionChildPage, selectedSession, updateSessionChildren]);
 
+  const selectFromList = useRef(applySessionSelection);
+  selectFromList.current = applySessionSelection;
   useEffect(() => {
     if (!sessionIndexListenerReady) {
       return;
@@ -1610,20 +1643,15 @@ export function useViewerState(visible = true) {
     const queryChanged = previousSessionQueryKey.current !== sessionQueryKey;
     const filterKey = `${providerKey}\u0000${debouncedSearch}`;
     const filtersChanged = previousSessionFilterKey.current !== filterKey;
-    if (!queryChanged && sessionListInFlight.current === sessionsRequest.current) {
-      // Index and Relay notifications can outpace a catalog read. Keep its
-      // result useful and coalesce those notifications into one trailing
-      // refresh instead of starting concurrent reads that will be discarded.
-      sessionListRefreshQueued.current = true;
-      return;
-    }
     const requestId = ++sessionsRequest.current;
+    const selectionRevision = createdSelectionRevision.current;
     sessionListInFlight.current = null;
-    sessionListRefreshQueued.current = false;
     previousSessionQueryKey.current = sessionQueryKey;
     previousSessionFilterKey.current = filterKey;
     setSessionsLoadingMore(false);
     if (enabledProviders.size === 0) {
+      lists.drop(null);
+      previousListRows.current.delete(null);
       clearSessionChildren();
       setSessions([]);
       setSessionsCursor(null);
@@ -1632,43 +1660,34 @@ export function useViewerState(visible = true) {
       setSourceErrors([]);
       setPendingProviders([]);
       // An explicitly opened created session can sit outside sidebar filters.
-      // Background refreshes retain it; changing filters still clears it.
-      if (filtersChanged) applySessionSelection(null);
+      // Changing filters clears the prior selection.
+      if (filtersChanged) selectFromList.current(null);
       return;
     }
 
     setSessionsLoading(true);
     setSessionsError(null);
     sessionListInFlight.current = requestId;
-    void listSessions({
-      query: {
-        order: sessionOrder,
-        providers: PROVIDERS.filter((provider) => enabledProviders.has(provider)),
-        search: debouncedSearch || undefined,
-      },
-      limit: SESSION_PAGE_SIZE,
-    })
+    const query = { order: sessionOrder, providers: PROVIDERS.filter((provider) => enabledProviders.has(provider)), search: debouncedSearch || undefined };
+    const limit = queryChanged ? SESSION_PAGE_SIZE : lists.limit(null) || SESSION_PAGE_SIZE;
+    void lists.open(null, query, limit)
       .then((response) => {
         if (sessionsRequest.current !== requestId) {
           return;
         }
-        setSessions(response.sessions);
-        setSessionsCursor(response.next_cursor);
-        setSourceErrors(response.source_errors);
-        setPendingProviders(response.pending_providers);
+        showRootPage(response);
         if (filtersChanged) {
           // Root responses deliberately omit lazy child rows. Replace the
           // tree only once the changed query is accepted, retaining an
           // explicit root selection only when it still belongs to the new
-          // first page. Background index refreshes keep the cached tree and
-          // can therefore leave a selected child visible.
+          // first page. Edits to the same list preserve its cached tree.
           clearSessionChildren();
           const currentSelection = selectedSessionKeyRef.current;
           const selectedRootIsVisible = currentSelection !== null
             && response.sessions.some((session) => session.session_key === currentSelection);
-          applySessionSelection(selectedRootIsVisible ? currentSelection : null);
+          if (createdSelectionRevision.current === selectionRevision) selectFromList.current(selectedRootIsVisible ? currentSelection : null);
         } else {
-          applySessionSelection(preserveSessionSelection(selectedSessionKeyRef.current));
+          selectFromList.current(preserveSessionSelection(selectedSessionKeyRef.current));
         }
       })
       .catch((error: unknown) => {
@@ -1679,7 +1698,7 @@ export function useViewerState(visible = true) {
             setSessionsCursor(null);
             setSourceErrors([]);
             setPendingProviders([]);
-            applySessionSelection(null);
+            selectFromList.current(null);
           }
           setSessionsError(errorMessage(error));
         }
@@ -1691,11 +1710,12 @@ export function useViewerState(visible = true) {
         finishSessionListRequest(requestId);
       });
   }, [
-    applySessionSelection,
     clearSessionChildren,
     debouncedSearch,
     enabledProviders,
+    lists,
     finishSessionListRequest,
+    showRootPage,
     providerKey,
     sessionQueryKey,
     sessionOrder,
@@ -2215,16 +2235,12 @@ export function useViewerState(visible = true) {
   }, [applySessionSelection]);
 
   const openCreatedSession = useCallback((session: SessionSummary) => {
-    // Creation supplies a verified native row, even when the current sidebar
-    // filter/page does not contain it. Retire a pre-creation catalog request
-    // before opening its exact history; normal query changes still apply.
-    sessionsRequest.current += 1;
-    sessionListInFlight.current = null;
-    sessionListRefreshQueued.current = false;
+    // A creation can complete while the first filtered page is loading.
+    // Accept that list's rows without letting its selection erase the new draft.
+    createdSelectionRevision.current += 1;
     pendingQuestionSession.current = null;
     applySessionSelection(session.session_key, session);
     setMobileSidebarOpen(false);
-    setSessionsAttempt((attempt) => attempt + 1);
   }, [applySessionSelection]);
 
   const openQuestion = useCallback((eventKey: string) => {
@@ -2310,26 +2326,13 @@ export function useViewerState(visible = true) {
     sessionListInFlight.current = requestGeneration;
     setSessionsLoadingMore(true);
     setSessionsError(null);
-    void listSessions({
-      query: {
-        order: sessionOrder,
-        providers: PROVIDERS.filter((provider) => enabledProviders.has(provider)),
-        search: debouncedSearch || undefined,
-      },
-      cursor: sessionsCursor,
-      limit: SESSION_PAGE_SIZE,
-    })
+    const query = { order: sessionOrder, providers: PROVIDERS.filter((provider) => enabledProviders.has(provider)), search: debouncedSearch || undefined };
+    void lists.open(null, query, lists.limit(null) + SESSION_PAGE_SIZE)
       .then((response) => {
         if (sessionsRequest.current !== requestGeneration) {
           return;
         }
-        setSessions((current) => {
-          const merged = mergeSessions(current, response.sessions);
-          return sessionOrder === "project" ? merged.sort(compareProjects) : merged;
-        });
-        setSessionsCursor(response.next_cursor);
-        setSourceErrors(response.source_errors);
-        setPendingProviders(response.pending_providers);
+        showRootPage(response);
       })
       .catch((error: unknown) => {
         if (sessionsRequest.current === requestGeneration) {
@@ -2342,7 +2345,7 @@ export function useViewerState(visible = true) {
         }
         finishSessionListRequest(requestGeneration);
       });
-  }, [debouncedSearch, enabledProviders, finishSessionListRequest, sessionOrder, sessionsCursor, sessionsLoading, sessionsLoadingMore]);
+  }, [debouncedSearch, enabledProviders, finishSessionListRequest, lists, showRootPage, sessionOrder, sessionsCursor, sessionsLoading, sessionsLoadingMore]);
 
   const loadOlderEvents = useCallback(() => {
     if (
@@ -2458,6 +2461,7 @@ export function useViewerState(visible = true) {
     sessions: displayedSessions.sessions,
     sessionChildren: displayedSessions.children,
     loadSessionChildren,
+    releaseSessionChildren,
     retrySessionChildren,
     loadMoreSessionChildren,
     openRelatedSession,

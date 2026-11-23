@@ -33,6 +33,12 @@ pub(crate) async fn publish_relay_change(
   let timeline_events = events.clone();
   let key = change.session_key.clone();
   let reset = change.reset;
+  // Relay publishes source switches, new external catalogs and status changes
+  // without a session key. A single reader's timeline change does not alter
+  // the external directory. Native metadata updates arrive on index commit.
+  if key.is_none() {
+    service.session_lists.invalidate(None);
+  }
   let _ = tokio::task::spawn_blocking(move || {
     if reset {
       for interest in service.invalidate_session_subscriptions(key.as_deref()) {
@@ -113,6 +119,8 @@ pub(crate) async fn publish_index_refresh(
   keys.extend(refresh.attention_session_keys.iter().cloned());
   keys.sort();
   keys.dedup();
+  let exact_rows = !refresh.catalog_refresh_required && !refresh.background_reconciliation_required && !keys.is_empty();
+  service.session_lists.invalidate(exact_rows.then_some(&keys));
   if !keys.is_empty() {
     let reader = service.clone();
     let expected_notifications = keys.clone();
@@ -162,6 +170,21 @@ impl ViewerRuntime {
   pub fn start(service: ViewerService) -> Self {
     let (events, _) = broadcast::channel(128);
     let mut tasks = Vec::new();
+    let lists = service.clone();
+    let list_events = events.clone();
+    tasks.push(tokio::spawn(async move {
+      loop {
+        lists.session_lists.changed.notified().await;
+        let reader = lists.clone();
+        let events = list_events.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+          reader.publish_session_lists(|update| {
+            let _ = emit(&events, "session-list-updated", update);
+          });
+        })
+        .await;
+      }
+    }));
     let mut project_changes = service.subscribe_project_registry_changes();
     let project_events = events.clone();
     tasks.push(tokio::spawn(async move {
@@ -359,6 +382,7 @@ impl ViewerRuntime {
             Ok(None) => {
               match refresh_service.follow_shared_index() {
                 Ok(true) => {
+                  refresh_service.session_lists.invalidate(None);
                   publish_shared_index_background(&refresh_service, &scheduler_events, true).await;
                   let _ = emit(
                     &scheduler_events,
@@ -452,6 +476,7 @@ impl ViewerRuntime {
         if work.is_none() && !pending_body_due {
           match refresh_service.observe_shared_index_change() {
             Ok(true) => {
+              refresh_service.session_lists.invalidate(None);
               publish_shared_index_background(&refresh_service, &scheduler_events, true).await;
               let _ = emit(
                 &scheduler_events,

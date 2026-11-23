@@ -450,7 +450,15 @@ explicit publication step.
 versions already on crates.io. `--list` checks only; `--dry-run` verifies without
 uploading; the default publishes pending crates through Cargo.
 
-Viewer protocol revision 3 uses one `open_session` request for a baseline and live
+Viewer protocol revision 4 uses `open_session_list` for filtered root rows and
+expanded child lists. The host pushes changed rows, removed keys and compact
+order edits. Shared viewers receive grant-scoped list changes and idle SSE
+heartbeats. The viewer reopens a list window on a missed revision or lost lease.
+Pi's live reader applies the most recent `session_info` name, including an
+explicit clear. The Pi body cursor change queues previously indexed sessions
+for a one-time background pass through the existing bounded indexer.
+
+The timeline uses one `open_session` request for a baseline and live
 interest. A cached timeline can resume by previous subscription ID, generation
 and revision together with the host's SHA-256 state hash. A matching baseline
 yields a delta with compact splices for any changed order lists. A
@@ -808,9 +816,9 @@ modes. The Rust default remains `forward` for legacy row-pagination callers.
 Activity preloads keep their slots while loading or actively changing; only
 settled preloads idle for 30 seconds can be replaced by another background
 candidate. Per-session preload cooldowns also bound repeated work after
-eviction/failure. Explicit opening bypasses that cooldown. Sidebar catalog
-refreshes coalesce while a list/page request is in flight, with one trailing
-refresh; changing filters still starts the new query immediately.
+eviction/failure. Explicit opening bypasses that cooldown. Sidebar updates
+that arrive before a list open completes are buffered. Changing filters
+opens a new query.
 
 Metadata catalogs are shared; event snapshots load on demand. Concurrent clients
 reuse one JSONL normalizer per session. Appends decode new complete lines;

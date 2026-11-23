@@ -48,6 +48,26 @@ can explicitly request older history. The first open never searches older
 pages for a saved scroll anchor. New turns extend the retained window, and
 older outstanding questions retain their attention context.
 
+## Session list
+
+The sidebar opens a metadata-only window for the current search, providers
+and sort order. Expanding a parent opens a separate window for its children.
+The host keeps the row keys in order and a SHA-256 fingerprint of each row.
+When the index commits a change, the host compares each affected view and
+sends only new or modified row bodies. A deletion carries the key and its
+order edit. A move carries just the edits needed to reposition the key.
+An unchanged view produces no list event, including for shared viewers.
+
+Each update names its subscription, generation and base revision. The client
+recovers a missed revision by reopening that window. Pagination grows the
+watched range and can open additional windows for older rows. Indexing
+progress and compact assistant previews use their own event types.
+
+The host admits up to 64 live list windows with 90-second leases. The viewer
+renews its windows in batches. If the host is at capacity, the user can still
+page through the index. The viewer retries admission and resumes live updates
+when a lease becomes available.
+
 ## Background messages and session coverage
 
 One independent compact interest covers either **All sessions** on the connected
@@ -123,12 +143,12 @@ in addition to the existing bounded display replicas.
 
 ## Adapters and limits
 
-Viewer protocol revision 3 uses the same open, release, resource and renewal
+Viewer protocol revision 4 uses the same open, release, resource and renewal
 commands on Tauri and HTTP. The Hub transports HTTP-shaped commands and SSE
 through the encrypted connection. Shared grants restrict access to their
 explicit session keys and namespace subscription IDs per recipient and grant.
-Shared viewers receive live updates to their own subscriptions and a catalog
-refresh notice every five seconds. Read markers and activity from unshared
+Shared viewers receive live updates to their own subscriptions. Idle
+streams carry only transport heartbeats. Read markers and activity from unshared
 descendants stay private.
 
 The host admits up to 24 active timeline subscriptions with 90-second leases.
@@ -178,6 +198,11 @@ It prints lineage/decode/reader timings and source/window counts, never message
 contents. Debug timings are diagnostic, not desktop release benchmarks.
 
 ## Remaining costs
+
+When the index signals a change, the host rereads the affected metadata windows
+and compares row fingerprints. This bounds the data sent to the client. A busy
+machine with several different filters can still spend time evaluating those
+queries. Lease renewal and transport heartbeats do not run them.
 
 Other providers and Codex correctness fallbacks still normalize full history.
 Codex source windows can be broader than the selected projection when dependencies

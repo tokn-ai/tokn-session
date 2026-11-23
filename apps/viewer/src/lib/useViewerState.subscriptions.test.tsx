@@ -1,7 +1,7 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { selectMachine } from "./transport";
-import type { BackgroundSessionUpdate, BackgroundUpdatesRequest, EventSummary, ListSessionsRequest, SessionSummary, SessionUpdate, OpenSessionRequest } from "./types";
+import type { BackgroundSessionUpdate, BackgroundUpdatesRequest, EventSummary, OpenSessionListRequest, SessionSummary, SessionUpdate, OpenSessionRequest } from "./types";
 import { useViewerState } from "./useViewerState";
 
 const { nativeInvoke, handlers, observers } = vi.hoisted(() => ({
@@ -57,12 +57,15 @@ function host(initial: boolean, session_keys = ["live", "other"]) {
   let revision = 1;
   let blocked: ((request: OpenSessionRequest) => Promise<SessionUpdate>) | undefined;
   const subscriptions = new Map<string, OpenSessionRequest>();
+  let listId: string | undefined;
+  let listRevision = 1;
   nativeInvoke.mockImplementation(async (command: string, payload?: Record<string, unknown>) => {
-    if (command === "list_sessions") {
-      const request = payload?.request as ListSessionsRequest;
+    if (command === "open_session_list") {
+      const request = payload?.request as OpenSessionListRequest;
+      listId = request.subscription_id;
       const sessions = session_keys.map(row).filter((session) => !request.query?.providers || request.query.providers.includes(session.provider))
         .map((session) => ({ ...session, is_running: session.session_key === "live" && running }));
-      return { sessions, next_cursor: null, source_errors: [], pending_providers: [] };
+      return { subscription_id: listId, generation: "list", revision: String(listRevision), base_revision: null, rows: sessions, removed_keys: [], order_edits: [], next_cursor: null, source_errors: [], pending_providers: [] };
     }
     if (command === "release_session") {
       const request = payload?.request as OpenSessionRequest;
@@ -83,6 +86,8 @@ function host(initial: boolean, session_keys = ["live", "other"]) {
       const request = payload?.request as { subscription_id: string; unsubscribe?: boolean };
       return { subscription_id: request.subscription_id, subscribed: !request.unsubscribe, generation: "compact", level: "messages" };
     }
+    if (command === "renew_session_lists") return { renewed_ids: payload?.ids, missing_ids: [] };
+    if (command === "release_session_list") return true;
     if (command === "renew_background_subscriptions") return { renewed: true };
     if (command === "acknowledge_session_attention") return { changed: false };
     if (command === "update_session_view") return;
@@ -90,7 +95,17 @@ function host(initial: boolean, session_keys = ["live", "other"]) {
   });
   return {
     subscriptions,
-    change(value: boolean) { running = value; revision++; },
+    change(value: boolean) {
+      running = value; revision++;
+      if (listId) {
+        const base_revision = String(listRevision++);
+        act(() => handlers.get("session-list-updated")?.({ payload: {
+          subscription_id: listId, generation: "list", revision: String(listRevision), base_revision,
+          rows: [{ ...row("live"), is_running: running }], removed_keys: [], order_edits: [],
+          next_cursor: null, source_errors: [], pending_providers: [],
+        } }));
+      }
+    },
     block(load: typeof blocked) { blocked = load; },
     baseline(request: OpenSessionRequest) { return baseline(request, running, revision); },
   };

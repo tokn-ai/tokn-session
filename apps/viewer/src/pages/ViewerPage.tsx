@@ -137,6 +137,7 @@ function ViewerContent({ visible = true, remote = false, connection, on_open_mac
             is_loading={viewer.sessionsLoading}
             is_loading_more={viewer.sessionsLoadingMore}
             on_children_load={viewer.loadSessionChildren}
+            on_children_release={viewer.releaseSessionChildren}
             on_children_load_more={viewer.loadMoreSessionChildren}
             on_children_retry={viewer.retrySessionChildren}
             on_load_more={viewer.loadMoreSessions}

@@ -102,7 +102,7 @@ it("stops at health when the machine uses the previous timeline protocol", async
   const { factory, sockets } = harness((socket, message) => {
     if (message.type !== "request_end") return;
     socket.push({ type: "response", status: 200, content_type: "application/json" });
-    socket.push({ type: "chunk", data: bytes('{"version":2}') });
+    socket.push({ type: "chunk", data: bytes(JSON.stringify({ version: VIEWER_API_VERSION - 1 })) });
     socket.push({ type: "end" });
   });
   await expect(EncryptedHubClient.connect("https://hub.example", host, identity, crypto(), undefined, factory))

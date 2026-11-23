@@ -545,6 +545,29 @@ export interface ListSessionChildrenResponse {
   next_cursor: string | null;
 }
 
+export interface OpenSessionListRequest {
+  subscription_id: string;
+  query?: SessionListQuery;
+  parent_session_key?: string;
+  offset?: number;
+  limit: number;
+  generation?: string;
+  revision?: string;
+}
+
+export interface SessionListUpdate {
+  subscription_id: string;
+  generation: string;
+  base_revision: string | null;
+  revision: string;
+  rows: SessionSummary[];
+  removed_keys: string[];
+  order_edits: SessionOrderEdit[];
+  next_cursor: string | null;
+  pending_providers: ViewerProvider[];
+  source_errors: SourceError[];
+}
+
 /**
  * Metadata-only signal emitted after a durable sidebar index refresh.
  * The keys identify only sessions with newly eligible visible messages; they

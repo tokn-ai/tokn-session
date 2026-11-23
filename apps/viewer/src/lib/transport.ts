@@ -6,13 +6,12 @@ export type CommandInvoker = <T>(command: string, payload?: Record<string, unkno
 export type EventSubscriber = <T>(event: string, handler: (event: { payload: T }) => void) => Promise<UnlistenFn>;
 type Handler = (event: { payload: unknown }) => void;
 export type ConnectionState = "connecting" | "connected" | "reconnecting";
-export const VIEWER_API_VERSION = 3;
+export const VIEWER_API_VERSION = 4;
 const MAX_EVENT_FRAME_LENGTH = 2 * 1024 * 1024;
-// Full session updates can include multiple bounded tool/native payloads.
-// Other notifications retain the smaller frame limit.
+// Timelines and lists can deliver several changed items in the same frame.
 const MAX_SESSION_UPDATE_FRAME_LENGTH = 64 * 1024 * 1024;
 export function eventFrameLimit(frame: string): number {
-  return /^event: ?session-updated\n/.test(frame) ? MAX_SESSION_UPDATE_FRAME_LENGTH : MAX_EVENT_FRAME_LENGTH;
+  return /^event: ?session-(?:list-)?updated\n/.test(frame) ? MAX_SESSION_UPDATE_FRAME_LENGTH : MAX_EVENT_FRAME_LENGTH;
 }
 export const isDesktop = isDesktopHost;
 

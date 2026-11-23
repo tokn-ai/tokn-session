@@ -74,12 +74,15 @@ impl EventParser {
     Ok(events)
   }
   fn check_limit(&self, length: usize) -> Result<(), String> {
-    let maximum =
-      if self.buffer.starts_with(b"event: session-updated\n") || self.buffer.starts_with(b"event:session-updated\n") {
-        self.max_session_update
-      } else {
-        self.max_event
-      };
+    let projected_update = self.buffer.strip_prefix(b"event:").is_some_and(|rest| {
+      let rest = rest.strip_prefix(b" ").unwrap_or(rest);
+      rest.starts_with(b"session-updated\n") || rest.starts_with(b"session-list-updated\n")
+    });
+    let maximum = if projected_update {
+      self.max_session_update
+    } else {
+      self.max_event
+    };
     if length > maximum {
       Err("Host event exceeds size limit".into())
     } else {
@@ -111,5 +114,14 @@ mod tests {
     assert!(EventParser::with_limits(32, 64).unwrap().feed(&[b'x'; 33]).is_err());
     assert!(EventParser::default().feed(b"event:ready\ndata:not-json\n\n").is_err());
     assert!(EventParser::with_limits(0, 64).is_err());
+  }
+
+  #[test]
+  fn list_updates_share_the_timeline_frame_budget() {
+    for name in ["session-list-updated", "session-updated", "session-notification"] {
+      let frame = format!("event: {name}\ndata: \"{}\"\n\n", "x".repeat(48));
+      let result = EventParser::with_limits(32, 128).unwrap().feed(frame.as_bytes());
+      assert_eq!(result.is_ok(), name != "session-notification");
+    }
   }
 }

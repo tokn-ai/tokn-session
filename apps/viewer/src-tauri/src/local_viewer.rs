@@ -159,6 +159,9 @@ async fn forward_events(mut events: broadcast::Receiver<ViewerEvent>, app: AppHa
       }
       Err(broadcast::error::RecvError::Lagged(_)) => {
         crate::runtime_management::changed(&app);
+        // A skipped list delta can be the last change to an otherwise idle
+        // window. Revalidate the active subscriptions after any event gap.
+        let _ = app.emit("transport-reconnected", serde_json::json!({}));
         let _ = app.emit("registered-projects-changed", serde_json::json!({}));
         let _ = app.emit(
           "relay-changed",

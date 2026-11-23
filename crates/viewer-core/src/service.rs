@@ -111,6 +111,7 @@ pub struct ViewerService {
   question_claims: Arc<Mutex<question_input::QuestionClaims>>,
   pub(crate) updates: Arc<Mutex<crate::updates::UpdateStore>>,
   pub(crate) background: Arc<Mutex<crate::background::BackgroundStore>>,
+  pub(crate) session_lists: Arc<crate::session_list::SessionLists>,
   #[cfg(test)]
   notification_work_stats: Arc<Mutex<notifications::NotificationWorkStats>>,
   /// Per-request metadata projection. The adapter still owns grant verification,
@@ -778,6 +779,7 @@ impl ViewerService {
       loaded_session_cache: Arc::new(Mutex::new(None)),
       updates: Arc::new(Mutex::new(crate::updates::UpdateStore::default())),
       background: Arc::new(Mutex::new(crate::background::BackgroundStore::default())),
+      session_lists: Arc::default(),
       #[cfg(test)]
       notification_work_stats: Arc::new(Mutex::new(notifications::NotificationWorkStats::default())),
       input_broker: crate::input::InputBroker::default(),
@@ -1222,9 +1224,17 @@ impl ViewerService {
   pub fn list_sessions(&self, request: ListSessionsRequest) -> Result<ListSessionsResponse, String> {
     let limit = bounded_limit(request.limit)?;
     let offset = requested_offset(request.cursor.as_deref(), request.offset, decode_list_cursor)?.unwrap_or(0);
-    let providers = selected_providers(&request.query.providers);
-    let search = request
-      .query
+    self.list_session_window(&request.query, offset, limit)
+  }
+
+  pub(crate) fn list_session_window(
+    &self,
+    query: &crate::model::SessionQuery,
+    offset: usize,
+    limit: usize,
+  ) -> Result<ListSessionsResponse, String> {
+    let providers = selected_providers(&query.providers);
+    let search = query
       .search
       .as_deref()
       .map(str::trim)
@@ -1276,9 +1286,8 @@ impl ViewerService {
       .map_err(|error| format!("failed to read project order: {error}"))?;
 
     if let Some(search) = search.as_deref() {
-      let mut matches = Vec::new();
-      for candidate in candidates {
-        let summary = match session_summary_with_child_count(
+      candidates.retain(|candidate| {
+        match session_summary_with_child_count(
           candidate.provider,
           candidate.header.clone(),
           candidate.child_count,
@@ -1287,46 +1296,17 @@ impl ViewerService {
         ) {
           Ok(mut summary) => {
             apply_project_group(&mut summary, &project_order);
-            summary
+            matches_search(&summary, Some(search))
           }
           Err(message) => {
             record_source_error(&mut source_errors, candidate.provider, message);
-            continue;
+            false
           }
-        };
-        if matches_search(&summary, Some(search)) {
-          matches.push(candidate);
         }
-      }
-      sort_root_candidates(&mut matches, request.query.order, &project_order);
-      let start = offset.min(matches.len());
-      let end = start.saturating_add(limit).min(matches.len());
-      let next_cursor = (end < matches.len()).then(|| encode_list_cursor(end));
-      let mut sessions = Vec::with_capacity(end - start);
-      for candidate in matches[start..end].iter().cloned() {
-        match session_summary_with_child_count(
-          candidate.provider,
-          candidate.header,
-          candidate.child_count,
-          candidate.is_subagent,
-          candidate.attention,
-        ) {
-          Ok(mut summary) => {
-            apply_project_group(&mut summary, &project_order);
-            sessions.push(summary);
-          }
-          Err(message) => record_source_error(&mut source_errors, candidate.provider, message),
-        }
-      }
-      return Ok(ListSessionsResponse {
-        sessions,
-        next_cursor,
-        pending_providers: inventories.pending_providers,
-        source_errors,
       });
     }
 
-    sort_root_candidates(&mut candidates, request.query.order, &project_order);
+    sort_root_candidates(&mut candidates, query.order, &project_order);
     let start = offset.min(candidates.len());
     let end = start.saturating_add(limit).min(candidates.len());
     let next_cursor = (end < candidates.len()).then(|| encode_list_cursor(end));
@@ -1347,6 +1327,12 @@ impl ViewerService {
       }
     }
 
+    // Provider-wide warnings and indexing progress belong to the owner. Apply
+    // this after building the page, including any errors resolving relations.
+    if self.session_scope.is_some() {
+      source_errors.clear();
+      inventories.pending_providers.clear();
+    }
     Ok(ListSessionsResponse {
       sessions,
       next_cursor,
@@ -1365,18 +1351,43 @@ impl ViewerService {
   ) -> Result<ListSessionChildrenResponse, String> {
     let limit = bounded_limit(request.limit)?;
     let offset = requested_offset(request.cursor.as_deref(), request.offset, decode_list_cursor)?.unwrap_or(0);
-    let parent_locator = decode_session_key(&request.parent_session_key)?;
-    let inventory = self
-      .indexed_session_inventory(parent_locator.provider)?
-      .ok_or_else(|| "session catalog is still being indexed".to_string())?;
+    self.list_session_child_window(&request.parent_session_key, offset, limit, false)
+  }
+
+  pub(crate) fn list_session_child_window(
+    &self,
+    parent_key: &str,
+    offset: usize,
+    limit: usize,
+    watch_missing_parent: bool,
+  ) -> Result<ListSessionChildrenResponse, String> {
+    self.check_session_scope(parent_key)?;
+    let parent_locator = decode_session_key(parent_key)?;
+    let empty = || ListSessionChildrenResponse {
+      sessions: Vec::new(),
+      next_cursor: None,
+    };
+    let Some(inventory) = self.indexed_session_inventory(parent_locator.provider)? else {
+      return if watch_missing_parent {
+        Ok(empty())
+      } else {
+        Err("session catalog is still being indexed".into())
+      };
+    };
     let mut ignored_errors = Vec::new();
     let relations = session_relation_index(parent_locator.provider, inventory.headers, &mut ignored_errors);
     let attention = session_relation_attention(parent_locator.provider, &relations, &inventory.direct_attention);
-    let parent_index = relations
+    let Some(parent_index) = relations
       .headers
       .iter()
       .position(|header| locator_for_header(parent_locator.provider, header) == parent_locator)
-      .ok_or_else(|| "session key no longer matches its source record".to_string())?;
+    else {
+      return if watch_missing_parent {
+        Ok(empty())
+      } else {
+        Err("session key no longer matches its source record".into())
+      };
+    };
 
     let mut candidates = relations
       .headers
@@ -1508,10 +1519,6 @@ impl ViewerService {
           None => result.pending_providers.push(provider),
         }
       }
-      if self.session_scope.is_some() {
-        result.pending_providers.clear();
-        result.source_errors.clear();
-      }
       return Ok(result);
     }
     let mut committed_providers = HashSet::new();
@@ -1571,16 +1578,8 @@ impl ViewerService {
         .into_iter()
         .map(|(provider, inventory)| (provider, self.scope_inventory(provider, inventory)))
         .collect(),
-      pending_providers: if self.session_scope.is_some() {
-        Vec::new()
-      } else {
-        pending_providers
-      },
-      source_errors: if self.session_scope.is_some() {
-        Vec::new()
-      } else {
-        source_errors
-      },
+      pending_providers,
+      source_errors,
     })
   }
 
@@ -3163,6 +3162,11 @@ impl ViewerService {
       .session_index
       .mark_seen_through(&key, attention_revision, current_time_ms())
       .map_err(|error| format!("failed to acknowledge session attention: {error}"))?;
+    if changed {
+      self
+        .session_lists
+        .invalidate(Some(std::slice::from_ref(&request.session_key)));
+    }
     Ok(AcknowledgeSessionAttentionResponse { changed })
   }
 
@@ -6147,6 +6151,7 @@ mod tests {
   mod event_filter;
   mod history_cache;
   mod latest_message;
+  mod live_session_list;
   mod questions;
   mod running_notifications;
   mod targeted_index;

@@ -38,7 +38,7 @@ pub(super) async fn command(State(state): State<ApiState>, Json(mut share): Json
   }
   let subscription_id = matches!(
     share.command.as_str(),
-    "open_session" | "release_session" | "subscribe_background_updates"
+    "open_session" | "release_session" | "subscribe_background_updates" | "open_session_list"
   )
   .then(|| {
     share
@@ -48,8 +48,11 @@ pub(super) async fn command(State(state): State<ApiState>, Json(mut share): Json
       .cloned()
   })
   .flatten();
-  let renewal_prefix =
-    (share.command == "renew_session_subscriptions").then(|| format!("share_timeline_{}:", share.principal));
+  let renewal_prefix = match share.command.as_str() {
+    "renew_session_subscriptions" => Some(format!("share_timeline_{}:", share.principal)),
+    "renew_session_lists" => Some(format!("share_list_{}:", share.principal)),
+    _ => None,
+  };
   if let Err(message) = prepare(&mut share) {
     return error(StatusCode::FORBIDDEN, message).into_response();
   }
@@ -133,6 +136,9 @@ pub(super) async fn command(State(state): State<ApiState>, Json(mut share): Json
     }
     // An index failure can contain paths/provider details outside this share.
     // Do not relay raw diagnostics from shared service internals to guests.
+    Ok(Err((StatusCode::TOO_MANY_REQUESTS, detail))) if detail.0["error"] == SESSION_LIST_CAPACITY_ERROR => {
+      error(StatusCode::TOO_MANY_REQUESTS, SESSION_LIST_CAPACITY_ERROR).into_response()
+    }
     Ok(Err((status, _))) => error(status, "Shared session request failed or is no longer available").into_response(),
     Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Shared session request failed").into_response(),
   }
@@ -149,6 +155,17 @@ fn prepare(share: &mut SharedRequest) -> Result<(), &'static str> {
   let request = share.payload.get_mut("request");
   match share.command.as_str() {
     "health" | "list_sessions" | "get_relay_status" | "get_session_index_progress" => Ok(()),
+    "open_session_list" | "release_session_list" => {
+      let request = request.ok_or("Missing session list request")?;
+      if let Some(parent) = request.get("parent_session_key").filter(|value| !value.is_null()) {
+        check(parent.as_str().ok_or("Invalid parent session key")?)?;
+      }
+      let id = request["subscription_id"]
+        .as_str()
+        .ok_or("Missing subscription identity")?;
+      request["subscription_id"] = json!(scoped_id("list", &share.principal, id)?);
+      Ok(())
+    }
     "list_session_children"
     | "load_event_page"
     | "inspect_session_event"
@@ -226,22 +243,23 @@ fn prepare(share: &mut SharedRequest) -> Result<(), &'static str> {
       request.insert("subscription_id".into(), json!(background_id(&share.principal, id)?));
       Ok(())
     }
-    "renew_background_subscriptions" | "renew_session_subscriptions" => {
-      let namespace = if share.command == "renew_background_subscriptions" {
-        background_id
-      } else {
-        subscription_id
+    "renew_background_subscriptions" | "renew_session_subscriptions" | "renew_session_lists" => {
+      let (family, max_ids) = match share.command.as_str() {
+        "renew_session_lists" => ("list", 64),
+        "renew_background_subscriptions" => ("bg", 24),
+        _ => ("timeline", 24),
       };
       let ids = share
         .payload
         .get_mut("ids")
         .and_then(Value::as_array_mut)
         .ok_or("Missing subscription identities")?;
-      if ids.len() > 24 {
+      if ids.len() > max_ids {
         return Err("Too many subscriptions");
       }
       for id in ids {
-        *id = json!(namespace(
+        *id = json!(scoped_id(
+          family,
           &share.principal,
           id.as_str().ok_or("Invalid subscription identity")?
         )?);
@@ -305,20 +323,45 @@ fn background_id(principal: &str, id: &str) -> Result<String, &'static str> {
   scoped_id("bg", principal, id)
 }
 
+// A list event can contain several session identities, including deletions
+// and moved rows with no corresponding row body in this update.
+fn list_event_in_scope(payload: &Value, keys: &[String]) -> bool {
+  let allowed = |key: &Value| {
+    key
+      .as_str()
+      .is_some_and(|key| keys.iter().any(|grant_key| grant_key == key))
+  };
+  let key_array = |value: &Value| value.as_array().is_some_and(|values| values.iter().all(allowed));
+  payload["rows"]
+    .as_array()
+    .is_some_and(|rows| rows.iter().all(|row| allowed(&row["session_key"])))
+    && key_array(&payload["removed_keys"])
+    && payload["order_edits"]
+      .as_array()
+      .is_some_and(|edits| edits.iter().all(|edit| key_array(&edit["insert"])))
+}
+
 fn shared_event(mut event: ViewerEvent, keys: &[String], principal: &str, prefix: &str) -> Option<ViewerEvent> {
   let family = match event.event.as_str() {
     "session-updated" | "session-subscription-invalidated" => "timeline",
     "background-session-updated" => "bg",
+    "session-list-updated" => "list",
     _ => return None,
   };
-  let key = event.payload["session_key"].as_str()?;
-  if !keys.iter().any(|allowed| allowed == key) {
-    return None;
-  }
   // The core reserves the share_ namespace for grant-scoped services.
   let id = event.payload["subscription_id"]
     .as_str()?
     .strip_prefix(&format!("share_{family}_{principal}:"))?;
+  if family == "list" {
+    if !list_event_in_scope(&event.payload, keys) {
+      return None;
+    }
+  } else {
+    let key = event.payload["session_key"].as_str()?;
+    if !keys.iter().any(|allowed| allowed == key) {
+      return None;
+    }
+  }
   event.payload["subscription_id"] = json!(id);
   if family == "bg" {
     event.payload["has_unread"] = json!(false);
@@ -334,18 +377,12 @@ async fn events(state: ApiState, keys: Vec<String>, principal: String, prefix: S
     Err(_) => return error(StatusCode::TOO_MANY_REQUESTS, "Too many viewer subscriptions").into_response(),
   };
   let mut receiver = state.events.subscribe();
-  // Only grant-owned subscriptions join the fixed-cadence catalog invalidations.
   let stream = async_stream::stream! {
     let _permit = permit;
     yield Ok::<_, Infallible>(Event::default().event("ready").data("{}"));
-    let change = json!({ "changed": true, "attention_session_keys": [], "updated_session_keys": keys }).to_string();
-    let mut cadence = tokio::time::interval_at(tokio::time::Instant::now() + Duration::from_secs(5), Duration::from_secs(5));
     loop {
       tokio::select! {
         _ = state.shutdown.cancelled() => break,
-        _ = cadence.tick() => {
-          yield Ok(Event::default().event("session-index-changed").data(change.clone()));
-        },
         received = receiver.recv() => {
           let Ok(event) = received else { break; };
           if let Some(event) = shared_event(event, &keys, &principal, &prefix) {
@@ -355,7 +392,9 @@ async fn events(state: ApiState, keys: Vec<String>, principal: String, prefix: S
       }
     }
   };
-  Sse::new(stream).into_response()
+  Sse::new(stream)
+    .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+    .into_response()
 }
 
 #[cfg(test)]
@@ -495,6 +534,46 @@ mod tests {
   }
 
   #[test]
+  fn list_subscriptions_route_each_row_removal_and_order_entry_only_within_its_grant() {
+    let keys = vec!["allowed".to_owned(), "second".to_owned()];
+    let client_id = "screen:root";
+    let id = scoped_id("list", "grant", client_id).unwrap();
+    let payload = json!({
+      "subscription_id":id,"rows":[{"session_key":"allowed","title":"changed"}],"removed_keys":["second"],
+      "order_edits":[{"start":0,"delete_count":1,"insert":["allowed"]}],
+    });
+    let event = |payload| ViewerEvent {
+      event: "session-list-updated".into(),
+      payload,
+    };
+    let accepted = shared_event(event(payload.clone()), &keys, "grant", "screen").unwrap();
+    assert_eq!(accepted.payload["subscription_id"], client_id);
+    assert_eq!(accepted.payload["rows"], payload["rows"]);
+    assert!(shared_event(event(payload.clone()), &keys, "other-grant", "screen").is_none());
+    assert!(shared_event(event(payload.clone()), &keys, "grant", "another-screen").is_none());
+    for field in ["/rows/0/session_key", "/removed_keys/0", "/order_edits/0/insert/0"] {
+      let mut hidden = payload.clone();
+      *hidden.pointer_mut(field).unwrap() = json!("private");
+      assert!(shared_event(event(hidden), &keys, "grant", "screen").is_none());
+    }
+    for command in ["open_session_list", "release_session_list"] {
+      let mut registered = request(command, json!({"request":{"subscription_id":client_id}}));
+      let expected = scoped_id("list", &registered.principal, client_id).unwrap();
+      prepare(&mut registered).unwrap();
+      assert_eq!(registered.payload["request"]["subscription_id"], expected);
+    }
+    assert!(
+      prepare(&mut request(
+        "open_session_list",
+        json!({
+          "request":{"subscription_id":client_id,"parent_session_key":"private"},
+        })
+      ))
+      .is_err()
+    );
+  }
+
+  #[test]
   fn scope_covers_every_key_bearing_command_and_disallows_control() {
     for command in [
       "load_event_page",
@@ -577,7 +656,7 @@ mod tests {
     );
   }
 
-  #[tokio::test]
+  #[tokio::test(start_paused = true)]
   async fn shared_endpoint_keeps_local_auth_and_never_emits_global_events() {
     let data = tempfile::tempdir().unwrap();
     let service = ViewerService::native(data.path().join("index.sqlite")).unwrap();
@@ -656,6 +735,37 @@ mod tests {
       value,
       json!({"sessions":[],"next_cursor":null,"pending_providers":[],"source_errors":[]})
     );
+    let list_request = json!({"request":{"subscription_id":"screen:root"}});
+    let list = app
+      .clone()
+      .oneshot(request("open_session_list", true, list_request.clone()))
+      .await
+      .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    let baseline: Value = serde_json::from_slice(&list.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(baseline["subscription_id"], "screen:root");
+    assert_eq!(baseline["rows"], json!([]));
+    let renew_lists = json!({"ids":["screen:root","other"]});
+    for (command, payload, expected) in [
+      (
+        "renew_session_lists",
+        renew_lists.clone(),
+        json!({"renewed_ids":["screen:root"],"missing_ids":["other"]}),
+      ),
+      ("release_session_list", list_request, json!(true)),
+      (
+        "renew_session_lists",
+        renew_lists,
+        json!({"renewed_ids":[],"missing_ids":["screen:root","other"]}),
+      ),
+    ] {
+      let result = app.clone().oneshot(request(command, true, payload)).await.unwrap();
+      assert_eq!(result.status(), StatusCode::OK);
+      assert_eq!(
+        serde_json::from_slice::<Value>(&result.into_body().collect().await.unwrap().to_bytes()).unwrap(),
+        expected
+      );
+    }
     let subscribed = app
       .clone()
       .oneshot(request(
@@ -680,6 +790,16 @@ mod tests {
       .into_body();
     let ready = stream.frame().await.unwrap().unwrap().into_data().unwrap();
     assert!(std::str::from_utf8(&ready).unwrap().contains("event: ready"));
+    // An idle guest sees only a transport keepalive even after the former
+    // five-second refresh interval has passed multiple times.
+    let idle = tokio::time::timeout(Duration::from_secs(16), stream.frame())
+      .await
+      .unwrap()
+      .unwrap()
+      .unwrap()
+      .into_data()
+      .unwrap();
+    assert!(idle.starts_with(b":"));
     // The broadcaster is filtered before any host-wide data reaches guests.
     let _ = events.send(ViewerEvent {
       event: "relay-status".into(),
@@ -711,5 +831,30 @@ mod tests {
     assert!(next.contains("Checking schema"));
     assert!(next.contains("\"has_unread\":false"));
     assert!(!next.contains("share_bg_"));
+  }
+
+  #[tokio::test]
+  async fn full_live_list_store_returns_the_static_list_fallback_signal_to_guests() {
+    let data = tempfile::tempdir().unwrap();
+    let service = ViewerService::native(data.path().join("index.sqlite")).unwrap();
+    for index in 0..64 {
+      let request = serde_json::from_value(json!({"subscription_id":format!("owner:{index}")})).unwrap();
+      service.open_session_list(request).unwrap();
+    }
+    let (events, _) = broadcast::channel(4);
+    let app = router(service, events, None, vec![], CancellationToken::new());
+    let identity = br#"{"version":1,"provider":"pi","session_id":"fixture","source_path":"/fixtures/one.jsonl"}"#;
+    let key = format!(
+      "session.v1.{}",
+      identity.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    );
+    let result = app.oneshot(Request::post("/api/v1/shared")
+      .header("content-type","application/json")
+      .body(axum::body::Body::from(json!({
+        "session_keys":[key],"principal":"reader","command":"open_session_list","payload":{"request":{"subscription_id":"screen:list"}}
+      }).to_string())).unwrap()).await.unwrap();
+    assert_eq!(result.status(), StatusCode::TOO_MANY_REQUESTS);
+    let error: Value = serde_json::from_slice(&result.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(error, json!({"error":SESSION_LIST_CAPACITY_ERROR}));
   }
 }

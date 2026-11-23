@@ -530,7 +530,9 @@ mod tests {
                     content_type: Some("application/json".into()),
                   },
                   InnerMessage::Chunk {
-                    data: protocol::encode(br#"{"version":3}"#),
+                    data: protocol::encode(
+                      &serde_json::to_vec(&json!({"version": protocol::VIEWER_API_VERSION})).unwrap(),
+                    ),
                   },
                   InnerMessage::End {},
                 ] {
@@ -613,7 +615,10 @@ mod tests {
       .await;
       assert_eq!(response.status(), StatusCode::OK);
       let body = response.into_body().collect().await.unwrap().to_bytes();
-      assert_eq!(body, br#"{"version":3}"#.as_slice());
+      assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        json!({"version": protocol::VIEWER_API_VERSION})
+      );
     }
     assert_eq!(pairing_count.load(Ordering::SeqCst), 2);
     assert_eq!(noise_count.load(Ordering::SeqCst), 1);

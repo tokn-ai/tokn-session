@@ -132,12 +132,13 @@ See [message input behavior](../apps/viewer/README.md#sending-messages).
 
 ## API contract
 
-`GET /api/v1/health` returns `{"version":3}`. Clients check this protocol revision before starting an event stream.
+`GET /api/v1/health` returns `{"version":4}`. Clients check this protocol revision before starting an event stream.
 Commands are `POST /api/v1/<command>` with the same snake_case payload as the
 Tauri adapter, normally `{"request":{...}}`. Commands without a request take
 `{}`. Responses use the shared viewer-core models. Supported commands:
 
 - `list_sessions`, `list_session_children`
+- `open_session_list`, `renew_session_lists`, `release_session_list`
 - `open_session`, `release_session`, `renew_session_subscriptions`
 - `load_session_details`, `inspect_session_event`
 - `subscribe_background_updates`, `renew_background_subscriptions`
@@ -154,6 +155,22 @@ history access. A syntactically valid key containing an arbitrary source path
 does not grant access. The API allows at most 16 concurrent command requests,
 32 SSE clients, and 1 MiB request bodies. Error responses contain `error`;
 invalid JSON/body-limit responses may be plain text.
+
+`open_session_list` watches the root rows matching a `query`, or the direct
+children of a `parent_session_key`. Pass a `subscription_id`, `limit` and
+optional `offset`. The first response contains the ordered rows and a null
+`base_revision`. Each subsequent `session-list-updated` event contains new and
+changed rows, `removed_keys`, ordered splices in `order_edits`, and the current
+pagination and indexing metadata. A title edit leaves the order edits empty
+when the row keeps its position.
+
+To grow or reconnect a window, reopen it with the same subscription ID,
+generation and last applied revision. The host returns a delta when it can
+match that revision and a snapshot otherwise. A new filter or sort order uses
+a fresh subscription ID. `renew_session_lists` renews the client's loaded
+windows in one request with `ids` and returns `renewed_ids` and `missing_ids`.
+Renewal does not read session rows. `release_session_list` takes
+`{"request":{"subscription_id":"…"}}` and returns whether it released a lease.
 
 `open_session` accepts `session_key`, `subscription_id`, an optional delivery
 level (`final`, `messages`, `steps` or `all`), an optional `scope` and an optional
@@ -236,7 +253,7 @@ delivery already in progress. Never automatically retry an unknown outcome.
 viewer, or Apell applet. The JSON body supplies `subscription_prefix`, a random
 ID for this viewer connection. Each timeline or sidebar subscription uses
 `<subscription_prefix>:<unique ID>`. The host forwards matching
-`session-updated` and `background-session-updated` events. When a timeline
+`session-updated`, `session-list-updated` and `background-session-updated` events. When a timeline
 changes source generation during publication, `session-subscriptions-lost`
 names the subscription to reopen. An explicit reader reset sends the owner a
 `relay-changed` event and shared viewers a targeted `session-subscriptions-lost`.
@@ -244,10 +261,10 @@ Owner streams also receive `session-notification`, `relay-status`,
 `session-index-changed`, and `session-index-progress`. Owners can use
 `GET /api/v1/events` to monitor general events alone.
 
-Streams begin with `ready`. Owner streams use 15-second heartbeats. Shared
-viewers receive a catalog refresh notice every five seconds for their granted
-sessions. A lagging subscriber disconnects. On reconnect the viewer revalidates the selected
-timeline, renews sidebar interests, and refreshes catalog and status data.
+Streams begin with `ready` and use 15-second SSE comments to keep idle
+connections alive. Shared list updates include only rows visible to the grant.
+A lagging subscriber disconnects. On reconnect the viewer revalidates its open list
+windows and selected timeline, renews background interests, and reads current status.
 Event pages include `follow_error` while followers retry, preserving last-good cards with a
 visible stale-data warning until recovery. The browser shows its
 connection state and preserves last-received data during temporary outages.

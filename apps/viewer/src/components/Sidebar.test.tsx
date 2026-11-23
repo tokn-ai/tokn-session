@@ -342,6 +342,7 @@ describe("Sidebar session identity", () => {
   it("renders cached nested subagents as independently selectable tree items", () => {
     const onChildrenLoad = vi.fn();
     const onSessionSelect = vi.fn();
+    const onChildrenRelease = vi.fn();
     const parent = session({
       session_key: "codex:parent",
       session_id: "parent-0000",
@@ -366,6 +367,7 @@ describe("Sidebar session identity", () => {
         is_loading={false}
         is_loading_more={false}
         on_children_load={onChildrenLoad}
+        on_children_release={onChildrenRelease}
         on_children_load_more={vi.fn()}
         on_children_retry={vi.fn()}
         on_load_more={vi.fn()}
@@ -393,7 +395,7 @@ describe("Sidebar session identity", () => {
 
     expect(screen.queryByRole("button", { name: /subagent Hubble/i })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Show 1 subagent for Root task" }));
-    expect(onChildrenLoad).not.toHaveBeenCalled();
+    expect(onChildrenLoad).toHaveBeenCalledExactlyOnceWith(parent.session_key);
 
     const childRow = screen.getByRole("button", {
       name: `subagent Hubble, Codex session ${child.session_id}`,
@@ -401,6 +403,8 @@ describe("Sidebar session identity", () => {
     expect(childRow).toHaveTextContent("/root/researcher");
     fireEvent.click(childRow);
     expect(onSessionSelect).toHaveBeenCalledWith(child.session_key);
+    fireEvent.click(screen.getByRole("button", { name: "Hide 1 subagent for Root task" }));
+    expect(onChildrenRelease).toHaveBeenCalledExactlyOnceWith(parent.session_key);
   });
 });
 
