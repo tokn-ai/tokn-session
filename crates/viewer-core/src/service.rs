@@ -4139,7 +4139,8 @@ fn source_cursor(provider: ViewerProvider, source_path: &Path) -> Result<String,
   // normalization can change running or question state. Codex's existing
   // explicit turn endings already terminate activity, so keep its cursor.
   let prefix = match provider {
-    ViewerProvider::Pi => "source-revision.pi.v4",
+    // Pi's native body reader now follows session_info renames and clears.
+    ViewerProvider::Pi => "source-revision.pi.v5",
     ViewerProvider::OpenCode => "source-revision.opencode.v3",
     ViewerProvider::ZCode => "source-revision.zcode.v2",
     ViewerProvider::Qoder => "source-revision.qoder.v1",

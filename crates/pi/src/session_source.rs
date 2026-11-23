@@ -304,7 +304,7 @@ impl PiSessionSummary {
   pub fn ingest_line(&mut self, line: &str) -> Result<(), String> {
     let line: PiSessionLine = serde_json::from_str(line).map_err(|err| err.to_string())?;
     match line.into_item() {
-      PiSessionItem::SessionInfo(info) => self.title = info.name.and_then(non_blank),
+      PiSessionItem::SessionInfo(info) => self.title = info.display_name().map(str::to_owned),
       PiSessionItem::Message(message) => {
         self.message_count = self.message_count.saturating_add(1);
         if self.preview.is_none() {
