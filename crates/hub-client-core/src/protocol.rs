@@ -3,7 +3,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
 pub const VERSION: u32 = 1;
-pub const VIEWER_API_VERSION: u64 = 2;
+pub const VIEWER_API_VERSION: u64 = 3;
 pub const MAX_BODY: usize = 1024 * 1024;
 pub const CHUNK_SIZE: usize = 32 * 1024;
 pub const MAX_FRAME: usize = 2 * 1024 * 1024;

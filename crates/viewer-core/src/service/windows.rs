@@ -502,6 +502,7 @@ mod tests {
       subscription_id: update.subscription_id.clone(),
       generation: update.generation.clone(),
       revision: update.revision.clone(),
+      state_hash: update.state_hash.clone(),
     })
   }
 
@@ -767,7 +768,11 @@ mod tests {
     .unwrap();
     assert!(!next.snapshot);
     assert_eq!(next.items.iter().filter(|item| item["kind"] == "event").count(), 1);
-    assert_eq!(next.event_order.unwrap().len(), records.len() + 1);
+    let edit = next.order_edits.unwrap().event_order.unwrap();
+    assert_eq!(
+      (edit.start, edit.delete_count, edit.insert.len()),
+      (records.len(), 0, 1)
+    );
     service
       .relay
       .configure(RelaySettings {
@@ -1043,7 +1048,8 @@ mod tests {
     .await;
     assert!(!history.snapshot);
     assert_eq!(history.items.len(), 3, "only the three additional turns cross the wire");
-    assert_eq!(history.item_order.as_ref().unwrap().len(), 6);
+    let edit = history.order_edits.as_ref().unwrap().item_order.as_ref().unwrap();
+    assert_eq!((edit.start, edit.delete_count, edit.insert.len()), (0, 0, 3));
     service
       .release_session(SessionReleaseRequest {
         subscription_id: history.subscription_id.clone(),
@@ -1054,9 +1060,22 @@ mod tests {
       subscription_id: "new-view".into(),
       ..earlier_request
     };
+    let mut wrong_hash = proof(&history).unwrap();
+    wrong_hash.state_hash = "0".repeat(64);
+    let miss = open(
+      OpenSessionRequest {
+        subscription_id: "wrong-hash".into(),
+        ..resumed_request.clone()
+      },
+      Some(wrong_hash),
+    )
+    .await;
+    assert!(miss.snapshot && miss.base_state_hash.is_none());
     let warm = open(resumed_request.clone(), proof(&history)).await;
     assert_eq!(warm.generation, history.generation);
     assert_eq!(warm.revision, history.revision);
+    assert_eq!(warm.state_hash, history.state_hash);
+    assert_eq!(warm.base_state_hash.as_ref(), Some(&history.state_hash));
     assert!(!warm.snapshot && warm.items.is_empty() && warm.item_order.is_none());
     assert_eq!(warm.state["total_events"], 6);
     let full_request = OpenSessionRequest {

@@ -68,7 +68,7 @@ fn seed_machine(database: &Path, key_file: &Path, host_id: &str) -> Result<(), B
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let directory = tempfile::tempdir()?;
   let viewer = Router::new()
-    .route("/api/v1/health", get(|| async { Json(json!({"version":2})) }))
+    .route("/api/v1/health", get(|| async { Json(json!({"version":protocol::VIEWER_API_VERSION})) }))
     .route("/api/v1/list_sessions", post(|Json(payload): Json<Value>| async move {
       Json(json!({"sessions":[{"text":"Synthetic encrypted history"}],"received_bytes":payload["large"].as_str().map(str::len).unwrap_or(0)}))
     }))

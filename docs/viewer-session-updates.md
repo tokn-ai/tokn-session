@@ -22,17 +22,19 @@ the catalog so they can buffer events that precede a command response.
 `open_session` registers live interest and returns a coherent timeline in
 one command. A cold open defaults to Steps and the latest three turns with
 collapsed groups. Opening a cached session paints its existing cards immediately
-and sends the previous subscription ID, generation and revision in `resume`.
+and sends the previous subscription ID, generation, revision and SHA-256 state
+hash in `resume`.
 When the host can identify that exact projection, it sends changed items,
-removals, changed ordering and current state. An unchanged reopen sends zero
+removals, compact edits to each affected order and current state. An unchanged reopen sends zero
 timeline items. A missing or invalid baseline produces a snapshot in the same
 response. A separate `history_cursor` extends the retained history window.
 Opening a group changes the requested group membership through the same command.
 
 The host captures the baseline under the same lock used for live publication.
-The client validates queued events against the response's generation and revision.
+The client checks that a queued delta's generation, base revision and base hash
+match the cached timeline before applying its edits.
 After a connection interruption it reopens its retained interest with its last
-accepted revision. A reader reset sends one `relay-changed` invalidation to
+accepted revision and hash. A reader reset sends one `relay-changed` invalidation to
 the owner and a targeted notice to affected shared viewers. A replacement
 discovered during normal publication also produces a small resync notice on
 SSE. Recovering a timeline reads history only for the open session. Operations
@@ -121,7 +123,7 @@ in addition to the existing bounded display replicas.
 
 ## Adapters and limits
 
-Viewer protocol revision 2 uses the same open, release, resource and renewal
+Viewer protocol revision 3 uses the same open, release, resource and renewal
 commands on Tauri and HTTP. The Hub transports HTTP-shaped commands and SSE
 through the encrypted connection. Shared grants restrict access to their
 explicit session keys and namespace subscription IDs per recipient and grant.

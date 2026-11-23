@@ -61,9 +61,9 @@ function snapshot(request: OpenSessionRequest, revision = "1"): SessionUpdate {
   };
   return {
     subscription_id: request.subscription_id, session_key: request.session_key, level: request.level,
-    generation: "local", base_revision: null, revision, snapshot: true,
+    generation: "local", base_revision: null, base_state_hash: null, state_hash: "1".repeat(64), revision, snapshot: true,
     items: [{ item_id: event.event_key, kind: "assistant_message", level: "steps", summary: event }],
-    groups: [], removed_items: [], item_order: [event.event_key],
+    groups: [], removed_items: [], item_order: [event.event_key], semantic_order: [event.event_key], event_order: [],
     state: { previous_cursor: "local-earlier", next_cursor: null,
       total_events: 2, history_status: "complete", scope: request.scope },
   };

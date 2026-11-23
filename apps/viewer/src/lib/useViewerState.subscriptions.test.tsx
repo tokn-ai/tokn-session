@@ -46,9 +46,9 @@ function baseline(request: OpenSessionRequest, running: boolean, revision: numbe
   const summary: EventSummary = { event_key: "reply", type: "message", provider: "codex", timestamp: null,
     phase: "finished", role: "assistant", delivery: "final", title: "Assistant", summary: "Cached reply",
     summary_truncated: false, is_hidden: false, is_error: false, tool: null, usage: null, reasoning: null };
-  return { ...request, generation: "delivery", revision: String(revision), base_revision: null, snapshot: true,
+  return { ...request, generation: "delivery", revision: String(revision), base_revision: null, base_state_hash: null, state_hash: String(revision).padStart(64, "0"), snapshot: true,
     items: [{ item_id: "reply", kind: "assistant_message", level: "final", summary }], groups: [],
-    removed_items: [], item_order: ["reply"], state: { total_events: 1, previous_cursor: null, next_cursor: null,
+    removed_items: [], item_order: ["reply"], semantic_order: ["reply"], event_order: [], state: { total_events: 1, previous_cursor: null, next_cursor: null,
       history_status: "complete", is_running: running, source_revision: `source:${revision}` } };
 }
 
@@ -108,6 +108,27 @@ async function heartbeat(timers: ReturnType<typeof vi.spyOn>) {
   });
 }
 
+it("recovers a same-revision hash conflict with a fresh snapshot", async () => {
+  const backend = host(false);
+  const { result } = renderHook(() => useViewerState());
+  await open(result, "live");
+  const [first] = backend.subscriptions.values();
+  let recovery: OpenSessionRequest | undefined;
+  backend.change(true);
+  backend.block(async (request) => {
+    recovery = request;
+    return backend.baseline(request);
+  });
+  act(() => handlers.get("session-updated")?.({ payload: {
+    ...baseline(first, false, 1), state_hash: "f".repeat(64),
+    snapshot: false, base_revision: "0", base_state_hash: "0".repeat(64),
+    items: [], groups: [], item_order: null, semantic_order: null, event_order: null,
+  } }));
+  await waitFor(() => expect(recovery?.subscription_id).toBe(first.subscription_id));
+  expect(recovery?.resume).toBeUndefined();
+  await waitFor(() => expect(result.current.sessions.find((row) => row.session_key === "live")?.is_running).toBe(true));
+});
+
 it("reuses the retained window and applies a live update that beats the reopen response", async () => {
   const backend = host(false);
   const { result } = renderHook(() => useViewerState());
@@ -125,12 +146,12 @@ it("reuses the retained window and applies a live update that beats the reopen r
   act(() => result.current.selectSession("live"));
   expect(result.current.events).toBe(cached);
   await waitFor(() => expect(reopened?.resume).toEqual({
-    subscription_id: first.subscription_id, generation: "delivery", revision: "1",
+    subscription_id: first.subscription_id, generation: "delivery", revision: "1", state_hash: "1".padStart(64, "0"),
   }));
   expect(reopened.subscription_id).not.toBe(first.subscription_id);
   const snapshot = backend.baseline(reopened);
-  const ack = { ...snapshot, snapshot: false, base_revision: "1", items: [], item_order: null };
-  const delta = { ...ack, revision: "2", items: snapshot.items.map((item) => ({
+  const ack = { ...snapshot, snapshot: false, base_revision: "1", base_state_hash: "1".padStart(64, "0"), items: [], item_order: null, semantic_order: null, event_order: null };
+  const delta = { ...ack, revision: "2", state_hash: "2".padStart(64, "0"), items: snapshot.items.map((item) => ({
     ...item, summary: { ...item.summary!, summary: "A newer reply" },
   })), state: { ...ack.state, source_revision: "source:2", is_running: true } };
   act(() => handlers.get("session-updated")?.({ payload: delta }));
@@ -148,8 +169,8 @@ it("rebinds an unchanged projection after stream reconnect with one open and no 
   const before = result.current.events;
   const first = [...backend.subscriptions.values()][0];
   backend.block(async (request) => {
-    expect(request.resume).toEqual({ subscription_id: first.subscription_id, generation: "delivery", revision: "1" });
-    return { ...backend.baseline(request), snapshot: false, base_revision: "1", items: [], item_order: null };
+    expect(request.resume).toEqual({ subscription_id: first.subscription_id, generation: "delivery", revision: "1", state_hash: "1".padStart(64, "0") });
+    return { ...backend.baseline(request), snapshot: false, base_revision: "1", base_state_hash: "1".padStart(64, "0"), items: [], item_order: null, semantic_order: null, event_order: null };
   });
   await act(async () => handlers.get("transport-reconnected")?.({ payload: {} }));
   expect(result.current.events).toBe(before);

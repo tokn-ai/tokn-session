@@ -32,7 +32,7 @@ struct ApiState {
   shutdown: CancellationToken,
 }
 
-const VIEWER_PROTOCOL_VERSION: u32 = 2;
+const VIEWER_PROTOCOL_VERSION: u32 = 3;
 
 type ApiError = (StatusCode, Json<Value>);
 fn error(status: StatusCode, message: impl Into<String>) -> ApiError {
@@ -952,6 +952,8 @@ mod tests {
     assert_eq!(cold["snapshot"], true);
     assert!(!cold["items"].as_array().unwrap().is_empty());
     assert_eq!(cold["subscription_id"], "first");
+    let hash = cold["state_hash"].as_str().unwrap();
+    assert_eq!(hash.len(), 64);
     let renewal = post_json(
       app,
       "shared",
@@ -962,11 +964,23 @@ mod tests {
     let release = post_json(app, "shared", scoped("release_session", json!({"request":open}))).await;
     assert_eq!(release, json!({"subscription_id":"first","unsubscribed":true}));
     let mut next = json!({"session_key":session_key,"subscription_id":"second","resume":{
-      "subscription_id":"first","generation":cold["generation"],"revision":cold["revision"]
+      "subscription_id":"first","generation":cold["generation"],"revision":cold["revision"],"state_hash":cold["state_hash"]
     }});
+    let mut divergent = next.clone();
+    divergent["subscription_id"] = json!("divergent");
+    divergent["resume"]["state_hash"] = json!(if hash.starts_with('0') {
+      "1".repeat(64)
+    } else {
+      "0".repeat(64)
+    });
+    let fresh = post_json(app, "shared", scoped("open_session", json!({"request":divergent}))).await;
+    assert_eq!(fresh["snapshot"], true);
+    assert!(fresh["base_state_hash"].is_null());
     let warm = post_json(app, "shared", scoped("open_session", json!({"request":next}))).await;
     assert_eq!(warm["snapshot"], false);
     assert_eq!(warm["base_revision"], cold["revision"]);
+    assert_eq!(warm["base_state_hash"], cold["state_hash"]);
+    assert_eq!(warm["state_hash"], cold["state_hash"]);
     assert_eq!(warm["subscription_id"], "second");
     assert_eq!(warm["items"], json!([]));
     // The same session key and revision from an independent viewer cannot

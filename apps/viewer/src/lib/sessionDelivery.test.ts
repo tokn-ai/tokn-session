@@ -55,13 +55,13 @@ it("routes model reads and mutation through the captured session machine without
   expect(invoke).not.toHaveBeenCalled();
 });
 const request: OpenSessionRequest = { subscription_id: "modern", session_key: "one", level: "steps", scope: { history: "latest_turn", group_keys: [] } };
-const update: SessionUpdate = { ...request, generation: "source", revision: "1", snapshot: true, base_revision: null,
-  items: [], groups: [], removed_items: [], item_order: [], state: { total_events: 0, previous_cursor: null, next_cursor: null, history_status: "complete" } };
+const update: SessionUpdate = { ...request, generation: "source", revision: "1", snapshot: true, base_revision: null, base_state_hash: null, state_hash: "1".repeat(64),
+  items: [], groups: [], removed_items: [], item_order: [], semantic_order: [], event_order: [], state: { total_events: 0, previous_cursor: null, next_cursor: null, history_status: "complete" } };
 
 it("opens cold and retained projections in one request each on their captured machine", async () => {
   const { send, calls } = machineInvoker();
   calls.mockResolvedValue(update);
-  const resume = { ...request, resume: { subscription_id: "earlier", generation: "source", revision: "1" } };
+  const resume = { ...request, resume: { subscription_id: "earlier", generation: "source", revision: "1", state_hash: "1".repeat(64) } };
   const group = { ...resume, scope: { ...request.scope!, group_keys: ["activity:a"] } };
   for (const open of [request, resume, group]) expect(await openSession(open, send)).toBe(update);
   expect(calls.mock.calls).toEqual([request, resume, group].map((request) => ["open_session", { request }]));

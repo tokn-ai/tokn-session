@@ -2188,7 +2188,7 @@ describe("useViewerState expanded tool detail", () => {
     });
     vi.mocked(openSession).mockImplementation(async (request) => {
       const snapshot = semanticSnapshot(request, toolEventPage());
-      return request.resume ? { ...snapshot, snapshot: false, base_revision: request.resume.revision, items: [], item_order: null } : snapshot;
+      return request.resume ? { ...snapshot, snapshot: false, base_revision: request.resume.revision, base_state_hash: request.resume.state_hash, items: [], item_order: null, semantic_order: null, event_order: null } : snapshot;
     });
     vi.mocked(loadEventDetail)
       .mockImplementationOnce(() => oldA.promise)
@@ -2846,9 +2846,9 @@ describe("useViewerState subagent discovery", () => {
 function semanticSnapshot(request: import("./types").OpenSessionRequest, page: EventPageResponse & { scope?: import("./types").SessionUpdateScope }): import("./types").SessionUpdate {
   const { events, ...state } = page;
   return { subscription_id: request.subscription_id, session_key: request.session_key, level: request.level,
-    generation: "fixture", base_revision: null, revision: "1", snapshot: true,
+    generation: "fixture", base_revision: null, base_state_hash: null, state_hash: "1".repeat(64), revision: "1", snapshot: true,
     items: events.map((summary) => ({ item_id: summary.event_key, kind: "tool_summary", level: "steps", summary })),
-    groups: [], removed_items: [], item_order: events.map((event) => event.event_key), state };
+    groups: [], removed_items: [], item_order: events.map((event) => event.event_key), semantic_order: events.map((event) => event.event_key), event_order: [], state };
 }
 
 describe("semantic session delivery", () => {
@@ -3234,7 +3234,7 @@ describe("semantic session delivery", () => {
     await waitFor(() => expect(result.current.events).toEqual(page.events));
     const request = vi.mocked(openSession).mock.calls.find(([request]) => request.level === "steps")![0];
     const update = semanticSnapshot(request, page);
-    act(() => emit?.({ ...update, snapshot: false, base_revision: "1", revision: "2", item_order: null,
+    act(() => emit?.({ ...update, snapshot: false, base_revision: "1", base_state_hash: "1".repeat(64), revision: "2", state_hash: "2".repeat(64), item_order: null, semantic_order: null, event_order: null,
       items: [{ ...update.items[0], summary: { ...page.events[0], summary: "pushed progress" } }] }));
     await waitFor(() => expect(result.current.events[0].summary).toBe("pushed progress"));
     expect(loadEventPage).not.toHaveBeenCalled();
@@ -3258,7 +3258,7 @@ describe("semantic session delivery", () => {
     act(() => result.current.toggleEventExpanded(page.events[0].event_key));
     await waitFor(() => expect(result.current.trajectoryPages.get("live")?.get(page.events[0].event_key)?.events).toEqual([child]));
     const request = vi.mocked(openSession).mock.calls.find(([request]) => request.level === "steps")![0];
-    act(() => emit?.({ ...makeUpdate(request), snapshot: false, base_revision: "1", revision: "2", item_order: null, groups: [],
+    act(() => emit?.({ ...makeUpdate(request), snapshot: false, base_revision: "1", base_state_hash: "1".repeat(64), revision: "2", state_hash: "2".repeat(64), item_order: null, semantic_order: null, event_order: null, groups: [],
       items: [{ item_id: child.event_key, kind: "tool_summary", level: "steps", summary: { ...child, summary: "cached progress" } }] }));
     await waitFor(() => expect(result.current.trajectoryPages.get("live")?.get(page.events[0].event_key)?.events[0].summary).toBe("cached progress"));
     expect(loadTrajectoryEventPage).not.toHaveBeenCalled();
@@ -3397,7 +3397,7 @@ describe("semantic session delivery", () => {
     await waitFor(() => expect(result.current.detail?.tool_output?.sections[0].text).toBe("inspected"));
     const request = vi.mocked(openSession).mock.calls.find(([request]) => request.level === "steps")![0];
     const initial = semanticSnapshot(request, page);
-    act(() => emit?.({ ...initial, snapshot: false, base_revision: "1", revision: "2", item_order: null,
+    act(() => emit?.({ ...initial, snapshot: false, base_revision: "1", base_state_hash: "1".repeat(64), revision: "2", state_hash: "2".repeat(64), item_order: null, semantic_order: null, event_order: null,
       items: [{ ...initial.items[0], summary: { ...page.events[0], summary: "changed" } }] }));
     await waitFor(() => expect(result.current.detail?.tool_output?.sections[0].text).toBe("updated inspection"));
     expect(loadToolDetails).not.toHaveBeenCalled();

@@ -45,6 +45,12 @@ fn generation() -> String {
   )
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PresentationSource {
+  Provider,
+  Index,
+}
+
 pub(crate) struct SessionReader {
   file: Option<FileState>,
   database: Option<OpenCodeSessionSource>,
@@ -52,6 +58,7 @@ pub(crate) struct SessionReader {
   #[cfg(test)]
   database_reads: usize,
   native: bool,
+  presentation: PresentationSource,
   root: PathBuf,
   version: Vec<Option<FileVersion>>,
   codex_history: Option<tokn_session_codex::CodexHistoryReader>,
@@ -65,42 +72,16 @@ pub(crate) struct SessionReader {
 impl SessionReader {
   #[cfg(test)]
   pub fn new(entry: CatalogEntry, native: bool, root: PathBuf) -> Result<Self, String> {
-    Self::new_with_cancel(entry, native, root, None)
+    Self::open(entry, native, root, None, false, PresentationSource::Provider)
   }
 
-  pub fn new_cancellable(
-    entry: CatalogEntry,
-    native: bool,
-    root: PathBuf,
-    cancel: CancellationToken,
-  ) -> Result<Self, String> {
-    Self::new_with_cancel(entry, native, root, Some(cancel))
-  }
-
-  pub fn new_window_cancellable(
-    entry: CatalogEntry,
-    native: bool,
-    root: PathBuf,
-    cancel: CancellationToken,
-  ) -> Result<Self, String> {
-    Self::new_with_mode(entry, native, root, Some(cancel), true)
-  }
-
-  fn new_with_cancel(
-    entry: CatalogEntry,
-    native: bool,
-    root: PathBuf,
-    cancel: Option<CancellationToken>,
-  ) -> Result<Self, String> {
-    Self::new_with_mode(entry, native, root, cancel, false)
-  }
-
-  fn new_with_mode(
+  pub fn open(
     entry: CatalogEntry,
     native: bool,
     root: PathBuf,
     cancel: Option<CancellationToken>,
     window: bool,
+    presentation: PresentationSource,
   ) -> Result<Self, String> {
     check_cancelled(cancel.as_ref())?;
     let mut reader = Self {
@@ -122,6 +103,7 @@ impl SessionReader {
       #[cfg(test)]
       database_reads: 0,
       native,
+      presentation,
       root,
       version: Vec::new(),
       codex_history: (entry.provider == Provider::Codex).then(|| {
@@ -385,8 +367,10 @@ impl SessionReader {
     } else {
       self.window_shapes.extend(shapes);
     }
-    self.snapshot.entry.header.title = update.reference.title;
-    self.snapshot.entry.header.preview = update.reference.preview;
+    if self.presentation == PresentationSource::Provider {
+      self.snapshot.entry.header.title = update.reference.title;
+      self.snapshot.entry.header.preview = update.reference.preview;
+    }
     self.snapshot.entry.header.cwd = update.reference.cwd;
     self.snapshot.entry.header.parent_session_id = update.reference.parent_session_id;
     self.snapshot.revision += 1;
@@ -433,7 +417,7 @@ impl SessionReader {
   fn reconcile(
     &mut self,
     reference: SessionRef,
-    header: SessionHeader,
+    mut header: SessionHeader,
     records: Vec<CompactRecord>,
     version: Vec<Option<FileVersion>>,
     force_reset: bool,
@@ -455,6 +439,10 @@ impl SessionReader {
     #[cfg(not(unix))]
     let replaced = false;
     let reset = force_reset || replaced || prefix < self.snapshot.records.len();
+    if self.presentation == PresentationSource::Index {
+      header.title.clone_from(&self.snapshot.entry.header.title);
+      header.preview.clone_from(&self.snapshot.entry.header.preview);
+    }
     let header_changed = header != self.snapshot.entry.header;
     let changed =
       reset || records.len() != self.snapshot.records.len() || header_changed || self.snapshot.error.is_some();

@@ -1010,14 +1010,22 @@ export interface SessionUpdate {
   generation: string;
   base_revision: string | null;
   revision: string;
+  state_hash: string;
+  base_state_hash: string | null;
   snapshot: boolean;
   items: SessionUpdateItem[];
   groups?: SessionUpdateItem[];
   semantic_order?: string[] | null;
   event_order?: string[] | null;
   removed_items: string[];
-  item_order: string[] | null;
+  item_order?: string[] | null;
+  order_edits?: Partial<Record<"item_order" | "semantic_order" | "event_order", SessionOrderEdit>> | null;
   state: Omit<EventPageResponse, "events"> & { is_running?: boolean; error?: string; scope?: SessionUpdateScope };
+}
+export interface SessionOrderEdit {
+  start: number;
+  delete_count: number;
+  insert: string[];
 }
 export interface SessionUpdateScope {
   history: "latest_turn" | "recent_turns" | "retained";
@@ -1025,7 +1033,7 @@ export interface SessionUpdateScope {
   group_keys: string[];
 }
 export interface OpenSessionRequest {
-  resume?: { subscription_id: string; generation: string; revision: string };
+  resume?: { subscription_id: string; generation: string; revision: string; state_hash: string };
   subscription_id: string;
   session_key: string;
   level: ConversationUpdateLevel;
