@@ -6,6 +6,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
   collections::{BTreeMap, HashMap, HashSet},
   sync::Arc,
@@ -51,6 +52,7 @@ pub struct SessionResume {
   pub subscription_id: String,
   pub generation: String,
   pub revision: String,
+  pub state_hash: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -76,6 +78,57 @@ pub struct SessionSubscriptionRenewal {
 }
 
 #[derive(Debug, Serialize)]
+pub struct OrderEdit {
+  pub start: usize,
+  pub delete_count: usize,
+  pub insert: Vec<String>,
+}
+
+impl OrderEdit {
+  /// Replace the portion between the two unchanged ends. An append carries
+  /// only new IDs, even when the receiver has thousands of retained items.
+  fn between(before: &[String], after: &[String]) -> Option<Self> {
+    let start = before.iter().zip(after).take_while(|(a, b)| a == b).count();
+    if start == before.len() && start == after.len() {
+      return None;
+    }
+    let suffix = before[start..]
+      .iter()
+      .rev()
+      .zip(after[start..].iter().rev())
+      .take_while(|(a, b)| a == b)
+      .count();
+    Some(Self {
+      start,
+      delete_count: before.len() - start - suffix,
+      insert: after[start..after.len() - suffix].to_vec(),
+    })
+  }
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct OrderEdits {
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub item_order: Option<OrderEdit>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub semantic_order: Option<OrderEdit>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub event_order: Option<OrderEdit>,
+}
+
+impl OrderEdits {
+  fn is_empty(&self) -> bool {
+    self.item_order.is_none() && self.semantic_order.is_none() && self.event_order.is_none()
+  }
+}
+
+#[derive(Serialize)]
+enum OrderChange<'a> {
+  Snapshot([&'a [String]; 3]),
+  Delta(&'a OrderEdits),
+}
+
+#[derive(Debug, Serialize)]
 pub struct SessionUpdate {
   pub subscription_id: String,
   pub session_key: String,
@@ -83,6 +136,8 @@ pub struct SessionUpdate {
   pub generation: String,
   pub base_revision: Option<String>,
   pub revision: String,
+  pub base_state_hash: Option<String>,
+  pub state_hash: String,
   pub snapshot: bool,
   /// Semantic objects: user_message, assistant_message, notification,
   /// tool_summary, or detail. Existing card summaries are a presentation adapter.
@@ -95,6 +150,8 @@ pub struct SessionUpdate {
   pub event_order: Option<Vec<String>>,
   pub removed_items: Vec<String>,
   pub item_order: Option<Vec<String>>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub order_edits: Option<OrderEdits>,
   pub state: Value,
 }
 
@@ -103,6 +160,7 @@ struct Subscription {
   request: OpenSessionRequest,
   generation: String,
   revision: u64,
+  state_hash: String,
   items: BTreeMap<String, Value>,
   order: Vec<String>,
   semantic_order: Vec<String>,
@@ -296,6 +354,7 @@ impl Subscription {
       request: request.clone(),
       generation: uuid::Uuid::new_v4().to_string(),
       revision: 0,
+      state_hash: String::new(),
       items: BTreeMap::new(),
       order: Vec::new(),
       semantic_order: Vec::new(),
@@ -313,10 +372,42 @@ impl Subscription {
       && self.request.level == request.level
       && self.generation == resume.generation
       && self.revision.to_string() == resume.revision
+      && self.state_hash == resume.state_hash
+  }
+
+  /// Commit to a full projection on reset and only the actual changes thereafter.
+  /// The short-lived subscription ID can change when this projection is resumed.
+  fn next_hash(
+    &self,
+    parent: Option<&str>,
+    upserts: &[&Value],
+    removed: &[String],
+    orders: OrderChange<'_>,
+    state: &Value,
+  ) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"tokn:session-projection:v1\0");
+    serde_json::to_writer(
+      &mut digest,
+      &(
+        parent,
+        &self.request.session_key,
+        self.request.level,
+        &self.generation,
+        self.revision,
+        upserts,
+        removed,
+        orders,
+        state,
+      ),
+    )
+    .expect("projection contains only JSON values and an infallible hash writer");
+    format!("{:x}", digest.finalize())
   }
 
   fn measure_bytes(&mut self) {
     self.bytes = self.request.subscription_id.len()
+      + self.state_hash.len()
       + self.request.session_key.len()
       + self
         .session_scope
@@ -351,8 +442,17 @@ impl Subscription {
       return None;
     }
     let base_revision = self.revision.to_string();
+    let snapshot = self.revision == 0;
+    let base_state_hash = (!snapshot).then(|| self.state_hash.clone());
     self.revision += 1;
     self.state["error"] = json!(error);
+    let empty_edits = OrderEdits::default();
+    let orders = if snapshot {
+      OrderChange::Snapshot([&self.order, &self.semantic_order, &self.event_order])
+    } else {
+      OrderChange::Delta(&empty_edits)
+    };
+    self.state_hash = self.next_hash(base_state_hash.as_deref(), &[&item], &[], orders, &self.state);
     self.items.insert(id, item.clone());
     self.measure_bytes();
     Some(SessionUpdate {
@@ -360,15 +460,18 @@ impl Subscription {
       session_key: self.request.session_key.clone(),
       level: self.request.level,
       generation: self.generation.clone(),
-      base_revision: Some(base_revision),
+      base_revision: (!snapshot).then_some(base_revision),
       revision: self.revision.to_string(),
-      snapshot: false,
+      base_state_hash,
+      state_hash: self.state_hash.clone(),
+      snapshot,
       items: vec![item],
       groups: Vec::new(),
-      semantic_order: None,
-      event_order: None,
+      semantic_order: snapshot.then(|| self.semantic_order.clone()),
+      event_order: snapshot.then(|| self.event_order.clone()),
       removed_items: Vec::new(),
-      item_order: None,
+      item_order: snapshot.then(|| self.order.clone()),
+      order_edits: None,
       state: self.state.clone(),
     })
   }
@@ -461,25 +564,24 @@ impl Subscription {
       }
     }
     let old_revision = self.revision.to_string();
-    let changed = reset
-      || self.items != items
-      || self.order != order
-      || self.event_order != event_order
-      || self.semantic_order != semantic_order
-      || self.state != state;
-    if reset && self.revision != 0 {
-      self.generation = uuid::Uuid::new_v4().to_string();
-    }
-    if changed {
-      self.revision += 1;
-    }
+    let reset = reset || self.revision == 0;
     let snapshot = reset || cursor != Some(old_revision.as_str());
-    let additions: Vec<Value> = items
+    let base_state_hash = (!snapshot).then(|| self.state_hash.clone());
+    let edits = if reset {
+      OrderEdits::default()
+    } else {
+      OrderEdits {
+        item_order: OrderEdit::between(&self.order, &order),
+        semantic_order: OrderEdit::between(&self.semantic_order, &semantic_order),
+        event_order: OrderEdit::between(&self.event_order, &event_order),
+      }
+    };
+    let upserts: Vec<_> = items
       .iter()
-      .filter(|(key, value)| snapshot || self.items.get(*key) != Some(*value))
-      .map(|(_, value)| value.clone())
+      .filter(|(key, value)| reset || self.items.get(*key) != Some(*value))
+      .map(|(_, value)| value)
       .collect();
-    let removed = if snapshot {
+    let removed: Vec<String> = if reset {
       Vec::new()
     } else {
       self
@@ -489,9 +591,36 @@ impl Subscription {
         .cloned()
         .collect()
     };
-    let item_order = (snapshot || self.order != order).then(|| order.clone());
-    let semantic_order_update = (snapshot || self.semantic_order != semantic_order).then(|| semantic_order.clone());
-    let event_order_update = (snapshot || self.event_order != event_order).then(|| event_order.clone());
+    let changed = reset || !upserts.is_empty() || !removed.is_empty() || !edits.is_empty() || self.state != state;
+    if reset && self.revision != 0 {
+      self.generation = uuid::Uuid::new_v4().to_string();
+    }
+    if changed {
+      self.revision += 1;
+      let orders = if reset {
+        OrderChange::Snapshot([&order, &semantic_order, &event_order])
+      } else {
+        OrderChange::Delta(&edits)
+      };
+      self.state_hash = self.next_hash(
+        (!reset).then_some(self.state_hash.as_str()),
+        &upserts,
+        &removed,
+        orders,
+        &state,
+      );
+    }
+    let additions = if snapshot && !reset {
+      // A cursor miss can require a full response from an existing generation.
+      // Its commitment still describes the same state as a successful resume.
+      items.values().collect()
+    } else {
+      upserts
+    };
+    let (groups, additions) = additions
+      .into_iter()
+      .cloned()
+      .partition(|item| item["kind"] == "work_summary");
     self.event_order = event_order;
     self.semantic_order = semantic_order;
     self.items = items;
@@ -505,20 +634,16 @@ impl Subscription {
       generation: self.generation.clone(),
       base_revision: (!snapshot).then_some(old_revision),
       revision: self.revision.to_string(),
+      base_state_hash,
+      state_hash: self.state_hash.clone(),
       snapshot,
-      groups: additions
-        .iter()
-        .filter(|item| item["kind"] == "work_summary")
-        .cloned()
-        .collect(),
-      items: additions
-        .into_iter()
-        .filter(|item| item["kind"] != "work_summary")
-        .collect(),
-      semantic_order: semantic_order_update,
-      event_order: event_order_update,
-      removed_items: removed,
-      item_order,
+      groups,
+      items: additions,
+      semantic_order: snapshot.then(|| self.semantic_order.clone()),
+      event_order: snapshot.then(|| self.event_order.clone()),
+      removed_items: if snapshot { Vec::new() } else { removed },
+      item_order: snapshot.then(|| self.order.clone()),
+      order_edits: (!snapshot && !edits.is_empty()).then_some(edits),
       state: self.state.clone(),
     }
   }
@@ -819,6 +944,7 @@ mod tests {
       },
       generation: "initial".into(),
       revision: 0,
+      state_hash: String::new(),
       items: BTreeMap::new(),
       order: Vec::new(),
       semantic_order: Vec::new(),
@@ -970,6 +1096,7 @@ mod tests {
       subscription_id: "view".into(),
       generation: "initial".into(),
       revision: "4".into(),
+      state_hash: String::new(),
     };
     let (opened, cursor) = store.open(&request, &None, Some(&stale));
     assert!(cursor.is_none());
@@ -1104,7 +1231,9 @@ mod tests {
       Some(&next.revision),
     );
     assert_eq!(removed.removed_items.len(), 21);
-    assert_eq!(removed.event_order.unwrap().len(), 3);
+    let edit = removed.order_edits.unwrap().event_order.unwrap();
+    assert_eq!((edit.start, edit.delete_count), (3, 21));
+    assert!(edit.insert.is_empty());
     let steps =
       subscription(UpdateLevel::Steps).update_with_events(page(vec![], vec![]), vec![], vec![], events, true, None);
     assert!(steps.items.is_empty());
@@ -1131,9 +1260,91 @@ mod tests {
     assert!(!update.snapshot);
     assert_eq!(update.items.len(), 1);
     assert!(update.item_order.is_none());
+    assert!(update.order_edits.is_none());
+    assert_eq!(update.base_state_hash.as_ref(), Some(&first.state_hash));
+    assert_ne!(update.state_hash, first.state_hash);
     let unchanged = state.update(page(next.clone(), vec![]), next, vec![], false, Some(&update.revision));
     assert_eq!(unchanged.revision, update.revision);
+    assert_eq!(unchanged.state_hash, update.state_hash);
+    assert_eq!(unchanged.base_state_hash.as_ref(), Some(&update.state_hash));
     assert!(unchanged.items.is_empty());
+  }
+
+  #[test]
+  fn append_wire_size_is_independent_of_the_retained_order_length() {
+    let mut subscription = subscription(UpdateLevel::Steps);
+    let mut events: Vec<_> = (0..1000)
+      .map(|i| message(&format!("existing-message-{i}"), "user", "unspecified", "earlier"))
+      .collect();
+    let first = subscription.update(page(events.clone(), vec![]), events.clone(), vec![], true, None);
+    assert_eq!(first.state_hash.len(), 64);
+    assert!(
+      first
+        .state_hash
+        .bytes()
+        .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    );
+    assert!(first.base_state_hash.is_none());
+    events.push(message("new-message", "assistant", "final", "latest"));
+    let next = subscription.update(
+      page(events.clone(), vec![]),
+      events,
+      vec![],
+      false,
+      Some(&first.revision),
+    );
+    let wire = serde_json::to_string(&next).unwrap();
+    assert!(wire.len() < 1500, "one appended message used {} bytes", wire.len());
+    assert!(!wire.contains("existing-message-"));
+    let edit = json!({"start":1000,"delete_count":0,"insert":["new-message"]});
+    assert_eq!(
+      json!(next.order_edits),
+      json!({"item_order":edit,"semantic_order":edit})
+    );
+    assert_eq!(next.base_state_hash.as_ref(), Some(&first.state_hash));
+  }
+
+  #[test]
+  fn order_splice_reconstructs_insertion_deletion_and_reordering() {
+    let before = ["a", "b", "c", "d"].map(String::from);
+    for (after, start, delete_count, insert) in [
+      (vec!["x", "a", "b", "c", "d"], 0, 0, vec!["x"]),
+      (vec!["a", "c", "d"], 1, 1, vec![]),
+      (vec!["a", "c", "b", "d"], 1, 2, vec!["c", "b"]),
+      (vec![], 0, 4, vec![]),
+    ] {
+      let after: Vec<_> = after.into_iter().map(String::from).collect();
+      let edit = OrderEdit::between(&before, &after).unwrap();
+      assert_eq!((edit.start, edit.delete_count), (start, delete_count));
+      assert_eq!(edit.insert, insert);
+      let mut rebuilt = before.to_vec();
+      rebuilt.splice(edit.start..edit.start + edit.delete_count, edit.insert);
+      assert_eq!(rebuilt, after);
+    }
+    assert!(OrderEdit::between(&before, &before).is_none());
+  }
+
+  #[test]
+  fn revision_commitment_binds_predecessor_and_order_for_equal_counters() {
+    let mut left = subscription(UpdateLevel::Steps);
+    let mut right = subscription(UpdateLevel::Steps);
+    let a = message("a", "user", "unspecified", "A");
+    let b = message("b", "user", "unspecified", "B");
+    let initial =
+      |sub: &mut Subscription, items: Vec<Value>| sub.update(page(items.clone(), vec![]), items, vec![], true, None);
+    let first = initial(&mut left, vec![a.clone(), b.clone()]);
+    let reversed = initial(&mut right, vec![b.clone(), a.clone()]);
+    assert_ne!(first.state_hash, reversed.state_hash);
+    let edit = |sub: &mut Subscription, cursor: &str| {
+      let items = vec![a.clone(), b.clone(), message("c", "assistant", "final", "C")];
+      sub.update(page(items.clone(), vec![]), items, vec![], false, Some(cursor))
+    };
+    let left_final = edit(&mut left, &first.revision);
+    let right_final = edit(&mut right, &reversed.revision);
+    assert_eq!(left_final.revision, right_final.revision);
+    assert_ne!(left_final.state_hash, right_final.state_hash);
+    assert_eq!(left_final.base_state_hash, Some(first.state_hash));
+    assert_eq!(right_final.base_state_hash, Some(reversed.state_hash));
   }
 
   #[test]
@@ -1160,6 +1371,9 @@ mod tests {
     assert!(resolved.items.is_empty());
     assert_eq!(resolved.state["outstanding_questions"], json!([]));
     assert_ne!(resolved.revision, first.revision);
+    assert_ne!(resolved.state_hash, first.state_hash);
+    assert_eq!(resolved.base_state_hash, Some(first.state_hash));
+    assert!(resolved.order_edits.is_none());
   }
 
   #[test]
@@ -1241,8 +1455,10 @@ mod tests {
   fn source_errors_preserve_display_and_recovery_retires_the_notification() {
     let mut state = subscription(UpdateLevel::Steps);
     let events = vec![message("u", "user", "unspecified", "hi")];
-    state.update(page(events.clone(), vec![]), events.clone(), vec![], true, None);
+    let first = state.update(page(events.clone(), vec![]), events.clone(), vec![], true, None);
     let failed = state.failure("source unavailable".into()).unwrap();
+    assert_eq!(failed.base_state_hash.as_ref(), Some(&first.state_hash));
+    assert_ne!(failed.state_hash, first.state_hash);
     assert_eq!(failed.items[0]["notification"]["message"], "source unavailable");
     assert!(state.failure("source unavailable".into()).is_none());
     let recovered = state.update(
@@ -1254,6 +1470,8 @@ mod tests {
     );
     assert!(recovered.items.is_empty());
     assert_eq!(recovered.removed_items, vec!["notification:source-error"]);
+    assert_eq!(recovered.base_state_hash.as_ref(), Some(&failed.state_hash));
+    assert_ne!(recovered.state_hash, failed.state_hash);
     assert!(recovered.state.get("error").is_none());
   }
 }

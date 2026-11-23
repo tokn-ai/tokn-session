@@ -5,14 +5,83 @@ import type { EventSummary, SessionUpdate } from "./types";
 function summary(id: string, text = id): EventSummary {
   return { event_key: id, type: "message", provider: "codex", timestamp: null, phase: "finished", role: "assistant", title: "Assistant", summary: text, summary_truncated: false, is_hidden: false, is_bookkeeping: false, is_error: null, tool: null, usage: null, reasoning: null, trajectory: null, agent_activity: null, compaction: null };
 }
+function delta(base_revision: string, revision: string) {
+  return { snapshot: false, base_revision, revision, state_hash: revision.padStart(64, "0"),
+    base_state_hash: base_revision.padStart(64, "0"), item_order: null, semantic_order: null, event_order: null };
+}
 function snapshot(cache: SessionDisplayCache, key: string, ids = ["a"]): SessionUpdate {
   const request = cache.request(key);
-  return { ...request, generation: "source", revision: "1", base_revision: null, snapshot: true,
-    items: ids.map((id) => ({ item_id: id, kind: "assistant_message", level: "final", summary: summary(id) })), groups: [], item_order: ids,
+  return { ...request, generation: "source", revision: "1", base_revision: null, base_state_hash: null, state_hash: "1".padStart(64, "0"), snapshot: true,
+    items: ids.map((id) => ({ item_id: id, kind: "assistant_message", level: "final", summary: summary(id) })), groups: [], item_order: ids, semantic_order: ids, event_order: [],
     removed_items: [], state: { total_events: ids.length, history_status: "complete", previous_cursor: null, next_cursor: null, outstanding_questions: [] } };
 }
 
 describe("session display replicas", () => {
+  it("applies order splices to the matching hashed revision and resumes with the result", () => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one", ["a", "b"]);
+    const first = cache.apply(initial)!;
+    const edit = { start: 2, delete_count: 0, insert: ["c"] };
+    const append = { ...initial, ...delta("1", "2"),
+      order_edits: { item_order: edit, semantic_order: edit },
+      items: [{ ...initial.items[0], item_id: "c", summary: summary("c") }] };
+    const next = cache.apply(append)!;
+    expect(next.events.map((event) => event.event_key)).toEqual(["a", "b", "c"]);
+    expect(next.events[0]).toBe(first.events[0]);
+    expect(cache.request("one").resume?.state_hash).toBe(append.state_hash);
+    const reordered = cache.apply({ ...append, ...delta("2", "3"), items: [],
+      order_edits: { item_order: { start: 0, delete_count: 2, insert: ["b", "a"] } } })!;
+    expect(reordered.events.map((event) => event.event_key)).toEqual(["b", "a", "c"]);
+  });
+
+  it("keeps independent semantic order on display-only edits", () => {
+    const cache = new SessionDisplayCache();
+    const initial = { ...snapshot(cache, "one", ["a", "b"]), ...cache.request("one", "messages"),
+      item_order: ["b"], semantic_order: ["a", "b"] };
+    cache.apply(initial);
+    const next = cache.apply({ ...initial, ...delta("1", "2"), items: [],
+      order_edits: { item_order: { start: 0, delete_count: 1, insert: ["a"] } } })!;
+    expect(next.events.map((event) => event.event_key)).toEqual(["a", "b"]);
+  });
+
+  it("drops a conflicting hash on a delta, duplicate revision, or unchanged acknowledgement", () => {
+    for (const mode of ["delta", "duplicate", "ack"] as const) {
+      const cache = new SessionDisplayCache();
+      const initial = snapshot(cache, "one");
+      cache.apply(initial);
+      const update = { ...initial, ...delta("1", mode === "delta" ? "2" : "1"), items: [] };
+      if (mode === "duplicate") update.state_hash = "a".repeat(64);
+      else update.base_state_hash = "b".repeat(64);
+      if (mode === "duplicate") expect(cache.stale(update)).toBe(false);
+      expect(cache.apply(update, mode === "ack")).toBeNull();
+      expect(cache.request("one").resume).toBeUndefined();
+    }
+  });
+
+  it.each([
+    { start: -1, delete_count: 0, insert: [] },
+    { start: 2, delete_count: 0, insert: [] },
+    { start: 0, delete_count: 2, insert: [] },
+    { start: 0.5, delete_count: 0, insert: [] },
+    { start: 1, delete_count: 0, insert: ["unknown"] },
+  ])("recovers from invalid order edits without publishing a partial page", (edit) => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one");
+    cache.apply(initial);
+    expect(cache.apply({ ...initial, ...delta("1", "2"), items: [], order_edits: { semantic_order: edit } })).toBeNull();
+    expect(cache.request("one").resume).toBeUndefined();
+  });
+
+  it("requires an unchanged acknowledgement to contain no edits", () => {
+    const cache = new SessionDisplayCache();
+    const initial = snapshot(cache, "one");
+    cache.apply(initial);
+    const malformed = { ...initial, ...delta("1", "1"), items: [],
+      order_edits: { item_order: { start: 0, delete_count: 1, insert: [] } } };
+    expect(cache.apply(malformed, true)).toBeNull();
+    expect(cache.request("one").resume).toBeUndefined();
+  });
+
   it("retains current model across levels and rejects older history/context", () => {
     const cache = new SessionDisplayCache();
     const model = (model_id: string) => ({ model: { model_provider: "openai", model_id, display_name: null }, source: "recorded" as const, revision: model_id });
@@ -57,7 +126,7 @@ describe("session display replicas", () => {
     expect(cache.requests([initial.subscription_id])).toEqual([cache.request("one")]);
     expect(cache.liveRecoveryRequests()).toEqual([cache.request("one")]);
     expect(cache.liveRunning("one")).toBeUndefined();
-    cache.apply({ ...initial, snapshot: false, base_revision: "1", revision: "2" });
+    cache.apply({ ...initial, ...delta("1", "2") });
     expect(cache.liveRunning("one")).toBeUndefined();
     cache.apply(initial);
     expect(cache.liveRunning("one")).toBe(true);
@@ -70,7 +139,7 @@ describe("session display replicas", () => {
     initial.state = { ...initial.state, is_running, source_revision: "source:1" };
     cache.apply(initial);
     vi.setSystemTime(80_000);
-    cache.apply({ ...initial, snapshot: false, base_revision: "1", revision: "2", state: { ...initial.state, source_revision: "source:2" } });
+    cache.apply({ ...initial, ...delta("1", "2"), state: { ...initial.state, source_revision: "source:2" } });
     expect(cache.liveRunning("one")).toBe(is_running);
     vi.setSystemTime(90_001);
     expect(cache.liveRunning("one")).toBeUndefined();
@@ -201,10 +270,10 @@ describe("session display replicas", () => {
     const initial = snapshot(cache, "one"); initial.state.is_running = true;
     cache.apply(initial);
     cache.resources.set("one", "group", "group", { status: "complete" });
-    cache.apply({ ...initial, snapshot: false, base_revision: "missing", revision: "3" });
+    cache.apply({ ...initial, ...delta("missing", "3") });
     expect(cache.liveRunning("one")).toBeUndefined();
     expect(cache.resources.coverage("one", "group", "group").status).toBe("stale");
-    cache.apply({ ...initial, snapshot: false, base_revision: "1", revision: "2", items: [{ ...initial.items[0], summary: summary("a", "stale pending") }] });
+    cache.apply({ ...initial, ...delta("1", "2"), items: [{ ...initial.items[0], summary: summary("a", "stale pending") }] });
     cache.invalidate("one");
     expect(cache.resources.coverage("one", "group", "group").status).toBe("missing");
     const page = cache.apply({ ...initial, state: { ...initial.state, is_running: undefined } }, true)!;
@@ -264,7 +333,7 @@ describe("session display replicas", () => {
     cache.release("one", "steps");
     const final = cache.request("one", "final");
     expect(final.scope).toEqual({ history: "retained", turn_key: "turn", group_keys: ["activity:a"] });
-    expect([...cache.commit("one", cache.apply({ ...initial, ...final, items: [], item_order: [] })!)!]).toEqual([]);
+    expect([...cache.commit("one", cache.apply({ ...initial, ...final, items: [], item_order: [], semantic_order: [] })!)!]).toEqual([]);
     expect(cache.resources.detail("one", "tool", "a")).toBe(detail);
     expect(cache.resources.detail("one", "inspect", "a")).toBe(detail);
     expect(cache.resources.coverage("one", "group", "activity:a").status).toBe("complete");
@@ -408,12 +477,12 @@ describe("session display replicas", () => {
     expect(cache.assistantPreview("unopened")).toBeNull();
     expect(cache.subscriptionIds()).toEqual(subscriptions);
     const final = cache.request("one", "final");
-    cache.apply({ ...initial, ...final, items: [initial.items[0]], item_order: ["event.v1.2"],
+    cache.apply({ ...initial, ...final, items: [initial.items[0]], item_order: ["event.v1.2"], semantic_order: ["event.v1.2"],
       state: { ...initial.state, source_revision: "source:9" } });
     expect(cache.assistantPreview("one")).toBe("Checking schema.");
     cache.release("one", "all");
     expect(cache.assistantPreview("one")).toBe("Checking schema.");
-    cache.apply({ ...initial, ...final, generation: "replacement", revision: "1", items: [], item_order: [],
+    cache.apply({ ...initial, ...final, generation: "replacement", revision: "1", items: [], item_order: [], semantic_order: [],
       state: { ...initial.state, source_revision: "replacement:1" } }, true);
     expect(cache.assistantPreview("one")).toBeNull();
     cache.invalidate("one");
@@ -427,7 +496,7 @@ describe("session display replicas", () => {
     cache.apply(initial);
     const final = cache.request("one", "final");
     cache.apply({ ...initial, ...final });
-    cache.apply({ ...initial, revision: "2", items: [], item_order: [], state: { ...initial.state, source_revision: "source:2" } });
+    cache.apply({ ...initial, revision: "2", items: [], item_order: [], semantic_order: [], state: { ...initial.state, source_revision: "source:2" } });
     expect(cache.assistantPreview("one")).toBeNull();
   });
 
@@ -444,7 +513,7 @@ describe("session display replicas", () => {
   it("applies changed items while retaining unchanged references", () => {
     const cache = new SessionDisplayCache(); const initial = snapshot(cache, "one", ["a", "b"]);
     const first = cache.apply(initial)!;
-    const next = cache.apply({ ...initial, snapshot: false, base_revision: "1", revision: "2", item_order: null,
+    const next = cache.apply({ ...initial, ...delta("1", "2"),
       items: [{ ...initial.items[1], summary: summary("b", "updated") }] })!;
     expect(next.events[0]).toBe(first.events[0]); expect(next.events[1].summary).toBe("updated");
   });
@@ -453,20 +522,20 @@ describe("session display replicas", () => {
     const cache = new SessionDisplayCache(); const initial = snapshot(cache, "one"); cache.apply(initial);
     expect(cache.apply({ ...initial, subscription_id: "other" })).toBeNull();
     expect(cache.get("one")).not.toBeNull();
-    expect(cache.apply({ ...initial, snapshot: false, base_revision: "missing", revision: "3" })).toBeNull();
+    expect(cache.apply({ ...initial, ...delta("missing", "3") })).toBeNull();
     expect(cache.get("one")).toBeNull(); expect(cache.apply({ ...initial, revision: "4" })).not.toBeNull();
   });
 
   it("buffers updates that arrive before the initial snapshot response", () => {
     const cache = new SessionDisplayCache(); const initial = snapshot(cache, "one");
-    cache.apply({ ...initial, snapshot: false, base_revision: "1", revision: "2", item_order: null,
+    cache.apply({ ...initial, ...delta("1", "2"),
       items: [{ ...initial.items[0], summary: summary("a", "newest") }] });
     expect(cache.apply(initial)?.events[0].summary).toBe("newest");
   });
 
   it("does not regress a newer push when an older request completes", () => {
     const cache = new SessionDisplayCache(); const initial = snapshot(cache, "one"); cache.apply(initial);
-    cache.apply({ ...initial, snapshot: false, base_revision: "1", revision: "2", item_order: null,
+    cache.apply({ ...initial, ...delta("1", "2"),
       items: [{ ...initial.items[0], summary: summary("a", "newest") }] });
     expect(cache.apply(initial)?.events[0].summary).toBe("newest");
   });
@@ -474,7 +543,7 @@ describe("session display replicas", () => {
   it("keeps final coverage separate from all coverage", () => {
     const cache = new SessionDisplayCache(); const initial = snapshot(cache, "one"); cache.apply(initial);
     const final = cache.request("one", "final");
-    cache.apply({ ...initial, ...final, revision: "9", items: [], item_order: [] });
+    cache.apply({ ...initial, ...final, revision: "9", items: [], item_order: [], semantic_order: [] });
     expect(cache.request("one").resume?.revision).toBe("1"); expect(cache.request("one", "final").resume?.revision).toBe("9");
   });
 
@@ -501,7 +570,7 @@ describe("session display replicas", () => {
     cache.apply({ ...initial, ...steps });
     cache.apply({ ...initial, ...final });
     // A pending interest has no replica yet and still needs remote release.
-    cache.apply({ ...initial, ...messages, snapshot: false, base_revision: "1", revision: "2" });
+    cache.apply({ ...initial, ...messages, ...delta("1", "2") });
     const expected = cache.requests().map(({ session_key, subscription_id }) => ({ session_key, subscription_id }));
     cache.select("retained");
     cache.apply(snapshot(cache, "retained"));
@@ -526,9 +595,9 @@ describe("session display replicas", () => {
   it("compares committed snapshots correctly across coalesced pushes", () => {
     const cache = new SessionDisplayCache(); const initial = snapshot(cache, "one", ["a", "b"]);
     const first = cache.apply(initial)!; cache.commit("one", first);
-    const second = cache.apply({ ...initial, snapshot: false, base_revision: "1", revision: "2", item_order: null,
+    const second = cache.apply({ ...initial, ...delta("1", "2"),
       items: [{ ...initial.items[0], summary: summary("a", "updated a") }] })!;
-    const third = cache.apply({ ...initial, snapshot: false, base_revision: "2", revision: "3", item_order: null,
+    const third = cache.apply({ ...initial, ...delta("2", "3"),
       items: [{ ...initial.items[1], summary: summary("b", "updated b") }] })!;
     expect([...cache.commit("one", second)!]).toEqual(["a"]);
     expect([...cache.commit("one", third)!]).toEqual(["b"]);
@@ -544,13 +613,13 @@ describe("session display replicas", () => {
     const first = cache.apply(initial)!; cache.commit("one", first);
     expect(first.events).toHaveLength(1);
     expect(cache.sourceEvents("one")[0].event).toEqual({ type: "tool_result", text: "full output" });
-    const next = cache.apply({ ...initial, snapshot: false, revision: "2", base_revision: "1", item_order: null, event_order: null,
+    const next = cache.apply({ ...initial, ...delta("1", "2"),
       items: [{ item_id: "detail:a", kind: "detail", level: "details", event_key: "a", detail: { ...detail, event: { output: "updated" } } }] })!;
     expect(next.events[0]).toBe(first.events[0]);
     expect(cache.detail("one", "a")?.event).toEqual({ output: "updated" });
     expect([...cache.commit("one", next)!]).toEqual(["a"]);
-    const removed = cache.apply({ ...initial, snapshot: false, revision: "3", base_revision: "2", item_order: null,
-      event_order: [], items: [], removed_items: ["event:result"] })!;
+    const removed = cache.apply({ ...initial, ...delta("2", "3"),
+      order_edits: { event_order: { start: 0, delete_count: 1, insert: [] } }, items: [], removed_items: ["event:result"] })!;
     expect(removed.events).toHaveLength(1);
     expect(cache.sourceEvents("one")).toEqual([]);
   });
@@ -567,12 +636,12 @@ describe("session display replicas", () => {
     expect(first.total_events).toBe(125);
     expect(first.previous_cursor).toBeNull();
     expect(first.next_cursor).toBeNull();
-    cache.apply({ ...initial, snapshot: false, revision: "2", base_revision: "1", item_order: null, groups: [],
+    cache.apply({ ...initial, ...delta("1", "2"), groups: [],
       items: [{ ...initial.items[0], summary: summary("child-0", "finished") }] });
     const updated = cache.trajectoryGroup("one", "work")!;
     expect(updated.events[0].summary).toBe("finished");
     expect(updated.events[1]).toBe(first.events[1]);
-    cache.apply({ ...initial, snapshot: false, revision: "3", base_revision: "2", item_order: null,
+    cache.apply({ ...initial, ...delta("2", "3"),
       items: [{ item_id: "child-125", kind: "tool_summary", level: "steps", summary: summary("child-125") }],
       groups: [{ ...initial.groups[0], summary: { ...group, child_keys: [...group.child_keys, "child-125"] } }] });
     const appended = cache.trajectoryGroup("one", "work")!;
@@ -601,20 +670,20 @@ describe("session display replicas", () => {
     const work = { ...summary("work"), type: "trajectory", child_keys: [a.event_key, c.event_key] };
     const initial: SessionUpdate = { ...snapshot(cache, "one"), ...request, items: [a, c].map((summary) =>
       ({ item_id: summary.event_key, kind: "work_summary", level: "steps", summary })),
-      groups: [{ item_id: "work", kind: "work_summary", level: "steps", summary: work }], item_order: ["work"],
+      groups: [{ item_id: "work", kind: "work_summary", level: "steps", summary: work }], item_order: ["work"], semantic_order: [a.event_key, c.event_key],
       state: { ...snapshot(cache, "one").state, scope: { history: "recent_turns", turn_key: "user", group_keys: [] } } };
     cache.apply(initial);
     expect(cache.trajectoryGroup("one", "work")?.events).toEqual([a, c]);
     expect(cache.trajectoryGroup("one", a.event_key)).toBeNull();
     cache.includeGroup("one", a.event_key);
     expect(cache.request("one", "steps").scope).toEqual({ history: "recent_turns", turn_key: "user", group_keys: [a.event_key] });
-    const update = { ...initial, snapshot: false, base_revision: "1", revision: "2", groups: [], item_order: null,
+    const update = { ...initial, ...delta("1", "2"), groups: [], item_order: null,
       items: ["a", "b"].map((id) => ({ item_id: id, kind: "tool_summary" as const, level: "steps" as const, summary: summary(id) })) };
     cache.apply(update);
     const complete = cache.trajectoryGroup("one", a.event_key)!;
     expect(complete.events.map((event) => event.event_key)).toEqual(["a", "b"]);
     expect(cache.trajectoryGroup("one", c.event_key)).toBeNull();
-    cache.apply({ ...update, base_revision: "2", revision: "3", items: [
+    cache.apply({ ...update, ...delta("2", "3"), items: [
       { item_id: a.event_key, kind: "work_summary", level: "steps", summary: { ...a, child_keys: ["a", "b", "d"] } },
       { item_id: "d", kind: "tool_summary", level: "steps", summary: summary("d") } ] });
     const appended = cache.trajectoryGroup("one", a.event_key)!;
@@ -632,7 +701,7 @@ describe("session display replicas", () => {
     const detail = { event_key: "a", event: { output: "old payload" }, native: null, is_hidden: false, tool_output: null };
     cache.resources.set("one", "tool", "a", { status: "complete" }, detail);
     cache.resources.set("one", "inspect", "a", { status: "complete" }, detail);
-    const second = cache.apply({ ...initial, snapshot: false, base_revision: "1", revision: "2", items: [], item_order: null,
+    const second = cache.apply({ ...initial, ...delta("1", "2"), items: [], item_order: null,
       state: { ...initial.state, source_revision: "source:2" } })!;
     expect(second.events[0]).toBe(first.events[0]);
     expect([...cache.commit("one", second)!]).toEqual(["a"]);

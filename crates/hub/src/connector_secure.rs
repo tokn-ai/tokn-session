@@ -680,7 +680,7 @@ mod tests {
         )
         .route(
           "/api/v1/health",
-          axum::routing::get(|| async { axum::Json(json!({"version":2})) }),
+          axum::routing::get(|| async { axum::Json(json!({"version":protocol::VIEWER_API_VERSION})) }),
         );
       axum::serve(listener, app).await.unwrap();
     });

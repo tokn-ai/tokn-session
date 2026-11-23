@@ -1,9 +1,11 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { EncryptedHubClient, authenticateHubHost, pairHubHost, readHubDiscoveryGroup, type SocketFactory } from "./hubEncryptedClient";
 import type { CryptoApi, DeviceIdentity } from "./hubCrypto";
+import { VIEWER_API_VERSION } from "./transport";
 import { encodeBase64Url } from "./hub";
 import { PeerRetiredError, RelayCarrier, type DirectPeer, type DirectPeerFactory } from "./hubTransport";
 
+const viewerHealth = JSON.stringify({ version: VIEWER_API_VERSION });
 const host = { host_id: "550e8400-e29b-41d4-a716-446655440000", host_public_key: "H".repeat(43) };
 const identity: DeviceIdentity = { public_key: () => "D".repeat(43), export_secret: () => "S".repeat(43), free: () => {} };
 const encode = (value: unknown) => new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value));
@@ -56,7 +58,7 @@ function harness(respond: (socket: TestSocket, message: Record<string, unknown>)
   if (message.type === "request_end") {
     const events = socket.request?.path === "/api/v1/events";
     socket.push({ type: "response", status: 200, content_type: events ? "text/event-stream" : "application/json" });
-    socket.push({ type: "chunk", data: bytes(events ? "event: ready\ndata: {}\n\n" : '{"version":2}') });
+    socket.push({ type: "chunk", data: bytes(events ? "event: ready\ndata: {}\n\n" : viewerHealth) });
     if (!events) socket.push({ type: "end" });
   }
 }) {
@@ -67,7 +69,7 @@ function harness(respond: (socket: TestSocket, message: Record<string, unknown>)
 function viewerReply(socket: TestSocket): void {
   const events = socket.request?.path === "/api/v1/events";
   socket.push({ type: "response", status: 200, content_type: events ? "text/event-stream" : "application/json" });
-  socket.push({ type: "chunk", data: bytes(events ? "event: ready\ndata: {}\n\n" : '{"version":2}') });
+  socket.push({ type: "chunk", data: bytes(events ? "event: ready\ndata: {}\n\n" : viewerHealth) });
   if (!events) socket.push({ type: "end" });
 }
 function directHarness(options: { reject_input?: boolean; wrong_pin?: boolean; hold_health?: boolean; hold_relay_input?: boolean } = {}) {
@@ -96,11 +98,11 @@ function directHarness(options: { reject_input?: boolean; wrong_pin?: boolean; h
 }
 afterEach(() => { vi.useRealTimers(); });
 
-it("stops at health when the machine cannot serve scoped streams", async () => {
+it("stops at health when the machine uses the previous timeline protocol", async () => {
   const { factory, sockets } = harness((socket, message) => {
     if (message.type !== "request_end") return;
     socket.push({ type: "response", status: 200, content_type: "application/json" });
-    socket.push({ type: "chunk", data: bytes('{"version":1}') });
+    socket.push({ type: "chunk", data: bytes('{"version":2}') });
     socket.push({ type: "end" });
   });
   await expect(EncryptedHubClient.connect("https://hub.example", host, identity, crypto(), undefined, factory))
@@ -156,7 +158,7 @@ it("fragments bounded requests and acknowledges response chunks on the same chan
   const { factory, sockets } = harness((socket, message) => {
     if (message.type === "request_end") {
       socket.push({ type: "response", status: 200, content_type: "application/json" });
-      socket.push({ type: "chunk", data: bytes('{"version":2}') });
+      socket.push({ type: "chunk", data: bytes(viewerHealth) });
     }
     if (message.type === "window") socket.push({ type: "end" });
   });

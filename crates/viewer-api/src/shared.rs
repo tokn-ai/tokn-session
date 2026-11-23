@@ -376,7 +376,7 @@ mod tests {
   #[test]
   fn subscriptions_are_scoped_to_both_session_and_principal() {
     let payload = json!({"request":{"session_key":"allowed","subscription_id":"same",
-      "resume":{"subscription_id":"previous","generation":"baseline","revision":"2"}}});
+      "resume":{"subscription_id":"previous","generation":"baseline","revision":"2","state_hash":"a".repeat(64)}}});
     let mut first = request("open_session", payload.clone());
     let mut second = request("open_session", payload);
     second.principal = "another".into();

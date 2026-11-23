@@ -132,7 +132,7 @@ See [message input behavior](../apps/viewer/README.md#sending-messages).
 
 ## API contract
 
-`GET /api/v1/health` returns `{"version":2}`. Clients check this protocol revision before starting an event stream.
+`GET /api/v1/health` returns `{"version":3}`. Clients check this protocol revision before starting an event stream.
 Commands are `POST /api/v1/<command>` with the same snake_case payload as the
 Tauri adapter, normally `{"request":{...}}`. Commands without a request take
 `{}`. Responses use the shared viewer-core models. Supported commands:
@@ -158,11 +158,29 @@ invalid JSON/body-limit responses may be plain text.
 `open_session` accepts `session_key`, `subscription_id`, an optional delivery
 level (`final`, `messages`, `steps` or `all`), an optional `scope` and an optional
 `history_cursor`. It starts live delivery and returns the initial three-turn
-window in one response. Pass the cached `{subscription_id, generation, revision}`
+window in one response. Pass the cached `{subscription_id, generation, revision, state_hash}`
 in `resume` to receive changes against a retained baseline. The response is a
 snapshot when the baseline is unavailable. The same command can add older
 turns or expand a group. `release_session` takes the current subscription ID and
 session key. A released projection can still satisfy a later resume.
+
+Each revision carries a host-issued `state_hash`, a lowercase SHA-256 hex
+digest. The host links each change to the previous digest and includes the
+projected items, session metadata, removals and order changes in that chain.
+Clients store this digest alongside the applied revision. A delta applies
+only to its `base_revision` and `base_state_hash` within the same generation.
+On a mismatch the client requests a fresh snapshot. An unchanged reopen
+retains the same digest.
+
+A snapshot supplies the full `item_order`, `semantic_order` and `event_order`.
+A delta can carry one splice per changed order in `order_edits`. Each splice
+keeps the first `start` IDs, removes the next `delete_count`, inserts the
+listed IDs and keeps the suffix. Omitted orders retain their previous values.
+For example, appending a ninetieth message to the display order sends
+`{"start":89,"delete_count":0,"insert":["message-90"]}` for `item_order`.
+Edits to an existing message send its updated item. They require an order
+splice only if its position or membership changes.
+
 The history compatibility API requests `load_event_page` with `window_mode: "retained"` and
 `direction: "backward"` to receive the complete resident history window,
 initially the latest three turns. `window_mode: "earlier"` with its `previous_cursor`

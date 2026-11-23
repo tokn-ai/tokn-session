@@ -7,6 +7,7 @@ interface Replica {
   subscription_id: string;
   generation: string;
   revision: string;
+  state_hash: string;
   items: Map<string, SessionUpdateItem>;
   order: string[];
   semantic_order: string[];
@@ -21,6 +22,10 @@ interface LiveLease {
 }
 
 const LIVE_LEASE_MS = 90_000;
+
+function validStateHash(hash: unknown): boolean {
+  return typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash);
+}
 
 function sourceGenerationFrom(revision?: string): string | undefined {
   const index = revision?.lastIndexOf(":") ?? -1;
@@ -40,6 +45,19 @@ function weight(value: unknown): number {
   if (Array.isArray(value)) return value.reduce((size, item) => size + weight(item), 24);
   if (value && typeof value === "object") return Object.values(value).reduce<number>((size, item) => size + weight(item), 32);
   return 8;
+}
+
+function applyOrder(update: SessionUpdate, name: "item_order" | "semantic_order" | "event_order", previous: string[]): string[] | null {
+  const complete = update[name];
+  if (update.snapshot) return Array.isArray(complete) && update.order_edits == null ? complete : null;
+  if (complete != null) return null;
+  const edit = update.order_edits?.[name];
+  if (edit == null) return previous;
+  const { start, delete_count, insert } = edit;
+  if (!Number.isSafeInteger(start) || start < 0 || start > previous.length
+    || !Number.isSafeInteger(delete_count) || delete_count < 0 || delete_count > previous.length - start
+    || !Array.isArray(insert)) return null;
+  return previous.slice(0, start).concat(insert, previous.slice(start + delete_count));
 }
 
 function isAssistantFragment(event: EventSummary): boolean {
@@ -121,7 +139,7 @@ export class SessionDisplayCache {
     const scope = this.scopes.get(session_key) ?? { history: "recent_turns" as const, group_keys: [] };
     const replica = this.replicas.get(key);
     return { session_key, level, subscription_id, scope,
-      ...(replica ? { resume: { subscription_id: replica.subscription_id, generation: replica.generation, revision: replica.revision } } : {}),
+      ...(replica ? { resume: { subscription_id: replica.subscription_id, generation: replica.generation, revision: replica.revision, state_hash: replica.state_hash } } : {}),
     };
   }
 
@@ -476,7 +494,8 @@ export class SessionDisplayCache {
     if (this.isRetiredSource(update) || this.isOlderSource(update)) return true;
     const previous = this.replicas.get(this.key(update.session_key, update.level));
     return previous?.generation === update.generation && (previous.revision.length > update.revision.length
-      || (previous.revision.length === update.revision.length && previous.revision >= update.revision));
+      || (previous.revision.length === update.revision.length && previous.revision > update.revision)
+      || (previous.revision === update.revision && previous.state_hash === update.state_hash));
   }
 
   accepts(update: Pick<SessionUpdate, "session_key" | "subscription_id" | "level">): boolean {
@@ -514,9 +533,21 @@ export class SessionDisplayCache {
     if (previous?.generation === update.generation
       && (previous.revision.length > update.revision.length
         || (previous.revision.length === update.revision.length && previous.revision > update.revision))) return previous.page;
-    if (!update.snapshot && previous?.generation === update.generation && previous.revision === update.revision) {
+    const sameRevision = previous?.generation === update.generation && previous.revision === update.revision;
+    if (!validStateHash(update.state_hash)
+      || (update.snapshot ? update.base_state_hash !== null : !validStateHash(update.base_state_hash))
+      || (sameRevision && previous.state_hash !== update.state_hash && !(leaseAcknowledged && update.snapshot))) {
+      this.dropReplica(key, update.session_key);
+      return null;
+    }
+    if (!update.snapshot && sameRevision) {
       if (!leaseAcknowledged) return previous.page;
-      if (update.base_revision !== previous.revision) return null;
+      if (update.base_revision !== previous.revision || update.base_state_hash !== previous.state_hash
+        || update.order_edits != null || update.item_order != null || update.semantic_order != null || update.event_order != null
+        || update.items.length || update.groups?.length || update.removed_items.length) {
+        this.dropReplica(key, update.session_key);
+        return null;
+      }
       // An unchanged open confirms the exact retained projection. Keep its
       // rows and resource references and transfer live authority to the new ID.
       previous.subscription_id = update.subscription_id;
@@ -531,7 +562,8 @@ export class SessionDisplayCache {
       if (!leaseAcknowledged) this.queuePush(update);
       return null;
     }
-    if (!update.snapshot && (!previous || previous.generation !== update.generation || previous.revision !== update.base_revision)) {
+    if (!update.snapshot && (!previous || previous.generation !== update.generation
+      || previous.revision !== update.base_revision || previous.state_hash !== update.base_state_hash)) {
       this.dropReplica(key, update.session_key);
       return null;
     }
@@ -547,11 +579,14 @@ export class SessionDisplayCache {
       const retained = old && equal(old, item) ? old : item;
       items.set(item.item_id, retained); bytes += weight(retained);
     }
-    const order = update.item_order ?? previous?.order ?? [];
-    const semantic_order = update.semantic_order ?? (update.snapshot || update.item_order != null ? order : previous?.semantic_order ?? order);
+    const order = applyOrder(update, "item_order", previous?.order ?? []);
+    const semantic_order = applyOrder(update, "semantic_order", previous?.semantic_order ?? []);
+    const event_order = applyOrder(update, "event_order", previous?.event_order ?? []);
+    if (!order || !semantic_order || !event_order || order.some((id) => !items.get(id)?.summary)
+      || semantic_order.some((id) => !items.get(id)?.summary) || event_order.some((id) => !items.get(id)?.event)) {
+      this.dropReplica(key, update.session_key); return null;
+    }
     const display_order = update.level === "messages" || update.level === "final" ? semantic_order : order;
-    const event_order = update.event_order ?? previous?.event_order ?? [];
-    if (event_order.some((id) => !items.get(id)?.event)) { this.dropReplica(key, update.session_key); return null; }
     const events = display_order.map((id) => items.get(id)?.summary).filter((event) => event !== undefined);
     if (update.level === "all" && [...items.values()].some((item) =>
       item.summary?.child_keys?.some((child) => !items.get(child)?.summary))) {
@@ -586,7 +621,7 @@ export class SessionDisplayCache {
     this.pageItems.set(page, items);
     this.pageLevels.set(page, update.level);
     this.replicas.delete(key);
-    this.replicas.set(key, { session_key: update.session_key, subscription_id: update.subscription_id, generation: update.generation, revision: update.revision, items, order, semantic_order, event_order, page, bytes });
+    this.replicas.set(key, { session_key: update.session_key, subscription_id: update.subscription_id, generation: update.generation, revision: update.revision, state_hash: update.state_hash, items, order, semantic_order, event_order, page, bytes });
     if ((update.snapshot || leaseAcknowledged) && this.pending.has(key)) return this.drainPending(key);
     const sessions = () => new Set([...this.replicas.keys()].map((key) => JSON.parse(key)[0] as string));
     while (sessions().size > 8 || [...this.replicas.values()].reduce((size, replica) => size + replica.bytes, 0) > 64 * 1024 * 1024) {

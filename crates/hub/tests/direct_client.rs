@@ -116,7 +116,10 @@ impl Harness {
     let event_attempts = Arc::new(AtomicUsize::new(0));
     let attempts = event_attempts.clone();
     let viewer = Router::new()
-      .route("/api/v1/health", get(|| async { Json(json!({"version":2})) }))
+      .route(
+        "/api/v1/health",
+        get(|| async { Json(json!({"version":protocol::VIEWER_API_VERSION})) }),
+      )
       .route(
         "/api/v1/list_sessions",
         post(|Json(payload): Json<serde_json::Value>| async move {

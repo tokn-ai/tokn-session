@@ -530,7 +530,7 @@ mod tests {
                     content_type: Some("application/json".into()),
                   },
                   InnerMessage::Chunk {
-                    data: protocol::encode(br#"{"version":2}"#),
+                    data: protocol::encode(br#"{"version":3}"#),
                   },
                   InnerMessage::End {},
                 ] {
@@ -613,7 +613,7 @@ mod tests {
       .await;
       assert_eq!(response.status(), StatusCode::OK);
       let body = response.into_body().collect().await.unwrap().to_bytes();
-      assert_eq!(body, br#"{"version":2}"#.as_slice());
+      assert_eq!(body, br#"{"version":3}"#.as_slice());
     }
     assert_eq!(pairing_count.load(Ordering::SeqCst), 2);
     assert_eq!(noise_count.load(Ordering::SeqCst), 1);

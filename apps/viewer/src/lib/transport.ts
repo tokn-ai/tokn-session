@@ -6,7 +6,7 @@ export type CommandInvoker = <T>(command: string, payload?: Record<string, unkno
 export type EventSubscriber = <T>(event: string, handler: (event: { payload: T }) => void) => Promise<UnlistenFn>;
 type Handler = (event: { payload: unknown }) => void;
 export type ConnectionState = "connecting" | "connected" | "reconnecting";
-export const VIEWER_API_VERSION = 2;
+export const VIEWER_API_VERSION = 3;
 const MAX_EVENT_FRAME_LENGTH = 2 * 1024 * 1024;
 // Full session updates can include multiple bounded tool/native payloads.
 // Other notifications retain the smaller frame limit.

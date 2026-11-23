@@ -450,9 +450,10 @@ explicit publication step.
 versions already on crates.io. `--list` checks only; `--dry-run` verifies without
 uploading; the default publishes pending crates through Cargo.
 
-Viewer protocol revision 2 uses one `open_session` request for a baseline and live
+Viewer protocol revision 3 uses one `open_session` request for a baseline and live
 interest. A cached timeline can resume by previous subscription ID, generation
-and revision. A proof that matches a retained projection yields a delta. A
+and revision together with the host's SHA-256 state hash. A matching baseline
+yields a delta with compact splices for any changed order lists. A
 cache miss yields a snapshot in the same response. Indexed readers include the
 catalog title and preview in their first snapshot so an unchanged first poll
 preserves the cached revision. Direct web, Hub web, Apell
