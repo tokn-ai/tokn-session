@@ -31,7 +31,7 @@ fn profile_local_codex_open() {
   drop(decoded);
   drop(history);
   let start = std::time::Instant::now();
-  let reader = SessionReader::new_with_mode(
+  let reader = SessionReader::open(
     CatalogEntry {
       key: "profile".into(),
       provider: Provider::Codex,
@@ -41,6 +41,7 @@ fn profile_local_codex_open() {
     root,
     None,
     true,
+    PresentationSource::Provider,
   )
   .unwrap();
   eprintln!(
@@ -377,16 +378,30 @@ fn cancelled_reader_skips_initial_source_access_and_later_polls() {
   cancelled.cancel();
   let mut missing = entry.clone();
   missing.header.path = fixture.directory.path().join("missing.db");
-  let error = SessionReader::new_cancellable(missing, false, fixture.directory.path().into(), cancelled)
-    .err()
-    .unwrap();
+  let error = SessionReader::open(
+    missing,
+    false,
+    fixture.directory.path().into(),
+    Some(cancelled),
+    false,
+    PresentationSource::Provider,
+  )
+  .err()
+  .unwrap();
   assert!(
     error.contains("cancelled"),
     "cancellation wins over missing source: {error}"
   );
   let cancel = CancellationToken::new();
-  let mut reader =
-    SessionReader::new_cancellable(entry, false, fixture.directory.path().into(), cancel.clone()).unwrap();
+  let mut reader = SessionReader::open(
+    entry,
+    false,
+    fixture.directory.path().into(),
+    Some(cancel.clone()),
+    false,
+    PresentationSource::Provider,
+  )
+  .unwrap();
   let before = reader.snapshot.clone();
   cancel.cancel();
   assert!(reader.poll().unwrap_err().contains("cancelled"));
@@ -863,7 +878,7 @@ fn lazy_codex_prepend_preserves_existing_event_positions_across_pages() {
     body.push_str(&turn(index));
   }
   std::fs::write(&path, body).unwrap();
-  let mut reader = SessionReader::new_with_mode(
+  let mut reader = SessionReader::open(
     CatalogEntry {
       key: "lazy".into(),
       provider: Provider::Codex,
@@ -873,6 +888,7 @@ fn lazy_codex_prepend_preserves_existing_event_positions_across_pages() {
     directory.path().into(),
     None,
     true,
+    PresentationSource::Provider,
   )
   .unwrap();
   let positions = |reader: &SessionReader| {

@@ -453,7 +453,9 @@ uploading; the default publishes pending crates through Cargo.
 Viewer protocol revision 2 uses one `open_session` request for a baseline and live
 interest. A cached timeline can resume by previous subscription ID, generation
 and revision. A proof that matches a retained projection yields a delta. A
-cache miss yields a snapshot in the same response. Direct web, Hub web, Apell
+cache miss yields a snapshot in the same response. Indexed readers include the
+catalog title and preview in their first snapshot so an unchanged first poll
+preserves the cached revision. Direct web, Hub web, Apell
 and remote desktop each use one scoped SSE stream per machine connection.
 Desktop Local uses the same commands through Tauri. Opening defaults to the
 latest three user turns at Steps. Groups, tool display payloads and source

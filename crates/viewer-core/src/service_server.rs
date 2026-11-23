@@ -16,7 +16,7 @@ use crate::{
   RelayConfig,
   service_metadata::PresentationCache,
   service_protocol::*,
-  service_source::{SessionReader, Snapshot},
+  service_source::{PresentationSource, SessionReader, Snapshot},
 };
 
 struct FollowedSession {
@@ -358,15 +358,14 @@ impl Service {
       .path
       .clone();
     let cancel = cancel.clone();
-    tokio::task::spawn_blocking(move || {
-      if window {
-        SessionReader::new_window_cancellable(entry, native, root, cancel)
-      } else {
-        SessionReader::new_cancellable(entry, native, root, cancel)
-      }
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    let presentation = if self.index.is_some() {
+      PresentationSource::Index
+    } else {
+      PresentationSource::Provider
+    };
+    tokio::task::spawn_blocking(move || SessionReader::open(entry, native, root, Some(cancel), window, presentation))
+      .await
+      .map_err(|e| e.to_string())?
   }
 
   fn follow_reader(&self, worker: Weak<FollowedSession>, cancel: CancellationToken, mut wake: watch::Receiver<()>) {
@@ -393,37 +392,7 @@ impl Service {
         let result = tokio::task::spawn_blocking(move || {
           let mut reader = reader.lock().map_err(|_| "Session reader lock poisoned".to_string())?;
           let reader = &mut *reader;
-          let result = reader.poll().and_then(|changed| {
-            if let Some(index) = &index {
-              if let Some(entry) = crate::index_queries::snapshot_entry_for_key(index, &reader.snapshot.entry.key)? {
-                let header = &mut reader.snapshot.entry.header;
-                if header.title != entry.header.title || header.preview != entry.header.preview {
-                  header.title = entry.header.title;
-                  header.preview = entry.header.preview;
-                  reader.snapshot.revision += 1;
-                  return Ok(true);
-                }
-              }
-              return Ok(changed);
-            }
-            // Refresh even when a metadata-only source row produced no events.
-            metadata.refresh_followed(&reader.snapshot.entry);
-            // OpenCode follows already load current presentation metadata.
-            // JSONL follows need their separately cached names/previews.
-            if matches!(reader.snapshot.entry.provider, Provider::Codex | Provider::Pi) {
-              let before = reader.snapshot.entry.header.clone();
-              metadata.apply(
-                &reader.snapshot.entry.key,
-                reader.snapshot.entry.provider,
-                &mut reader.snapshot.entry.header,
-              );
-              if before != reader.snapshot.entry.header {
-                reader.snapshot.revision += 1;
-                return Ok(true);
-              }
-            }
-            Ok(changed)
-          });
+          let result = poll_reader(reader, index.as_deref(), &metadata);
           if let Err(error) = &result {
             reader.snapshot.error = Some(error.clone());
           }
@@ -639,6 +608,44 @@ impl Service {
   }
 }
 
+fn poll_reader(
+  reader: &mut SessionReader,
+  index: Option<&tokn_session_index::SessionIndex>,
+  metadata: &PresentationCache,
+) -> Result<bool, String> {
+  let changed = reader.poll()?;
+  let before = &reader.snapshot.entry.header;
+  if let Some(index) = index {
+    if let Some(entry) = crate::index_queries::snapshot_entry_for_key(index, &reader.snapshot.entry.key)?
+      && (before.title != entry.header.title || before.preview != entry.header.preview)
+    {
+      let header = &mut reader.snapshot.entry.header;
+      header.title = entry.header.title;
+      header.preview = entry.header.preview;
+      reader.snapshot.revision += 1;
+      return Ok(true);
+    }
+    return Ok(changed);
+  }
+  // Refresh even when a metadata-only source row produced no events.
+  metadata.refresh_followed(&reader.snapshot.entry);
+  // OpenCode follows already load current presentation metadata.
+  // JSONL follows need their separately cached names/previews.
+  if matches!(reader.snapshot.entry.provider, Provider::Codex | Provider::Pi) {
+    let before = before.clone();
+    metadata.apply(
+      &reader.snapshot.entry.key,
+      reader.snapshot.entry.provider,
+      &mut reader.snapshot.entry.header,
+    );
+    if before != reader.snapshot.entry.header {
+      reader.snapshot.revision += 1;
+      return Ok(true);
+    }
+  }
+  Ok(changed)
+}
+
 async fn send(stream: &mut (impl tokio::io::AsyncWrite + Unpin), frame: Frame) -> Result<(), String> {
   tokio::time::timeout(Duration::from_secs(10), write_frame(stream, &frame))
     .await
@@ -703,6 +710,75 @@ mod tests {
 
   async fn session_cancel(service: &Service, key: &str) -> CancellationToken {
     service.sessions.lock().await[key].upgrade().unwrap().cancel.clone()
+  }
+
+  #[tokio::test]
+  async fn indexed_reader_starts_with_current_presentation_and_publishes_later_edits() {
+    use crate::model::ViewerProvider;
+    use crate::service::{index_catalog_source_key, index_source_key_for_path};
+    use tokn_session_index::{SessionIndex, SessionKey, SessionMetadata, SourceReplacement, SourceState};
+
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("rollout-history.jsonl");
+    let mut rollout = String::from(r#"{"type":"session_meta","payload":{"id":"history"}}"#);
+    for turn in 0..5 {
+      rollout.push_str(&format!(
+        "\n{}\n{}",
+        serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_id":format!("turn-{turn}")}}),
+        serde_json::json!({"type":"event_msg","payload":{"type":"user_message","message":format!("prompt {turn}")}})
+      ));
+    }
+    std::fs::write(&path, format!("{rollout}\n")).unwrap();
+
+    let index = Arc::new(SessionIndex::open_in_memory().unwrap());
+    let provider = ViewerProvider::Codex;
+    index
+      .replace_source(SourceReplacement::baseline(
+        SourceState::new(index_catalog_source_key(provider), "ready", 0),
+        Vec::new(),
+      ))
+      .unwrap();
+    let source = index_source_key_for_path(provider, &path).unwrap();
+    let key = SessionKey::new(&source.provider, &source.source_key, "history");
+    let set_presentation = |title: &str, preview: &str| {
+      let mut metadata = SessionMetadata::new(key.clone(), path.to_str().unwrap());
+      metadata.title = Some(title.into());
+      metadata.preview = Some(preview.into());
+      index
+        .replace_source(SourceReplacement::baseline(
+          SourceState::new(source.clone(), title, 0),
+          vec![metadata],
+        ))
+        .unwrap();
+    };
+    set_presentation("Indexed title", "Indexed preview");
+    let mut config = RelayConfig::new(vec![ProviderRoot::new(Provider::Codex, root.path().into())]);
+    config.poll_interval = Duration::from_secs(60);
+    let service = Service::from_index(config, index.clone()).unwrap();
+    let key = serde_json::to_string(&(Provider::Codex, &path, "history")).unwrap();
+    let session = service.follow_mode(&key, true).await.unwrap();
+    let mut changes = session.snapshots().subscribe();
+    let cold = changes.borrow_and_update().clone();
+    assert_eq!(cold.entry.header.title.as_deref(), Some("Indexed title"));
+    assert_eq!(cold.entry.header.preview.as_deref(), Some("Indexed preview"));
+
+    {
+      let mut reader = session.reader.get().unwrap().lock().unwrap();
+      assert!(!poll_reader(&mut reader, Some(&index), &service.metadata).unwrap());
+      assert_eq!(reader.snapshot.revision, cold.revision);
+    }
+
+    set_presentation("Renamed", "Updated preview");
+    session.wake.send_replace(());
+    tokio::time::timeout(Duration::from_secs(3), changes.changed())
+      .await
+      .unwrap()
+      .unwrap();
+    let updated = changes.borrow_and_update().clone();
+    assert_eq!(updated.generation, cold.generation);
+    assert_eq!(updated.revision, cold.revision + 1);
+    assert_eq!(updated.entry.header.title.as_deref(), Some("Renamed"));
+    assert_eq!(updated.entry.header.preview.as_deref(), Some("Updated preview"));
   }
 
   #[tokio::test]
