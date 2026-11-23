@@ -6,6 +6,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { readReadingPosition, readingEventKey } from "./readingPosition";
 import { refreshEventWindow, loadCompleteTrajectory } from "./liveEvents";
 import { SessionLists } from "./sessionLists";
+import { compareActivity, compareProjects, compareSessionChildren } from "./sidebarOrder";
 import { useViewerPreferences } from "./viewerPreferences";
 import { useSessionView } from "./useSessionView";
 import {
@@ -214,7 +215,6 @@ export function useViewerState(visible = true) {
     () => new Set(PROVIDERS),
   );
   const providerKey = PROVIDERS.filter((provider) => enabledProviders.has(provider)).join(",");
-  const sessionQueryKey = `${sessionOrder}\u0000${providerKey}\u0000${debouncedSearch}`;
 
   const lists = useMemo(() => new SessionLists(send, transport.release, transport.subscription_prefix), [send, transport]);
   const previousListRows = useRef(new Map<string | null, SessionSummary[]>());
@@ -248,7 +248,6 @@ export function useViewerState(visible = true) {
   const sessionListInFlight = useRef<number | null>(null);
   const createdSelectionRevision = useRef(0);
   const previousSessionFilterKey = useRef<string | null>(null);
-  const previousSessionQueryKey = useRef<string | null>(null);
   const [sessionIndexListenerReady, setSessionIndexListenerReady] = useState(false);
   const [sessionIndexProgress, setSessionIndexProgress] = useState<SessionIndexProgress | null>(null);
   const [sessionIndexProgressLoading, setSessionIndexProgressLoading] = useState(true);
@@ -1467,7 +1466,10 @@ export function useViewerState(visible = true) {
             // this parent's loaded prefix. Preserve only that optimistic row.
             const selected = displayed.find((row) => row.session_key === selectedSessionKeyRef.current);
             if (selected && !previous?.some((row) => row.session_key === selected.session_key)
-              && !sessions.some((row) => row.session_key === selected.session_key)) sessions.push(selected);
+              && !sessions.some((row) => row.session_key === selected.session_key)) {
+              sessions.push(selected);
+              sessions.sort(compareSessionChildren);
+            }
             return { sessions, next_cursor: response.next_cursor, is_loading: false, is_loading_more: false, error: null };
           });
         })
@@ -1599,7 +1601,7 @@ export function useViewerState(visible = true) {
     sessionOrderRef.current = order;
     sessionsRequest.current += 1;
     sessionListInFlight.current = null;
-    setSessionsLoading(true);
+    setSessions((current) => [...current].sort(order === "project" ? compareProjects : compareActivity));
     setSessionsCursor(null);
     setSelectedSessionMetadata(selectedSession);
   }, [selectedSession]);
@@ -1620,7 +1622,7 @@ export function useViewerState(visible = true) {
       && target.parent_session_id === selectedSession.session_id;
     if (isDirectChild) {
       updateSessionChildren(sourceSessionKey, (existing) => ({
-        sessions: mergeSessions(existing?.sessions ?? [], [target]),
+        sessions: mergeSessions(existing?.sessions ?? [], [target]).sort(compareSessionChildren),
         next_cursor: existing?.next_cursor ?? null,
         is_loading: existing?.is_loading ?? false,
         is_loading_more: existing?.is_loading_more ?? false,
@@ -1640,13 +1642,11 @@ export function useViewerState(visible = true) {
     if (!sessionIndexListenerReady) {
       return;
     }
-    const queryChanged = previousSessionQueryKey.current !== sessionQueryKey;
     const filterKey = `${providerKey}\u0000${debouncedSearch}`;
     const filtersChanged = previousSessionFilterKey.current !== filterKey;
     const requestId = ++sessionsRequest.current;
     const selectionRevision = createdSelectionRevision.current;
     sessionListInFlight.current = null;
-    previousSessionQueryKey.current = sessionQueryKey;
     previousSessionFilterKey.current = filterKey;
     setSessionsLoadingMore(false);
     if (enabledProviders.size === 0) {
@@ -1669,7 +1669,7 @@ export function useViewerState(visible = true) {
     setSessionsError(null);
     sessionListInFlight.current = requestId;
     const query = { order: sessionOrder, providers: PROVIDERS.filter((provider) => enabledProviders.has(provider)), search: debouncedSearch || undefined };
-    const limit = queryChanged ? SESSION_PAGE_SIZE : lists.limit(null) || SESSION_PAGE_SIZE;
+    const limit = filtersChanged ? SESSION_PAGE_SIZE : lists.limit(null) || SESSION_PAGE_SIZE;
     void lists.open(null, query, limit)
       .then((response) => {
         if (sessionsRequest.current !== requestId) {
@@ -1717,7 +1717,6 @@ export function useViewerState(visible = true) {
     finishSessionListRequest,
     showRootPage,
     providerKey,
-    sessionQueryKey,
     sessionOrder,
     sessionIndexListenerReady,
     sessionsAttempt,

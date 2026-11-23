@@ -50,16 +50,23 @@ older outstanding questions retain their attention context.
 
 ## Session list
 
-The sidebar opens a metadata-only window for the current search, providers
-and sort order. Expanding a parent opens a separate window for its children.
-The host keeps the row keys in order and a SHA-256 fingerprint of each row.
-When the index commits a change, the host compares each affected view and
-sends only new or modified row bodies. A deletion carries the key and its
-order edit. A move carries just the edits needed to reposition the key.
-An unchanged view produces no list event, including for shared viewers.
+The sidebar opens a metadata-only window for the current search and providers.
+Expanding a parent opens a separate window for its children. Each row has a
+session key and a SHA-256 revision of the summary visible to that viewer.
+When the index commits a change, the host compares the revisions in each
+affected window and sends only new or changed summaries. Rows leaving a window
+are identified by key. An unchanged window produces no list event, including
+for shared viewers.
 
-Each update names its subscription, generation and base revision. The client
-recovers a missed revision by reopening that window. Pagination grows the
+The frontend owns display order. For example, when a session becomes active,
+the host sends its updated summary and the frontend uses the activity time to
+place it. Changing between Time and Projects is local when all matching rows
+are loaded. For a partial list the host uses the requested ranking to select
+page membership, and the frontend sorts the loaded rows.
+
+Each update also names its subscription, generation and window revision. A
+delta includes the window revision it builds on. The client recovers a missed
+delta by reopening that window. Pagination grows the
 watched range and can open additional windows for older rows. Indexing
 progress and compact assistant previews use their own event types.
 

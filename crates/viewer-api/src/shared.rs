@@ -323,22 +323,19 @@ fn background_id(principal: &str, id: &str) -> Result<String, &'static str> {
   scoped_id("bg", principal, id)
 }
 
-// A list event can contain several session identities, including deletions
-// and moved rows with no corresponding row body in this update.
+// Check both the revisioned row bodies and tombstones against the grant.
 fn list_event_in_scope(payload: &Value, keys: &[String]) -> bool {
   let allowed = |key: &Value| {
     key
       .as_str()
       .is_some_and(|key| keys.iter().any(|grant_key| grant_key == key))
   };
-  let key_array = |value: &Value| value.as_array().is_some_and(|values| values.iter().all(allowed));
   payload["rows"]
     .as_array()
-    .is_some_and(|rows| rows.iter().all(|row| allowed(&row["session_key"])))
-    && key_array(&payload["removed_keys"])
-    && payload["order_edits"]
+    .is_some_and(|rows| rows.iter().all(|row| allowed(&row["session"]["session_key"])))
+    && payload["removed_keys"]
       .as_array()
-      .is_some_and(|edits| edits.iter().all(|edit| key_array(&edit["insert"])))
+      .is_some_and(|keys| keys.iter().all(allowed))
 }
 
 fn shared_event(mut event: ViewerEvent, keys: &[String], principal: &str, prefix: &str) -> Option<ViewerEvent> {
@@ -534,13 +531,12 @@ mod tests {
   }
 
   #[test]
-  fn list_subscriptions_route_each_row_removal_and_order_entry_only_within_its_grant() {
+  fn list_subscriptions_route_each_revisioned_row_and_removal_only_within_its_grant() {
     let keys = vec!["allowed".to_owned(), "second".to_owned()];
     let client_id = "screen:root";
     let id = scoped_id("list", "grant", client_id).unwrap();
     let payload = json!({
-      "subscription_id":id,"rows":[{"session_key":"allowed","title":"changed"}],"removed_keys":["second"],
-      "order_edits":[{"start":0,"delete_count":1,"insert":["allowed"]}],
+      "subscription_id":id,"rows":[{"revision":"a".repeat(64),"session":{"session_key":"allowed","title":"changed"}}],"removed_keys":["second"],
     });
     let event = |payload| ViewerEvent {
       event: "session-list-updated".into(),
@@ -551,7 +547,7 @@ mod tests {
     assert_eq!(accepted.payload["rows"], payload["rows"]);
     assert!(shared_event(event(payload.clone()), &keys, "other-grant", "screen").is_none());
     assert!(shared_event(event(payload.clone()), &keys, "grant", "another-screen").is_none());
-    for field in ["/rows/0/session_key", "/removed_keys/0", "/order_edits/0/insert/0"] {
+    for field in ["/rows/0/session/session_key", "/removed_keys/0"] {
       let mut hidden = payload.clone();
       *hidden.pointer_mut(field).unwrap() = json!("private");
       assert!(shared_event(event(hidden), &keys, "grant", "screen").is_none());

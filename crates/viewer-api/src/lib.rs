@@ -776,7 +776,7 @@ mod tests {
       ),
       (
         "session-list-updated",
-        json!({"subscription_id":"viewer:list","rows":[{"title":"changed"}]}),
+        json!({"subscription_id":"viewer:list","rows":[{"revision":"b".repeat(64),"session":{"session_key":"row","title":"changed"}}]}),
       ),
       (
         "session-updated",

@@ -3,12 +3,12 @@
 use crate::{
   ViewerService,
   model::{DEFAULT_PAGE_LIMIT, ListSessionsResponse, SessionQuery, SessionSummary, SourceError, ViewerProvider},
-  updates::{OrderEdit, SessionSubscriptionRenewal},
+  updates::SessionSubscriptionRenewal,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, digest::Output};
 use std::{
-  collections::{HashMap, HashSet},
+  collections::{BTreeMap, HashMap, HashSet},
   sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -42,15 +42,21 @@ pub struct SessionListSubscriptionRequest {
 }
 
 #[derive(Debug, Serialize)]
+pub struct SessionListRow {
+  pub session: SessionSummary,
+  /// SHA-256 of this scoped row's content. Independent of its page or position.
+  pub revision: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct SessionListUpdate {
   pub subscription_id: String,
   pub generation: String,
-  /// A null base replaces the window. The snapshot rows are already in order.
+  /// A null base replaces the window. Clients choose the display order.
   pub base_revision: Option<String>,
   pub revision: String,
-  pub rows: Vec<SessionSummary>,
+  pub rows: Vec<SessionListRow>,
   pub removed_keys: Vec<String>,
-  pub order_edits: Vec<OrderEdit>,
   pub next_cursor: Option<String>,
   pub pending_providers: Vec<ViewerProvider>,
   pub source_errors: Vec<SourceError>,
@@ -141,8 +147,7 @@ struct Replica {
 // only in the index and in the outgoing changed rows.
 #[derive(Eq, PartialEq)]
 struct Baseline {
-  keys: Vec<String>,
-  hashes: Vec<[u8; 32]>,
+  rows: BTreeMap<String, Output<Sha256>>,
   next_cursor: Option<String>,
   pending_providers: Vec<ViewerProvider>,
   source_errors: Vec<SourceError>,
@@ -158,17 +163,14 @@ impl Baseline {
     if size > MAX_BASELINE_BYTES {
       return Err(SESSION_LIST_CAPACITY_ERROR.into());
     }
-    let mut keys = Vec::with_capacity(page.sessions.len());
-    let mut hashes = Vec::with_capacity(page.sessions.len());
+    let mut rows = BTreeMap::new();
     for row in &page.sessions {
       let mut hash = Sha256::new();
       serde_json::to_writer(&mut hash, row).map_err(|error| error.to_string())?;
-      keys.push(row.session_key.clone());
-      hashes.push(hash.finalize().into());
+      rows.insert(row.session_key.clone(), hash.finalize());
     }
     Ok(Self {
-      keys,
-      hashes,
+      rows,
       next_cursor: page.next_cursor.clone(),
       pending_providers: page.pending_providers.clone(),
       source_errors: page.source_errors.clone(),
@@ -209,24 +211,25 @@ impl Window {
       return Ok(None);
     }
     let base_revision = (!snapshot).then(|| replica.revision.to_string());
-    let mut removed_keys = Vec::new();
-    let mut order_edits = Vec::new();
-    let rows = if let Some(previous) = previous.filter(|_| !snapshot) {
-      if current.keys != previous.keys {
-        let retained: HashSet<_> = current.keys.iter().collect();
-        removed_keys.extend(previous.keys.iter().filter(|key| !retained.contains(key)).cloned());
-        order_edits = order_delta(&previous.keys, &current.keys);
-      }
-      let old: HashMap<_, _> = previous.keys.iter().zip(&previous.hashes).collect();
-      page
-        .sessions
-        .into_iter()
-        .zip(&current.hashes)
-        .filter_map(|(row, hash)| (old.get(&row.session_key).copied() != Some(hash)).then_some(row))
-        .collect()
-    } else {
-      page.sessions
-    };
+    let base = previous.filter(|_| !snapshot);
+    let removed_keys = base
+      .into_iter()
+      .flat_map(|base| base.rows.keys())
+      .filter(|key| !current.rows.contains_key(*key))
+      .cloned()
+      .collect();
+    let rows = page
+      .sessions
+      .into_iter()
+      .filter_map(|session| {
+        let digest = &current.rows[&session.session_key];
+        let previous_digest = base.and_then(|base| base.rows.get(&session.session_key));
+        (Some(digest) != previous_digest).then(|| SessionListRow {
+          session,
+          revision: format!("{digest:x}"),
+        })
+      })
+      .collect();
     if changed {
       replica.revision += 1;
       replica.baseline = Some(current);
@@ -238,71 +241,11 @@ impl Window {
       revision: replica.revision.to_string(),
       rows,
       removed_keys,
-      order_edits,
       next_cursor: page.next_cursor,
       pending_providers: page.pending_providers,
       source_errors: page.source_errors,
     }))
   }
-}
-
-// Keep the longest subsequence already in the requested order. Delete other
-// runs right-to-left, then insert only new or moved IDs at their final offsets.
-// In particular, moving the bottom row to the top never resends its neighbors.
-fn order_delta(before: &[String], after: &[String]) -> Vec<OrderEdit> {
-  let old_positions: HashMap<_, _> = before.iter().enumerate().map(|(i, key)| (key, i)).collect();
-  let mut tails: Vec<(usize, usize)> = Vec::new();
-  let mut predecessor = vec![None; after.len()];
-  for (new_index, key) in after.iter().enumerate() {
-    let Some(&old_index) = old_positions.get(key) else {
-      continue;
-    };
-    let depth = tails.partition_point(|&(position, _)| position < old_index);
-    predecessor[new_index] = depth.checked_sub(1).map(|i| tails[i].1);
-    if depth == tails.len() {
-      tails.push((old_index, new_index));
-    } else {
-      tails[depth] = (old_index, new_index);
-    }
-  }
-  let mut kept = HashSet::with_capacity(tails.len());
-  let mut last = tails.last().map(|&(_, index)| index);
-  while let Some(index) = last {
-    kept.insert(&after[index]);
-    last = predecessor[index];
-  }
-  let mut edits = Vec::new();
-  let mut end = before.len();
-  while end > 0 {
-    let mut start = end;
-    while start > 0 && !kept.contains(&before[start - 1]) {
-      start -= 1;
-    }
-    if start < end {
-      edits.push(OrderEdit {
-        start,
-        delete_count: end - start,
-        insert: Vec::new(),
-      });
-    }
-    end = start.saturating_sub(1);
-  }
-  let mut start = 0;
-  while start < after.len() {
-    let mut end = start;
-    while end < after.len() && !kept.contains(&after[end]) {
-      end += 1;
-    }
-    if start < end {
-      edits.push(OrderEdit {
-        start,
-        delete_count: 0,
-        insert: after[start..end].to_vec(),
-      });
-    }
-    start = end + 1;
-  }
-  edits
 }
 
 impl ViewerService {
@@ -459,43 +402,6 @@ impl ViewerService {
         // Preserve the displayed rows. The next renewal will request a new
         // baseline instead of acknowledging a subscription which missed data.
         Err(_) => self.forget_session_list(&window),
-      }
-    }
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn compact_moves_and_mixed_membership_reconstruct_the_exact_order() {
-    fn keys(s: &str) -> Vec<String> {
-      s.chars().map(|c| c.to_string()).collect()
-    }
-    for (old, new) in [
-      ("", ""),
-      ("", "abc"),
-      ("abc", ""),
-      ("abcd", "bcda"),
-      ("abcd", "dabc"),
-      ("abcd", "dbac"),
-      ("aXbcY", "pbaZrc"),
-      ("abcdefg", "zbxgfdya"),
-      ("abcd", "abcd"),
-    ] {
-      let mut result = keys(old);
-      let edits = order_delta(&result, &keys(new));
-      for e in &edits {
-        result.splice(e.start..e.start + e.delete_count, e.insert.clone());
-      }
-      assert_eq!(result, keys(new), "failed to transform {old} to {new}");
-      if old == new {
-        assert!(edits.is_empty());
-      }
-      if new == "dabc" || new == "bcda" {
-        assert_eq!(edits.len(), 2);
-        assert_eq!(edits.iter().map(|e| e.insert.len()).sum::<usize>(), 1);
       }
     }
   }

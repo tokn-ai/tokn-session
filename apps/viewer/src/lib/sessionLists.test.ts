@@ -1,12 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
+import { revisionedSession } from "../../tests/sessionListFixtures";
 import { SessionLists } from "./sessionLists";
 import type { OpenSessionListRequest, SessionListUpdate, SessionSummary } from "./types";
 import type { CommandInvoker } from "./transport";
 
-const row = (session_key: string, title = session_key) => ({ session_key, title }) as SessionSummary;
-function snapshot(request: OpenSessionListRequest, rows: SessionSummary[], revision = "1"): SessionListUpdate {
+const row = (session_key: string, title = session_key, updated_at_ms = -Number(session_key) || 0): SessionSummary => ({
+  session_key, session_id: session_key, parent_session_id: null, is_subagent: false, provider: "codex",
+  title, preview: null, cwd: null, project: null, updated_at_ms, timestamp: null, agent_path: null,
+  agent_nickname: null, agent_role: null, child_count: 0, message_count: null, event_count: null, history_status: null, has_unread: false,
+});
+function snapshot(request: OpenSessionListRequest, sessions: SessionSummary[], revision = "1"): SessionListUpdate {
+  const rows = sessions.map(revisionedSession);
   return { subscription_id: request.subscription_id, generation: "g", base_revision: null, revision, rows,
-    removed_keys: [], order_edits: [], next_cursor: null, pending_providers: [], source_errors: [] };
+    removed_keys: [], next_cursor: null, pending_providers: [], source_errors: [] };
 }
 
 function setup(open: (request: OpenSessionListRequest) => Promise<SessionListUpdate>, renewed = true) {
@@ -22,27 +28,73 @@ function setup(open: (request: OpenSessionListRequest) => Promise<SessionListUpd
 }
 
 describe("live session list windows", () => {
-  it("applies renames, moves, insertions and removals locally and retains untouched row objects", async () => {
-    const oldA = row("a"), oldB = row("b");
+  it("orders changed rows from metadata and retains unchanged bodies across deltas and fresh baselines", async () => {
+    const oldA = row("a", "A", 1), oldB = row("b", "B", 3), oldC = row("c", "C", 2);
     let request!: OpenSessionListRequest;
-    const { lists, invoke } = setup(async (r) => { request = r; return snapshot(r, [oldA, oldB, row("c")]); });
+    let source = [oldA, oldB, oldC];
+    const { lists, invoke } = setup(async (r) => {
+      request = r;
+      return { ...snapshot(r, source.map((s) => ({ ...s }))), generation: r.revision ? "restarted" : "g" };
+    });
     const initial = await lists.open(null, {}, 60);
-    const update: SessionListUpdate = { ...snapshot(request, [row("a", "renamed")], "2"), base_revision: "1" };
-    lists.push(update);
-    expect(lists.onPage).toHaveBeenLastCalledWith(null, { ...initial, sessions: [row("a", "renamed"), oldB, row("c")] });
-    const newA = update.rows[0];
-    lists.push({ ...update, base_revision: "2", revision: "3", rows: [row("d")], removed_keys: ["c"], order_edits: [
-      { start: 2, delete_count: 1, insert: [] }, { start: 1, delete_count: 1, insert: [] },
-      { start: 0, delete_count: 0, insert: ["b", "d"] },
-    ] });
+    expect(initial.sessions.map((s) => s.session_key)).toEqual(["b", "c", "a"]);
+    const retainedB = initial.sessions[0];
+    const renamedA = row("a", "renamed", 4), addedD = row("d", "D", 2);
+    const delta = { ...snapshot(request, [addedD, renamedA, { ...oldB }], "2"), base_revision: "1", removed_keys: ["c"] };
+    lists.push(delta);
     const last = vi.mocked(lists.onPage).mock.lastCall![1].sessions;
-    expect(last.map((r) => r.session_key)).toEqual(["b", "d", "a"]);
-    expect(last[0]).toBe(oldB);
-    expect(last[2]).toBe(newA);
-    lists.push(update); // Replayed event after revision 3.
+    expect(last).toEqual([renamedA, retainedB, addedD]);
+    expect(last[1]).toBe(retainedB);
+    lists.push(delta);
+    expect(lists.onPage).toHaveBeenCalledOnce();
+    source = [addedD, oldB, renamedA];
+    const resynced = await lists.open(null, {}, 60);
+    expect(resynced.sessions.every((s, i) => s === last[i])).toBe(true);
     await lists.renew();
-    expect(lists.onPage).toHaveBeenCalledTimes(2);
-    expect(invoke.mock.calls.map(([name]) => name)).toEqual(["open_session_list", "renew_session_lists"]);
+    expect(invoke.mock.calls.map(([name]) => name)).toEqual(["open_session_list", "open_session_list", "renew_session_lists"]);
+  });
+
+  it("ignores an unchanged row revision and replaces only overlapping rows that changed across a ranked page switch", async () => {
+    const a = row("a"), b = row("b"), c = row("c");
+    let request!: OpenSessionListRequest;
+    const { lists } = setup(async (r) => {
+      request = r;
+      const sessions = (r.query?.order === "time" ? [a, b] : [c, b]).map((s) => ({ ...s }));
+      return { ...snapshot(r, sessions), next_cursor: "more" };
+    });
+    const first = await lists.open(null, { order: "time" }, 2);
+    const unchanged = { ...snapshot(request, [{ ...b }], "2"), base_revision: "1", next_cursor: "more" };
+    lists.push(unchanged);
+    expect(lists.onPage).not.toHaveBeenCalled();
+    const next = await lists.open(null, { order: "project" }, 2);
+    expect(next.sessions.find((s) => s.session_key === "b")).toBe(first.sessions[1]);
+    expect(next.sessions.some((s) => s.session_key === "a")).toBe(false);
+  });
+
+  it("sorts a complete set locally, then selects the right membership when it grows past the boundary", async () => {
+    const requests: OpenSessionListRequest[] = [];
+    const a = { ...row("a", "A", 5), project_key: "first", project_order_ms: 1 };
+    const b = { ...row("b", "B", 1), project_key: "second", project_order_ms: 9 };
+    const c = { ...row("c", "C", 2), project_key: "third", project_order_ms: 8 };
+    const { lists } = setup(async (r) => {
+      requests.push(r);
+      return r.query?.order === "project" ? { ...snapshot(r, [c, b]), next_cursor: "more" } : snapshot(r, [b, a]);
+    });
+    expect((await lists.open(null, { order: "time" }, 2)).sessions).toEqual([a, b]);
+    expect((await lists.open(null, { order: "project" }, 2)).sessions).toEqual([b, a]);
+    expect(requests).toHaveLength(1);
+    lists.push({ ...snapshot(requests[0], [c], "2"), removed_keys: ["b"], base_revision: "1", next_cursor: "more" });
+    await vi.waitFor(() => expect(lists.onPage).toHaveBeenCalledOnce());
+    expect(requests.map((r) => r.query?.order)).toEqual(["time", "project"]);
+    expect(vi.mocked(lists.onPage).mock.lastCall![1].sessions).toEqual([b, c]);
+  });
+
+  it("sorts siblings by recency and stable local ties regardless of the root grouping", async () => {
+    const a = { ...row("key:z", "A", 2), session_id: "alpha" };
+    const b = { ...row("key:a", "B", 2), session_id: "beta" };
+    const early = { ...row("key:b", "early", 1), project_order_ms: 100 };
+    const { lists } = setup(async (r) => snapshot(r, [early, b, a]));
+    expect((await lists.open("parent", undefined, 60)).sessions).toEqual([a, b, early]);
   });
 
   it("queues a live rename before its snapshot response and discards pushes to released child views", async () => {

@@ -158,16 +158,24 @@ invalid JSON/body-limit responses may be plain text.
 
 `open_session_list` watches the root rows matching a `query`, or the direct
 children of a `parent_session_key`. Pass a `subscription_id`, `limit` and
-optional `offset`. The first response contains the ordered rows and a null
-`base_revision`. Each subsequent `session-list-updated` event contains new and
-changed rows, `removed_keys`, ordered splices in `order_edits`, and the current
-pagination and indexing metadata. A title edit leaves the order edits empty
-when the row keeps its position.
+optional `offset`. The first response contains the rows in the window and a
+null `base_revision`. Each `rows` entry is `{ session, revision }`. Its
+`revision` is a lowercase SHA-256 digest of the visible session summary. The
+same summary has the same revision across subscriptions. Clients merge rows by
+`session.session_key` and sort them locally. Array positions have no protocol
+meaning.
+
+Each subsequent `session-list-updated` event carries only new or changed rows,
+keys leaving the window in `removed_keys`, and current pagination and indexing
+metadata. A rename sends one updated row. A change to pagination metadata can
+produce an update with empty row and removal arrays.
 
 To grow or reconnect a window, reopen it with the same subscription ID,
 generation and last applied revision. The host returns a delta when it can
-match that revision and a snapshot otherwise. A new filter or sort order uses
-a fresh subscription ID. `renew_session_lists` renews the client's loaded
+match that revision and a snapshot otherwise. A new filter uses a fresh
+subscription ID. Switching between Time and Projects reuses a fully loaded
+list. When more rows exist, the viewer asks for the page under the selected
+ranking. `renew_session_lists` renews the client's loaded
 windows in one request with `ids` and returns `renewed_ids` and `missing_ids`.
 Renewal does not read session rows. `release_session_list` takes
 `{"request":{"subscription_id":"…"}}` and returns whether it released a lease.
@@ -285,16 +293,15 @@ refreshes or subagent replies. Compatibility fields `has_unread_descendant` and
 from older servers. Acknowledgement
 revisions remain opaque and must come from the displayed newest event page.
 
-Session list requests accept `query.order` (`time`, the default, or `project`).
-Project ordering is applied before pagination and groups folder identities by
+Session list requests accept `query.order` (`time`, the default, or `project`)
+to select which rows fall inside a page. Project ranking groups folder identities by
 their durable discovery anchor, newest first, then session activity. Git metadata
 is read only in the recorded working folder; explicit worktrees can share a
 repository identity, while non-Git subfolders remain independent projects.
 Root summaries include nullable `project_key` and `project_order_ms`; `cwd` remains
 the original session working directory. Clients should group by `project_key`,
-falling back to `cwd` for older servers. Clients keep Recent display positions in
-memory; this does not change API activity ordering. Start a fresh cursor when
-changing the order or filters.
+falling back to `cwd` for older servers. Clients keep Recent display positions
+in memory. Cursors belong to the filters and ranking used to select the page.
 
 ### Async question answers
 

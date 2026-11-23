@@ -555,14 +555,19 @@ export interface OpenSessionListRequest {
   revision?: string;
 }
 
+export interface SessionListRow {
+  session: SessionSummary;
+  /** Content revision of this row as visible to this viewer. */
+  revision: string;
+}
+
 export interface SessionListUpdate {
   subscription_id: string;
   generation: string;
   base_revision: string | null;
   revision: string;
-  rows: SessionSummary[];
+  rows: SessionListRow[];
   removed_keys: string[];
-  order_edits: SessionOrderEdit[];
   next_cursor: string | null;
   pending_providers: ViewerProvider[];
   source_errors: SourceError[];

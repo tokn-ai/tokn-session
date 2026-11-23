@@ -47,6 +47,7 @@ import type {
 import { useViewerState } from "./useViewerState";
 import { readViewerPreferences, updateViewerPreferences, VIEWER_PREFERENCES_KEY } from "./viewerPreferences";
 import { ViewerPage } from "../pages/ViewerPage";
+import { revisionedSession } from "../../tests/sessionListFixtures";
 
 vi.mock("../components/RelayConnection", () => ({ RelayConnection: () => null }));
 
@@ -99,11 +100,11 @@ vi.mock("./transport", async (original) => {
   } };
 });
 
-function pushListRows(rows: SessionSummary[], order_edits: SessionListUpdate["order_edits"] = []) {
+function pushListRows(rows: SessionSummary[], next_cursor: string | null = null) {
   const request = vi.mocked(openSessionList).mock.calls.find(([entry]) => !entry.parent_session_key)?.[0];
   if (!request || !listObserver) throw new Error("No session list subscription");
   listObserver({ payload: { subscription_id: request.subscription_id, generation: "list", base_revision: "1",
-    revision: "2", rows, order_edits, removed_keys: [], next_cursor: null, source_errors: [], pending_providers: [] } });
+    revision: "2", rows: rows.map(revisionedSession), removed_keys: [], next_cursor, source_errors: [], pending_providers: [] } });
 }
 
 let restore_host: (() => void) | undefined;
@@ -116,7 +117,7 @@ beforeEach(() => {
       ? { ...await listSessionChildren({ parent_session_key: request.parent_session_key, limit: request.limit }, send), pending_providers: [], source_errors: [] }
       : await listSessions({ query: request.query!, limit: request.limit }, send);
     return { subscription_id: request.subscription_id, generation: "list", revision: "1", base_revision: null,
-      rows: page.sessions, removed_keys: [], order_edits: [], next_cursor: page.next_cursor,
+      rows: page.sessions.map(revisionedSession), removed_keys: [], next_cursor: page.next_cursor,
       pending_providers: page.pending_providers, source_errors: page.source_errors };
   });
   vi.mocked(subscribeBackgroundUpdates).mockReset().mockImplementation(async (request) => ({ subscription_id: request.subscription_id, generation: "background", revision: "0", scope: request.scope, subscribed: true }));
@@ -466,10 +467,10 @@ describe("sidebar view preference", () => {
     act(() => result.current.toggleProvider("pi"));
     await waitFor(() => expect(result.current.selectedSessionKey).toBeNull());
   });
-  it("applies Settings ordering while retaining the open projection and background interest", async () => {
-    vi.mocked(listSessions)
-      .mockResolvedValueOnce({ sessions: [session("settings-open")], next_cursor: null, source_errors: [], pending_providers: [] })
-      .mockResolvedValueOnce({ sessions: [session("settings-other")], next_cursor: null, source_errors: [], pending_providers: [] });
+  it("switches a complete list to Projects locally and retains the open session and background interest", async () => {
+    const active = { ...session("settings-open"), updated_at_ms: 20, project_key: "older", project_order_ms: 1 };
+    const newestProject = { ...session("settings-other"), updated_at_ms: 10, project_key: "newer", project_order_ms: 2 };
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [active, newestProject], next_cursor: null, source_errors: [], pending_providers: [] });
     vi.mocked(openSession).mockImplementation(async (request) => semanticSnapshot(request, toolEventPage()));
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "settings-open");
@@ -481,12 +482,27 @@ describe("sidebar view preference", () => {
     expect(result.current.selectedSession?.session_key).toBe("settings-open");
     expect(result.current.events).toEqual(toolEventPage().events);
     expect(openSession).toHaveBeenCalledTimes(historyRequests);
+    expect(openSessionList).toHaveBeenCalledOnce();
     expect(subscribeBackgroundUpdates).toHaveBeenCalledOnce();
+  });
+
+  it("requests the current ranking when a complete list grows beyond its window after a local sort", async () => {
+    vi.mocked(listSessions)
+      .mockResolvedValueOnce({ sessions: [session("first")], next_cursor: null, source_errors: [], pending_providers: [] })
+      .mockResolvedValueOnce({ sessions: [session("new-project")], next_cursor: "sessions.v1.1", source_errors: [], pending_providers: [] });
+    const { result } = renderHook(() => useViewerState());
+    await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+    act(() => result.current.setSessionOrder("project"));
+    expect(openSessionList).toHaveBeenCalledOnce();
+    act(() => pushListRows([], "sessions.v1.1"));
+    await waitFor(() => expect(result.current.sessions[0]?.session_key).toBe("new-project"));
+    expect(openSessionList).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(openSessionList).mock.calls[1][0].query?.order).toBe("project");
   });
 
   it("requests project order and preserves a selection outside the replacement page", async () => {
     vi.mocked(listSessions)
-      .mockResolvedValueOnce({ sessions: [session("a")], next_cursor: null, source_errors: [], pending_providers: [] })
+      .mockResolvedValueOnce({ sessions: [session("a")], next_cursor: "sessions.v1.1", source_errors: [], pending_providers: [] })
       .mockResolvedValueOnce({ sessions: [session("b")], next_cursor: null, source_errors: [], pending_providers: [] });
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "a");
@@ -3177,13 +3193,14 @@ describe("semantic session delivery", () => {
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "preview");
     await waitFor(() => expect(result.current.events).toEqual(page.events));
-    await waitFor(() => expect(result.current.sessions[0].latest_assistant_preview).toBe("Latest answer."));
+    const listedPreview = () => result.current.sessions.find((row) => row.session_key === listed.session_key)?.latest_assistant_preview;
+    await waitFor(() => expect(listedPreview()).toBe("Latest answer."));
     expect(result.current.selectedSession?.latest_assistant_preview).toBe("Latest answer.");
     expect(openSession).toHaveBeenCalledOnce();
     expect(loadEventPage).toHaveBeenCalledTimes(semantic ? 0 : 1);
     act(() => result.current.selectSession("other"));
     await waitFor(() => expect(result.current.selectedSessionKey).toBe("other"));
-    expect(result.current.sessions[0].latest_assistant_preview).toBe("Latest answer.");
+    expect(listedPreview()).toBe("Latest answer.");
   });
 
   it("keeps live running state through stale catalog and attention updates, then clears on completion", async () => {

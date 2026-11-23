@@ -451,8 +451,10 @@ versions already on crates.io. `--list` checks only; `--dry-run` verifies withou
 uploading; the default publishes pending crates through Cargo.
 
 Viewer protocol revision 4 uses `open_session_list` for filtered root rows and
-expanded child lists. The host pushes changed rows, removed keys and compact
-order edits. Shared viewers receive grant-scoped list changes and idle SSE
+expanded child lists. The host pushes changed summaries with per-row SHA-256
+revisions and the keys of rows leaving the window. The frontend sorts loaded
+rows and reuses complete lists when switching between Time and Projects.
+Shared viewers receive grant-scoped list changes and idle SSE
 heartbeats. The viewer reopens a list window on a missed revision or lost lease.
 Pi's live reader applies the most recent `session_info` name, including an
 explicit clear. The Pi body cursor change queues previously indexed sessions

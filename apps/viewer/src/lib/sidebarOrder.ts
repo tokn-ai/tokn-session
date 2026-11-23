@@ -35,6 +35,14 @@ export function compareActivity(left: SessionSummary, right: SessionSummary): nu
     || left.session_key.localeCompare(right.session_key);
 }
 
+/** Child branches stay newest-first in either root grouping. */
+export function compareSessionChildren(left: SessionSummary, right: SessionSummary): number {
+  return (right.updated_at_ms ?? -Infinity) - (left.updated_at_ms ?? -Infinity)
+    || (right.timestamp ?? "").localeCompare(left.timestamp ?? "")
+    || left.session_id.localeCompare(right.session_id)
+    || left.session_key.localeCompare(right.session_key);
+}
+
 export function projectKey(session: SessionSummary): string {
   return sessionProjectKey(session);
 }

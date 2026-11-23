@@ -1,13 +1,15 @@
 import { createUuid } from "./id";
 import { listSessionChildren, listSessions, openSessionList } from "./tauri";
 import { SESSION_PAGE_SIZE } from "./state";
+import { compareActivity, compareProjects, compareSessionChildren } from "./sidebarOrder";
 import type { CommandInvoker } from "./transport";
-import type { ListSessionsResponse, OpenSessionListRequest, SessionListQuery, SessionListUpdate, SessionSummary } from "./types";
+import type { ListSessionsResponse, OpenSessionListRequest, SessionListQuery, SessionListRow, SessionListUpdate, SessionSummary } from "./types";
 
 class InvalidListUpdate extends Error {}
 
 interface Watch {
   request: OpenSessionListRequest;
+  rows: Map<string, SessionListRow>;
   page?: ListSessionsResponse;
   generation?: string;
   revision?: string;
@@ -24,42 +26,46 @@ function apply(watch: Watch, update: SessionListUpdate): void {
   if (update.subscription_id !== watch.request.subscription_id || !update.generation || !/^\d+$/.test(update.revision)) {
     throw new InvalidListUpdate("Invalid session list revision");
   }
-  let sessions: SessionSummary[];
-  if (update.base_revision === null) {
-    if (new Set(update.rows.map((row) => row.session_key)).size !== update.rows.length
-      || update.order_edits.length || update.removed_keys.length) {
-      throw new InvalidListUpdate("Invalid session list snapshot");
-    }
-    sessions = update.rows;
-  } else {
-    if (!watch.page || update.generation !== watch.generation || watch.revision !== update.base_revision) {
-      throw new InvalidListUpdate("Session list revision gap");
-    }
-    const hasChanges = update.rows.length || update.removed_keys.length || update.order_edits.length;
-    if (BigInt(update.revision) < BigInt(watch.revision) || (update.revision === watch.revision && hasChanges)) {
-      throw new InvalidListUpdate("Invalid session list revision");
-    }
-    const rows = new Map(watch.page.sessions.map((row) => [row.session_key, row]));
-    for (const key of update.removed_keys) rows.delete(key);
-    for (const row of update.rows) rows.set(row.session_key, row);
-    const order = watch.page.sessions.map((row) => row.session_key);
-    for (const edit of update.order_edits) {
-      if (!Number.isSafeInteger(edit.start) || !Number.isSafeInteger(edit.delete_count)
-        || edit.start < 0 || edit.start > order.length || edit.delete_count < 0 || edit.delete_count > order.length - edit.start) {
-        throw new InvalidListUpdate("Invalid session list order");
-      }
-      order.splice(edit.start, edit.delete_count, ...edit.insert);
-    }
-    if (order.length !== rows.size || new Set(order).size !== rows.size) {
-      throw new InvalidListUpdate("Invalid session list membership");
-    }
-    sessions = order.map((key) => {
-      const row = rows.get(key);
-      if (!row) throw new InvalidListUpdate("Missing session list row");
-      return row;
-    });
+  const snapshot = update.base_revision === null;
+  if (snapshot && (update.removed_keys.length || (watch.revision && watch.generation === update.generation
+    && BigInt(update.revision) < BigInt(watch.revision)))) {
+    throw new InvalidListUpdate("Invalid session list snapshot");
   }
-  watch.page = { sessions, next_cursor: update.next_cursor, pending_providers: update.pending_providers, source_errors: update.source_errors };
+  if (!snapshot && (!watch.page || watch.generation !== update.generation || watch.revision !== update.base_revision
+    || BigInt(update.revision) < BigInt(watch.revision))) {
+    throw new InvalidListUpdate("Session list revision gap");
+  }
+
+  // Content revisions identify scoped row bodies independently of a window's
+  // generation. Resyncing an unchanged row preserves its visible overlays.
+  const rows = snapshot ? new Map<string, SessionListRow>() : new Map(watch.rows);
+  const touched = new Set(update.removed_keys);
+  for (const key of touched) rows.delete(key);
+  let changed = (snapshot ? update.rows.length : rows.size) !== watch.rows.size;
+  for (const entry of update.rows) {
+    const key = entry.session?.session_key;
+    if (!key || touched.has(key) || !/^[a-f0-9]{64}$/.test(entry.revision)) {
+      throw new InvalidListUpdate("Invalid session list row");
+    }
+    touched.add(key);
+    const old = watch.rows.get(key);
+    if (old?.revision === entry.revision) rows.set(key, old);
+    else {
+      rows.set(key, entry);
+      changed = true;
+    }
+  }
+  if (!snapshot && update.revision === watch.revision && changed) throw new InvalidListUpdate("Invalid session list revision");
+
+  const sessions = !changed && watch.page && !watch.waitingForLease
+    ? watch.page.sessions : [...rows.values()].map((row) => row.session);
+  watch.rows = rows;
+  const previous = watch.page;
+  if (!previous || sessions !== previous.sessions || update.next_cursor !== previous.next_cursor
+    || JSON.stringify(update.pending_providers) !== JSON.stringify(previous.pending_providers)
+    || JSON.stringify(update.source_errors) !== JSON.stringify(previous.source_errors)) {
+    watch.page = { sessions, next_cursor: update.next_cursor, pending_providers: update.pending_providers, source_errors: update.source_errors };
+  }
   watch.generation = update.generation;
   watch.revision = update.revision;
 }
@@ -72,6 +78,7 @@ type Parent = string | null;
 
 export class SessionLists {
   private windows = new Map<Parent, Watch[]>();
+  private rootQuery?: SessionListQuery;
   private byId = new Map<string, Watch>();
   private recovering?: Promise<void>;
   private recoveryQueue = Promise.resolve();
@@ -107,7 +114,7 @@ export class SessionLists {
     const windows = this.windows.get(parent) ?? [];
     const first = windows[0]?.page;
     if (!first) throw new Error("Session list was closed");
-    if (windows.length === 1) return first;
+    const compare = parent !== null ? compareSessionChildren : this.rootQuery?.order === "project" ? compareProjects : compareActivity;
     const rows = new Map<string, SessionSummary>();
     let cursor = first.next_cursor;
     for (const watch of windows) {
@@ -115,14 +122,33 @@ export class SessionLists {
       for (const row of watch.page.sessions) if (!rows.has(row.session_key)) rows.set(row.session_key, row);
       cursor = watch.page.next_cursor;
     }
-    return { ...first, sessions: [...rows.values()], next_cursor: cursor };
+    return { ...first, sessions: [...rows.values()].sort(compare), next_cursor: cursor };
   }
 
   async open(parent: Parent, query: SessionListQuery | undefined, limit: number): Promise<ListSessionsResponse> {
     let windows = this.windows.get(parent);
-    if (windows && JSON.stringify(windows[0]?.request.query) !== JSON.stringify(query)) {
-      this.drop(parent);
-      windows = undefined;
+    let reusable: Map<string, SessionListRow> | undefined;
+    const current = windows?.[0]?.request.query;
+    const orderChanged = parent === null && (this.rootQuery?.order ?? "time") !== (query?.order ?? "time");
+    if (parent === null) this.rootQuery = query;
+    const sameFilters = current?.search === query?.search && JSON.stringify(current?.providers) === JSON.stringify(query?.providers);
+    const sameRanking = (current?.order ?? "time") === (query?.order ?? "time");
+    if (windows && (!sameFilters || !sameRanking)) {
+      const complete = windows.every((watch) => watch.page && !watch.opening) && windows[windows.length - 1]?.page?.next_cursor === null;
+      if (sameFilters && complete) {
+        // Both rankings select exactly the same complete set. Retain its lease.
+        if (orderChanged) return this.combined(parent);
+      } else {
+        // This query needs a new membership snapshot. Retain equal row bodies
+        // through ranking/filter switches without carrying any old membership.
+        reusable = new Map();
+        for (const window of windows) for (const [key, row] of window.rows) reusable.set(key, row);
+        this.drop(parent);
+        windows = undefined;
+      }
+    } else if (orderChanged && windows?.every((watch) => watch.page && !watch.opening)) {
+      // Switching back to the ranking that already owns this membership.
+      return this.combined(parent);
     }
     if (!windows) {
       windows = [];
@@ -139,7 +165,7 @@ export class SessionLists {
         watch = {
           request: { subscription_id, ...(parent === null ? { query } : { parent_session_key: parent }),
             ...(offset ? { offset } : {}), limit: count },
-          queued: [], buffering: false, overflow: false, retry: false, waitingForLease: false,
+          rows: reusable ?? new Map(), queued: [], buffering: false, overflow: false, retry: false, waitingForLease: false,
         };
         windows.push(watch);
         this.byId.set(subscription_id, watch);
@@ -152,7 +178,24 @@ export class SessionLists {
       await this.read(watch, false, true);
     }
     if (this.windows.get(parent) !== windows) throw new Error("Session list was closed");
-    return this.combined(parent);
+    const page = this.combined(parent);
+    return this.needsNewMembership(parent, page) ? this.open(null, this.rootQuery, this.limit(null)) : page;
+  }
+
+  private needsNewMembership(parent: Parent, page: ListSessionsResponse): boolean {
+    return parent === null && page.next_cursor !== null
+      && (this.windows.get(null)?.[0]?.request.query?.order ?? "time") !== (this.rootQuery?.order ?? "time");
+  }
+
+  private publish(parent: Parent): void {
+    const page = this.combined(parent);
+    if (!this.needsNewMembership(parent, page)) { this.onPage(parent, page); return; }
+    // A complete set can become a partial page after a new session arrives.
+    // Re-select membership using the currently visible ranking before paging.
+    const query = this.rootQuery;
+    void this.open(null, query, this.limit(null)).then((selected) => {
+      if (this.windows.has(null) && this.rootQuery === query) this.onPage(null, selected);
+    }, (error) => { if (this.windows.has(null) && this.rootQuery === query) this.onError(null, error); });
   }
 
   // A full host can still serve ordinary pages while this window waits for a
@@ -248,6 +291,7 @@ export class SessionLists {
       return;
     }
     const parent = watch.request.parent_session_key ?? null;
+    const previous = watch.page;
     try {
       if (update.base_revision === null) throw new InvalidListUpdate("Unexpected session list snapshot");
       apply(watch, update);
@@ -255,7 +299,7 @@ export class SessionLists {
       void this.recover(watch, true);
       return;
     }
-    this.onPage(parent, this.combined(parent));
+    if (watch.page !== previous) this.publish(parent);
   }
 
   private recover(watch: Watch, cold = false): Promise<void> {
@@ -269,7 +313,7 @@ export class SessionLists {
       if (!current()) return;
       try {
         await this.read(watch, cold);
-        if (current()) this.onPage(parent, this.combined(parent));
+        if (current()) this.publish(parent);
       } catch (error) {
         if (current()) this.onError(parent, error);
       }

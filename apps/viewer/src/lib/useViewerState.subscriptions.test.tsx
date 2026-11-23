@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { selectMachine } from "./transport";
 import type { BackgroundSessionUpdate, BackgroundUpdatesRequest, EventSummary, OpenSessionListRequest, SessionSummary, SessionUpdate, OpenSessionRequest } from "./types";
 import { useViewerState } from "./useViewerState";
+import { revisionedSession } from "../../tests/sessionListFixtures";
 
 const { nativeInvoke, handlers, observers } = vi.hoisted(() => ({
   nativeInvoke: vi.fn(), handlers: new Map<string, (event: { payload: unknown }) => void>(),
@@ -65,7 +66,7 @@ function host(initial: boolean, session_keys = ["live", "other"]) {
       listId = request.subscription_id;
       const sessions = session_keys.map(row).filter((session) => !request.query?.providers || request.query.providers.includes(session.provider))
         .map((session) => ({ ...session, is_running: session.session_key === "live" && running }));
-      return { subscription_id: listId, generation: "list", revision: String(listRevision), base_revision: null, rows: sessions, removed_keys: [], order_edits: [], next_cursor: null, source_errors: [], pending_providers: [] };
+      return { subscription_id: listId, generation: "list", revision: String(listRevision), base_revision: null, rows: sessions.map(revisionedSession), removed_keys: [], next_cursor: null, source_errors: [], pending_providers: [] };
     }
     if (command === "release_session") {
       const request = payload?.request as OpenSessionRequest;
@@ -101,7 +102,7 @@ function host(initial: boolean, session_keys = ["live", "other"]) {
         const base_revision = String(listRevision++);
         act(() => handlers.get("session-list-updated")?.({ payload: {
           subscription_id: listId, generation: "list", revision: String(listRevision), base_revision,
-          rows: [{ ...row("live"), is_running: running }], removed_keys: [], order_edits: [],
+          rows: [revisionedSession({ ...row("live"), is_running: running })], removed_keys: [],
           next_cursor: null, source_errors: [], pending_providers: [],
         } }));
       }
