@@ -455,8 +455,11 @@ and expanded child lists. The host pushes changed summaries with SHA-256
 revisions in `sessions` and the keys of sessions leaving the window in
 `removed_keys`. The frontend sorts loaded sessions and reuses complete lists
 when switching between Time and Projects.
-Shared viewers receive grant-scoped list changes and idle SSE
-heartbeats. The viewer reopens a list window on a missed revision or lost lease.
+Clients cache a server-issued `synced_through` cursor with each loaded window
+and reopen with `since` after a missed update or lost lease. Identical pages
+with matching permissions share change tracking. Recent deletions replay by
+key. An expired cursor receives a fresh snapshot. Shared viewers receive
+grant-scoped list changes and idle SSE heartbeats.
 Pi's live reader applies the most recent `session_info` name, including an
 explicit clear. The Pi body cursor change queues previously indexed sessions
 for a one-time background pass through the existing bounded indexer.

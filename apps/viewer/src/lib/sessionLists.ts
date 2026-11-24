@@ -6,45 +6,44 @@ import type { CommandInvoker } from "./transport";
 import type { ListSessionsResponse, OpenSessionListRequest, SessionListQuery, SessionListEntry, SessionListUpdate, SessionSummary } from "./types";
 
 class InvalidListUpdate extends Error {}
+class ListCursorGap extends InvalidListUpdate {}
 
 interface Watch {
   request: OpenSessionListRequest;
   entries: Map<string, SessionListEntry>;
   page?: ListSessionsResponse;
-  generation?: string;
-  revision?: string;
+  cursor?: string;
   opening?: Promise<ListSessionsResponse>;
   queued: SessionListUpdate[];
   buffering: boolean;
   overflow: boolean;
-  recovery?: Promise<void>;
+  queuedRecovery?: Promise<void>;
   retry: boolean;
   waitingForLease: boolean;
 }
 
 function apply(watch: Watch, update: SessionListUpdate): void {
-  if (update.subscription_id !== watch.request.subscription_id || !update.generation || !/^\d+$/.test(update.revision)) {
-    throw new InvalidListUpdate("Invalid session list revision");
+  if (update?.subscription_id !== watch.request.subscription_id || typeof update.synced_through !== "string" || !update.synced_through
+    || !Array.isArray(update.sessions) || !Array.isArray(update.removed_keys) || !Array.isArray(update.pending_providers)
+    || !Array.isArray(update.source_errors) || (update.next_cursor !== null && typeof update.next_cursor !== "string")) {
+    throw new InvalidListUpdate("Invalid session list update");
   }
-  const snapshot = update.base_revision === null;
-  if (snapshot && (update.removed_keys.length || (watch.revision && watch.generation === update.generation
-    && BigInt(update.revision) < BigInt(watch.revision)))) {
-    throw new InvalidListUpdate("Invalid session list snapshot");
-  }
-  if (!snapshot && (!watch.page || watch.generation !== update.generation || watch.revision !== update.base_revision
-    || BigInt(update.revision) < BigInt(watch.revision))) {
-    throw new InvalidListUpdate("Session list revision gap");
-  }
+  const snapshot = update.base_cursor === null;
+  if (snapshot && update.removed_keys.length) throw new InvalidListUpdate("Invalid session list snapshot");
+  if (!snapshot && (!watch.page || !watch.cursor || update.base_cursor !== watch.cursor)) throw new ListCursorGap();
 
-  // Summary revisions are independent of the window generation. Reusing
-  // an unchanged summary preserves its visible overlays across snapshots.
+  // Reuse unchanged summaries so their visible overlays survive a snapshot.
   const entries = snapshot ? new Map<string, SessionListEntry>() : new Map(watch.entries);
-  const touched = new Set(update.removed_keys);
-  for (const key of touched) entries.delete(key);
+  const touched = new Set<string>();
+  for (const key of update.removed_keys) {
+    if (typeof key !== "string" || !key || touched.has(key)) throw new InvalidListUpdate("Invalid removed session key");
+    touched.add(key);
+    entries.delete(key);
+  }
   let changed = (snapshot ? update.sessions.length : entries.size) !== watch.entries.size;
   for (const entry of update.sessions) {
-    const key = entry.session?.session_key;
-    if (!key || touched.has(key) || !/^[a-f0-9]{64}$/.test(entry.revision)) {
+    const key = entry?.session?.session_key;
+    if (typeof key !== "string" || !key || touched.has(key) || typeof entry.revision !== "string" || !/^[a-f0-9]{64}$/.test(entry.revision)) {
       throw new InvalidListUpdate("Invalid session list entry");
     }
     touched.add(key);
@@ -55,19 +54,25 @@ function apply(watch: Watch, update: SessionListUpdate): void {
       changed = true;
     }
   }
-  if (!snapshot && update.revision === watch.revision && changed) throw new InvalidListUpdate("Invalid session list revision");
-
   const sessions = !changed && watch.page && !watch.waitingForLease
     ? watch.page.sessions : [...entries.values()].map((entry) => entry.session);
-  watch.entries = entries;
   const previous = watch.page;
   if (!previous || sessions !== previous.sessions || update.next_cursor !== previous.next_cursor
     || JSON.stringify(update.pending_providers) !== JSON.stringify(previous.pending_providers)
     || JSON.stringify(update.source_errors) !== JSON.stringify(previous.source_errors)) {
+    if (!snapshot && update.synced_through === watch.cursor) throw new InvalidListUpdate("Changed session list reused its cutoff");
     watch.page = { sessions, next_cursor: update.next_cursor, pending_providers: update.pending_providers, source_errors: update.source_errors };
   }
-  watch.generation = update.generation;
-  watch.revision = update.revision;
+  watch.entries = entries;
+  watch.cursor = update.synced_through;
+}
+
+function applyPush(watch: Watch, update: SessionListUpdate): void {
+  if (watch.cursor && update.synced_through === watch.cursor) return;
+  // A pushed replacement has no base to check. An open from our latest
+  // cutoff confirms its current contents even if a late frame is delivered.
+  if (update.base_cursor === null) throw new ListCursorGap();
+  apply(watch, update);
 }
 
 const MAX_PENDING = 32;
@@ -221,8 +226,7 @@ export class SessionLists {
     watch.waitingForLease = true;
     page = { ...page, sessions: [...new Map(page.sessions.map((session) => [session.session_key, session])).values()] };
     watch.page = page;
-    watch.generation = undefined;
-    watch.revision = undefined;
+    watch.cursor = undefined;
     return page;
   }
 
@@ -233,33 +237,46 @@ export class SessionLists {
       watch.buffering = true;
       watch.queued = [];
       watch.overflow = false;
-      const resume = !reset && watch.revision ? { generation: watch.generation, revision: watch.revision } : {};
-      const update = await openSessionList({ ...watch.request, ...resume }, this.send);
+      const since = reset ? undefined : watch.cursor;
+      const update = await openSessionList({ ...watch.request, ...(since === undefined ? {} : { since }) }, this.send);
       if (!current()) {
         this.retire(watch);
         throw new Error("Session list was closed");
       }
+      if (!update || (update.base_cursor !== null && (!since || update.base_cursor !== since))) {
+        throw new InvalidListUpdate("Unexpected session list base");
+      }
       apply(watch, update);
       watch.waitingForLease = false;
-      if (watch.overflow) throw new InvalidListUpdate("Too many pending session list updates");
-      for (const pushed of watch.queued) if (!this.stale(watch, pushed)) apply(watch, pushed);
+      if (watch.overflow) throw new ListCursorGap("Too many pending session list updates");
+      for (const pushed of watch.queued) applyPush(watch, pushed);
       watch.buffering = false;
       watch.queued = [];
       return watch.page!;
     };
-    // Only malformed/gapped pushes warrant another baseline. Connection and
-    // permission failures surface to the caller without a repeated command.
     const run = async () => {
-      try {
-        return await fetch(cold);
-      } catch (error) {
-        if (!current()) throw error;
-        if (/live session list capacity exceeded/i.test(String(error))) {
-          if (allowStatic) return this.staticPage(watch);
-          if (watch.waitingForLease && watch.page) return watch.page;
+      let reset = cold;
+      let replayed = false;
+      while (true) {
+        try {
+          return await fetch(reset);
+        } catch (error) {
+          if (!current()) throw error;
+          if (error instanceof ListCursorGap && watch.cursor && !replayed) {
+            // The stream can race a command response. Ask for changes after
+            // the last applied cutoff before falling back to a full list.
+            replayed = true;
+            reset = false;
+          } else if (error instanceof InvalidListUpdate && !reset) {
+            reset = true;
+          } else {
+            if (/live session list capacity exceeded/i.test(String(error))) {
+              if (allowStatic) return this.staticPage(watch);
+              if (watch.waitingForLease && watch.page) return watch.page;
+            }
+            throw error;
+          }
         }
-        if (cold || !(error instanceof InvalidListUpdate)) throw error;
-        return fetch(true);
       }
     };
     watch.opening = run().then((page) => {
@@ -276,14 +293,9 @@ export class SessionLists {
     return watch.opening;
   }
 
-  private stale(watch: Watch, update: SessionListUpdate) {
-    return update.generation === watch.generation && watch.revision !== undefined && /^\d+$/.test(update.revision)
-      && BigInt(update.revision) <= BigInt(watch.revision);
-  }
-
   push(update: SessionListUpdate) {
     const watch = this.byId.get(update.subscription_id);
-    if (!watch || this.stale(watch, update)) return;
+    if (!watch || (watch.cursor && update.synced_through === watch.cursor)) return;
     // Capacity can be reached while growing a smaller live window. Its old
     // pushes belong to the shorter order until this client gets a new baseline.
     if (watch.waitingForLease && !watch.buffering) return;
@@ -295,23 +307,25 @@ export class SessionLists {
     const parent = watch.request.parent_session_key ?? null;
     const previous = watch.page;
     try {
-      if (update.base_revision === null) throw new InvalidListUpdate("Unexpected session list snapshot");
-      apply(watch, update);
-    } catch {
-      void this.recover(watch, true);
+      applyPush(watch, update);
+    } catch (error) {
+      void this.recover(watch, !(error instanceof ListCursorGap));
       return;
     }
     if (watch.page !== previous) this.publish(parent);
   }
 
   private recover(watch: Watch, cold = false): Promise<void> {
-    if (watch.recovery) return watch.recovery;
+    if (watch.queuedRecovery) return watch.queuedRecovery;
     const current = () => this.byId.get(watch.request.subscription_id) === watch;
     const parent = watch.request.parent_session_key ?? null;
     const restore = async () => {
       // An in-flight response may predate a disconnect. Validate again once it
       // settles even when the original snapshot happened to arrive successfully.
       if (watch.opening) await watch.opening.catch(() => {});
+      // Frames during read() are buffered. Once that read publishes, a new gap
+      // must be able to queue another catch-up, even within onPage itself.
+      watch.queuedRecovery = undefined;
       if (!current()) return;
       try {
         await this.read(watch, cold);
@@ -321,9 +335,9 @@ export class SessionLists {
       }
     };
     // A burst of gapped views shares the same bounded machine command channel.
-    watch.recovery = this.recoveryQueue.then(restore).finally(() => { watch.recovery = undefined; });
-    this.recoveryQueue = watch.recovery.catch(() => {});
-    return watch.recovery;
+    watch.queuedRecovery = this.recoveryQueue.then(restore);
+    this.recoveryQueue = watch.queuedRecovery.catch(() => {});
+    return watch.queuedRecovery;
   }
 
   reconnect(): void {

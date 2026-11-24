@@ -103,8 +103,8 @@ vi.mock("./transport", async (original) => {
 function pushListSessions(sessions: SessionSummary[], next_cursor: string | null = null) {
   const request = vi.mocked(openSessionList).mock.calls.find(([entry]) => !entry.parent_session_key)?.[0];
   if (!request || !listObserver) throw new Error("No session list subscription");
-  listObserver({ payload: { subscription_id: request.subscription_id, generation: "list", base_revision: "1",
-    revision: "2", sessions: sessions.map(revisionedSession), removed_keys: [], next_cursor, source_errors: [], pending_providers: [] } });
+  listObserver({ payload: { subscription_id: request.subscription_id, base_cursor: "list:first",
+    synced_through: "list:second", sessions: sessions.map(revisionedSession), removed_keys: [], next_cursor, source_errors: [], pending_providers: [] } });
 }
 
 let restore_host: (() => void) | undefined;
@@ -116,7 +116,7 @@ beforeEach(() => {
     const page = request.parent_session_key
       ? { ...await listSessionChildren({ parent_session_key: request.parent_session_key, limit: request.limit }, send), pending_providers: [], source_errors: [] }
       : await listSessions({ query: request.query!, limit: request.limit }, send);
-    return { subscription_id: request.subscription_id, generation: "list", revision: "1", base_revision: null,
+    return { subscription_id: request.subscription_id, synced_through: "list:first", base_cursor: null,
       sessions: page.sessions.map(revisionedSession), removed_keys: [], next_cursor: page.next_cursor,
       pending_providers: page.pending_providers, source_errors: page.source_errors };
   });

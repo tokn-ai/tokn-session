@@ -64,16 +64,31 @@ place it. Changing between Time and Projects is local when all matching sessions
 are loaded. For a partial list the host uses the requested ranking to select
 page membership, and the frontend sorts the loaded sessions.
 
-Each update also names its subscription, generation and window revision. A
-delta includes the window revision it builds on. The client recovers a missed
-delta by reopening that window. Pagination grows the
-watched range and can open additional windows for older sessions. Indexing
-progress and compact assistant previews use their own event types.
+Each client keeps one `synced_through` cursor with the list it has applied.
+When two clients watch the same page with the same permissions, the host
+shares the work of checking its membership. It records when each summary last
+changed and keeps recent removal keys. A client can disconnect, miss several
+changes, and reopen with `since` to receive them in one batch. Multiple edits
+to a session yield its latest summary. If the host has discarded the history
+needed for that cursor, it sends the current page as a snapshot.
 
-The host admits up to 64 live list windows with 90-second leases. The viewer
-renews its windows in batches. If the host is at capacity, the user can still
-page through the index. The viewer retries admission and resumes live updates
-when a lease becomes available.
+For example, if a phone misses a rename of A and the deletion of B while a
+desktop stays online, the phone can send its own cached cutoff and receive A
+in `sessions` and B in `removed_keys`. The desktop keeps its live subscription.
+Paginated and filtered views track page membership so a session that enters a
+full page can displace another. Indexing progress and compact assistant
+previews use their own event types.
+
+The host caches up to 64 distinct pages and supports up to 1,024 live list
+subscriptions. Each subscription holds a routing ID and the last cutoff sent.
+Subscribers to the same page share its summaries and removal history. An edit
+produces one internal broadcast per group of subscribers at the same cutoff
+and transport. HTTP streams expand only their matching subscription IDs.
+Local desktop subscriptions use a separate delivery group. A lease
+lasts 90 seconds and the viewer renews up to 64 together. When capacity is
+needed, the host can evict a page with no active subscriptions. If every page
+is in use, the user can still page through the index. The viewer retries
+admission and resumes live updates when a lease becomes available.
 
 ## Background messages and session coverage
 
@@ -206,10 +221,11 @@ contents. Debug timings are diagnostic, not desktop release benchmarks.
 
 ## Remaining costs
 
-When the index signals a change, the host rereads the affected metadata windows
-and compares session summary fingerprints. This bounds the data sent to the client. A busy
-machine with several different filters can still spend time evaluating those
-queries. Lease renewal and transport heartbeats do not run them.
+When the index signals a change, the host rereads affected pages and compares
+summary fingerprints once per distinct active view. Multiple clients watching
+the same page share this cost. Different filters, page boundaries or grants
+can still require separate queries. Lease renewal and transport heartbeats
+do not run them.
 
 Other providers and Codex correctness fallbacks still normalize full history.
 Codex source windows can be broader than the selected projection when dependencies

@@ -37,7 +37,7 @@ pub async fn open_session_list(
   request: OpenSessionListRequest,
 ) -> Result<SessionListUpdate, String> {
   let service = state.service(&app).await?;
-  tauri::async_runtime::spawn_blocking(move || service.open_session_list(request))
+  tauri::async_runtime::spawn_blocking(move || service.open_local_session_list(request))
     .await
     .map_err(|error| error.to_string())?
 }

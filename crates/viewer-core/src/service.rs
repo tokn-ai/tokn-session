@@ -4207,7 +4207,7 @@ fn file_modified_at_ms(path: &Path) -> Option<i64> {
   i64::try_from(duration.as_millis()).ok()
 }
 
-fn selected_providers(requested: &[ViewerProvider]) -> Vec<ViewerProvider> {
+pub(crate) fn selected_providers(requested: &[ViewerProvider]) -> Vec<ViewerProvider> {
   if requested.is_empty() {
     return ViewerProvider::ALL.to_vec();
   }

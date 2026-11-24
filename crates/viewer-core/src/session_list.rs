@@ -1,25 +1,28 @@
-//! Leased, metadata-only windows over the session sidebar. The query runs on
-//! open and on source changes. Renewing a window never touches the index.
+//! A list's change history is shared by all watchers with the same visibility,
+//! filter and page. A lease holds only the routing identity and last push cursor.
+mod projection;
+
 use crate::{
   ViewerService,
-  model::{DEFAULT_PAGE_LIMIT, ListSessionsResponse, SessionQuery, SessionSummary, SourceError, ViewerProvider},
+  model::{DEFAULT_PAGE_LIMIT, SessionQuery, SessionSummary, SourceError, ViewerProvider},
   updates::SessionSubscriptionRenewal,
 };
+use projection::{PageSpec, Projection};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256, digest::Output};
 use std::{
-  collections::{BTreeMap, HashMap, HashSet},
+  collections::{BTreeMap, HashMap, HashSet, VecDeque},
   sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicU64, Ordering},
   },
   time::{Duration, Instant},
 };
 use tokio::sync::Notify;
 
-const MAX_WINDOWS: usize = 64;
+const MAX_VIEWS: usize = 64;
+const MAX_LEASES: usize = 1024;
+const MAX_RENEWALS: usize = 64;
 const MAX_SESSIONS_PER_WINDOW: usize = 4096;
-const MAX_BASELINE_BYTES: usize = 4 * 1024 * 1024;
 const LEASE: Duration = Duration::from_secs(90);
 pub const SESSION_LIST_CAPACITY_ERROR: &str = "Live session list capacity exceeded";
 
@@ -32,8 +35,7 @@ pub struct OpenSessionListRequest {
   #[serde(default)]
   pub offset: usize,
   pub limit: Option<usize>,
-  pub generation: Option<String>,
-  pub revision: Option<String>,
+  pub since: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,20 +43,19 @@ pub struct SessionListSubscriptionRequest {
   pub subscription_id: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct SessionListEntry {
   pub session: SessionSummary,
   /// SHA-256 of the session summary visible in this scope.
   pub revision: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct SessionListUpdate {
   pub subscription_id: String,
-  pub generation: String,
-  /// A null base replaces the window. Clients choose the display order.
-  pub base_revision: Option<String>,
-  pub revision: String,
+  /// A null base replaces the window. Clients store synced_through with that list.
+  pub base_cursor: Option<String>,
+  pub synced_through: String,
   pub sessions: Vec<SessionListEntry>,
   pub removed_keys: Vec<String>,
   pub next_cursor: Option<String>,
@@ -64,34 +65,118 @@ pub struct SessionListUpdate {
 
 #[derive(Default)]
 pub(crate) struct SessionLists {
-  windows: Mutex<HashMap<String, LeasedWindow>>,
+  registry: Mutex<Registry>,
   pub(crate) changed: Notify,
+  #[cfg(test)]
+  reads: std::sync::atomic::AtomicUsize,
+  #[cfg(test)]
+  tombstone_limit: std::sync::OnceLock<usize>,
 }
 
 type Scope = Option<Arc<HashSet<String>>>;
 
-struct LeasedWindow {
-  expires: Instant,
-  window: Arc<Window>,
+#[derive(Default)]
+struct Registry {
+  // Ordered by most recent admission. Active views never get evicted.
+  views: VecDeque<Arc<Projection>>,
+  leases: HashMap<String, Lease>,
+  epoch: u64,
 }
 
-struct Window {
-  id: String,
-  scope: Scope,
-  query: SessionQuery,
-  parent: Option<String>,
-  offset: usize,
-  generation: String,
-  dirty: AtomicBool,
-  replica: Mutex<Replica>,
+struct Lease {
+  expires: Instant,
+  route: Arc<Route>,
+}
+
+struct Route {
+  view: Arc<Projection>,
+  local: bool,
+  sent: AtomicU64,
+}
+
+struct Admission {
+  route: Arc<Route>,
+  resized_from: Option<Arc<Projection>>,
+}
+
+impl Registry {
+  fn expire(&mut self, now: Instant) {
+    self.leases.retain(|_, lease| lease.expires > now);
+  }
+
+  fn admit(&mut self, id: &str, spec: PageSpec, local: bool) -> Result<Admission, String> {
+    let now = Instant::now();
+    self.expire(now);
+    let mut resized_from = None;
+    if let Some(lease) = self.leases.get_mut(id) {
+      if lease.route.local != local || !lease.route.view.spec.same_query(&spec) {
+        return Err("Session list identity is already in use".into());
+      }
+      if lease.route.view.spec.limit == spec.limit {
+        lease.expires = now + LEASE;
+        return Ok(Admission {
+          route: lease.route.clone(),
+          resized_from: None,
+        });
+      }
+      resized_from = Some(lease.route.view.clone());
+    } else if self.leases.len() >= MAX_LEASES {
+      return Err(SESSION_LIST_CAPACITY_ERROR.into());
+    }
+
+    let view = if let Some(index) = self.views.iter().position(|v| v.spec == spec) {
+      self.views.remove(index).expect("matched existing view")
+    } else {
+      if self.views.len() >= MAX_VIEWS {
+        // The current route can relinquish its old page when growing a window.
+        let evict = self
+          .views
+          .iter()
+          .position(|view| {
+            !self
+              .leases
+              .iter()
+              .any(|(other, lease)| other != id && Arc::ptr_eq(&lease.route.view, view))
+          })
+          .ok_or(SESSION_LIST_CAPACITY_ERROR)?;
+        self.views.remove(evict);
+      }
+      // Epoch zero is reserved for a route that has not opened successfully.
+      self.epoch = self.epoch.max(1);
+      Arc::new(Projection::new(spec, self.epoch))
+    };
+    self.views.push_back(view.clone());
+    let route = Arc::new(Route {
+      view,
+      local,
+      sent: AtomicU64::new(0),
+    });
+    self.leases.insert(
+      id.to_owned(),
+      Lease {
+        expires: now + LEASE,
+        route: route.clone(),
+      },
+    );
+    Ok(Admission { route, resized_from })
+  }
 }
 
 impl SessionLists {
-  /// Directory changes can affect ranking across an entire query. For known
-  /// session changes, only a grant or provider that can see those sessions needs work.
+  #[cfg(test)]
+  pub(crate) fn read_count(&self) -> usize {
+    self.reads.load(Ordering::Relaxed)
+  }
+
+  #[cfg(test)]
+  pub(crate) fn limit_tombstones(&self, count: usize) {
+    self.tombstone_limit.set(count).unwrap();
+  }
+
   pub(crate) fn invalidate(&self, keys: Option<&[String]>) {
-    let Ok(windows) = self.windows.lock() else { return };
-    if windows.is_empty() {
+    let Ok(mut registry) = self.registry.lock() else { return };
+    registry.epoch = registry.epoch.checked_add(1).expect("session list clock overflow");
+    if registry.views.is_empty() {
       return;
     }
     let providers: HashSet<_> = keys
@@ -103,157 +188,48 @@ impl SessionLists {
           .map(|locator| locator.provider)
       })
       .collect();
-    let now = Instant::now();
-    let mut wake = false;
-    for entry in windows.values().filter(|entry| entry.expires > now) {
-      let window = &entry.window;
-      if let Some(keys) = keys {
-        if window
-          .scope
-          .as_ref()
-          .is_some_and(|scope| !keys.iter().any(|key| scope.contains(key)))
-        {
-          continue;
-        }
-        if !providers.is_empty()
-          && !window.query.providers.is_empty()
-          && window.parent.is_none()
-          && !window
-            .query
-            .providers
-            .iter()
-            .any(|provider| providers.contains(provider))
-        {
-          continue;
-        }
+    // Mark retained views even while their last client is offline. No query runs
+    // for them until someone opens the view again.
+    let mut affected = false;
+    for view in &registry.views {
+      if view.spec.affected(keys, &providers) {
+        view.invalidate(registry.epoch);
+        affected = true;
       }
-      window.dirty.store(true, Ordering::Release);
-      wake = true;
     }
-    if wake {
+    if affected && !registry.leases.is_empty() {
       self.changed.notify_one();
     }
   }
-}
 
-#[derive(Default)]
-struct Replica {
-  limit: usize,
-  revision: u64,
-  baseline: Option<Baseline>,
-}
-
-// Retain keys and summary fingerprints. The index supplies the summaries
-// when a session changes.
-#[derive(Eq, PartialEq)]
-struct Baseline {
-  session_digests: BTreeMap<String, Output<Sha256>>,
-  next_cursor: Option<String>,
-  pending_providers: Vec<ViewerProvider>,
-  source_errors: Vec<SourceError>,
-}
-
-impl Baseline {
-  fn new(page: &ListSessionsResponse) -> Result<Self, String> {
-    let size = page
-      .sessions
-      .iter()
-      .map(|session| session.session_key.len() + 64)
-      .sum::<usize>();
-    if size > MAX_BASELINE_BYTES {
-      return Err(SESSION_LIST_CAPACITY_ERROR.into());
+  fn forget(&self, id: &str, route: &Arc<Route>) {
+    if let Ok(mut registry) = self.registry.lock()
+      && registry
+        .leases
+        .get(id)
+        .is_some_and(|lease| Arc::ptr_eq(&lease.route, route))
+    {
+      registry.leases.remove(id);
     }
-    let mut session_digests = BTreeMap::new();
-    for session in &page.sessions {
-      let mut hash = Sha256::new();
-      serde_json::to_writer(&mut hash, session).map_err(|error| error.to_string())?;
-      session_digests.insert(session.session_key.clone(), hash.finalize());
-    }
-    Ok(Self {
-      session_digests,
-      next_cursor: page.next_cursor.clone(),
-      pending_providers: page.pending_providers.clone(),
-      source_errors: page.source_errors.clone(),
-    })
-  }
-}
-
-impl Window {
-  fn read(&self, service: &ViewerService, limit: usize) -> Result<ListSessionsResponse, String> {
-    let mut reader = service.clone();
-    reader.session_scope = self.scope.clone();
-    if let Some(parent) = &self.parent {
-      let page = reader.list_session_child_window(parent, self.offset, limit, true)?;
-      return Ok(ListSessionsResponse {
-        sessions: page.sessions,
-        next_cursor: page.next_cursor,
-        pending_providers: Vec::new(),
-        source_errors: Vec::new(),
-      });
-    }
-    reader.list_session_window(&self.query, self.offset, limit)
-  }
-
-  fn capture(
-    &self,
-    service: &ViewerService,
-    replica: &mut Replica,
-    limit: usize,
-    snapshot: bool,
-    acknowledge: bool,
-  ) -> Result<Option<SessionListUpdate>, String> {
-    let page = self.read(service, limit)?;
-    let current = Baseline::new(&page)?;
-    let previous = replica.baseline.as_ref();
-    let changed = previous != Some(&current);
-    replica.limit = limit;
-    if !changed && !acknowledge {
-      return Ok(None);
-    }
-    let base_revision = (!snapshot).then(|| replica.revision.to_string());
-    let base = previous.filter(|_| !snapshot);
-    let removed_keys = base
-      .into_iter()
-      .flat_map(|base| base.session_digests.keys())
-      .filter(|key| !current.session_digests.contains_key(*key))
-      .cloned()
-      .collect();
-    let sessions = page
-      .sessions
-      .into_iter()
-      .filter_map(|session| {
-        let digest = &current.session_digests[&session.session_key];
-        let previous_digest = base.and_then(|base| base.session_digests.get(&session.session_key));
-        (Some(digest) != previous_digest).then(|| SessionListEntry {
-          session,
-          revision: format!("{digest:x}"),
-        })
-      })
-      .collect();
-    if changed {
-      replica.revision += 1;
-      replica.baseline = Some(current);
-    }
-    Ok(Some(SessionListUpdate {
-      subscription_id: self.id.clone(),
-      generation: self.generation.clone(),
-      base_revision,
-      revision: replica.revision.to_string(),
-      sessions,
-      removed_keys,
-      next_cursor: page.next_cursor,
-      pending_providers: page.pending_providers,
-      source_errors: page.source_errors,
-    }))
   }
 }
 
 impl ViewerService {
   pub fn open_session_list(&self, request: OpenSessionListRequest) -> Result<SessionListUpdate, String> {
-    let limit = request.limit.unwrap_or(DEFAULT_PAGE_LIMIT);
+    self.open_list(request, false)
+  }
+
+  /// Native desktop events route directly to the webview. Embedded HTTP
+  /// clients receive their updates over their own SSE connections.
+  pub fn open_local_session_list(&self, request: OpenSessionListRequest) -> Result<SessionListUpdate, String> {
+    self.open_list(request, true)
+  }
+
+  fn open_list(&self, request: OpenSessionListRequest, local: bool) -> Result<SessionListUpdate, String> {
     if !self.valid_subscription_id(&request.subscription_id) {
       return Err("Invalid session list identity".into());
     }
+    let limit = request.limit.unwrap_or(DEFAULT_PAGE_LIMIT);
     if !(1..=MAX_SESSIONS_PER_WINDOW).contains(&limit) {
       return Err(format!(
         "Live session lists support 1 to {MAX_SESSIONS_PER_WINDOW} sessions per window"
@@ -263,82 +239,63 @@ impl ViewerService {
       self.check_session_scope(parent)?;
       crate::model::decode_session_key(parent)?;
     }
-    let window = {
-      let mut windows = self
-        .session_lists
-        .windows
-        .lock()
-        .map_err(|_| "Session list store unavailable")?;
-      let now = Instant::now();
-      windows.retain(|_, entry| entry.expires > now);
-      if let Some(entry) = windows.get_mut(&request.subscription_id) {
-        let window = &entry.window;
-        if window.scope != self.session_scope
-          || window.query != request.query
-          || window.parent != request.parent_session_key
-          || window.offset != request.offset
-        {
-          return Err("Session list identity is already in use".into());
-        }
-        entry.expires = now + LEASE;
-        window.clone()
-      } else {
-        if windows.len() >= MAX_WINDOWS {
-          return Err(SESSION_LIST_CAPACITY_ERROR.into());
-        }
-        let window = Arc::new(Window {
-          id: request.subscription_id.clone(),
-          scope: self.session_scope.clone(),
-          query: request.query,
-          parent: request.parent_session_key,
-          offset: request.offset,
-          generation: uuid::Uuid::new_v4().to_string(),
-          dirty: AtomicBool::new(false),
-          replica: Mutex::default(),
-        });
-        windows.insert(
-          request.subscription_id,
-          LeasedWindow {
-            expires: now + LEASE,
-            window: window.clone(),
-          },
-        );
-        window
-      }
-    };
-    let mut replica = window.replica.lock().map_err(|_| "Session list unavailable")?;
-    let matches = replica.baseline.is_some()
-      && request.generation.as_ref() == Some(&window.generation)
-      && request.revision.as_ref() == Some(&replica.revision.to_string());
-    let result = window.capture(self, &mut replica, limit, !matches, true);
-    if result
+    let spec = PageSpec::new(
+      self.session_scope.clone(),
+      request.query,
+      request.parent_session_key,
+      request.offset,
+      limit,
+    );
+    let id = request.subscription_id;
+    let admission = self
+      .session_lists
+      .registry
+      .lock()
+      .map_err(|_| "Session list store unavailable")?
+      .admit(&id, spec, local)?;
+    // Never hold the registry lock across a database read, or two projection
+    // locks together when a route grows from one page to another.
+    let previous = admission
+      .resized_from
       .as_ref()
-      .is_err_and(|error| replica.baseline.is_none() || error == SESSION_LIST_CAPACITY_ERROR)
-    {
-      self.forget_session_list(&window);
+      .and_then(|old| old.saved_digests(request.since.as_deref()));
+    let route = admission.route;
+    let view = &route.view;
+    let result = view.capture(self, |page| {
+      let update = if let Some((since, previous)) = previous {
+        page.resized(id.clone(), since, &previous)
+      } else {
+        page.update(id.clone(), request.since.as_deref())
+      };
+      route.sent.store(page.head, Ordering::Release);
+      update
+    });
+    if result.is_err() {
+      self.session_lists.forget(&id, &route);
     }
-    result.map(|update| update.expect("an open always acknowledges its revision"))
+    result
   }
 
   pub fn renew_session_lists(&self, ids: &[String]) -> Result<SessionSubscriptionRenewal, String> {
-    if ids.len() > MAX_WINDOWS || ids.iter().any(|id| !self.valid_subscription_id(id)) {
+    if ids.len() > MAX_RENEWALS || ids.iter().any(|id| !self.valid_subscription_id(id)) {
       return Err("Invalid session list renewal".into());
     }
-    let mut windows = self
+    let mut registry = self
       .session_lists
-      .windows
+      .registry
       .lock()
       .map_err(|_| "Session list store unavailable")?;
     let now = Instant::now();
-    windows.retain(|_, entry| entry.expires > now);
+    registry.expire(now);
     let mut renewal = SessionSubscriptionRenewal::default();
     let mut seen = HashSet::new();
     for id in ids.iter().filter(|id| seen.insert(*id)) {
-      if let Some(entry) = windows
+      if let Some(lease) = registry
+        .leases
         .get_mut(id)
-        .filter(|entry| entry.window.scope == self.session_scope)
+        .filter(|lease| lease.route.view.spec.scope == self.session_scope)
       {
-        entry.expires = now + LEASE;
+        lease.expires = now + LEASE;
         renewal.renewed_ids.push(id.clone());
       } else {
         renewal.missing_ids.push(id.clone());
@@ -351,58 +308,78 @@ impl ViewerService {
     if !self.valid_subscription_id(&request.subscription_id) {
       return Err("Invalid session list identity".into());
     }
-    let mut windows = self
+    let mut registry = self
       .session_lists
-      .windows
+      .registry
       .lock()
       .map_err(|_| "Session list store unavailable")?;
-    let owned = windows
+    let owned = registry
+      .leases
       .get(&request.subscription_id)
-      .is_some_and(|e| e.window.scope == self.session_scope);
+      .is_some_and(|lease| lease.route.view.spec.scope == self.session_scope);
     if owned {
-      windows.remove(&request.subscription_id);
+      registry.leases.remove(&request.subscription_id);
     }
     Ok(owned)
   }
 
-  fn forget_session_list(&self, window: &Arc<Window>) {
-    if let Ok(mut windows) = self.session_lists.windows.lock()
-      && windows
-        .get(&window.id)
-        .is_some_and(|entry| Arc::ptr_eq(&entry.window, window))
-    {
-      windows.remove(&window.id);
+  pub(crate) fn publish_session_list_batches(&self, mut publish: impl FnMut(SessionListUpdate, Vec<String>, bool)) {
+    let views = {
+      let Ok(mut registry) = self.session_lists.registry.lock() else {
+        return;
+      };
+      registry.expire(Instant::now());
+      let mut active = HashMap::<_, (Arc<Projection>, Vec<(String, Arc<Route>)>)>::new();
+      for (id, lease) in &registry.leases {
+        let view = &lease.route.view;
+        let (_, routes) = active
+          .entry(view.identity)
+          .or_insert_with(|| (view.clone(), Vec::new()));
+        routes.push((id.clone(), lease.route.clone()));
+      }
+      active
+    };
+    for (view, routes) in views.into_values() {
+      let result = view.capture(self, |page| {
+        // Clients at the same cutoff receive the same payload. The routing ID
+        // is the only per-client part, including for independently opened tabs.
+        let mut cohorts = BTreeMap::<(u64, bool), Vec<String>>::new();
+        for (id, route) in &routes {
+          let sent = route.sent.load(Ordering::Acquire);
+          if sent != 0 && sent != page.head {
+            cohorts.entry((sent, route.local)).or_default().push(id.clone());
+            route.sent.store(page.head, Ordering::Release);
+          }
+        }
+        (!cohorts.is_empty()).then(|| (page.clone(), cohorts))
+      });
+      let delivery = match result {
+        Ok(delivery) => delivery,
+        Err(_) => {
+          for (id, route) in &routes {
+            self.session_lists.forget(id, route);
+          }
+          continue;
+        }
+      };
+      let Some((page, cohorts)) = delivery else { continue };
+      // Hold only the immutable page here. Build one cohort's payload at a
+      // time, and never call transport code under the projection lock.
+      for ((since, local), ids) in cohorts {
+        publish(page.delta_or_snapshot(String::new(), Some(since)), ids, local);
+      }
     }
   }
 
+  #[cfg(test)]
   pub(crate) fn publish_session_lists(&self, mut publish: impl FnMut(SessionListUpdate)) {
-    let windows: Vec<_> = {
-      let Ok(mut windows) = self.session_lists.windows.lock() else {
-        return;
-      };
-      let now = Instant::now();
-      windows.retain(|_, entry| entry.expires > now);
-      windows
-        .values()
-        .filter(|entry| entry.window.dirty.swap(false, Ordering::AcqRel))
-        .map(|entry| entry.window.clone())
-        .collect()
-    };
-    for window in windows {
-      let Ok(mut replica) = window.replica.lock() else {
-        continue;
-      };
-      if replica.baseline.is_none() {
-        continue;
+    self.publish_session_list_batches(|update, ids, _| {
+      for subscription_id in ids {
+        publish(SessionListUpdate {
+          subscription_id,
+          ..update.clone()
+        });
       }
-      let limit = replica.limit;
-      match window.capture(self, &mut replica, limit, false, false) {
-        Ok(Some(update)) => publish(update),
-        Ok(None) => {}
-        // Preserve the displayed sessions. The next renewal will request a new
-        // baseline instead of acknowledging a subscription which missed data.
-        Err(_) => self.forget_session_list(&window),
-      }
-    }
+    });
   }
 }

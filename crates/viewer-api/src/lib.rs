@@ -457,6 +457,10 @@ fn event_stream(state: ApiState, subscription_prefix: Option<String>) -> Result<
     .try_acquire_owned()
     .map_err(|_| error(StatusCode::TOO_MANY_REQUESTS, "Too many viewer subscriptions"))?;
   let mut receiver = state.events.subscribe();
+  let list_prefix = subscription_prefix
+    .as_deref()
+    .filter(|prefix| !prefix.starts_with("share_"))
+    .map(|prefix| format!("{prefix}:"));
   let stream = async_stream::stream! {
     let _permit = permit;
     yield Ok::<_, Infallible>(Event::default().event("ready").data("{}"));
@@ -464,8 +468,11 @@ fn event_stream(state: ApiState, subscription_prefix: Option<String>) -> Result<
       let received = tokio::select! { biased; _ = state.shutdown.cancelled() => break, event = receiver.recv() => event };
       match received {
         Ok(event) => {
-          let Some(event) = stream_event(event, subscription_prefix.as_deref()) else { continue };
-          yield Ok(Event::default().event(event.event).data(event.payload.to_string()));
+          for event in event.for_subscriptions(|id| list_prefix.as_ref().is_some_and(|prefix| id.starts_with(prefix))) {
+            if let Some(event) = stream_event(event, subscription_prefix.as_deref()) {
+              yield Ok(Event::default().event(event.event).data(event.payload.to_string()));
+            }
+          }
         },
         Err(broadcast::error::RecvError::Lagged(_)) => {
           // Reconnect forces a fresh catalog/timeline; never apply an incomplete sequence.
@@ -784,12 +791,7 @@ mod tests {
       ),
       ("session-notification", json!({"session_key":"one"})),
     ] {
-      events
-        .send(ViewerEvent {
-          event: name.into(),
-          payload,
-        })
-        .unwrap();
+      events.send(ViewerEvent::new(name, payload)).unwrap();
     }
     assert!(next_frame(&mut other).await.starts_with("event: session-updated\n"));
     assert!(
@@ -1123,20 +1125,15 @@ mod tests {
     let ready = body.frame().await.unwrap().unwrap().into_data().unwrap();
     assert!(String::from_utf8_lossy(&ready).contains("event: ready"));
     events
-      .send(ViewerEvent {
-        event: "relay-changed".into(),
-        payload: json!({"session_key":key,"reset":false}),
-      })
+      .send(ViewerEvent::new(
+        "relay-changed",
+        json!({"session_key":key,"reset":false}),
+      ))
       .unwrap();
     let update = body.frame().await.unwrap().unwrap().into_data().unwrap();
     assert!(String::from_utf8_lossy(&update).contains("relay-changed"));
     for _ in 0..4 {
-      events
-        .send(ViewerEvent {
-          event: "relay-changed".into(),
-          payload: json!({}),
-        })
-        .unwrap();
+      events.send(ViewerEvent::new("relay-changed", json!({}))).unwrap();
     }
     assert!(
       body.frame().await.is_none(),

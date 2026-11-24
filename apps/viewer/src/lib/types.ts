@@ -551,8 +551,8 @@ export interface OpenSessionListRequest {
   parent_session_key?: string;
   offset?: number;
   limit: number;
-  generation?: string;
-  revision?: string;
+  /** Last cutoff applied to this list. */
+  since?: string;
 }
 
 export interface SessionListEntry {
@@ -563,9 +563,8 @@ export interface SessionListEntry {
 
 export interface SessionListUpdate {
   subscription_id: string;
-  generation: string;
-  base_revision: string | null;
-  revision: string;
+  base_cursor: string | null;
+  synced_through: string;
   sessions: SessionListEntry[];
   removed_keys: string[];
   next_cursor: string | null;
