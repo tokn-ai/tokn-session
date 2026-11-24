@@ -51,23 +51,23 @@ older outstanding questions retain their attention context.
 ## Session list
 
 The sidebar opens a metadata-only window for the current search and providers.
-Expanding a parent opens a separate window for its children. Each row has a
-session key and a SHA-256 revision of the summary visible to that viewer.
+Expanding a parent opens a separate window for its children. The `sessions`
+array holds summaries, each with its session key and a SHA-256 revision.
 When the index commits a change, the host compares the revisions in each
-affected window and sends only new or changed summaries. Rows leaving a window
-are identified by key. An unchanged window produces no list event, including
-for shared viewers.
+affected window and sends only new or changed summaries in `sessions`. Keys
+of sessions leaving a window appear in `removed_keys`. An unchanged window
+produces no list event, including for shared viewers.
 
 The frontend owns display order. For example, when a session becomes active,
 the host sends its updated summary and the frontend uses the activity time to
-place it. Changing between Time and Projects is local when all matching rows
+place it. Changing between Time and Projects is local when all matching sessions
 are loaded. For a partial list the host uses the requested ranking to select
-page membership, and the frontend sorts the loaded rows.
+page membership, and the frontend sorts the loaded sessions.
 
 Each update also names its subscription, generation and window revision. A
 delta includes the window revision it builds on. The client recovers a missed
 delta by reopening that window. Pagination grows the
-watched range and can open additional windows for older rows. Indexing
+watched range and can open additional windows for older sessions. Indexing
 progress and compact assistant previews use their own event types.
 
 The host admits up to 64 live list windows with 90-second leases. The viewer
@@ -207,7 +207,7 @@ contents. Debug timings are diagnostic, not desktop release benchmarks.
 ## Remaining costs
 
 When the index signals a change, the host rereads the affected metadata windows
-and compares row fingerprints. This bounds the data sent to the client. A busy
+and compares session summary fingerprints. This bounds the data sent to the client. A busy
 machine with several different filters can still spend time evaluating those
 queries. Lease renewal and transport heartbeats do not run them.
 

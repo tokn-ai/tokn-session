@@ -156,28 +156,28 @@ does not grant access. The API allows at most 16 concurrent command requests,
 32 SSE clients, and 1 MiB request bodies. Error responses contain `error`;
 invalid JSON/body-limit responses may be plain text.
 
-`open_session_list` watches the root rows matching a `query`, or the direct
+`open_session_list` watches the root sessions matching a `query`, or the direct
 children of a `parent_session_key`. Pass a `subscription_id`, `limit` and
-optional `offset`. The first response contains the rows in the window and a
-null `base_revision`. Each `rows` entry is `{ session, revision }`. Its
-`revision` is a lowercase SHA-256 digest of the visible session summary. The
-same summary has the same revision across subscriptions. Clients merge rows by
+optional `offset`. The first response has a null `base_revision`. Its `sessions`
+array contains a `{ session, revision }` entry for every session in the window.
+Each entry’s `revision` is a lowercase SHA-256 digest of the visible session summary. The
+same summary has the same revision across subscriptions. Clients merge entries by
 `session.session_key` and sort them locally. Array positions have no protocol
 meaning.
 
-Each subsequent `session-list-updated` event carries only new or changed rows,
-keys leaving the window in `removed_keys`, and current pagination and indexing
-metadata. A rename sends one updated row. A change to pagination metadata can
-produce an update with empty row and removal arrays.
+Each subsequent `session-list-updated` event carries new or changed summaries
+in `sessions`, keys leaving the window in `removed_keys`, and current pagination
+and indexing metadata. A rename sends one updated summary. A metadata-only
+update has empty `sessions` and `removed_keys` arrays.
 
 To grow or reconnect a window, reopen it with the same subscription ID,
 generation and last applied revision. The host returns a delta when it can
 match that revision and a snapshot otherwise. A new filter uses a fresh
 subscription ID. Switching between Time and Projects reuses a fully loaded
-list. When more rows exist, the viewer asks for the page under the selected
+list. When more sessions exist, the viewer asks for the page under the selected
 ranking. `renew_session_lists` renews the client's loaded
 windows in one request with `ids` and returns `renewed_ids` and `missing_ids`.
-Renewal does not read session rows. `release_session_list` takes
+Renewal only extends the lease. `release_session_list` takes
 `{"request":{"subscription_id":"…"}}` and returns whether it released a lease.
 
 `open_session` accepts `session_key`, `subscription_id`, an optional delivery
@@ -270,7 +270,7 @@ Owner streams also receive `session-notification`, `relay-status`,
 `GET /api/v1/events` to monitor general events alone.
 
 Streams begin with `ready` and use 15-second SSE comments to keep idle
-connections alive. Shared list updates include only rows visible to the grant.
+connections alive. Shared list updates include only sessions visible to the grant.
 A lagging subscriber disconnects. On reconnect the viewer revalidates its open list
 windows and selected timeline, renews background interests, and reads current status.
 Event pages include `follow_error` while followers retry, preserving last-good cards with a
@@ -294,7 +294,7 @@ from older servers. Acknowledgement
 revisions remain opaque and must come from the displayed newest event page.
 
 Session list requests accept `query.order` (`time`, the default, or `project`)
-to select which rows fall inside a page. Project ranking groups folder identities by
+to select which sessions fall inside a page. Project ranking groups folder identities by
 their durable discovery anchor, newest first, then session activity. Git metadata
 is read only in the recorded working folder; explicit worktrees can share a
 repository identity, while non-Git subfolders remain independent projects.

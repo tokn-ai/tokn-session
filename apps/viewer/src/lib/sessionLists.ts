@@ -3,13 +3,13 @@ import { listSessionChildren, listSessions, openSessionList } from "./tauri";
 import { SESSION_PAGE_SIZE } from "./state";
 import { compareActivity, compareProjects, compareSessionChildren } from "./sidebarOrder";
 import type { CommandInvoker } from "./transport";
-import type { ListSessionsResponse, OpenSessionListRequest, SessionListQuery, SessionListRow, SessionListUpdate, SessionSummary } from "./types";
+import type { ListSessionsResponse, OpenSessionListRequest, SessionListQuery, SessionListEntry, SessionListUpdate, SessionSummary } from "./types";
 
 class InvalidListUpdate extends Error {}
 
 interface Watch {
   request: OpenSessionListRequest;
-  rows: Map<string, SessionListRow>;
+  entries: Map<string, SessionListEntry>;
   page?: ListSessionsResponse;
   generation?: string;
   revision?: string;
@@ -36,30 +36,30 @@ function apply(watch: Watch, update: SessionListUpdate): void {
     throw new InvalidListUpdate("Session list revision gap");
   }
 
-  // Content revisions identify scoped row bodies independently of a window's
-  // generation. Resyncing an unchanged row preserves its visible overlays.
-  const rows = snapshot ? new Map<string, SessionListRow>() : new Map(watch.rows);
+  // Summary revisions are independent of the window generation. Reusing
+  // an unchanged summary preserves its visible overlays across snapshots.
+  const entries = snapshot ? new Map<string, SessionListEntry>() : new Map(watch.entries);
   const touched = new Set(update.removed_keys);
-  for (const key of touched) rows.delete(key);
-  let changed = (snapshot ? update.rows.length : rows.size) !== watch.rows.size;
-  for (const entry of update.rows) {
+  for (const key of touched) entries.delete(key);
+  let changed = (snapshot ? update.sessions.length : entries.size) !== watch.entries.size;
+  for (const entry of update.sessions) {
     const key = entry.session?.session_key;
     if (!key || touched.has(key) || !/^[a-f0-9]{64}$/.test(entry.revision)) {
-      throw new InvalidListUpdate("Invalid session list row");
+      throw new InvalidListUpdate("Invalid session list entry");
     }
     touched.add(key);
-    const old = watch.rows.get(key);
-    if (old?.revision === entry.revision) rows.set(key, old);
+    const old = watch.entries.get(key);
+    if (old?.revision === entry.revision) entries.set(key, old);
     else {
-      rows.set(key, entry);
+      entries.set(key, entry);
       changed = true;
     }
   }
   if (!snapshot && update.revision === watch.revision && changed) throw new InvalidListUpdate("Invalid session list revision");
 
   const sessions = !changed && watch.page && !watch.waitingForLease
-    ? watch.page.sessions : [...rows.values()].map((row) => row.session);
-  watch.rows = rows;
+    ? watch.page.sessions : [...entries.values()].map((entry) => entry.session);
+  watch.entries = entries;
   const previous = watch.page;
   if (!previous || sessions !== previous.sessions || update.next_cursor !== previous.next_cursor
     || JSON.stringify(update.pending_providers) !== JSON.stringify(previous.pending_providers)
@@ -72,8 +72,8 @@ function apply(watch: Watch, update: SessionListUpdate): void {
 
 const MAX_PENDING = 32;
 // Start another independent live window on a page boundary before the host
-// limit. Previously loaded rows keep their subscriptions as browsing continues.
-const WINDOW_ROWS = Math.floor(4096 / SESSION_PAGE_SIZE) * SESSION_PAGE_SIZE;
+// limit. Previously loaded sessions keep their subscriptions as browsing continues.
+const SESSIONS_PER_WINDOW = Math.floor(4096 / SESSION_PAGE_SIZE) * SESSION_PAGE_SIZE;
 type Parent = string | null;
 
 export class SessionLists {
@@ -115,19 +115,21 @@ export class SessionLists {
     const first = windows[0]?.page;
     if (!first) throw new Error("Session list was closed");
     const compare = parent !== null ? compareSessionChildren : this.rootQuery?.order === "project" ? compareProjects : compareActivity;
-    const rows = new Map<string, SessionSummary>();
+    const sessions = new Map<string, SessionSummary>();
     let cursor = first.next_cursor;
     for (const watch of windows) {
       if (!watch.page) break;
-      for (const row of watch.page.sessions) if (!rows.has(row.session_key)) rows.set(row.session_key, row);
+      for (const session of watch.page.sessions) {
+        if (!sessions.has(session.session_key)) sessions.set(session.session_key, session);
+      }
       cursor = watch.page.next_cursor;
     }
-    return { ...first, sessions: [...rows.values()].sort(compare), next_cursor: cursor };
+    return { ...first, sessions: [...sessions.values()].sort(compare), next_cursor: cursor };
   }
 
   async open(parent: Parent, query: SessionListQuery | undefined, limit: number): Promise<ListSessionsResponse> {
     let windows = this.windows.get(parent);
-    let reusable: Map<string, SessionListRow> | undefined;
+    let reusable: Map<string, SessionListEntry> | undefined;
     const current = windows?.[0]?.request.query;
     const orderChanged = parent === null && (this.rootQuery?.order ?? "time") !== (query?.order ?? "time");
     if (parent === null) this.rootQuery = query;
@@ -139,10 +141,10 @@ export class SessionLists {
         // Both rankings select exactly the same complete set. Retain its lease.
         if (orderChanged) return this.combined(parent);
       } else {
-        // This query needs a new membership snapshot. Retain equal row bodies
+        // This query needs a new membership snapshot. Retain unchanged summaries
         // through ranking/filter switches without carrying any old membership.
         reusable = new Map();
-        for (const window of windows) for (const [key, row] of window.rows) reusable.set(key, row);
+        for (const window of windows) for (const [key, entry] of window.entries) reusable.set(key, entry);
         this.drop(parent);
         windows = undefined;
       }
@@ -155,9 +157,9 @@ export class SessionLists {
       this.windows.set(parent, windows);
     }
     const previousLimit = this.limit(parent);
-    for (let offset = 0; offset < limit; offset += WINDOW_ROWS) {
-      const count = Math.min(WINDOW_ROWS, limit - offset);
-      const index = offset / WINDOW_ROWS;
+    for (let offset = 0; offset < limit; offset += SESSIONS_PER_WINDOW) {
+      const count = Math.min(SESSIONS_PER_WINDOW, limit - offset);
+      const index = offset / SESSIONS_PER_WINDOW;
       let watch = windows[index];
       if (!watch) {
         const id = createUuid();
@@ -165,7 +167,7 @@ export class SessionLists {
         watch = {
           request: { subscription_id, ...(parent === null ? { query } : { parent_session_key: parent }),
             ...(offset ? { offset } : {}), limit: count },
-          rows: reusable ?? new Map(), queued: [], buffering: false, overflow: false, retry: false, waitingForLease: false,
+          entries: reusable ?? new Map(), queued: [], buffering: false, overflow: false, retry: false, waitingForLease: false,
         };
         windows.push(watch);
         this.byId.set(subscription_id, watch);
@@ -217,7 +219,7 @@ export class SessionLists {
     }
     if (this.byId.get(watch.request.subscription_id) !== watch) throw new Error("Session list was closed");
     watch.waitingForLease = true;
-    page = { ...page, sessions: [...new Map(page.sessions.map((row) => [row.session_key, row])).values()] };
+    page = { ...page, sessions: [...new Map(page.sessions.map((session) => [session.session_key, session])).values()] };
     watch.page = page;
     watch.generation = undefined;
     watch.revision = undefined;

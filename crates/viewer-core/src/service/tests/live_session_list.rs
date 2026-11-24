@@ -1,5 +1,7 @@
 use super::*;
-use crate::session_list::{OpenSessionListRequest, SessionListRow, SessionListSubscriptionRequest, SessionListUpdate};
+use crate::session_list::{
+  OpenSessionListRequest, SessionListEntry, SessionListSubscriptionRequest, SessionListUpdate,
+};
 
 fn request(id: &str, limit: usize) -> OpenSessionListRequest {
   serde_json::from_value(json!({"subscription_id":id,"limit":limit,"query":{"providers":["codex"]}})).unwrap()
@@ -35,16 +37,16 @@ fn published(service: &ViewerService) -> Vec<SessionListUpdate> {
   out
 }
 
-fn row_by_id<'a>(update: &'a SessionListUpdate, id: &str) -> &'a SessionListRow {
+fn entry_by_id<'a>(update: &'a SessionListUpdate, id: &str) -> &'a SessionListEntry {
   update
-    .rows
+    .sessions
     .iter()
-    .find(|row| row.session.session_id == id)
-    .expect("missing fixture row")
+    .find(|entry| entry.session.session_id == id)
+    .expect("missing fixture session")
 }
 
 #[test]
-fn live_session_list_sends_one_renamed_row_and_preserves_filtered_scoped_windows() {
+fn live_session_list_sends_one_renamed_session_and_preserves_filtered_scoped_windows() {
   let mut a = session_header("a", None, "/project", "2026-01-03T00:00:00Z");
   let mut b = session_header("b", None, "/project", "2026-01-02T00:00:00Z");
   let c = session_header("c", None, "/project", "2026-01-01T00:00:00Z");
@@ -52,23 +54,23 @@ fn live_session_list_sends_one_renamed_row_and_preserves_filtered_scoped_windows
   let first = service.open_session_list(request("owner", 2)).unwrap();
   assert_eq!(
     first
-      .rows
+      .sessions
       .iter()
-      .map(|r| r.session.session_id.as_str())
+      .map(|entry| entry.session.session_id.as_str())
       .collect::<BTreeSet<_>>(),
     BTreeSet::from(["a", "b"])
   );
   assert!(first.base_revision.is_none() && first.next_cursor.is_some());
 
-  let guest_key = row_by_id(&first, "b").session.session_key.clone();
+  let guest_key = entry_by_id(&first, "b").session.session_key.clone();
   let guest = service.scoped_to_sessions(std::slice::from_ref(&guest_key)).unwrap();
   let guest_req = request("share_list_guest:visible", 2);
   let granted = guest.open_session_list(guest_req.clone()).unwrap();
-  assert_eq!(granted.rows.len(), 1);
-  assert_eq!(granted.rows[0].session.session_key, guest_key);
+  assert_eq!(granted.sessions.len(), 1);
+  assert_eq!(granted.sessions[0].session.session_key, guest_key);
   let mut filter = request("search", 5);
   filter.query.search = Some("needle".into());
-  assert!(service.open_session_list(filter).unwrap().rows.is_empty());
+  assert!(service.open_session_list(filter).unwrap().sessions.is_empty());
 
   a.title = Some("renamed".into());
   replace(&service, &a, true);
@@ -77,14 +79,14 @@ fn live_session_list_sends_one_renamed_row_and_preserves_filtered_scoped_windows
   let update = &updates[0];
   assert_eq!(update.subscription_id, "owner");
   assert_eq!(update.base_revision.as_ref(), Some(&first.revision));
-  assert_eq!(update.rows.len(), 1);
-  assert_eq!(update.rows[0].session.title.as_deref(), Some("renamed"));
-  assert_ne!(row_by_id(update, "a").revision, row_by_id(&first, "a").revision);
+  assert_eq!(update.sessions.len(), 1);
+  assert_eq!(update.sessions[0].session.title.as_deref(), Some("renamed"));
+  assert_ne!(entry_by_id(update, "a").revision, entry_by_id(&first, "a").revision);
   assert_eq!(
-    update.rows[0].revision,
+    update.sessions[0].revision,
     format!(
       "{:x}",
-      Sha256::digest(serde_json::to_vec(&update.rows[0].session).unwrap())
+      Sha256::digest(serde_json::to_vec(&update.sessions[0].session).unwrap())
     )
   );
   assert!(update.removed_keys.is_empty());
@@ -94,23 +96,23 @@ fn live_session_list_sends_one_renamed_row_and_preserves_filtered_scoped_windows
   expand.generation = Some(update.generation.clone());
   expand.revision = Some(update.revision.clone());
   let expanded = service.open_session_list(expand.clone()).unwrap();
-  assert_eq!(expanded.rows.len(), 1);
-  assert_eq!(expanded.rows[0].session.session_id, "c");
+  assert_eq!(expanded.sessions.len(), 1);
+  assert_eq!(expanded.sessions[0].session.session_id, "c");
   assert!(expanded.next_cursor.is_none());
   let recovered = service.open_session_list(expand).unwrap();
   assert!(recovered.base_revision.is_none());
   assert_eq!(recovered.revision, expanded.revision);
-  assert_eq!(recovered.rows.len(), 3);
-  assert_eq!(row_by_id(&recovered, "a").revision, row_by_id(update, "a").revision);
-  assert_eq!(row_by_id(&recovered, "b").revision, row_by_id(&first, "b").revision);
+  assert_eq!(recovered.sessions.len(), 3);
+  assert_eq!(entry_by_id(&recovered, "a").revision, entry_by_id(update, "a").revision);
+  assert_eq!(entry_by_id(&recovered, "b").revision, entry_by_id(&first, "b").revision);
 
   b.title = Some("needle".into());
   replace(&service, &b, true);
   let updates = published(&service);
   assert_eq!(updates.len(), 3);
   for update in updates {
-    assert_eq!(update.rows.len(), 1);
-    assert_eq!(update.rows[0].session.session_id, "b");
+    assert_eq!(update.sessions.len(), 1);
+    assert_eq!(update.sessions[0].session.session_id, "b");
   }
   let id = || SessionListSubscriptionRequest {
     subscription_id: guest_req.subscription_id.clone(),
@@ -137,7 +139,7 @@ fn live_session_list_sends_one_renamed_row_and_preserves_filtered_scoped_windows
   let updates = published(&service);
   assert_eq!(updates.len(), 2);
   for update in updates {
-    assert!(update.rows.is_empty());
+    assert!(update.sessions.is_empty());
     assert_eq!(update.removed_keys, [guest_key.clone()]);
   }
 }
@@ -156,22 +158,25 @@ fn rank_change_sends_one_upsert_and_only_drops_a_key_if_it_leaves_the_page() {
   let updates = published(&service);
   assert_eq!(updates.len(), 2);
   for update in updates {
-    assert_eq!(update.rows.len(), 1);
-    assert_eq!(update.rows[0].session.session_id, "c");
-    assert_ne!(update.rows[0].revision, row_by_id(&full, "c").revision);
+    assert_eq!(update.sessions.len(), 1);
+    assert_eq!(update.sessions[0].session.session_id, "c");
+    assert_ne!(update.sessions[0].revision, entry_by_id(&full, "c").revision);
     if update.subscription_id == page.subscription_id {
-      assert_eq!(update.removed_keys, [row_by_id(&page, "b").session.session_key.clone()]);
+      assert_eq!(
+        update.removed_keys,
+        [entry_by_id(&page, "b").session.session_key.clone()]
+      );
     } else {
       assert_eq!(update.subscription_id, full.subscription_id);
       assert!(update.removed_keys.is_empty());
     }
     let wire = serde_json::to_value(&update).unwrap();
-    for field in ["order", "order_edits", "position", "moves"] {
+    for field in ["rows", "order", "order_edits", "position", "moves"] {
       assert!(wire.get(field).is_none());
     }
     assert_eq!(
-      wire["rows"][0],
-      json!({"session":update.rows[0].session,"revision":update.rows[0].revision})
+      wire["sessions"][0],
+      json!({"session":update.sessions[0].session,"revision":update.sessions[0].revision})
     );
   }
 }
@@ -185,15 +190,15 @@ fn live_child_window_tracks_new_and_removed_members_including_parent_removal() {
   let mut children = request("children", 2);
   children.parent_session_key = Some(encode_session_key(&locator_for_header(ViewerProvider::Codex, &parent)).unwrap());
   let first = service.open_session_list(children).unwrap();
-  assert_eq!(first.rows.len(), 1);
-  assert_eq!(first.rows[0].session.session_id, "a");
+  assert_eq!(first.sessions.len(), 1);
+  assert_eq!(first.sessions[0].session.session_id, "a");
   replace(&service, &new, true);
   let inserted = published(&service).pop().unwrap();
-  assert_eq!(inserted.rows.len(), 1);
-  assert_eq!(inserted.rows[0].session.session_id, "b");
+  assert_eq!(inserted.sessions.len(), 1);
+  assert_eq!(inserted.sessions[0].session.session_id, "b");
   replace(&service, &parent, false);
   let removed = published(&service).pop().unwrap();
-  assert!(removed.rows.is_empty());
+  assert!(removed.sessions.is_empty());
   assert_eq!(removed.removed_keys.len(), 2);
   assert!(published(&service).is_empty());
 }
@@ -209,7 +214,7 @@ fn live_session_list_offset_matches_static_page_membership() {
   deep.offset = 200;
   let slice = service.open_session_list(deep).unwrap();
   let prefix = service.open_session_list(request("prefix", 201)).unwrap();
-  assert_eq!(prefix.rows.len(), 201);
+  assert_eq!(prefix.sessions.len(), 201);
   let public_page = service
     .list_sessions(ListSessionsRequest {
       limit: Some(200),
@@ -223,19 +228,19 @@ fn live_session_list_offset_matches_static_page_membership() {
       ..Default::default()
     })
     .unwrap();
-  assert_eq!(slice.rows.len(), 1);
-  assert_eq!(slice.rows[0].session.session_key, boundary.sessions[0].session_key);
+  assert_eq!(slice.sessions.len(), 1);
+  assert_eq!(slice.sessions[0].session.session_key, boundary.sessions[0].session_key);
   let expected: BTreeSet<_> = public_page
     .sessions
     .iter()
     .chain(&boundary.sessions)
-    .map(|row| &row.session_key)
+    .map(|session| &session.session_key)
     .collect();
   assert_eq!(
     prefix
-      .rows
+      .sessions
       .iter()
-      .map(|row| &row.session.session_key)
+      .map(|entry| &entry.session.session_key)
       .collect::<BTreeSet<_>>(),
     expected
   );
@@ -256,8 +261,8 @@ fn idle_windows_and_batched_renewals_do_not_read_or_advance_the_projection() {
   let private = session_header("private", None, "/project", "2026-01-01T00:00:00Z");
   let service = fixture(vec![visible.clone(), private.clone()]);
   let initial = service.open_session_list(request("owner", 2)).unwrap();
-  let allowed = row_by_id(&initial, "visible").session.session_key.clone();
-  let hidden = row_by_id(&initial, "private").session.session_key.clone();
+  let allowed = entry_by_id(&initial, "visible").session.session_key.clone();
+  let hidden = entry_by_id(&initial, "private").session.session_key.clone();
   let guest = service.scoped_to_sessions(std::slice::from_ref(&allowed)).unwrap();
   let grant = guest.open_session_list(request("share_list_guest:test", 2)).unwrap();
 
@@ -283,7 +288,7 @@ fn idle_windows_and_batched_renewals_do_not_read_or_advance_the_projection() {
   service.publish_session_lists(|update| observed.push(update));
   assert_eq!(observed.len(), 1);
   assert_eq!(observed[0].subscription_id, grant.subscription_id);
-  assert_eq!(observed[0].rows[0].session.title.as_deref(), Some("changed"));
+  assert_eq!(observed[0].sessions[0].session.title.as_deref(), Some("changed"));
 }
 
 #[tokio::test]
@@ -301,7 +306,7 @@ async fn live_session_list_publication_follows_commits_and_directory_switches() 
     &events,
     IndexRefresh {
       changed: true,
-      updated_session_keys: vec![open.rows[0].session.session_key.clone()],
+      updated_session_keys: vec![open.sessions[0].session.session_key.clone()],
       ..Default::default()
     },
   )
@@ -309,7 +314,7 @@ async fn live_session_list_publication_follows_commits_and_directory_switches() 
   let mut changes = Vec::new();
   service.publish_session_lists(|u| changes.push(u));
   assert_eq!(changes.len(), 1);
-  assert_eq!(changes[0].rows[0].session.title.as_deref(), Some("committed"));
+  assert_eq!(changes[0].sessions[0].session.title.as_deref(), Some("committed"));
 
   record.title = Some("directory changed".to_owned());
   replace(&service, &record, true);
@@ -317,7 +322,7 @@ async fn live_session_list_publication_follows_commits_and_directory_switches() 
     service.clone(),
     &events,
     crate::relay::RelayChange {
-      session_key: Some(open.rows[0].session.session_key.clone()),
+      session_key: Some(open.sessions[0].session.session_key.clone()),
       reset: false,
     },
   )
@@ -335,5 +340,8 @@ async fn live_session_list_publication_follows_commits_and_directory_switches() 
   let mut changes = Vec::new();
   service.publish_session_lists(|u| changes.push(u));
   assert_eq!(changes.len(), 1);
-  assert_eq!(changes[0].rows[0].session.title.as_deref(), Some("directory changed"));
+  assert_eq!(
+    changes[0].sessions[0].session.title.as_deref(),
+    Some("directory changed")
+  );
 }

@@ -323,16 +323,16 @@ fn background_id(principal: &str, id: &str) -> Result<String, &'static str> {
   scoped_id("bg", principal, id)
 }
 
-// Check both the revisioned row bodies and tombstones against the grant.
+// Check both the session summaries and tombstones against the grant.
 fn list_event_in_scope(payload: &Value, keys: &[String]) -> bool {
   let allowed = |key: &Value| {
     key
       .as_str()
       .is_some_and(|key| keys.iter().any(|grant_key| grant_key == key))
   };
-  payload["rows"]
+  payload["sessions"]
     .as_array()
-    .is_some_and(|rows| rows.iter().all(|row| allowed(&row["session"]["session_key"])))
+    .is_some_and(|sessions| sessions.iter().all(|entry| allowed(&entry["session"]["session_key"])))
     && payload["removed_keys"]
       .as_array()
       .is_some_and(|keys| keys.iter().all(allowed))
@@ -531,12 +531,12 @@ mod tests {
   }
 
   #[test]
-  fn list_subscriptions_route_each_revisioned_row_and_removal_only_within_its_grant() {
+  fn list_subscriptions_route_each_session_and_removal_only_within_its_grant() {
     let keys = vec!["allowed".to_owned(), "second".to_owned()];
     let client_id = "screen:root";
     let id = scoped_id("list", "grant", client_id).unwrap();
     let payload = json!({
-      "subscription_id":id,"rows":[{"revision":"a".repeat(64),"session":{"session_key":"allowed","title":"changed"}}],"removed_keys":["second"],
+      "subscription_id":id,"sessions":[{"revision":"a".repeat(64),"session":{"session_key":"allowed","title":"changed"}}],"removed_keys":["second"],
     });
     let event = |payload| ViewerEvent {
       event: "session-list-updated".into(),
@@ -544,10 +544,10 @@ mod tests {
     };
     let accepted = shared_event(event(payload.clone()), &keys, "grant", "screen").unwrap();
     assert_eq!(accepted.payload["subscription_id"], client_id);
-    assert_eq!(accepted.payload["rows"], payload["rows"]);
+    assert_eq!(accepted.payload["sessions"], payload["sessions"]);
     assert!(shared_event(event(payload.clone()), &keys, "other-grant", "screen").is_none());
     assert!(shared_event(event(payload.clone()), &keys, "grant", "another-screen").is_none());
-    for field in ["/rows/0/session/session_key", "/removed_keys/0"] {
+    for field in ["/sessions/0/session/session_key", "/removed_keys/0"] {
       let mut hidden = payload.clone();
       *hidden.pointer_mut(field).unwrap() = json!("private");
       assert!(shared_event(event(hidden), &keys, "grant", "screen").is_none());
@@ -740,7 +740,7 @@ mod tests {
     assert_eq!(list.status(), StatusCode::OK);
     let baseline: Value = serde_json::from_slice(&list.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(baseline["subscription_id"], "screen:root");
-    assert_eq!(baseline["rows"], json!([]));
+    assert_eq!(baseline["sessions"], json!([]));
     let renew_lists = json!({"ids":["screen:root","other"]});
     for (command, payload, expected) in [
       (

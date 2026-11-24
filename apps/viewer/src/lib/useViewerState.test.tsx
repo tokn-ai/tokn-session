@@ -100,11 +100,11 @@ vi.mock("./transport", async (original) => {
   } };
 });
 
-function pushListRows(rows: SessionSummary[], next_cursor: string | null = null) {
+function pushListSessions(sessions: SessionSummary[], next_cursor: string | null = null) {
   const request = vi.mocked(openSessionList).mock.calls.find(([entry]) => !entry.parent_session_key)?.[0];
   if (!request || !listObserver) throw new Error("No session list subscription");
   listObserver({ payload: { subscription_id: request.subscription_id, generation: "list", base_revision: "1",
-    revision: "2", rows: rows.map(revisionedSession), removed_keys: [], next_cursor, source_errors: [], pending_providers: [] } });
+    revision: "2", sessions: sessions.map(revisionedSession), removed_keys: [], next_cursor, source_errors: [], pending_providers: [] } });
 }
 
 let restore_host: (() => void) | undefined;
@@ -117,7 +117,7 @@ beforeEach(() => {
       ? { ...await listSessionChildren({ parent_session_key: request.parent_session_key, limit: request.limit }, send), pending_providers: [], source_errors: [] }
       : await listSessions({ query: request.query!, limit: request.limit }, send);
     return { subscription_id: request.subscription_id, generation: "list", revision: "1", base_revision: null,
-      rows: page.sessions.map(revisionedSession), removed_keys: [], next_cursor: page.next_cursor,
+      sessions: page.sessions.map(revisionedSession), removed_keys: [], next_cursor: page.next_cursor,
       pending_providers: page.pending_providers, source_errors: page.source_errors };
   });
   vi.mocked(subscribeBackgroundUpdates).mockReset().mockImplementation(async (request) => ({ subscription_id: request.subscription_id, generation: "background", revision: "0", scope: request.scope, subscribed: true }));
@@ -494,7 +494,7 @@ describe("sidebar view preference", () => {
     await waitFor(() => expect(result.current.sessions).toHaveLength(1));
     act(() => result.current.setSessionOrder("project"));
     expect(openSessionList).toHaveBeenCalledOnce();
-    act(() => pushListRows([], "sessions.v1.1"));
+    act(() => pushListSessions([], "sessions.v1.1"));
     await waitFor(() => expect(result.current.sessions[0]?.session_key).toBe("new-project"));
     expect(openSessionList).toHaveBeenCalledTimes(2);
     expect(vi.mocked(openSessionList).mock.calls[1][0].query?.order).toBe("project");
@@ -1921,7 +1921,7 @@ describe("useViewerState session-index signalling", () => {
     }));
     expect(result.current.sessions).toEqual([initial]);
     const renamed = { ...initial, title: "Updated title" };
-    act(() => pushListRows([renamed]));
+    act(() => pushListSessions([renamed]));
     expect(result.current.sessions).toEqual([renamed]);
     expect(result.current.sessionsLoading).toBe(false);
     expect(openSessionList).toHaveBeenCalledOnce();
@@ -2033,7 +2033,7 @@ describe("useViewerState session-index signalling", () => {
     await waitFor(() => expect(loadEventPage).toHaveBeenCalledTimes(2));
 
     act(() => emitIndexChange?.({ changed: true, attention_session_keys: [] }));
-    act(() => pushListRows([{ ...root, title: "Renamed parent" }]));
+    act(() => pushListSessions([{ ...root, title: "Renamed parent" }]));
     expect(listSessions).toHaveBeenCalledOnce();
     expect(result.current.selectedSessionKey).toBe(child.session_key);
     expect(result.current.selectedSession?.session_key).toBe(child.session_key);
@@ -2569,7 +2569,7 @@ describe("useViewerState agent communication detail", () => {
     expect(result.current.sessions[0].question_attention).toEqual({ required_count: 0, available_count: 0 });
     expect(result.current.selectedSession?.question_attention?.available_count).toBe(0);
     act(() => indexChange?.({ changed: true, attention_session_keys: [] }));
-    act(() => pushListRows([stale]));
+    act(() => pushListSessions([stale]));
     expect(openSessionList).toHaveBeenCalledOnce();
     expect(result.current.sessions[0].question_attention?.available_count).toBe(0);
   });
@@ -3026,7 +3026,7 @@ describe("semantic session delivery", () => {
     vi.mocked(loadEventPage).mockResolvedValue({ ...toolEventPage(), attention_revision: "10" });
     vi.mocked(acknowledgeSessionAttention).mockImplementation(async () => {
       if (!accepted) throw new Error("Acknowledgement rejected");
-      pushListRows([{ ...unread, has_unread: false, unread_final_count: 0 }]);
+      pushListSessions([{ ...unread, has_unread: false, unread_final_count: 0 }]);
       return { changed: true };
     });
     const { result } = renderHook(() => useViewerState());

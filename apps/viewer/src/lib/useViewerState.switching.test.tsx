@@ -35,7 +35,7 @@ function listSnapshot(session_key: string, subscription_id: string): SessionList
     updated_at_ms: 1, timestamp: null, agent_path: null, agent_nickname: null, agent_role: null,
     child_count: 0, message_count: null, event_count: 1, history_status: "complete", has_unread: false,
   };
-  return { subscription_id, generation: "list", revision: "1", base_revision: null, rows: [revisionedSession(session)], removed_keys: [], next_cursor: null, source_errors: [], pending_providers: [] };
+  return { subscription_id, generation: "list", revision: "1", base_revision: null, sessions: [revisionedSession(session)], removed_keys: [], next_cursor: null, source_errors: [], pending_providers: [] };
 }
 
 function remoteMachine() {

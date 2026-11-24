@@ -555,9 +555,9 @@ export interface OpenSessionListRequest {
   revision?: string;
 }
 
-export interface SessionListRow {
+export interface SessionListEntry {
   session: SessionSummary;
-  /** Content revision of this row as visible to this viewer. */
+  /** Content revision of the session summary visible to this viewer. */
   revision: string;
 }
 
@@ -566,7 +566,7 @@ export interface SessionListUpdate {
   generation: string;
   base_revision: string | null;
   revision: string;
-  rows: SessionListRow[];
+  sessions: SessionListEntry[];
   removed_keys: string[];
   next_cursor: string | null;
   pending_providers: ViewerProvider[];

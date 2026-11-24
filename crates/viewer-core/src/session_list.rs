@@ -18,7 +18,7 @@ use std::{
 use tokio::sync::Notify;
 
 const MAX_WINDOWS: usize = 64;
-const MAX_WINDOW_ROWS: usize = 4096;
+const MAX_SESSIONS_PER_WINDOW: usize = 4096;
 const MAX_BASELINE_BYTES: usize = 4 * 1024 * 1024;
 const LEASE: Duration = Duration::from_secs(90);
 pub const SESSION_LIST_CAPACITY_ERROR: &str = "Live session list capacity exceeded";
@@ -42,9 +42,9 @@ pub struct SessionListSubscriptionRequest {
 }
 
 #[derive(Debug, Serialize)]
-pub struct SessionListRow {
+pub struct SessionListEntry {
   pub session: SessionSummary,
-  /// SHA-256 of this scoped row's content. Independent of its page or position.
+  /// SHA-256 of the session summary visible in this scope.
   pub revision: String,
 }
 
@@ -55,7 +55,7 @@ pub struct SessionListUpdate {
   /// A null base replaces the window. Clients choose the display order.
   pub base_revision: Option<String>,
   pub revision: String,
-  pub rows: Vec<SessionListRow>,
+  pub sessions: Vec<SessionListEntry>,
   pub removed_keys: Vec<String>,
   pub next_cursor: Option<String>,
   pub pending_providers: Vec<ViewerProvider>,
@@ -88,7 +88,7 @@ struct Window {
 
 impl SessionLists {
   /// Directory changes can affect ranking across an entire query. For known
-  /// row changes, only a grant or provider that can see those rows needs work.
+  /// session changes, only a grant or provider that can see those sessions needs work.
   pub(crate) fn invalidate(&self, keys: Option<&[String]>) {
     let Ok(windows) = self.windows.lock() else { return };
     if windows.is_empty() {
@@ -143,11 +143,11 @@ struct Replica {
   baseline: Option<Baseline>,
 }
 
-// Retain IDs and row fingerprints. Titles, previews and other row bodies live
-// only in the index and in the outgoing changed rows.
+// Retain keys and summary fingerprints. The index supplies the summaries
+// when a session changes.
 #[derive(Eq, PartialEq)]
 struct Baseline {
-  rows: BTreeMap<String, Output<Sha256>>,
+  session_digests: BTreeMap<String, Output<Sha256>>,
   next_cursor: Option<String>,
   pending_providers: Vec<ViewerProvider>,
   source_errors: Vec<SourceError>,
@@ -158,19 +158,19 @@ impl Baseline {
     let size = page
       .sessions
       .iter()
-      .map(|row| row.session_key.len() + 64)
+      .map(|session| session.session_key.len() + 64)
       .sum::<usize>();
     if size > MAX_BASELINE_BYTES {
       return Err(SESSION_LIST_CAPACITY_ERROR.into());
     }
-    let mut rows = BTreeMap::new();
-    for row in &page.sessions {
+    let mut session_digests = BTreeMap::new();
+    for session in &page.sessions {
       let mut hash = Sha256::new();
-      serde_json::to_writer(&mut hash, row).map_err(|error| error.to_string())?;
-      rows.insert(row.session_key.clone(), hash.finalize());
+      serde_json::to_writer(&mut hash, session).map_err(|error| error.to_string())?;
+      session_digests.insert(session.session_key.clone(), hash.finalize());
     }
     Ok(Self {
-      rows,
+      session_digests,
       next_cursor: page.next_cursor.clone(),
       pending_providers: page.pending_providers.clone(),
       source_errors: page.source_errors.clone(),
@@ -214,17 +214,17 @@ impl Window {
     let base = previous.filter(|_| !snapshot);
     let removed_keys = base
       .into_iter()
-      .flat_map(|base| base.rows.keys())
-      .filter(|key| !current.rows.contains_key(*key))
+      .flat_map(|base| base.session_digests.keys())
+      .filter(|key| !current.session_digests.contains_key(*key))
       .cloned()
       .collect();
-    let rows = page
+    let sessions = page
       .sessions
       .into_iter()
       .filter_map(|session| {
-        let digest = &current.rows[&session.session_key];
-        let previous_digest = base.and_then(|base| base.rows.get(&session.session_key));
-        (Some(digest) != previous_digest).then(|| SessionListRow {
+        let digest = &current.session_digests[&session.session_key];
+        let previous_digest = base.and_then(|base| base.session_digests.get(&session.session_key));
+        (Some(digest) != previous_digest).then(|| SessionListEntry {
           session,
           revision: format!("{digest:x}"),
         })
@@ -239,7 +239,7 @@ impl Window {
       generation: self.generation.clone(),
       base_revision,
       revision: replica.revision.to_string(),
-      rows,
+      sessions,
       removed_keys,
       next_cursor: page.next_cursor,
       pending_providers: page.pending_providers,
@@ -254,9 +254,9 @@ impl ViewerService {
     if !self.valid_subscription_id(&request.subscription_id) {
       return Err("Invalid session list identity".into());
     }
-    if !(1..=MAX_WINDOW_ROWS).contains(&limit) {
+    if !(1..=MAX_SESSIONS_PER_WINDOW).contains(&limit) {
       return Err(format!(
-        "Live session lists support 1 to {MAX_WINDOW_ROWS} rows per window"
+        "Live session lists support 1 to {MAX_SESSIONS_PER_WINDOW} sessions per window"
       ));
     }
     if let Some(parent) = &request.parent_session_key {
@@ -399,7 +399,7 @@ impl ViewerService {
       match window.capture(self, &mut replica, limit, false, false) {
         Ok(Some(update)) => publish(update),
         Ok(None) => {}
-        // Preserve the displayed rows. The next renewal will request a new
+        // Preserve the displayed sessions. The next renewal will request a new
         // baseline instead of acknowledging a subscription which missed data.
         Err(_) => self.forget_session_list(&window),
       }

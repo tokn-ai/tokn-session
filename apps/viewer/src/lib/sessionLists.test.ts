@@ -10,8 +10,7 @@ const row = (session_key: string, title = session_key, updated_at_ms = -Number(s
   agent_nickname: null, agent_role: null, child_count: 0, message_count: null, event_count: null, history_status: null, has_unread: false,
 });
 function snapshot(request: OpenSessionListRequest, sessions: SessionSummary[], revision = "1"): SessionListUpdate {
-  const rows = sessions.map(revisionedSession);
-  return { subscription_id: request.subscription_id, generation: "g", base_revision: null, revision, rows,
+  return { subscription_id: request.subscription_id, generation: "g", base_revision: null, revision, sessions: sessions.map(revisionedSession),
     removed_keys: [], next_cursor: null, pending_providers: [], source_errors: [] };
 }
 
