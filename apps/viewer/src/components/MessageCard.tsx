@@ -38,6 +38,7 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
   const response = role === "assistant" && event.delivery === "final" && event.phase === "finished" && !event.is_hidden
     ? event.response_metadata : undefined;
   const model = response?.model;
+  const model_source = model?.origin === "request" ? "Requested model" : "Reported model";
   const fast = response?.fast_mode === "reported" ? "Fast"
     : response?.fast_mode === "requested" ? "Fast requested" : undefined;
 
@@ -86,8 +87,8 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
           {model || fast ? (
             <span className="message-event__response" role="group" aria-label="Response details">
               {model ? (
-                <span title={model.model.model_provider ?? undefined}>
-                  {model.model.model_id}{model.origin === "request" ? " (requested)" : ""}
+                <span title={[model_source, model.model.model_provider].filter(Boolean).join(" · ")}>
+                  {model.model.model_id}
                 </span>
               ) : null}
               {fast ? <span>{fast}</span> : null}

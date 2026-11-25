@@ -112,9 +112,9 @@ describe("final response details", () => {
     },
   });
 
-  it("distinguishes requested and reported details on the final reply", () => {
+  it("displays the model ID with its source in a tooltip", () => {
     const view = render(card(final_reply));
-    expect(screen.getByRole("group", { name: "Response details" })).toHaveTextContent("model-alias (requested)");
+    expect(screen.getByText("model-alias", { exact: true })).toHaveAttribute("title", "Requested model · fixture");
     expect(screen.getByText("Fast requested")).toBeVisible();
 
     view.rerender(card(message({
@@ -124,7 +124,7 @@ describe("final response details", () => {
         fast_mode: "reported",
       },
     })));
-    expect(screen.getByText("backend-model")).toBeVisible();
+    expect(screen.getByText("backend-model", { exact: true })).toHaveAttribute("title", "Reported model");
     expect(screen.getByText("Fast")).toBeVisible();
   });
 

@@ -343,9 +343,10 @@ adapters retain read-only selection. Desktop supplies no verifiable catalog
 through follower IPC. Unsupported pickers show a reason. Shares and viewing grants never
 expose live catalogs or model mutation. See [session models](viewer-models.md).
 
-Finished final reply cards display the model recorded for that message and label
-a request route as requested. An explicit response-level priority report shows
-**Fast**. Codex's persistent thread tier is insufficient to infer a reply's tier.
+Finished final reply cards display the recorded model ID. The model tooltip
+indicates whether the ID comes from the request or the provider's response.
+An explicit response-level priority report shows **Fast**. Codex's saved tier
+is a thread default and individual turns can override it.
 Explicit Qoder `end_turn` messages can appear as final replies. See
 [response metadata](event-ir.md#response-metadata).
 
