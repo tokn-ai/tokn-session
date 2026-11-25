@@ -243,3 +243,83 @@ fn absent_model_checkpoint_has_a_hard_read_budget_without_loading_omitted_rows()
   assert!(retained.source_start.unwrap() > 2 * 1024 * 1024);
   assert!(reader.poll(&source).unwrap().is_none());
 }
+
+#[test]
+fn response_metadata_is_not_seeded_from_lazy_model_baselines_and_follows_exact_appends() {
+  fn response(turn: &str, text: &str) -> String {
+    row(
+      json!({"type":"response_item","payload":{"type":"message","id":text,"role":"assistant",
+      "phase":"final_answer","content":[{"type":"output_text","text":text}],
+      "internal_chat_message_metadata_passthrough":{"turn_id":turn}}}),
+    )
+  }
+  fn messages(records: &[NormalizedRecord]) -> Vec<(&str, &tokn_session_core::MessageEvent)> {
+    records
+      .iter()
+      .flat_map(|record| {
+        record.events.iter().filter_map(|event| match event {
+          AgentEvent::Message(message) if message.role == tokn_session_core::Role::Assistant => {
+            Some((record.record_id.as_str(), message))
+          }
+          _ => None,
+        })
+      })
+      .collect()
+  }
+  let old = row(json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"old"}}))
+    + &row(json!({"type":"turn_context","payload":{"turn_id":"old","model":"model-a"}}))
+    + &response("old", "old-answer")
+    + &row(json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"old"}}));
+  let current = row(json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"current"}}))
+    + &response("current", "unscoped-answer");
+  let (_directory, path, source) = fixture(&(old + &current));
+  let mut reader = CodexHistoryReader::new_window(path.clone(), true, 64 * 1024, 1);
+  let latest = reader.poll(&source).unwrap().unwrap();
+  assert!(latest.source_start.unwrap() > 0);
+  assert_eq!(
+    latest.reference.model_baseline.as_ref().unwrap().model.model_id,
+    "model-a"
+  );
+  let retained = messages(&latest.records);
+  assert_eq!(retained.len(), 1);
+  assert!(retained[0].1.response_metadata.is_none());
+  let retained_key = retained[0].0.to_owned();
+
+  let append = row(json!({"type":"turn_context","payload":{"turn_id":"current","model":"model-b"}}))
+    + &response("current", "current-answer");
+  std::fs::OpenOptions::new()
+    .append(true)
+    .open(&path)
+    .unwrap()
+    .write_all(append.as_bytes())
+    .unwrap();
+  let delta = reader.poll(&source).unwrap().unwrap();
+  assert!(!delta.reset);
+  let appended = messages(&delta.records);
+  assert_eq!(appended.len(), 1);
+  assert_eq!(
+    appended[0]
+      .1
+      .response_metadata
+      .as_ref()
+      .unwrap()
+      .model
+      .as_ref()
+      .unwrap()
+      .model
+      .model_id,
+    "model-b"
+  );
+  let appended_key = appended[0].0.to_owned();
+
+  let full = CodexHistoryReader::new(path, true, 64 * 1024)
+    .poll(&source)
+    .unwrap()
+    .unwrap();
+  let full_messages = messages(&full.records);
+  assert_eq!(full_messages.len(), 3);
+  assert_eq!(full_messages[1].0, retained_key);
+  assert_eq!(full_messages[2].0, appended_key);
+  assert_eq!(full_messages[1].1.response_metadata, retained[0].1.response_metadata);
+  assert_eq!(full_messages[2].1.response_metadata, appended[0].1.response_metadata);
+}

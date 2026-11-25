@@ -1280,6 +1280,7 @@ mod tests {
         timestamp: None,
       }),
       AgentEvent::Message(MessageEvent {
+        response_metadata: None,
         images: Vec::new(),
         provenance: None,
         provider: Provider::Codex,
@@ -1331,6 +1332,7 @@ mod tests {
   #[test]
   fn render_event_summary_handles_message_first_line() {
     let event = AgentEvent::Message(MessageEvent {
+      response_metadata: None,
       images: Vec::new(),
       provenance: None,
       provider: Provider::Codex,
@@ -1713,6 +1715,7 @@ mod tests {
     let native = json!({"type":"custom_message","customType":"extension","display":false,"content":"secret content"});
     let events = vec![
       AgentEvent::Message(MessageEvent {
+        response_metadata: None,
         images: Vec::new(),
         provider: Provider::Pi,
         session_id: None,

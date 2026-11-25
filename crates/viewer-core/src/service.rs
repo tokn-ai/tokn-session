@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 use tokn_session_client::SessionHeader;
 use tokn_session_core::{
-  AgentActivity, AgentEvent, LifecycleOutcome, LoadedSession, MessageDelivery, Phase, Provider, Role,
+  AgentActivity, AgentEvent, LifecycleOutcome, LoadedSession, MessageDelivery, Phase, Provider, ResponseMetadata, Role,
   SessionHeaderCatalog, TerminalAction, ToolCallEvent, ToolKind, ToolOperation, ToolOperationStatus, ToolSummary,
   UsageKind, assemble_tool_operations,
 };
@@ -4147,7 +4147,8 @@ fn source_cursor(provider: ViewerProvider, source_path: &Path) -> Result<String,
     ViewerProvider::Pi => "source-revision.pi.v5",
     ViewerProvider::OpenCode => "source-revision.opencode.v3",
     ViewerProvider::ZCode => "source-revision.zcode.v2",
-    ViewerProvider::Qoder => "source-revision.qoder.v1",
+    // Explicit native end-turn records now count as final replies.
+    ViewerProvider::Qoder => "source-revision.qoder.v2",
     ViewerProvider::WorkBuddy => "source-revision.workbuddy.v2",
     ViewerProvider::Dsh => "source-revision.dsh.v3",
     ViewerProvider::Codex => "source-revision.codex.v2",
@@ -4921,6 +4922,7 @@ fn trajectory_event_summary(trajectory: &Trajectory, events: &[AgentEvent]) -> E
 
   EventSummary {
     model_change: None,
+    response_metadata: None,
     images: None,
     child_keys: Some(
       trajectory
@@ -5222,6 +5224,19 @@ fn event_summary_with_delegation_targets(
     .flatten();
   EventSummary {
     model_change: None,
+    response_metadata: match event {
+      AgentEvent::Message(message)
+        if !hidden
+          && message.phase == Phase::Finished
+          && is_final_assistant_message(message.role, message.delivery) =>
+      {
+        message
+          .response_metadata
+          .as_ref()
+          .and_then(|metadata| ResponseMetadata::new(metadata.model.clone(), metadata.fast_mode))
+      }
+      _ => None,
+    },
     images,
     child_keys: None,
     slot_key: None,
@@ -5273,6 +5288,7 @@ fn tool_operation_event_summary(source_event_index: usize, operation: &ToolOpera
     truncate_with_flag(tool_operation_summary(operation, &tool), MAX_TECHNICAL_SUMMARY_CHARS);
   EventSummary {
     model_change: None,
+    response_metadata: None,
     images: Some(image_resources::operation_images(operation)),
     child_keys: None,
     slot_key: None,
@@ -6153,6 +6169,7 @@ mod tests {
   mod latest_message;
   mod live_session_list;
   mod questions;
+  mod response_metadata;
   mod running_notifications;
   mod targeted_index;
   mod usage_filter;
@@ -6247,6 +6264,7 @@ mod tests {
           .enumerate()
           .map(|(index, message)| {
             AgentEvent::Message(MessageEvent {
+              response_metadata: None,
               images: Vec::new(),
               provenance: message.hidden.then(|| MessageProvenance {
                 source: json!({"fixture": true}),
@@ -10527,6 +10545,7 @@ mod tests {
       timestamp: None,
     });
     let hidden_message = AgentEvent::Message(MessageEvent {
+      response_metadata: None,
       images: Vec::new(),
       provenance: Some(MessageProvenance {
         source: json!({"kind": "fixture"}),
@@ -11250,6 +11269,7 @@ mod tests {
         None,
       ),
       AgentEvent::Message(MessageEvent {
+        response_metadata: None,
         images: Vec::new(),
         provenance: None,
         provider: Provider::Codex,
@@ -12305,6 +12325,7 @@ mod tests {
   fn oversized_detail_representations_are_replaced_with_bounded_json_placeholders() {
     let oversized = "x".repeat(MAX_DETAIL_VALUE_BYTES + 1);
     let event = AgentEvent::Message(MessageEvent {
+      response_metadata: None,
       images: Vec::new(),
       provenance: Some(MessageProvenance {
         source: json!({"kind": "fixture"}),
@@ -12357,6 +12378,7 @@ mod tests {
       (0..count)
         .map(|index| {
           AgentEvent::Message(MessageEvent {
+            response_metadata: None,
             images: Vec::new(),
             provenance: None,
             provider: Provider::Codex,
@@ -12380,6 +12402,7 @@ mod tests {
 
   pub(super) fn message_event_with_role(text: &str, role: Role, delivery: MessageDelivery) -> AgentEvent {
     AgentEvent::Message(MessageEvent {
+      response_metadata: None,
       images: Vec::new(),
       provenance: None,
       provider: Provider::Codex,
@@ -12561,6 +12584,7 @@ mod tests {
 
   fn hidden_message_session() -> LoadedSession {
     loaded_session(vec![AgentEvent::Message(MessageEvent {
+      response_metadata: None,
       images: Vec::new(),
       provenance: Some(MessageProvenance {
         source: json!({"kind": "extension"}),

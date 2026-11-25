@@ -15,6 +15,7 @@ pub(crate) fn normalize(session_id: Option<String>, native: Value, timestamp: Op
       return vec![unknown(session_id, native, timestamp)];
     };
     return vec![AgentEvent::Message(MessageEvent {
+      response_metadata: None,
       images: native["content"]
         .as_array()
         .into_iter()

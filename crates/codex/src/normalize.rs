@@ -7,6 +7,7 @@ mod image_tests;
 mod images;
 mod item_lifecycle;
 mod questions;
+mod response_metadata;
 mod retention;
 mod turn_lifecycle;
 
@@ -48,6 +49,7 @@ pub struct CodexNormalizer {
   next_pending_code_mode_token: u64,
   question_replies: questions::RepliesNormalizer,
   generation_dedup: images::GenerationDedup,
+  response_context: response_metadata::ResponseContext,
 }
 
 #[derive(Clone, Debug)]
@@ -140,6 +142,7 @@ impl CodexNormalizer {
       next_pending_code_mode_token: 0,
       question_replies: Default::default(),
       generation_dedup: Default::default(),
+      response_context: Default::default(),
     }
   }
 
@@ -161,6 +164,7 @@ impl CodexNormalizer {
       next_pending_code_mode_token: 0,
       question_replies: Default::default(),
       generation_dedup: Default::default(),
+      response_context: Default::default(),
     }
   }
 
@@ -181,6 +185,26 @@ impl CodexNormalizer {
       return Vec::new();
     }
 
+    let metadata = self.response_context.observe(&line);
+    let mut events = self.normalize_accepted_line(line, timestamp, communication_trigger);
+    if let Some(metadata) = metadata.filter(|_| self.response_context.owns_session(self.session_id.as_deref())) {
+      for event in &mut events {
+        if let AgentEvent::Message(message) = event {
+          if message.role == Role::Assistant && message.session_id == self.session_id {
+            message.response_metadata = Some(metadata.clone());
+          }
+        }
+      }
+    }
+    events
+  }
+
+  fn normalize_accepted_line(
+    &mut self,
+    line: CodexLine,
+    timestamp: Option<String>,
+    communication_trigger: Option<bool>,
+  ) -> Vec<AgentEvent> {
     let duplicate_generation = self.generation_dedup.observe(
       line.item(),
       matches!(self.history_mode, CodexRolloutHistoryMode::Paginated),
@@ -880,6 +904,7 @@ fn normalize_message(session_id: Option<String>, item: MessageItem, timestamp: O
   }
 
   vec![AgentEvent::Message(MessageEvent {
+    response_metadata: None,
     images,
     provenance: None,
     provider: Provider::Codex,
@@ -1561,6 +1586,7 @@ fn message_event(
   timestamp: Option<String>,
 ) -> AgentEvent {
   AgentEvent::Message(MessageEvent {
+    response_metadata: None,
     images: Vec::new(),
     provenance: None,
     provider: Provider::Codex,

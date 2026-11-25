@@ -2006,6 +2006,21 @@ button:disabled {
   margin-top: 0;
 }
 
+.message-event__response {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.message-event__response > span + span {
+  border-inline-start: 1px solid var(--border);
+  padding-inline-start: 8px;
+}
+
 .message-event__inspect:disabled {
   cursor: default;
   opacity: 0.45;

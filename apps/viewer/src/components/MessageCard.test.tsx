@@ -103,6 +103,39 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+describe("final response details", () => {
+  const final_reply = message({
+    delivery: "final",
+    response_metadata: {
+      model: { model: { model_provider: "fixture", model_id: "model-alias" }, origin: "request" },
+      fast_mode: "requested",
+    },
+  });
+
+  it("displays the model ID with its source in a tooltip", () => {
+    const view = render(card(final_reply));
+    expect(screen.getByText("model-alias", { exact: true })).toHaveAttribute("title", "Requested model · fixture");
+    expect(screen.getByText("Fast requested")).toBeVisible();
+
+    view.rerender(card(message({
+      delivery: "final",
+      response_metadata: {
+        model: { model: { model_provider: null, model_id: "backend-model" }, origin: "response" },
+        fast_mode: "reported",
+      },
+    })));
+    expect(screen.getByText("backend-model", { exact: true })).toHaveAttribute("title", "Reported model");
+    expect(screen.getByText("Fast")).toBeVisible();
+  });
+
+  it.each([
+    { delivery: "commentary" }, { phase: "delta" }, { is_hidden: true }, { response_metadata: undefined },
+  ] satisfies Partial<EventSummary>[])("omits response details for %j", (overrides) => {
+    render(card({ ...final_reply, ...overrides }));
+    expect(screen.queryByRole("group", { name: "Response details" })).not.toBeInTheDocument();
+  });
+});
+
 describe("message translation availability", () => {
   it.each([
     { role: "user" },
