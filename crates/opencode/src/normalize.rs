@@ -3,8 +3,9 @@ use serde_json::{Value, json};
 use tokn_opencode_protocol::v1::{MessageItem, PartItem, TokenUsage, ToolState, ToolStateItem};
 use tokn_session_core::{
   AgentEvent, MessageDelivery, MessageEvent, MessageImage, MessageImageSource, MessageProvenance, MetadataEvent,
-  MetadataKind, Phase, Provider, ProviderChanged, ReasoningEvent, Role, SessionStarted, ToolCallEvent, ToolRecordKind,
-  ToolTransport, UnknownEvent, UsageEvent, UsageKind, tool_kind_for_optional_name, tool_summary_for_io,
+  MetadataKind, ModelOrigin, Phase, Provider, ProviderChanged, ReasoningEvent, ResponseMetadata, Role, SessionStarted,
+  ToolCallEvent, ToolRecordKind, ToolTransport, UnknownEvent, UsageEvent, UsageKind, tool_kind_for_optional_name,
+  tool_summary_for_io,
 };
 
 mod v2;
@@ -323,6 +324,7 @@ impl OpenCodeNormalizer {
     let mut events = Vec::with_capacity(unknowns.len() + 1);
     if !text.is_empty() || !images.is_empty() {
       events.push(AgentEvent::Message(MessageEvent {
+        response_metadata: None,
         images,
         provenance,
         provider: self.provider,
@@ -394,6 +396,7 @@ impl OpenCodeNormalizer {
 
     match item {
       PartItem::Text(part) => vec![AgentEvent::Message(MessageEvent {
+        response_metadata: None,
         images: Vec::new(),
         provenance: provenance.clone(),
         provider: self.provider,
@@ -407,6 +410,7 @@ impl OpenCodeNormalizer {
         timestamp: timestamp(time_created),
       })],
       PartItem::File(file) if is_image_file(&file) => vec![AgentEvent::Message(MessageEvent {
+        response_metadata: None,
         images: vec![recorded_file_image(file, part_id)],
         provenance: provenance.clone(),
         provider: self.provider,
@@ -564,11 +568,43 @@ impl OpenCodeNormalizer {
     for part in parts {
       events.extend(self.normalize_assistant_part(message_id, parent_id, &provenance, message_phase, part));
     }
+    annotate_response_messages(&mut events, recorded_response_model(self.provider, message_native));
     events.extend(malformed_usage);
     if let Some(usage) = latest_step_usage.or(fallback_usage) {
       events.push(usage);
     }
     events
+  }
+}
+
+fn recorded_response_model(provider: Provider, native: &Value) -> Option<ResponseMetadata> {
+  // These identities record the routing choice for this assistant call, not
+  // a backend report of its resolved model. Never inherit session selection.
+  let current_zcode =
+    provider == Provider::ZCode && (native.get("modelId").is_some() || native.get("providerId").is_some());
+  let (provider_key, model_key) = if current_zcode {
+    ("providerId", "modelId")
+  } else {
+    ("providerID", "modelID")
+  };
+  ResponseMetadata::new(
+    ResponseMetadata::recorded_model(
+      native.get(provider_key).and_then(Value::as_str),
+      native.get(model_key).and_then(Value::as_str),
+      ModelOrigin::Request,
+    ),
+    None,
+  )
+}
+
+fn annotate_response_messages(events: &mut [AgentEvent], metadata: Option<ResponseMetadata>) {
+  for event in events {
+    if let AgentEvent::Message(message) = event
+      && message.role == Role::Assistant
+      && message.provenance.as_ref().and_then(|provenance| provenance.display) != Some(false)
+    {
+      message.response_metadata.clone_from(&metadata);
+    }
   }
 }
 
@@ -907,6 +943,146 @@ mod tests {
 
   use super::OpenCodeNormalizer;
   use crate::row::{OpenCodeMessageRow, OpenCodePartRow};
+
+  fn response_message(events: &[AgentEvent]) -> &tokn_session_core::MessageEvent {
+    events
+      .iter()
+      .find_map(|event| match event {
+        AgentEvent::Message(message) if message.role == Role::Assistant => Some(message),
+        _ => None,
+      })
+      .expect("assistant text should be normalized")
+  }
+
+  #[test]
+  fn v1_response_metadata_uses_each_assistant_record_without_inheriting_selection() {
+    for provider in [
+      tokn_session_core::Provider::OpenCode,
+      tokn_session_core::Provider::ZCode,
+    ] {
+      let mut normalizer = OpenCodeNormalizer::with_provider("session".into(), provider);
+      normalizer.normalize_message(message_row(
+        "user",
+        json!({
+          "role":"user", "model":{"providerID":"selected","modelID":"requested"}
+        }),
+        Vec::new(),
+      ));
+      for id in ["first", "second"] {
+        let events = normalizer.normalize_message(message_row(
+          id,
+          json!({
+            "role":"assistant", "parentID":"user", "providerID":"call-provider", "modelID":"call-model"
+          }),
+          vec![part_row("text", json!({"type":"text","text":"answer"}))],
+        ));
+        let message = response_message(&events);
+        assert_eq!(message.message_id.as_deref(), Some(id));
+        let metadata = message.response_metadata.as_ref().unwrap();
+        let model = metadata.model.as_ref().unwrap();
+        assert_eq!(model.model.model_provider.as_deref(), Some("call-provider"));
+        assert_eq!(model.model.model_id, "call-model");
+        assert_eq!(model.origin, tokn_session_core::ModelOrigin::Request);
+        assert_eq!(metadata.fast_mode, None);
+      }
+      let missing = normalizer.normalize_message(message_row(
+        "missing",
+        json!({"role":"assistant"}),
+        vec![part_row("text", json!({"type":"text","text":"unknown model"}))],
+      ));
+      assert!(response_message(&missing).response_metadata.is_none());
+    }
+  }
+
+  #[test]
+  fn zcode_current_response_fields_override_legacy_fields_and_hidden_responses_stay_unannotated() {
+    let mut normalizer = OpenCodeNormalizer::with_provider("session".into(), tokn_session_core::Provider::ZCode);
+    let data = json!({"role":"assistant", "providerId":"current", "modelId":"current-model",
+      "providerID":"old", "modelID":"old-model"});
+    let events = normalizer.normalize_message(message_row(
+      "current",
+      data.clone(),
+      vec![part_row("text", json!({"type":"text","text":"answer"}))],
+    ));
+    let model = response_message(&events)
+      .response_metadata
+      .as_ref()
+      .unwrap()
+      .model
+      .as_ref()
+      .unwrap();
+    assert_eq!(model.model.model_provider.as_deref(), Some("current"));
+    assert_eq!(model.model.model_id, "current-model");
+    for model_id in [json!(""), json!(" padded "), json!("bad\nmodel"), json!(false)] {
+      let mut invalid = data.clone();
+      invalid["modelId"] = model_id;
+      let events = normalizer.normalize_message(message_row(
+        "invalid",
+        invalid,
+        vec![part_row("text", json!({"type":"text","text":"answer"}))],
+      ));
+      assert!(response_message(&events).response_metadata.is_none());
+    }
+    let mut hidden = data;
+    hidden["semantics"] = json!({"origin":"agent_runtime", "kind":"assistant_response",
+      "uiVisibility":"hidden", "transcriptVisibility":"hidden", "providerVisibility":"visible"});
+    let events = normalizer.normalize_message(message_row(
+      "hidden",
+      hidden,
+      vec![part_row("text", json!({"type":"text","text":"internal answer"}))],
+    ));
+    assert!(response_message(&events).response_metadata.is_none());
+  }
+
+  #[test]
+  fn v2_response_metadata_records_call_model_and_only_correlated_terminal_priority_tier() {
+    let mut normalizer = OpenCodeNormalizer::new("session".into());
+    for (index, tier, response_id, finished, reported_fast) in [
+      (0, "priority", "resp_one", true, true),
+      (1, "priority", "resp_two", true, true),
+      (2, "default", "resp_default", true, false),
+      (3, "flex", "resp_flex", true, false),
+      (4, "preview", "resp_preview", true, false),
+      (5, "priority", "resp_pending", false, false),
+      (6, "priority", "", true, false),
+    ] {
+      let mut native = json!({"type":"assistant", "id":format!("assistant_{index}"), "agent":"build",
+        "model":{"providerID":"provider","id":"selected-model","variant":"fast"},
+        "native":{"responseId":response_id,"serviceTier":tier,"model":"backend-alias"},
+        "content":[{"type":"text","text":"answer"}], "time":{"created":1}});
+      if finished {
+        native["time"]["completed"] = json!(2);
+      }
+      let row = serde_json::from_value::<tokn_opencode_protocol::v2::MessageData>(native).unwrap();
+      let events = normalizer.normalize_v2_message(&row);
+      let metadata = response_message(&events).response_metadata.as_ref().unwrap();
+      let model = metadata.model.as_ref().unwrap();
+      assert_eq!(model.model.model_provider.as_deref(), Some("provider"));
+      assert_eq!(model.model.model_id, "selected-model");
+      assert_eq!(model.origin, tokn_session_core::ModelOrigin::Request);
+      assert_eq!(
+        metadata.fast_mode,
+        reported_fast.then_some(tokn_session_core::ResponseFastMode::Reported)
+      );
+    }
+    let request_only = json!({
+      "type":"assistant", "id":"request-only", "agent":"build",
+      "model":{"providerID":"provider","id":"selected-model"},
+      "serviceTier":"priority", "options":{"serviceTier":"priority"},
+      "content":[{"type":"text","text":"answer"}], "time":{"created":1,"completed":2}
+    });
+    let mut failed = request_only.clone();
+    failed["native"] = json!({"responseId":"resp_failed","serviceTier":"priority"});
+    failed["error"] = json!({"name":"APIError","data":{"message":"failed"}});
+    for native in [request_only, failed] {
+      let row = serde_json::from_value::<tokn_opencode_protocol::v2::MessageData>(native).unwrap();
+      let events = normalizer.normalize_v2_message(&row);
+      assert_eq!(
+        response_message(&events).response_metadata.as_ref().unwrap().fast_mode,
+        None
+      );
+    }
+  }
 
   #[test]
   fn hidden_zcode_models_do_not_change_the_visible_session_model() {

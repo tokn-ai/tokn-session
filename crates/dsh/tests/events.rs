@@ -542,3 +542,83 @@ fn future_chunks_remain_visible_even_when_an_assembled_message_exists() {
   assert_eq!(events[0]["native"], future);
   assert_eq!(events[1]["type"], "message");
 }
+
+#[test]
+fn response_metadata_uses_only_the_same_messages_versioned_response_or_request_route() {
+  let mut rows = vec![record(
+    "request/header",
+    0,
+    json!({"reason":"initial","header":{"config":{
+      "provider":"session-route","model":"session-selection"
+    }}}),
+  )];
+  for step in 1..=7 {
+    let mut row = assistant(step, step, None);
+    row["data"]["message"]["source"] = json!({
+      "kind":"model","provider":"request-route","model":"requested",
+      "replayState":{"response":{"kind":"pi-ai","version":2,"provider":"backend-route",
+        "model":"requested","responseModel":format!("backend-{step}"),"serviceTier":"priority"},"blocks":[]}
+    });
+    match step {
+      2 => {
+        row["data"]["message"]["source"]["replayState"]["response"]["responseModel"] = Value::Null;
+      }
+      3 => {
+        row["data"]["message"]["source"]["replayState"]["response"]["version"] = json!(3);
+      }
+      4 => {
+        row["data"]["message"]["source"]["replayState"]["response"]["model"] = json!("unrelated");
+      }
+      5 => {
+        row["data"]["message"]["source"]["replayState"]["response"]["responseModel"] = json!("invalid\nmodel");
+      }
+      6 => {
+        row["data"]["interrupted"] = json!(true);
+      }
+      7 => {
+        row["data"]["message"]["source"]["kind"] = json!("plugin");
+      }
+      _ => {}
+    }
+    rows.push(row);
+  }
+  let events = normalize(rows);
+  assert_eq!(events[0]["type"], "provider_changed");
+  assert_eq!(events[0]["model_id"], "session-selection");
+  let messages: Vec<_> = events.iter().filter(|event| event["type"] == "message").collect();
+  assert_eq!(messages.len(), 7);
+  assert_eq!(messages[0]["response_metadata"]["model"]["origin"], "response");
+  assert_eq!(
+    messages[0]["response_metadata"]["model"]["model"]["model_provider"],
+    "backend-route"
+  );
+  assert_eq!(
+    messages[0]["response_metadata"]["model"]["model"]["model_id"],
+    "backend-1"
+  );
+  for message in &messages[1..5] {
+    assert_eq!(message["response_metadata"]["model"]["origin"], "request");
+    assert_eq!(
+      message["response_metadata"]["model"]["model"]["model_provider"],
+      "request-route"
+    );
+    assert_eq!(message["response_metadata"]["model"]["model"]["model_id"], "requested");
+  }
+  assert!(
+    messages[5..]
+      .iter()
+      .all(|message| message.get("response_metadata").is_none())
+  );
+  assert!(
+    messages
+      .iter()
+      .all(|message| message["response_metadata"].get("fast_mode").is_none())
+  );
+  assert_eq!(
+    events
+      .iter()
+      .filter(|event| event["type"] == "provider_changed")
+      .count(),
+    1
+  );
+}

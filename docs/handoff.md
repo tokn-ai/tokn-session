@@ -343,6 +343,12 @@ adapters retain read-only selection. Desktop supplies no verifiable catalog
 through follower IPC. Unsupported pickers show a reason. Shares and viewing grants never
 expose live catalogs or model mutation. See [session models](viewer-models.md).
 
+Finished final reply cards display the model recorded for that message and label
+a request route as requested. An explicit response-level priority report shows
+**Fast**. Codex's persistent thread tier is insufficient to infer a reply's tier.
+Explicit Qoder `end_turn` messages can appear as final replies. See
+[response metadata](event-ir.md#response-metadata).
+
 Recorded images from Codex, Pi, OpenCode, and ZCode now render through lazy
 thumbnail/full resources, including image-only messages. The composer and local
 New session dialog support picking, paste, drag/drop, and image-only sending.

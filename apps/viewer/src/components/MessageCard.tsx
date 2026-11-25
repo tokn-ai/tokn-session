@@ -35,6 +35,11 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
     ? <MessageImages session_key={session_key} event_key={event.event_key} revision={event.content_revision} images={tray_images} />
     : <span className="message-image__status">Image unavailable</span> : null;
   const canTranslate = Boolean(status && session_key && role === "assistant" && !event.is_hidden && event.summary.trim());
+  const response = role === "assistant" && event.delivery === "final" && event.phase === "finished" && !event.is_hidden
+    ? event.response_metadata : undefined;
+  const model = response?.model;
+  const fast = response?.fast_mode === "reported" ? "Fast"
+    : response?.fast_mode === "requested" ? "Fast requested" : undefined;
 
   return (
     <article className="message-event" data-kind={event.type} data-presentation={presentation} data-role={role} data-selected={is_selected}>
@@ -78,6 +83,16 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
           </div>
         ) : null}
         <div className="message-event__actions">
+          {model || fast ? (
+            <span className="message-event__response" role="group" aria-label="Response details">
+              {model ? (
+                <span title={model.model.model_provider ?? undefined}>
+                  {model.model.model_id}{model.origin === "request" ? " (requested)" : ""}
+                </span>
+              ) : null}
+              {fast ? <span>{fast}</span> : null}
+            </span>
+          ) : null}
           {canTranslate ? (
             <>
               {translation.loading ? (

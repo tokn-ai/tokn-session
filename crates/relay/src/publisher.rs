@@ -51,6 +51,7 @@ mod tests {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let event = AgentEvent::Message(MessageEvent {
+      response_metadata: None,
       images: Vec::new(),
       provenance: None,
       provider: Provider::Pi,

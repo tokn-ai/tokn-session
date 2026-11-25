@@ -290,13 +290,27 @@ impl Normalizer<'_> {
       return;
     }
     events.push(AgentEvent::Message(MessageEvent {
+      response_metadata: (role == Role::Assistant
+        && row["isMeta"] != true
+        && row["isApiErrorMessage"] != true
+        && row["aborted"] != true)
+        .then(|| {
+          // Qoder persists the response's model on the native assistant row.
+          // Session configuration and provider usage defaults are not evidence
+          // for this response's model or service tier.
+          ResponseMetadata::new(
+            ResponseMetadata::recorded_model(None, row["message"]["model"].as_str(), ModelOrigin::Response),
+            None,
+          )
+        })
+        .flatten(),
       provenance: provenance(row),
       provider: Provider::Qoder,
       session_id: Some(self.reference.id.clone()),
       message_id: string(row, "uuid"),
       parent_id: string(row, "parentUuid"),
       role,
-      delivery: MessageDelivery::Unspecified,
+      delivery: message_delivery(row, role),
       phase: Phase::Finished,
       text: std::mem::take(text).join("\n"),
       images: std::mem::take(images),
@@ -383,6 +397,25 @@ fn time(value: &Value) -> Option<String> {
     .map(str::to_owned)
     .or_else(|| value["timestamp"].as_i64().map(|time| time.to_string()))
 }
+fn message_delivery(row: &Value, role: Role) -> MessageDelivery {
+  // The native message serializer retains its terminal stop_reason. Older
+  // rows without that proof, tool steps and synthetic messages stay ambiguous.
+  if role == Role::Assistant
+    && row["type"] == "assistant"
+    && row["message"]["stop_reason"] == "end_turn"
+    && row["isMeta"] != true
+    && row["isApiErrorMessage"] != true
+    && row["aborted"] != true
+    && row["message"]["content"]
+      .as_array()
+      .is_some_and(|blocks| blocks.iter().all(|block| block["type"] != "tool_use"))
+  {
+    MessageDelivery::Final
+  } else {
+    MessageDelivery::Unspecified
+  }
+}
+
 fn provenance(row: &Value) -> Option<MessageProvenance> {
   (row["isMeta"] == true).then(|| MessageProvenance {
     source: json!({"is_meta":true}),

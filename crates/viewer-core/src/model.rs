@@ -456,6 +456,9 @@ pub struct QuestionSelectionSummary {
 pub struct EventSummary {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub model_change: Option<ModelChangeSummary>,
+  /// Provider-recorded metadata for a finished final assistant reply.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub response_metadata: Option<tokn_session_core::ResponseMetadata>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub images: Option<Vec<crate::images::MessageImageSummary>>,
   /// Recorded selections only; absent when no reply can be correlated safely.

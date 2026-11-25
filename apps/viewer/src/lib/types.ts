@@ -862,6 +862,10 @@ export interface ReleaseImageUploadRequest { target: ImageUploadTarget; upload_i
 
 export interface EventSummary {
   model_change?: { previous: ModelIdentity; current: ModelIdentity };
+  response_metadata?: {
+    model?: { model: Pick<ModelIdentity, "model_provider" | "model_id">; origin: "request" | "response" };
+    fast_mode?: "requested" | "reported";
+  };
   images?: MessageImageSummary[];
   question_selections?: QuestionSelectionSummary[];
   child_keys?: string[];

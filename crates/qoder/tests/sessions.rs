@@ -32,6 +32,92 @@ fn texts(source: &QoderSessionSource, path: &Path) -> Vec<String> {
 }
 
 #[test]
+fn response_models_and_explicit_terminal_delivery_are_local_to_each_visible_assistant_row() {
+  let directory = tempfile::tempdir().unwrap();
+  let path = directory.path().join("session-main.jsonl");
+  let mut rows = vec![message("user", None, "Begin")];
+  let mut parent = "user".to_owned();
+  for index in 1..=8 {
+    let id = format!("assistant-{index}");
+    let mut row = message(&id, Some(&parent), "");
+    row["type"] = json!("assistant");
+    row["message"] = json!({"role":"assistant","model":format!("backend-{index}"),
+      "stop_reason":"end_turn","content":[{"type":"text","text":format!("answer {index}")}],
+      "usage":{"input_tokens":1,"output_tokens":1,"service_tier":"priority","speed":"fast"}});
+    match index {
+      2 => {
+        row["message"].as_object_mut().unwrap().remove("stop_reason");
+      }
+      3 => {
+        row["message"]["content"].as_array_mut().unwrap().push(json!({
+          "type":"tool_use","id":"tool","name":"Read","input":{}
+        }));
+      }
+      4 => {
+        row["isMeta"] = json!(true);
+      }
+      5 => {
+        row["isApiErrorMessage"] = json!(true);
+      }
+      6 => {
+        row["message"]["model"] = json!("invalid\nmodel");
+      }
+      7 => {
+        row["message"].as_object_mut().unwrap().remove("model");
+      }
+      8 => {
+        row["aborted"] = json!(true);
+      }
+      _ => {}
+    }
+    rows.push(row);
+    parent = id;
+  }
+  write_rows(&path, &rows);
+  let events = QoderSessionSource::new(None).load_session_path(&path).unwrap().events;
+  let messages: Vec<_> = events
+    .iter()
+    .filter_map(|event| match event {
+      AgentEvent::Message(message) => Some(message),
+      _ => None,
+    })
+    .collect();
+  assert_eq!(messages.len(), 9);
+  assert!(messages[0].response_metadata.is_none());
+  for (message, model) in [
+    (messages[1], "backend-1"),
+    (messages[2], "backend-2"),
+    (messages[3], "backend-3"),
+  ] {
+    let metadata = message.response_metadata.as_ref().unwrap();
+    assert_eq!(metadata.fast_mode, None);
+    let recorded = metadata.model.as_ref().unwrap();
+    assert_eq!(recorded.origin, tokn_session_core::ModelOrigin::Response);
+    assert_eq!(recorded.model.model_id, model);
+    assert_eq!(recorded.model.model_provider, None);
+  }
+  assert!(messages[4..].iter().all(|message| message.response_metadata.is_none()));
+  for index in [1, 6, 7] {
+    assert_eq!(messages[index].delivery, tokn_session_core::MessageDelivery::Final);
+  }
+  for index in [0, 2, 3, 4, 5, 8] {
+    assert_eq!(
+      messages[index].delivery,
+      tokn_session_core::MessageDelivery::Unspecified
+    );
+  }
+  // Preserve the existing native response-model labels, including malformed
+  // labels kept for inspection; the new metadata applies stricter validation.
+  assert_eq!(
+    events
+      .iter()
+      .filter(|event| matches!(event, AgentEvent::ProviderChanged(_)))
+      .count(),
+    7
+  );
+}
+
+#[test]
 fn discovers_and_normalizes_official_transcript_shapes_without_losing_unknown_records() {
   let source = QoderSessionSource::new(Some(fixture().parent().unwrap().to_path_buf()));
   let header = source.list_session_relations().unwrap().remove(0);
