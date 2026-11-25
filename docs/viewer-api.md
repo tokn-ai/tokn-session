@@ -132,12 +132,13 @@ See [message input behavior](../apps/viewer/README.md#sending-messages).
 
 ## API contract
 
-`GET /api/v1/health` returns `{"version":3}`. Clients check this protocol revision before starting an event stream.
+`GET /api/v1/health` returns `{"version":4}`. Clients check this protocol revision before starting an event stream.
 Commands are `POST /api/v1/<command>` with the same snake_case payload as the
 Tauri adapter, normally `{"request":{...}}`. Commands without a request take
 `{}`. Responses use the shared viewer-core models. Supported commands:
 
 - `list_sessions`, `list_session_children`
+- `open_session_list`, `renew_session_lists`, `release_session_list`
 - `open_session`, `release_session`, `renew_session_subscriptions`
 - `load_session_details`, `inspect_session_event`
 - `subscribe_background_updates`, `renew_background_subscriptions`
@@ -154,6 +155,40 @@ history access. A syntactically valid key containing an arbitrary source path
 does not grant access. The API allows at most 16 concurrent command requests,
 32 SSE clients, and 1 MiB request bodies. Error responses contain `error`;
 invalid JSON/body-limit responses may be plain text.
+
+`open_session_list` watches the root sessions matching a `query`, or the direct
+children of a `parent_session_key`. Pass a `subscription_id`, `limit` and
+optional `offset`. The first response has a null `base_cursor`. Its `sessions`
+array contains a `{ session, revision }` entry for every session in the window.
+Each entry’s `revision` is a lowercase SHA-256 digest of the visible session summary. The
+same summary has the same revision across subscriptions. Clients merge entries by
+`session.session_key` and sort them locally. Array positions have no protocol
+meaning.
+
+Each subsequent `session-list-updated` event carries new or changed summaries
+in `sessions`, keys leaving the window in `removed_keys`, and current pagination
+and indexing metadata. A rename sends one updated summary. A metadata-only
+update has empty `sessions` and `removed_keys` arrays.
+
+Keep the response's opaque `synced_through` cursor with the list after applying
+the entire update. A delta's `base_cursor` identifies the cached list it can
+update. The separate pagination cursor `next_cursor` selects the next page.
+
+After reconnecting or missing a delta, reopen the window with
+`since` set to its last applied `synced_through`. Clients reading the same
+window with the same permissions share its change history. A new subscription
+can resume that window using the same cursor. The response contains the latest
+summaries of sessions added or changed since that point and the keys of
+sessions that left. A host restart, an expired cutoff, or a cursor from an
+unrelated window returns a fresh snapshot with `base_cursor: null`. Keep the
+subscription ID when increasing a window's limit to request just the added or
+changed summaries if its previous cutoff is available. A new filter uses a
+fresh subscription ID. Switching between Time and Projects reuses a fully
+loaded list. When more sessions exist, the viewer asks for the page under the selected
+ranking. `renew_session_lists` renews the client's loaded
+windows in one request with `ids` and returns `renewed_ids` and `missing_ids`.
+Renewal only extends the lease. `release_session_list` takes
+`{"request":{"subscription_id":"…"}}` and returns whether it released a lease.
 
 `open_session` accepts `session_key`, `subscription_id`, an optional delivery
 level (`final`, `messages`, `steps` or `all`), an optional `scope` and an optional
@@ -236,7 +271,7 @@ delivery already in progress. Never automatically retry an unknown outcome.
 viewer, or Apell applet. The JSON body supplies `subscription_prefix`, a random
 ID for this viewer connection. Each timeline or sidebar subscription uses
 `<subscription_prefix>:<unique ID>`. The host forwards matching
-`session-updated` and `background-session-updated` events. When a timeline
+`session-updated`, `session-list-updated` and `background-session-updated` events. When a timeline
 changes source generation during publication, `session-subscriptions-lost`
 names the subscription to reopen. An explicit reader reset sends the owner a
 `relay-changed` event and shared viewers a targeted `session-subscriptions-lost`.
@@ -244,10 +279,10 @@ Owner streams also receive `session-notification`, `relay-status`,
 `session-index-changed`, and `session-index-progress`. Owners can use
 `GET /api/v1/events` to monitor general events alone.
 
-Streams begin with `ready`. Owner streams use 15-second heartbeats. Shared
-viewers receive a catalog refresh notice every five seconds for their granted
-sessions. A lagging subscriber disconnects. On reconnect the viewer revalidates the selected
-timeline, renews sidebar interests, and refreshes catalog and status data.
+Streams begin with `ready` and use 15-second SSE comments to keep idle
+connections alive. Shared list updates include only sessions visible to the grant.
+A lagging subscriber disconnects. On reconnect the viewer revalidates its open list
+windows and selected timeline, renews background interests, and reads current status.
 Event pages include `follow_error` while followers retry, preserving last-good cards with a
 visible stale-data warning until recovery. The browser shows its
 connection state and preserves last-received data during temporary outages.
@@ -268,16 +303,15 @@ refreshes or subagent replies. Compatibility fields `has_unread_descendant` and
 from older servers. Acknowledgement
 revisions remain opaque and must come from the displayed newest event page.
 
-Session list requests accept `query.order` (`time`, the default, or `project`).
-Project ordering is applied before pagination and groups folder identities by
+Session list requests accept `query.order` (`time`, the default, or `project`)
+to select which sessions fall inside a page. Project ranking groups folder identities by
 their durable discovery anchor, newest first, then session activity. Git metadata
 is read only in the recorded working folder; explicit worktrees can share a
 repository identity, while non-Git subfolders remain independent projects.
 Root summaries include nullable `project_key` and `project_order_ms`; `cwd` remains
 the original session working directory. Clients should group by `project_key`,
-falling back to `cwd` for older servers. Clients keep Recent display positions in
-memory; this does not change API activity ordering. Start a fresh cursor when
-changing the order or filters.
+falling back to `cwd` for older servers. Clients keep Recent display positions
+in memory. Cursors belong to the filters and ranking used to select the page.
 
 ### Async question answers
 

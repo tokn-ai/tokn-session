@@ -585,6 +585,14 @@ pub struct SessionInfoItem {
   pub extra: ExtraFields,
 }
 
+impl SessionInfoItem {
+  /// The latest session_info sets the displayed name. A blank or missing
+  /// name explicitly clears a previously assigned title.
+  pub fn display_name(&self) -> Option<&str> {
+    self.name.as_deref().map(str::trim).filter(|name| !name.is_empty())
+  }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LeafItem {

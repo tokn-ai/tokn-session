@@ -68,7 +68,7 @@ fn outcome_recovery_cursors_are_scoped_to_the_affected_providers() {
   std::fs::write(&path, "unchanged source").unwrap();
   for (provider, prefix) in [
     (ViewerProvider::Codex, "source-revision.codex.v2."),
-    (ViewerProvider::Pi, "source-revision.pi.v4."),
+    (ViewerProvider::Pi, "source-revision.pi.v5."),
     (ViewerProvider::OpenCode, "source-revision.opencode.v3."),
     (ViewerProvider::ZCode, "source-revision.zcode.v2."),
     (ViewerProvider::WorkBuddy, "source-revision.workbuddy.v2."),
@@ -152,7 +152,7 @@ fn provider_outcome_upgrade_repairs_unchanged_activity_once_without_unread_repli
     let source = index_source_key_for_path(provider, &path).unwrap();
     let current_raw = source_cursor(provider, &path).unwrap();
     let old_raw = if provider == ViewerProvider::Pi {
-      current_raw.replacen("source-revision.pi.v4.", "source-revision.pi.v2.", 1)
+      current_raw.replacen("source-revision.pi.v5.", "source-revision.pi.v2.", 1)
     } else {
       // These providers previously used the physical-file v1 cursor.
       format!("source-revision.v1.{}", current_raw.splitn(4, '.').nth(3).unwrap())
@@ -198,7 +198,13 @@ fn provider_outcome_upgrade_repairs_unchanged_activity_once_without_unread_repli
 }
 
 #[test]
-fn pi_outcome_upgrade_restages_unchanged_history_once_without_new_unread_replies() {
+fn pi_title_and_outcome_upgrades_restore_unchanged_history_once_without_new_unread_replies() {
+  for old_prefix in ["source-revision.v1.", "source-revision.pi.v4."] {
+    assert_pi_body_upgrade(old_prefix);
+  }
+}
+
+fn assert_pi_body_upgrade(old_prefix: &str) {
   struct PiHistory {
     header: SessionHeader,
     loads: std::sync::atomic::AtomicUsize,
@@ -221,18 +227,18 @@ fn pi_outcome_upgrade_restages_unchanged_history_once_without_new_unread_replies
   let path = directory.path().join("failed-pi.jsonl");
   let lines = [
     json!({"type":"session", "version":3, "id":"failed-pi", "timestamp":"2026-10-19T00:00:00Z", "cwd":"/project"}),
+    json!({"type":"session_info","name":"Existing name"}),
     json!({"type":"message", "id":"user", "timestamp":"2026-10-19T00:00:01Z", "message":{"role":"user", "content":[{"type":"text", "text":"Hello"}]}}),
     json!({"type":"message", "id":"failed", "parentId":"user", "timestamp":"2026-10-19T00:00:02Z", "message":{"role":"assistant", "content":[], "stopReason":"error", "errorMessage":"Connection error.", "usage":{"input":0,"output":0}}}),
   ];
   std::fs::write(&path, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
-  let header = indexed_header(path.clone(), "failed-pi", None);
+  let mut header = indexed_header(path.clone(), "failed-pi", None);
+  header.title = None;
   let index = Arc::new(SessionIndex::open_in_memory().unwrap());
   let source = index_source_key_for_path(ViewerProvider::Pi, &path).unwrap();
-  // The initial Pi failure recovery must still accept the pre-upgrade v1
-  // cursor, independently of other providers' normalization revisions.
   let current_raw = source_cursor(ViewerProvider::Pi, &path).unwrap();
-  let old_raw = current_raw.replacen("source-revision.pi.v4.", "source-revision.v1.", 1);
-  assert!(old_raw.starts_with("source-revision.v1."));
+  let old_raw = current_raw.replacen("source-revision.pi.v5.", old_prefix, 1);
+  assert!(old_raw.starts_with(old_prefix));
   assert_ne!(current_raw, old_raw);
   let metadata = session_metadata_from_header(
     &source,
@@ -257,6 +263,7 @@ fn pi_outcome_upgrade_restages_unchanged_history_once_without_new_unread_replies
   let service = ViewerService::new_with_index(repository.clone(), index.clone());
   service.refresh_session_index().unwrap();
   let repaired = indexed_row(&index, ViewerProvider::Pi, &header);
+  assert_eq!(repaired.body_title.as_deref(), Some("Existing name"));
   let activity = Activity::from_marker(repaired.attention_marker.as_deref()).unwrap();
   assert!(!activity.running);
   assert_eq!(activity.final_count, 0);

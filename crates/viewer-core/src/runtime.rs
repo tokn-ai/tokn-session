@@ -1,11 +1,13 @@
 use crate::{
   model::{IndexWorkerError, ViewerProvider},
   service::{IndexRefresh, SessionIndexWake, ViewerService},
+  session_list::SessionListUpdate,
   watcher::{SessionFileWatcher, WatchRequest},
 };
 use std::{
   collections::{BTreeMap, BTreeSet},
   path::PathBuf,
+  sync::Arc,
   time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::broadcast;
@@ -14,14 +16,75 @@ use tokio::sync::broadcast;
 pub struct ViewerEvent {
   pub event: String,
   pub payload: serde_json::Value,
+  #[serde(skip)]
+  list_batch: Option<Arc<ListBatch>>,
+}
+
+#[derive(Debug)]
+struct ListBatch {
+  subscription_ids: Vec<String>,
+  payload: serde_json::Value,
+  local: bool,
+}
+
+impl ViewerEvent {
+  pub fn new(event: impl Into<String>, payload: serde_json::Value) -> Self {
+    Self {
+      event: event.into(),
+      payload,
+      list_batch: None,
+    }
+  }
+
+  /// All routes reading a page from the same cutoff share one broadcast slot.
+  pub fn session_list_batch(
+    subscription_ids: Vec<String>,
+    update: &SessionListUpdate,
+    local: bool,
+  ) -> Result<Self, String> {
+    let payload = serde_json::to_value(update).map_err(|error| error.to_string())?;
+    Ok(Self {
+      event: "session-list-updated".into(),
+      payload: serde_json::Value::Null,
+      list_batch: Some(Arc::new(ListBatch {
+        subscription_ids,
+        payload,
+        local,
+      })),
+    })
+  }
+
+  /// Expand a shared list update only for this adapter's subscriptions.
+  /// Ordinary events pass through for the adapter's normal visibility checks.
+  pub fn for_subscriptions(self, matches: impl FnMut(&str) -> bool) -> impl Iterator<Item = Self> {
+    self.for_delivery(false, matches)
+  }
+
+  pub fn for_local_viewer(self) -> impl Iterator<Item = Self> {
+    self.for_delivery(true, |_| true)
+  }
+
+  fn for_delivery(mut self, local: bool, mut matches: impl FnMut(&str) -> bool) -> impl Iterator<Item = Self> {
+    let batch = self.list_batch.take();
+    let single = batch.is_none().then_some(self);
+    let batch = batch.filter(|batch| batch.local == local);
+    let count = batch.as_ref().map_or(0, |batch| batch.subscription_ids.len());
+    single.into_iter().chain((0..count).filter_map(move |i| {
+      let batch = batch.as_ref()?;
+      let id = &batch.subscription_ids[i];
+      if !matches(id) {
+        return None;
+      }
+      let mut payload = batch.payload.clone();
+      payload["subscription_id"] = serde_json::Value::String(id.clone());
+      Some(Self::new("session-list-updated", payload))
+    }))
+  }
 }
 
 fn emit<T: serde::Serialize>(events: &broadcast::Sender<ViewerEvent>, event: &str, payload: T) -> Result<(), String> {
   let payload = serde_json::to_value(payload).map_err(|e| e.to_string())?;
-  let _ = events.send(ViewerEvent {
-    event: event.into(),
-    payload,
-  });
+  let _ = events.send(ViewerEvent::new(event, payload));
   Ok(())
 }
 
@@ -33,6 +96,12 @@ pub(crate) async fn publish_relay_change(
   let timeline_events = events.clone();
   let key = change.session_key.clone();
   let reset = change.reset;
+  // Relay publishes source switches, new external catalogs and status changes
+  // without a session key. A single reader's timeline change does not alter
+  // the external directory. Native metadata updates arrive on index commit.
+  if key.is_none() {
+    service.session_lists.invalidate(None);
+  }
   let _ = tokio::task::spawn_blocking(move || {
     if reset {
       for interest in service.invalidate_session_subscriptions(key.as_deref()) {
@@ -113,6 +182,8 @@ pub(crate) async fn publish_index_refresh(
   keys.extend(refresh.attention_session_keys.iter().cloned());
   keys.sort();
   keys.dedup();
+  let exact_rows = !refresh.catalog_refresh_required && !refresh.background_reconciliation_required && !keys.is_empty();
+  service.session_lists.invalidate(exact_rows.then_some(&keys));
   if !keys.is_empty() {
     let reader = service.clone();
     let expected_notifications = keys.clone();
@@ -162,6 +233,23 @@ impl ViewerRuntime {
   pub fn start(service: ViewerService) -> Self {
     let (events, _) = broadcast::channel(128);
     let mut tasks = Vec::new();
+    let lists = service.clone();
+    let list_events = events.clone();
+    tasks.push(tokio::spawn(async move {
+      loop {
+        lists.session_lists.changed.notified().await;
+        let reader = lists.clone();
+        let events = list_events.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+          reader.publish_session_list_batches(|update, ids, local| {
+            if let Ok(batch) = ViewerEvent::session_list_batch(ids, &update, local) {
+              let _ = events.send(batch);
+            }
+          });
+        })
+        .await;
+      }
+    }));
     let mut project_changes = service.subscribe_project_registry_changes();
     let project_events = events.clone();
     tasks.push(tokio::spawn(async move {
@@ -359,6 +447,7 @@ impl ViewerRuntime {
             Ok(None) => {
               match refresh_service.follow_shared_index() {
                 Ok(true) => {
+                  refresh_service.session_lists.invalidate(None);
                   publish_shared_index_background(&refresh_service, &scheduler_events, true).await;
                   let _ = emit(
                     &scheduler_events,
@@ -452,6 +541,7 @@ impl ViewerRuntime {
         if work.is_none() && !pending_body_due {
           match refresh_service.observe_shared_index_change() {
             Ok(true) => {
+              refresh_service.session_lists.invalidate(None);
               publish_shared_index_background(&refresh_service, &scheduler_events, true).await;
               let _ = emit(
                 &scheduler_events,
@@ -1083,6 +1173,36 @@ mod tests {
     watcher_wake_after_backend_failure,
   };
   use crate::{model::ViewerProvider, watcher::WatchRequest};
+
+  #[test]
+  fn local_list_delivery_is_independent_of_subscription_id_spelling() {
+    let update = crate::session_list::SessionListUpdate {
+      subscription_id: String::new(),
+      base_cursor: Some("before".into()),
+      synced_through: "after".into(),
+      sessions: Vec::new(),
+      removed_keys: vec!["deleted".into()],
+      next_cursor: None,
+      pending_providers: Vec::new(),
+      source_errors: Vec::new(),
+    };
+    let id = "viewer:sidebar";
+    let local = super::ViewerEvent::session_list_batch(vec![id.into()], &update, true).unwrap();
+    let http = super::ViewerEvent::session_list_batch(vec![id.into()], &update, false).unwrap();
+    assert!(
+      local
+        .clone()
+        .for_subscriptions(|candidate| candidate == id)
+        .next()
+        .is_none()
+    );
+    assert!(http.for_local_viewer().next().is_none());
+    let mut delivered = local.for_local_viewer();
+    let event = delivered.next().unwrap();
+    assert_eq!(event.payload["subscription_id"], id);
+    assert_eq!(event.payload["removed_keys"][0], "deleted");
+    assert!(delivered.next().is_none());
+  }
 
   #[tokio::test]
   async fn sidebar_metadata_refresh_does_not_reconcile_all_compact_interests() {

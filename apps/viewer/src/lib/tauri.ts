@@ -233,6 +233,10 @@ export function listenForTransportReconnect(handler: (scope?: SessionSubscriptio
   return subscribe<SessionSubscriptionReconnect>("transport-reconnected", (event) => handler(event.payload));
 }
 
+export function openSessionList(request: import("./types").OpenSessionListRequest, send: CommandInvoker = invoke): Promise<import("./types").SessionListUpdate> {
+  return send("open_session_list", { request });
+}
+
 export function listSessions(request: ListSessionsRequest, send: CommandInvoker = invoke): Promise<ListSessionsResponse> {
   return send<ListSessionsResponse>("list_sessions", { request });
 }

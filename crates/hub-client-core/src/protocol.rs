@@ -3,7 +3,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
 pub const VERSION: u32 = 1;
-pub const VIEWER_API_VERSION: u64 = 3;
+pub const VIEWER_API_VERSION: u64 = 4;
 pub const MAX_BODY: usize = 1024 * 1024;
 pub const CHUNK_SIZE: usize = 32 * 1024;
 pub const MAX_FRAME: usize = 2 * 1024 * 1024;
@@ -130,6 +130,9 @@ pub fn allowed_route(method: &str, path: &str, allow_control: bool) -> bool {
       "/api/v1/events"
       | "/api/v1/list_sessions"
       | "/api/v1/list_session_children"
+      | "/api/v1/open_session_list"
+      | "/api/v1/renew_session_lists"
+      | "/api/v1/release_session_list"
       | "/api/v1/load_event_page"
       | "/api/v1/open_session"
       | "/api/v1/release_session"
@@ -319,6 +322,9 @@ mod tests {
     assert!(allowed_route("POST", "/api/v1/list_sessions", false));
     for allow_control in [false, true] {
       for path in [
+        "/api/v1/open_session_list",
+        "/api/v1/renew_session_lists",
+        "/api/v1/release_session_list",
         "/api/v1/open_session",
         "/api/v1/release_session",
         "/api/v1/subscribe_background_updates",

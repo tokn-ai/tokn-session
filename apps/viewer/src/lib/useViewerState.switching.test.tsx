@@ -2,8 +2,9 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { saveReadingPosition } from "./readingPosition";
 import { selectMachine, type ViewerClient } from "./transport";
-import type { EventSummary, ListSessionsResponse, SessionSummary, SessionUpdate, OpenSessionRequest } from "./types";
+import type { EventSummary, SessionListUpdate, SessionSummary, SessionUpdate, OpenSessionRequest } from "./types";
 import { useViewerState } from "./useViewerState";
+import { revisionedSession } from "../../tests/sessionListFixtures";
 
 // Keep the real reader API and transport: this exercises the local IPC / remote
 // boundary rather than replacing the very routing behavior under test.
@@ -27,25 +28,28 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function catalog(session_key: string): ListSessionsResponse {
+function listSnapshot(session_key: string, subscription_id: string): SessionListUpdate {
   const session: SessionSummary = {
     session_key, session_id: session_key, parent_session_id: null, is_subagent: false,
     provider: "codex", title: session_key, preview: null, project: "repo", cwd: "/repo",
     updated_at_ms: 1, timestamp: null, agent_path: null, agent_nickname: null, agent_role: null,
     child_count: 0, message_count: null, event_count: 1, history_status: "complete", has_unread: false,
   };
-  return { sessions: [session], next_cursor: null, source_errors: [], pending_providers: [] };
+  return { subscription_id, synced_through: "list:first", base_cursor: null, sessions: [revisionedSession(session)], removed_keys: [], next_cursor: null, source_errors: [], pending_providers: [] };
 }
 
 function remoteMachine() {
-  const invoke = vi.fn(async (command: string) => {
-    if (command === "list_sessions") return catalog("remote-session");
+  const invoke = vi.fn(async (command: string, payload?: unknown) => {
+    if (command === "open_session_list") {
+      const { request } = payload as { request: { subscription_id: string } };
+      return listSnapshot("remote-session", request.subscription_id);
+    }
     if (command === "update_session_view") return;
     return new Promise(() => {});
   });
   const client: ViewerClient = {
     endpoint: "https://hub.example/machines/550e8400-e29b-41d4-a716-446655440000",
-    invoke: <T,>(command: string) => invoke(command) as Promise<T>,
+    invoke: <T,>(command: string, payload?: unknown) => invoke(command, payload) as Promise<T>,
     listen: async () => () => {}, setStateListener: () => {}, onClose: () => () => {},
     release: async () => {}, close: vi.fn(),
   };
@@ -73,7 +77,7 @@ it("releases native history when selecting an app-only draft and ignores late hi
   const page = deferred<SessionUpdate>();
   let request!: OpenSessionRequest;
   nativeInvoke.mockImplementation(async (command: string, payload?: { request: OpenSessionRequest }) => {
-    if (command === "list_sessions") return catalog("local-session");
+    if (command === "open_session_list") return listSnapshot("local-session", payload!.request.subscription_id);
     if (command === "release_session") return { unsubscribed: true };
     if (command === "open_session") { request = payload!.request; return page.promise; }
     if (command === "update_session_view") return;
@@ -97,7 +101,7 @@ it("stops delayed local pagination when a remote viewer replaces the local reade
   const pending = deferred<SessionUpdate>();
   let backward_request: OpenSessionRequest | undefined;
   nativeInvoke.mockImplementation(async (command: string, payload?: { request: OpenSessionRequest }) => {
-    if (command === "list_sessions") return catalog("local-session");
+    if (command === "open_session_list") return listSnapshot("local-session", payload!.request.subscription_id);
     if (command === "open_session") {
       backward_request = payload!.request;
       return backward_request.history_cursor ? pending.promise : snapshot(backward_request);
@@ -143,8 +147,8 @@ it("stops delayed local pagination when a remote viewer replaces the local reade
 
 it("does not contact the successor machine after a retired local open rejects", async () => {
   const pending = deferred<never>();
-  nativeInvoke.mockImplementation(async (command: string) => {
-    if (command === "list_sessions") return catalog("local-session");
+  nativeInvoke.mockImplementation(async (command: string, payload?: { request: OpenSessionRequest }) => {
+    if (command === "open_session_list") return listSnapshot("local-session", payload!.request.subscription_id);
     if (command === "open_session") return pending.promise;
     if (command === "release_session") return { unsubscribed: true };
     if (command === "update_session_view") return;

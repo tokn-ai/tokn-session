@@ -545,6 +545,33 @@ export interface ListSessionChildrenResponse {
   next_cursor: string | null;
 }
 
+export interface OpenSessionListRequest {
+  subscription_id: string;
+  query?: SessionListQuery;
+  parent_session_key?: string;
+  offset?: number;
+  limit: number;
+  /** Last cutoff applied to this list. */
+  since?: string;
+}
+
+export interface SessionListEntry {
+  session: SessionSummary;
+  /** Content revision of the session summary visible to this viewer. */
+  revision: string;
+}
+
+export interface SessionListUpdate {
+  subscription_id: string;
+  base_cursor: string | null;
+  synced_through: string;
+  sessions: SessionListEntry[];
+  removed_keys: string[];
+  next_cursor: string | null;
+  pending_providers: ViewerProvider[];
+  source_errors: SourceError[];
+}
+
 /**
  * Metadata-only signal emitted after a durable sidebar index refresh.
  * The keys identify only sessions with newly eligible visible messages; they

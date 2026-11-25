@@ -409,12 +409,12 @@ impl ActivityReaders {
         if reset {
           entry.activity = Activity::default();
         }
+        if let Some(last) = update.records.last() {
+          entry.activity.presentation.title = last.session.title.as_ref().map(|v| v.chars().take(160).collect());
+        }
         for record in update.records {
           if record.session.session_id != locator.session_id {
             return Err("Session activity owner changed".into());
-          }
-          if let Some(title) = record.session.title {
-            entry.activity.presentation.title = Some(title.chars().take(160).collect());
           }
           for event in record.record.events {
             if entry.activity.presentation.preview.is_none() {
@@ -1149,5 +1149,12 @@ mod tests {
     let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
     write!(file, "{}", reply.replace("m1", "m2")).unwrap();
     assert_eq!(readers.read(&locator).unwrap().final_count, 2);
+    writeln!(file, "{}", json!({"type":"session_info","name":" Renamed "})).unwrap();
+    assert_eq!(
+      readers.read(&locator).unwrap().presentation.title.as_deref(),
+      Some("Renamed")
+    );
+    writeln!(file, "{}", json!({"type":"session_info","name":"  "})).unwrap();
+    assert_eq!(readers.read(&locator).unwrap().presentation.title, None);
   }
 }

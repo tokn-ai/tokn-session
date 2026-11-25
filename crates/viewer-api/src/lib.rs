@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use std::{convert::Infallible, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::{Semaphore, broadcast};
 use tokio_util::sync::CancellationToken;
+use tokn_viewer_core::session_list::SESSION_LIST_CAPACITY_ERROR;
 use tokn_viewer_core::{ViewerService, runtime::ViewerEvent};
 use tower_http::{
   cors::CorsLayer,
@@ -32,7 +33,7 @@ struct ApiState {
   shutdown: CancellationToken,
 }
 
-const VIEWER_PROTOCOL_VERSION: u32 = 3;
+const VIEWER_PROTOCOL_VERSION: u32 = 4;
 
 type ApiError = (StatusCode, Json<Value>);
 fn error(status: StatusCode, message: impl Into<String>) -> ApiError {
@@ -315,18 +316,26 @@ fn dispatch(service: &ViewerService, command: &str, payload: Value) -> Result<Va
       )
     })?;
   }
+  let command_error = |message: String| {
+    let status = if command == "open_session_list" && message == SESSION_LIST_CAPACITY_ERROR {
+      StatusCode::TOO_MANY_REQUESTS
+    } else {
+      StatusCode::BAD_REQUEST
+    };
+    error(status, message)
+  };
   macro_rules! call {
     ($method:ident) => {{
       let request = serde_json::from_value(request).map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
-      let result = service
-        .$method(request)
-        .map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+      let result = service.$method(request).map_err(command_error)?;
       serde_json::to_value(result)
     }};
   }
   let result = match command {
     "list_sessions" => call!(list_sessions),
     "list_session_children" => call!(list_session_children),
+    "open_session_list" => call!(open_session_list),
+    "release_session_list" => call!(release_session_list),
     "load_event_page" => call!(load_event_page),
     "open_session" => call!(open_session),
     "release_session" => call!(release_session),
@@ -344,15 +353,18 @@ fn dispatch(service: &ViewerService, command: &str, payload: Value) -> Result<Va
           .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
       )
     }
-    "renew_session_subscriptions" => {
+    "renew_session_subscriptions" | "renew_session_lists" => {
       let ids: Vec<String> = serde_json::from_value(payload.get("ids").cloned().unwrap_or_else(|| json!([])))
         .map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
-      if ids.len() > 24 {
-        return Err(error(StatusCode::BAD_REQUEST, "Too many subscriptions"));
+      let renewal = if command == "renew_session_lists" {
+        service.renew_session_lists(&ids)
+      } else {
+        if ids.len() > 24 {
+          return Err(error(StatusCode::BAD_REQUEST, "Too many subscriptions"));
+        }
+        service.renew_session_subscriptions(&ids)
       }
-      let renewal = service
-        .renew_session_subscriptions(&ids)
-        .map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+      .map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
       serde_json::to_value(renewal)
     }
     "renew_background_subscriptions" => {
@@ -422,7 +434,7 @@ impl StreamSubscription {
 fn stream_event(mut event: ViewerEvent, prefix: Option<&str>) -> Option<ViewerEvent> {
   if matches!(
     event.event.as_str(),
-    "session-updated" | "background-session-updated" | "session-subscription-invalidated"
+    "session-updated" | "background-session-updated" | "session-list-updated" | "session-subscription-invalidated"
   ) {
     let id = event.payload["subscription_id"].as_str()?;
     if id.split_once(':')?.0 != prefix? {
@@ -445,6 +457,10 @@ fn event_stream(state: ApiState, subscription_prefix: Option<String>) -> Result<
     .try_acquire_owned()
     .map_err(|_| error(StatusCode::TOO_MANY_REQUESTS, "Too many viewer subscriptions"))?;
   let mut receiver = state.events.subscribe();
+  let list_prefix = subscription_prefix
+    .as_deref()
+    .filter(|prefix| !prefix.starts_with("share_"))
+    .map(|prefix| format!("{prefix}:"));
   let stream = async_stream::stream! {
     let _permit = permit;
     yield Ok::<_, Infallible>(Event::default().event("ready").data("{}"));
@@ -452,8 +468,11 @@ fn event_stream(state: ApiState, subscription_prefix: Option<String>) -> Result<
       let received = tokio::select! { biased; _ = state.shutdown.cancelled() => break, event = receiver.recv() => event };
       match received {
         Ok(event) => {
-          let Some(event) = stream_event(event, subscription_prefix.as_deref()) else { continue };
-          yield Ok(Event::default().event(event.event).data(event.payload.to_string()));
+          for event in event.for_subscriptions(|id| list_prefix.as_ref().is_some_and(|prefix| id.starts_with(prefix))) {
+            if let Some(event) = stream_event(event, subscription_prefix.as_deref()) {
+              yield Ok(Event::default().event(event.event).data(event.payload.to_string()));
+            }
+          }
         },
         Err(broadcast::error::RecvError::Lagged(_)) => {
           // Reconnect forces a fresh catalog/timeline; never apply an incomplete sequence.
@@ -763,17 +782,16 @@ mod tests {
         json!({"subscription_id":"viewer:sidebar"}),
       ),
       (
+        "session-list-updated",
+        json!({"subscription_id":"viewer:list","sessions":[{"revision":"b".repeat(64),"session":{"session_key":"one","title":"changed"}}]}),
+      ),
+      (
         "session-updated",
         json!({"subscription_id":"viewer:timeline","snapshot":true,"items":["x".repeat(65536)]}),
       ),
       ("session-notification", json!({"session_key":"one"})),
     ] {
-      events
-        .send(ViewerEvent {
-          event: name.into(),
-          payload,
-        })
-        .unwrap();
+      events.send(ViewerEvent::new(name, payload)).unwrap();
     }
     assert!(next_frame(&mut other).await.starts_with("event: session-updated\n"));
     assert!(
@@ -781,6 +799,7 @@ mod tests {
         .await
         .starts_with("event: background-session-updated\n")
     );
+    assert!(next_frame(&mut mine).await.starts_with("event: session-list-updated\n"));
     let reset = next_frame(&mut mine).await;
     assert_eq!(
       reset,
@@ -1106,20 +1125,15 @@ mod tests {
     let ready = body.frame().await.unwrap().unwrap().into_data().unwrap();
     assert!(String::from_utf8_lossy(&ready).contains("event: ready"));
     events
-      .send(ViewerEvent {
-        event: "relay-changed".into(),
-        payload: json!({"session_key":key,"reset":false}),
-      })
+      .send(ViewerEvent::new(
+        "relay-changed",
+        json!({"session_key":key,"reset":false}),
+      ))
       .unwrap();
     let update = body.frame().await.unwrap().unwrap().into_data().unwrap();
     assert!(String::from_utf8_lossy(&update).contains("relay-changed"));
     for _ in 0..4 {
-      events
-        .send(ViewerEvent {
-          event: "relay-changed".into(),
-          payload: json!({}),
-        })
-        .unwrap();
+      events.send(ViewerEvent::new("relay-changed", json!({}))).unwrap();
     }
     assert!(
       body.frame().await.is_none(),

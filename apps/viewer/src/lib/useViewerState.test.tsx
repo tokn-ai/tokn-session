@@ -18,6 +18,7 @@ import {
   listenForSessionNotifications,
   listenForSubscriptionLoss,
   openSession,
+  openSessionList,
   releaseSession,
   inspectSessionEvent,
   loadToolDetails,
@@ -37,6 +38,7 @@ import type {
   EventPageResponse,
   ListSessionsResponse,
   SessionIndexChangedEvent,
+  SessionListUpdate,
   SessionIndexProgress,
   SessionSummary,
   TrajectoryEventPageResponse,
@@ -45,6 +47,7 @@ import type {
 import { useViewerState } from "./useViewerState";
 import { readViewerPreferences, updateViewerPreferences, VIEWER_PREFERENCES_KEY } from "./viewerPreferences";
 import { ViewerPage } from "../pages/ViewerPage";
+import { revisionedSession } from "../../tests/sessionListFixtures";
 
 vi.mock("../components/RelayConnection", () => ({ RelayConnection: () => null }));
 
@@ -58,6 +61,7 @@ vi.mock("./tauri", () => ({
   updateSessionView: vi.fn(() => Promise.resolve()),
   releaseSession: vi.fn(async () => {}),
   openSession: vi.fn(() => Promise.reject(new Error("Unknown viewer command"))),
+  openSessionList: vi.fn(),
   loadToolDetails: vi.fn((request, send) => loadEventDetail(request, send)),
   inspectSessionEvent: vi.fn((request) => loadEventDetail(request)),
   renewSessionSubscriptions: vi.fn(() => Promise.resolve()),
@@ -82,9 +86,40 @@ vi.mock("./tauri", () => ({
   retrySessionIndex: vi.fn(() => new Promise(() => undefined)),
 }));
 
+let listObserver: ((event: { payload: SessionListUpdate }) => void) | undefined;
+vi.mock("./transport", async (original) => {
+  const actual = await original<typeof import("./transport")>();
+  return { ...actual, captureTransport: () => {
+    const transport = actual.captureTransport();
+    const listen: typeof transport.listen = async (event, handler) => {
+      if (event !== "session-list-updated") return transport.listen(event, handler);
+      listObserver = handler as typeof listObserver;
+      return () => { listObserver = undefined; };
+    };
+    return { ...transport, listen };
+  } };
+});
+
+function pushListSessions(sessions: SessionSummary[], next_cursor: string | null = null) {
+  const request = vi.mocked(openSessionList).mock.calls.find(([entry]) => !entry.parent_session_key)?.[0];
+  if (!request || !listObserver) throw new Error("No session list subscription");
+  listObserver({ payload: { subscription_id: request.subscription_id, base_cursor: "list:first",
+    synced_through: "list:second", sessions: sessions.map(revisionedSession), removed_keys: [], next_cursor, source_errors: [], pending_providers: [] } });
+}
+
 let restore_host: (() => void) | undefined;
 beforeEach(() => {
   localStorage.clear();
+  listObserver = undefined;
+  // Reuse the row fixtures in these hook tests for live list baselines.
+  vi.mocked(openSessionList).mockReset().mockImplementation(async (request, send) => {
+    const page = request.parent_session_key
+      ? { ...await listSessionChildren({ parent_session_key: request.parent_session_key, limit: request.limit }, send), pending_providers: [], source_errors: [] }
+      : await listSessions({ query: request.query!, limit: request.limit }, send);
+    return { subscription_id: request.subscription_id, synced_through: "list:first", base_cursor: null,
+      sessions: page.sessions.map(revisionedSession), removed_keys: [], next_cursor: page.next_cursor,
+      pending_providers: page.pending_providers, source_errors: page.source_errors };
+  });
   vi.mocked(subscribeBackgroundUpdates).mockReset().mockImplementation(async (request) => ({ subscription_id: request.subscription_id, generation: "background", revision: "0", scope: request.scope, subscribed: true }));
   vi.mocked(renewBackgroundSubscriptions).mockReset().mockResolvedValue(undefined);
   vi.mocked(listenForBackgroundUpdates).mockReset().mockResolvedValue(vi.fn());
@@ -432,10 +467,10 @@ describe("sidebar view preference", () => {
     act(() => result.current.toggleProvider("pi"));
     await waitFor(() => expect(result.current.selectedSessionKey).toBeNull());
   });
-  it("applies Settings ordering while retaining the open projection and background interest", async () => {
-    vi.mocked(listSessions)
-      .mockResolvedValueOnce({ sessions: [session("settings-open")], next_cursor: null, source_errors: [], pending_providers: [] })
-      .mockResolvedValueOnce({ sessions: [session("settings-other")], next_cursor: null, source_errors: [], pending_providers: [] });
+  it("switches a complete list to Projects locally and retains the open session and background interest", async () => {
+    const active = { ...session("settings-open"), updated_at_ms: 20, project_key: "older", project_order_ms: 1 };
+    const newestProject = { ...session("settings-other"), updated_at_ms: 10, project_key: "newer", project_order_ms: 2 };
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [active, newestProject], next_cursor: null, source_errors: [], pending_providers: [] });
     vi.mocked(openSession).mockImplementation(async (request) => semanticSnapshot(request, toolEventPage()));
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "settings-open");
@@ -447,12 +482,27 @@ describe("sidebar view preference", () => {
     expect(result.current.selectedSession?.session_key).toBe("settings-open");
     expect(result.current.events).toEqual(toolEventPage().events);
     expect(openSession).toHaveBeenCalledTimes(historyRequests);
+    expect(openSessionList).toHaveBeenCalledOnce();
     expect(subscribeBackgroundUpdates).toHaveBeenCalledOnce();
+  });
+
+  it("requests the current ranking when a complete list grows beyond its window after a local sort", async () => {
+    vi.mocked(listSessions)
+      .mockResolvedValueOnce({ sessions: [session("first")], next_cursor: null, source_errors: [], pending_providers: [] })
+      .mockResolvedValueOnce({ sessions: [session("new-project")], next_cursor: "sessions.v1.1", source_errors: [], pending_providers: [] });
+    const { result } = renderHook(() => useViewerState());
+    await waitFor(() => expect(result.current.sessions).toHaveLength(1));
+    act(() => result.current.setSessionOrder("project"));
+    expect(openSessionList).toHaveBeenCalledOnce();
+    act(() => pushListSessions([], "sessions.v1.1"));
+    await waitFor(() => expect(result.current.sessions[0]?.session_key).toBe("new-project"));
+    expect(openSessionList).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(openSessionList).mock.calls[1][0].query?.order).toBe("project");
   });
 
   it("requests project order and preserves a selection outside the replacement page", async () => {
     vi.mocked(listSessions)
-      .mockResolvedValueOnce({ sessions: [session("a")], next_cursor: null, source_errors: [], pending_providers: [] })
+      .mockResolvedValueOnce({ sessions: [session("a")], next_cursor: "sessions.v1.1", source_errors: [], pending_providers: [] })
       .mockResolvedValueOnce({ sessions: [session("b")], next_cursor: null, source_errors: [], pending_providers: [] });
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "a");
@@ -1672,7 +1722,7 @@ describe("useViewerState session-index signalling", () => {
       initialPageLoaded: true,
       sessionKey: indexedSession.session_key,
     }]);
-    await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(2));
+    expect(openSessionList).toHaveBeenCalledOnce();
   });
 
   it("keeps a hidden machine's new page cached and unread until it is visible", async () => {
@@ -1818,7 +1868,7 @@ describe("useViewerState session-index signalling", () => {
     expect(acknowledgeSessionAttention).not.toHaveBeenCalled();
   });
 
-  it("reloads the sidebar after an index-change event and unregisters on cleanup", async () => {
+  it("keeps the sidebar subscription after an index change and unregisters on cleanup", async () => {
     const unlisten = vi.fn();
     let emitIndexChange: ((change: SessionIndexChangedEvent) => void) | undefined;
     vi.mocked(listenForSessionIndexChanges).mockImplementation((handler) => {
@@ -1838,15 +1888,14 @@ describe("useViewerState session-index signalling", () => {
     await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(1));
     expect(loadEventPage).not.toHaveBeenCalled();
     act(() => emitIndexChange?.({ changed: true, attention_session_keys: [] }));
-    await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(2));
+    expect(openSessionList).toHaveBeenCalledOnce();
     expect(loadEventPage).not.toHaveBeenCalled();
     unmount();
     expect(unlisten).toHaveBeenCalledOnce();
   });
 
-  it("coalesces index and Relay changes into one trailing catalog read", async () => {
+  it("applies a row update after index and Relay hints without rereading the list", async () => {
     const first = deferred<ListSessionsResponse>();
-    const second = deferred<ListSessionsResponse>();
     let emitIndexChange: ((change: SessionIndexChangedEvent) => void) | undefined;
     let emitRelayChange: ((change: RelayChange) => void) | undefined;
     vi.mocked(listenForSessionIndexChanges).mockImplementation((handler) => {
@@ -1857,9 +1906,7 @@ describe("useViewerState session-index signalling", () => {
       emitRelayChange = handler;
       return Promise.resolve(vi.fn());
     });
-    vi.mocked(listSessions)
-      .mockReturnValueOnce(first.promise)
-      .mockReturnValueOnce(second.promise);
+    vi.mocked(listSessions).mockReturnValueOnce(first.promise);
     const { result } = renderHook(() => useViewerState());
     await waitFor(() => expect(listSessions).toHaveBeenCalledOnce());
 
@@ -1873,15 +1920,11 @@ describe("useViewerState session-index signalling", () => {
       sessions: [initial], next_cursor: null, source_errors: [], pending_providers: [],
     }));
     expect(result.current.sessions).toEqual([initial]);
-    expect(listSessions).toHaveBeenCalledTimes(2);
-
-    const latest = session("codex:latest-result");
-    await act(async () => second.resolve({
-      sessions: [latest], next_cursor: null, source_errors: [], pending_providers: [],
-    }));
-    expect(result.current.sessions).toEqual([latest]);
+    const renamed = { ...initial, title: "Updated title" };
+    act(() => pushListSessions([renamed]));
+    expect(result.current.sessions).toEqual([renamed]);
     expect(result.current.sessionsLoading).toBe(false);
-    expect(listSessions).toHaveBeenCalledTimes(2);
+    expect(openSessionList).toHaveBeenCalledOnce();
   });
 
   it("starts a changed provider query immediately and ignores the superseded catalog", async () => {
@@ -1913,7 +1956,7 @@ describe("useViewerState session-index signalling", () => {
     expect(listSessions).toHaveBeenCalledTimes(2);
   });
 
-  it("waits for pagination before a queued catalog refresh, including after a failure", async () => {
+  it("keeps the loaded rows when a larger list window fails during index activity", async () => {
     const more = deferred<ListSessionsResponse>();
     let emitIndexChange: ((change: SessionIndexChangedEvent) => void) | undefined;
     vi.mocked(listenForSessionIndexChanges).mockImplementation((handler) => {
@@ -1933,16 +1976,16 @@ describe("useViewerState session-index signalling", () => {
     await waitFor(() => expect(result.current.sessionsLoading).toBe(false));
     act(() => result.current.loadMoreSessions());
     expect(listSessions).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(listSessions).mock.calls[1]![0].cursor).toBe("sessions.v1.1");
+    expect(vi.mocked(openSessionList).mock.calls[1]![0].limit).toBeGreaterThan(vi.mocked(openSessionList).mock.calls[0]![0].limit!);
     for (let index = 0; index < 3; index += 1) {
       act(() => emitIndexChange?.({ changed: true, attention_session_keys: [] }));
     }
     expect(listSessions).toHaveBeenCalledTimes(2);
     await act(async () => more.reject(new Error("index temporarily unavailable")));
-    expect(listSessions).toHaveBeenCalledTimes(3);
+    expect(openSessionList).toHaveBeenCalledTimes(2);
     expect(result.current.sessions).toEqual([initial]);
     expect(result.current.sessionsLoadingMore).toBe(false);
-    expect(result.current.sessionsError).toBeNull();
+    expect(result.current.sessionsError).toContain("index temporarily unavailable");
   });
 
   it("drops queued catalog work when unmounting to change machines", async () => {
@@ -1990,19 +2033,15 @@ describe("useViewerState session-index signalling", () => {
     await waitFor(() => expect(loadEventPage).toHaveBeenCalledTimes(2));
 
     act(() => emitIndexChange?.({ changed: true, attention_session_keys: [] }));
-    await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(2));
+    act(() => pushListSessions([{ ...root, title: "Renamed parent" }]));
+    expect(listSessions).toHaveBeenCalledOnce();
     expect(result.current.selectedSessionKey).toBe(child.session_key);
     expect(result.current.selectedSession?.session_key).toBe(child.session_key);
     await waitFor(() => expect(loadEventPage).toHaveBeenCalledTimes(2));
   });
 
-  it("keeps the visible session when a background catalog refresh fails", async () => {
+  it("keeps the visible session when a list retry fails", async () => {
     const selected = session("codex:refresh-failure");
-    let emitIndexChange: ((change: SessionIndexChangedEvent) => void) | undefined;
-    vi.mocked(listenForSessionIndexChanges).mockImplementation((handler) => {
-      emitIndexChange = handler;
-      return Promise.resolve(vi.fn());
-    });
     vi.mocked(listSessions)
       .mockResolvedValueOnce({
         sessions: [selected],
@@ -2016,7 +2055,7 @@ describe("useViewerState session-index signalling", () => {
 
     await selectListedSession(result, selected.session_key);
     await waitFor(() => expect(loadEventPage).toHaveBeenCalledOnce());
-    act(() => emitIndexChange?.({ changed: true, attention_session_keys: [] }));
+    act(() => result.current.retrySessions());
 
     await waitFor(() => {
       expect(result.current.sessionsError).toBe("local index is temporarily unavailable");
@@ -2530,7 +2569,8 @@ describe("useViewerState agent communication detail", () => {
     expect(result.current.sessions[0].question_attention).toEqual({ required_count: 0, available_count: 0 });
     expect(result.current.selectedSession?.question_attention?.available_count).toBe(0);
     act(() => indexChange?.({ changed: true, attention_session_keys: [] }));
-    await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(2));
+    act(() => pushListSessions([stale]));
+    expect(openSessionList).toHaveBeenCalledOnce();
     expect(result.current.sessions[0].question_attention?.available_count).toBe(0);
   });
 
@@ -2986,7 +3026,7 @@ describe("semantic session delivery", () => {
     vi.mocked(loadEventPage).mockResolvedValue({ ...toolEventPage(), attention_revision: "10" });
     vi.mocked(acknowledgeSessionAttention).mockImplementation(async () => {
       if (!accepted) throw new Error("Acknowledgement rejected");
-      vi.mocked(listSessions).mockResolvedValue(catalog({ ...unread, has_unread: false, unread_final_count: 0 }));
+      pushListSessions([{ ...unread, has_unread: false, unread_final_count: 0 }]);
       return { changed: true };
     });
     const { result } = renderHook(() => useViewerState());
@@ -3153,13 +3193,14 @@ describe("semantic session delivery", () => {
     const { result } = renderHook(() => useViewerState());
     await selectListedSession(result, "preview");
     await waitFor(() => expect(result.current.events).toEqual(page.events));
-    await waitFor(() => expect(result.current.sessions[0].latest_assistant_preview).toBe("Latest answer."));
+    const listedPreview = () => result.current.sessions.find((row) => row.session_key === listed.session_key)?.latest_assistant_preview;
+    await waitFor(() => expect(listedPreview()).toBe("Latest answer."));
     expect(result.current.selectedSession?.latest_assistant_preview).toBe("Latest answer.");
     expect(openSession).toHaveBeenCalledOnce();
     expect(loadEventPage).toHaveBeenCalledTimes(semantic ? 0 : 1);
     act(() => result.current.selectSession("other"));
     await waitFor(() => expect(result.current.selectedSessionKey).toBe("other"));
-    expect(result.current.sessions[0].latest_assistant_preview).toBe("Latest answer.");
+    expect(listedPreview()).toBe("Latest answer.");
   });
 
   it("keeps live running state through stale catalog and attention updates, then clears on completion", async () => {
@@ -3280,7 +3321,7 @@ describe("semantic session delivery", () => {
     act(() => indexChange?.({ changed: true, catalog_refresh_required: false,
       attention_session_keys: ["live"], updated_session_keys: ["live"] }));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
-    expect(listSessions).toHaveBeenCalledTimes(catalogCalls + (available ? 0 : 1));
+    expect(listSessions).toHaveBeenCalledTimes(catalogCalls);
     expect(openSession).toHaveBeenCalledTimes(updateCalls);
     expect(loadEventPage).not.toHaveBeenCalled();
   });

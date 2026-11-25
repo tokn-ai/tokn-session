@@ -70,7 +70,7 @@ pub enum SessionOrder {
   Project,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 pub struct SessionQuery {
   #[serde(default)]
   pub order: SessionOrder,
@@ -118,7 +118,7 @@ pub struct ListSessionChildrenResponse {
   pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SourceError {
   pub provider: ViewerProvider,
   pub message: String,

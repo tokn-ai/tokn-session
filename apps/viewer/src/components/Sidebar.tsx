@@ -51,6 +51,7 @@ interface SidebarProps {
   on_session_select: (session_key: string) => void;
   on_question_session_select?: (session_key: string) => void;
   on_children_load: (parent_session_key: string) => void;
+  on_children_release?: (parent_session_key: string) => void;
   on_children_retry: (parent_session_key: string) => void;
   on_children_load_more: (parent_session_key: string) => void;
   on_retry: () => void;
@@ -66,6 +67,7 @@ interface SessionBranchProps {
   selected_session_key: string | null;
   on_toggle: (session_key: string) => void;
   on_children_load: (parent_session_key: string) => void;
+  on_children_release?: (parent_session_key: string) => void;
   on_session_select: (session_key: string) => void;
   on_question_session_select?: (session_key: string) => void;
   on_children_retry: (parent_session_key: string) => void;
@@ -96,6 +98,7 @@ function SessionBranch({
   selected_session_key,
   on_toggle,
   on_children_load,
+  on_children_release,
   on_session_select,
   on_question_session_select,
   on_children_retry,
@@ -121,11 +124,13 @@ function SessionBranch({
   const questionCount = requiredCount + availableCount;
   const questionLabel = requiredCount > 0 ? "Input required" : "Question available";
 
+  const missingChildren = childrenState === undefined;
   useEffect(() => {
-    if (hasChildren && isExpanded && !childrenState) {
-      on_children_load(session.session_key);
-    }
-  }, [childrenState, hasChildren, isExpanded, on_children_load, session.session_key]);
+    if (hasChildren && isExpanded) on_children_load(session.session_key);
+  }, [hasChildren, isExpanded, missingChildren, on_children_load, session.session_key]);
+  useEffect(() => {
+    if (hasChildren && isExpanded) return () => on_children_release?.(session.session_key);
+  }, [hasChildren, isExpanded, on_children_release, session.session_key]);
 
   return (
     <div className="session-tree__branch" data-depth={depth}>
@@ -215,6 +220,7 @@ function SessionBranch({
               expanded_session_keys={expanded_session_keys}
               key={child.session_key}
               on_children_load={on_children_load}
+              on_children_release={on_children_release}
               on_children_load_more={on_children_load_more}
               on_children_retry={on_children_retry}
               on_session_select={on_session_select}
@@ -279,6 +285,7 @@ export function Sidebar({
   on_session_select,
   on_question_session_select,
   on_children_load,
+  on_children_release,
   on_children_retry,
   on_children_load_more,
   on_retry,
@@ -509,6 +516,7 @@ export function Sidebar({
                     expanded_session_keys={expandedSessionKeys}
                     key={session.session_key}
                     on_children_load={on_children_load}
+                    on_children_release={on_children_release}
                     on_children_load_more={on_children_load_more}
                     on_children_retry={on_children_retry}
                     on_session_select={on_session_select}

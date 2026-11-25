@@ -155,10 +155,15 @@ async fn forward_events(mut events: broadcast::Receiver<ViewerEvent>, app: AppHa
         if matches!(event.event.as_str(), "managed-session-changed" | "relay-status") {
           crate::runtime_management::changed(&app);
         }
-        let _ = app.emit(&event.event, event.payload);
+        for event in event.for_local_viewer() {
+          let _ = app.emit(&event.event, event.payload);
+        }
       }
       Err(broadcast::error::RecvError::Lagged(_)) => {
         crate::runtime_management::changed(&app);
+        // A skipped list delta can be the last change to an otherwise idle
+        // window. Revalidate the active subscriptions after any event gap.
+        let _ = app.emit("transport-reconnected", serde_json::json!({}));
         let _ = app.emit("registered-projects-changed", serde_json::json!({}));
         let _ = app.emit(
           "relay-changed",

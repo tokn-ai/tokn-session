@@ -48,6 +48,48 @@ can explicitly request older history. The first open never searches older
 pages for a saved scroll anchor. New turns extend the retained window, and
 older outstanding questions retain their attention context.
 
+## Session list
+
+The sidebar opens a metadata-only window for the current search and providers.
+Expanding a parent opens a separate window for its children. The `sessions`
+array holds summaries, each with its session key and a SHA-256 revision.
+When the index commits a change, the host compares the revisions in each
+affected window and sends only new or changed summaries in `sessions`. Keys
+of sessions leaving a window appear in `removed_keys`. An unchanged window
+produces no list event, including for shared viewers.
+
+The frontend owns display order. For example, when a session becomes active,
+the host sends its updated summary and the frontend uses the activity time to
+place it. Changing between Time and Projects is local when all matching sessions
+are loaded. For a partial list the host uses the requested ranking to select
+page membership, and the frontend sorts the loaded sessions.
+
+Each client keeps one `synced_through` cursor with the list it has applied.
+When two clients watch the same page with the same permissions, the host
+shares the work of checking its membership. It records when each summary last
+changed and keeps recent removal keys. A client can disconnect, miss several
+changes, and reopen with `since` to receive them in one batch. Multiple edits
+to a session yield its latest summary. If the host has discarded the history
+needed for that cursor, it sends the current page as a snapshot.
+
+For example, if a phone misses a rename of A and the deletion of B while a
+desktop stays online, the phone can send its own cached cutoff and receive A
+in `sessions` and B in `removed_keys`. The desktop keeps its live subscription.
+Paginated and filtered views track page membership so a session that enters a
+full page can displace another. Indexing progress and compact assistant
+previews use their own event types.
+
+The host caches up to 64 distinct pages and supports up to 1,024 live list
+subscriptions. Each subscription holds a routing ID and the last cutoff sent.
+Subscribers to the same page share its summaries and removal history. An edit
+produces one internal broadcast per group of subscribers at the same cutoff
+and transport. HTTP streams expand only their matching subscription IDs.
+Local desktop subscriptions use a separate delivery group. A lease
+lasts 90 seconds and the viewer renews up to 64 together. When capacity is
+needed, the host can evict a page with no active subscriptions. If every page
+is in use, the user can still page through the index. The viewer retries
+admission and resumes live updates when a lease becomes available.
+
 ## Background messages and session coverage
 
 One independent compact interest covers either **All sessions** on the connected
@@ -123,12 +165,12 @@ in addition to the existing bounded display replicas.
 
 ## Adapters and limits
 
-Viewer protocol revision 3 uses the same open, release, resource and renewal
+Viewer protocol revision 4 uses the same open, release, resource and renewal
 commands on Tauri and HTTP. The Hub transports HTTP-shaped commands and SSE
 through the encrypted connection. Shared grants restrict access to their
 explicit session keys and namespace subscription IDs per recipient and grant.
-Shared viewers receive live updates to their own subscriptions and a catalog
-refresh notice every five seconds. Read markers and activity from unshared
+Shared viewers receive live updates to their own subscriptions. Idle
+streams carry only transport heartbeats. Read markers and activity from unshared
 descendants stay private.
 
 The host admits up to 24 active timeline subscriptions with 90-second leases.
@@ -178,6 +220,12 @@ It prints lineage/decode/reader timings and source/window counts, never message
 contents. Debug timings are diagnostic, not desktop release benchmarks.
 
 ## Remaining costs
+
+When the index signals a change, the host rereads affected pages and compares
+summary fingerprints once per distinct active view. Multiple clients watching
+the same page share this cost. Different filters, page boundaries or grants
+can still require separate queries. Lease renewal and transport heartbeats
+do not run them.
 
 Other providers and Codex correctness fallbacks still normalize full history.
 Codex source windows can be broader than the selected projection when dependencies
