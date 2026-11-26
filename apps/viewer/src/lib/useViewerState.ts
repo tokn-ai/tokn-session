@@ -6,6 +6,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { readReadingPosition, readingEventKey } from "./readingPosition";
 import { refreshEventWindow, loadCompleteTrajectory } from "./liveEvents";
 import { SessionLists } from "./sessionLists";
+import { matchesSessionActivity } from "./sessionActivity";
 import { compareActivity, compareProjects, compareSessionChildren } from "./sidebarOrder";
 import { useViewerPreferences } from "./viewerPreferences";
 import { useSessionView } from "./useSessionView";
@@ -45,6 +46,7 @@ import {
   type EventDetail,
   type EventSummary,
   type OutstandingQuestion,
+  type SessionActivityFilter,
   type SessionChildrenState,
   type SessionHistoryStatus,
   type SessionIndexProgress,
@@ -211,10 +213,17 @@ export function useViewerState(visible = true) {
   const sessionOrderRef = useRef(sessionOrder);
   const [search, setSearchValue] = useState("");
   const debouncedSearch = useDebouncedValue(search.trim(), 180);
+  const [activityFilter, setActivityFilter] = useState<SessionActivityFilter>("all");
   const [enabledProviders, setEnabledProviders] = useState<Set<ViewerProvider>>(
     () => new Set(PROVIDERS),
   );
   const providerKey = PROVIDERS.filter((provider) => enabledProviders.has(provider)).join(",");
+  const sessionQuery = useMemo(() => ({
+    order: sessionOrder,
+    providers: PROVIDERS.filter((provider) => enabledProviders.has(provider)),
+    search: debouncedSearch || undefined,
+    activity: activityFilter,
+  }), [activityFilter, debouncedSearch, enabledProviders, sessionOrder]);
 
   const lists = useMemo(() => new SessionLists(send, transport.release, transport.subscription_prefix), [send, transport]);
   const previousListRows = useRef(new Map<string | null, SessionSummary[]>());
@@ -247,7 +256,7 @@ export function useViewerState(visible = true) {
   const sessionsRequest = useRef(0);
   const sessionListInFlight = useRef<number | null>(null);
   const createdSelectionRevision = useRef(0);
-  const previousSessionFilterKey = useRef<string | null>(null);
+  const previousSessionFilter = useRef<{ scope: string; activity: SessionActivityFilter } | null>(null);
   const [sessionIndexListenerReady, setSessionIndexListenerReady] = useState(false);
   const [sessionIndexProgress, setSessionIndexProgress] = useState<SessionIndexProgress | null>(null);
   const [sessionIndexProgressLoading, setSessionIndexProgressLoading] = useState(true);
@@ -1594,6 +1603,10 @@ export function useViewerState(visible = true) {
   const selectedSession = useMemo(() => findKnownSession(displayedSessions.sessions, displayedSessions.children, selectedSessionKey)
     ?? (selectedSessionMetadata?.session_key === selectedSessionKey ? projectSession(selectedSessionMetadata) : null),
     [displayedSessions, selectedSessionKey, selectedSessionMetadata, projectSession]);
+  // Live runs and question answers can update a visible row before the host
+  // publishes its departure from the index-backed queue.
+  const queuedSessions = useMemo(() => activityFilter === "all" ? displayedSessions.sessions
+    : displayedSessions.sessions.filter((session) => matchesSessionActivity(session, activityFilter)), [activityFilter, displayedSessions.sessions]);
   useSessionView(selectedSessionKey, selectedSession, sessions, sessionChildren, visible);
 
   const applySessionOrder = useCallback((order: SessionOrder) => {
@@ -1642,12 +1655,13 @@ export function useViewerState(visible = true) {
     if (!sessionIndexListenerReady) {
       return;
     }
-    const filterKey = `${providerKey}\u0000${debouncedSearch}`;
-    const filtersChanged = previousSessionFilterKey.current !== filterKey;
+    const scope = JSON.stringify([providerKey, debouncedSearch]);
+    const scopeChanged = previousSessionFilter.current?.scope !== scope;
+    const filtersChanged = scopeChanged || previousSessionFilter.current?.activity !== activityFilter;
     const requestId = ++sessionsRequest.current;
     const selectionRevision = createdSelectionRevision.current;
     sessionListInFlight.current = null;
-    previousSessionFilterKey.current = filterKey;
+    previousSessionFilter.current = { scope, activity: activityFilter };
     setSessionsLoadingMore(false);
     if (enabledProviders.size === 0) {
       lists.drop(null);
@@ -1668,9 +1682,8 @@ export function useViewerState(visible = true) {
     setSessionsLoading(true);
     setSessionsError(null);
     sessionListInFlight.current = requestId;
-    const query = { order: sessionOrder, providers: PROVIDERS.filter((provider) => enabledProviders.has(provider)), search: debouncedSearch || undefined };
     const limit = filtersChanged ? SESSION_PAGE_SIZE : lists.limit(null) || SESSION_PAGE_SIZE;
-    void lists.open(null, query, limit)
+    void lists.open(null, sessionQuery, limit)
       .then((response) => {
         if (sessionsRequest.current !== requestId) {
           return;
@@ -1685,7 +1698,7 @@ export function useViewerState(visible = true) {
           const currentSelection = selectedSessionKeyRef.current;
           const selectedRootIsVisible = currentSelection !== null
             && response.sessions.some((session) => session.session_key === currentSelection);
-          if (createdSelectionRevision.current === selectionRevision) selectFromList.current(selectedRootIsVisible ? currentSelection : null);
+          if (scopeChanged && createdSelectionRevision.current === selectionRevision) selectFromList.current(selectedRootIsVisible ? currentSelection : null);
         } else {
           selectFromList.current(preserveSessionSelection(selectedSessionKeyRef.current));
         }
@@ -1698,7 +1711,7 @@ export function useViewerState(visible = true) {
             setSessionsCursor(null);
             setSourceErrors([]);
             setPendingProviders([]);
-            selectFromList.current(null);
+            if (scopeChanged) selectFromList.current(null);
           }
           setSessionsError(errorMessage(error));
         }
@@ -1711,13 +1724,14 @@ export function useViewerState(visible = true) {
       });
   }, [
     clearSessionChildren,
+    activityFilter,
     debouncedSearch,
     enabledProviders,
     lists,
     finishSessionListRequest,
     showRootPage,
     providerKey,
-    sessionOrder,
+    sessionQuery,
     sessionIndexListenerReady,
     sessionsAttempt,
   ]);
@@ -2221,11 +2235,24 @@ export function useViewerState(visible = true) {
     setSearchValue(value);
   }, []);
 
+  const changeActivityFilter = useCallback((next: SessionActivityFilter) => {
+    if (next === activityFilter) return;
+    // A changed queue can contain children absent from the normal root list.
+    // Retire its lease before accepting another push or displaying the new tab.
+    sessionsRequest.current += 1;
+    lists.drop(null);
+    setSessions([]);
+    setSessionsCursor(null);
+    setSessionsError(null);
+    setSessionsLoading(true);
+    setActivityFilter(next);
+  }, [activityFilter, lists]);
+
   const selectSession = useCallback((sessionKey: string) => {
     pendingQuestionSession.current = null;
-    applySessionSelection(sessionKey);
+    applySessionSelection(sessionKey, findKnownSession(displayedSessions.sessions, displayedSessions.children, sessionKey) ?? undefined);
     setMobileSidebarOpen(false);
-  }, [applySessionSelection]);
+  }, [applySessionSelection, displayedSessions]);
 
   const clearSessionSelection = useCallback(() => {
     pendingQuestionSession.current = null;
@@ -2254,10 +2281,10 @@ export function useViewerState(visible = true) {
       openQuestion(outstandingQuestions[0].event_key);
     } else {
       pendingQuestionSession.current = sessionKey;
-      applySessionSelection(sessionKey);
+      applySessionSelection(sessionKey, findKnownSession(displayedSessions.sessions, displayedSessions.children, sessionKey) ?? undefined);
     }
     setMobileSidebarOpen(false);
-  }, [applySessionSelection, openQuestion, outstandingQuestions, selectedSessionKey]);
+  }, [applySessionSelection, displayedSessions, openQuestion, outstandingQuestions, selectedSessionKey]);
 
   const selectEvent = useCallback((eventKey: string) => {
     inspectorTriggerRef.current = document.getElementById(eventButtonId(eventKey));
@@ -2325,8 +2352,7 @@ export function useViewerState(visible = true) {
     sessionListInFlight.current = requestGeneration;
     setSessionsLoadingMore(true);
     setSessionsError(null);
-    const query = { order: sessionOrder, providers: PROVIDERS.filter((provider) => enabledProviders.has(provider)), search: debouncedSearch || undefined };
-    void lists.open(null, query, lists.limit(null) + SESSION_PAGE_SIZE)
+    void lists.open(null, sessionQuery, lists.limit(null) + SESSION_PAGE_SIZE)
       .then((response) => {
         if (sessionsRequest.current !== requestGeneration) {
           return;
@@ -2344,7 +2370,7 @@ export function useViewerState(visible = true) {
         }
         finishSessionListRequest(requestGeneration);
       });
-  }, [debouncedSearch, enabledProviders, finishSessionListRequest, lists, showRootPage, sessionOrder, sessionsCursor, sessionsLoading, sessionsLoadingMore]);
+  }, [finishSessionListRequest, lists, showRootPage, sessionQuery, sessionsCursor, sessionsLoading, sessionsLoadingMore]);
 
   const loadOlderEvents = useCallback(() => {
     if (
@@ -2452,12 +2478,14 @@ export function useViewerState(visible = true) {
     setBackgroundUpdatesLevel: backgroundUpdates.changeLevel,
     backgroundUpdatesStatus: backgroundUpdates.status,
     sessionOrder,
+    activityFilter,
+    setActivityFilter: changeActivityFilter,
     setSessionOrder: changeSessionOrder,
     search,
     setSearch: changeSearch,
     enabledProviders,
     toggleProvider,
-    sessions: displayedSessions.sessions,
+    sessions: queuedSessions,
     sessionChildren: displayedSessions.children,
     loadSessionChildren,
     releaseSessionChildren,

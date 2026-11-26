@@ -1,27 +1,31 @@
-import { useCallback, useEffect, useId, useMemo, useState } from "react";
-import type {
-  SessionChildrenState,
-  SourceError,
-  SessionSummary,
-  ViewerProvider,
-  SessionOrder,
-  RegisteredProject,
-} from "../lib/types";
+import { useCallback, useEffect, useId, useMemo, useState, type KeyboardEvent } from "react";
 import {
-  formatRelativeTime,
-  knownSessionAncestors,
-  providerLabel,
-  sessionDisplayTitle,
-  subagentDetail,
-} from "../lib/state";
-import { BranchIcon, ChevronIcon, CloseIcon, PanelIcon, SearchIcon, WarningIcon } from "./Icons";
+  PROVIDERS,
+  type RegisteredProject,
+  type SessionActivityFilter,
+  type SessionChildrenState,
+  type SessionOrder,
+  type SessionSummary,
+  type SourceError,
+  type ViewerProvider,
+} from "../lib/types";
+import { knownSessionAncestors, providerLabel } from "../lib/state";
+import { SESSION_ACTIVITY_LABELS } from "../lib/sessionActivity";
+import { ActivityIcon, CloseIcon, FilterIcon, PanelIcon, SearchIcon, WarningIcon } from "./Icons";
 import { useSidebarGroups } from "../lib/useSidebarGroups";
 import { LoadingRows } from "./StateView";
 import { SessionDraftRows } from "./SessionDraftRows";
 import type { SessionDraft } from "../lib/useSessionDrafts";
 import { sidebarDraftEntries, type SidebarDraftEntry } from "../lib/sidebarDrafts";
+import { SessionBranch } from "./SessionBranch";
+import { SessionSidebarGroup } from "./SessionSidebarGroup";
+import "./Sidebar.css";
 
 interface SidebarProps {
+  on_workspace_open?: () => void;
+  workspace_selected?: boolean;
+  activity_filter?: SessionActivityFilter;
+  on_clear_activity_filter?: () => void;
   drafts?: readonly SessionDraft[];
   selected_draft_id?: string | null;
   on_draft_select?: (draft_id: string) => void;
@@ -58,28 +62,7 @@ interface SidebarProps {
   on_load_more: () => void;
 }
 
-interface SessionBranchProps {
-  order: SessionOrder;
-  session: SessionSummary;
-  depth: number;
-  expanded_session_keys: ReadonlySet<string>;
-  session_children: ReadonlyMap<string, SessionChildrenState>;
-  selected_session_key: string | null;
-  on_toggle: (session_key: string) => void;
-  on_children_load: (parent_session_key: string) => void;
-  on_children_release?: (parent_session_key: string) => void;
-  on_session_select: (session_key: string) => void;
-  on_question_session_select?: (session_key: string) => void;
-  on_children_retry: (parent_session_key: string) => void;
-  on_children_load_more: (parent_session_key: string) => void;
-}
-
-const PROVIDER_FILTERS: ViewerProvider[] = ["codex", "pi", "opencode", "zcode", "qoder", "workbuddy", "dsh"];
 const NO_PROJECTS: RegisteredProject[] = [];
-
-function subagentCountLabel(count: number): string {
-  return `${count} subagent${count === 1 ? "" : "s"}`;
-}
 
 function pendingProviderLabel(providers: ViewerProvider[]): string {
   const labels = providers.map((provider) => providerLabel(provider));
@@ -89,173 +72,29 @@ function pendingProviderLabel(providers: ViewerProvider[]): string {
   return `${labels.slice(0, -1).join(", ")}, and ${labels[labels.length - 1]!}`;
 }
 
-function SessionBranch({
-  order,
-  session,
-  depth,
-  expanded_session_keys,
-  session_children,
-  selected_session_key,
-  on_toggle,
-  on_children_load,
-  on_children_release,
-  on_session_select,
-  on_question_session_select,
-  on_children_retry,
-  on_children_load_more,
-}: SessionBranchProps) {
-  const metadataId = useId();
-  const hasChildren = session.child_count > 0;
-  const isExpanded = expanded_session_keys.has(session.session_key);
-  const childrenState = session_children.get(session.session_key);
-  const children = childrenState?.sessions ?? [];
-  const relationship = depth > 0 ? subagentDetail(session) : null;
-  const title = sessionDisplayTitle(session);
-  const preview = session.latest_assistant_preview?.split(/\r?\n/).find((line) => line.trim())?.replace(/\s+/g, " ").trim();
-  const project = session.project?.trim() || session.cwd?.split(/[\\/]/).filter(Boolean).slice(-1)[0] || "Unassigned project";
-  const sessionDescription = depth > 0 ? `subagent ${title}` : title;
-  const requiredCount = session.question_attention?.required_count ?? 0;
-  const availableCount = session.question_attention?.available_count ?? 0;
-  const isRunning = requiredCount === 0 && (session.is_running === true || session.has_running_descendant === true);
-  const unreadCount = session.unread_final_count ?? Number(session.has_unread);
-  const hasUnread = !isRunning && unreadCount > 0;
-  const unreadLabel = `${unreadCount} unread final ${unreadCount === 1 ? "reply" : "replies"}`;
-  const runningLabel = session.is_running ? "Running" : "Subagent running";
-  const questionCount = requiredCount + availableCount;
-  const questionLabel = requiredCount > 0 ? "Input required" : "Question available";
-
-  const missingChildren = childrenState === undefined;
-  useEffect(() => {
-    if (hasChildren && isExpanded) on_children_load(session.session_key);
-  }, [hasChildren, isExpanded, missingChildren, on_children_load, session.session_key]);
-  useEffect(() => {
-    if (hasChildren && isExpanded) return () => on_children_release?.(session.session_key);
-  }, [hasChildren, isExpanded, on_children_release, session.session_key]);
-
-  return (
-    <div className="session-tree__branch" data-depth={depth}>
-      <div className="session-tree__row">
-        {hasChildren ? (
-          <button
-            aria-expanded={isExpanded}
-            aria-label={`${isExpanded ? "Hide" : "Show"} ${subagentCountLabel(session.child_count)} for ${title}`}
-            className="session-tree__toggle"
-            onClick={() => on_toggle(session.session_key)}
-            type="button"
-          >
-            <ChevronIcon className={isExpanded ? "is-expanded" : undefined} />
-          </button>
-        ) : (
-          <span aria-hidden="true" className="session-tree__toggle-spacer" />
-        )}
-        <button
-          aria-current={session.session_key === selected_session_key ? "page" : undefined}
-          aria-describedby={metadataId}
-          aria-label={`${sessionDescription}, ${providerLabel(session.provider)} session ${session.session_id}${questionCount ? `, ${questionLabel.toLowerCase()}` : ""}${isRunning ? `, ${runningLabel.toLowerCase()}` : hasUnread ? `, ${unreadLabel}` : ""}`}
-          className="session-row"
-          data-selected={session.session_key === selected_session_key}
-          data-subagent={depth > 0}
-          data-unread={hasUnread || undefined}
-          onClick={() => questionCount && on_question_session_select ? on_question_session_select(session.session_key) : on_session_select(session.session_key)}
-          title={`${title}\n${providerLabel(session.provider)} · ${session.project || session.cwd || "Unassigned project"}\n${session.session_id}`}
-          type="button"
-        >
-          <span className="session-row__body">
-            <span className="session-row__headline">
-              {depth > 0 ? <BranchIcon className="session-row__branch-icon" /> : null}
-              <span className="session-row__title">{title}</span>
-              <span className="session-row__time" aria-hidden="true">{formatRelativeTime(session.timestamp, session.updated_at_ms)}</span>
-              {questionCount > 0 ? <span className="session-row__question" data-blocking={requiredCount > 0} role="img" aria-label={`${questionLabel}, ${questionCount} unanswered ${questionCount === 1 ? "question" : "questions"}`} title={questionLabel}>?{questionCount > 1 ? questionCount : ""}</span> : null}
-              {isRunning ? (
-                <span aria-label={runningLabel} className="session-row__running inline-spinner" role="img" />
-              ) : hasUnread ? (
-                <span
-                  aria-label={unreadLabel}
-                  className={unreadCount > 1 ? "session-row__unread-count" : "session-row__unread-dot"}
-                  data-unread-source="direct"
-                  role="img"
-                >{unreadCount > 1 ? unreadCount : null}</span>
-              ) : null}
-            </span>
-            {order === "time" && preview ? <span className="session-row__preview" title={preview}>{preview}</span> : null}
-            {order === "time" ? <span className="session-row__project" title={session.cwd ?? project}>{project}</span> : null}
-            <span className="session-row__meta sr-only" id={metadataId}>
-              <span className="session-row__provider" data-provider={session.provider}>{providerLabel(session.provider)}</span>
-              <span aria-hidden="true">·</span>
-              <span>{formatRelativeTime(session.timestamp, session.updated_at_ms)}</span>
-              {relationship ? (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <span className="session-row__relationship" title={relationship}>{relationship}</span>
-                </>
-              ) : null}
-              {session.child_count > 0 ? (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <span>{subagentCountLabel(session.child_count)}</span>
-                </>
-              ) : null}
-            </span>
-          </span>
-        </button>
-      </div>
-
-      {hasChildren && isExpanded ? (
-        <div className="session-tree__children">
-          {childrenState?.is_loading && children.length === 0 ? (
-            <div className="session-tree__state">
-              <span className="inline-spinner" />
-              Loading subagents…
-            </div>
-          ) : null}
-
-          {childrenState && !childrenState.is_loading && !childrenState.error && children.length === 0 ? (
-            <div className="session-tree__state">No current subagents.</div>
-          ) : null}
-
-          {children.map((child) => (
-            <SessionBranch
-              order={order}
-              depth={depth + 1}
-              expanded_session_keys={expanded_session_keys}
-              key={child.session_key}
-              on_children_load={on_children_load}
-              on_children_release={on_children_release}
-              on_children_load_more={on_children_load_more}
-              on_children_retry={on_children_retry}
-              on_session_select={on_session_select}
-              on_question_session_select={on_question_session_select}
-              on_toggle={on_toggle}
-              selected_session_key={selected_session_key}
-              session={child}
-              session_children={session_children}
-            />
-          ))}
-
-          {childrenState?.error ? (
-            <div className="session-tree__error" role="alert">
-              <span>Subagents unavailable: {childrenState.error}</span>
-              <button onClick={() => on_children_retry(session.session_key)} type="button">Retry</button>
-            </div>
-          ) : null}
-
-          {childrenState?.next_cursor ? (
-            <button
-              className="session-tree__load-more"
-              disabled={childrenState.is_loading || childrenState.is_loading_more}
-              onClick={() => on_children_load_more(session.session_key)}
-              type="button"
-            >
-              {childrenState.is_loading_more ? "Loading subagents…" : "Load more subagents"}
-            </button>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
-  );
+// Arrow keys move focus through rendered roots, children and drafts. Activation
+// remains a separate native button action, so browsing never opens a session.
+function navigateSessionRows(event: KeyboardEvent<HTMLElement>) {
+  if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.nativeEvent.isComposing) return;
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+  const fromSearch = target.matches('input[type="search"]');
+  if (!fromSearch && !target.matches("button.session-row")) return;
+  const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button.session-row"));
+  if (!rows.length || (fromSearch && event.key === "ArrowUp")) return;
+  const index = rows.indexOf(target as HTMLButtonElement);
+  const next = event.key === "ArrowDown" ? rows[Math.min(index + 1, rows.length - 1)]
+    : rows[index - 1] ?? event.currentTarget.querySelector<HTMLInputElement>('input[type="search"]');
+  event.preventDefault();
+  next?.focus();
 }
 
 export function Sidebar({
+  on_workspace_open,
+  workspace_selected = false,
+  activity_filter = "all",
+  on_clear_activity_filter,
   drafts = [],
   selected_draft_id = null,
   on_draft_select,
@@ -291,13 +130,17 @@ export function Sidebar({
   on_retry,
   on_load_more,
 }: SidebarProps) {
-  const draft_entries = useMemo(() => sidebarDraftEntries(drafts, registered_projects, selected_draft_id, search),
-    [drafts, registered_projects, selected_draft_id, search]);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const filtersId = useId();
+  const searchHelpId = useId();
+  const filtered = activity_filter !== "all";
+  const draft_entries = useMemo(() => filtered ? [] : sidebarDraftEntries(drafts, registered_projects, selected_draft_id, search),
+    [drafts, registered_projects, selected_draft_id, search, filtered]);
   const draft_projects = useMemo(() => new Set(draft_entries.flatMap(({ project }) => project ? [project.project_id] : [])), [draft_entries]);
   const visible_projects = useMemo(() => registered_projects.filter((project) => !search.trim()
     || draft_projects.has(project.project_id)
     || `${project.name} ${project.folder_path}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())), [registered_projects, search, draft_projects]);
-  const groups = useSidebarGroups(sessions, order, visible_projects);
+  const groups = useSidebarGroups(sessions, order, filtered ? NO_PROJECTS : visible_projects);
   const project_drafts = useMemo(() => {
     const grouped = new Map<string, SidebarDraftEntry[]>();
     if (order === "project") for (const entry of draft_entries) {
@@ -314,8 +157,11 @@ export function Sidebar({
   const indexingLabel = pendingProviderLabel(pending_providers);
   const [expandedSessionKeys, setExpandedSessionKeys] = useState<Set<string>>(() => new Set());
 
+  const ancestors = useMemo(() => filtered ? [] : knownSessionAncestors(sessions, session_children, selected_session_key),
+    [sessions, session_children, selected_session_key, filtered]);
+  const selectedRoot = ancestors[0] ?? selected_session_key;
+
   useEffect(() => {
-    const ancestors = knownSessionAncestors(sessions, session_children, selected_session_key);
     if (ancestors.length === 0) {
       return;
     }
@@ -326,7 +172,7 @@ export function Sidebar({
       }
       return next.size === current.size ? current : next;
     });
-  }, [selected_session_key, session_children, sessions]);
+  }, [ancestors]);
 
   const toggleSessionBranch = useCallback((session_key: string) => {
     setExpandedSessionKeys((current) => {
@@ -341,7 +187,7 @@ export function Sidebar({
   }, []);
 
   return (
-    <aside aria-label="Sessions" className="sidebar">
+    <aside aria-label="Sessions" className="sidebar" onKeyDown={navigateSessionRows}>
       <header className="sidebar__header" data-tauri-drag-region>
         <div className="brand-mark" aria-hidden="true">
           <span />
@@ -356,57 +202,68 @@ export function Sidebar({
       </header>
 
       <div className="sidebar__controls">
-        {on_add_project || on_new_session ? <div className="workspace-actions">
-          {on_new_session ? <button type="button" disabled={!workspace_available} onClick={() => on_new_session()}>New session</button> : null}
-          {on_add_project ? <button type="button" disabled={!workspace_available} onClick={on_add_project}>Add project</button> : null}
-        </div> : null}
-        {workspace_notice ? <p className="workspace-sidebar-notice" role="status">{workspace_notice}
-          {on_workspace_retry ? <button className="text-button" type="button" onClick={on_workspace_retry}>Retry projects</button> : null}</p> : null}
-        <div className="sidebar__filter-heading">
-          {search || enabled_providers.size !== PROVIDER_FILTERS.length ? (
-            <button className="text-button" type="button" onClick={() => {
-              on_search_change("");
-              for (const provider of PROVIDER_FILTERS) {
-                if (!enabled_providers.has(provider)) on_provider_toggle(provider);
-              }
-            }}>Reset filters</button>
-          ) : null}
-        </div>
+        {on_workspace_open && <button type="button" className="workspace-nav"
+          aria-current={workspace_selected ? "page" : undefined} onClick={on_workspace_open}>
+          <ActivityIcon />Workspace
+        </button>}
+        {(on_new_session || on_add_project) && <div className="sidebar__creation">
+          {on_new_session && <button className="sidebar__new" type="button"
+            disabled={!workspace_available} onClick={() => on_new_session()}>
+            <span aria-hidden="true">+</span>New session
+          </button>}
+          {on_add_project && <button className="sidebar__add-project" type="button"
+            aria-label="Add project" title="Add project" disabled={!workspace_available} onClick={on_add_project}>
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 8V6a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8Z" /><path d="M12 10v7m-3.5-3.5h7" />
+            </svg>
+          </button>}
+        </div>}
+        {workspace_notice && <p className="workspace-sidebar-notice" role="status">{workspace_notice}
+          {on_workspace_retry && <button className="text-button" type="button" onClick={on_workspace_retry}>Retry projects</button>}
+        </p>}
         <label className="search-field">
           <span className="sr-only">Search sessions</span>
           <SearchIcon />
           <input
+            aria-describedby={searchHelpId}
+            aria-keyshortcuts="Control+k Meta+k"
             onChange={(event) => on_search_change(event.currentTarget.value)}
             placeholder="Search sessions"
             spellCheck={false}
             type="search"
             value={search}
           />
-          {is_loading && sessions.length > 0 ? <span className="inline-spinner" /> : null}
+          {is_loading && sessions.length > 0 ? <span className="inline-spinner" /> : !search &&
+            <kbd aria-hidden="true" className="sidebar__shortcut">{/Mac|iPad|iPhone/.test(navigator.platform) ? "⌘ K" : "Ctrl K"}</kbd>}
         </label>
-
-        <details className="sidebar-providers">
-          <summary>Providers <span>{enabled_providers.size === PROVIDER_FILTERS.length ? "All" : `${enabled_providers.size} selected`}</span><ChevronIcon /></summary>
-          <div aria-label="Filter by provider" className="provider-filters">
-            {PROVIDER_FILTERS.map((provider) => (
-              <button
-                aria-pressed={enabled_providers.has(provider)}
-                className="provider-filter"
-                data-provider={provider}
-                key={provider}
-                onClick={() => on_provider_toggle(provider)}
-                type="button"
-              >
-                <span className="provider-dot" />
-                {providerLabel(provider)}
-              </button>
-            ))}
+        <span id={searchHelpId} className="sr-only">Press the down arrow to browse sessions, then Enter to open.</span>
+        <div className="sidebar__tools">
+          <div aria-label="Group sessions" className="sidebar-order" role="group">
+            <button aria-pressed={order === "time"} onClick={() => on_order_change?.("time")} type="button">Time</button>
+            <button aria-pressed={order === "project"} onClick={() => on_order_change?.("project")} type="button">Projects</button>
           </div>
-        </details>
-        <div aria-label="Group sessions" className="sidebar-order" role="group">
-          <button aria-pressed={order === "time"} onClick={() => on_order_change?.("time")} type="button">Time</button>
-          <button aria-pressed={order === "project"} onClick={() => on_order_change?.("project")} type="button">Projects</button>
+          <button type="button" className="sidebar__filter-trigger" aria-controls={filtersOpen ? filtersId : undefined}
+            aria-label={`Providers, ${enabled_providers.size} of ${PROVIDERS.length} selected`}
+            aria-expanded={filtersOpen} data-filtered={enabled_providers.size !== PROVIDERS.length}
+            onClick={() => setFiltersOpen(!filtersOpen)}>
+            <FilterIcon />Providers{enabled_providers.size !== PROVIDERS.length && <span>{enabled_providers.size}</span>}
+          </button>
         </div>
+        {filtered && <button type="button" className="sidebar__activity-filter"
+          aria-label={`Clear activity filter: ${SESSION_ACTIVITY_LABELS[activity_filter]}`} onClick={on_clear_activity_filter}>
+          {SESSION_ACTIVITY_LABELS[activity_filter]}<CloseIcon />
+        </button>}
+        {filtersOpen && <div aria-label="Filter by provider" className="provider-filters" id={filtersId} role="group">
+          {PROVIDERS.map((provider) => (
+            <button aria-pressed={enabled_providers.has(provider)} className="provider-filter" data-provider={provider}
+              key={provider} onClick={() => on_provider_toggle(provider)} type="button">
+              <span className="provider-dot" />{providerLabel(provider)}
+            </button>
+          ))}
+          {enabled_providers.size !== PROVIDERS.length && <button className="text-button" type="button" onClick={() => {
+            for (const provider of PROVIDERS) if (!enabled_providers.has(provider)) on_provider_toggle(provider);
+          }}>Select all</button>}
+        </div>}
       </div>
 
       {source_errors.length > 0 ? (
@@ -436,11 +293,11 @@ export function Sidebar({
       ) : null}
 
       <div className="sidebar__list">
-        {on_draft_select && ungrouped_drafts.length ? <section className="session-group" aria-label="Draft sessions">
-          <h2>{order === "project" ? "Choose a project" : "Drafts"} <span className="session-group__count">{ungrouped_drafts.length}</span></h2>
-          <div className="session-group__items"><SessionDraftRows entries={ungrouped_drafts}
-            selected_draft_id={selected_draft_id} on_select={on_draft_select} /></div>
-        </section> : null}
+        {on_draft_select && ungrouped_drafts.length > 0 && <SessionSidebarGroup label="Draft sessions"
+          title={order === "project" ? "Choose a project" : "Drafts"} count={ungrouped_drafts.length}
+          search={search} selected_key={ungrouped_drafts.some(({ draft }) => draft.draft_id === selected_draft_id) ? selected_draft_id : null}>
+          <SessionDraftRows entries={ungrouped_drafts} selected_draft_id={selected_draft_id} on_select={on_draft_select} />
+        </SessionSidebarGroup>}
         {is_loading && sessions.length === 0 ? <LoadingRows count={6} /> : null}
 
         {!is_loading && error && sessions.length === 0 ? (
@@ -477,6 +334,8 @@ export function Sidebar({
                 ? "Enable a provider to browse its sessions."
                 : isIndexingCatalog
                   ? `Indexing ${indexingLabel}. Known sessions will appear here shortly.`
+                  : filtered
+                    ? `No sessions match “${SESSION_ACTIVITY_LABELS[activity_filter]}” with your current filters.`
                   : search.trim()
                     ? "Try a different search."
                     : "Known sessions will appear here."}
@@ -493,42 +352,38 @@ export function Sidebar({
 
         {groups.map((group) => {
           const entries = project_drafts.get(group.key) ?? [];
+          const selectedKey = group.sessions.some((session) => session.session_key === selectedRoot)
+            ? selected_session_key : entries.find(({ draft }) => draft.draft_id === selected_draft_id)?.draft.draft_id ?? null;
           return (
-            <section className="session-group" key={group.key}>
-              <h2 title={group.project}>
-                {group.project}
-                <span className="session-group__count" title={`${group.sessions.length} loaded sessions${entries.length ? ` · ${entries.length} ${entries.length === 1 ? "draft" : "drafts"}` : ""}`}>
-                  {group.sessions.length + entries.length}
-                </span>
-                {group.registered_projects && on_new_session ? <button type="button" className="session-group__new"
-                  aria-label={`New session in ${group.project}`} disabled={!workspace_available || !group.registered_projects.some((project) => project.available)}
-                  title={group.registered_projects.some((project) => project.available) ? undefined : group.registered_projects.map((project) => project.unavailable_reason ?? "This folder is unavailable.").join("\n")}
-                  onClick={() => on_new_session(group.key)}>+</button> : null}
-              </h2>
-              <div className="session-group__items">
-                {on_draft_select ? <SessionDraftRows entries={entries} selected_draft_id={selected_draft_id}
-                  show_project={false} on_select={on_draft_select} /> : null}
-                {group.sessions.length === 0 && entries.length === 0 ? <p className="workspace-empty-project">No sessions yet</p> : null}
-                {group.sessions.map((session) => (
-                  <SessionBranch
-                    order={order}
-                    depth={0}
-                    expanded_session_keys={expandedSessionKeys}
-                    key={session.session_key}
-                    on_children_load={on_children_load}
-                    on_children_release={on_children_release}
-                    on_children_load_more={on_children_load_more}
-                    on_children_retry={on_children_retry}
-                    on_session_select={on_session_select}
-                    on_question_session_select={on_question_session_select}
-                    on_toggle={toggleSessionBranch}
-                    selected_session_key={selected_session_key}
-                    session={session}
-                    session_children={session_children}
-                  />
-                ))}
-              </div>
-            </section>
+            <SessionSidebarGroup key={`${order}:${group.key}`} title={group.project} count={group.sessions.length + entries.length}
+              search={search} selected_key={selectedKey}
+              action={group.registered_projects && on_new_session && <button type="button" className="session-group__new"
+                aria-label={`New session in ${group.project}`} disabled={!workspace_available || !group.registered_projects.some((project) => project.available)}
+                title={group.registered_projects.some((project) => project.available) ? `New session in ${group.project}` : group.registered_projects.map((project) => project.unavailable_reason ?? "This folder is unavailable.").join("\n")}
+                onClick={() => on_new_session(group.key)}>+</button>}>
+              {on_draft_select ? <SessionDraftRows entries={entries} selected_draft_id={selected_draft_id}
+                show_project={false} on_select={on_draft_select} /> : null}
+              {group.sessions.length === 0 && entries.length === 0 ? <p className="workspace-empty-project">No sessions yet</p> : null}
+              {group.sessions.map((session) => (
+                <SessionBranch
+                  order={order}
+                  activity_filter={activity_filter}
+                  depth={0}
+                  expanded_session_keys={expandedSessionKeys}
+                  key={session.session_key}
+                  on_children_load={on_children_load}
+                  on_children_release={on_children_release}
+                  on_children_load_more={on_children_load_more}
+                  on_children_retry={on_children_retry}
+                  on_session_select={on_session_select}
+                  on_question_session_select={on_question_session_select}
+                  on_toggle={toggleSessionBranch}
+                  selected_session_key={selected_session_key}
+                  session={session}
+                  session_children={session_children}
+                />
+              ))}
+            </SessionSidebarGroup>
           );
         })}
 

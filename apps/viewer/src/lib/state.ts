@@ -289,7 +289,7 @@ export function providerLabel(provider: ViewerProvider): string {
   }
 }
 
-function timestampMs(timestamp: string | null): number {
+export function timestampMs(timestamp: string | null): number {
   if (!timestamp) {
     return Number.NaN;
   }
@@ -324,16 +324,16 @@ export function formatRelativeTime(timestamp: string | null, epochMs: number | n
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(parsed);
 }
 
-export function formatTimestamp(timestamp: string | null): string {
+const dateAndTime = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+const timeOnly = new Intl.DateTimeFormat(undefined, { timeStyle: "short" });
+
+export function formatTimestamp(timestamp: string | null, style: "full" | "time" = "full"): string {
   if (!timestamp) {
     return "Timestamp unavailable";
   }
   const parsed = timestampMs(timestamp);
-  if (!Number.isFinite(parsed)) {
+  if (!Number.isFinite(new Date(parsed).getTime())) {
     return timestamp;
   }
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(parsed);
+  return (style === "time" ? timeOnly : dateAndTime).format(parsed);
 }

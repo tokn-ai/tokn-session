@@ -8,6 +8,7 @@ import { creationModelScope, useSessionCreationModels } from "../lib/useSessionC
 import { ImageAttachmentPicker, ImageAttachmentPreviews, imageDrop, imagePaste } from "./ImageAttachments";
 import { PanelIcon, SendIcon } from "./Icons";
 import { SessionModelPicker } from "./SessionModelPicker";
+import { ComposerToolbar } from "./ComposerToolbar";
 import { DraftSessionActivity } from "./DraftSessionActivity";
 import "./DraftConversation.css";
 
@@ -134,16 +135,20 @@ export function DraftConversation({ draft, projects, workspace_available, worksp
       <div className="draft-conversation__setup">
         <div className="draft-conversation__welcome">
           <h1>Start a conversation</h1>
-          <p>Your conversation starts when you send your first message.</p>
         </div>
         <div className="draft-conversation__fields">
-          <label className="draft-conversation__project">Project folder
-            <select value={draft.project_id} disabled={draft.locked || draft.sending} onChange={(event) => on_change({ project_id: event.target.value, selection: { provider } })}>
+          <div className="draft-conversation__project">
+            <div className="draft-conversation__project-heading">
+              <label htmlFor={`${input_id}-project`}>Project folder</label>
+              <button className="text-button" type="button" disabled={draft.locked || draft.sending || !workspace_available} onClick={on_add_project}>Add project</button>
+            </div>
+            <select id={`${input_id}-project`} value={draft.project_id} title={project?.folder_path}
+              disabled={draft.locked || draft.sending} onChange={(event) => on_change({ project_id: event.target.value, selection: { provider } })}>
               <option value="" disabled>Choose a folder</option>
               {draft.project_id && !project ? <option value={draft.project_id} disabled>Unavailable folder</option> : null}
               {projects.map((entry) => <option key={entry.project_id} value={entry.project_id} disabled={!entry.available}>{entry.name} · {entry.folder_path}{entry.available ? "" : " (unavailable)"}</option>)}
             </select>
-          </label>
+          </div>
           <label>Agent
             <select value={provider} disabled={draft.locked || draft.sending} onChange={(event) => on_change({ selection: { provider: event.target.value as RpcProvider } })}>
               {Object.entries(DRAFT_AGENT_NAMES).map(([value, name]) => <option key={value} value={value}>{name}</option>)}
@@ -159,10 +164,6 @@ export function DraftConversation({ draft, projects, workspace_available, worksp
               {agent?.runtimes.map((entry) => <option key={entry.profile_id} value={entry.profile_id} disabled={!entry.available}>{entry.name}{entry.available ? "" : " (unavailable)"}</option>)}
             </select>
           </label> : null}
-        </div>
-        <div className="draft-conversation__folder-row">
-          <span title={project?.folder_path}>{project?.folder_path ?? "Choose an existing folder for this session."}</span>
-          <button className="text-button" type="button" disabled={draft.locked || draft.sending || !workspace_available} onClick={on_add_project}>Add project</button>
         </div>
         {!workspace_available ? <p className="draft-conversation__notice" role="status">{workspace_notice ?? "Local session creation is currently unavailable."}</p> : null}
         {workspace_available && !projects.some((entry) => entry.available) ? <p className="draft-conversation__notice">No folders are available. Add an existing folder to start a session.</p> : null}
@@ -181,55 +182,55 @@ export function DraftConversation({ draft, projects, workspace_available, worksp
           ? <button className="text-button" type="button" disabled={draft.sending} onClick={(event) => on_configure_runtime(event.currentTarget)}>Configure agent runtime</button> : null}
         {pending_session ? <DraftSessionActivity key={pending_session.session_key} session={pending_session}
           revision={draft.snapshot!.revision} on_check={on_check} /> : null}
+        {managed_controls}
+        <form className="session-composer" data-expanded="true" aria-label="Send the first message" onSubmit={(event) => { event.preventDefault(); submit(); }}
+          onPaste={(event) => { if (!draft.locked && images_allowed) imagePaste(event, addImages); }}
+          onDragOver={(event) => { if (!draft.locked && images_allowed && event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
+          onDrop={(event) => { if (!draft.locked && images_allowed) imageDrop(event, addImages); }}>
+          <div className="session-composer__content">
+            <label className="sr-only" htmlFor={input_id}>First message</label>
+            <div className="session-composer__box">
+              <ImageAttachmentPreviews images={draft.images} disabled={draft.locked || draft.sending} on_remove={on_remove_image} />
+              <textarea ref={textarea} id={input_id} value={draft.prompt} rows={3} disabled={draft.locked || draft.sending}
+                aria-describedby={`${input_id}-status ${input_id}-hint`} aria-invalid={over_limit || undefined}
+                placeholder={`What would you like ${agent_name} to do?`} onChange={(event) => on_change({ prompt: event.target.value })}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing && event.keyCode !== 229) {
+                    event.preventDefault(); submit();
+                  }
+                }} />
+              <ComposerToolbar options={<>
+                <ImageAttachmentPicker image_count={draft.images.length} limits={images_allowed ? DEFAULT_IMAGE_LIMITS : null} disabled={draft.locked || draft.sending} on_add={addImages} />
+                <SessionModelPicker key={model_scope} model={model} provider={agent_name} mode="creation" input_busy={draft.locked || draft.sending}
+                  selected_model={draft.model?.choice} selection_current={model_current} on_clear={() => on_change({ model: null })}
+                  on_select={(choice) => { const selected = model.selectionFor(choice); if (selected) on_change({ model: selected }); }} />
+              </>}>
+                {checking_existing ? <button className="draft-conversation__check" type="submit" disabled={draft.sending}>{draft.sending ? "Checking…" : "Check session start"}</button>
+                  : <button className="session-composer__send" type="submit" disabled={!can_send} aria-label={draft.sending ? "Starting session…" : "Send"} title="Send message (⌘ / Ctrl + Enter)">
+                    {draft.sending ? <span className="inline-spinner" aria-hidden="true" /> : <SendIcon />}
+                  </button>}
+              </ComposerToolbar>
+            </div>
+            <div className="session-composer__actions" id={`${input_id}-hint`}>
+              {over_limit ? <span className="session-composer__limit">{length.toLocaleString()} / {MAX_MESSAGE_LENGTH.toLocaleString()} characters</span>
+                : <span>⌘ / Ctrl + Enter to send · Draft kept until this window closes</span>}
+            </div>
+            <div className="draft-conversation__status" id={`${input_id}-status`} role="status">
+              {draft.sending ? <p><span className="inline-spinner" />Starting {agent_name} and checking its conversation…</p>
+                : draft.uncertain ? <p>The first message has not been confirmed. Check the session start before sending again.</p>
+                : draft.locked && !draft.snapshot?.session ? <p>Waiting for the conversation to be saved. You can return to this draft later.</p> : null}
+              {draft.snapshot?.creation_input_state === "rejected" ? <p className="draft-conversation__error">The session was created, but the first message was not accepted. Your draft is retained.</p> : null}
+              {draft.snapshot?.message ? <p>{draft.snapshot.message}</p> : null}
+              {draft.snapshot?.last_turn_error ? <p className="draft-conversation__error">{draft.snapshot.last_turn_error}</p> : null}
+              {draft.error && draft.error !== draft.snapshot?.message ? <p className="draft-conversation__error" role="alert">{draft.error}</p> : null}
+              {draft.image_error ? <p className="draft-conversation__error" role="alert">{draft.image_error}</p> : null}
+              {draft.model && !model_current && !model.loading && !draft.locked ? <p className="draft-conversation__error" role="alert">The list of available models changed. Choose a model again or use runtime default before sending.</p> : null}
+              {!!draft.images.length && agent && !images_allowed ? <p className="draft-conversation__error" role="alert">{draft.model ? "This model cannot accept these images. Remove them or choose a model with image support." : `${agent_name} cannot accept these images. Remove them or choose an agent with image support.`}</p> : null}
+              {draft.snapshot?.session && on_open_session ? <button className="text-button" type="button" onClick={on_open_session}>Open saved conversation</button> : null}
+            </div>
+          </div>
+        </form>
       </div>
     </div>
-
-    {managed_controls}
-    <form className="session-composer" data-expanded="true" aria-label="Send the first message" onSubmit={(event) => { event.preventDefault(); submit(); }}
-      onPaste={(event) => { if (!draft.locked && images_allowed) imagePaste(event, addImages); }}
-      onDragOver={(event) => { if (!draft.locked && images_allowed && event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
-      onDrop={(event) => { if (!draft.locked && images_allowed) imageDrop(event, addImages); }}>
-      <div className="session-composer__content">
-        <label className="sr-only" htmlFor={input_id}>First message</label>
-        <div className="session-composer__box">
-          <ImageAttachmentPreviews images={draft.images} disabled={draft.locked || draft.sending} on_remove={on_remove_image} />
-          <textarea ref={textarea} id={input_id} value={draft.prompt} rows={3} disabled={draft.locked || draft.sending}
-            aria-describedby={`${input_id}-status ${input_id}-hint`} aria-invalid={over_limit || undefined}
-            placeholder={`What would you like ${agent_name} to do?`} onChange={(event) => on_change({ prompt: event.target.value })}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing && event.keyCode !== 229) {
-                event.preventDefault(); submit();
-              }
-            }} />
-          <ImageAttachmentPicker image_count={draft.images.length} limits={images_allowed ? DEFAULT_IMAGE_LIMITS : null} disabled={draft.locked || draft.sending} on_add={addImages} />
-          <div className="session-composer__footer">
-            <SessionModelPicker key={model_scope} model={model} provider={agent_name} mode="creation" input_busy={draft.locked || draft.sending}
-              selected_model={draft.model?.choice} selection_current={model_current} on_clear={() => on_change({ model: null })}
-              on_select={(choice) => { const selected = model.selectionFor(choice); if (selected) on_change({ model: selected }); }} />
-            {checking_existing ? <button className="draft-conversation__check" type="submit" disabled={draft.sending}>{draft.sending ? "Checking…" : "Check session start"}</button>
-              : <button className="session-composer__send" type="submit" disabled={!can_send} aria-label={draft.sending ? "Starting session…" : "Send"} title="Send message (⌘ / Ctrl + Enter)">
-                {draft.sending ? <span className="inline-spinner" aria-hidden="true" /> : <SendIcon />}
-              </button>}
-          </div>
-        </div>
-        <div className="session-composer__actions" id={`${input_id}-hint`}>
-          {over_limit ? <span className="session-composer__limit">{length.toLocaleString()} / {MAX_MESSAGE_LENGTH.toLocaleString()} characters</span>
-            : <span>⌘ / Ctrl + Enter to send · Draft kept until this window closes</span>}
-        </div>
-        <div className="draft-conversation__status" id={`${input_id}-status`} role="status">
-          {draft.sending ? <p><span className="inline-spinner" />Starting {agent_name} and checking its conversation…</p>
-            : draft.uncertain ? <p>The first message has not been confirmed. Check the session start before sending again.</p>
-            : draft.locked && !draft.snapshot?.session ? <p>Waiting for the conversation to be saved. You can return to this draft later.</p> : null}
-          {draft.snapshot?.creation_input_state === "rejected" ? <p className="draft-conversation__error">The session was created, but the first message was not accepted. Your draft is retained.</p> : null}
-          {draft.snapshot?.message ? <p>{draft.snapshot.message}</p> : null}
-          {draft.snapshot?.last_turn_error ? <p className="draft-conversation__error">{draft.snapshot.last_turn_error}</p> : null}
-          {draft.error && draft.error !== draft.snapshot?.message ? <p className="draft-conversation__error" role="alert">{draft.error}</p> : null}
-          {draft.image_error ? <p className="draft-conversation__error" role="alert">{draft.image_error}</p> : null}
-          {draft.model && !model_current && !model.loading && !draft.locked ? <p className="draft-conversation__error" role="alert">The list of available models changed. Choose a model again or use runtime default before sending.</p> : null}
-          {!!draft.images.length && agent && !images_allowed ? <p className="draft-conversation__error" role="alert">{draft.model ? "This model cannot accept these images. Remove them or choose a model with image support." : `${agent_name} cannot accept these images. Remove them or choose an agent with image support.`}</p> : null}
-          {draft.snapshot?.session && on_open_session ? <button className="text-button" type="button" onClick={on_open_session}>Open saved conversation</button> : null}
-        </div>
-      </div>
-    </form>
   </main>;
 }

@@ -18,6 +18,7 @@ interface MarkdownContentProps {
   content: string;
   class_name?: string;
   image_context?: MarkdownImageContext;
+  literal_html?: boolean;
 }
 
 const ALLOWED_ELEMENTS = [
@@ -98,7 +99,7 @@ const MARKDOWN_COMPONENTS = {
   },
 } satisfies Components;
 
-export function MarkdownContent({ content, class_name, image_context }: MarkdownContentProps) {
+export function MarkdownContent({ content, class_name, image_context, literal_html = false }: MarkdownContentProps) {
   const rootClassName = ["markdown-content", class_name].filter(Boolean).join(" ");
 
   return (
@@ -108,7 +109,7 @@ export function MarkdownContent({ content, class_name, image_context }: Markdown
           allowedElements={ALLOWED_ELEMENTS}
           components={MARKDOWN_COMPONENTS}
           remarkPlugins={[remarkGfm, remarkBreaks]}
-          skipHtml
+          skipHtml={!literal_html}
           urlTransform={safeUrlTransform}
         >
           {content}

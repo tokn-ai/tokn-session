@@ -4,6 +4,20 @@ import type { EventSummary, TrajectoryEventPageState } from "../lib/types";
 import { DeferredActivityGroup } from "./DeferredActivityGroup";
 
 afterEach(cleanup);
+it("reveals running or failed activity when its parent is visible and respects a manual collapse", () => {
+  const event = { event_key: "activity:a", type: "activity_group", summary: "1 command", phase: "running" } as EventSummary;
+  const props = { event, parent_visible: false, on_load: vi.fn(), children: () => null };
+  const { rerender } = render(<DeferredActivityGroup {...props} />);
+  expect(props.on_load).not.toHaveBeenCalled();
+  rerender(<DeferredActivityGroup {...props} parent_visible />);
+  expect(props.on_load).toHaveBeenCalledWith(event.event_key);
+  const button = screen.getByRole("button", { name: /Running/ });
+  fireEvent.click(button);
+  rerender(<DeferredActivityGroup {...props} parent_visible event={{ ...event }} />);
+  expect(button).toHaveAttribute("aria-expanded", "false");
+  rerender(<DeferredActivityGroup {...props} parent_visible event={{ ...event, phase: "finished", is_error: true }} />);
+  expect(screen.getByRole("button", { name: /Failed activity/ })).toHaveAttribute("aria-expanded", "true");
+});
 it("defers complete rows until expansion, retains them, and reports actual visibility", () => {
   const event = { event_key: "activity:a", type: "activity_group", summary: "2 commands", child_keys: ["a", "b"] } as EventSummary;
   const on_load = vi.fn(), on_visibility = vi.fn();

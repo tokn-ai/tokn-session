@@ -1,8 +1,7 @@
 # Tokn Sessions Viewer
 
 The viewer shares a React UI across desktop, Apell, and browser clients for
-browsing historical Pi, Codex,
-OpenCode, ZCode, WorkBuddy, and DeepSeek Harness (DSH) sessions in one place. It
+browsing Pi, Codex, OpenCode, ZCode, Qoder, WorkBuddy, and DeepSeek Harness (DSH) sessions in one place. It
 shows root sessions in a searchable, provider-filterable sidebar, expands their
 known subagents on demand, and renders each selected normalized event stream as
 a conversation with inspectable technical events.
@@ -107,13 +106,10 @@ with their session while switching conversations, and Markdown whitespace is
 preserved. Drafts are held in memory and cleared when changing machines or
 closing the viewer.
 
-- Root Codex tasks use Codex Desktop's local IPC. Desktop must be running and
-  own the selected task. Subagents receive messages through their parent task.
-- Pi requires the [input bridge](../../extensions/pi/README.md) in the live
-  process for that exact session. Idle input starts a turn; busy input queues a
-  follow-up.
-- Other providers and the desktop External snapshot connection show why input
-  is unavailable. To message another machine, connect to its viewer API.
+The host checks the available control route for each session. Supported agents
+offer **Send**, **Guide**, **Queue**, or **Stop** according to their runtime
+capabilities. The model menu and image attachments use the same session scope.
+A read-only session shows the host reason and a **Retry availability** action.
 
 The footer reports acceptance or failure, including the backend's failure
 reason. After acceptance, the viewer refreshes history immediately and briefly
@@ -122,8 +118,8 @@ The conversation displays the message when the provider records it. If delivery
 cannot be confirmed, the draft stays locked until **Edit message** is chosen
 after checking the conversation. Messages
 are never retried automatically. Input is limited to 16,384 characters; Pi also
-has a 32 KiB encoded-request limit. The viewer does not create sessions or fall
-back to a separate CLI process.
+has a 32 KiB encoded-request limit. On local desktop, **Start session** opens a draft with project, agent, runtime,
+model and first message in one form. The first send starts the provider session.
 
 Codex tasks that continue in a new rollout file retain their earlier messages
 in the viewer. The reader follows the saved history references and respects
@@ -132,21 +128,26 @@ is unavailable, a read error preserves the last loaded conversation.
 
 ## Using the viewer
 
-For Relay-backed providers the sidebar reads Relay's metadata catalog. For
-local providers it starts from the local session index rather than reading
-provider storage in the initial viewport. On a fresh database, it shows an indexing
-state until the background cataloger has committed each selected provider. Use
-the provider pills to include or exclude sources, type in the search box to
-match indexed title, preview, session id, project, working directory, or agent
-identity, and select a row to load its newest normalized events. A disclosure
-control loads that session's direct subagents as indexed metadata only; nested
-controls continue the tree, and selecting a child opens the child's independent
-timeline. This does not merge child events into the parent conversation or
-infer live completion states. Rows prefer the indexed provider title, then an
-indexed preview of the first meaningful user prompt, then an agent label for
-known subagents, and otherwise show **Untitled session**. The shortened id
-beside the title remains a separate identity field; the full id is available to
-assistive technology and on hover.
+The viewer opens to **Session inbox** on the current machine. Select a
+conversation to read it, or choose an activity queue to find work across projects.
+
+- **All sessions** shows root conversations. Expand a session in the sidebar to browse its subagents.
+- **Needs input** shows sessions with outstanding indexed blocking questions. Opening one selects its pending question.
+- **Running** shows sessions with a provider-reported active turn and no blocking question.
+- **Unread** shows sessions with unread replies.
+
+Activity queues include matching subagents and filter the index before
+pagination. Both panes share search, provider selection and time/project
+ordering. Use **Workspace** to return to the inbox. **Find session** or
+**Cmd/Ctrl+K** focuses sidebar search and opens the drawer on phones. The
+arrow keys move between results, and Enter opens the focused session.
+Search matches titles, previews, IDs, projects, folders and agent identities.
+
+Message headers identify the speaker and time. Use **Jump to prompt** to
+navigate user messages in loaded history, or load earlier history from that
+menu. Live replies render Markdown while reasoning and tool details can be
+expanded independently.
+
 Historical agent-activity records become delegation cards when their native
 target id resolves to a canonical direct child of the selected session within
 the same provider. **Open** selects that child and makes it available in the
@@ -167,8 +168,8 @@ rows without message content, including session settings, delivery markers, and
 successful turn completion. It applies to the conversation and expanded work
 sections, hiding intermediate usage while keeping the final accounting for each
 usage kind. Errors, messages, tools, agent communications, and unfamiliar events
-remain visible. All events are shown initially; the active button reads
-**Show lifecycle**, which restores the hidden rows.
+remain visible. Routine bookkeeping starts hidden. **Show lifecycle** restores
+those rows.
 Counts and pagination still describe the complete history, and hidden counts
 refer only to loaded rows.
 
@@ -278,8 +279,7 @@ Catalog and body replacements are staged with optimistic source-cursor checks:
 a body result must still match the catalog snapshot before it can apply.
 Checkpoints include an index-owned mutation generation as well as the
 provider-owned cursor, so a same-cursor metadata update cannot be overwritten
-by a second viewer. The initial main pane intentionally has no selected
-timeline; only an explicit session selection reads provider history. Codex can
+by a second viewer. The inbox uses catalog metadata. Selecting a session opens its history. Codex can
 also
 read title metadata from its optional private `state_5.sqlite` in read-only
 mode; rows are correlated by both thread id and rollout path, and incompatible

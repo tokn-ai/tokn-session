@@ -49,6 +49,26 @@ function toggleFilter() {
   fireEvent.click(screen.getByRole("button", { name: /^(Hide|Show) lifecycle$/ }));
 }
 
+it("jumps to a loaded prompt without opening its inspector or exposing hidden messages", () => {
+  const view = props({ events: [
+    event("first", { type: "message", role: "user", summary: "Inspect the parser", is_bookkeeping: false }),
+    event("private", { type: "message", role: "user", summary: "Hidden extension text", is_hidden: true }),
+    event("second", { type: "message", role: "user", summary: "Review the tests", is_bookkeeping: false }),
+  ], has_older: true });
+  const rendered = render(<Conversation {...view} />);
+  fireEvent.click(screen.getByRole("button", { name: "Jump to prompt" }));
+  const picker = screen.getByRole("region", { name: "Prompts in this session" });
+  expect(picker).not.toHaveTextContent("Hidden extension text");
+  fireEvent.click(screen.getByRole("button", { name: "Inspect the parser" }));
+  expect(rendered.container.querySelector('[data-reading-slot="first"]')).toHaveFocus();
+  expect(screen.queryByRole("region", { name: "Prompts in this session" })).toBeNull();
+  expect(view.on_event_select).not.toHaveBeenCalled();
+  expect(view.on_follow_change).toHaveBeenCalledWith(false);
+  fireEvent.click(screen.getByRole("button", { name: "Jump to prompt" }));
+  fireEvent.click(screen.getByRole("button", { name: "Load earlier history" }));
+  expect(view.on_load_older).toHaveBeenCalledOnce();
+});
+
 describe("Conversation quick filter", () => {
   it("keeps confirmed model separators visible while lifecycle is hidden", () => {
     const model = (model_id: string) => ({ model_provider: "openai", model_id, display_name: model_id });

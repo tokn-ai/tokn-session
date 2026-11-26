@@ -25,11 +25,11 @@ use crate::model::{
   CatalogRefreshScope, EventDetail, EventPage, EventPageRequest, EventSummary, IndexActivity, IndexWorkerError,
   ListSessionChildrenRequest, ListSessionChildrenResponse, ListSessionsRequest, ListSessionsResponse,
   LoadEventDetailRequest, LoadTrajectoryEventPageRequest, PageDirection, ProviderBody, ReasoningCardSummary,
-  SessionIndexProgress, SessionLocator, SessionOrder, SessionSummary, SourceError, ToolCardSummary, ToolOutputPreview,
-  ToolOutputSection, TrajectoryCardSummary, TrajectoryEventPage, UsageCardSummary, ViewerProvider, bounded_limit,
-  decode_event_cursor, decode_event_key, decode_list_cursor, decode_session_key, decode_trajectory_event_cursor,
-  decode_trajectory_key, encode_event_cursor, encode_event_key, encode_list_cursor, encode_session_key,
-  encode_trajectory_event_cursor, encode_trajectory_key, parse_updated_at_ms, requested_offset,
+  SessionActivityFilter, SessionIndexProgress, SessionLocator, SessionOrder, SessionSummary, SourceError,
+  ToolCardSummary, ToolOutputPreview, ToolOutputSection, TrajectoryCardSummary, TrajectoryEventPage, UsageCardSummary,
+  ViewerProvider, bounded_limit, decode_event_cursor, decode_event_key, decode_list_cursor, decode_session_key,
+  decode_trajectory_event_cursor, decode_trajectory_key, encode_event_cursor, encode_event_key, encode_list_cursor,
+  encode_session_key, encode_trajectory_event_cursor, encode_trajectory_key, parse_updated_at_ms, requested_offset,
 };
 use crate::repository::activity::Activity;
 use crate::repository::{NativeRepository, SessionBodyIndexing, ViewerRepository};
@@ -1255,18 +1255,25 @@ impl ViewerService {
       let relations = session_relation_index(provider, inventory.headers, &mut source_errors);
       let attention = session_relation_attention(provider, &relations, &inventory.direct_attention);
       for (index, header) in relations.headers.into_iter().enumerate() {
-        // A child is hidden from the root roster only when its parent is a
-        // present, canonical header and its relation does not make a cycle.
-        // That deliberately keeps orphaned and cyclic records discoverable.
-        if relations.parent_indices[index].is_some() {
+        // The ordinary roster is a tree. Activity queues surface matching
+        // sessions directly, even when their parent is outside this page.
+        let is_subagent = relations.parent_indices[index].is_some();
+        let state = attention[index];
+        let include = match query.activity {
+          SessionActivityFilter::All => !is_subagent,
+          SessionActivityFilter::NeedsInput => state.question_attention.required_count > 0,
+          SessionActivityFilter::Running => state.is_running && state.question_attention.required_count == 0,
+          SessionActivityFilter::Unread => state.has_unread,
+        };
+        if !include {
           continue;
         }
         candidates.push(SessionListCandidate {
           provider,
           header,
           child_count: relations.child_counts[index],
-          is_subagent: false,
-          attention: attention[index],
+          is_subagent,
+          attention: state,
         });
       }
     }
@@ -6658,6 +6665,7 @@ mod tests {
         order: SessionOrder::Project,
         providers: vec![ViewerProvider::Codex],
         search,
+        ..Default::default()
       },
       cursor,
       offset: None,
@@ -6710,6 +6718,7 @@ mod tests {
           order: SessionOrder::Project,
           providers: vec![ViewerProvider::Codex],
           search: None,
+          ..Default::default()
         },
         cursor: None,
         offset: None,
@@ -6785,6 +6794,7 @@ mod tests {
           order: SessionOrder::Time,
           providers: vec![ViewerProvider::Codex],
           search: None,
+          ..Default::default()
         },
         cursor: None,
         offset: None,
@@ -7353,6 +7363,7 @@ mod tests {
           order: SessionOrder::Time,
           providers: vec![ViewerProvider::Codex],
           search: None,
+          ..Default::default()
         },
         cursor: None,
         offset: None,
@@ -7740,6 +7751,7 @@ mod tests {
           order: SessionOrder::Time,
           providers: vec![ViewerProvider::Codex],
           search: None,
+          ..Default::default()
         },
         cursor: None,
         offset: None,
@@ -8039,6 +8051,7 @@ mod tests {
           order: SessionOrder::Time,
           providers: vec![ViewerProvider::Codex],
           search: None,
+          ..Default::default()
         },
         cursor: None,
         offset: None,
@@ -8071,6 +8084,7 @@ mod tests {
         order: SessionOrder::Time,
         providers: vec![ViewerProvider::Codex],
         search: None,
+        ..Default::default()
       },
       cursor: None,
       offset: None,
@@ -8191,6 +8205,7 @@ mod tests {
           order: SessionOrder::Time,
           providers: vec![ViewerProvider::Codex],
           search: None,
+          ..Default::default()
         },
         cursor: None,
         offset: None,
@@ -9154,6 +9169,7 @@ mod tests {
           order: SessionOrder::Time,
           providers: vec![ViewerProvider::Codex],
           search: None,
+          ..Default::default()
         },
         cursor: None,
         offset: None,
@@ -9192,6 +9208,7 @@ mod tests {
           order: SessionOrder::Time,
           providers: vec![ViewerProvider::Codex],
           search: None,
+          ..Default::default()
         },
         cursor: None,
         offset: None,
@@ -9232,6 +9249,7 @@ mod tests {
           order: SessionOrder::Time,
           providers: vec![ViewerProvider::Codex],
           search: None,
+          ..Default::default()
         },
         cursor: None,
         offset: None,
@@ -9322,6 +9340,7 @@ mod tests {
           order: SessionOrder::Time,
           providers: Vec::new(),
           search: Some("alpha".to_string()),
+          ..Default::default()
         },
         cursor: None,
         offset: None,
@@ -9344,6 +9363,7 @@ mod tests {
           order: SessionOrder::Time,
           providers: Vec::new(),
           search: Some("alpha".to_string()),
+          ..Default::default()
         },
         cursor: Some(next_cursor),
         offset: None,
@@ -9398,6 +9418,7 @@ mod tests {
           order: SessionOrder::Time,
           providers: vec![ViewerProvider::Codex],
           search: None,
+          ..Default::default()
         },
         cursor: None,
         offset: None,
@@ -9686,6 +9707,7 @@ mod tests {
           order: SessionOrder::Time,
           providers: vec![ViewerProvider::Codex],
           search: Some("socket ownership".to_string()),
+          ..Default::default()
         },
         cursor: None,
         offset: None,
@@ -9715,6 +9737,7 @@ mod tests {
           order: SessionOrder::Time,
           providers: vec![ViewerProvider::Codex],
           search: None,
+          ..Default::default()
         },
         cursor: None,
         offset: None,
@@ -9754,6 +9777,7 @@ mod tests {
           order: SessionOrder::Time,
           providers: vec![ViewerProvider::Codex],
           search: None,
+          ..Default::default()
         },
         cursor: None,
         offset: None,
@@ -9769,6 +9793,7 @@ mod tests {
           order: SessionOrder::Time,
           providers: vec![ViewerProvider::Codex],
           search: Some("indexed child preview".to_string()),
+          ..Default::default()
         },
         cursor: None,
         offset: None,
@@ -9846,6 +9871,7 @@ mod tests {
         order: SessionOrder::Time,
         providers: vec![ViewerProvider::Codex],
         search: None,
+        ..Default::default()
       },
       cursor: None,
       offset: None,

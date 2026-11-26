@@ -196,3 +196,10 @@ export function RestartIcon(props: IconProps) {
     <path d="M4 9a8 8 0 1 1 .5 7M4 4v5h5" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" />
   </IconBase>;
 }
+
+export function PromptListIcon(props: IconProps) {
+  return <IconBase {...props}>
+    <path d="M8 6h12M8 12h12M8 18h8" stroke="currentColor" strokeLinecap="round" strokeWidth="1.6" />
+    <path d="M4 6h.1M4 12h.1M4 18h.1" stroke="currentColor" strokeLinecap="round" strokeWidth="2.3" />
+  </IconBase>;
+}

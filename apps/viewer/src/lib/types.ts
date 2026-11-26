@@ -362,8 +362,11 @@ export interface ManagedSessionDialogResponse {
   cancelled: boolean;
 }
 
+export type SessionActivityFilter = "all" | "needs_input" | "running" | "unread";
+
 export interface SessionListQuery {
   order?: SessionOrder;
+  activity?: SessionActivityFilter;
   providers?: ViewerProvider[];
   search?: string;
 }

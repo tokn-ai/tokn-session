@@ -1,6 +1,6 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
 import type { EventSummary } from "../lib/types";
-import { ChevronIcon, SearchIcon } from "./Icons";
+import { ActivityIcon, ChevronIcon } from "./Icons";
 
 /** Messages divide a turn into activity blocks; never reorder captured events. */
 export function groupActivity(events: EventSummary[]): EventSummary[][] {
@@ -74,7 +74,7 @@ export function ActivityGroup({ events, selected_event_key, reveal = false, chil
     <div className="activity-group" role="listitem">
       <button className="activity-group__toggle" aria-expanded={expanded} aria-controls={regionId}
         onClick={() => { setLoaded(true); setExpanded((current) => !current); }} type="button">
-        <SearchIcon />
+        <ActivityIcon />
         <span>{summary}{failures ? <span className="activity-group__failures"> · {failures} {failures === 1 ? "failure" : "failures"}</span> : null}</span>
         <ChevronIcon className={expanded ? "chevron chevron--open" : "chevron"} />
       </button>

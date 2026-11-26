@@ -68,13 +68,15 @@ describe("activity folding", () => {
     expect(screen.getByText("first-125")).not.toBeVisible();
   });
 
-  it("bounds shell output locally and restores the exact captured text on expansion", () => {
+  it("keeps the command opening and final result visible and restores exact output on expansion", () => {
     const text = Array.from({length: 12}, (_, index) => `line ${index}`).join("\n");
     render(<ShellOutputSection command="cargo test" section={{label: "stdout", format: "text", text}} />);
     const output = screen.getByLabelText("cargo test stdout output");
-    expect(output.textContent).toBe(text.split("\n").slice(0, 8).join("\n"));
+    expect(output.textContent).toBe(text.split("\n").slice(0, 5).join("\n"));
+    expect(screen.getByLabelText("cargo test stdout output last lines").textContent).toBe("line 9\nline 10\nline 11");
     fireEvent.click(screen.getByRole("button", {name: "Show 4 more lines"}));
     expect(output.textContent).toBe(text);
+    expect(screen.queryByLabelText("cargo test stdout output last lines")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", {name: "Show fewer lines"}));
     expect(output.textContent).not.toContain("line 11");
   });

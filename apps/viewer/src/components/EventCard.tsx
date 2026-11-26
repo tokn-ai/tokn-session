@@ -15,12 +15,17 @@ import {
   sessionDisplayTitle,
   shortSessionId,
   subagentDetail,
+  timestampMs,
 } from "../lib/state";
 import {
   ChevronIcon,
+  ActivityIcon,
+  BranchIcon,
   InspectorIcon,
   ReasoningIcon,
+  SearchIcon,
   TechnicalIcon,
+  TerminalIcon,
   ToolIcon,
   UsageIcon,
   WarningIcon,
@@ -252,12 +257,12 @@ export function formatTrajectoryDuration(durationMs: string | null): string | nu
 }
 
 function trajectoryFacts(trajectory: TrajectoryCardSummary): string {
-  const facts = [pluralize(trajectory.event_count, "event")];
+  const facts = [];
   if (trajectory.tool_count > 0) {
-    facts.push(pluralize(trajectory.tool_count, "tool"));
+    facts.push(pluralize(trajectory.tool_count, "tool call"));
   }
   if (trajectory.reasoning_count > 0) {
-    facts.push(pluralize(trajectory.reasoning_count, "reasoning", "reasoning"));
+    facts.push(pluralize(trajectory.reasoning_count, "reasoning step"));
   }
   if (trajectory.agent_activity_count > 0) {
     facts.push(pluralize(trajectory.agent_activity_count, "subagent activity", "subagent activities"));
@@ -268,7 +273,7 @@ function trajectoryFacts(trajectory: TrajectoryCardSummary): string {
   if (trajectory.unknown_count > 0) {
     facts.push(pluralize(trajectory.unknown_count, "unknown event"));
   }
-  return facts.join(" · ");
+  return facts.length ? facts.join(" · ") : pluralize(trajectory.event_count, "event");
 }
 
 function useTrajectoryHeading(event: EventSummary): TechnicalCardHeading {
@@ -281,8 +286,7 @@ function useTrajectoryHeading(event: EventSummary): TechnicalCardHeading {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [working, trajectory?.started_at]);
-  const timestamp = trajectory?.started_at;
-  const start = timestamp ? (/^\d+$/.test(timestamp) ? Number(timestamp) : Date.parse(timestamp)) : NaN;
+  const start = timestampMs(trajectory?.started_at ?? null);
   const duration = formatTrajectoryDuration(working && Number.isFinite(start)
     ? String(Math.max(0, now - start))
     : trajectory?.duration_ms ?? null);
@@ -324,6 +328,13 @@ function formatDuration(milliseconds: number): string {
 }
 
 function eventIcon(event: EventSummary) {
+  if (event.type === "error" || event.type === "unknown" || event.is_error
+    || event.tool?.status === "failed" || (event.tool?.exit_code ?? 0) !== 0) {
+    return <WarningIcon />;
+  }
+  if (event.type === "agent_activity" || event.tool?.kind === "task") {
+    return <BranchIcon />;
+  }
   if (event.type === "reasoning") {
     return <ReasoningIcon />;
   }
@@ -331,10 +342,11 @@ function eventIcon(event: EventSummary) {
     return <UsageIcon />;
   }
   if (event.type === "tool_call") {
+    if (event.tool?.kind === "shell" || event.tool?.kind === "terminal" || event.tool?.kind === "code_execution") {
+      return <TerminalIcon />;
+    }
+    if (event.tool?.kind === "search" || event.tool?.kind === "web") return <SearchIcon />;
     return <ToolIcon />;
-  }
-  if (event.type === "unknown" || event.type === "error" || event.is_error) {
-    return <WarningIcon />;
   }
   return <TechnicalIcon />;
 }
@@ -343,7 +355,7 @@ function eventTone(event: EventSummary): string {
   if (event.type === "unknown") {
     return "unknown";
   }
-  if (event.type === "error" || event.is_error || (event.tool?.exit_code ?? 0) !== 0) {
+  if (event.type === "error" || event.is_error || event.tool?.status === "failed" || (event.tool?.exit_code ?? 0) !== 0) {
     return "error";
   }
   if (event.type === "reasoning") {
@@ -562,7 +574,7 @@ function TrajectorySection({
     </div>
   );
   return (
-    <section className="trajectory-section" data-selected={is_selected}>
+    <section className="trajectory-section transcript-work" data-status={event.trajectory?.status} data-selected={is_selected}>
       <div className="trajectory-section__header">
         <button
           aria-controls={regionId}
@@ -572,16 +584,18 @@ function TrajectorySection({
           onClick={() => on_toggle(event.event_key)}
           type="button"
         >
-          <ChevronIcon className={is_expanded ? "chevron chevron--open" : "chevron"} />
+          <span aria-hidden="true" className="transcript-work__icon">
+            {event.trajectory?.status === "working" ? <span className="inline-spinner" /> : <ActivityIcon width={16} height={16} />}
+          </span>
           <span className="trajectory-section__summary">
             <span className="trajectory-section__label" id={labelId}>
-              {event.trajectory?.status === "working" ? <span aria-hidden="true" className="inline-spinner" /> : null}
               {heading.primary}
             </span>
             {heading.secondary ? (
               <span className="trajectory-section__facts">{heading.secondary}</span>
             ) : null}
           </span>
+          <ChevronIcon className={is_expanded ? "chevron chevron--open" : "chevron"} />
         </button>
         <button
           aria-label={`Inspect ${heading.primary}`}

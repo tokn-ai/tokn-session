@@ -22,7 +22,7 @@ it("repositions an open model panel when a mobile keyboard resizes only the visu
   render(<SessionModelPicker model={controller()} provider="Pi" {...callbacks()} />);
   const trigger = screen.getByRole("button", { name: /Change model/ });
   let top = 600;
-  vi.spyOn(trigger, "getBoundingClientRect").mockImplementation(() => ({ left: 20, top }) as DOMRect);
+  vi.spyOn(trigger, "getBoundingClientRect").mockImplementation(() => ({ left: 20, top, bottom: top + 36 }) as DOMRect);
   fireEvent.click(trigger);
   expect(screen.getByRole("dialog")).toHaveStyle({ maxHeight: "460px" });
   top = 260;
@@ -31,6 +31,20 @@ it("repositions an open model panel when a mobile keyboard resizes only the visu
   viewport.offsetTop = 30;
   act(() => viewport.dispatchEvent(new Event("scroll")));
   expect(screen.getByRole("dialog")).toHaveStyle({ maxHeight: "206px" });
+});
+
+it("keeps the draft model menu visible when its scrollable setup moves near the top", () => {
+  render(<div data-testid="setup"><SessionModelPicker model={controller()} provider="Pi" {...callbacks()} /></div>);
+  const trigger = screen.getByRole("button", { name: /Change model/ });
+  let top = 400;
+  vi.spyOn(trigger, "getBoundingClientRect").mockImplementation(() => ({ left: 20, top, bottom: top + 36 }) as DOMRect);
+  fireEvent.click(trigger);
+  const dialog = screen.getByRole("dialog");
+  expect(dialog).toHaveStyle({ bottom: `${window.innerHeight - 392}px` });
+  top = 30;
+  fireEvent.scroll(screen.getByTestId("setup"));
+  expect(dialog).toHaveStyle({ top: "74px" });
+  expect(dialog.style.bottom).toBe("");
 });
 
 it("opens the lazy draft picker with Send/Pi-default guidance and dismisses on Escape/outside", () => {

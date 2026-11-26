@@ -1,6 +1,82 @@
-.session-live-output { flex: 0 0 auto; margin: 8px 16px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); max-height: 320px; overflow: auto; }
-.session-live-output header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
-.session-live-output small { color: var(--text-muted); }
-.session-live-output pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; margin: 8px 0; }
-.session-live-output details { color: var(--text-soft); }
-.session-live-output__tool { display: flex; gap: 8px; align-items: baseline; font-size: 12px; }
+.session-live-output {
+  box-sizing: border-box;
+  flex: 0 1 auto;
+  width: min(calc(100% - 32px), var(--conversation-width));
+  min-height: 0;
+  margin: 6px auto;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: auto;
+}
+
+.session-live-output__header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.session-live-output__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-inline-start: auto;
+  font-size: 11px;
+}
+
+.session-live-output__status::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--focus);
+}
+
+.session-live-output__parts {
+  display: grid;
+  gap: 8px;
+  max-height: min(25dvh, 280px);
+  padding: 10px 12px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.session-live-output__parts details,
+.session-live-output__parts small {
+  color: var(--text-soft);
+}
+
+.session-live-output__parts summary {
+  cursor: pointer;
+}
+
+.session-live-output__parts details .markdown-content {
+  margin-top: 5px;
+  padding-inline-start: 12px;
+  border-inline-start: 1px solid var(--border-strong);
+}
+
+.session-live-output__tool {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.session-live-output__tool svg {
+  flex: none;
+  align-self: center;
+  color: var(--text-soft);
+}
+
+.draft-session-activity .session-live-output {
+  width: 100%;
+}

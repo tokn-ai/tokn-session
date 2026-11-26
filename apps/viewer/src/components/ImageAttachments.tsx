@@ -41,8 +41,12 @@ export function ImageAttachmentPicker({ image_count, limits, disabled, on_add }:
         on_add(Array.from(event.target.files ?? []));
         event.target.value = "";
       }} />
-    <button className="image-attachments__add" type="button" disabled={disabled || image_count >= limits.max_images}
+    <button className="image-attachments__add" type="button" aria-label="Attach images" disabled={disabled || image_count >= limits.max_images}
       title={`Attach up to ${limits.max_images} images, ${Math.floor(limits.max_image_bytes / 1024 / 1024)} MB each. You can also paste or drop images.`}
-      onClick={() => picker.current?.click()}><span aria-hidden="true">＋</span> Attach images</button>
+      onClick={() => picker.current?.click()}>
+      <svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
+        <path d="m8 12 6.5-6.5a3.5 3.5 0 0 1 5 5l-9 9a5 5 0 0 1-7-7l9-9M8 12l-1.5 1.5a2 2 0 1 0 3 3l7.5-7.5" />
+      </svg>
+    </button>
   </div>;
 }

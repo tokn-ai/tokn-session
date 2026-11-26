@@ -8,18 +8,22 @@ export function SessionControlSelector({ control, input_busy = false, running = 
   if (!control.enabled || control.status && !control.status.can_select && !control.status.can_cancel) return null;
   const busy = control.checking || control.changing || control.stopping;
   const selectable = control.status?.can_select ?? control.provider === "codex";
-  return <div className="session-control" aria-label="Session control">
-    {selectable ? <label className="session-control__choice"><span>Control</span>
+  const can_stop = control.status?.transport === "rpc" && control.status.can_cancel
+    && control.status.available && (control.status.is_running ?? running);
+  const status_text = control.checking ? "Checking control…" : control.changing ? "Changing control…"
+    : control.error ?? control.notice ?? (!control.status?.available ? control.status?.message : null);
+  const show_retry = (control.error || !control.status?.available) && !busy && !input_busy;
+  if (!selectable && !can_stop && !status_text && !show_retry) return null;
+  return <div className="session-control" role="group" aria-label="Session control">
+    {selectable ? <label className="session-control__choice"><span>Connection</span>
       <select aria-label="Codex connection" value={control.status?.transport ?? "rpc"}
         disabled={busy || input_busy || !control.status} onChange={(event) => { void control.choose(event.target.value as SessionTransport); }}>
         <option value="rpc">RPC</option><option value="desktop">Codex Desktop</option>
       </select>
     </label> : null}
-    {control.status?.transport === "rpc" && control.status.can_cancel && control.status.available && (control.status.is_running ?? running) ? <button type="button" className="text-button"
+    {can_stop ? <button type="button" className="session-control__stop"
       disabled={busy} onClick={() => { void control.cancel(); }}>{control.stopping ? "Stopping…" : "Stop"}</button> : null}
-    <span className="session-control__status" role="status">
-      {control.checking ? "Checking control…" : control.changing ? "Changing control…" : control.error ?? control.notice ?? (!control.status?.available ? control.status?.message : null)}
-    </span>
-    {(control.error || !control.status?.available) && !busy && !input_busy ? <button type="button" className="text-button" onClick={() => { void control.refresh(); }}>Retry control</button> : null}
+    {status_text && <span className="session-control__status" role="status">{status_text}</span>}
+    {show_retry ? <button type="button" className="text-button" onClick={() => { void control.refresh(); }}>Retry control</button> : null}
   </div>;
 }

@@ -785,16 +785,6 @@ button:disabled {
   margin-left: auto;
 }
 
-.sidebar__filter-heading {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-bottom: 0;
-  color: var(--text-soft);
-  font-size: 11px;
-}
-
 .session-group__count {
   margin-left: 8px;
   color: var(--text-muted);
@@ -929,45 +919,6 @@ button:disabled {
 
 .search-field input::-webkit-search-cancel-button {
   opacity: 0.55;
-}
-
-.sidebar-providers {
-  margin-top: 10px;
-  color: var(--text-soft);
-  font-size: 11px;
-}
-
-.sidebar-providers summary {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 30px;
-  padding: 4px;
-  list-style: none;
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-.sidebar-providers summary::-webkit-details-marker {
-  display: none;
-}
-
-.sidebar-providers summary:hover {
-  background: var(--surface-hover);
-}
-
-.sidebar-providers summary > span {
-  margin-left: auto;
-  color: var(--text-muted);
-}
-
-.sidebar-providers summary > svg {
-  width: 14px;
-  transition: transform 140ms ease;
-}
-
-.sidebar-providers[open] summary > svg {
-  transform: rotate(180deg);
 }
 
 .provider-filters {
@@ -1674,6 +1625,10 @@ button:disabled {
 }
 
 .mobile-sidebar-button {
+  display: none;
+}
+
+.viewer-shell[data-sidebar-collapsed="true"] .mobile-sidebar-button {
   display: grid;
 }
 
@@ -1950,16 +1905,6 @@ button:disabled {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 8%, transparent);
 }
 
-.message-event__role {
-  margin-bottom: 4px;
-  color: var(--text-muted);
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  line-height: 12px;
-  text-transform: uppercase;
-}
-
 .message-event__text {
   overflow-wrap: anywhere;
   font-size: 15px;
@@ -2051,14 +1996,6 @@ button:disabled {
   font-size: 9.5px;
   font-weight: 620;
   white-space: nowrap;
-}
-
-.message-event__time {
-  position: absolute;
-  top: calc(100% + 3px);
-  right: 3px;
-  color: var(--text-muted);
-  font-size: 9px;
 }
 
 .markdown-content {
@@ -3634,10 +3571,6 @@ button:disabled {
     display: none;
   }
 
-  .sidebar-providers summary {
-    min-height: 40px;
-  }
-
   .viewer-shell,
   .viewer-shell[data-inspector-open="true"] {
     display: block;
@@ -3907,22 +3840,9 @@ button:disabled {
   .hub-header, .hub-host { align-items: flex-start; flex-direction: column; }
 }
 
-.session-row__running,
-.session-row__unread-count {
+.session-row__running {
   flex-shrink: 0;
   margin-left: auto;
-}
-
-.session-row__unread-count {
-  min-width: 18px;
-  padding: 1px 5px;
-  border-radius: 10px;
-  background: var(--focus);
-  color: var(--surface);
-  font-size: 11px;
-  font-weight: 650;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
 }
 
 .sidebar-order {

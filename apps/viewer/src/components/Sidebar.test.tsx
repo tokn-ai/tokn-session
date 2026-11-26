@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ComponentProps } from "react";
+import { useState, type ComponentProps } from "react";
 import type { RegisteredProject, SessionOrder, SessionSummary, ViewerProvider } from "../lib/types";
 import type { SessionDraft } from "../lib/useSessionDrafts";
 import { Sidebar } from "./Sidebar";
@@ -187,14 +187,121 @@ describe("Sidebar session identity", () => {
   it("keeps provider controls in a disclosure and delegates desktop collapse", () => {
     const collapse = vi.fn();
     renderSidebar([session()], [], null, collapse);
-    const disclosure = screen.getByText("Providers").closest("details");
-    expect(disclosure).not.toHaveAttribute("open");
-    fireEvent.click(screen.getByText("Providers"));
-    expect(disclosure).toHaveAttribute("open");
+    const disclosure = screen.getByRole("button", { name: "Providers, 1 of 7 selected" });
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("group", { name: "Filter by provider" })).not.toBeInTheDocument();
+    fireEvent.click(disclosure);
+    expect(disclosure).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("button", { name: "Codex" })).toHaveAttribute("aria-pressed", "true");
     fireEvent.click(screen.getByRole("button", { name: "Collapse sessions" }));
     expect(collapse).toHaveBeenCalledOnce();
   });
+  it("focuses visible results with arrow keys and leaves activation to the user", () => {
+    const select = vi.fn();
+    renderSidebar([
+      session({ title: "Design", session_key: "design", updated_at_ms: Date.now() }),
+      session({ title: "Build", session_key: "build", updated_at_ms: Date.now() - 1000 }),
+    ], [], null, undefined, "time", { on_session_select: select });
+    const search = screen.getByRole("searchbox");
+    const design = screen.getByRole("button", { name: /^Design,/ });
+    const build = screen.getByRole("button", { name: /^Build,/ });
+    fireEvent.keyDown(search, { key: "ArrowDown" });
+    expect(design).toHaveFocus();
+    fireEvent.keyDown(design, { key: "ArrowDown" });
+    expect(build).toHaveFocus();
+    fireEvent.keyDown(build, { key: "ArrowUp" });
+    fireEvent.keyDown(design, { key: "ArrowUp" });
+    expect(search).toHaveFocus();
+    expect(select).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /^Recent/ }));
+    expect(screen.queryByRole("button", { name: /^Design,/ })).not.toBeInTheDocument();
+    fireEvent.keyDown(search, { key: "ArrowDown" });
+    expect(search).toHaveFocus();
+  });
+
+  it("takes users back to the workspace and exposes its selected state", () => {
+    const open = vi.fn();
+    renderSidebar([], [], null, undefined, "time", { on_workspace_open: open, workspace_selected: true });
+    const entry = screen.getByRole("button", { name: "Workspace" });
+    expect(entry).toHaveAttribute("aria-current", "page");
+    fireEvent.click(entry);
+    expect(open).toHaveBeenCalledOnce();
+  });
+
+  it("lists matching subagents directly and suppresses unrelated projects and tree loads under an activity filter", () => {
+    const load = vi.fn();
+    const clear = vi.fn();
+    renderSidebar([session({ session_key: "child", title: "Verifier", is_subagent: true, child_count: 1 })],
+      [], null, undefined, "project", {
+        registered_projects: [{ project_id: "empty", group_key: "empty", folder_path: "empty", name: "Empty project", available: true, created_at_ms: 1 }],
+        activity_filter: "running", on_clear_activity_filter: clear, on_children_load: load,
+      });
+    expect(screen.getByRole("button", { name: /^subagent Verifier,/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Show 1 subagent/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /Empty project/ })).not.toBeInTheDocument();
+    expect(load).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Clear activity filter: Running" }));
+    expect(clear).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["running", "Running"],
+    ["unread", "2 unread final replies"],
+  ] as const)("opens the conversation from %s even when the session has an async question", (filter, label) => {
+    const open = vi.fn(); const question = vi.fn();
+    renderSidebar([session({
+      title: "Review", is_running: true, has_unread: true, unread_final_count: 2,
+      question_attention: { required_count: 0, available_count: 1 },
+    })], [], null, undefined, "time", { activity_filter: filter, on_session_select: open, on_question_session_select: question });
+    const row = screen.getByRole("button", { name: /^Review,/ });
+    expect(within(row).getByRole("img", { name: label })).toBeInTheDocument();
+    expect(within(row).queryByRole("img", { name: /^Question available/ })).not.toBeInTheDocument();
+    fireEvent.click(row);
+    expect(open).toHaveBeenCalledExactlyOnceWith("codex:session");
+    expect(question).not.toHaveBeenCalled();
+  });
+
+  it("routes Needs input to the required question and counts only blocking questions", () => {
+    const open = vi.fn(); const question = vi.fn();
+    renderSidebar([session({ title: "Review", question_attention: { required_count: 1, available_count: 2 } })],
+      [], null, undefined, "time", { activity_filter: "needs_input", on_session_select: open, on_question_session_select: question });
+    const row = screen.getByRole("button", { name: /^Review,/ });
+    expect(within(row).getByRole("img", { name: "Input required, 1 unanswered question" })).toBeInTheDocument();
+    fireEvent.click(row);
+    expect(question).toHaveBeenCalledExactlyOnceWith("codex:session");
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("restores expanded branches after returning from a flat activity queue", () => {
+    const parent = session({ session_key: "parent", session_id: "p", title: "Plan", child_count: 1 });
+    const child = session({ session_key: "worker", session_id: "w", title: "Worker", parent_session_id: "p", is_subagent: true, is_running: true });
+    const children = new Map([[parent.session_key, { sessions: [child], next_cursor: null, is_loading: false, is_loading_more: false, error: null }]]);
+    const load = vi.fn(); const release = vi.fn();
+    function ActivitySidebar() {
+      const [filtered, setFiltered] = useState(false);
+      return <><button onClick={() => setFiltered(true)}>View running</button>
+        <Sidebar sessions={filtered ? [child] : [parent]} session_children={children} search=""
+          selected_session_key={null} enabled_providers={new Set(["codex"])} error={null}
+          source_errors={[]} pending_providers={[]} is_loading={false} is_loading_more={false} has_more={false}
+          activity_filter={filtered ? "running" : "all"} on_clear_activity_filter={() => setFiltered(false)}
+          on_children_load={load} on_children_release={release} on_children_load_more={vi.fn()} on_children_retry={vi.fn()}
+          on_provider_toggle={vi.fn()} on_load_more={vi.fn()} on_session_select={vi.fn()} on_retry={vi.fn()} on_search_change={vi.fn()} />
+      </>;
+    }
+    render(<ActivitySidebar />);
+    fireEvent.click(screen.getByRole("button", { name: /^Show 1 subagent/ }));
+    expect(load).toHaveBeenCalledExactlyOnceWith("parent");
+    fireEvent.click(screen.getByRole("button", { name: "View running" }));
+    expect(release).toHaveBeenCalledExactlyOnceWith("parent");
+    expect(screen.queryByRole("button", { name: /^Hide 1 subagent/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^subagent Worker/ })).toHaveTextContent("Subagent");
+    expect(load).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Clear activity filter: Running" }));
+    expect(screen.getByRole("button", { name: /^Hide 1 subagent/ })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: /^subagent Worker/ })).toBeInTheDocument();
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps async question attention visible beside running state and unread replies", () => {
     const { rerender } = renderSidebar([session({ is_running: true, question_attention: { required_count: 0, available_count: 2 } })]);
     expect(screen.getByRole("img", { name: "Question available, 2 unanswered questions" })).toBeInTheDocument();
@@ -212,6 +319,7 @@ describe("Sidebar session identity", () => {
   it("offers WorkBuddy as a provider filter", () => {
     renderSidebar([]);
 
+    fireEvent.click(screen.getByRole("button", { name: /^Providers,/ }));
     const filter = screen.getByRole("button", { name: "WorkBuddy" });
     expect(filter).toHaveAttribute("data-provider", "workbuddy");
     expect(filter).toHaveAttribute("aria-pressed", "false");
@@ -245,7 +353,7 @@ describe("Sidebar session identity", () => {
     expect(within(row).queryByText("Original user prompt")).not.toBeInTheDocument();
   });
 
-  it("keeps project-grouped rows to titles even when a cached preview exists", () => {
+  it("shows project-grouped titles and providers without repeating the project or preview", () => {
     renderSidebar([session({ title: "Storage discussion", latest_assistant_preview: "Use SQLite locally." })], [], null, undefined, "project");
     const row = screen.getByRole("button", { name: /Storage discussion, Codex session/ });
     expect(within(row).getByText("Storage discussion")).toHaveClass("session-row__title");
@@ -409,10 +517,10 @@ describe("Sidebar session identity", () => {
 });
 
 describe("Sidebar unread activity", () => {
-  it("shows only a running circle, then the accumulated final-reply count, then nothing", () => {
+  it("shows running status, then the accumulated final-reply count, then clears the cue", () => {
     const running = session({ is_running: true, has_unread: true, unread_final_count: 3 });
     renderSidebar([running]);
-    expect(screen.getByRole("img", { name: "Running" })).toHaveClass("inline-spinner");
+    expect(screen.getByRole("img", { name: "Running" })).toHaveTextContent("Running");
     expect(screen.queryByRole("img", { name: /unread/ })).not.toBeInTheDocument();
     cleanup();
     renderSidebar([{ ...running, is_running: false }]);
@@ -445,14 +553,13 @@ describe("Sidebar unread activity", () => {
     const dot = within(row).getByRole("img", { name: "1 unread final reply" });
 
     expect(row).toHaveAttribute("data-unread", "true");
-    expect(dot).toHaveClass("session-row__unread-dot");
-    expect(dot).toHaveAttribute("data-unread-source", "direct");
+    expect(dot).toHaveTextContent("New reply");
   });
 
   it("counts only the parent’s own replies even when an older server reports descendant attention", () => {
     renderSidebar([session({ title: "Parent", has_unread: true, unread_final_count: 1,
       has_unread_descendant: true, unread_descendant_count: 2 })]);
-    expect(screen.getByRole("img", { name: "1 unread final reply" })).toHaveClass("session-row__unread-dot");
+    expect(screen.getByRole("img", { name: "1 unread final reply" })).toHaveTextContent("New reply");
     expect(screen.queryByRole("img", { name: /3 unread/ })).not.toBeInTheDocument();
   });
 
@@ -519,6 +626,6 @@ describe("Sidebar unread activity", () => {
       name: "subagent Hubble, Codex session child-0000, 1 unread final reply",
     });
     expect(within(childRow).getByRole("img", { name: "1 unread final reply" }))
-      .toHaveAttribute("data-unread-source", "direct");
+      .toHaveTextContent("New reply");
   });
 });

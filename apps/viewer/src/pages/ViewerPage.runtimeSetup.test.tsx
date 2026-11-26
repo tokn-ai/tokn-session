@@ -34,7 +34,8 @@ vi.mock("../components/SettingsDialog", () => ({ SettingsDialog: ({ initial_sect
 </div>; } }));
 vi.mock("../lib/useViewerState", () => ({ useViewerState: () => {
   const [selectedSessionKey, setSession] = useState<string | null>(null);
-  return { selectedSessionKey, clearSessionSelection: useCallback(() => setSession(null), []), openCreatedSession: useCallback(() => {}, []) };
+  return { selectedSessionKey, sessions: [], enabledProviders: new Set(["pi"]), sourceErrors: [], pendingProviders: [],
+    activityFilter: "all", search: "", clearSessionSelection: useCallback(() => setSession(null), []), openCreatedSession: useCallback(() => {}, []) };
 } }));
 
 let configured = false;
