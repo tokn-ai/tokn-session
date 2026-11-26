@@ -874,6 +874,8 @@ export interface EventSummary {
   images?: MessageImageSummary[];
   question_selections?: QuestionSelectionSummary[];
   child_keys?: string[];
+  /** Activity group containing one visible operation and otherwise only routine records. */
+  single_tool_key?: string;
   delivery?: "commentary" | "final" | "unspecified";
   event_key: string;
   /** Stable source slot, used only to restore disclosure after a generation reset. */

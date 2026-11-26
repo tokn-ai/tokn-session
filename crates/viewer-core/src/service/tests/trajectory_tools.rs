@@ -130,3 +130,25 @@ fn previews_bound_text_and_count_and_time_overlapping_calls_in_source_order() {
   assert_eq!(group.tool_previews[1].status, "pending");
   assert_eq!(group.tool_previews[2].label, "test");
 }
+
+#[test]
+fn nonzero_shell_exit_is_visible_even_if_the_provider_marked_delivery_successful() {
+  let mut finished = tool_call(
+    Provider::Codex,
+    "exec_command",
+    "build",
+    ToolKind::Shell,
+    Some(ToolSummary::Shell {
+      command: Some("build project".into()),
+      cwd: None,
+      exit_code: Some(7),
+    }),
+    Phase::Finished,
+    Some(json!({"output":"compiler error"})),
+  );
+  if let AgentEvent::ToolCall(record) = &mut finished {
+    record.is_error = Some(false);
+  }
+  let group = tool_group(&[finished]);
+  assert_eq!(group.tool_previews[0].status, "failed");
+}

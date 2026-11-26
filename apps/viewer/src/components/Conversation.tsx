@@ -170,12 +170,6 @@ export function Conversation({
   const childDetail = session.is_subagent ? subagentDetail(session) : null;
   const activity = sessionActivity(session);
 
-  function jumpToPrompt(eventKey: string) {
-    const row = Array.from(scroll.timelineRef.current?.querySelectorAll<HTMLElement>("[data-reading-prompt]") ?? [])
-      .find((element) => element.dataset.eventKey === eventKey);
-    scroll.reveal(row);
-  }
-
   function jumpToLatest() {
     scroll.jumpToLatest();
     scroll.timelineRef.current?.focus({ preventScroll: true });
@@ -238,7 +232,7 @@ export function Conversation({
           </div>
         </div>
         <PromptNavigator key={session.session_key} events={events} has_older={has_older} loading_older={is_loading_older}
-          timeline_ref={scroll.timelineRef} on_older={loadOlder} on_jump={jumpToPrompt} />
+          following={scroll.isFollowing} timeline_ref={scroll.timelineRef} on_older={loadOlder} on_jump={scroll.reveal} />
         <button
           aria-label={hideLifecycle ? "Show lifecycle" : "Hide lifecycle"}
           aria-pressed={hideLifecycle}

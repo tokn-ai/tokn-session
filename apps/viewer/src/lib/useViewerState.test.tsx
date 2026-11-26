@@ -1149,9 +1149,8 @@ describe("useViewerState Relay updates", () => {
     const sessionButton = screen.getByRole("button", { name: /session live/ });
     await act(async () => fireEvent.click(sessionButton));
     await waitFor(() => expect(screen.getByRole("button", { name: /^Working for/ })).toHaveAttribute("aria-expanded", "true"));
-    const commandsButton = await screen.findByRole("button", { name: "Ran 1 command" });
-    await act(async () => fireEvent.click(commandsButton));
-    expect(screen.getByText("cargo test")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Shell: cargo test", expanded: false })).toBeVisible();
+    expect(loadEventDetail).not.toHaveBeenCalled();
     const timeline = container.querySelector<HTMLElement>(".conversation__timeline")!;
     Object.defineProperties(timeline, { scrollHeight: { configurable: true, value: 1000 }, clientHeight: { configurable: true, value: 300 } });
     timeline.scrollTop = 120;
@@ -3380,6 +3379,11 @@ describe("semantic session delivery", () => {
     expect(result.current.expandedDetail?.tool_output?.sections[0].text).toBe("display payload");
     expect(loadToolDetails).toHaveBeenCalledOnce();
     expect(inspectSessionEvent).toHaveBeenCalledOnce();
+    vi.mocked(inspectSessionEvent).mockResolvedValueOnce({ ...toolDetail("updated inspection"), native: { source: "new revision" } });
+    act(() => result.current.retryDetail());
+    await waitFor(() => expect(result.current.detail?.native).toEqual({ source: "new revision" }));
+    expect(loadToolDetails).toHaveBeenCalledOnce();
+    expect(inspectSessionEvent).toHaveBeenCalledTimes(2);
   });
 
   it("keeps source inspection independent of cached display detail after subscription loss", async () => {

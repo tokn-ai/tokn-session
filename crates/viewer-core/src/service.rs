@@ -5106,7 +5106,7 @@ fn trajectory_tool_previews(trajectory: &Trajectory) -> Vec<TrajectoryToolPrevie
         kind: tool_kind_label(operation.tool_kind),
         label: normalize_one_line_text(&label, MAX_TRAJECTORY_TOOL_LABEL_CHARS)
           .unwrap_or_else(|| "Tool operation".to_owned()),
-        status: tool_operation_status_label(operation.status),
+        status: tool_operation_status_label(operation),
       })
     })
     .take(MAX_TRAJECTORY_TOOL_PREVIEWS)
@@ -5503,7 +5503,7 @@ fn tool_operation_card_summary(operation: &ToolOperation) -> ToolCardSummary {
     kind: tool_kind_label(operation.tool_kind).to_string(),
     tool_name: present_string(operation.tool_name.as_deref()).map(str::to_string),
     tool_call_id: present_string(operation.tool_call_id.as_deref()).map(str::to_string),
-    status: tool_operation_status_label(operation.status).to_string(),
+    status: tool_operation_status_label(operation).to_string(),
     provider_tool_name: present_string(operation.provider_tool_name.as_deref()).map(str::to_string),
     language: None,
     command: None,
@@ -5569,8 +5569,12 @@ fn terminal_action_label(action: TerminalAction) -> &'static str {
   }
 }
 
-fn tool_operation_status_label(status: ToolOperationStatus) -> &'static str {
-  match status {
+fn tool_operation_status_label(operation: &ToolOperation) -> &'static str {
+  // A result may report successful tool delivery while its shell command failed.
+  if matches!(&operation.summary, Some(ToolSummary::Shell { exit_code: Some(code), .. }) if *code != 0) {
+    return "failed";
+  }
+  match operation.status {
     ToolOperationStatus::Pending => "pending",
     ToolOperationStatus::Running => "running",
     ToolOperationStatus::Completed => "completed",

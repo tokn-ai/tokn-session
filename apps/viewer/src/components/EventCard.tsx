@@ -569,10 +569,16 @@ function TrajectorySection({
   const hiddenCount = (page?.events.length ?? 0) - visibleEvents.length;
   // Determine identity and boundaries before filtering: revealing lifecycle
   // rows must not unload or collapse an already opened inner group.
-  const activityGroups = groupActivity(page?.events ?? []).map((group) => ({
-    group_key: group[0].event_key,
-    events: hide_lifecycle ? group.filter((child) => !isBookkeepingEvent(child)) : group,
-  })).filter((group) => group.events.length > 0);
+  const activityGroups = groupActivity(page?.events ?? []).map((group) => {
+    const substantive = group.filter((child) => !isBookkeepingEvent(child));
+    const singleTool = group[0].type === "activity_group" ? !!group[0].single_tool_key
+      : substantive.length === 1 && substantive[0].type === "tool_call" && !substantive[0].is_hidden;
+    return {
+      group_key: group[0].event_key,
+      events: hide_lifecycle ? substantive : group,
+      inline: event.trajectory?.tool_count === 1 && singleTool,
+    };
+  }).filter((group) => group.events.length > 0);
   const renderChild = (childEvent: EventSummary) => (
     <div
       className="trajectory-section__item"
@@ -684,9 +690,10 @@ function TrajectorySection({
 
               {visibleEvents.length > 0 ? (
                 <div aria-label="Events in this turn" className="trajectory-section__events" role="list">
-                  {activityGroups.map(({ group_key, events: group }) => group[0].type === "activity_group" ? (
+                  {activityGroups.map(({ group_key, events: group, inline }) => group[0].type === "activity_group" ? (
                     <DeferredActivityGroup key={group_key} event={group[0]} page={activity_pages?.get(group_key)}
                       selected_event_key={selected_event_key} on_load={on_activity_load} on_retry={on_retry} parent_visible={is_expanded}
+                      inline={inline} reveal={group[0].child_keys?.some((key) => expanded_activity_keys?.has(key) ?? key === expanded_child_event_key)}
                       on_visibility={on_activity_visibility}>
                       {(children) => {
                         const visible = children.filter((child) => !hide_lifecycle || !isBookkeepingEvent(child));
@@ -695,7 +702,7 @@ function TrajectorySection({
                       }}
                     </DeferredActivityGroup>
                   ) : (
-                    <ActivityGroup key={group_key} events={group} selected_event_key={selected_event_key}
+                    <ActivityGroup key={group_key} events={group} selected_event_key={selected_event_key} inline={inline}
                       reveal={group.some((child) => expanded_activity_keys?.has(child.event_key)
                         ?? child.event_key === expanded_child_event_key)}>
                       {() => group.map(renderChild)}
@@ -901,6 +908,7 @@ export function EventCard({
           aria-controls={regionId}
           aria-expanded={cardIsExpanded}
           aria-label={heading?.action ? `${heading.action}: ${title}` : title}
+          aria-describedby={status ? `${button_id}-status` : undefined}
           className="technical-event__toggle"
           onClick={() => {
             if (usesControlledExpansion(event)) {
@@ -932,7 +940,7 @@ export function EventCard({
           </span>
           <span className="technical-event__meta">
             {status ? (
-              <span className="event-phase" data-tone={status.tone}>{status.label}</span>
+              <span className="event-phase" data-tone={status.tone} id={`${button_id}-status`}>{status.label}</span>
             ) : null}
           </span>
           <time dateTime={event.timestamp ?? undefined} title={timestampLabel}>

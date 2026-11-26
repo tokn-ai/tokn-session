@@ -1,10 +1,6 @@
 import type { Nodes } from "mdast";
-import remarkGfm from "remark-gfm";
-import remarkParse from "remark-parse";
-import { unified } from "unified";
+import { markdownParser } from "./markdownParser";
 import type { MessageImageSummary } from "./types";
-
-const parser = unified().use(remarkParse).use(remarkGfm);
 
 export function markdownImageRangeKey(start: number | undefined, end: number | undefined): string | null {
   if (typeof start !== "number" || typeof end !== "number"
@@ -24,7 +20,7 @@ export function bindMarkdownImages(content: string, images: MessageImageSummary[
     if (key) candidates.set(key, candidates.has(key) ? null : image);
   }
   if (!candidates.size) return new Map();
-  const tree = parser.parse(content);
+  const tree = markdownParser.parse(content);
   const definitions = new Set<string>();
   function visit(node: Nodes, apply: (node: Nodes) => void) {
     apply(node);

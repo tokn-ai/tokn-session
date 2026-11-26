@@ -7,6 +7,17 @@
 .session-header__context .conversation__model { flex-shrink: 2; }
 .session-header__context .conversation__metadata summary { display: block; text-overflow: ellipsis; }
 .session-header__context summary svg { vertical-align: middle; }
+.prompt-nav__controls { display: flex; align-items: center; }
+.prompt-nav__controls[data-stepping] {
+  gap: 1px;
+  padding: 1px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.session-header .prompt-nav__controls[data-stepping] .icon-button { width: 29px; height: 29px; flex-basis: 29px; padding: 0; border-radius: 5px; }
+.prompt-nav__step svg { width: 19px; height: 19px; }
+.prompt-nav__step--previous svg { transform: rotate(180deg); }
+.prompt-nav__step:disabled { opacity: .4; cursor: default; }
 .prompt-nav__panel {
   position: absolute;
   z-index: 5;
@@ -90,6 +101,7 @@
 @media (max-width: 600px) {
   .conversation .session-header { gap: 2px; padding-inline: 8px; }
   .session-header .icon-button { width: 36px; flex-basis: 36px; }
+  .session-header .prompt-nav__controls[data-stepping] .icon-button { width: 32px; height: 38px; flex-basis: 32px; }
   .session-header .conversation__filter { width: 36px; }
   .session-header__context { gap: 5px; }
   .session-header__context .conversation__model, .session-header__context .activity-label { display: none; }

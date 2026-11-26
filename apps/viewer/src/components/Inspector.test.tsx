@@ -1,9 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EventDetail, EventSummary } from "../lib/types";
 import { Inspector } from "./Inspector";
+import { ViewerVisibility } from "../lib/viewerVisibility";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 const EVENT: EventSummary = {
   event_key: "event.v1.2",
@@ -34,6 +35,87 @@ const DETAIL: EventDetail = {
   is_hidden: false,
   tool_output: null,
 };
+
+const base = { detail: DETAIL, event: EVENT, error: null, is_open: true, is_loading: false, on_close: vi.fn(), on_retry: vi.fn() };
+
+it("gates content and copying on the summary revision, then recovers with the matching payload", () => {
+  vi.stubGlobal("navigator", { clipboard: { writeText: vi.fn() } });
+  const retry = vi.fn();
+  const props = { ...base, on_retry: retry, event: { ...EVENT, content_revision: "new" } };
+  const detail = { ...DETAIL, native: { original: true }, content_revision: "old" };
+  const { rerender } = render(<Inspector {...props} detail={detail} />);
+  expect(screen.queryByRole("heading", { name: "Full result" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Copy (native|normalized) JSON/ })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  expect(retry).toHaveBeenCalledOnce();
+  rerender(<Inspector {...props} detail={{ ...detail, content_revision: "new" }} />);
+  expect(screen.getByRole("heading", { name: "Full result" })).toBeVisible();
+});
+
+it("compares the same representation across events, resets its scroll, and keeps desktop focus on the timeline", async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal("navigator", { clipboard: { writeText } });
+  const first = { ...DETAIL, native: { id: "first" } };
+  const second = { ...first, event_key: "another-event", native: { id: "second" } };
+  const tree = (event: EventSummary, detail: EventDetail | null) => <>
+    <button type="button">Inspect next message</button><Inspector {...base} event={event} detail={detail} />
+  </>;
+  const { rerender } = render(tree(EVENT, first));
+  expect(screen.getByRole("button", { name: "Close inspector" })).toHaveFocus();
+  fireEvent.keyDown(screen.getByRole("tab", { name: "Content" }), { key: "End" });
+  const native = screen.getByRole("tab", { name: "Native" });
+  expect(native).toHaveFocus();
+  const panel = screen.getByRole("tabpanel", { name: "Native" });
+  expect(panel).toHaveAttribute("tabindex", "0");
+  panel.scrollTop = 67;
+  const trigger = screen.getByRole("button", { name: "Inspect next message" });
+  trigger.focus();
+  const nextEvent = { ...EVENT, event_key: second.event_key };
+  rerender(tree(nextEvent, first));
+  expect(screen.queryByRole("button", { name: "Copy native JSON" })).not.toBeInTheDocument();
+  expect(panel).not.toHaveTextContent("first");
+  rerender(tree(nextEvent, second));
+  expect(native).toHaveAttribute("aria-selected", "true");
+  expect(panel.scrollTop).toBe(0);
+  expect(trigger).toHaveFocus();
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy native JSON" })));
+  expect(writeText).toHaveBeenCalledExactlyOnceWith(JSON.stringify(second.native, null, 2));
+  rerender(tree({ ...nextEvent, is_hidden: true }, second));
+  expect(native).toBeDisabled();
+  expect(screen.getByRole("tab", { name: "Normalized" })).toHaveAttribute("aria-selected", "true");
+  expect(panel).not.toHaveTextContent('"id": "second"');
+  expect(JSON.parse(panel.textContent!)).toEqual({ type: "message", provider: "codex", redacted: true });
+});
+
+it("opens a native dialog on phones and releases its modal surface when hidden, dismissed or resized", () => {
+  let matches = true;
+  let resize = () => {};
+  vi.stubGlobal("matchMedia", () => ({
+    get matches() { return matches; },
+    addEventListener: (_: string, listener: () => void) => { resize = listener; }, removeEventListener: vi.fn(),
+  }));
+  const close = vi.fn();
+  const tree = (is_open: boolean, visible = true) => <ViewerVisibility.Provider value={visible}>
+    <Inspector {...base} is_open={is_open} on_close={close} />
+  </ViewerVisibility.Provider>;
+  const { rerender } = render(tree(false));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  rerender(tree(true));
+  const dialog = screen.getByRole("dialog", { name: "Event inspector" });
+  expect(dialog).toHaveAttribute("open");
+  expect(screen.getByRole("button", { name: "Close inspector" })).toHaveFocus();
+  rerender(tree(true, false));
+  expect(dialog).not.toHaveAttribute("open");
+  rerender(tree(true));
+  fireEvent(dialog, new Event("cancel", { cancelable: true }));
+  expect(close).toHaveBeenCalledOnce();
+  rerender(tree(false));
+  expect(dialog).not.toHaveAttribute("open");
+  rerender(tree(true));
+  act(() => { matches = false; resize(); });
+  expect(screen.getByRole("complementary", { name: "Event inspector" })).toBeVisible();
+  expect(dialog).not.toHaveAttribute("open");
+});
 
 describe("Inspector Markdown routing", () => {
   it("shows the complete native provider error separately from its normalized shape", () => {

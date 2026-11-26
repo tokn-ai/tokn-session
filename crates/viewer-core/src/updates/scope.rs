@@ -81,6 +81,15 @@ fn group_summary(members: &[Value]) -> Value {
   summary["is_hidden"] = json!(false);
   summary["is_bookkeeping"] = json!(members.iter().all(|item| item["is_bookkeeping"] == true));
   summary["child_keys"] = json!(members.iter().map(key).collect::<Vec<_>>());
+  let mut substantive = members
+    .iter()
+    .filter(|item| item["is_bookkeeping"] != true || item["is_error"] == true);
+  if let (Some(tool), None) = (substantive.next(), substantive.next())
+    && tool["type"] == "tool_call"
+    && tool["is_hidden"] != true
+  {
+    summary["single_tool_key"] = json!(key(tool));
+  }
   for field in [
     "tool",
     "trajectory",
@@ -280,6 +289,48 @@ mod tests {
       json!(["activity:a", "commentary", "activity:c"])
     );
     assert!(!items.iter().any(|item| item["type"] == "tool_call"));
+  }
+
+  #[test]
+  fn only_one_visible_tool_with_routine_siblings_can_skip_its_group_control() {
+    let routine = json!({"event_key":"routine","type":"lifecycle","is_bookkeeping":true});
+    let mut command = tool("command");
+    command["tool"]["exit_code"] = json!(7);
+    let members = vec![routine.clone(), command.clone()];
+    let page = json!({"events":[{"event_key":"work","type":"trajectory","child_keys":["routine","command"]}]});
+    let (_, closed, _) = project(
+      page.clone(),
+      members.clone(),
+      vec![],
+      &mut UpdateScope::default(),
+      false,
+    );
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed[0]["single_tool_key"], "command");
+    assert_eq!(closed[0]["is_error"], true);
+    assert!(!closed[0].to_string().contains("private command"));
+    let mut interest = UpdateScope {
+      group_keys: vec![key(&closed[0]).to_owned()],
+      ..Default::default()
+    };
+    let (_, open, _) = project(page, members, vec![], &mut interest, false);
+    assert!(open.iter().any(|item| item == &command));
+    assert!(open.iter().any(|item| item == &routine));
+
+    for sibling in [
+      tool("second"),
+      json!({"type":"unknown"}),
+      json!({"type":"reasoning"}),
+      json!({"type":"lifecycle","is_bookkeeping":true,"is_error":true}),
+    ] {
+      assert!(
+        group_summary(&[command.clone(), sibling])
+          .get("single_tool_key")
+          .is_none()
+      );
+    }
+    command["is_hidden"] = json!(true);
+    assert!(group_summary(&[command]).get("single_tool_key").is_none());
   }
   #[test]
   fn recent_turns_include_three_prompts_and_pin_the_start_across_appends() {

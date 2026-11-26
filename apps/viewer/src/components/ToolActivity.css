@@ -56,6 +56,7 @@
 }
 
 .tool-input__blocks {
+  --tool-diff-added: #266438;
   display: grid;
   gap: 10px;
   margin: 4px 0 8px;
@@ -69,6 +70,31 @@
 .tool-output .tool-output__section pre {
   font-size: 12px;
   line-height: 1.6;
+}
+
+@media (prefers-color-scheme: dark) {
+  .tool-input__blocks { --tool-diff-added: #91c89b; }
+}
+
+.tool-input__blocks ins,
+.tool-input__blocks del {
+  display: inline-block;
+  min-width: 100%;
+  text-decoration: none;
+}
+
+.tool-input__blocks ins {
+  color: var(--tool-diff-added);
+  background: color-mix(in srgb, var(--tool-diff-added) 9%, transparent);
+}
+
+.tool-input__blocks del {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+
+.tool-diff__header {
+  color: var(--text-muted);
 }
 
 .shell-output > .tool-input,

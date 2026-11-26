@@ -140,6 +140,73 @@ it("offers a labeled jump to latest from a partial window and returns keyboard f
   expect(viewport).toHaveFocus();
 });
 
+it("steps across prompts at the bottom of the viewport and preserves the original reading line", () => {
+  const messages = ["Trace startup", "Inspect the cache", "Try a retry", "Review limits", "Summarize"];
+  const events = messages.map((summary, i) => event(String(i), { type: "message", role: "user", summary }));
+  events.splice(2, 0, event("hidden", { type: "message", role: "user", summary: "Hidden message", is_hidden: true }));
+  const conversation = props({ events });
+  const view = render(<Conversation {...conversation} />);
+  const viewport = screen.getByRole("region", { name: "Conversation history" });
+  let top = 660;
+  let prepend = 0;
+  Object.defineProperties(viewport, {
+    clientHeight: { value: 200 }, scrollHeight: { get: () => 860 + prepend },
+    scrollTop: { get: () => top, set: (value: number) => { top = Math.min(660 + prepend, Math.max(0, value)); } },
+  });
+  vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 360, 200));
+  const offsets = [30, 300, 740, 780, 800];
+  const rows = [...view.container.querySelectorAll<HTMLElement>("[data-reading-prompt]")];
+  rows.forEach((row, i) => vi.spyOn(row, "getBoundingClientRect")
+    .mockImplementation(() => new DOMRect(0, offsets[i] + prepend - top, 360, 40)));
+  fireEvent.wheel(viewport, { deltaY: -80 });
+  viewport.scrollTop = 320;
+  fireEvent.scroll(viewport);
+
+  const previous = screen.getByRole("button", { name: "Previous prompt" });
+  const next = screen.getByRole("button", { name: "Next prompt" });
+  const inspect = within(rows[1]).getByRole("button", { name: "Inspect user message" });
+  inspect.focus();
+  expect(fireEvent.keyDown(inspect, { altKey: true, key: "ArrowDown" })).toBe(true);
+  expect(inspect).toHaveFocus();
+  expect(top).toBe(320);
+  fireEvent.click(previous);
+  expect(rows[1]).toHaveFocus();
+  fireEvent.keyDown(rows[1], { altKey: true, key: "ArrowUp" });
+  expect(rows[0]).toHaveFocus();
+  expect(previous).toBeDisabled();
+  fireEvent.keyDown(rows[0], { altKey: true, key: "ArrowDown" });
+  expect(rows[1]).toHaveFocus();
+  // All three final prompts fit below the maximum scrollTop.
+  for (const row of rows.slice(2)) {
+    fireEvent.click(next);
+    expect(row).toHaveFocus();
+    expect(top).toBe(660);
+  }
+  expect(next).toBeDisabled();
+  prepend = 100;
+  view.rerender(<Conversation {...conversation} events={[...events]} />);
+  expect(top).toBe(760);
+  fireEvent.click(screen.getByRole("button", { name: "Jump to prompt" }));
+  const picker = within(screen.getByRole("region", { name: "Prompts in this session" }));
+  expect(picker.getByRole("button", { name: /Summarize/ })).toHaveAttribute("aria-current", "location");
+  const search = picker.getByRole("searchbox");
+  fireEvent.keyDown(search, { altKey: true, key: "ArrowDown" });
+  expect(search).toHaveFocus();
+  fireEvent.keyDown(search, { key: "Escape" });
+  fireEvent.click(previous);
+  expect(rows[3]).toHaveFocus();
+  fireEvent.click(screen.getByRole("button", { name: "Back to reading position" }));
+  expect(top).toBe(420);
+  expect(viewport).toHaveFocus();
+  fireEvent.click(screen.getByRole("button", { name: "Jump to latest" }));
+  fireEvent.click(previous);
+  expect(rows[1]).toHaveFocus();
+  fireEvent.click(previous);
+  expect(rows[0]).toHaveFocus();
+  expect(screen.queryByRole("button", { name: "Back to reading position" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+});
+
 it("holds the reading line when keyboard activation opens a long prompt at the live end", () => {
   const view = props({ events: [event("prompt", {
     type: "message", role: "user", is_bookkeeping: false,

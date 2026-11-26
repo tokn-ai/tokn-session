@@ -452,6 +452,47 @@ describe("EventCard subagent activity", () => {
 });
 
 describe("EventCard whole-turn trajectories", () => {
+  it.each(["scoped", "flat"])("shows a single operation directly when opening a %s turn, with output and inspection still independent", (transport) => {
+    const work = event({ event_key: "turn", type: "trajectory", trajectory: trajectory({ reasoning_count: 0, agent_activity_count: 0 }) });
+    const routine = event({ event_key: "start", type: "lifecycle", title: "Turn started", is_bookkeeping: true });
+    const command = event({ event_key: "build", type: "tool_call", tool: tool({ exit_code: 7 }) });
+    const group = event({ event_key: "activity:start", type: "activity_group", summary: "1 command, 1 event",
+      child_keys: [routine.event_key, command.event_key], single_tool_key: command.event_key });
+    const members = trajectoryPage({ events: [routine, command], total_events: 2 });
+    const props = {
+      button_id: "work", event: work, is_selected: false, detail: null, detail_error: null, detail_loading: false,
+      on_retry_detail: vi.fn(), on_select: vi.fn(), on_toggle: vi.fn(), on_trajectory_event_toggle: vi.fn(),
+      hide_lifecycle: true, on_activity_load: vi.fn(), on_activity_visibility: vi.fn(), on_trajectory_retry: vi.fn(),
+      trajectory_page: transport === "scoped" ? trajectoryPage({ events: [group], total_events: 1 }) : members,
+    };
+    const { rerender } = render(<EventCard {...props} is_expanded={false} />);
+    expect(props.on_activity_load).not.toHaveBeenCalled();
+    rerender(<EventCard {...props} is_expanded />);
+    const pages = new Map([[group.event_key, members]]);
+    if (transport === "scoped") {
+      expect(props.on_activity_load).toHaveBeenCalledWith(group.event_key);
+      expect(screen.getByText("Loading activity…")).toBeVisible();
+      rerender(<EventCard {...props} is_expanded activity_pages={new Map([[group.event_key, trajectoryPage({ error: "Offline" })]])} />);
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+      expect(props.on_trajectory_retry).toHaveBeenCalledWith(group.event_key);
+      rerender(<EventCard {...props} is_expanded activity_pages={pages} />);
+    }
+    const toolToggle = screen.getByRole("button", { name: "Shell: cargo test", expanded: false });
+    expect(toolToggle).toHaveAccessibleDescription("exit 7");
+    expect(screen.queryByRole("button", { name: /1 command/ })).not.toBeInTheDocument();
+    expect(props.on_trajectory_event_toggle).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Inspect cargo test" }));
+    expect(props.on_select).toHaveBeenCalledWith(command.event_key);
+    fireEvent.click(toolToggle);
+    expect(props.on_trajectory_event_toggle).toHaveBeenCalledWith(work.event_key, command.event_key);
+    rerender(<EventCard {...props} is_expanded hide_lifecycle={false} activity_pages={pages}
+      trajectory_expanded_event_key={command.event_key} trajectory_expanded_detail={detail({ event_key: command.event_key,
+        tool_output: { sections: [{ label: "Output", text: "compiler stopped", format: "text" }],
+          truncated: false, original_size_bytes: 16, source_event_key: command.event_key } })} />);
+    expect(screen.getByText("compiler stopped")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Turn started" })).toBeVisible();
+  });
+
   it("shows concrete recent operations and their status from the folded summary without loading children", () => {
     const onLoad = vi.fn();
     const turn = event({ type: "trajectory", trajectory: trajectory({
@@ -679,15 +720,49 @@ describe("EventCard tool output", () => {
     tool: tool(),
   });
 
-  it("shows the requested file changes when an edit captured no output", () => {
+  const editResult = {
+    sections: [{ label: "Output", text: "Updated file", format: "text" as const }],
+    truncated: false, original_size_bytes: 12, source_event_key: toolEvent.event_key,
+  };
+
+  it.each([false, true])("opens recorded file changes immediately (has captured output: %s)", (hasOutput) => {
     const patch = "@@ -1 +1 @@\n-before\n+<after>";
     renderCard({ ...toolEvent, tool: tool({ kind: "file_edit", path: "src/main.rs" }) }, {
       is_expanded: true,
-      detail: detail({ event: { input: { "src/main.rs": { type: "update", unified_diff: patch } } } }),
+      detail: detail({ event: { input: { "src/main.rs": { type: "update", unified_diff: patch } } },
+        tool_output: hasOutput ? editResult : null }),
     });
-    expect(screen.getByLabelText("Requested changes · src/main.rs").textContent).toBe(patch);
-    expect(screen.getByText("No output was captured for this tool call.")).toBeVisible();
+    const block = screen.getByLabelText("Requested changes · src/main.rs");
+    expect(block).toBeVisible();
+    expect(block.textContent).toBe(patch);
+    expect(block.querySelector("del")).toHaveTextContent("-before");
+    expect(block.querySelector("ins")).toHaveTextContent("+<after>");
+    expect(block.querySelector("after")).toBeNull();
+    expect(screen.getByText(hasOutput ? "Updated file" : "No output was captured for this tool call.")).toBeVisible();
     expect(screen.getByRole("button", { name: "Inspect src/main.rs" })).toBeVisible();
+  });
+
+  it("shows exact before and after selections for recorded replacements and bounds long changes", () => {
+    const replacement = Array.from({ length: 12 }, (_, index) => `next line ${index}`).join("\n");
+    renderCard({ ...toolEvent, tool: tool({ kind: "file_edit" }) }, {
+      is_expanded: true,
+      detail: detail({ event: { input: { oldString: "  previous();", newString: replacement } }, tool_output: editResult }),
+    });
+    expect(screen.getByLabelText("Requested changes · Find").querySelector("del")?.textContent).toBe("  previous();");
+    expect(screen.getByLabelText("Requested changes · Replace with last lines").querySelector("ins")).toHaveTextContent("next line 11");
+    fireEvent.click(screen.getByRole("button", { name: "Show 4 more lines" }));
+    expect(screen.getByLabelText("Requested changes · Replace with").textContent).toBe(replacement);
+  });
+
+  it("leaves unrecognized edit parameters behind the input disclosure when there is an output", async () => {
+    renderCard({ ...toolEvent, tool: tool({ kind: "file_edit" }) }, {
+      is_expanded: true,
+      detail: detail({ event: { input: { operation: "provider-defined edit" } }, tool_output: editResult }),
+    });
+    expect(screen.getByText("Updated file")).toBeVisible();
+    expect(screen.queryByLabelText("Requested changes · Parameters")).toBeNull();
+    fireEvent.click(screen.getByText("Requested changes"));
+    expect(await screen.findByLabelText("Requested changes · Parameters")).toHaveTextContent("provider-defined edit");
   });
 
   it("keeps tool input behind disclosure when results exist and bounds long non-shell output", async () => {

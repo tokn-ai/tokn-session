@@ -35,10 +35,12 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
     const checkId = ++store.next_check;
     update(key, (state) => ({ ...state, checking: true, check_id: checkId }));
     let availability: SessionInputStatus;
+    let availability_error = false;
     try {
       availability = send ? await getSessionInputStatus({ session_key: target_session }, send)
         : await getSessionInputStatus({ session_key: target_session });
     } catch (error) {
+      availability_error = true;
       availability = {
         available: false,
         message: withDetail(
@@ -49,7 +51,7 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
       };
     }
     update(key, (state) => state.check_id === checkId
-      ? { ...state, checking: false, availability }
+      ? { ...state, checking: false, availability, availability_error }
       : state);
   }, [store, update]);
 

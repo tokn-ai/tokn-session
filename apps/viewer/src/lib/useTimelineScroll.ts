@@ -269,13 +269,13 @@ export function useTimelineScroll({ session_key, initial_page_loaded, last_event
     reconcile();
   }
 
-  function reveal(element: HTMLElement | null | undefined) {
+  function reveal(element: HTMLElement | null | undefined, remember_position = true) {
     const timeline = timelineRef.current;
     if (!element || !timeline?.contains(element)) return;
     const offset = element.getBoundingClientRect().top - timeline.getBoundingClientRect().top - timeline.clientTop;
     const wasReading = !state.current.following && timeline.scrollTop < timeline.scrollHeight - timeline.clientHeight - 1;
     pause();
-    if (wasReading && !returnPosition && Math.abs(offset) > 1) setReturnPosition(state.current.position);
+    if (remember_position && wasReading && !returnPosition && Math.abs(offset) > 1) setReturnPosition(state.current.position);
     // scrollIntoView can also move the app shell or a containing dialog.
     timeline.scrollTop += offset;
     element.focus({ preventScroll: true });

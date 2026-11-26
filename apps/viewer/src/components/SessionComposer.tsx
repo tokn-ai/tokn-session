@@ -1,6 +1,6 @@
-import { useId, useLayoutEffect, useRef, useState } from "react";
+import { useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ImageAttachmentPreviews, ImageAttachmentPicker, imagePaste, imageDrop } from "./ImageAttachments";
-import { RefreshIcon, SendIcon } from "./Icons";
+import { ChevronIcon, RefreshIcon, SendIcon } from "./Icons";
 import { ComposerToolbar } from "./ComposerToolbar";
 import { useSessionInput } from "../lib/useSessionInput";
 import type { SessionSummary } from "../lib/types";
@@ -9,6 +9,21 @@ import type { SessionModelController } from "../lib/useSessionModel";
 import { SessionModelPicker } from "./SessionModelPicker";
 import { SessionControlSelector } from "./SessionControlSelector";
 import type { SessionControlController } from "../lib/useSessionControl";
+
+function ReadOnlyInput({ title, needs_attention, children }: { title: string; needs_attention: boolean; children: ReactNode }) {
+  const [open, setOpen] = useState(needs_attention);
+  const panelId = useId();
+  useLayoutEffect(() => { if (needs_attention) setOpen(true); }, [needs_attention]);
+  return <div className="composer-read-only">
+    {needs_attention ? <strong className="composer-read-only__heading">{title}</strong> : (
+      <button type="button" className="composer-read-only__toggle" aria-expanded={open} aria-controls={panelId}
+        onClick={() => setOpen(!open)}>{title}<ChevronIcon /></button>
+    )}
+    <div className="composer-read-only__panel" id={panelId} hidden={!needs_attention && !open}>
+      {children}
+    </div>
+  </div>;
+}
 
 export function SessionComposer({ session, on_accepted, input_refresh_key, model, control }: {
   session: SessionSummary | null;
@@ -27,7 +42,8 @@ export function SessionComposer({ session, on_accepted, input_refresh_key, model
   const [focused_session, setFocusedSession] = useState<string | null>(null);
   const expanded = !!input.draft || !!input.images.length || (!!session && focused_session === session.session_key);
   const read_only = input.availability?.available === false;
-  const show_editor = !read_only || !!input.draft || !!input.images.length || input.delivery_uncertain;
+  const control_failed = !!control?.blocked && !control.checking && !control.changing && !!control.error;
+  const show_editor = (!read_only && !control_failed) || !!input.draft || !!input.images.length || input.delivery_uncertain;
 
   useLayoutEffect(() => {
     if (!session || retry_focus.current !== session.session_key) {
@@ -66,17 +82,35 @@ export function SessionComposer({ session, on_accepted, input_refresh_key, model
     input_busy={input.sending || input.delivery_uncertain} selected_model={input.model_draft}
     on_select={input.setModel} on_clear={input.clearModel} />;
   const status_text = input.sending ? input.resuming ? `Resuming ${provider} and sending your message…` : "Sending your message…"
-    : input.notice ?? input.validation_notice ?? (input.checking ? "Checking message availability…" : input.availability?.message);
+    : input.notice ?? input.validation_notice ?? (control_failed ? (show_editor ? "Check the session connection to send your draft." : null)
+      : input.checking ? "Checking message availability…" : input.availability?.message);
   const connection = control && <SessionControlSelector control={control} input_busy={input.sending || input.delivery_uncertain}
     running={session.is_running} />;
-  const foldConnection = !show_editor && control?.status?.can_select && !(control.status.is_running ?? session.is_running)
-    && !control.changing && !control.stopping;
+  const foldConnection = !show_editor && !(control?.status?.is_running ?? session.is_running)
+    && !control?.changing && !control?.stopping && !control?.error && !control?.notice;
+  const needs_attention = show_editor || control_failed || input.availability_error || !!input.notice || !!input.validation_notice;
+  const read_only_title = input.availability_error ? "Couldn’t check message availability" : "Read-only session";
+  const status = <div className="session-composer__status" id={`${inputId}-status`} role="status">
+    {status_text && <span>{status_text}</span>}
+    {read_only && !input.checking && input.availability?.message && input.availability.message !== status_text
+      ? <span>{input.availability.message}</span> : null}
+    {input.delivery_uncertain && <button className="text-button" onClick={() => {
+      input.editMessage();
+      requestAnimationFrame(() => textarea.current?.focus());
+    }} type="button">Edit message</button>}
+    {read_only && <button className="text-button composer-read-only__retry" disabled={input.checking} onClick={(event) => {
+      if (document.activeElement === event.currentTarget) retry_focus.current = session.session_key;
+      input.retryAvailability();
+      if (model) void model.refresh();
+    }} type="button"><RefreshIcon />Retry availability</button>}
+  </div>;
 
   return (
     <form
-      aria-label="Send a message to this session"
+      aria-label={read_only || control_failed ? "Session input" : "Send a message to this session"}
       className="session-composer"
       data-expanded={expanded}
+      data-compact={!needs_attention || undefined}
       onPaste={(event) => { if (!disabled && input.image_limits) imagePaste(event, input.addImages); }}
       onDragOver={(event) => { if (!disabled && input.image_limits && event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
       onDrop={(event) => { if (!disabled && input.image_limits) imageDrop(event, input.addImages); }}
@@ -145,32 +179,11 @@ export function SessionComposer({ session, on_accepted, input_refresh_key, model
             </span>
           </div>
         </>}
-        <div className={read_only ? "composer-read-only" : "session-composer__status"} id={`${inputId}-status`} role="status">
-          {read_only && <strong>Read-only session</strong>}
-          {status_text && <span>{status_text}</span>}
-          {read_only && !input.checking && input.availability?.message && input.availability.message !== status_text
-            ? <span>{input.availability.message}</span> : null}
-          {input.delivery_uncertain ? (
-            <button className="text-button" onClick={() => {
-              input.editMessage();
-              requestAnimationFrame(() => textarea.current?.focus());
-            }} type="button">Edit message</button>
-          ) : null}
-          {read_only ? (
-            <button className="text-button composer-read-only__retry" title="Retry availability" disabled={input.checking} onClick={(event) => {
-              if (document.activeElement === event.currentTarget) retry_focus.current = session.session_key;
-              input.retryAvailability();
-              if (model) void model.refresh();
-            }} type="button">
-              <RefreshIcon /><span>Retry availability</span>
-            </button>
-          ) : null}
-        </div>
-        {!show_editor && (picker || foldConnection) ? <details className="composer-read-only__model" key={session.session_key}>
-          <summary>{foldConnection ? (picker ? "Connection and model" : "Connection details") : "Model details"}</summary>
+        {read_only ? <ReadOnlyInput key={session.session_key} title={read_only_title} needs_attention={needs_attention}>
+          {status}
           {foldConnection && connection}
-          {picker}
-        </details> : null}
+          {!show_editor && picker}
+        </ReadOnlyInput> : status}
       </div>
     </form>
   );
