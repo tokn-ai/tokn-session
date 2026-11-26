@@ -110,7 +110,7 @@ export function SessionBranch({
             {order === "time" && preview ? <span className="session-row__preview" title={preview}>{preview}</span> : null}
             <span className="session-row__meta" id={metadataId}>
               <span className="session-row__provider" data-provider={session.provider}>
-                <span aria-hidden="true" className="provider-dot" />{providerLabel(session.provider)}
+                {providerLabel(session.provider)}
               </span>
               {order === "time" && <><span aria-hidden="true">·</span><span className="session-row__project" title={session.cwd ?? project}>{project}</span></>}
               {!all && isSubagent && <span className="session-row__children" title={relationship ?? undefined}>Subagent</span>}

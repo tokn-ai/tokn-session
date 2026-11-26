@@ -218,16 +218,6 @@
 .sidebar .session-row__title { font-weight: 540; line-height: 17px; }
 .sidebar .session-row__preview { font-size: 11px; }
 .sidebar .session-row__meta { min-width: 0; gap: 5px; }
-.sidebar .session-row__provider {
-  display: inline-flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: 4px;
-  color: var(--text-soft);
-  font-weight: 500;
-}
-
-.sidebar .session-row__provider .provider-dot { width: 5px; height: 5px; opacity: 1; }
 .sidebar .session-row__project { line-height: inherit; }
 
 .session-row__children {

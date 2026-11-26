@@ -257,7 +257,7 @@ export function Sidebar({
           {PROVIDERS.map((provider) => (
             <button aria-pressed={enabled_providers.has(provider)} className="provider-filter" data-provider={provider}
               key={provider} onClick={() => on_provider_toggle(provider)} type="button">
-              <span className="provider-dot" />{providerLabel(provider)}
+              {providerLabel(provider)}
             </button>
           ))}
           {enabled_providers.size !== PROVIDERS.length && <button className="text-button" type="button" onClick={() => {

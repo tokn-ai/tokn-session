@@ -23,7 +23,7 @@ export function SessionDraftRows({ entries, selected_draft_id, show_project = tr
         </span>
         <span className="session-row__meta">
           <span className="session-row__provider" data-provider={draft.selection.provider === "open_code" ? "opencode" : draft.selection.provider}>
-            <span className="provider-dot" aria-hidden="true" />{DRAFT_AGENT_NAMES[draft.selection.provider]}
+            {DRAFT_AGENT_NAMES[draft.selection.provider]}
           </span>
           {show_project && <><span aria-hidden="true">·</span><span className="session-row__project" title={project?.folder_path}>{project?.name ?? "Choose a project"}</span></>}
         </span>
