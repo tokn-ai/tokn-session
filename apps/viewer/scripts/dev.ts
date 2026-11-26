@@ -1,13 +1,19 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { createServer, type ViteDevServer } from "vite";
+import { installDemoRollout, isolatedViewerEnvironment } from "./session-demo";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 let child: ChildProcess | undefined;
 let vite: ViteDevServer | undefined;
 let stopping = false;
+let demoHome: string | undefined;
+let apiEnded: Promise<void> | undefined;
 
 async function stop() {
   if (stopping) return;
@@ -52,13 +58,20 @@ async function main() {
   const executable = await buildApi();
   if (stopping) return;
   const token = randomBytes(32).toString("hex");
-  const api = spawn(executable, ["--api-only", "--bind", "127.0.0.1:0"], {
-    cwd: root,
-    env: { ...process.env, TOKN_VIEWER_TOKEN: token },
+  const args = ["--api-only", "--bind", "127.0.0.1:0"];
+  if (process.argv.includes("--demo")) {
+    demoHome = await mkdtemp(join(tmpdir(), "tokn-reader-demo-"));
+    await installDemoRollout(demoHome);
+    args.push("--local", "--native", "--index-path", join(demoHome, "index.sqlite"));
+  }
+  if (stopping) return;
+  const api = spawn(executable, args, {
+    cwd: demoHome ?? root,
+    env: { ...(demoHome ? isolatedViewerEnvironment(demoHome) : process.env), TOKN_VIEWER_TOKEN: token },
     stdio: ["ignore", "inherit", "pipe"],
   });
   child = api;
-  const ended = new Promise<void>((resolve) => {
+  apiEnded = new Promise<void>((resolve) => {
     api.once("close", (code) => {
       child = undefined;
       if (!stopping) {
@@ -83,8 +96,8 @@ async function main() {
     root,
     server: {
       host: "127.0.0.1",
-      port: Number(process.env.TOKN_VIEWER_DEV_PORT ?? 1437),
-      strictPort: true,
+      port: Number(process.env.TOKN_VIEWER_DEV_PORT ?? (demoHome ? 1438 : 1437)),
+      strictPort: !demoHome || !!process.env.TOKN_VIEWER_DEV_PORT,
       proxy: { "/api": { target: endpoint } },
     },
   });
@@ -93,7 +106,7 @@ async function main() {
   const url = vite.resolvedUrls?.local[0];
   if (!url) throw new Error("Vite did not provide a local address");
   console.log(`\nOpen the viewer: ${url}#token=${encodeURIComponent(token)}\n`);
-  await ended;
+  await apiEnded;
 }
 
 try { await main(); }
@@ -102,4 +115,8 @@ catch (error) {
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;
   }
-} finally { await stop(); }
+} finally {
+  await stop();
+  await apiEnded;
+  if (demoHome) await rm(demoHome, { recursive: true, force: true });
+}

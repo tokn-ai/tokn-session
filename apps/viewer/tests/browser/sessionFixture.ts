@@ -1,4 +1,5 @@
 import { test as base } from "@playwright/test";
+import { installDemoRollout, isolatedViewerEnvironment } from "../../scripts/session-demo";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -50,40 +51,47 @@ interface ViewerFixture {
   appendTurn: (prompt: string, reply: string) => Promise<void>;
 }
 
-export const test = base.extend<{ viewer: ViewerFixture }>({
-  viewer: async ({}, use) => {
-    const home = await mkdtemp(join(tmpdir(), "session-reader-"));
-    try {
-      const appendTurn = await writeSession(home);
-      const token = randomUUID();
-      const target = resolve(root, process.env.CARGO_TARGET_DIR || "target");
-      const executable = process.platform === "win32" ? "tokn-viewer-api.exe" : "tokn-viewer-api";
-      const server = spawn(join(target, "debug", executable), [
-        "--local", "--bind", "127.0.0.1:0", "--web-root", join(root, "apps/viewer/dist"),
-        "--index-path", join(home, "index.sqlite"),
-      ], {
-        cwd: home,
-        env: { HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home, TMPDIR: home,
-          SystemRoot: process.env.SystemRoot, TOKN_VIEWER_TOKEN: token },
-        stdio: ["ignore", "ignore", "pipe"],
+async function serveFixture(home: string, use: (url: string) => Promise<void>, includeNative = false) {
+  const token = randomUUID();
+  const target = resolve(root, process.env.CARGO_TARGET_DIR || "target");
+  const executable = process.platform === "win32" ? "tokn-viewer-api.exe" : "tokn-viewer-api";
+  const server = spawn(join(target, "debug", executable), [
+    "--local", "--bind", "127.0.0.1:0", "--web-root", join(root, "apps/viewer/dist"),
+    "--index-path", join(home, "index.sqlite"), ...(includeNative ? ["--native"] : []),
+  ], {
+    cwd: home,
+    env: { ...isolatedViewerEnvironment(home), TOKN_VIEWER_TOKEN: token },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  const closed = new Promise<void>(done => server.once("close", () => done()));
+  try {
+    const endpoint = await new Promise<string>((ready, reject) => {
+      server.once("error", reject);
+      server.once("exit", code => reject(new Error(`Viewer API exited during startup (${code})`)));
+      createInterface({ input: server.stderr }).on("line", line => {
+        if (line.startsWith("Viewer listening on ")) ready(line.slice("Viewer listening on ".length));
+        else process.stderr.write(line + "\n");
       });
-      const closed = new Promise<void>(done => server.once("close", () => done()));
-      try {
-        const endpoint = await new Promise<string>((ready, reject) => {
-          server.once("error", reject);
-          server.once("exit", code => reject(new Error(`Viewer API exited during startup (${code})`)));
-          createInterface({ input: server.stderr }).on("line", line => {
-            if (line.startsWith("Viewer listening on ")) ready(line.slice("Viewer listening on ".length));
-            else process.stderr.write(line + "\n");
-          });
-        });
-        await use({ url: `${endpoint}/#token=${token}`, appendTurn });
-      } finally {
-        server.kill();
-        await closed;
-      }
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
+    await use(`${endpoint}/#token=${token}`);
+  } finally {
+    server.kill();
+    await closed;
+  }
+}
+
+export const test = base.extend<{ fixture_home: string; viewer: ViewerFixture; demo_url: string }>({
+  fixture_home: async ({}, use) => {
+    const home = await mkdtemp(join(tmpdir(), "session-reader-"));
+    try { await use(home); }
+    finally { await rm(home, { recursive: true, force: true }); }
+  },
+  viewer: async ({ fixture_home }, use) => {
+    const appendTurn = await writeSession(fixture_home);
+    await serveFixture(fixture_home, url => use({ url, appendTurn }));
+  },
+  demo_url: async ({ fixture_home }, use) => {
+    await installDemoRollout(fixture_home);
+    await serveFixture(fixture_home, use, true);
   },
 });

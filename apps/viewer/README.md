@@ -62,6 +62,12 @@ the token from the address bar before rendering. Ctrl-C stops both processes.
 Set `TOKN_VIEWER_DEV_PORT` if port 1437 is occupied. The launcher uses a free
 loopback API port and requires no frontend build.
 
+To explore a mock Codex rollout, run `pnpm run demo:session` from `apps/viewer`
+and open the printed link. Select **Fix whitespace tokenization**. Its three
+turns reproduce a failing test, edit the lexer and verify the fix. The demo
+uses a temporary home and index. Ctrl-C removes both. The JSONL fixture is in
+[`fixtures/session-reader`](fixtures/session-reader).
+
 For separately managed processes, `pnpm run dev` starts Vite. Start
 `cargo run -p tokn-viewer-api -- --api-only` in another terminal, then open
 `http://localhost:1437` and connect using the prefilled address. Vite proxies
@@ -87,6 +93,10 @@ cargo build --locked -p tokn-viewer-api
 pnpm exec playwright install firefox
 pnpm run test:browser
 ```
+
+The Firefox tests capture the demo conversation, prompt index, failed command,
+file edit and inspector on desktop and phone. CI saves the PNGs in the
+`session-reader-previews` artifact.
 
 ## Response translation
 
@@ -119,7 +129,9 @@ closing the viewer.
 The host checks the available control route for each session. Supported agents
 offer **Send**, **Guide**, **Queue**, or **Stop** according to their runtime
 capabilities. The model menu and image attachments use the same session scope.
-A read-only session shows the host reason and a **Retry availability** action.
+Open **Read-only session** to see the host's reason, **Retry availability**
+and available connection and model controls. A failed availability check
+displays its error immediately.
 
 The footer reports acceptance or failure, including the backend's failure
 reason. After acceptance, the viewer refreshes history immediately and briefly
@@ -161,10 +173,10 @@ Fenced code blocks show their language when provided and offer a separate copy a
 when the clipboard is available. Copy appears once a streamed or clipped code block
 is complete. **Inspect** opens the underlying event.
 
-Use **Jump to prompt** to search loaded prompts, see the current reading position,
-or load earlier history. After jumping, you can return to where you were reading
-or jump to the latest activity. Live replies render Markdown while reasoning and
-tool details can be expanded independently.
+Use **Jump to prompt** to search loaded prompts or load earlier history. The
+arrows on either side step through prompts. **Alt+↑** and **Alt+↓** also step
+when the history or a prompt has keyboard focus. **Back to reading position**
+returns to the line where you started. **Jump to latest** resumes following.
 
 Historical agent-activity records become delegation cards when their native
 target id resolves to a canonical direct child of the selected session within
@@ -180,6 +192,10 @@ Earlier history is loaded on demand. Technical event headers expand in place,
 while their **Inspect** action opens the full inspector. Messages and reasoning
 have a readable **Content** view, while **Normalized** and **Native** expose the
 debugging representations.
+On desktop the inspector stays beside the conversation so you can compare
+events in the same tab. On phones it opens as a dialog. **Escape** returns
+focus to the inspection control. The JSON tabs offer a copy action when the
+clipboard is available.
 
 **Hide lifecycle** is a quick filter for routine lifecycle and bookkeeping
 rows without message content, including session settings, delivery markers, and
@@ -207,7 +223,9 @@ the last, including tools that start and finish in separate records. A folded gr
 previews up to three recent tools with their commands or targets and any pending,
 running or failed status.
 Expanding it fetches its contained event rows in bounded pages and shows
-them as their normal event cards. Each row remains independently inspectable,
+them as their normal event cards. A turn with a single tool and routine
+bookkeeping opens directly to the tool row. Select the row to read its output.
+Each row remains independently inspectable,
 and a recorded delegation can still open its verified direct child session.
 
 Relay batches refresh existing timeline and expanded child items without
