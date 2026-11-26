@@ -126,6 +126,33 @@ struct Payload {
   legacy_turn_id: Option<String>,
 }
 
+// Decode only these small fields on the candidate boundary rows. The generic
+// reverse scan never needs to retain message bodies, attachments, or tool data.
+#[derive(Deserialize)]
+struct PayloadProbe<T> {
+  payload: T,
+}
+
+#[derive(Deserialize)]
+struct GoalTurnProbe {
+  turn_attribution: TurnTrigger,
+}
+
+#[derive(Deserialize)]
+struct TurnTrigger {
+  turn_trigger: String,
+}
+
+#[derive(Deserialize)]
+struct GoalMessageProbe {
+  internal_chat_message_metadata_passthrough: ContentKinds,
+}
+
+#[derive(Deserialize)]
+struct ContentKinds {
+  content_item_kinds: [String; 1],
+}
+
 pub(super) fn start(
   files: &mut [ScratchFile],
   lengths: &[u64],
@@ -136,14 +163,45 @@ pub(super) fn start(
 ) -> Result<u64, String> {
   let mut logical = lengths.iter().sum::<u64>();
   let mut remaining = turns;
+  let mut goal_boundary = None;
   for (file, length) in files.iter_mut().zip(lengths).rev() {
     logical -= length;
-    let mut lines = ReverseLines::within(file, *length, 0, max_record_bytes, work);
+    let lower = if goal_boundary.is_some() {
+      length.saturating_sub(max_record_bytes as u64)
+    } else {
+      0
+    };
+    let mut lines = ReverseLines::within(file, *length, lower, max_record_bytes, work);
     while let Some((offset, row)) = lines.next(stats)? {
       stats.boundary_rows_scanned += 1;
-      let Ok(probe) = serde_json::from_slice::<Probe>(&row) else {
-        continue;
-      };
+      let probe = serde_json::from_slice::<Probe>(&row);
+      if let Some(boundary) = goal_boundary {
+        // A user-set goal and its initial status precede Codex’s execution
+        // turn. Keep the source rows with that turn, including across segments.
+        let Ok(probe) = probe else { return Ok(boundary) };
+        match (probe.kind.as_str(), probe.payload.kind.as_str()) {
+          ("session_meta", _) => continue,
+          ("event_msg", "thread_goal_updated") => {
+            goal_boundary = Some(logical + offset);
+            lines.limit_goal_lookbehind(offset);
+            continue;
+          }
+          ("response_item", "message") => {
+            if serde_json::from_slice::<PayloadProbe<GoalMessageProbe>>(&row).is_ok_and(|probe| {
+              probe
+                .payload
+                .internal_chat_message_metadata_passthrough
+                .content_item_kinds[0]
+                == tokn_session_core::MessageEvent::CODEX_USER_GOAL
+            }) {
+              return Ok(logical + offset);
+            }
+          }
+          _ => {}
+        }
+        return Ok(boundary);
+      }
+      let Ok(probe) = probe else { continue };
       if probe.kind == "event_msg"
         && matches!(probe.payload.kind.as_str(), "task_started" | "turn_started")
         && probe
@@ -154,12 +212,22 @@ pub(super) fn start(
       {
         remaining = remaining.saturating_sub(1);
         if remaining == 0 {
-          return Ok(logical + offset);
+          if serde_json::from_slice::<PayloadProbe<GoalTurnProbe>>(&row)
+            .is_ok_and(|probe| probe.payload.turn_attribution.turn_trigger == "goal")
+          {
+            goal_boundary = Some(logical + offset);
+            lines.limit_goal_lookbehind(offset);
+          } else {
+            return Ok(logical + offset);
+          }
         }
       }
     }
+    if let Some(boundary) = goal_boundary.filter(|_| lines.lower_bound > 0) {
+      return Ok(boundary);
+    }
   }
-  Ok(0)
+  Ok(goal_boundary.unwrap_or(0))
 }
 
 pub(super) fn is_turn_start(line: &CodexLine) -> bool {
@@ -202,6 +270,12 @@ impl<'a> ReverseLines<'a> {
       max_record_bytes,
       work,
     }
+  }
+
+  // The preceding row is optional. A goal-triggered turn must still open when
+  // the row before it is an unrelated, oversized record outside the window.
+  fn limit_goal_lookbehind(&mut self, end: u64) {
+    self.lower_bound = end.saturating_sub(self.max_record_bytes as u64).min(self.position);
   }
 
   fn next(&mut self, stats: &mut CodexHistoryReadStats) -> Result<Option<(u64, Vec<u8>)>, String> {

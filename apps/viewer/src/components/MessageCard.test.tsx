@@ -103,6 +103,39 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+describe("recorded goals", () => {
+  it("labels the goal beneath its prompt and preserves full-message disclosure", () => {
+    const objective = Array.from({ length: 12 }, (_, index) => `Requirement ${index + 1}`).join("\n");
+    const { rerender } = render(card(message({ role: "user", summary: objective, goal: { kind: "prompt" } })));
+    const prompt = screen.getByRole("article", { name: "user message" });
+    expect(prompt).toHaveAttribute("data-goal-prompt");
+    expect(prompt.querySelector("footer")).toContainElement(screen.getByText("Sent as goal"));
+    fireEvent.click(screen.getByRole("button", { name: "Read full prompt" }));
+    expect(screen.getByText(/Requirement 12/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Inspect user message" })).toBeEnabled();
+
+    rerender(card(message({ role: "user", summary: "An ordinary prompt" })));
+    expect(prompt).not.toHaveAttribute("data-goal-prompt");
+    expect(screen.queryByText("Sent as goal")).not.toBeInTheDocument();
+  });
+
+  it("puts the recorded completion duration and reply time next to the final reply actions", () => {
+    const reply = message({ delivery: "final", goal: { kind: "completed", duration_ms: "94000" } });
+    const { rerender } = render(card(reply));
+    const article = screen.getByRole("article", { name: "Codex message" });
+    const footer = article.querySelector("footer");
+    expect(footer).toContainElement(screen.getByText("Goal achieved in 1m 34s"));
+    expect(footer).toContainElement(screen.getByRole("button", { name: "Inspect assistant message" }));
+    expect(footer?.querySelectorAll("time")).toHaveLength(1);
+    expect(footer?.querySelector(".message-goal-completion time")).toHaveAttribute("datetime", reply.timestamp);
+
+    rerender(card(message({ delivery: "final", goal: { kind: "completed" } })));
+    expect(screen.getByText("Goal achieved", { exact: true })).toBeVisible();
+    rerender(card(message({ delivery: "final" })));
+    expect(screen.queryByText(/Goal achieved/)).not.toBeInTheDocument();
+  });
+});
+
 describe("reading long messages", () => {
   it("keeps prompt text alone in its bubble and puts timestamp and inspection after the message", () => {
     const view = render(card(message({ role: "user", summary: "Looks good.", timestamp: "2026-01-02T12:30:00Z" })));

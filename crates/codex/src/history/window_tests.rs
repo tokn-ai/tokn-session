@@ -323,3 +323,103 @@ fn response_metadata_is_not_seeded_from_lazy_model_baselines_and_follows_exact_a
   assert_eq!(full_messages[1].1.response_metadata, retained[0].1.response_metadata);
   assert_eq!(full_messages[2].1.response_metadata, appended[0].1.response_metadata);
 }
+
+#[test]
+fn goal_triggered_window_keeps_the_preamble_and_finds_a_continued_goal_completion() {
+  let objective = "Review the parser.";
+  let goal = |status| json!({"threadId":"lazy","objective":objective,"status":status,"createdAt":10});
+  let marker = row(
+    json!({"type":"response_item","payload":{"type":"message","role":"user","id":"goal-input",
+    "content":[{"type":"input_text","text":format!(
+      "<codex_internal_context source=\"user_goal\">\nUser set the goal: \"{objective}\"\nUser set goal status: \"active\".\n</codex_internal_context>")}],
+    "internal_chat_message_metadata_passthrough":{"turn_id":"input-turn","content_item_kinds":["user.goal"],
+    "content_item_metadata":[{"provenance":{"type":"harness","hook":false}}]}}}),
+  );
+  let active =
+    row(json!({"type":"event_msg","payload":{"type":"thread_goal_updated","threadId":"lazy","goal":goal("active")}}));
+  let goal_turn = row(
+    json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"work",
+    "turn_attribution":{"turn_trigger":"goal"}}}),
+  );
+  let (_directory, path, source) = fixture(&(turn(0) + &marker + &active + &goal_turn));
+  let mut reader = CodexHistoryReader::new_window(path.clone(), false, 64 * 1024, 1);
+  let first = reader.poll(&source).unwrap().unwrap();
+  assert!(first.source_start.unwrap() > 0);
+  assert!(
+    matches!(first.records[0].events.as_slice(), [AgentEvent::Message(m)] if m.is_user_goal() && m.text == objective)
+  );
+
+  // A later goal continuation can have no user prompt or active snapshot in its
+  // own turn. Its successful receipt still belongs to the original objective.
+  let metadata = json!({"turn_id":"continued"});
+  let continuation = row(
+    json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"continued",
+    "turn_attribution":{"turn_trigger":"goal"}}}),
+  ) + &row(
+    json!({"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"update",
+      "input":"text(await tools.update_goal({status:\"complete\"}))","internal_chat_message_metadata_passthrough":metadata}}),
+  ) + &row(
+    json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"update",
+      "output":[{"type":"input_text","text":"Script completed\nWall time 0.0 seconds\nOutput:\n"},
+        {"type":"input_text","text":json!({"goal":goal("complete")}).to_string()}],"internal_chat_message_metadata_passthrough":metadata}}),
+  );
+  std::fs::OpenOptions::new()
+    .append(true)
+    .open(&path)
+    .unwrap()
+    .write_all(continuation.as_bytes())
+    .unwrap();
+
+  let appended = reader.poll(&source).unwrap().unwrap();
+  let mut reopened = CodexHistoryReader::new_window(path, false, 64 * 1024, 1);
+  let reopened = reopened.poll(&source).unwrap().unwrap();
+  for snapshot in [appended, reopened] {
+    assert_eq!(
+      snapshot
+        .records
+        .iter()
+        .flat_map(|r| &r.events)
+        .filter(|event| matches!(event,
+      AgentEvent::GoalUpdated(g) if g.turn_id.as_deref()==Some("continued") && g.goal==Some(goal("complete"))))
+        .count(),
+      1
+    );
+  }
+}
+
+#[test]
+fn optional_goal_preamble_does_not_load_an_oversized_unrelated_record() {
+  let old = row(json!({"type":"unknown","payload":{"text":"x".repeat(256 * 1024)}}));
+  let recent = row(
+    json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"current",
+    "turn_attribution":{"turn_trigger":"goal"}}}),
+  );
+  let (_directory, path, source) = fixture(&(old + &recent));
+  let limits = CodexHistoryLimits {
+    max_record_bytes: 32 * 1024,
+    ..Default::default()
+  };
+  let mut reader = CodexHistoryReader::new_window_with_limits(path, false, limits, 1);
+  let page = reader.poll(&source).unwrap().unwrap();
+  assert_eq!(page.records.len(), 1);
+  assert!(page.source_start.unwrap() > 256 * 1024);
+}
+
+#[test]
+fn goal_lookbehind_skips_unrelated_message_payloads() {
+  // This provider extension exceeds the depth accepted when materializing a
+  // serde_json::Value. Scanning for a marker only needs the content item kinds.
+  let extra = format!("{}null{}", "[".repeat(150), "]".repeat(150));
+  let previous = format!(
+    r#"{{"type":"response_item","payload":{{"type":"message","role":"assistant","content":[],"extension":{extra}}}}}"#
+  );
+  let recent = row(
+    json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"goal",
+    "turn_attribution":{"turn_trigger":"goal"}}}),
+  );
+  let (_directory, path, source) = fixture(&(previous + "\n" + &recent));
+  let mut reader = CodexHistoryReader::new_window(path, false, 32 * 1024, 1);
+  let page = reader.poll(&source).unwrap().unwrap();
+  assert_eq!(page.records.len(), 1);
+  assert!(matches!(page.records[0].events.as_slice(), [AgentEvent::Lifecycle(turn)] if turn.turn_id == "goal"));
+}

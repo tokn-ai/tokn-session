@@ -59,6 +59,22 @@ pub(crate) fn decode_call(input: &Value) -> Option<DecodedCodeModeCall> {
   input.is_object().then_some(DecodedCodeModeCall { tool, input })
 }
 
+/// A goal status can only come from the nested tool itself. Accept the literal
+/// one-call wrapper and reject any script that could print its own response.
+pub(super) fn completes_goal(input: &Value) -> bool {
+  let Some(source) = input.as_str().map(str::trim) else {
+    return false;
+  };
+  let source = source.strip_suffix(';').unwrap_or(source).trim_end();
+  let Some(arguments) = source
+    .strip_prefix("text(await tools.update_goal(")
+    .and_then(|s| s.strip_suffix("))"))
+  else {
+    return false;
+  };
+  parse_literal_object(arguments.trim()).is_some_and(|value| value == serde_json::json!({"status":"complete"}))
+}
+
 /// Decode the executor's structured result for an already-recognized Code
 /// Mode call.  This is intentionally coupled to `decode_call`: a random
 /// custom-tool result containing JSON must not be reinterpreted this way.

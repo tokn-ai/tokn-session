@@ -157,6 +157,21 @@ pub struct MessageEvent {
   pub timestamp: Option<String>,
 }
 
+impl MessageEvent {
+  /// Codex's explicit user-authored goal, distinct from its automatic continuation instructions.
+  pub const CODEX_USER_GOAL: &'static str = "user.goal";
+
+  pub fn is_user_goal(&self) -> bool {
+    self.provider == Provider::Codex
+      && self.role == Role::User
+      && self
+        .provenance
+        .as_ref()
+        .and_then(|provenance| provenance.source.as_str())
+        == Some(Self::CODEX_USER_GOAL)
+  }
+}
+
 /// A recorded request for user input, not evidence that input is still pending.
 #[derive(Debug, Serialize, Clone, Deserialize)]
 pub struct QuestionRequestEvent {

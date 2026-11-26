@@ -410,7 +410,7 @@ impl CodexHistoryReader {
       },
     )?;
     state.offset = head.length;
-    if state.source_start > 0 && state.dependencies.missing {
+    if state.source_start > 0 && (state.dependencies.missing || state.normalizer.missing_goal_origin()) {
       self.widen_dependencies();
       return self.rebuild(source, projection, work).map(Some);
     }
@@ -654,7 +654,7 @@ impl CodexHistoryReader {
     }
     // A result can arrive after its invocation's turn. Widen only when that
     // dependency is actually needed, before publishing a partial operation.
-    if source_start > 0 && dependencies.missing {
+    if source_start > 0 && (dependencies.missing || normalizer.missing_goal_origin()) {
       self.widen_dependencies();
       // A retry must release its decoded files before reserving a wider range.
       drop(files);

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { SessionSummary } from "./types";
 import {
   findKnownSession,
+  formatRecordedDuration,
   groupSessions,
   knownSessionAncestors,
   preserveSessionSelection,
@@ -9,6 +10,15 @@ import {
   sessionDisplayTitle,
   shortSessionId,
 } from "./state";
+
+it("formats whole-second durations without losing precision", () => {
+  expect(formatRecordedDuration("9007199254740993")).toBe("104249991d 8h 59m");
+  expect(formatRecordedDuration("0")).toBe("0s");
+  expect(formatRecordedDuration("999")).toBe("0s");
+  expect(formatRecordedDuration("1999")).toBe("1s");
+  expect(formatRecordedDuration("61234")).toBe("1m 1s");
+  expect(formatRecordedDuration("not-a-duration")).toBeNull();
+});
 
 function session(overrides: Partial<SessionSummary> = {}): SessionSummary {
   return {

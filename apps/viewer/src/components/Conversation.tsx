@@ -311,6 +311,7 @@ export function Conversation({
 
               {visibleEvents.map((event) => (
                 <div tabIndex={-1} data-reading-slot={event.slot_key ?? event.event_key} data-reading-type={event.type}
+                  data-goal-kind={event.goal?.kind}
                   data-reading-timestamp={event.timestamp ?? ""}
                   data-reading-prompt={isVisiblePrompt(event) || undefined}
                   data-event-key={event.event_key} data-scroll-key={readingEventKey(event)} key={`${session.session_key}:${event.event_key}`}>

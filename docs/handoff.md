@@ -12,7 +12,9 @@ session search on desktop and opens the drawer on phones. The conversation
 header can search loaded prompts. Readers can return to their previous position
 after a jump, including across live updates. User prompts, work disclosures,
 agent replies and transient native output share one reading column. The
-session title opens metadata and the lifecycle filter. Long messages expand
+session title opens metadata and the lifecycle filter. Codex goal-triggered
+turns show the authored goal and keep work together across compaction. The final
+reply shows the outcome from a matching completion receipt. Long messages expand
 inline, and opening a short work group reveals its operations directly. Run
 `pnpm run demo:session` in `apps/viewer` for a mock Codex rollout with a
 failing command, a file edit and a successful rerun. Firefox CI exercises

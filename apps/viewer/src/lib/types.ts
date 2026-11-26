@@ -866,6 +866,8 @@ export interface UploadImageChunkResponse {
 export interface ReleaseImageUploadRequest { target: ImageUploadTarget; upload_id: string }
 
 export interface EventSummary {
+  /** Recorded goal associations for the prompt, its work, and its final reply. */
+  goal?: { kind: "prompt" } | { kind: "work" } | { kind: "completed"; duration_ms?: string | null };
   model_change?: { previous: ModelIdentity; current: ModelIdentity };
   response_metadata?: {
     model?: { model: Pick<ModelIdentity, "model_provider" | "model_id">; origin: "request" | "response" };

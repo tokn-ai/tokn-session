@@ -134,7 +134,8 @@ impl ViewerService {
     };
     let identity = self.window_identity(&locator, &loaded, true)?;
     let models = model_projection::ModelProjection::new(&loaded.events, loaded.reference.model_baseline.as_ref());
-    let timeline = timeline_entries_with_models(&loaded.events, &models);
+    let goals = goal_projection::GoalProjection::new(&loaded.events);
+    let timeline = timeline_entries_with_models(&loaded.events, &models, &goals);
     let entries: Vec<_> = timeline
       .iter()
       .filter(|entry| timeline_entry_start_source_event_index(entry).is_some_and(|index| index >= start))
@@ -145,17 +146,11 @@ impl ViewerService {
       .then(|| self.delegation_targets_for_parent(&locator))
       .unwrap_or_default();
     let intermediate_usage = usage_filter::intermediate_usage(&loaded.events);
-    let events = entries
-      .iter()
-      .map(|entry| {
-        identity.summary(models.summary(timeline_entry_event_summary(
-          entry,
-          &loaded.events,
-          &targets,
-          &intermediate_usage,
-        )))
-      })
-      .collect::<Vec<_>>();
+    let summarize = |entry: &TimelineEntry| {
+      let summary = timeline_entry_event_summary(entry, &loaded.events, &targets, &intermediate_usage);
+      identity.summary(models.summary(goals.summary(entry, summary)))
+    };
+    let events = entries.iter().map(|entry| summarize(entry)).collect::<Vec<_>>();
     // Intermediate assistant messages and individual tool operations remain
     // semantic objects even when the current UI folds them into a trajectory.
     let base = if include_semantic {
@@ -167,14 +162,7 @@ impl ViewerService {
       base
         .iter()
         .filter(|entry| timeline_entry_start_source_event_index(entry).is_some_and(|index| index >= start))
-        .map(|entry| {
-          identity.summary(models.summary(timeline_entry_event_summary(
-            entry,
-            &loaded.events,
-            &targets,
-            &intermediate_usage,
-          )))
-        })
+        .map(summarize)
         .collect()
     } else {
       Vec::new()

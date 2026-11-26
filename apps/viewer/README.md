@@ -176,6 +176,12 @@ Fenced code blocks show their language when provided and offer a separate copy a
 when the clipboard is available. Copy appears once a streamed or clipped code block
 is complete. **Inspect** opens the underlying event.
 
+A Codex goal appears as a blue prompt with **Sent as goal**. Expand **Worked
+for** to inspect individual operations, command failures, context compaction
+and turn accounting. The final reply shows **Goal achieved** when the rollout
+records completion. Its duration comes from the goal receipt and may differ
+from the time spent on work in the current turn.
+
 Use **Jump to prompt** to search loaded prompts or load earlier history. The
 arrows on either side step through prompts. **Alt+↑** and **Alt+↓** also step
 when the history or a prompt has keyboard focus. **Back to reading position**
@@ -215,8 +221,9 @@ Contiguous stretches of intermediate assistant progress and non-message work
 are grouped into a compact work trajectory item, keeping the
 surrounding conversation easy to scan. A non-final assistant message itself is
 enough to make a stretch fold; metadata-only stretches remain flat. Terminal
-bookkeeping after a final reply remains as ordinary chronological rows instead
-of creating a second **Worked** item. It shows
+bookkeeping after a final reply stays chronological. For a Codex goal turn with a
+recorded identity and a work disclosure, trailing usage belongs to that
+disclosure. Compaction during the same turn also remains available there. It shows
 **Working for …** with a ticking elapsed time when a provider turn-start is
 observed, auto-expanding to show the newest work. Completion collapses it to
 **Worked for …**; it can be reopened manually. Providers without reliable turn

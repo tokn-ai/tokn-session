@@ -1,13 +1,13 @@
 import { useId, useMemo } from "react";
 import { bindMarkdownImages } from "../lib/markdownImages";
 import type { EventSummary } from "../lib/types";
-import { formatTimestamp, providerLabel } from "../lib/state";
+import { formatRecordedDuration, formatTimestamp, providerLabel } from "../lib/state";
 import { useMessageTranslation } from "../lib/useMessageTranslation";
 import { MessageImages } from "./MessageImages";
 import { MarkdownContent } from "./MarkdownContent";
 import { CopyTextButton } from "./CopyTextButton";
 import { messageExcerpt, useMessageBody } from "../lib/useMessageBody";
-import { ChevronIcon, InspectorIcon } from "./Icons";
+import { ChevronIcon, CompletedGoalIcon, GoalIcon, InspectorIcon } from "./Icons";
 import { useTranslationEngine, useTranslationStatus } from "./TranslationProvider";
 import "./Transcript.css";
 
@@ -75,10 +75,14 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
     : response?.fast_mode === "requested" ? "Fast requested" : undefined;
   const phase = event.phase && event.phase !== "finished" ? event.phase : null;
   const progress = event.delivery === "commentary";
+  const goalPrompt = !event.is_hidden && role === "user" && event.goal?.kind === "prompt";
+  const completion = !event.is_hidden && role === "assistant" && event.goal?.kind === "completed" ? event.goal : null;
+  const goalDuration = completion && formatRecordedDuration(completion.duration_ms);
+  const timestamp = event.timestamp && <time dateTime={event.timestamp} title={formatTimestamp(event.timestamp)}>{formatTimestamp(event.timestamp, "time")}</time>;
 
   return (
     <article className="message-event transcript-message" aria-label={`${sender} message`}
-      data-kind={event.type} data-presentation={presentation} data-role={role} data-selected={is_selected}>
+      data-kind={event.type} data-presentation={presentation} data-role={role} data-selected={is_selected} data-goal-prompt={goalPrompt || undefined}>
       <div className="message-event__surface">
         {(presentation === "technical" || progress || phase) && <header className="message-phase">
           {presentation === "technical" && <span>{sender}</span>}
@@ -135,6 +139,7 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
         ) : null}
       </div>
       <footer className="message-utilities" data-read-action={inspectFullMessage || undefined}>
+        {goalPrompt && <span className="message-goal-label"><GoalIcon />Sent as goal</span>}
         <div className="message-utilities__buttons">
           {canCopy && <CopyTextButton class_name="message-event__inspect" text={copyText} label={preview
             ? "Copy message preview" : translation.showing_translation ? "Copy translation" : "Copy message"} />}
@@ -146,6 +151,10 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
             aria-label="Translate → 简体中文" className="message-event__inspect" onClick={() => { void translation.translate(); }}
             title={engine?.description} type="button">Translate</button>}
         </div>
+        {completion && <span className="message-goal-completion">
+          <span className="message-goal-label"><CompletedGoalIcon />{goalDuration ? `Goal achieved in ${goalDuration}` : "Goal achieved"}</span>
+          {timestamp}
+        </span>}
         {model || fast ? <span className="message-event__response" role="group" aria-label="Response details">
           {model && <span title={[model_source, model.model.model_provider].filter(Boolean).join(" · ")}>{model.model.model_id}</span>}
           {fast && <span>{fast}</span>}
@@ -171,7 +180,7 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
         )}
         {(role === "assistant" || event.timestamp) && <span className="message-byline">
           {role === "assistant" && <span className="message-byline__sender" data-provider={event.provider}>{sender}</span>}
-          {event.timestamp && <time dateTime={event.timestamp} title={formatTimestamp(event.timestamp)}>{formatTimestamp(event.timestamp, "time")}</time>}
+          {!completion && timestamp}
         </span>}
       </footer>
     </article>

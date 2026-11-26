@@ -39,6 +39,7 @@ use crate::repository::{NativeRepository, SessionBodyIndexing, ViewerRepository}
 mod agent_activity;
 mod compaction;
 mod event_filter;
+mod goal_projection;
 mod image_resources;
 mod input;
 mod managed_sessions;
@@ -690,7 +691,16 @@ struct Trajectory {
   /// `trajectory.v1.*` key. Unlike the run's final position, this remains
   /// stable while an active trajectory gains appended events.
   start_source_event_index: usize,
+  /// Recorded goal work can own an earlier goal marker and later usage. Keep
+  /// its clock inside the actual execution and the reply in the conversation.
+  goal: Option<GoalSegment>,
   entries: Vec<TimelineEntry>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GoalSegment {
+  source_floor: usize,
+  reply_index: Option<usize>,
 }
 
 impl ViewerService {
@@ -3110,7 +3120,8 @@ impl ViewerService {
       loaded
     };
     let models = model_projection::ModelProjection::new(&loaded.events, loaded.reference.model_baseline.as_ref());
-    let timeline = timeline_entries_with_models(&loaded.events, &models);
+    let goals = goal_projection::GoalProjection::new(&loaded.events);
+    let timeline = timeline_entries_with_models(&loaded.events, &models, &goals);
     let identity = self.window_identity(&locator, &loaded, false)?;
     let total_events = timeline.len();
     let requested = requested_offset(request.cursor.as_deref(), request.offset, decode_event_cursor)?;
@@ -3129,11 +3140,9 @@ impl ViewerService {
     let events = timeline[start..end]
       .iter()
       .map(|entry| {
-        identity.summary(models.summary(timeline_entry_event_summary(
+        identity.summary(models.summary(goals.summary(
           entry,
-          &loaded.events,
-          &delegation_targets,
-          &intermediate_usage,
+          timeline_entry_event_summary(entry, &loaded.events, &delegation_targets, &intermediate_usage),
         )))
       })
       .collect();
@@ -4685,25 +4694,28 @@ fn base_timeline_entries(events: &[AgentEvent]) -> Vec<TimelineEntry> {
 #[cfg(test)]
 fn timeline_entries(events: &[AgentEvent]) -> Vec<TimelineEntry> {
   let models = model_projection::ModelProjection::new(events, None);
-  timeline_entries_with_models(events, &models)
+  timeline_entries_with_models(events, &models, &goal_projection::GoalProjection::new(events))
 }
 
 fn timeline_entries_with_models(
   events: &[AgentEvent],
   models: &model_projection::ModelProjection,
+  goals: &goal_projection::GoalProjection,
 ) -> Vec<TimelineEntry> {
   let base_entries = base_timeline_entries(events);
   let mut entries = Vec::with_capacity(base_entries.len());
   let mut pending = Vec::new();
-  // Codex writes a replaceable session token snapshot after a reply. Keep all
-  // post-final records as ordinary rows until a new prompt or a non-final
-  // assistant message proves that another turn has begun.
+  // Goal executions keep their compaction and accounting inside work. Other
+  // turns retain independently visible compaction, final usage and reply timing.
   let mut after_final_reply = false;
-
-  for entry in base_entries {
+  let mut goal_turn: Option<&tokn_session_core::LifecycleEvent> = None;
+  let mut goal_floor = None;
+  let mut base_entries = base_entries.into_iter().peekable();
+  while let Some(entry) = base_entries.next() {
+    let record = trajectory_state::source_record(&entry, events);
     // Providers can write turn-start before the user prompt. Keep that marker
     // with the work below the prompt instead of making a separate empty turn.
-    if matches!(&entry, TimelineEntry::Event { source_event_index } if matches!(&events[*source_event_index], AgentEvent::Message(m) if m.role == Role::User))
+    if matches!(record, Some(AgentEvent::Message(m)) if m.role == Role::User)
       && !pending.is_empty()
       && pending.iter().all(|e| trajectory_state::is_turn_start(e, events))
     {
@@ -4711,13 +4723,52 @@ fn timeline_entries_with_models(
       entries.push(entry);
       continue;
     }
-    if trajectory_state::is_turn_start(&entry, events) && !pending.is_empty() {
-      flush_trajectory_candidate(&mut entries, &mut pending, events);
+    if trajectory_state::is_turn_start(&entry, events) {
+      let start = record.and_then(trajectory_state::codex_start);
+      if let (Some(start), Some(active)) = (start, goal_turn)
+        && start.turn_id == active.turn_id
+        && start.session_id == active.session_id
+      {
+        // A provider can repeat the same start observation after a checkpoint.
+        // It is still inspectable, but does not create another execution.
+        pending.push(entry);
+        continue;
+      }
+      let prelude = matches!((start, pending.as_slice()), (Some(turn), [row]) if trajectory_state::is_goal_prelude(row, events, turn));
+      if !prelude {
+        flush_trajectory_candidate(&mut entries, &mut pending, events, goal_floor, None);
+      }
+      let index = timeline_entry_start_source_event_index(&entry);
+      goal_turn = start.filter(|_| prelude || index.is_some_and(|i| goals.is_goal_work(i)));
+      goal_floor = goal_turn.and(index);
     }
+    let turn_record =
+      record.filter(|event| goal_turn.is_some_and(|turn| trajectory_state::belongs_to_turn(event, turn)));
     if matches!(&entry, TimelineEntry::Event { source_event_index } if models.is_change(*source_event_index))
-      || is_trajectory_boundary(&entry, events)
+      || (!matches!(turn_record, Some(AgentEvent::Compaction(_))) && is_trajectory_boundary(&entry, events))
     {
-      flush_trajectory_candidate(&mut entries, &mut pending, events);
+      let mut reply = None;
+      if let (Some(turn), Some(AgentEvent::Message(message))) = (goal_turn, turn_record)
+        && is_final_assistant_message(message.role, message.delivery)
+        && pending.iter().any(|row| is_substantive_work_entry(row, events))
+      {
+        reply = timeline_entry_start_source_event_index(&entry);
+        while let Some(usage) = base_entries.next_if(|row| {
+          matches!(trajectory_state::source_record(row, events), Some(u @ AgentEvent::Usage(_)) if trajectory_state::belongs_to_turn(u, turn))
+        }) {
+          pending.push(usage);
+        }
+      }
+      flush_trajectory_candidate(&mut entries, &mut pending, events, goal_floor, reply);
+      // A question or a model switch divides visible work without ending
+      // the native execution. Late tool results keep their own invocation
+      // keys, but cannot move the resumed segment before its separator.
+      if matches!(record, Some(AgentEvent::SessionStarted(_)))
+        || matches!(record, Some(AgentEvent::Message(m)) if m.role == Role::User || is_final_assistant_message(m.role, m.delivery))
+      {
+        goal_turn = None;
+      }
+      goal_floor = goal_turn.and_then(|_| timeline_entry_start_source_event_index(&entry).map(|index| index + 1));
       update_after_final_reply(&entry, events, &mut after_final_reply);
       entries.push(entry);
     } else if after_final_reply && !starts_trajectory_after_final_reply(&entry, events) {
@@ -4725,11 +4776,15 @@ fn timeline_entries_with_models(
       // turn, these rows must remain chronologically outside that trajectory.
       entries.push(entry);
     } else {
+      if matches!(turn_record, Some(AgentEvent::Lifecycle(l)) if matches!(l.scope, tokn_session_core::LifecycleScope::Turn) && l.phase == Phase::Finished)
+      {
+        goal_turn = None;
+      }
       after_final_reply = false;
       pending.push(entry);
     }
   }
-  flush_trajectory_candidate(&mut entries, &mut pending, events);
+  flush_trajectory_candidate(&mut entries, &mut pending, events, goal_floor, None);
   entries
 }
 
@@ -4770,6 +4825,8 @@ fn flush_trajectory_candidate(
   output: &mut Vec<TimelineEntry>,
   pending: &mut Vec<TimelineEntry>,
   events: &[AgentEvent],
+  goal_floor: Option<usize>,
+  reply_index: Option<usize>,
 ) {
   if pending.is_empty() {
     return;
@@ -4779,7 +4836,28 @@ fn flush_trajectory_candidate(
     return;
   }
 
-  let Some(start_source_event_index) = pending.iter().filter_map(timeline_entry_start_source_event_index).min() else {
+  let goal = goal_floor.map(|source_floor| GoalSegment {
+    source_floor,
+    reply_index,
+  });
+  let anchor = pending
+    .iter()
+    .filter_map(|entry| {
+      let index = timeline_entry_start_source_event_index(entry)?;
+      let Some(floor) = goal_floor.filter(|&floor| index < floor) else {
+        return Some(index);
+      };
+      // An operation invoked in a previous segment occupies its result's later
+      // timeline position. Keep its original key on the child only.
+      match entry {
+        TimelineEntry::ToolOperation { operation, .. } => {
+          operation.timeline_source_event_index().filter(|i| *i >= floor)
+        }
+        _ => None,
+      }
+    })
+    .min();
+  let Some(start_source_event_index) = anchor else {
     // Every base timeline row should originate from at least one source
     // record. If that invariant is violated, retaining flat rows is safer
     // than inventing a synthetic key with no detail target.
@@ -4789,6 +4867,7 @@ fn flush_trajectory_candidate(
   output.push(TimelineEntry::Trajectory {
     trajectory: Trajectory {
       start_source_event_index,
+      goal,
       entries: std::mem::take(pending),
     },
   });
@@ -4872,7 +4951,7 @@ fn trajectory_for_start_with_models(
   start_source_event_index: usize,
   models: &model_projection::ModelProjection,
 ) -> Option<Trajectory> {
-  timeline_entries_with_models(events, models)
+  timeline_entries_with_models(events, models, &goal_projection::GoalProjection::new(events))
     .into_iter()
     .find_map(|entry| match entry {
       TimelineEntry::Trajectory { trajectory } if trajectory.start_source_event_index == start_source_event_index => {
@@ -4930,6 +5009,7 @@ fn trajectory_event_summary(trajectory: &Trajectory, events: &[AgentEvent]) -> E
   let summary = trajectory_summary(&card);
 
   EventSummary {
+    goal: None,
     model_change: None,
     response_metadata: None,
     images: None,
@@ -5052,14 +5132,36 @@ fn trajectory_card_summary(trajectory: &Trajectory, events: &[AgentEvent]) -> Tr
   // Finished tools occupy the result's timeline position. Use their original
   // invocation and result positions to time the group, even when calls overlap.
   let indices = trajectory_source_event_indices(trajectory);
+  let timestamp_with_ms = |timestamp| Some((timestamp, parse_updated_at_ms(Some(timestamp))?));
   let mut timestamps = indices
     .iter()
+    .filter(|&&index| {
+      trajectory
+        .goal
+        .is_none_or(|goal| index >= goal.source_floor && goal.reply_index.is_none_or(|reply| index < reply))
+    })
     .filter_map(|&index| timestamp_for_event(&events[index]))
-    .filter_map(|timestamp| Some((timestamp, parse_updated_at_ms(Some(timestamp))?)));
+    .filter_map(timestamp_with_ms);
   let first_timestamp = timestamps.next();
   let mut last_timestamp = timestamps.next_back().or(first_timestamp);
   let status = trajectory_state::status(trajectory, events);
-  if status == "complete"
+  if let Some(GoalSegment {
+    source_floor,
+    reply_index: Some(reply),
+  }) = trajectory.goal
+  {
+    // Goal work ends at the last observed pre-reply activity. Later token
+    // reports remain inspectable and do not add time to the execution.
+    let goal_work_end = indices
+      .iter()
+      .rev()
+      .copied()
+      .filter(|&i| i >= source_floor && i < reply)
+      .filter_map(|i| trajectory_state::work_timestamp(&events[i]))
+      .find_map(timestamp_with_ms);
+    let reply_time = timestamp_for_event(&events[reply]).and_then(timestamp_with_ms);
+    last_timestamp = goal_work_end.or(reply_time).or(last_timestamp);
+  } else if status == "complete"
     && let Some(timestamp) = trajectory_state::completion_timestamp(trajectory, events)
     && let Some(time) = parse_updated_at_ms(Some(timestamp))
     && last_timestamp.as_ref().is_some_and(|(_, last)| time >= *last)
@@ -5238,6 +5340,8 @@ fn event_summary_with_delegation_targets(
     })
     .flatten();
   EventSummary {
+    goal: matches!(event, AgentEvent::Message(message) if !hidden && message.is_user_goal())
+      .then_some(crate::model::GoalPresentation::Prompt),
     model_change: None,
     response_metadata: match event {
       AgentEvent::Message(message)
@@ -5304,6 +5408,7 @@ fn tool_operation_event_summary(source_event_index: usize, operation: &ToolOpera
     MAX_TECHNICAL_SUMMARY_CHARS,
   );
   EventSummary {
+    goal: None,
     model_change: None,
     response_metadata: None,
     images: Some(image_resources::operation_images(operation)),
@@ -6185,9 +6290,11 @@ fn truncate_with_flag(value: String, max_chars: usize) -> (String, bool) {
 mod tests {
   mod activity_backfill;
   mod background_performance;
+  mod codex_work;
   mod communications;
   mod error_inspection;
   mod event_filter;
+  mod goal_projection;
   mod history_cache;
   mod latest_message;
   mod live_session_list;

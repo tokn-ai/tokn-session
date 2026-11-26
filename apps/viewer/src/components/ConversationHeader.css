@@ -139,6 +139,7 @@
 .timeline > [data-reading-slot] + [data-reading-slot],
 .timeline > [data-reading-slot] + .session-live-output { margin-block-start: 16px; }
 .timeline > [data-reading-slot] + [data-reading-prompt] { margin-block-start: 40px; }
+.timeline > [data-goal-kind="prompt"] + [data-goal-kind="work"] { margin-block-start: 30px; }
 .timeline > [data-reading-slot] + .page-button { margin-top: 20px; }
 @media (max-width: 600px) {
   .conversation .session-header { gap: 2px; padding-inline: 8px; }

@@ -2,6 +2,7 @@ mod async_replies;
 mod code_mode;
 mod communication;
 mod diagnostics;
+mod goals;
 #[cfg(test)]
 mod image_tests;
 mod images;
@@ -50,6 +51,7 @@ pub struct CodexNormalizer {
   question_replies: questions::RepliesNormalizer,
   generation_dedup: images::GenerationDedup,
   response_context: response_metadata::ResponseContext,
+  goals: goals::Goals,
 }
 
 #[derive(Clone, Debug)]
@@ -143,6 +145,7 @@ impl CodexNormalizer {
       question_replies: Default::default(),
       generation_dedup: Default::default(),
       response_context: Default::default(),
+      goals: Default::default(),
     }
   }
 
@@ -165,6 +168,7 @@ impl CodexNormalizer {
       question_replies: Default::default(),
       generation_dedup: Default::default(),
       response_context: Default::default(),
+      goals: Default::default(),
     }
   }
 
@@ -186,7 +190,9 @@ impl CodexNormalizer {
     }
 
     let metadata = self.response_context.observe(&line);
+    let goal = self.goals.observe(&line, self.session_id.as_deref());
     let mut events = self.normalize_accepted_line(line, timestamp, communication_trigger);
+    events.extend(goal);
     if let Some(metadata) = metadata.filter(|_| self.response_context.owns_session(self.session_id.as_deref())) {
       for event in &mut events {
         if let AgentEvent::Message(message) = event {
@@ -274,6 +280,10 @@ impl CodexNormalizer {
       _ => true,
     });
     events
+  }
+
+  pub(crate) fn missing_goal_origin(&self) -> bool {
+    self.goals.missing_origin
   }
 
   pub fn history_status(&self) -> SessionHistoryStatus {

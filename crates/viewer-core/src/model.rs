@@ -464,8 +464,21 @@ pub struct QuestionSelectionSummary {
   pub written_answer_truncated: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GoalPresentation {
+  Prompt,
+  Work,
+  Completed {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<String>,
+  },
+}
+
 #[derive(Debug, Serialize)]
 pub struct EventSummary {
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub goal: Option<GoalPresentation>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub model_change: Option<ModelChangeSummary>,
   /// Provider-recorded metadata for a finished final assistant reply.

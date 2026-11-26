@@ -10,7 +10,7 @@ import type {
   TrajectoryEventPageState,
   UsageCardSummary,
 } from "../lib/types";
-import { EventCard, formatTrajectoryDuration } from "./EventCard";
+import { EventCard } from "./EventCard";
 
 afterEach(cleanup);
 
@@ -452,6 +452,30 @@ describe("EventCard subagent activity", () => {
 });
 
 describe("EventCard whole-turn trajectories", () => {
+  it("keeps folded goal work to its elapsed time and reveals the original failed operation on expansion", () => {
+    const command = event({ type: "tool_call", event_key: "check", role: null, tool: tool({ command: "cargo check", exit_code: 1 }) });
+    const turn = event({ type: "trajectory", event_key: "work", goal: { kind: "work" }, trajectory: trajectory({
+      duration_ms: "98000", tool_count: 1, error_count: 1,
+      tool_previews: [{ kind: "shell", label: "cargo check", status: "failed" }],
+    }) });
+    const props = {
+      button_id: "work", event: turn, is_selected: false, detail: null, detail_error: null, detail_loading: false,
+      on_retry_detail: vi.fn(), on_select: vi.fn(), on_toggle: vi.fn(),
+    };
+    const { rerender } = render(<EventCard {...props} is_expanded={false} />);
+    const toggle = screen.getByRole("button", { name: "Worked for 1m 38s", expanded: false });
+    expect(toggle).toHaveTextContent(/^Worked for 1m 38s$/);
+    expect(toggle).not.toHaveAttribute("aria-describedby");
+    fireEvent.click(screen.getByRole("button", { name: "Inspect Worked for 1m 38s" }));
+    expect(props.on_select).toHaveBeenCalledWith("work");
+    fireEvent.click(toggle);
+    expect(props.on_toggle).toHaveBeenCalledWith("work");
+
+    rerender(<EventCard {...props} is_expanded trajectory_page={trajectoryPage({ events: [command], total_events: 1 })} />);
+    expect(screen.getByRole("button", { name: "Shell: cargo check" })).toHaveAccessibleDescription(/exit 1/);
+    expect(screen.getByRole("button", { name: "Inspect cargo check" })).toBeVisible();
+  });
+
   it.each(["scoped", "flat"])("shows a single operation directly when opening a %s turn, with output and inspection still independent", (transport) => {
     const work = event({ event_key: "turn", type: "trajectory", trajectory: trajectory({ reasoning_count: 0, agent_activity_count: 0 }) });
     const routine = event({ event_key: "start", type: "lifecycle", title: "Turn started", is_bookkeeping: true });
@@ -746,14 +770,6 @@ describe("EventCard whole-turn trajectories", () => {
     expect(onRetry).toHaveBeenCalledWith(trajectoryEvent.event_key);
   });
 
-  it("formats whole-second durations without Number precision loss", () => {
-    expect(formatTrajectoryDuration("9007199254740993")).toBe("104249991d 8h 59m");
-    expect(formatTrajectoryDuration("0")).toBe("0s");
-    expect(formatTrajectoryDuration("999")).toBe("0s");
-    expect(formatTrajectoryDuration("1999")).toBe("1s");
-    expect(formatTrajectoryDuration("61234")).toBe("1m 1s");
-    expect(formatTrajectoryDuration("not-a-duration")).toBeNull();
-  });
 });
 
 describe("EventCard tool output", () => {

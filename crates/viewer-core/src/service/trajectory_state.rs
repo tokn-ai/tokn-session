@@ -1,5 +1,71 @@
 use super::*;
-use tokn_session_core::LifecycleScope;
+use tokn_session_core::{LifecycleEvent, LifecycleScope};
+
+pub(super) fn source_record<'a>(entry: &TimelineEntry, events: &'a [AgentEvent]) -> Option<&'a AgentEvent> {
+  match entry {
+    TimelineEntry::Event { source_event_index } => events.get(*source_event_index),
+    _ => None,
+  }
+}
+
+pub(super) fn codex_start(event: &AgentEvent) -> Option<&LifecycleEvent> {
+  match event {
+    AgentEvent::Lifecycle(l)
+      if l.provider == Provider::Codex
+        && matches!(l.scope, LifecycleScope::Turn)
+        && l.phase == Phase::Started
+        && !l.turn_id.is_empty() =>
+    {
+      Some(l)
+    }
+    _ => None,
+  }
+}
+
+pub(super) fn belongs_to_turn(event: &AgentEvent, turn: &LifecycleEvent) -> bool {
+  let (provider, session, id) = match event {
+    AgentEvent::Lifecycle(l) => (l.provider, l.session_id.as_deref(), Some(l.turn_id.as_str())),
+    AgentEvent::Message(m) => (m.provider, m.session_id.as_deref(), None),
+    AgentEvent::Compaction(c) => (c.provider, c.session_id.as_deref(), c.turn_id.as_deref()),
+    AgentEvent::GoalUpdated(g) => (g.provider, g.session_id.as_deref(), g.turn_id.as_deref()),
+    AgentEvent::Usage(u) => (u.provider, u.session_id.as_deref(), u.turn_id.as_deref()),
+    _ => return false,
+  };
+  provider == Provider::Codex
+    && id.is_none_or(|id| id == turn.turn_id)
+    && session.zip(turn.session_id.as_deref()).is_none_or(|(a, b)| a == b)
+}
+
+pub(super) fn is_goal_prelude(entry: &TimelineEntry, events: &[AgentEvent], turn: &LifecycleEvent) -> bool {
+  let TimelineEntry::Event { source_event_index } = entry else {
+    return false;
+  };
+  let event = &events[*source_event_index];
+  let AgentEvent::GoalUpdated(g) = event else {
+    return false;
+  };
+  let Some(goal) = g.goal.as_ref() else { return false };
+  if !belongs_to_turn(event, turn) || goal.get("status").and_then(Value::as_str) != Some("active") {
+    return false;
+  }
+  match g.turn_id.as_deref() {
+    Some(_) => true,
+    None => matches!(source_event_index.checked_sub(1).map(|i| &events[i]), Some(AgentEvent::Message(m))
+      if m.is_user_goal() && goal.get("objective").and_then(Value::as_str) == Some(&m.text)),
+  }
+}
+
+pub(super) fn work_timestamp(event: &AgentEvent) -> Option<&str> {
+  match event {
+    AgentEvent::Message(m) if is_non_final_assistant_message(m.role, m.delivery) => m.timestamp.as_deref(),
+    AgentEvent::ToolCall(_)
+    | AgentEvent::Reasoning(_)
+    | AgentEvent::AgentActivity(_)
+    | AgentEvent::Compaction(_)
+    | AgentEvent::Error(_) => timestamp_for_event(event),
+    _ => None,
+  }
+}
 
 pub(super) fn is_turn_start(entry: &TimelineEntry, events: &[AgentEvent]) -> bool {
   matches!(entry, TimelineEntry::Event { source_event_index }
@@ -42,6 +108,9 @@ fn superseding_boundary_timestamp<'a>(trajectory: &Trajectory, events: &'a [Agen
 }
 
 pub(super) fn status(trajectory: &Trajectory, events: &[AgentEvent]) -> &'static str {
+  if trajectory.goal.is_some_and(|g| g.reply_index.is_some()) {
+    return "complete";
+  }
   if superseding_boundary_timestamp(trajectory, events).is_some() {
     return "complete";
   }

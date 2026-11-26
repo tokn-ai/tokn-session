@@ -11,6 +11,7 @@ import type {
 } from "../lib/types";
 import {
   eventButtonId,
+  formatRecordedDuration,
   formatTimestamp,
   sessionDisplayTitle,
   shortSessionId,
@@ -229,43 +230,6 @@ function pluralize(count: number, singular: string, plural = `${singular}s`): st
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
-/**
- * Formats a decimal millisecond value without coercing it through Number.
- *
- * The backend keeps this as a string because it may be a Rust u64, which can
- * exceed JavaScript's safe integer range. BigInt lets the UI retain every
- * recorded value while displaying whole seconds rather than milliseconds.
- */
-export function formatTrajectoryDuration(durationMs: string | null): string | null {
-  const source = durationMs?.trim() ?? "";
-  if (!/^\d+$/.test(source)) {
-    return null;
-  }
-
-  let remaining: bigint;
-  try {
-    remaining = BigInt(source);
-  } catch {
-    return null;
-  }
-
-  const units: Array<[bigint, string]> = [
-    [86_400_000n, "d"],
-    [3_600_000n, "h"],
-    [60_000n, "m"],
-    [1_000n, "s"],
-  ];
-  const parts: string[] = [];
-  for (const [unitMs, label] of units) {
-    const count = remaining / unitMs;
-    if (count > 0n) {
-      parts.push(`${count.toString()}${label}`);
-      remaining %= unitMs;
-    }
-  }
-  return parts.join(" ") || "0s";
-}
-
 function trajectoryFacts(trajectory: TrajectoryCardSummary): string {
   const facts = [];
   if (trajectory.tool_count > 0) {
@@ -322,7 +286,7 @@ function useTrajectoryHeading(event: EventSummary): TechnicalCardHeading {
     return () => window.clearInterval(timer);
   }, [working, trajectory?.started_at]);
   const start = timestampMs(trajectory?.started_at ?? null);
-  const duration = formatTrajectoryDuration(working && Number.isFinite(start)
+  const duration = formatRecordedDuration(working && Number.isFinite(start)
     ? String(Math.max(0, now - start))
     : trajectory?.duration_ms ?? null);
   const verb = working ? "Working" : trajectory?.status === "unknown" ? "Work" : "Worked";
@@ -340,10 +304,11 @@ function WorkHeader({ event, button_id, expanded, on_select, on_toggle }: {
   on_select: (key: string) => void; on_toggle: (key: string) => void;
 }) {
   const heading = useTrajectoryHeading(event);
-  const factsId = heading.secondary ? `${button_id}-facts` : undefined;
-  const previewId = !expanded && !event.is_hidden && event.trajectory?.tool_previews?.length ? `${button_id}-preview` : undefined;
-  const failures = event.trajectory?.error_count ?? 0;
-  return <div className="trajectory-section__header">
+  const foldedGoal = !expanded && event.goal?.kind === "work";
+  const factsId = !foldedGoal && heading.secondary ? `${button_id}-facts` : undefined;
+  const previewId = !foldedGoal && !expanded && !event.is_hidden && event.trajectory?.tool_previews?.length ? `${button_id}-preview` : undefined;
+  const failures = foldedGoal ? 0 : event.trajectory?.error_count ?? 0;
+  return <div className="trajectory-section__header" data-folded-goal={foldedGoal || undefined}>
     <button type="button" className="trajectory-section__toggle" aria-label={heading.primary}
       aria-expanded={expanded} aria-controls={`${button_id}-details`}
       aria-describedby={[factsId, previewId].filter(Boolean).join(" ") || undefined}
@@ -351,7 +316,7 @@ function WorkHeader({ event, button_id, expanded, on_select, on_toggle }: {
       {event.trajectory?.status === "working" && <span aria-hidden="true" className="inline-spinner" />}
       <span className="trajectory-section__label" id={`${button_id}-label`}>{heading.primary}</span>
       <ChevronIcon className={expanded ? "chevron chevron--open" : "chevron"} />
-      {heading.secondary && <span id={factsId} className={previewId || expanded || failures ? "sr-only" : "trajectory-section__facts"}>{heading.secondary}</span>}
+      {factsId && <span id={factsId} className={previewId || expanded || failures ? "sr-only" : "trajectory-section__facts"}>{heading.secondary}</span>}
       {previewId && event.trajectory && <WorkPreview trajectory={event.trajectory} id={previewId} />}
       {!previewId && failures > 0 && <span aria-hidden="true" className="work-preview__state" data-status="failed">{pluralize(failures, "error")}</span>}
     </button>

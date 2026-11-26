@@ -26,6 +26,19 @@ export function SearchIcon(props: IconProps) {
   );
 }
 
+export function GoalIcon(props: IconProps) {
+  return <IconBase {...props} stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7">
+    <path d="M19.8 10.1a8.2 8.2 0 1 1-6-6M16 11a4.2 4.2 0 1 1-3-3M12 12l5-5" />
+    <path d="m16 5 3-3v3h3l-3 3h-3z" />
+  </IconBase>;
+}
+
+export function CompletedGoalIcon(props: IconProps) {
+  return <IconBase {...props} stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7">
+    <circle cx="12" cy="12" r="9" /><path d="m8 12 2.6 2.6L16 9" />
+  </IconBase>;
+}
+
 export function PanelIcon(props: IconProps) {
   return (
     <IconBase {...props}>
