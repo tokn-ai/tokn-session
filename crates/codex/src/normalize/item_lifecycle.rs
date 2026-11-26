@@ -298,6 +298,7 @@ fn normalize_canonical_agent_message(
     )]);
   }
   Some(vec![AgentEvent::Message(MessageEvent {
+    response_metadata: None,
     images: Vec::new(),
     provenance: None,
     provider: Provider::Codex,

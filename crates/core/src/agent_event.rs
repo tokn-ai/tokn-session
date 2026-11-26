@@ -142,6 +142,8 @@ pub struct SessionSettingsApplied {
 pub struct MessageEvent {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub provenance: Option<MessageProvenance>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub response_metadata: Option<crate::ResponseMetadata>,
   pub provider: Provider,
   pub session_id: Option<String>,
   pub message_id: Option<String>,

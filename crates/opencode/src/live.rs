@@ -21,6 +21,7 @@ impl OpenCodeLiveNormalizer {
 
     Ok(match event {
       RunEvent::Text(part) => vec![wrap_agent_event(AgentEvent::Message(MessageEvent {
+        response_metadata: None,
         images: Vec::new(),
         provenance: None,
         provider: Provider::OpenCode,

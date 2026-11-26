@@ -66,6 +66,12 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
   const sender = role === "assistant" ? providerLabel(event.provider) || "Assistant" : role;
   const fullMessage = event.summary_truncated && !event.is_hidden;
   const canCopy = usesMarkdown && !!event.summary.trim() && typeof navigator.clipboard?.writeText === "function";
+  const response = role === "assistant" && event.delivery === "final" && event.phase === "finished" && !event.is_hidden
+    ? event.response_metadata : undefined;
+  const model = response?.model;
+  const model_source = model?.origin === "request" ? "Requested model" : "Reported model";
+  const fast = response?.fast_mode === "reported" ? "Fast"
+    : response?.fast_mode === "requested" ? "Fast requested" : undefined;
 
   return (
     <article className="message-event transcript-message" aria-label={`${sender} message`}
@@ -122,37 +128,51 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
             ) : null}
           </div>
         ) : null}
-        {canTranslate ? (
+        {model || fast || canTranslate ? (
           <div className="message-event__actions">
-            {translation.loading ? (
-              <>
-                <span className="message-translation__status" role="status">
-                  {!translation.progress?.resume ? <span className="inline-spinner" aria-hidden="true" /> : null}
-                  {translation.progress?.message ?? "Translating…"}
-                </span>
-                {translation.progress?.resume ? (
-                  <button className="message-event__inspect" onClick={translation.progress.resume} type="button">Continue translation</button>
+            {model || fast ? (
+              <span className="message-event__response" role="group" aria-label="Response details">
+                {model ? (
+                  <span title={[model_source, model.model.model_provider].filter(Boolean).join(" · ")}>
+                    {model.model.model_id}
+                  </span>
                 ) : null}
-                <button className="message-event__inspect" onClick={translation.cancel} type="button">Cancel</button>
-              </>
-            ) : translation.translated ? (
+                {fast ? <span>{fast}</span> : null}
+              </span>
+            ) : null}
+            {canTranslate ? (
               <>
-                <span className="message-translation__status">{translation.showing_translation ? `简体中文 · ${engine?.label}` : "Original"}</span>
-                <button className="message-event__inspect" onClick={translation.toggle} type="button">
-                  {translation.showing_translation ? "Show original" : "Show translation"}
-                </button>
+                {translation.loading ? (
+                  <>
+                    <span className="message-translation__status" role="status">
+                      {!translation.progress?.resume ? <span className="inline-spinner" aria-hidden="true" /> : null}
+                      {translation.progress?.message ?? "Translating…"}
+                    </span>
+                    {translation.progress?.resume ? (
+                      <button className="message-event__inspect" onClick={translation.progress.resume} type="button">Continue translation</button>
+                    ) : null}
+                    <button className="message-event__inspect" onClick={translation.cancel} type="button">Cancel</button>
+                  </>
+                ) : translation.translated ? (
+                  <>
+                    <span className="message-translation__status">{translation.showing_translation ? `简体中文 · ${engine?.label}` : "Original"}</span>
+                    <button className="message-event__inspect" onClick={translation.toggle} type="button">
+                      {translation.showing_translation ? "Show original" : "Show translation"}
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    className="message-event__inspect"
+                    disabled={!status?.available}
+                    onClick={() => { void translation.translate(); }}
+                    title={status?.available ? engine?.description : status?.reason ?? undefined}
+                    type="button"
+                  >
+                    {translation.error ? "Retry translation" : "Translate → 简体中文"}
+                  </button>
+                )}
               </>
-            ) : (
-              <button
-                className="message-event__inspect"
-                disabled={!status?.available}
-                onClick={() => { void translation.translate(); }}
-                title={status?.available ? engine?.description : status?.reason ?? undefined}
-                type="button"
-              >
-                {translation.error ? "Retry translation" : "Translate → 简体中文"}
-              </button>
-            )}
+            ) : null}
           </div>
         ) : null}
       </div>

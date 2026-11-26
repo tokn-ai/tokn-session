@@ -3,8 +3,9 @@ use serde_json::Value;
 use crate::event::{PiContentBlock, PiMessage, PiMessageItem, PiSessionItem, PiSessionLine, PiUserContent};
 use tokn_session_core::{
   AgentEvent, ErrorEvent, MessageDelivery, MessageEvent, MessageImage, MessageImageSource, MetadataEvent, MetadataKind,
-  Phase, Provider, ProviderChanged, ReasoningEvent, Role, SessionStarted, ToolCallEvent, ToolRecordKind, ToolTransport,
-  UnknownEvent, UsageKind, tool_kind_for_name, tool_summary_for_input, tool_summary_for_io,
+  ModelOrigin, Phase, Provider, ProviderChanged, ReasoningEvent, ResponseMetadata, Role, SessionStarted, ToolCallEvent,
+  ToolRecordKind, ToolTransport, UnknownEvent, UsageKind, tool_kind_for_name, tool_summary_for_input,
+  tool_summary_for_io,
 };
 
 pub struct PiNormalizer {
@@ -398,6 +399,23 @@ fn normalize_assistant_message(
   message: crate::event::PiAssistantMessage,
   has_outcome: bool,
 ) -> Vec<AgentEvent> {
+  let response_metadata = (!has_outcome && message.stop_reason.as_deref() != Some("pending"))
+    .then(|| {
+      let model = ResponseMetadata::recorded_model(
+        message.provider.as_deref(),
+        message.response_model.as_deref(),
+        ModelOrigin::Response,
+      )
+      .or_else(|| {
+        ResponseMetadata::recorded_model(
+          message.provider.as_deref(),
+          message.model.as_deref(),
+          ModelOrigin::Request,
+        )
+      });
+      ResponseMetadata::new(model, None)
+    })
+    .flatten();
   let timestamp = meta
     .timestamp
     .clone()
@@ -504,7 +522,13 @@ fn normalize_assistant_message(
     }
   }
 
-  ensure_message_events(combine_message_blocks(events), session_id, timestamp)
+  let mut events = ensure_message_events(combine_message_blocks(events), session_id, timestamp);
+  for event in &mut events {
+    if let AgentEvent::Message(message) = event {
+      message.response_metadata = response_metadata.clone();
+    }
+  }
+  events
 }
 
 fn recorded_image(index: usize, content: tokn_pi_protocol::ImageContent) -> MessageImage {
@@ -603,6 +627,7 @@ fn message_event(
   timestamp: Option<String>,
 ) -> AgentEvent {
   AgentEvent::Message(MessageEvent {
+    response_metadata: None,
     images: Vec::new(),
     provenance: None,
     provider: Provider::Pi,
@@ -675,6 +700,58 @@ fn json_value(value: impl serde::Serialize) -> Value {
 mod tests {
   use super::*;
   use tokn_session_core::{ToolKind, ToolSummary};
+
+  #[test]
+  fn response_metadata_is_bound_to_each_message_without_changing_selected_model_facts() {
+    let events = normalize_fixture(
+      r#"{"type":"session","id":"pi"}
+{"type":"model_change","id":"selection","provider":"route","modelId":"requested"}
+{"type":"message","id":"one","message":{"role":"assistant","provider":"route","model":"requested","responseModel":"backend-a","stopReason":"stop","content":[{"type":"text","text":"one"}]}}
+{"type":"message","id":"two","message":{"role":"assistant","provider":"route","model":"requested","responseModel":"backend-b","stopReason":"stop","content":[{"type":"text","text":"two"}]}}
+{"type":"message","id":"fallback","message":{"role":"assistant","provider":"route","model":"requested","responseModel":" bad model ","serviceTier":"priority","content":[{"type":"text","text":"three"}]}}
+{"type":"message","id":"missing","message":{"role":"assistant","content":[{"type":"text","text":"four"}]}}
+{"type":"message","id":"cancelled","message":{"role":"assistant","model":"requested","responseModel":"backend","stopReason":"aborted","content":[{"type":"text","text":"prefix"}]}}
+{"type":"message","id":"pending","message":{"role":"assistant","model":"requested","stopReason":"pending","content":[{"type":"text","text":"prefix"}]}}
+{"type":"message","id":"user","message":{"role":"user","content":"next"}}
+{"type":"model_change","id":"later-selection","provider":"other","modelId":"later"}"#,
+    );
+    let messages: Vec<_> = events
+      .iter()
+      .filter_map(|event| match event {
+        AgentEvent::Message(message) => Some(message),
+        _ => None,
+      })
+      .collect();
+    for (message, id, origin) in [
+      (messages[0], "backend-a", ModelOrigin::Response),
+      (messages[1], "backend-b", ModelOrigin::Response),
+      (messages[2], "requested", ModelOrigin::Request),
+    ] {
+      let metadata = message.response_metadata.as_ref().unwrap();
+      assert_eq!(metadata.fast_mode, None);
+      let model = metadata.model.as_ref().unwrap();
+      assert_eq!(model.model.model_id, id);
+      assert_eq!(model.model.model_provider.as_deref(), Some("route"));
+      assert_eq!(model.origin, origin);
+    }
+    assert!(messages[3..].iter().all(|message| message.response_metadata.is_none()));
+    let selections: Vec<_> = events
+      .iter()
+      .filter_map(|event| match event {
+        AgentEvent::ProviderChanged(event) if event.model_origin == Some(ModelOrigin::Selection) => {
+          event.model_id.as_deref()
+        }
+        _ => None,
+      })
+      .collect();
+    assert_eq!(selections, ["requested", "later"]);
+    assert!(
+      !events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::ProviderChanged(event)
+      if event.model_id.as_deref().is_some_and(|id| id.starts_with("backend"))))
+    );
+  }
 
   #[test]
   fn model_observations_distinguish_selection_and_request_without_backend_alias_switches() {

@@ -2,7 +2,7 @@
 //! into V1 parts, so Inspector and unknown records retain the actual source.
 use super::*;
 use tokn_opencode_protocol::v2::{ContentItem, FileAttachment, MessageData, MessageItem, ModelRef};
-use tokn_session_core::{CompactionEvent, CompactionState, ModelOrigin};
+use tokn_session_core::{CompactionEvent, CompactionState, ModelOrigin, ResponseFastMode, ResponseMetadata};
 
 impl OpenCodeNormalizer {
   pub(crate) fn normalize_v2_message(&mut self, row: &MessageData) -> Vec<AgentEvent> {
@@ -277,6 +277,28 @@ impl OpenCodeNormalizer {
       }
       MessageItem::Unknown(_) => events.push(self.v2_unknown("message", native, time)),
     }
+    if let MessageItem::Assistant(message) = row.item() {
+      let finished = message.time.completed.is_some() || message.finish.is_some();
+      let reported_fast = self.provider == Provider::OpenCode
+        && finished
+        && message.error.is_none()
+        && native.pointer("/native/serviceTier").and_then(Value::as_str) == Some("priority")
+        && native
+          .pointer("/native/responseId")
+          .and_then(Value::as_str)
+          .is_some_and(|id| !id.is_empty() && id.len() <= 512 && id.trim() == id && !id.chars().any(char::is_control));
+      annotate_response_messages(
+        &mut events,
+        ResponseMetadata::new(
+          ResponseMetadata::recorded_model(
+            Some(&message.model.provider_id),
+            Some(&message.model.id),
+            ModelOrigin::Request,
+          ),
+          reported_fast.then_some(ResponseFastMode::Reported),
+        ),
+      );
+    }
     events
   }
 
@@ -319,6 +341,7 @@ impl OpenCodeNormalizer {
     time: Option<i64>,
   ) -> AgentEvent {
     AgentEvent::Message(MessageEvent {
+      response_metadata: None,
       provenance: None,
       provider: self.provider,
       session_id: Some(self.session_id.clone()),

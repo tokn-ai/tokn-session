@@ -1,8 +1,8 @@
 use serde_json::Value;
 use tokn_session_core::{
-  AgentEvent, ErrorEvent, MessageDelivery, MessageEvent, MetadataEvent, MetadataKind, Phase, Provider, ProviderChanged,
-  ReasoningEvent, Role, SessionStarted, ToolCallEvent, ToolRecordKind, ToolTransport, UnknownEvent, UsageEvent,
-  UsageKind, tool_kind_for_optional_name, tool_summary_for_io,
+  AgentEvent, ErrorEvent, MessageDelivery, MessageEvent, MetadataEvent, MetadataKind, ModelOrigin, Phase, Provider,
+  ProviderChanged, ReasoningEvent, ResponseMetadata, Role, SessionStarted, ToolCallEvent, ToolRecordKind,
+  ToolTransport, UnknownEvent, UsageEvent, UsageKind, tool_kind_for_optional_name, tool_summary_for_io,
 };
 use tokn_workbuddy_protocol::{ContentBlock, WorkBuddySessionItem, WorkBuddySessionLine};
 
@@ -267,7 +267,24 @@ impl WorkBuddyNormalizer {
       .and_then(|data| data.get("error"))
       .and_then(provider_error_message);
     if !text.is_empty() {
+      let response_metadata =
+        if role == Role::Assistant && item.status.as_deref() == Some("completed") && error.is_none() {
+          item
+            .provider_data
+            .as_ref()
+            .and_then(|data| data["requestModelId"].as_str())
+            .and_then(|model| {
+              let (provider, id) = split_model(model);
+              ResponseMetadata::new(
+                ResponseMetadata::recorded_model(provider.as_deref(), Some(&id), ModelOrigin::Request),
+                None,
+              )
+            })
+        } else {
+          None
+        };
       events.push(AgentEvent::Message(MessageEvent {
+        response_metadata,
         images: Vec::new(),
         provenance: None,
         provider: Provider::WorkBuddy,
@@ -629,7 +646,7 @@ fn unknown_event(
 
 #[cfg(test)]
 mod tests {
-  use tokn_session_core::{AgentEvent, MessageDelivery, Phase, ToolKind, ToolRecordKind, UsageKind};
+  use tokn_session_core::{AgentEvent, MessageDelivery, ModelOrigin, Phase, ToolKind, ToolRecordKind, UsageKind};
 
   use super::WorkBuddyNormalizer;
 
@@ -675,7 +692,11 @@ mod tests {
         && tool.tool_call_id.as_deref() == Some("call_00_ET_QRXue3bsxdLblbRzA9Fp3295"))));
     assert!(events.iter().any(|event| matches!(event, AgentEvent::Message(message)
       if matches!(message.delivery, MessageDelivery::Final)
-        && message.text == "Total count: **10**. Largest: **banana (5)**.")));
+        && message.text == "Total count: **10**. Largest: **banana (5)**."
+        && message.response_metadata.as_ref().is_some_and(|metadata| metadata.fast_mode.is_none()
+          && metadata.model.as_ref().is_some_and(|model| model.origin == ModelOrigin::Request
+            && model.model.model_provider.as_deref() == Some("custom-local")
+            && model.model.model_id == "deepseek-v4-flash")))));
     let usage = events
       .iter()
       .filter_map(|event| match event {

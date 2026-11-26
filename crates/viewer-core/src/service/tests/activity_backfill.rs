@@ -71,6 +71,7 @@ fn outcome_recovery_cursors_are_scoped_to_the_affected_providers() {
     (ViewerProvider::Pi, "source-revision.pi.v5."),
     (ViewerProvider::OpenCode, "source-revision.opencode.v3."),
     (ViewerProvider::ZCode, "source-revision.zcode.v2."),
+    (ViewerProvider::Qoder, "source-revision.qoder.v2."),
     (ViewerProvider::WorkBuddy, "source-revision.workbuddy.v2."),
     (ViewerProvider::Dsh, "source-revision.dsh.v3."),
   ] {

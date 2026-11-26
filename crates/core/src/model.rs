@@ -24,6 +24,51 @@ pub struct ModelObservation {
   pub origin: ModelOrigin,
 }
 
+/// Metadata recorded for the model call that produced this assistant message.
+/// A routing request and a backend report carry different provenance.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResponseMetadata {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub model: Option<ModelObservation>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub fast_mode: Option<ResponseFastMode>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseFastMode {
+  Requested,
+  Reported,
+}
+
+impl ResponseMetadata {
+  pub fn new(model: Option<ModelObservation>, fast_mode: Option<ResponseFastMode>) -> Option<Self> {
+    let model = model.and_then(|model| {
+      Self::recorded_model(
+        model.model.model_provider.as_deref(),
+        Some(&model.model.model_id),
+        model.origin,
+      )
+    });
+    (model.is_some() || fast_mode.is_some()).then_some(Self { model, fast_mode })
+  }
+
+  pub fn recorded_model(provider: Option<&str>, id: Option<&str>, origin: ModelOrigin) -> Option<ModelObservation> {
+    fn valid(value: &str) -> bool {
+      !value.is_empty() && value.len() <= 512 && value.trim() == value && !value.chars().any(char::is_control)
+    }
+
+    let id = id.filter(|value| valid(value))?;
+    matches!(origin, ModelOrigin::Request | ModelOrigin::Response).then(|| ModelObservation {
+      model: ModelIdentity {
+        model_provider: provider.filter(|value| valid(value)).map(str::to_owned),
+        model_id: id.into(),
+      },
+      origin,
+    })
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;

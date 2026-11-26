@@ -19,6 +19,11 @@ relationships. `CodexHistoryReader` supports bounded paginated history and
 incremental updates. The adapter preserves native unknown records and correlates
 tool outputs, questions, usage, and compaction observations.
 
+Assistant response metadata includes the requested model when an explicit
+output turn ID matches its `turn_context`. Canonical items also match the owning
+thread. A lazy window needs the same turn-specific evidence. Persistent thread
+settings record defaults and can differ from the model and tier used for a reply.
+
 History cutoffs address decoded JSONL bytes. `CodexHistoryLimits` separates
 individual records (128 MiB by default), materialized snapshot or append batches
 (128 MiB), temporary disk space (a shared 512 MiB pool), and work duration

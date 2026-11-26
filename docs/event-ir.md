@@ -18,6 +18,21 @@ explicit empty output; metadata-only progress preserves it. Output images remain
 tool results and do not become assistant replies. Viewer delivery exposes bounded
 metadata and lazy resources; normalized JSON export preserves recorded sources.
 
+## Response metadata
+
+A message may include `response_metadata` for the model call that produced it.
+`model.origin` distinguishes a request route from an identity reported by the
+provider. `fast_mode` distinguishes a request for Fast from a provider report
+that priority service was used. Omitted fields indicate missing response-level
+evidence.
+
+Viewer shows these details on visible, finished final replies. Codex's recorded
+turn context identifies the requested model when correlated to the reply. The
+persisted Codex tier describes a thread default, which can be overridden per
+turn. Current OpenCode can report Fast from a completed Open Responses reply
+with an explicit `priority` tier. Other providers expose message-local model
+facts when their records carry them.
+
 ## Lifecycle
 
 `lifecycle` identifies a turn and optionally a step, with `scope`, `phase`, and

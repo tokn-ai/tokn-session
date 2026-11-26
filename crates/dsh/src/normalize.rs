@@ -11,6 +11,7 @@ use tokn_session_core::{
   tool_kind_for_optional_name, tool_summary_for_io,
 };
 
+mod response_metadata;
 mod turn_end;
 
 /// Historical log view, not a reconstruction of the compacted model surface.
@@ -455,9 +456,15 @@ impl Normalizer {
         .get("sourceEventSeqs")
         .and_then(|value| serde_json::from_value(value.clone()).ok()),
     };
+    let response_metadata = (role == Role::Assistant && native["data"]["interrupted"] != true)
+      .then(|| response_metadata::for_message(message))
+      .flatten();
     for event in &mut events {
       match event {
-        AgentEvent::Message(event) => event.provenance = Some(provenance.clone()),
+        AgentEvent::Message(event) => {
+          event.provenance = Some(provenance.clone());
+          event.response_metadata = response_metadata.clone();
+        }
         AgentEvent::Reasoning(event) => event.provenance = Some(provenance.clone()),
         _ => {}
       }
@@ -491,6 +498,7 @@ impl Normalizer {
     time: Option<String>,
   ) -> AgentEvent {
     AgentEvent::Message(MessageEvent {
+      response_metadata: None,
       images: Vec::new(),
       provenance: None,
       provider: Provider::Dsh,
