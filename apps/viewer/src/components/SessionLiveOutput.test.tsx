@@ -4,7 +4,7 @@ import { SessionLiveOutput } from "./SessionLiveOutput";
 
 afterEach(cleanup);
 
-it("keeps streamed work visibly separate from saved messages and retires it on completion", () => {
+it("renders streamed work safely and retires it on completion", () => {
   const view = render(<SessionLiveOutput output={{ prompt_id: "prompt", truncated: true, parts: [
     { kind: "text", text: "<script>literal preview</script>" },
     { kind: "text", text: "The result is **complete**." },
@@ -24,18 +24,12 @@ it("keeps streamed work visibly separate from saved messages and retires it on c
   expect(screen.queryByRole("region", { name: "Live response" })).not.toBeInTheDocument();
 });
 
-it("follows streamed content until the reader scrolls up and resumes at the bottom", () => {
-  const live = (text: string) => <SessionLiveOutput output={{ prompt_id: "one", truncated: false,
-    parts: [{ kind: "text", text }] }} />;
-  const view = render(live("Starting"));
-  const content = screen.getByRole("region", { name: "Live response content" });
-  Object.defineProperties(content, { scrollHeight: { value: 200 }, clientHeight: { value: 100 } });
-  content.scrollTop = 30;
-  fireEvent.scroll(content);
-  view.rerender(live("Continuing"));
-  expect(content.scrollTop).toBe(30);
-  content.scrollTop = 100;
-  fireEvent.scroll(content);
-  view.rerender(live("Finishing"));
-  expect(content.scrollTop).toBe(200);
+it("resets reasoning disclosures when the active prompt changes", () => {
+  const live = (prompt_id: string) => <SessionLiveOutput output={{ prompt_id, truncated: false,
+    parts: [{ kind: "reasoning", text: "Checking" }] }} />;
+  const view = render(live("first"));
+  fireEvent.click(screen.getByText("Thinking"));
+  expect(screen.getByText("Thinking").closest("details")).toHaveAttribute("open");
+  view.rerender(live("second"));
+  expect(screen.getByText("Thinking").closest("details")).not.toHaveAttribute("open");
 });

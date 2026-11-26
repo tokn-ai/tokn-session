@@ -104,6 +104,21 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("reading long messages", () => {
+  it("keeps prompt text alone in its bubble and puts timestamp and inspection after the message", () => {
+    const view = render(card(message({ role: "user", summary: "Looks good.", timestamp: "2026-01-02T12:30:00Z" })));
+    const prompt = screen.getByRole("article", { name: "user message" });
+    const bubble = prompt.querySelector(".message-event__surface");
+    expect(bubble).toHaveTextContent(/^Looks good\.$/);
+    expect(prompt.querySelector("footer")).toContainElement(screen.getByRole("button", { name: "Inspect user message" }));
+    expect(prompt.querySelector("footer time")).toHaveAttribute("datetime", "2026-01-02T12:30:00Z");
+
+    view.rerender(card(message({ provider: "zcode", summary: "Done." })));
+    const reply = screen.getByRole("article", { name: "ZCode message" });
+    expect(reply.querySelector(".message-event__surface")).toHaveTextContent(/^Done\.$/);
+    expect(reply.querySelector("header")).toBeNull();
+    expect(reply.querySelector("footer [data-provider]")).toHaveAttribute("data-provider", "zcode");
+  });
+
   it("folds long prompts locally and keeps the complete original available", () => {
     const lines = Array.from({ length: 12 }, (_, index) => `Instruction ${index + 1}`).join("\n");
     render(card(message({ role: "user", summary: lines })));
@@ -255,25 +270,21 @@ describe("message translation availability", () => {
     expect(screen.queryByRole("button", { name: /Translate/ })).not.toBeInTheDocument();
   });
 
-  it("explains unavailable desktop translation without starting a request", async () => {
+  it("omits unavailable desktop translation actions without starting a request", async () => {
     vi.mocked(getTranslationStatus).mockResolvedValue({ available: false, reason: "Requires macOS 15 or later." });
     render(card(message()));
-    const button = await screen.findByRole("button", { name: "Translate → 简体中文" });
-    expect(button).toBeDisabled();
-    expect(button).toHaveAttribute("title", "Requires macOS 15 or later.");
-    fireEvent.click(button);
+    await act(async () => {});
+    expect(screen.queryByRole("button", { name: /Translate/ })).toBeNull();
     expect(loadEventDetail).not.toHaveBeenCalled();
     expect(translateText).not.toHaveBeenCalled();
   });
 
-  it("explains unavailable browser translation without invoking native commands", async () => {
+  it("omits unavailable browser translation actions without invoking native commands", async () => {
     vi.mocked(viewerCapabilities).mockReturnValue({ native_translation: false } as ReturnType<typeof viewerCapabilities>);
     vi.mocked(browserTranslationEngine.getStatus).mockResolvedValue({ available: false, reason: "This browser does not support local translation." });
     render(card(message()));
-    const button = await screen.findByRole("button", { name: "Translate → 简体中文" });
-    expect(button).toBeDisabled();
-    expect(button).toHaveAttribute("title", "This browser does not support local translation.");
-    fireEvent.click(button);
+    await act(async () => {});
+    expect(screen.queryByRole("button", { name: /Translate/ })).toBeNull();
     expect(browserTranslationEngine.start).not.toHaveBeenCalled();
     expect(getTranslationStatus).not.toHaveBeenCalled();
     expect(loadEventDetail).not.toHaveBeenCalled();

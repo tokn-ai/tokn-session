@@ -93,6 +93,22 @@ export function ToolIcon(props: IconProps) {
   );
 }
 
+export function EditFileIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="m15 5 4 4M4.5 19.5l4.6-1 11-11a2.8 2.8 0 0 0-4-4l-11 11-1 5Z" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </IconBase>
+  );
+}
+
+export function ReadFileIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M13.5 3h-7a1.5 1.5 0 0 0-1.5 1.5v15A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5v-11L13.5 3Zm0 .5v5H19M8.5 13h7M8.5 16.5h5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </IconBase>
+  );
+}
+
 export function TechnicalIcon(props: IconProps) {
   return (
     <IconBase {...props}>

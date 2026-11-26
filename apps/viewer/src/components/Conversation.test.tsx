@@ -1,52 +1,17 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { EventSummary, SessionSummary } from "../lib/types";
 import { Conversation } from "./Conversation";
+import { event, props, SESSION } from "./conversationTestFixtures";
 
 vi.mock("./SessionComposer", () => ({ SessionComposer: () => null }));
 
 afterEach(cleanup);
 beforeEach(() => localStorage.clear());
 
-const SESSION: SessionSummary = {
-  session_key: "codex:root", session_id: "root", parent_session_id: null,
-  is_subagent: false, provider: "codex", title: "Session title", preview: null,
-  project: null, cwd: null, updated_at_ms: null, timestamp: null,
-  agent_path: null, agent_nickname: null, agent_role: null, child_count: 0,
-  message_count: null, event_count: null, history_status: null, has_unread: false,
-};
-
-function event(key: string, overrides: Partial<EventSummary> = {}): EventSummary {
-  return {
-    event_key: key, type: "lifecycle", provider: "codex", timestamp: null,
-    phase: null, role: null, title: key, summary: `${key} detail`,
-    summary_truncated: false, is_hidden: false, is_error: false,
-    tool: null, usage: null, reasoning: null, is_bookkeeping: true,
-    ...overrides,
-  };
-}
-
-function props(overrides: Partial<React.ComponentProps<typeof Conversation>> = {}): React.ComponentProps<typeof Conversation> {
-  return {
-    session: SESSION, events: [], selected_event_key: null, expanded_event_key: null,
-    expanded_detail: null, expanded_detail_error: null, expanded_detail_loading: false,
-    initial_page_loaded: true, is_loading: false, is_loading_older: false,
-    is_loading_newer: false, error: null, has_older: false, has_newer: false,
-    total_events: 10, history_status: null, inspector_open: false,
-    on_sidebar_open: vi.fn(), on_inspector_toggle: vi.fn(), on_event_select: vi.fn(),
-    on_event_toggle: vi.fn(), trajectory_pages: new Map(), trajectory_expanded_key: null,
-    trajectory_expanded_event_key: null, trajectory_expanded_detail: null,
-    trajectory_expanded_detail_error: null, trajectory_expanded_detail_loading: false,
-    on_trajectory_retry: vi.fn(), on_trajectory_event_toggle: vi.fn(),
-    on_trajectory_retry_expanded_detail: vi.fn(), on_open_related_session: vi.fn(),
-    on_load_older: vi.fn(), on_load_newer: vi.fn(), on_retry: vi.fn(),
-    on_retry_expanded_detail: vi.fn(), on_follow_change: vi.fn(),
-    ...overrides,
-  };
-}
-
 function toggleFilter() {
-  fireEvent.click(screen.getByRole("button", { name: /^(Hide|Show) lifecycle$/ }));
+  const details = screen.getByRole("button", { name: /^Session details for / });
+  if (details.getAttribute("aria-expanded") !== "true") fireEvent.click(details);
+  fireEvent.click(screen.getByRole("checkbox", { name: "Show lifecycle events" }));
 }
 
 it("jumps to a loaded prompt without opening its inspector or exposing hidden messages", () => {
@@ -254,14 +219,17 @@ describe("Conversation quick filter", () => {
   it("keeps session metadata behind a disclosure and closes it when switching sessions", () => {
     const view = props({ session: { ...SESSION, project: "Viewer", cwd: "/work/viewer" } });
     const { rerender } = render(<Conversation {...view} />);
-    const metadata = screen.getByText("Viewer", { selector: "summary" }).closest("details");
-    expect(metadata).not.toHaveAttribute("open");
-    fireEvent.click(screen.getByText("Viewer", { selector: "summary" }));
-    expect(metadata).toHaveAttribute("open");
-    expect(screen.getByText("/work/viewer")).toBeInTheDocument();
-    expect(screen.getByLabelText("Session root")).toBeInTheDocument();
+    const details = screen.getByRole("button", { name: "Session details for Session title" });
+    expect(details).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(details);
+    expect(screen.getByRole("region", { name: "Session details" })).toHaveFocus();
+    expect(screen.getByText("/work/viewer")).toBeVisible();
+    expect(screen.getByText("root")).toBeVisible();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(details).toHaveFocus();
+    fireEvent.click(details);
     rerender(<Conversation {...view} session={{ ...SESSION, session_key: "codex:next", project: "Next project" }} />);
-    expect(screen.getByText("Next project", { selector: "summary" }).closest("details")).not.toHaveAttribute("open");
+    expect(screen.getByRole("button", { name: /^Session details for / })).toHaveAttribute("aria-expanded", "false");
   });
   it("shows separate blocking and available question notices and opens their cards", () => {
     const on_question_open = vi.fn();
@@ -315,7 +283,8 @@ describe("Conversation quick filter", () => {
       event("Unknown provider event", { type: "unknown" }),
       event("Turn failed", { is_error: true }), event("Task outcome", { is_bookkeeping: false }),
     ] })} />);
-    expect(screen.getByRole("button", { name: "Show lifecycle" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: /^Session details for / }));
+    expect(screen.getByRole("checkbox", { name: "Show lifecycle events" })).not.toBeChecked();
     expect(screen.queryByRole("button", { name: "Turn started" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Context settings" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Mid-turn usage" })).not.toBeInTheDocument();
@@ -325,7 +294,7 @@ describe("Conversation quick filter", () => {
     expect(screen.getByText("3 events hidden in this loaded range.")).toBeInTheDocument();
     expect(screen.getByText(/10 events/)).toBeInTheDocument();
     toggleFilter();
-    expect(screen.getByRole("button", { name: "Hide lifecycle" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("checkbox", { name: "Show lifecycle events", hidden: true })).toBeChecked();
     expect(screen.getByRole("button", { name: "Turn started" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Mid-turn usage" })).toBeInTheDocument();
     expect(screen.queryByText(/events hidden/)).not.toBeInTheDocument();
@@ -366,7 +335,7 @@ describe("Conversation quick filter", () => {
     toggleFilter();
     rerender(<Conversation {...props({ session: { ...SESSION, session_key: "codex:next", session_id: "next" },
       events: [event("Second turn")] })} />);
-    expect(screen.getByRole("button", { name: "Hide lifecycle" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("checkbox", { name: "Show lifecycle events", hidden: true })).toBeChecked();
     expect(screen.getByRole("button", { name: "Second turn" })).toBeInTheDocument();
     toggleFilter();
     expect(screen.queryByRole("button", { name: "Second turn" })).not.toBeInTheDocument();
@@ -387,7 +356,7 @@ describe("Conversation quick filter", () => {
       }]])]]) });
     render(<Conversation {...view} />);
     const turnButton = screen.getByRole("button", { name: "Worked for 1s" });
-    fireEvent.click(screen.getByRole("button", { name: "Recorded 1 event" }));
+    expect(screen.queryByRole("button", { name: "Recorded 1 event" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Worked for 1s" })).toBe(turnButton);
     expect(turnButton).toHaveAttribute("aria-expanded", "true");
     expect(screen.queryByRole("button", { name: "Nested lifecycle" })).not.toBeInTheDocument();
@@ -396,9 +365,9 @@ describe("Conversation quick filter", () => {
     expect(screen.getByText("2 events hidden in this turn.")).toBeInTheDocument();
     expect(screen.queryByText(/Loaded .* of .* events/)).not.toBeInTheDocument();
     expect(view.on_trajectory_event_toggle).not.toHaveBeenCalled();
-    expect(view.on_follow_change).toHaveBeenCalledExactlyOnceWith(false);
+    expect(view.on_follow_change).not.toHaveBeenCalled();
     toggleFilter();
-    expect(screen.getByRole("button", {name: "Recorded 3 events"})).toHaveAttribute("aria-expanded", "true");
+    expect(screen.queryByRole("button", {name: "Recorded 3 events"})).not.toBeInTheDocument();
     expect(screen.getByRole("button", {name: "Nested lifecycle"})).toBeInTheDocument();
     expect(screen.getAllByRole("button", {name: /^Worked/})).toHaveLength(1);
   });

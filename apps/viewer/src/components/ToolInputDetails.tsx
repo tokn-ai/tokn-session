@@ -48,19 +48,24 @@ function inputBlocks(kind: string, input: JsonValue): InputBlock[] {
 }
 
 /** Only render the operation's bounded normalized input, never provider-native data. */
-export function ToolInputDetails({ kind, record, has_output }: { kind: string; record: JsonValue; has_output: boolean }) {
+export function ToolInputDetails({ kind, path, record, has_output }: { kind: string; path?: string | null; record: JsonValue; has_output: boolean }) {
   const input = object(record) && record.redacted !== true && record.truncated !== true ? record.input : null;
   const edits = useMemo(() => kind === "file_edit" && input != null ? editBlocks(input) : null, [kind, input]);
   const authored = kind === "file_edit" || kind === "file_write" || kind === "code_execution";
   const [userOpen, setUserOpen] = useState<boolean | null>(null);
-  const open = userOpen ?? (edits !== null || (authored && !has_output));
+  const open = userOpen ?? (authored && !has_output);
   if (input == null) return null;
   const label = kind === "file_edit" ? "Requested changes" : kind === "file_write" ? "Requested file content"
     : kind === "code_execution" ? "Submitted code" : "Tool input";
+  if (edits) return <div className="tool-input__blocks tool-input__blocks--edits">
+    {edits.map((block, index) => <ToolTextSection key={index}
+      heading={edits.length === 1 && block.heading === path ? undefined : block.heading}
+      text={block.text} format={block.format} label={`${label} · ${block.heading}`} />)}
+  </div>;
   return <details className="tool-input" open={open} onToggle={(event) => setUserOpen(event.currentTarget.open)}>
     <summary>{label}</summary>
     {open && <div className="tool-input__blocks">
-      {(edits ?? inputBlocks(kind, input)).map((block, index) => <ToolTextSection key={index} heading={block.heading}
+      {inputBlocks(kind, input).map((block, index) => <ToolTextSection key={index} heading={block.heading}
         text={block.text} format={block.format} label={`${label} · ${block.heading}`} />)}
     </div>}
   </details>;

@@ -277,7 +277,7 @@ describe("EventCard conversation content", () => {
     }
   });
 
-  it("uses the user bubble presentation and keeps the user role label", () => {
+  it("identifies the user prompt by its accessible name and bubble presentation", () => {
     const { container } = renderCard(event({
       role: "user",
       title: "User message",
@@ -288,7 +288,7 @@ describe("EventCard conversation content", () => {
       "data-presentation",
       "bubble",
     );
-    expect(screen.getByText("user")).toBeInTheDocument();
+    expect(screen.getByRole("article", { name: "user message" })).toBeInTheDocument();
     expect(screen.getByText("My Request:")).toBeInTheDocument();
   });
 
@@ -372,9 +372,9 @@ describe("EventCard tool headings", () => {
     for (const [, , primary] of tools) {
       expect(screen.getByText(primary)).toBeInTheDocument();
     }
-    expect(screen.getByText("/work/repo")).toBeInTheDocument();
+    expect(screen.queryByText("/work/repo")).not.toBeInTheDocument();
     expect(screen.getByText("1.5 KB")).toBeInTheDocument();
-    expect(screen.getByText("+8 −3")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Edit: lib.rs" })).toHaveAccessibleDescription("+8 −3");
   });
 
   it("reports provider errors as failed even when the exit code is zero", () => {
@@ -490,6 +490,11 @@ describe("EventCard whole-turn trajectories", () => {
         tool_output: { sections: [{ label: "Output", text: "compiler stopped", format: "text" }],
           truncated: false, original_size_bytes: 16, source_event_key: command.event_key } })} />);
     expect(screen.getByText("compiler stopped")).toBeVisible();
+    expect(screen.getByLabelText("cargo test output")).toBeVisible();
+    expect(screen.getAllByText("cargo test")).toHaveLength(1);
+    expect(screen.getAllByText(/^exit 7$/i)).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Shell: cargo test" })).toHaveAccessibleDescription("exit 7 /work/repo");
+    expect(screen.queryByRole("heading", { name: "Output" })).toBeNull();
     expect(screen.getByRole("button", { name: "Turn started" })).toBeVisible();
   });
 
@@ -507,6 +512,10 @@ describe("EventCard whole-turn trajectories", () => {
     const toggle = screen.getByRole("button", { name: "Worked for 1h" });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(toggle).toHaveAccessibleDescription(/5 tool calls.*2 earlier tool calls.*Read src\/config.rs.*Shell cargo check Failed.*Task Inspect the configuration Pending/);
+    expect(screen.getByText("cargo check")).toBeVisible();
+    expect(screen.getByText("Failed")).toBeVisible();
+    expect(screen.getByText("+4")).toBeVisible();
+    expect(screen.queryByText("src/config.rs", { exact: true })).toBeNull();
     expect(onLoad).not.toHaveBeenCalled();
     expect(screen.queryByRole("list", { name: "Events in this turn" })).not.toBeInTheDocument();
   });
@@ -523,6 +532,21 @@ describe("EventCard whole-turn trajectories", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("shows the active operation and retains an earlier failure count in a live turn", () => {
+    renderCard(event({ type: "trajectory", trajectory: trajectory({
+      status: "working", started_at: null, tool_count: 2, error_count: 1,
+      tool_previews: [
+        { kind: "shell", label: "cargo test", status: "failed" },
+        { kind: "file_edit", label: "src/lexer.rs", status: "running" },
+      ],
+    }) }));
+    const toggle = screen.getByRole("button", { name: /^Working/ });
+    expect(toggle).toHaveAccessibleDescription(/Shell cargo test Failed.*Edit src\/lexer.rs Running/);
+    expect(screen.getByText("src/lexer.rs", { exact: true })).toBeVisible();
+    expect(screen.getByText("Running", { exact: true })).toBeVisible();
+    expect(screen.getByText("1 error", { exact: true })).toBeVisible();
   });
 
   it("does not claim unknown historical work is currently running", () => {
@@ -641,18 +665,39 @@ describe("EventCard whole-turn trajectories", () => {
   });
 
   it("retains exploration disclosure state while folding the enclosing work", () => {
-    const children = [event({event_key: "read", type: "tool_call", tool: tool({kind: "file_read", path: "a.rs"})}),
-      event({event_key: "search", type: "tool_call", tool: tool({kind: "search", query: "state"})})];
+    const children = ["a.rs", "b.rs", "c.rs", "d.rs"].map(path =>
+      event({ event_key: path, type: "tool_call", tool: tool({ kind: "file_read", path }) }));
+    children.push(event({ event_key: "search", type: "tool_call", tool: tool({ kind: "search", query: "state" }) }));
     const props = {button_id: "work", event: trajectoryEvent, is_selected: false, detail: null,
       detail_error: null, detail_loading: false, on_retry_detail: vi.fn(), on_select: vi.fn(), on_toggle: vi.fn(),
       trajectory_page: trajectoryPage({events: children})};
     const {rerender} = render(<EventCard {...props} is_expanded />);
-    fireEvent.click(screen.getByRole("button", {name: "Read 1 file, performed 1 search"}));
+    fireEvent.click(screen.getByRole("button", {name: "Read 4 files, performed 1 search"}));
     expect(screen.getByRole("button", {name: "Read: a.rs"})).toBeVisible();
     rerender(<EventCard {...props} is_expanded={false} trajectory_page={{ ...props.trajectory_page, has_loaded: false }} />);
     expect(screen.queryByRole("button", {name: "Read: a.rs"})).not.toBeInTheDocument();
     rerender(<EventCard {...props} is_expanded />);
     expect(screen.getByRole("button", {name: "Read: a.rs"})).toBeVisible();
+  });
+
+  it.each(["scoped", "flat"])("exposes the operations in a short %s sequence without a second summary or eager tool output", (transport) => {
+    const edit = event({ event_key: "fix", type: "tool_call", tool: tool({ kind: "file_edit", path: "src/lexer.rs" }) });
+    const test = event({ event_key: "test", type: "tool_call", tool: tool() });
+    const group = event({ event_key: "activity:fix", type: "activity_group", summary: "1 command, 1 file edit",
+      child_keys: [edit.event_key, test.event_key] });
+    const children = trajectoryPage({ events: [edit, test], total_events: 2 });
+    const onToggle = vi.fn();
+    renderCard(event({ type: "trajectory", trajectory: trajectory({ tool_count: 2 }) }), {
+      is_expanded: true,
+      trajectory_page: transport === "scoped" ? trajectoryPage({ events: [group], total_events: 1 }) : children,
+      activity_pages: new Map([[group.event_key, children]]), on_trajectory_event_toggle: onToggle,
+    });
+    const editToggle = screen.getByRole("button", { name: "Edit: src/lexer.rs", expanded: false });
+    const testToggle = screen.getByRole("button", { name: "Shell: cargo test", expanded: false });
+    expect(editToggle.compareDocumentPosition(testToggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /1 command/ })).toBeNull();
+    expect(onToggle).not.toHaveBeenCalled();
+    expect(screen.queryByText("Loading tool output…")).toBeNull();
   });
 
   it("retains errors and filter notices without offering partial group controls", () => {

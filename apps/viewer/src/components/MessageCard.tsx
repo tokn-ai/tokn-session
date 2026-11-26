@@ -63,7 +63,7 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
   const imageContent = hasImages && tray_images.length ? session_key
     ? <MessageImages session_key={session_key} event_key={event.event_key} revision={event.content_revision} images={tray_images} />
     : <span className="message-image__status">Image unavailable</span> : null;
-  const canTranslate = Boolean(status && session_key && role === "assistant" && !event.is_hidden && event.summary.trim());
+  const canTranslate = Boolean(status?.available && session_key && role === "assistant" && !event.is_hidden && event.summary.trim());
   const sender = role === "assistant" ? providerLabel(event.provider) || "Assistant" : role;
   const canCopy = usesMarkdown && !!event.summary.trim();
   const copyText = preview ? display_text : translatedText ?? expandedText ?? event.summary;
@@ -73,25 +73,18 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
   const model_source = model?.origin === "request" ? "Requested model" : "Reported model";
   const fast = response?.fast_mode === "reported" ? "Fast"
     : response?.fast_mode === "requested" ? "Fast requested" : undefined;
+  const phase = event.phase && event.phase !== "finished" ? event.phase : null;
+  const progress = event.delivery === "commentary";
 
   return (
     <article className="message-event transcript-message" aria-label={`${sender} message`}
       data-kind={event.type} data-presentation={presentation} data-role={role} data-selected={is_selected}>
       <div className="message-event__surface">
-        <header className="message-byline">
-          <span className="message-byline__sender" data-provider={role === "assistant" ? event.provider : undefined}>{sender}</span>
-          {event.delivery === "commentary" ? <span className="message-byline__phase">Progress update</span> : null}
-          {event.phase && event.phase !== "finished" ? <span className="message-byline__phase">{event.phase}</span> : null}
-          {event.timestamp ? <time title={formatTimestamp(event.timestamp)}>{formatTimestamp(event.timestamp, "time")}</time> : null}
-          <span className="message-byline__actions">
-            {canCopy ? <CopyTextButton class_name="message-event__inspect" text={copyText} label={preview
-              ? "Copy message preview" : translation.showing_translation ? "Copy translation" : "Copy message"} /> : null}
-            <button aria-label={`Inspect ${role} message`} className="message-event__inspect" id={button_id}
-              onClick={() => on_select(event.event_key)} title={inspectFullMessage ? "View full message" : "Inspect message"} type="button">
-              {inspectFullMessage ? "View full message" : <InspectorIcon width={15} height={15} />}
-            </button>
-          </span>
-        </header>
+        {(presentation === "technical" || progress || phase) && <header className="message-phase">
+          {presentation === "technical" && <span>{sender}</span>}
+          {progress && <span>Progress update</span>}
+          {phase && <span>{phase}</span>}
+        </header>}
         {event.type === "question_reply" && !event.is_hidden ? <span className="message-event__answer-heading">Recorded answers</span> : null}
         {role === "user" ? imageContent : null}
         {showText ? usesMarkdown ? (
@@ -140,54 +133,47 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
             ) : null}
           </div>
         ) : null}
-        {model || fast || canTranslate ? (
-          <div className="message-event__actions">
-            {model || fast ? (
-              <span className="message-event__response" role="group" aria-label="Response details">
-                {model ? (
-                  <span title={[model_source, model.model.model_provider].filter(Boolean).join(" · ")}>
-                    {model.model.model_id}
-                  </span>
-                ) : null}
-                {fast ? <span>{fast}</span> : null}
-              </span>
-            ) : null}
-            {canTranslate ? (
-              <>
-                {translation.loading ? (
-                  <>
-                    <span className="message-translation__status" role="status">
-                      {!translation.progress?.resume ? <span className="inline-spinner" aria-hidden="true" /> : null}
-                      {translation.progress?.message ?? "Translating…"}
-                    </span>
-                    {translation.progress?.resume ? (
-                      <button className="message-event__inspect" onClick={translation.progress.resume} type="button">Continue translation</button>
-                    ) : null}
-                    <button className="message-event__inspect" onClick={translation.cancel} type="button">Cancel</button>
-                  </>
-                ) : translation.translated ? (
-                  <>
-                    <span className="message-translation__status">{translation.showing_translation ? `简体中文 · ${engine?.label}` : "Original"}</span>
-                    <button className="message-event__inspect" onClick={translation.toggle} type="button">
-                      {translation.showing_translation ? "Show original" : "Show translation"}
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    className="message-event__inspect"
-                    disabled={!status?.available}
-                    onClick={() => { void translation.translate(); }}
-                    title={status?.available ? engine?.description : status?.reason ?? undefined}
-                    type="button"
-                  >
-                    {translation.error ? "Retry translation" : "Translate → 简体中文"}
-                  </button>
-                )}
-              </>
-            ) : null}
-          </div>
-        ) : null}
       </div>
+      <footer className="message-utilities" data-read-action={inspectFullMessage || undefined}>
+        <div className="message-utilities__buttons">
+          {canCopy && <CopyTextButton class_name="message-event__inspect" text={copyText} label={preview
+            ? "Copy message preview" : translation.showing_translation ? "Copy translation" : "Copy message"} />}
+          <button aria-label={`Inspect ${role} message`} className="message-event__inspect" id={button_id}
+            onClick={() => on_select(event.event_key)} title={inspectFullMessage ? "View full message" : "Inspect message"} type="button">
+            {inspectFullMessage ? "View full message" : <InspectorIcon width={15} height={15} />}
+          </button>
+          {canTranslate && !translation.loading && !translation.translated && !translation.error && <button
+            aria-label="Translate → 简体中文" className="message-event__inspect" onClick={() => { void translation.translate(); }}
+            title={engine?.description} type="button">Translate</button>}
+        </div>
+        {model || fast ? <span className="message-event__response" role="group" aria-label="Response details">
+          {model && <span title={[model_source, model.model.model_provider].filter(Boolean).join(" · ")}>{model.model.model_id}</span>}
+          {fast && <span>{fast}</span>}
+        </span> : null}
+        {canTranslate && (translation.loading || translation.translated || translation.error) && (
+          <div className="message-utilities__translation">
+            {translation.loading ? <>
+              <span className="message-translation__status" role="status">
+                {!translation.progress?.resume && <span className="inline-spinner" aria-hidden="true" />}
+                {translation.progress?.message ?? "Translating…"}
+              </span>
+              {translation.progress?.resume && <button className="message-event__inspect" onClick={translation.progress.resume}
+                type="button">Continue translation</button>}
+              <button className="message-event__inspect" onClick={translation.cancel} type="button">Cancel</button>
+            </> : translation.translated ? <>
+              <span className="message-translation__status">{translation.showing_translation ? `简体中文 · ${engine?.label}` : "Original"}</span>
+              <button className="message-event__inspect" onClick={translation.toggle} type="button">
+                {translation.showing_translation ? "Show original" : "Show translation"}
+              </button>
+            </> : <button className="message-event__inspect" onClick={() => { void translation.translate(); }}
+              title={engine?.description} type="button">Retry translation</button>}
+          </div>
+        )}
+        {(role === "assistant" || event.timestamp) && <span className="message-byline">
+          {role === "assistant" && <span className="message-byline__sender" data-provider={event.provider}>{sender}</span>}
+          {event.timestamp && <time dateTime={event.timestamp} title={formatTimestamp(event.timestamp)}>{formatTimestamp(event.timestamp, "time")}</time>}
+        </span>}
+      </footer>
     </article>
   );
 }

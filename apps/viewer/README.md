@@ -94,8 +94,9 @@ pnpm exec playwright install firefox
 pnpm run test:browser
 ```
 
-The Firefox tests capture the demo conversation, prompt index, failed command,
-file edit and inspector on desktop and phone. CI saves the PNGs in the
+The Firefox tests capture the first turn, latest reply, prompt index, failed
+command, file edit and inspector on desktop and phone. A separate Qoder fixture
+shows a simulated running response alongside saved history. CI saves the PNGs in the
 `session-reader-previews` artifact.
 
 ## Response translation
@@ -165,7 +166,9 @@ ordering. Use **Workspace** to return to the inbox. **Find session** or
 arrow keys move between results, and Enter opens the focused session.
 Search matches titles, previews, IDs, projects, folders and agent identities.
 
-Message headers identify the speaker and time. Long prompts start folded.
+User prompts sit on the right and agent replies read down the main column.
+Message actions sit beside a prompt or below a reply. Focus a message action to
+see the recorded speaker and time. Long prompts start folded.
 **Read full prompt** and **Read full reply** expand messages in the transcript.
 If a message exceeds the host's detail limit, you can read, fold and reopen
 the available preview without another request.
@@ -197,13 +200,13 @@ events in the same tab. On phones it opens as a dialog. **Escape** returns
 focus to the inspection control. The JSON tabs offer a copy action when the
 clipboard is available.
 
-**Hide lifecycle** is a quick filter for routine lifecycle and bookkeeping
+Select the conversation title to see the provider, model, session ID and last
+update. **Show lifecycle events** in this panel controls routine bookkeeping
 rows without message content, including session settings, delivery markers, and
 successful turn completion. It applies to the conversation and expanded work
 sections, hiding intermediate usage while keeping the final accounting for each
 usage kind. Errors, messages, tools, agent communications, and unfamiliar events
-remain visible. Routine bookkeeping starts hidden. **Show lifecycle** restores
-those rows.
+remain visible. Routine bookkeeping starts hidden.
 Counts and pagination still describe the complete history, and hidden counts
 refer only to loaded rows.
 
@@ -220,13 +223,17 @@ observed, auto-expanding to show the newest work. Completion collapses it to
 signals show neutral **Work** until a final reply or turn boundary closes the
 run. Durations use provider timestamps from the first contributing record through
 the last, including tools that start and finish in separate records. A folded group
-previews up to three recent tools with their commands or targets and any pending,
-running or failed status.
-Expanding it fetches its contained event rows in bounded pages and shows
-them as their normal event cards. A turn with a single tool and routine
-bookkeeping opens directly to the tool row. Select the row to read its output.
+shows a recent command or target and the additional tool count. Running or
+failed work takes priority in the preview.
+Expanding a short work group reveals its individual operations directly.
+Larger groups load in bounded pages. Select a command for its output or an
+edit for its recorded changes.
 Each row remains independently inspectable,
 and a recorded delegation can still open its verified direct child session.
+
+When a runtime supplies a live response, its text and tools appear beneath the
+latest recorded turn. The **Working** indicator clears when the preview ends.
+The same scroll position applies while the response streams.
 
 Relay batches refresh existing timeline and expanded child items without
 discarding loaded history. Scrolling follows new work only at the bottom;

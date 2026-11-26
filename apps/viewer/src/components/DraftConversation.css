@@ -33,7 +33,8 @@
 .draft-session-activity { margin-top: 24px; border-top: 1px solid var(--border); padding-top: 16px; }
 .draft-session-activity h2 { margin: 0; font-size: 15px; font-weight: 550; }
 .draft-session-activity > p { color: var(--text-muted); font-size: 12px; line-height: 1.6; }
-.draft-session-activity .session-interactions, .draft-session-activity .session-live-output { margin-right: 0; margin-left: 0; }
+.draft-session-activity__preview { max-height: min(25dvh, 280px); overflow: auto; padding: 4px; }
+.draft-session-activity .session-interactions { margin-right: 0; margin-left: 0; }
 @media (max-width: 600px) {
   .draft-conversation__body { padding: 20px 16px; }
   .draft-conversation__welcome { margin-bottom: 20px; }

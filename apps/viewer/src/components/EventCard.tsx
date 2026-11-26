@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   AgentActivityCardSummary,
   EventDetail,
@@ -19,9 +19,10 @@ import {
 } from "../lib/state";
 import {
   ChevronIcon,
-  ActivityIcon,
   BranchIcon,
+  EditFileIcon,
   InspectorIcon,
+  ReadFileIcon,
   ReasoningIcon,
   SearchIcon,
   TechnicalIcon,
@@ -296,14 +297,17 @@ function WorkPreview({ trajectory, id }: { trajectory: TrajectoryCardSummary; id
     status: ["failed", "running", "pending"].includes(status) ? status : "",
   }));
   const descriptions = rows.map((row) => [row.action, row.label, humanize(row.status)].filter(Boolean).join(" "));
+  // The recorded window contains at most three operations. Keep a current or
+  // failed operation in sight even if a later routine command has completed.
+  const recent = [...rows].reverse();
+  const active = trajectory.status === "working" && recent.find(row => row.status === "running" || row.status === "pending");
+  const current = active || recent.find(row => row.status === "failed") || recent[0];
   return <span className="work-preview">
     <span id={id} className="sr-only">{[earlierLabel, ...descriptions].filter(Boolean).join(". ")}</span>
-    {earlierLabel && <span className="work-preview__earlier" aria-hidden="true">{earlierLabel}</span>}
-    {rows.map((row, index) => <span key={index} className="work-preview__row" aria-hidden="true">
-      <span className="work-preview__kind">{row.action}</span>
-      <span className="work-preview__label" title={row.label}>{row.label}</span>
-      {row.status ? <span className="work-preview__state" data-status={row.status}>{humanize(row.status)}</span> : null}
-    </span>)}
+    {current.status && <span aria-hidden="true" className="work-preview__state" data-status={current.status}>{humanize(current.status)}</span>}
+    <span aria-hidden="true" className="work-preview__label" title={current.label}>{current.label}</span>
+    {trajectory.tool_count > 1 && <span aria-hidden="true" className="work-preview__count">+{trajectory.tool_count - 1}</span>}
+    {trajectory.error_count > 0 && current.status !== "failed" && <span aria-hidden="true" className="work-preview__state" data-status="failed">{pluralize(trajectory.error_count, "error")}</span>}
   </span>;
 }
 
@@ -330,10 +334,36 @@ function useTrajectoryHeading(event: EventSummary): TechnicalCardHeading {
   };
 }
 
+/** Keep the ticking clock local so that open tool rows and logs do not rerender each second. */
+function WorkHeader({ event, button_id, expanded, on_select, on_toggle }: {
+  event: EventSummary; button_id: string; expanded: boolean;
+  on_select: (key: string) => void; on_toggle: (key: string) => void;
+}) {
+  const heading = useTrajectoryHeading(event);
+  const factsId = heading.secondary ? `${button_id}-facts` : undefined;
+  const previewId = !expanded && !event.is_hidden && event.trajectory?.tool_previews?.length ? `${button_id}-preview` : undefined;
+  const failures = event.trajectory?.error_count ?? 0;
+  return <div className="trajectory-section__header">
+    <button type="button" className="trajectory-section__toggle" aria-label={heading.primary}
+      aria-expanded={expanded} aria-controls={`${button_id}-details`}
+      aria-describedby={[factsId, previewId].filter(Boolean).join(" ") || undefined}
+      onClick={() => on_toggle(event.event_key)}>
+      {event.trajectory?.status === "working" && <span aria-hidden="true" className="inline-spinner" />}
+      <span className="trajectory-section__label" id={`${button_id}-label`}>{heading.primary}</span>
+      <ChevronIcon className={expanded ? "chevron chevron--open" : "chevron"} />
+      {heading.secondary && <span id={factsId} className={previewId || expanded || failures ? "sr-only" : "trajectory-section__facts"}>{heading.secondary}</span>}
+      {previewId && event.trajectory && <WorkPreview trajectory={event.trajectory} id={previewId} />}
+      {!previewId && failures > 0 && <span aria-hidden="true" className="work-preview__state" data-status="failed">{pluralize(failures, "error")}</span>}
+    </button>
+    <button type="button" className="trajectory-section__inspect" id={button_id} aria-label={`Inspect ${heading.primary}`}
+      onClick={() => on_select(event.event_key)}><InspectorIcon /></button>
+  </div>;
+}
+
 function changeSummary(tool: ToolCardSummary): string | null {
   const changes = [
-    tool.added === null ? null : `+${tool.added}`,
-    tool.removed === null ? null : `−${tool.removed}`,
+    tool.added == null ? null : `+${tool.added}`,
+    tool.removed == null ? null : `−${tool.removed}`,
   ].filter((change): change is string => change !== null);
   return changes.length > 0 ? changes.join(" ") : null;
 }
@@ -377,6 +407,8 @@ function eventIcon(event: EventSummary) {
       return <TerminalIcon />;
     }
     if (event.tool?.kind === "search" || event.tool?.kind === "web") return <SearchIcon />;
+    if (event.tool?.kind === "file_edit" || event.tool?.kind === "file_write") return <EditFileIcon />;
+    if (event.tool?.kind === "file_read") return <ReadFileIcon />;
     return <ToolIcon />;
   }
   return <TechnicalIcon />;
@@ -558,31 +590,34 @@ function TrajectorySection({
   expanded_activity_keys?: Set<string>;
   expanded_activities?: Map<string, ExpandedActivityState>;
 }) {
-  const heading = useTrajectoryHeading(event);
   const regionId = `${button_id}-details`;
   const labelId = `${button_id}-label`;
-  const factsId = heading.secondary ? `${button_id}-facts` : undefined;
-  const previewId = !is_expanded && !event.is_hidden && event.trajectory?.tool_previews?.length ? `${button_id}-preview` : undefined;
-  const visibleEvents = hide_lifecycle
-    ? page?.events.filter((event) => !isBookkeepingEvent(event)) ?? []
-    : page?.events ?? [];
-  const hiddenCount = (page?.events.length ?? 0) - visibleEvents.length;
-  // Determine identity and boundaries before filtering: revealing lifecycle
-  // rows must not unload or collapse an already opened inner group.
-  const activityGroups = groupActivity(page?.events ?? []).map((group) => {
-    const substantive = group.filter((child) => !isBookkeepingEvent(child));
-    const singleTool = group[0].type === "activity_group" ? !!group[0].single_tool_key
-      : substantive.length === 1 && substantive[0].type === "tool_call" && !substantive[0].is_hidden;
-    return {
-      group_key: group[0].event_key,
-      events: hide_lifecycle ? substantive : group,
-      inline: event.trajectory?.tool_count === 1 && singleTool,
-    };
-  }).filter((group) => group.events.length > 0);
+  // Determine identity and boundaries before filtering. Revealing routine rows
+  // must not unload a group's tool output or disturb its original chronology.
+  const activityGroups = useMemo(() => {
+    const groups = groupActivity(page?.events ?? []);
+    return groups.map(group => {
+      const substantive = group.filter(child => !isBookkeepingEvent(child));
+      const deferred = group[0].type === "activity_group";
+      const singleTool = deferred ? !!group[0].single_tool_key
+        : substantive.length === 1 && substantive[0].type === "tool_call" && !substantive[0].is_hidden;
+      const count = deferred ? group[0].child_keys?.length : group.length;
+      // A single short sequence already has a disclosure on the enclosing turn.
+      // Keep larger groups and groups separated by agent commentary independently lazy.
+      const shortSequence = groups.length === 1 && count !== undefined && count > 0 && count <= 4;
+      return {
+        group_key: group[0].event_key,
+        events: hide_lifecycle ? substantive : group,
+        hidden_count: hide_lifecycle ? group.length - substantive.length : 0,
+        inline: shortSequence || (event.trajectory?.tool_count === 1 && singleTool),
+      };
+    });
+  }, [page?.events, hide_lifecycle, event.trajectory?.tool_count]);
+  const hiddenCount = activityGroups.reduce((count, group) => count + group.hidden_count, 0);
+  const visibleCount = (page?.events.length ?? 0) - hiddenCount;
   const renderChild = (childEvent: EventSummary) => (
     <div
       className="trajectory-section__item"
-      data-error={childEvent.is_error || childEvent.type === "error"}
       data-scroll-key={JSON.stringify([readingEventKey(event), readingEventKey(childEvent)])}
       key={childEvent.event_key}
       role="listitem"
@@ -614,40 +649,7 @@ function TrajectorySection({
   );
   return (
     <section className="trajectory-section transcript-work" data-status={event.trajectory?.status} data-selected={is_selected}>
-      <div className="trajectory-section__header">
-        <button
-          aria-controls={regionId}
-          aria-expanded={is_expanded}
-          aria-label={heading.primary}
-          aria-describedby={[factsId, previewId].filter(Boolean).join(" ") || undefined}
-          className="trajectory-section__toggle"
-          onClick={() => on_toggle(event.event_key)}
-          type="button"
-        >
-          <span aria-hidden="true" className="transcript-work__icon">
-            {event.trajectory?.status === "working" ? <span className="inline-spinner" /> : <ActivityIcon width={16} height={16} />}
-          </span>
-          <span className="trajectory-section__summary">
-            <span className="trajectory-section__label" id={labelId}>
-              {heading.primary}
-            </span>
-            {heading.secondary ? (
-              <span className="trajectory-section__facts" id={factsId}>{heading.secondary}</span>
-            ) : null}
-          </span>
-          <ChevronIcon className={is_expanded ? "chevron chevron--open" : "chevron"} />
-          {previewId && event.trajectory ? <WorkPreview trajectory={event.trajectory} id={previewId} /> : null}
-        </button>
-        <button
-          aria-label={`Inspect ${heading.primary}`}
-          className="trajectory-section__inspect"
-          id={button_id}
-          onClick={() => on_select(event.event_key)}
-          type="button"
-        >
-          <InspectorIcon />
-        </button>
-      </div>
+      <WorkHeader event={event} button_id={button_id} expanded={is_expanded} on_toggle={on_toggle} on_select={on_select} />
 
       {is_expanded || page?.has_loaded || (page?.events.length ?? 0) > 0 ? (
         <div
@@ -683,14 +685,14 @@ function TrajectorySection({
 
               {hiddenCount > 0 ? (
                 <p className="event-filter-notice" role="status">
-                  {visibleEvents.length === 0 ? "No events match this filter in this turn. " : ""}
+                  {visibleCount === 0 ? "No events match this filter in this turn. " : ""}
                   {hiddenCount} {hiddenCount === 1 ? "event hidden" : "events hidden"} in this turn.
                 </p>
               ) : null}
 
-              {visibleEvents.length > 0 ? (
+              {visibleCount > 0 ? (
                 <div aria-label="Events in this turn" className="trajectory-section__events" role="list">
-                  {activityGroups.map(({ group_key, events: group, inline }) => group[0].type === "activity_group" ? (
+                  {activityGroups.filter(group => group.events.length > 0).map(({ group_key, events: group, inline }) => group[0].type === "activity_group" ? (
                     <DeferredActivityGroup key={group_key} event={group[0]} page={activity_pages?.get(group_key)}
                       selected_event_key={selected_event_key} on_load={on_activity_load} on_retry={on_retry} parent_visible={is_expanded}
                       inline={inline} reveal={group[0].child_keys?.some((key) => expanded_activity_keys?.has(key) ?? key === expanded_child_event_key)}
@@ -773,22 +775,20 @@ function ToolOutput({
     || (event.tool?.status === undefined && event.phase !== null && event.phase !== "finished");
   const toolLabel = toolHeading(event).primary;
   const isShell = event.tool?.kind === "shell" || event.tool?.kind === "terminal";
+  const input = detail && <ToolInputDetails kind={event.tool?.kind ?? "unknown"} path={event.tool?.path} record={detail.event} has_output={hasOutput} />;
+  const sections = output?.sections ?? [];
+  const streams = sections.map((section, index) => {
+    const isGeneric = !section.label || section.label.toLowerCase() === "output";
+    return <ToolTextSection key={`${event.event_key}-${index}`}
+      terminal={isShell} text={section.text} format={section.format}
+      heading={sections.length === 1 && isShell && isGeneric ? undefined : section.label ?? "Output"}
+      label={`${toolLabel} ${isGeneric ? "output" : `${section.label} output`}`} />;
+  });
   return (
     <div aria-busy={is_loading} className={isShell ? "tool-output shell-output" : "tool-output"}>
       <DetailRefreshError error={error} on_retry={on_retry} />
-      {isShell ? (
-        <header className="shell-output__header">
-          {event.tool?.cwd ? <span className="shell-output__cwd" title={event.tool.cwd}>{event.tool.cwd}</span> : null}
-          <code className="shell-output__command"><span aria-hidden="true">{event.tool?.kind === "shell" ? "$ " : ""}</span>{event.tool?.command || toolLabel}</code>
-          {event.tool?.exit_code !== null && event.tool?.exit_code !== undefined ? (
-            <span className="shell-output__exit" data-error={event.tool.exit_code !== 0}>Exit {event.tool.exit_code}</span>
-          ) : null}
-        </header>
-      ) : null}
-      {detail && <ToolInputDetails kind={event.tool?.kind ?? "unknown"} record={detail.event} has_output={hasOutput} />}
-      {output?.sections.map((section, index) => <ToolTextSection key={`${event.event_key}-${index}`}
-        terminal={isShell} text={section.text} format={section.format} heading={section.label ?? "Output"}
-        label={`${toolLabel} ${section.label ? `${section.label} output` : "output"}`} />)}
+      {!isShell && input}
+      {isShell && streams.length ? <div className="tool-output__streams">{streams}</div> : streams}
       {imageContent}
       {!hasOutput && <p className="tool-output__empty" role="status">
         {isPending ? "Output is not available yet." : "No output was captured for this tool call."}
@@ -800,6 +800,7 @@ function ToolOutput({
           Inspect the event for the complete bounded detail.
         </p>
       ) : null}
+      {isShell && input}
     </div>
   );
 }
@@ -887,10 +888,13 @@ export function EventCard({
 
   const heading = cardHeading(event);
   const title = heading?.primary ?? event.title;
-  const status = eventStatus(event);
   const regionId = `${button_id}-details`;
   const labelId = `${button_id}-label`;
   const cardIsExpanded = usesControlledExpansion(event) ? is_expanded : isLocallyExpanded;
+  const isShell = event.tool?.kind === "shell" || event.tool?.kind === "terminal";
+  const status = eventStatus(event) ?? (isShell && cardIsExpanded && event.tool?.exit_code === 0
+    ? { label: "exit 0", tone: "success" } : null);
+  const secondary = event.tool?.kind === "shell" && !cardIsExpanded ? null : heading?.secondary;
   const isCommunication = isAgentCommunication(event);
   const subagentTarget = event.type === "agent_activity"
     ? (isCommunication ? event.agent_activity?.actor : event.agent_activity?.target) ?? null
@@ -901,14 +905,14 @@ export function EventCard({
       data-selected={is_selected}
       data-tone={eventTone(event)}
       data-expanded={cardIsExpanded}
-      data-shell={event.tool?.kind === "shell" || event.tool?.kind === "terminal"}
+      data-tool-kind={event.tool?.kind}
     >
       <div className="technical-event__header">
         <button
           aria-controls={regionId}
           aria-expanded={cardIsExpanded}
           aria-label={heading?.action ? `${heading.action}: ${title}` : title}
-          aria-describedby={status ? `${button_id}-status` : undefined}
+          aria-describedby={[status && `${button_id}-status`, secondary && `${button_id}-context`].filter(Boolean).join(" ") || undefined}
           className="technical-event__toggle"
           onClick={() => {
             if (usesControlledExpansion(event)) {
@@ -922,7 +926,7 @@ export function EventCard({
           <span className="technical-event__icon">{eventIcon(event)}</span>
           <span className="technical-event__heading">
             <span className="technical-event__title-row">
-              {heading?.action ? <span className="tool-action">{heading.action}</span> : null}
+              {heading?.action && event.tool?.kind !== "shell" ? <span className="tool-action">{heading.action}</span> : null}
               <span
                 className="technical-event__title"
                 data-monospace={heading?.monospace || undefined}
@@ -932,9 +936,13 @@ export function EventCard({
                 {title}
               </span>
             </span>
-            {heading?.secondary && !(cardIsExpanded && (event.tool?.kind === "shell" || event.tool?.kind === "terminal")) ? (
-              <span className="technical-event__secondary" title={heading.secondary}>
-                {heading.secondary}
+            {secondary ? (
+              <span className="technical-event__secondary" title={secondary} id={`${button_id}-context`}>
+                {event.tool?.kind === "file_edit" ? <>
+                  {event.tool.added != null && <span className="tool-change__added">+{event.tool.added}</span>}
+                  {event.tool.added != null && event.tool.removed != null ? " " : null}
+                  {event.tool.removed != null && <span className="tool-change__removed">−{event.tool.removed}</span>}
+                </> : secondary}
               </span>
             ) : null}
           </span>

@@ -61,7 +61,7 @@ describe("tool output images", () => {
       detail_error: "Could not refresh output",
     }));
     expect(screen.getByText("Renderer exited")).toBeInTheDocument();
-    expect(screen.getByText("Exit 1")).toBeInTheDocument();
+    expect(screen.getAllByText(/^exit 1$/i)).toHaveLength(1);
     expect(screen.getByText(/Output preview is truncated/)).toBeInTheDocument();
     expect(screen.getByText(/Image unavailable/)).toBeInTheDocument();
     expect(screen.getByText(/Could not refresh output/)).toBeInTheDocument();

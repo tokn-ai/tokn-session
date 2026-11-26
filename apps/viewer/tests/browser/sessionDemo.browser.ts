@@ -98,9 +98,6 @@ test("reviews the recorded patch alongside its test command", async ({ page, dem
   await page.getByRole("button", { name: "Jump to prompt" }).click();
   await page.getByRole("region", { name: "Prompts in this session" }).getByRole("button").filter({ hasText: middlePrompt }).click();
   await page.getByRole("button", { name: /^Worked/ }).filter({ hasText: "2 tool calls" }).click();
-  const group = page.getByRole("button", { name: /1 command.*1 file edit/ });
-  await expect(group).toHaveAttribute("aria-expanded", "false");
-  await group.click();
   await page.getByRole("button", { name: "Edit: src/lexer.rs", exact: true }).click();
   const patch = page.getByLabel("Requested changes · src/lexer.rs", { exact: true });
   await expect(patch).toContainText("-  if input.is_empty() {");
@@ -108,4 +105,26 @@ test("reviews the recorded patch alongside its test command", async ({ page, dem
   await expect(page.getByRole("button", { name: "Shell: cargo test -p parser --test whitespace" })).toHaveAttribute("aria-expanded", "false");
   await patch.scrollIntoViewIfNeeded();
   await capture(page, info, "file-edit");
+});
+
+test("shows a complete turn and opens session details at narrow widths", async ({ page, demo_url }, info) => {
+  await openDemo(page, demo_url);
+  const history = page.getByRole("region", { name: "Conversation history" });
+  await history.hover();
+  await page.mouse.wheel(0, -2000);
+  await expect.poll(() => history.evaluate(el => el.scrollTop)).toBe(0);
+  await capture(page, info, "first-turn");
+  if (info.project.name === "phone") await page.setViewportSize({ width: 320, height: 700 });
+  const trigger = page.getByRole("button", { name: /^Session details for / });
+  await trigger.click();
+  const details = page.getByRole("region", { name: "Session details" });
+  await expect(details).toBeVisible();
+  await expect(details.getByText("Codex", { exact: true })).toBeVisible();
+  const lifecycle = details.getByRole("checkbox", { name: "Show lifecycle events" });
+  await lifecycle.check();
+  await expect(lifecycle).toBeChecked();
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.keyboard.press("Escape");
+  await expect(trigger).toBeFocused();
+  await expect(details).toBeHidden();
 });

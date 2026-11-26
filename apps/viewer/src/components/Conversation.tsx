@@ -1,14 +1,13 @@
-import type { ExpandedActivityState } from "../lib/types";
 import { useLayoutEffect, type ReactNode } from "react";
 import { useSessionModel } from "../lib/useSessionModel";
 import { SessionControlContext, useSessionControl } from "../lib/useSessionControl";
-import { modelLabel } from "../lib/sessionModels";
 import { readingEventKey } from "../lib/readingPosition";
 import { useTimelineScroll } from "../lib/useTimelineScroll";
 import { useViewerPreferences } from "../lib/viewerPreferences";
 import { isBookkeepingEvent } from "../lib/eventFilter";
 import type {
   EventDetail,
+  ExpandedActivityState,
   EventSummary,
   OutstandingQuestion,
   SessionHistoryStatus,
@@ -16,20 +15,14 @@ import type {
   SessionModelState,
   TrajectoryEventPageState,
 } from "../lib/types";
-import {
-  eventButtonId,
-  formatTimestamp,
-  providerLabel,
-  sessionDisplayTitle,
-  shortSessionId,
-  subagentDetail,
-} from "../lib/state";
-import { ChevronIcon, FilterIcon, InspectorIcon, PanelIcon, SendIcon } from "./Icons";
+import { eventButtonId } from "../lib/state";
+import { InspectorIcon, PanelIcon, SendIcon } from "./Icons";
 import { EventCard } from "./EventCard";
 import { isVisiblePrompt, PromptNavigator } from "./PromptNavigator";
 import { sessionActivity } from "../lib/sessionActivity";
 import "./ConversationHeader.css";
 import { LoadingRows, StateView } from "./StateView";
+import { SessionDetails } from "./SessionDetails";
 import { SessionComposer } from "./SessionComposer";
 import { SessionInteractions } from "./SessionInteractions";
 import { SessionLiveOutput } from "./SessionLiveOutput";
@@ -167,7 +160,10 @@ export function Conversation({
   const eventCount = total_events ?? session.event_count;
   const countLabel = eventCount !== null ? `${eventCount} events`
     : session.message_count !== null ? `${session.message_count} messages` : "Event count unavailable";
-  const childDetail = session.is_subagent ? subagentDetail(session) : null;
+  const hiddenLabel = hiddenCount ? `${hiddenCount} ${hiddenCount === 1 ? "event hidden" : "events hidden"} in this loaded range.` : null;
+  // A live response belongs at the latest end, never after a partial older page.
+  const liveOutput = has_newer ? undefined : control.status?.live_output;
+  const hasLiveOutput = Boolean(liveOutput?.parts.length);
   const activity = sessionActivity(session);
 
   function jumpToLatest() {
@@ -191,72 +187,23 @@ export function Conversation({
           <PanelIcon />
         </button>
         <div className="conversation__identity">
-          <div className="conversation__title-row">
-            <h2 tabIndex={-1} title={sessionDisplayTitle(session)}>{sessionDisplayTitle(session)}</h2>
-          </div>
-          <div className="session-header__context">
-            <span className="provider-badge" data-provider={session.provider}>{providerLabel(session.provider)}</span>
-            <details className="conversation__metadata" key={session.session_key}>
-              <summary>
-                {session.is_subagent ? "Subagent · " : ""}{session.project ?? session.cwd ?? "Unassigned project"}
-                <ChevronIcon />
-              </summary>
-              <div className="conversation__metadata-panel">
-                <p title={`${session.cwd ?? "Unassigned project"}\nSession ${session.session_id}`}>
-                  {session.is_subagent ? (
-                    <>
-                      <span title={childDetail ?? undefined}>
-                        {childDetail ? `Subagent · ${childDetail}` : "Subagent"}
-                      </span>
-                      <span aria-hidden="true"> · </span>
-                    </>
-                  ) : null}
-                  {session.project ?? session.cwd ?? "Unassigned project"}
-                  <span aria-hidden="true"> · </span>
-                  <span
-                    aria-label={`Session ${session.session_id}`}
-                    className="conversation__session-id"
-                  >
-                    {shortSessionId(session.session_id)}
-                  </span>
-                  <span aria-hidden="true"> · </span>
-                  {countLabel}
-                </p>
-                <p className="conversation__path">{session.cwd}</p>
-              </div>
-            </details>
-            {model.state?.model && <span className="conversation__model" title={`${model.state.model.model_provider ?? session.provider} · ${model.state.model.model_id}`}>
-              {modelLabel(model.state.model)}{model.state.source === "recorded" ? " · Recorded" : model.state.source === "catalog" ? " · Model list" : ""}
-            </span>}
-            {activity.label && <span className="activity-label" data-tone={activity.tone}>{activity.label}</span>}
-          </div>
+          <SessionDetails key={session.session_key} session={session} model={model.state} count_label={countLabel}
+            hidden_label={visibleEvents.length ? hiddenLabel : null} show_lifecycle={!hideLifecycle}
+            on_lifecycle_change={show_lifecycle => updatePreferences({ show_lifecycle })} />
+          {activity.label && <span className="activity-label" data-tone={activity.tone}>{activity.label}</span>}
         </div>
         <PromptNavigator key={session.session_key} events={events} has_older={has_older} loading_older={is_loading_older}
           following={scroll.isFollowing} timeline_ref={scroll.timelineRef} on_older={loadOlder} on_jump={scroll.reveal} />
-        <button
-          aria-label={hideLifecycle ? "Show lifecycle" : "Hide lifecycle"}
-          aria-pressed={hideLifecycle}
-          className="conversation__filter"
-          onClick={() => updatePreferences({ show_lifecycle: hideLifecycle })}
-          title={hideLifecycle
-            ? "Show lifecycle events and mid-turn usage again."
-            : "Hide routine lifecycle, session, configuration, and metadata events without content, plus mid-turn usage. Keep end-of-turn usage and meaningful activity."}
-          type="button"
-        >
-          <FilterIcon />
-          <span className="conversation__filter-label">{hideLifecycle ? "Show lifecycle" : "Hide lifecycle"}</span>
-        </button>
-        <button
+        {selected_event_key && <button
           aria-label={inspector_open ? "Close event inspector" : "Open event inspector"}
           aria-pressed={inspector_open}
           className="icon-button inspector-toggle"
-          disabled={!selected_event_key}
           onClick={on_inspector_toggle}
           title="Event inspector"
           type="button"
         >
           <InspectorIcon />
-        </button>
+        </button>}
       </header>
 
       {managed_controls}
@@ -280,7 +227,7 @@ export function Conversation({
           onClickCapture={(event) => {
             // Pointer and keyboard activation both reach capture before the disclosure changes layout.
             if (event.target instanceof Element && event.target.closest(
-              '[data-reading-slot] button[aria-expanded="false"]:not(:disabled), [data-reading-slot] details:not([open]) > summary',
+              '[data-reading-slot] button[aria-expanded="false"]:not(:disabled), .timeline details:not([open]) > summary',
             )) scroll.pause();
           }}
           onScroll={scroll.onScroll}
@@ -307,13 +254,13 @@ export function Conversation({
               Showing last loaded history while live updates retry: {follow_error}
             </div>
           ) : null}
-          {is_loading && events.length === 0 ? (
+          {is_loading && !hasLiveOutput && events.length === 0 ? (
             <div className="timeline-loading">
               <LoadingRows count={5} />
             </div>
           ) : null}
 
-          {!is_loading && error && events.length === 0 ? (
+          {!is_loading && error && !hasLiveOutput && events.length === 0 ? (
             <StateView
               action_label="Try again"
               message={error}
@@ -323,14 +270,14 @@ export function Conversation({
             />
           ) : null}
 
-          {!is_loading && !error && events.length === 0 ? (
+          {!is_loading && !error && !hasLiveOutput && events.length === 0 ? (
             <StateView
               message="The provider returned a valid session with no normalized events."
               title="No events in this session"
             />
           ) : null}
 
-          {events.length > 0 ? (
+          {events.length > 0 || hasLiveOutput ? (
             <div className="timeline" aria-label="Session event timeline" ref={scroll.contentRef}>
               {history_status && history_status !== "complete" ? (
                 <div className="history-notice" role="status">
@@ -354,20 +301,13 @@ export function Conversation({
                 >
                   {is_loading_older ? "Loading earlier turns…" : "Load earlier turns"}
                 </button>
-              ) : (
-                <div className="timeline-boundary">
-                  <span />
-                  <span>Session start</span>
-                  <span />
-                </div>
-              )}
-
-              {hiddenCount > 0 ? (
-                <p className="event-filter-notice" role="status">
-                  {visibleEvents.length === 0 ? "No events match this filter in the loaded range. " : ""}
-                  {hiddenCount} {hiddenCount === 1 ? "event hidden" : "events hidden"} in this loaded range.
-                </p>
               ) : null}
+
+              {hiddenLabel && !visibleEvents.length && !hasLiveOutput && (
+                <p className="event-filter-notice" role="status">
+                  No events match this filter in the loaded range. {hiddenLabel}
+                </p>
+              )}
 
               {visibleEvents.map((event) => (
                 <div tabIndex={-1} data-reading-slot={event.slot_key ?? event.event_key} data-reading-type={event.type}
@@ -433,13 +373,8 @@ export function Conversation({
                 >
                   {is_loading_newer ? "Loading newer events…" : "Load newer events"}
                 </button>
-              ) : (
-                <div className="timeline-boundary timeline-boundary--end">
-                  <span />
-                  <span>{formatTimestamp(events[events.length - 1]?.timestamp ?? null)}</span>
-                  <span />
-                </div>
-              )}
+              ) : null}
+              <SessionLiveOutput output={liveOutput} />
             </div>
           ) : null}
         </div>
@@ -461,7 +396,6 @@ export function Conversation({
         </div>}
       </div>
       <SessionInteractions session={session} refresh_key={input_refresh_key} on_accepted={on_input_accepted} />
-      <SessionLiveOutput output={control.status?.live_output} />
       <SessionComposer session={session} on_accepted={on_input_accepted} model={model}
         control={control.enabled ? control : undefined}
         input_refresh_key={(input_refresh_key ?? 0) + model.input_revision} />

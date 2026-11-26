@@ -51,7 +51,7 @@ interface ViewerFixture {
   appendTurn: (prompt: string, reply: string) => Promise<void>;
 }
 
-async function serveFixture(home: string, use: (url: string) => Promise<void>, includeNative = false) {
+export async function serveFixture(home: string, use: (url: string) => Promise<void>, includeNative = false) {
   const token = randomUUID();
   const target = resolve(root, process.env.CARGO_TARGET_DIR || "target");
   const executable = process.platform === "win32" ? "tokn-viewer-api.exe" : "tokn-viewer-api";
