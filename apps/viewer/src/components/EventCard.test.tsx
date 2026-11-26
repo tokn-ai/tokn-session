@@ -257,6 +257,26 @@ describe("EventCard conversation content", () => {
     expect(onSelect).toHaveBeenCalledWith("event.v1.1");
   });
 
+  it("identifies the speaker and copies only the displayed preview when a message is truncated", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    try {
+      const visible = event({ provider: "zcode", delivery: "commentary", summary_truncated: true });
+      const { unmount } = renderCard(visible);
+      const message = screen.getByRole("article", { name: "ZCode message" });
+      expect(message.querySelector("time")?.textContent).toBeTruthy();
+      expect(screen.getByText("Progress update")).toBeVisible();
+      fireEvent.click(screen.getByRole("button", { name: "Copy message preview" }));
+      expect(await screen.findByText("Copied")).toBeVisible();
+      expect(writeText).toHaveBeenCalledWith(visible.summary);
+      unmount();
+      renderCard({ ...visible, is_hidden: true });
+      expect(screen.queryByRole("button", { name: /copy/i })).not.toBeInTheDocument();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("uses the user bubble presentation and keeps the user role label", () => {
     const { container } = renderCard(event({
       role: "user",

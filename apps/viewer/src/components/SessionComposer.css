@@ -1,0 +1,117 @@
+.session-composer .composer-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 3px 10px 10px;
+}
+
+.composer-toolbar__options,
+.composer-toolbar__delivery {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.composer-toolbar__options {
+  flex: 1 1 10rem;
+}
+
+.composer-toolbar__delivery {
+  margin-inline-start: auto;
+}
+
+.composer-toolbar .session-model { flex: 1 1 7rem; }
+.composer-toolbar .session-model__trigger { margin: 0; }
+.composer-toolbar .session-model__reason { white-space: normal; }
+.composer-toolbar .session-composer__provider { padding-inline: 6px; }
+
+.composer-toolbar .image-attachments__add {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.composer-toolbar__delivery > .text-button {
+  color: var(--text-soft);
+  padding: 7px 9px;
+  font-size: 12px;
+  border-radius: 8px;
+}
+
+.composer-toolbar .image-attachments__add:not(:disabled):hover,
+.composer-toolbar__delivery > .text-button:not(:disabled):hover {
+  background: var(--surface-hover);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.composer-toolbar__delivery > .text-button:disabled,
+.composer-toolbar .image-attachments__add:disabled {
+  opacity: .5;
+  cursor: default;
+}
+
+.composer-read-only {
+  display: grid;
+  align-items: center;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.composer-read-only > strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.composer-read-only > span {
+  grid-column: 1;
+  overflow-wrap: anywhere;
+  max-height: 16dvh;
+  overflow: auto;
+}
+
+.composer-read-only__retry {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+
+.composer-read-only__retry svg { flex: none; width: 14px; }
+.composer-read-only__model { margin: 5px 3px 0; color: var(--text-muted); font-size: 11px; }
+.composer-read-only__model summary { width: fit-content; cursor: pointer; }
+.composer-read-only__model .session-model { margin: 6px 0; }
+
+@media (pointer: coarse) {
+  .composer-toolbar button,
+  .composer-read-only__retry,
+  .composer-read-only__model summary {
+    min-height: 44px;
+  }
+
+  .composer-toolbar .image-attachments__add,
+  .composer-toolbar .session-composer__send { width: 44px; height: 44px; }
+  .composer-read-only__model summary { align-content: center; }
+}
+
+@media (max-width: 500px) {
+  .composer-read-only { gap: 3px; }
+  .composer-read-only__retry { grid-column: 1 / -1; grid-row: auto; justify-self: start; }
+  .composer-toolbar__options { flex-basis: 7rem; }
+}

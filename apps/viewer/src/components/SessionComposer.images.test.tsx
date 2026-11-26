@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionComposer } from "./SessionComposer";
+import { SessionInputWorkspace } from "../lib/sessionInputWorkspace";
 import { getSessionInputStatus, releaseImageUpload, submitSessionInput, uploadImageChunk } from "../lib/tauri";
 import { captureTransport, viewerStorageScope } from "../lib/transport";
 import { DEFAULT_IMAGE_LIMITS } from "../lib/imageDrafts";
@@ -24,6 +25,57 @@ beforeEach(() => {
   vi.mocked(submitSessionInput).mockImplementation(async (request) => ({ request_id: request.request_id, status: "accepted", message: "Sent" }));
 });
 afterEach(() => { cleanup(); });
+const workspace = (open: boolean) => <SessionInputWorkspace>
+  {open ? <SessionComposer session={session} /> : <main>Session inbox</main>}
+</SessionInputWorkspace>;
+
+it("retains text and images in the inbox and finishes the original upload while the composer is closed", async () => {
+  let finish!: (result: UploadImageChunkResponse) => void;
+  vi.mocked(uploadImageChunk).mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+  const view = render(workspace(true));
+  await ready();
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "Review this image" } });
+  attach();
+  view.rerender(workspace(false));
+  expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+  view.rerender(workspace(true));
+  await ready();
+  expect(screen.getByRole("textbox")).toHaveValue("Review this image");
+  expect(screen.getByAltText("screen.png")).toBeVisible();
+  clickSend();
+  await waitFor(() => expect(uploadImageChunk).toHaveBeenCalledOnce());
+  view.rerender(workspace(false));
+  const [request] = vi.mocked(uploadImageChunk).mock.calls[0];
+  await act(async () => finish({ upload_id: request.upload_id, received_bytes: request.total_bytes, image_id: "uploaded" }));
+  expect(submitSessionInput).toHaveBeenCalledExactlyOnceWith({
+    session_key: session.session_key, request_id: expect.any(String), text: "Review this image", image_ids: ["uploaded"],
+  }, send);
+  view.rerender(workspace(true));
+  await ready();
+  expect(screen.getByRole("textbox")).toHaveValue("");
+  expect(screen.queryByAltText("screen.png")).not.toBeInTheDocument();
+  expect(URL.revokeObjectURL).toHaveBeenCalledOnce();
+  attach();
+  view.rerender(workspace(false));
+  view.unmount();
+  expect(URL.revokeObjectURL).toHaveBeenCalledTimes(2);
+});
+
+it("releases an unfinished upload without sending if its machine workspace closes", async () => {
+  let finish!: (result: UploadImageChunkResponse) => void;
+  vi.mocked(uploadImageChunk).mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+  const view = render(workspace(true));
+  await ready(); attach(); clickSend();
+  await waitFor(() => expect(uploadImageChunk).toHaveBeenCalledOnce());
+  view.rerender(workspace(false));
+  view.unmount();
+  const [request] = vi.mocked(uploadImageChunk).mock.calls[0];
+  await act(async () => finish({ upload_id: request.upload_id, received_bytes: request.total_bytes, image_id: "unused" }));
+  expect(submitSessionInput).not.toHaveBeenCalled();
+  expect(releaseImageUpload).toHaveBeenCalledOnce();
+  expect(URL.revokeObjectURL).toHaveBeenCalledOnce();
+});
+
 describe("composer image messages", () => {
   it("uploads only on send, supports image-only input and clears after acceptance", async () => {
     render(<SessionComposer session={session} />); await ready(); attach();

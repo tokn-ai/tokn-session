@@ -156,7 +156,7 @@ does not grant access. The API allows at most 16 concurrent command requests,
 32 SSE clients, and 1 MiB request bodies. Error responses contain `error`;
 invalid JSON/body-limit responses may be plain text.
 
-`open_session_list` watches the root sessions matching a `query`, or the direct
+`open_session_list` watches sessions matching a `query`, or the direct
 children of a `parent_session_key`. Pass a `subscription_id`, `limit` and
 optional `offset`. The first response has a null `base_cursor`. Its `sessions`
 array contains a `{ session, revision }` entry for every session in the window.
@@ -164,6 +164,11 @@ Each entry’s `revision` is a lowercase SHA-256 digest of the visible session s
 same summary has the same revision across subscriptions. Clients merge entries by
 `session.session_key` and sort them locally. Array positions have no protocol
 meaning.
+
+`query.activity` defaults to `all` for the root roster. The `needs_input`,
+`running` and `unread` values select a flat window that includes matching
+subagents. The host applies activity, provider and search filters before
+sorting and pagination. Direct-child subscriptions use only their parent key.
 
 Each subsequent `session-list-updated` event carries new or changed summaries
 in `sessions`, keys leaving the window in `removed_keys`, and current pagination

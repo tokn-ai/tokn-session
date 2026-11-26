@@ -1,5 +1,5 @@
 import { createUuid } from "./id";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useSyncExternalStore } from "react";
 import { getSessionInputStatus, submitSessionInput } from "./tauri";
 import { errorMessage } from "./state";
 import type { ModelChoice, SessionInputDeliveryMode, SessionInputStatus } from "./types";
@@ -7,53 +7,32 @@ import { captureTransport, viewerStorageScope, type CommandInvoker } from "./tra
 import { sameModel } from "./sessionModels";
 import type { SessionModelController } from "./useSessionModel";
 import type { SessionControlController } from "./useSessionControl";
-import { addImageDrafts, disposeImageDrafts, imageLimits, releaseImageUploads, uploadImageDrafts, type ImageDraft, type ImageUploadReceipt } from "./imageDrafts";
+import { addImageDrafts, disposeImageDrafts, imageLimits, releaseImageUploads, uploadImageDrafts, type ImageUploadReceipt } from "./imageDrafts";
+import { useSessionInputStore } from "./sessionInputWorkspace";
 
 const DEFAULT_MAX_LENGTH = 16_384;
 const UNCONFIRMED_MESSAGE = "Delivery not confirmed. Check the conversation before sending again.";
-
-interface InputState {
-  control_revision?: string;
-  draft: string;
-  model_draft: ModelChoice | null;
-  images: ImageDraft[];
-  availability: SessionInputStatus | null;
-  checking: boolean;
-  check_id: number;
-  sending: boolean;
-  resuming: boolean;
-  delivery_uncertain: boolean;
-  notice: string | null;
-}
-
-function emptyInput(): InputState {
-  return {
-    draft: "", model_draft: null, images: [], availability: null, checking: true, check_id: 0,
-    sending: false, resuming: false, delivery_uncertain: false, notice: null,
-  };
-}
 
 /** Keep drafts and in-flight results attached to their original session. */
 export function useSessionInput(session_key: string | null, on_accepted?: (session_key: string) => void, refresh_key = 0,
   model?: SessionModelController, control?: SessionControlController) {
   const scope = viewerStorageScope();
-  const current_scope = useRef(scope);
-  current_scope.current = scope;
   const scopedKey = (key: string) => JSON.stringify([scope, key]);
-  const states = useRef(new Map<string, InputState>());
-  const check_sequence = useRef(0);
-  const mounted = useRef(false);
-  const acceptedHandler = useRef(on_accepted);
-  acceptedHandler.current = on_accepted;
-  const [, render] = useState(0);
-
-  const update = useCallback((key: string, apply: (state: InputState) => InputState) => {
-    states.current.set(key, apply(states.current.get(key) ?? emptyInput()));
-    if (mounted.current) render((revision) => revision + 1);
-  }, []);
+  const store = useSessionInputStore();
+  const { update } = store;
+  const key = session_key ? scopedKey(session_key) : null;
+  const saved = useSyncExternalStore(store.subscribe, () => store.get(key));
+  useLayoutEffect(() => {
+    const accepted = (target: string, refresh_model: boolean) => {
+      if (target === session_key && refresh_model) void model?.refresh();
+      return on_accepted?.(target);
+    };
+    store.on_accepted = accepted;
+    return () => { if (store.on_accepted === accepted) store.on_accepted = undefined; };
+  }, [model, on_accepted, session_key, store]);
 
   const checkAvailability = useCallback(async (key: string, target_session: string, send?: CommandInvoker) => {
-    const checkId = ++check_sequence.current;
+    const checkId = ++store.next_check;
     update(key, (state) => ({ ...state, checking: true, check_id: checkId }));
     let availability: SessionInputStatus;
     try {
@@ -72,27 +51,26 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
     update(key, (state) => state.check_id === checkId
       ? { ...state, checking: false, availability }
       : state);
-  }, [update]);
-
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-      for (const value of states.current.values()) disposeImageDrafts(value.images);
-      states.current.clear();
-    };
-  }, []);
+  }, [store, update]);
 
   useEffect(() => {
     if (!session_key) return;
     const key = scopedKey(session_key);
-    const check_id = ++check_sequence.current;
-    update(key, (old) => ({ ...old, control_revision: control?.revision, checking: true, availability: null, check_id,
-      model_draft: old.control_revision !== control?.revision ? null : old.model_draft }));
+    const check_id = ++store.next_check;
+    update(key, (old) => {
+      const revision_changed = old.control_revision !== control?.revision;
+      // A newly mounted inspector restarts its local revision counter. Keep the
+      // model until the host identifies a different connection.
+      const binding_changed = old.control_binding
+        ? !!control?.binding_key && old.control_binding !== control.binding_key
+        : revision_changed;
+      return { ...old, control_revision: control?.revision, control_binding: control?.binding_key ?? old.control_binding,
+        checking: true, check_id, availability: !control?.blocked && !revision_changed && !binding_changed ? old.availability : null,
+        model_draft: binding_changed ? null : old.model_draft };
+    });
     if (!control?.blocked) void checkAvailability(key, session_key);
-  }, [session_key, scope, checkAvailability, refresh_key, control?.revision, control?.blocked, update]);
+  }, [session_key, scope, checkAvailability, refresh_key, control?.revision, control?.binding_key, control?.blocked, store, update]);
 
-  const saved = (session_key && states.current.get(scopedKey(session_key))) || emptyInput();
   const state = control?.blocked || saved.control_revision !== control?.revision
     ? { ...saved, checking: true, availability: null } : saved;
   const maxLength = state.availability?.max_length ?? DEFAULT_MAX_LENGTH;
@@ -117,9 +95,9 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
     if (!session_key || control?.blocked) return;
     const key = scopedKey(session_key);
     const source_session = session_key;
-    // Read the ref, not the render snapshot: two clicks in one frame must send once.
-    const current = states.current.get(key);
-    if (!current || current.sending || current.delivery_uncertain || current.checking
+    // Two clicks in one frame must share the same admission lock.
+    const current = store.get(key);
+    if (current.sending || current.delivery_uncertain || current.checking
       || !current.availability?.available || (!current.draft.trim() && !current.images.length)
       || (current.model_draft && (model?.status?.supports_model_input !== true || !model.status.can_list || model.checking))
       || (current.images.length > 0 && !draftImageLimits(current.availability, current.model_draft, model))
@@ -148,6 +126,7 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
       return;
     }
     let accepted = false;
+    let refresh_model = per_input_model || supports_delivery_modes;
     let provider_attempted = false;
     const transport = images.length || model_selection || supports_delivery_modes ? captureTransport() : null;
     const uploads: ImageUploadReceipt[] = [];
@@ -157,9 +136,9 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
     try {
       let image_ids: string[] = [];
       if (transport) image_ids = await uploadImageDrafts(images, { type: "session", session_key: source_session }, transport.invoke,
-        () => mounted.current && current_scope.current === source_scope && !disconnected, (receipt) => uploads.push(receipt));
-      if (current_scope.current !== source_scope || disconnected || images.length && !mounted.current) throw new Error("The selected machine changed. Message was not sent.");
-      if (delivery && !states.current.get(key)?.availability?.delivery_modes?.includes(delivery)) {
+        () => store.active && viewerStorageScope() === source_scope && !disconnected, (receipt) => uploads.push(receipt));
+      if (!store.active || viewerStorageScope() !== source_scope || disconnected) throw new Error("The selected machine changed. Message was not sent.");
+      if (delivery && !store.get(key)?.availability?.delivery_modes?.includes(delivery)) {
         update(key, (value) => ({ ...value, sending: false, resuming: false,
           notice: "This delivery mode is no longer available. Refresh availability before sending." }));
         return;
@@ -168,13 +147,15 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
       const request = { session_key: source_session, request_id: requestId, text,
         ...(image_ids.length ? { image_ids } : {}), ...(model_selection ? { model_selection } : {}), ...(delivery ? { delivery } : {}) };
       const result = transport ? await submitSessionInput(request, transport.invoke) : await submitSessionInput(request);
+      if (!store.active) return;
       const matchingResponse = result.request_id === requestId;
       if (matchingResponse && result.model_result && !per_input_model) {
         const reset_model = result.status === "accepted" || result.model_result.outcome === "ignored_while_running";
         if (reset_model) update(key, (value) => ({ ...value, model_draft: value.model_draft === model_draft ? null : value.model_draft }));
-        if (model?.acceptState(result.model_result.state, reset_model)) {
-          if (reset_model) void model.refresh();
-        } else if (reset_model && !model) void checkAvailability(key, source_session);
+        const applied = model?.acceptState(result.model_result.state, reset_model);
+        if (result.status === "accepted") refresh_model ||= reset_model;
+        else if (reset_model && applied) void model?.refresh();
+        if (!model && reset_model && viewerStorageScope() === source_scope) void checkAvailability(key, source_session, transport?.invoke);
       }
       if (matchingResponse && result.status === "accepted") {
         disposeImageDrafts(images);
@@ -191,7 +172,7 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
         update(key, (value) => ({ ...value, sending: false, resuming: false, notice: result.message || "Message was not sent. Try again." }));
         // Resume can lose a process lease or fail its saved-folder checks after
         // the initial capability read. Recheck without resending the draft.
-        if (current.availability.resume_required) void checkAvailability(key, source_session);
+        if (current.availability.resume_required && viewerStorageScope() === source_scope) void checkAvailability(key, source_session, transport?.invoke);
       } else {
         update(key, (value) => ({
           ...value, sending: false, resuming: false, delivery_uncertain: true,
@@ -213,13 +194,12 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
       await releaseUploads();
     }
     // A refresh failure cannot change the provider's delivery acknowledgement.
-    if (accepted && mounted.current && current_scope.current === source_scope) {
+    if (accepted && store.active && viewerStorageScope() === source_scope) {
       // A queued model choice belongs to its input. Read native state rather
       // than displaying that choice as the session's current model.
-      if (per_input_model || supports_delivery_modes) void model?.refresh();
       if (supports_delivery_modes) void checkAvailability(key, source_session, transport?.invoke);
       try {
-        await acceptedHandler.current?.(source_session);
+        await store.on_accepted?.(source_session, refresh_model);
       } catch {
         update(key, (value) => ({ ...value, notice: "Message sent. The conversation could not refresh." }));
       }

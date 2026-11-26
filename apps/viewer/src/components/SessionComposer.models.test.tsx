@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { SessionComposer } from "./SessionComposer";
+import { SessionInputWorkspace } from "../lib/sessionInputWorkspace";
 import { useSessionModel } from "../lib/useSessionModel";
 import { getSessionInputStatus, getSessionModelStatus, listSessionModels, submitSessionInput, uploadImageChunk, releaseImageUpload } from "../lib/tauri";
 import { DEFAULT_IMAGE_LIMITS } from "../lib/imageDrafts";
@@ -74,6 +75,25 @@ it("preserves a draft model through a control readiness check on the same route"
   view.rerender(<Composer control={control} />);
   await waitFor(() => expect(field()).toBeEnabled());
   expect(screen.getByRole("button", { name: /Model: Second model/ })).toBeInTheDocument();
+  expect(field()).toHaveValue("Keep this message");
+});
+
+it("restores the chosen model when reopening the same runtime and clears it for a replacement", async () => {
+  const original: SessionControlController = { owner: "one", provider: "pi", status: null, checking: false, changing: false,
+    stopping: false, error: null, notice: null, revision: "2", binding_key: "runtime-one",
+    enabled: false, blocked: false, choose: vi.fn(), cancel: vi.fn(), refresh: vi.fn() };
+  const workspace = (control?: SessionControlController) => <SessionInputWorkspace>
+    {control ? <Composer control={control} /> : <main>Session inbox</main>}
+  </SessionInputWorkspace>;
+  const view = render(workspace(original));
+  await waitFor(() => expect(field()).toBeEnabled());
+  prompt(); await chooseSecond();
+  view.rerender(workspace());
+  view.rerender(workspace({ ...original, revision: "0", binding_key: null, blocked: true }));
+  view.rerender(workspace({ ...original, revision: "0" }));
+  await screen.findByRole("button", { name: /Model: Second model/ });
+  view.rerender(workspace({ ...original, revision: "1", binding_key: "runtime-two" }));
+  await screen.findByRole("button", { name: /Model: First model/ });
   expect(field()).toHaveValue("Keep this message");
 });
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { useViewerVisible } from "../lib/viewerVisibility";
 import { useFloatingPanel } from "../lib/useFloatingPanel";
@@ -31,7 +31,7 @@ export function SessionModelPicker({ model, provider, input_busy = false, select
 }) {
   const visible = useViewerVisible();
   const [open, setOpen] = useState(false);
-  const [position, setPosition] = useState({ left: 16, bottom: 80, maxHeight: 460 });
+  const [position, setPosition] = useState<CSSProperties>({});
   const trigger = useRef<HTMLButtonElement>(null);
   const panel_id = useId();
   const close = useCallback(() => setOpen(false), []);
@@ -40,24 +40,38 @@ export function SessionModelPicker({ model, provider, input_busy = false, select
   const label = identity ? modelLabel(identity) : mode === "creation" ? "Runtime default" : provider;
   const reason = model.reason ?? model.error ?? (model.checking ? "Checking model availability…" : "Model selection is unavailable for this session.");
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) return;
-    const place = () => {
+    const place = (event?: Event) => {
+      if (event?.target instanceof Node && panel.current?.contains(event.target)) return;
       const rect = trigger.current?.getBoundingClientRect();
-      const visible_top = window.visualViewport?.offsetTop ?? 0;
-      if (rect) setPosition({ left: Math.max(12, Math.min(rect.left, window.innerWidth - 332)),
-        bottom: Math.max(12, window.innerHeight - rect.top + 8), maxHeight: Math.min(460, Math.max(80, rect.top - visible_top - 24)) });
+      if (!rect) return;
+      const viewport = window.visualViewport;
+      const visible_top = viewport?.offsetTop ?? 0;
+      const visible_bottom = visible_top + (viewport?.height ?? window.innerHeight);
+      const anchor_top = Math.min(visible_bottom, rect.top);
+      const anchor_bottom = Math.max(visible_top, rect.bottom);
+      const space_above = anchor_top - visible_top - 24;
+      const space_below = visible_bottom - anchor_bottom - 24;
+      const above = space_above >= 200 || space_above >= space_below;
+      setPosition({
+        left: Math.max(12, Math.min(rect.left, window.innerWidth - 332)),
+        ...(above ? { bottom: window.innerHeight - anchor_top + 8 } : { top: anchor_bottom + 8 }),
+        maxHeight: Math.max(0, Math.min(460, above ? space_above : space_below)),
+      });
     };
     place();
+    document.addEventListener("scroll", place, true);
     window.addEventListener("resize", place);
     window.visualViewport?.addEventListener("resize", place);
     window.visualViewport?.addEventListener("scroll", place);
     return () => {
+      document.removeEventListener("scroll", place, true);
       window.removeEventListener("resize", place);
       window.visualViewport?.removeEventListener("resize", place);
       window.visualViewport?.removeEventListener("scroll", place);
     };
-  }, [open]);
+  }, [open, panel]);
 
   useEffect(() => {
     if (open && mode === "session" && model.choices === null && !model.loading && !model.error) void model.loadChoices();

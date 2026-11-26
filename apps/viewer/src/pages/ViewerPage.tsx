@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Conversation } from "../components/Conversation";
+import { SessionInbox } from "../components/SessionInbox";
+import { providerLabel } from "../lib/state";
 import { RelayConnection } from "../components/RelayConnection";
 import { Inspector } from "../components/Inspector";
 import { SessionDrawer } from "../components/SessionDrawer";
@@ -8,6 +10,7 @@ import { StatusBar } from "../components/StatusBar";
 import { QuestionAnswersProvider } from "../components/QuestionAnswersProvider";
 import { TranslationProvider } from "../components/TranslationProvider";
 import { ViewerVisibility } from "../lib/viewerVisibility";
+import { SessionInputWorkspace } from "../lib/sessionInputWorkspace";
 import { useViewerState } from "../lib/useViewerState";
 import { SettingsDialog } from "../components/SettingsDialog";
 import { ManagedPiDialog, ManagedSessionControls, RegisterProjectDialog } from "../components/ProjectWorkspace";
@@ -28,12 +31,17 @@ interface ViewerPageProps {
 
 export function ViewerPage(props: ViewerPageProps) {
   return <ViewerVisibility.Provider value={props.visible ?? true}>
-    <TranslationProvider><QuestionAnswersProvider><ViewerContent {...props} /></QuestionAnswersProvider></TranslationProvider>
+    <TranslationProvider><QuestionAnswersProvider>
+      <SessionInputWorkspace key={props.machine_key ?? (props.remote ? "remote" : "local")}>
+        <ViewerContent {...props} />
+      </SessionInputWorkspace>
+    </QuestionAnswersProvider></TranslationProvider>
   </ViewerVisibility.Provider>;
 }
 
 function ViewerContent({ visible = true, remote = false, connection, on_open_machines, machine_label = remote ? "Selected machine" : "This computer", machine_key = remote ? "remote" : "local" }: ViewerPageProps) {
   const viewer = useViewerState(visible);
+  const app = useRef<HTMLDivElement>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("viewer");
@@ -99,25 +107,50 @@ function ViewerContent({ visible = true, remote = false, connection, on_open_mac
     selectDraft(drafts.createDraft(project?.project_id ?? ""));
   }
 
-  function openSessions() {
+  function openWorkspace() {
+    selected_draft_ref.current = null;
+    setSelectedDraftId(null);
+    viewer.clearSessionSelection();
+    window.requestAnimationFrame(() => app.current?.querySelector<HTMLElement>(".inbox-heading h1")?.focus());
+  }
+
+  const setMobileSidebarOpen = viewer.setMobileSidebarOpen;
+  const openSessions = useCallback(() => {
     if (window.matchMedia("(max-width: 860px)").matches) {
-      viewer.setMobileSidebarOpen(true);
+      setMobileSidebarOpen(true);
     } else {
       setSidebarCollapsed(false);
-      window.requestAnimationFrame(() => document.querySelector<HTMLInputElement>('.sidebar input[type="search"]')?.focus());
     }
-  }
+    window.requestAnimationFrame(() => app.current?.querySelector<HTMLInputElement>('.sidebar input[type="search"]')?.focus());
+  }, [setMobileSidebarOpen]);
+
+  useEffect(() => {
+    if (!visible) return;
+    function shortcut(event: KeyboardEvent) {
+      if (event.defaultPrevented || event.isComposing || event.altKey || event.shiftKey
+        || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "k") return;
+      if (document.querySelector("dialog:modal:not(.sidebar-shell)")) return;
+      event.preventDefault();
+      openSessions();
+    }
+    window.addEventListener("keydown", shortcut);
+    return () => window.removeEventListener("keydown", shortcut);
+  }, [visible, openSessions]);
 
   function collapseSidebar() {
     setSidebarCollapsed(true);
-    window.requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('.conversation button[aria-label="Open sessions"]')?.focus());
+    window.requestAnimationFrame(() => app.current?.querySelector<HTMLButtonElement>('.conversation button[aria-label="Open sessions"]')?.focus());
   }
 
   return (
-    <div className="viewer-app" data-remote={remote} hidden={!visible} inert={!visible}>
+    <div className="viewer-app" data-remote={remote} hidden={!visible} inert={!visible} ref={app}>
       <div className="viewer-shell" data-inspector-open={viewer.inspectorOpen} data-sidebar-collapsed={sidebarCollapsed}>
         <SessionDrawer desktop_hidden={sidebarCollapsed} is_open={visible && viewer.mobileSidebarOpen} on_close={() => viewer.setMobileSidebarOpen(false)}>
           <Sidebar
+            on_workspace_open={openWorkspace}
+            workspace_selected={!selected_draft && !viewer.selectedSession}
+            activity_filter={viewer.activityFilter}
+            on_clear_activity_filter={() => viewer.setActivityFilter("all")}
             drafts={drafts?.drafts}
             selected_draft_id={selected_draft_id}
             on_draft_select={drafts ? selectDraft : undefined}
@@ -182,6 +215,18 @@ function ViewerContent({ visible = true, remote = false, connection, on_open_mac
           } : undefined}
           managed_controls={<ManagedSessionControls snapshot={selected_draft.snapshot} busy={workspace.controlling}
             error={workspace.controlErrorFor(selected_draft.snapshot?.request_id)} on_control={(kind, snapshot) => { void workspace.control(kind, snapshot); }} />}
+        /> : !viewer.selectedSession ? <SessionInbox machine_label={machine_label}
+          sessions={viewer.sessions} activity={viewer.activityFilter} search={viewer.search}
+          provider_count={viewer.enabledProviders.size} pending={viewer.pendingProviders.length > 0}
+          loading={viewer.sessionsLoading} loading_more={viewer.sessionsLoadingMore} has_more={viewer.sessionsCursor !== null}
+          error={viewer.sessionsError}
+          source_warning={viewer.sourceErrors.length ? `Unavailable sources · ${viewer.sourceErrors.map((item) => providerLabel(item.provider)).join(", ")}` : null}
+          on_filter={viewer.setActivityFilter} on_open={(key, question) => {
+            selectSession(key, question);
+            if (!question) window.requestAnimationFrame(() => app.current?.querySelector<HTMLElement>(".session-header h2")?.focus({ preventScroll: true }));
+          }} on_find={openSessions}
+          on_create={drafts && workspace.workspace?.available ? () => newSession() : undefined}
+          on_load_more={viewer.loadMoreSessions} on_retry={viewer.retrySessions}
         /> : <Conversation
           current_model={viewer.currentModel}
           input_refresh_key={workspace.input_refresh_key}

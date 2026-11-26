@@ -26,6 +26,9 @@ import {
 } from "../lib/state";
 import { ChevronIcon, FilterIcon, InspectorIcon, PanelIcon, SendIcon } from "./Icons";
 import { EventCard } from "./EventCard";
+import { PromptNavigator } from "./PromptNavigator";
+import { sessionActivity } from "../lib/sessionActivity";
+import "./ConversationHeader.css";
 import { LoadingRows, StateView } from "./StateView";
 import { SessionComposer } from "./SessionComposer";
 import { SessionInteractions } from "./SessionInteractions";
@@ -42,7 +45,7 @@ interface ConversationProps {
   on_show_live_activity?: () => void;
   on_follow_change?: (following: boolean) => void;
   on_input_accepted?: (session_key: string) => void;
-  session: SessionSummary | null;
+  session: SessionSummary;
   events: EventSummary[];
   selected_event_key: string | null;
   expanded_event_key: string | null;
@@ -137,56 +140,56 @@ export function Conversation({
   on_retry_expanded_detail,
 }: ConversationProps) {
   const control = useSessionControl(session, input_refresh_key, on_input_accepted);
-  const model = useSessionModel(control.blocked ? null : session?.session_key ?? null, current_model, session?.is_running,
+  const model = useSessionModel(control.blocked ? null : session.session_key, current_model, session.is_running,
     input_refresh_key, control.enabled ? control.revision : undefined);
   const { preferences, updatePreferences } = useViewerPreferences();
   const hideLifecycle = !preferences.show_lifecycle;
   const visibleEvents = hideLifecycle ? events.filter((event) => !isBookkeepingEvent(event)) : events;
   const hiddenCount = events.length - visibleEvents.length;
   const scroll = useTimelineScroll({
-    session_key: session?.session_key ?? null,
+    session_key: session.session_key,
     initial_page_loaded,
     last_event: events.length ? readingEventKey(events[events.length - 1]) : undefined,
     on_follow_change,
   });
 
-  useLayoutEffect(() => {
-    if (!question_navigation) return;
-    const button = document.getElementById(`${eventButtonId(question_navigation.event_key)}-label`)?.closest("button");
+  function revealInHistory(element: HTMLElement | null | undefined) {
     const timeline = scroll.timelineRef.current;
-    if (!button || !timeline?.contains(button)) return;
+    if (!element || !timeline?.contains(element)) return;
     scroll.pause();
-    // scrollIntoView also scrolls overflow-hidden ancestors, shifting the app
-    // shell. Question navigation belongs exclusively to the history viewport.
-    timeline.scrollTop += button.getBoundingClientRect().top
-      - timeline.getBoundingClientRect().top - timeline.clientTop;
-    button.focus({ preventScroll: true });
-    // Capture the chosen position so later detail/Markdown layout changes
-    // preserve it instead of restoring the previously visible timeline row.
+    // Only move the history viewport. ScrollIntoView can also shift the app shell.
+    timeline.scrollTop += element.getBoundingClientRect().top - timeline.getBoundingClientRect().top - timeline.clientTop;
+    element.focus({ preventScroll: true });
     scroll.pause();
-  }, [question_navigation, session?.session_key]);
+  }
+
+  useLayoutEffect(() => {
+    if (question_navigation) {
+      revealInHistory(document.getElementById(`${eventButtonId(question_navigation.event_key)}-label`)?.closest("button"));
+    }
+  }, [question_navigation, session.session_key]);
 
   function loadOlder() {
     scroll.pause();
     on_load_older();
   }
 
-  const knownCount = total_events ?? session?.event_count ?? session?.message_count ?? null;
-  const childDetail = session?.is_subagent ? subagentDetail(session) : null;
-  const countLabel = total_events !== null || session?.event_count !== null
-    ? knownCount !== null
-      ? `${knownCount} events${has_older ? " loaded" : ""}`
-      : "Event count unavailable"
-    : session?.message_count !== null
-      ? `${knownCount} messages`
-      : is_loading
-        ? "Loading events…"
-        : "Event count unavailable";
+  const eventCount = total_events ?? session.event_count;
+  const countLabel = eventCount !== null ? `${eventCount} events`
+    : session.message_count !== null ? `${session.message_count} messages` : "Event count unavailable";
+  const childDetail = session.is_subagent ? subagentDetail(session) : null;
+  const activity = sessionActivity(session);
+
+  function jumpToPrompt(eventKey: string) {
+    const row = Array.from(scroll.timelineRef.current?.querySelectorAll<HTMLElement>("[data-reading-slot]") ?? [])
+      .find((element) => element.dataset.eventKey === eventKey);
+    revealInHistory(row);
+  }
 
   return (
-    <SessionControlContext.Provider value={{ session_key: session?.session_key ?? null, revision: control.revision, blocked: control.blocked }}>
+    <SessionControlContext.Provider value={{ session_key: session.session_key, revision: control.revision, blocked: control.blocked }}>
     <main className="conversation">
-      <header className="conversation__header" data-tauri-drag-region>
+      <header className="conversation__header session-header" data-tauri-drag-region>
         <button
           aria-label="Open sessions"
           className="icon-button mobile-sidebar-button"
@@ -195,17 +198,12 @@ export function Conversation({
         >
           <PanelIcon />
         </button>
-        {session ? (
-          <div className="conversation__identity">
-            <div className="conversation__title-row">
-              <h2 title={sessionDisplayTitle(session)}>{sessionDisplayTitle(session)}</h2>
-              <span className="provider-badge" data-provider={session.provider}>
-                {providerLabel(session.provider)}
-              </span>
-              {model.state?.model ? <span className="conversation__model" title={`${model.state.model.model_provider ?? session.provider} · ${model.state.model.model_id}`}>
-                {modelLabel(model.state.model)}{model.state.source === "recorded" ? " · Recorded" : model.state.source === "catalog" ? " · Model list" : ""}
-              </span> : null}
-            </div>
+        <div className="conversation__identity">
+          <div className="conversation__title-row">
+            <h2 tabIndex={-1} title={sessionDisplayTitle(session)}>{sessionDisplayTitle(session)}</h2>
+          </div>
+          <div className="session-header__context">
+            <span className="provider-badge" data-provider={session.provider}>{providerLabel(session.provider)}</span>
             <details className="conversation__metadata" key={session.session_key}>
               <summary>
                 {session.is_subagent ? "Subagent · " : ""}{session.project ?? session.cwd ?? "Unassigned project"}
@@ -235,18 +233,18 @@ export function Conversation({
                 <p className="conversation__path">{session.cwd}</p>
               </div>
             </details>
+            {model.state?.model && <span className="conversation__model" title={`${model.state.model.model_provider ?? session.provider} · ${model.state.model.model_id}`}>
+              {modelLabel(model.state.model)}{model.state.source === "recorded" ? " · Recorded" : model.state.source === "catalog" ? " · Model list" : ""}
+            </span>}
+            {activity.label && <span className="activity-label" data-tone={activity.tone}>{activity.label}</span>}
           </div>
-        ) : (
-          <div className="conversation__identity conversation__identity--empty">
-            <h2>Session viewer</h2>
-            <p>Conversations across every known provider</p>
-          </div>
-        )}
+        </div>
+        <PromptNavigator key={session.session_key} events={events} has_older={has_older} loading_older={is_loading_older}
+          on_older={loadOlder} on_jump={jumpToPrompt} />
         <button
           aria-label={hideLifecycle ? "Show lifecycle" : "Hide lifecycle"}
           aria-pressed={hideLifecycle}
           className="conversation__filter"
-          disabled={!session}
           onClick={() => updatePreferences({ show_lifecycle: hideLifecycle })}
           title={hideLifecycle
             ? "Show lifecycle events and mid-turn usage again."
@@ -298,27 +296,18 @@ export function Conversation({
             }
           }}
         >
-          {session && follow_error ? (
+          {follow_error ? (
             <div className="pagination-error" role="alert">
               Showing last loaded history while live updates retry: {follow_error}
             </div>
           ) : null}
-          {!session ? (
-            <StateView
-              message="Browse your conversations, search by title, or filter by provider to pick up where you left off."
-              action_label="Browse sessions"
-              on_action={on_sidebar_open}
-              title="Select a session"
-            />
-          ) : null}
-
-          {session && is_loading && events.length === 0 ? (
+          {is_loading && events.length === 0 ? (
             <div className="timeline-loading">
               <LoadingRows count={5} />
             </div>
           ) : null}
 
-          {session && !is_loading && error && events.length === 0 ? (
+          {!is_loading && error && events.length === 0 ? (
             <StateView
               action_label="Try again"
               message={error}
@@ -328,14 +317,14 @@ export function Conversation({
             />
           ) : null}
 
-          {session && !is_loading && !error && events.length === 0 ? (
+          {!is_loading && !error && events.length === 0 ? (
             <StateView
               message="The provider returned a valid session with no normalized events."
               title="No events in this session"
             />
           ) : null}
 
-          {session && events.length > 0 ? (
+          {events.length > 0 ? (
             <div className="timeline" aria-label="Session event timeline" ref={scroll.contentRef}>
               {history_status && history_status !== "complete" ? (
                 <div className="history-notice" role="status">
@@ -375,7 +364,7 @@ export function Conversation({
               ) : null}
 
               {visibleEvents.map((event) => (
-                <div data-reading-slot={event.slot_key ?? event.event_key} data-reading-type={event.type}
+                <div tabIndex={-1} data-reading-slot={event.slot_key ?? event.event_key} data-reading-type={event.type}
                   data-reading-timestamp={event.timestamp ?? ""}
                   data-event-key={event.event_key} data-scroll-key={event.event_key} key={`${session.session_key}:${event.event_key}`}>
                 <EventCard
@@ -403,11 +392,7 @@ export function Conversation({
                   on_trajectory_retry_expanded_detail={on_trajectory_retry_expanded_detail}
                   on_select={on_event_select}
                   on_toggle={on_event_toggle}
-                  on_open_related_session={(target) => {
-                    if (session) {
-                      on_open_related_session(session.session_key, target);
-                    }
-                  }}
+                  on_open_related_session={(target) => on_open_related_session(session.session_key, target)}
                   on_retry_detail={on_retry_expanded_detail}
                   selected_event_key={selected_event_key}
                   trajectory_page={event.type === "trajectory"

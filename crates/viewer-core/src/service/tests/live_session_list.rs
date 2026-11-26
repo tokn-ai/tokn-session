@@ -618,3 +618,95 @@ fn native_and_network_routes_share_one_page_and_deliver_only_on_their_own_adapte
     BTreeSet::from([("screen:native".into(), true), ("screen:browser".into(), false)])
   );
 }
+
+#[test]
+fn activity_queues_page_matching_children_and_remove_acknowledged_replies_without_loading_transcripts() {
+  let parent = session_header("parent", None, "/project", "2026-01-06T00:00:00Z");
+  let child = |id, date| session_header(id, Some("parent"), "/project", date);
+  let blocked = child("approval", "2026-01-05T00:00:00Z");
+  let working = child("working", "2026-01-04T00:00:00Z");
+  let earlier = child("earlier", "2026-01-03T00:00:00Z");
+  let unread = child("reply", "2026-01-02T00:00:00Z");
+  let loads = Arc::new(AtomicUsize::new(0));
+  let service = service_with_indexed_headers(
+    Arc::new(CountingRepository { loads: loads.clone() }),
+    vec![(
+      ViewerProvider::Codex,
+      vec![
+        parent,
+        blocked.clone(),
+        working.clone(),
+        earlier.clone(),
+        unread.clone(),
+      ],
+    )],
+  );
+
+  // Use the durable activity projection exactly as the body indexer leaves it.
+  // The async question is compatible with active work. Blocking input is not.
+  for (header, marker, notify) in [
+    (&blocked, "session-activity.v4.0.1.1.0", false),
+    (&working, "session-activity.v4.0.1.0.1", false),
+    (&earlier, "session-activity.v4.0.1.0.0", false),
+    (&unread, "session-activity.v4.1.0.0.0", true),
+  ] {
+    let source = index_source_key_for_path(ViewerProvider::Codex, &header.path).unwrap();
+    let metadata = session_metadata_from_header(&source, header.clone(), Some(marker.into()), notify).unwrap();
+    service
+      .session_index
+      .replace_source(SourceReplacement::new(
+        SourceState::new(source, "indexed-activity", 1),
+        vec![metadata],
+      ))
+      .unwrap();
+  }
+  let open = |id, activity, offset| {
+    let mut options = request(id, 1);
+    options.query.activity = activity;
+    options.offset = offset;
+    service.open_session_list(options).unwrap()
+  };
+
+  let all = open("all", SessionActivityFilter::All, 0);
+  assert_eq!(all.sessions.len(), 1);
+  assert_eq!(all.sessions[0].session.session_id, "parent");
+  assert!(all.next_cursor.is_none());
+
+  let needs_input = open("input", SessionActivityFilter::NeedsInput, 0);
+  let running = open("running", SessionActivityFilter::Running, 0);
+  let running_next = open("running-next", SessionActivityFilter::Running, 1);
+  let replies = open("unread", SessionActivityFilter::Unread, 0);
+  for (page, expected, has_more) in [
+    (&needs_input, "approval", false),
+    (&running, "working", true),
+    (&running_next, "earlier", false),
+    (&replies, "reply", false),
+  ] {
+    assert_eq!(page.sessions.len(), 1);
+    assert_eq!(page.sessions[0].session.session_id, expected);
+    assert!(page.sessions[0].session.is_subagent);
+    assert_eq!(page.next_cursor.is_some(), has_more);
+  }
+
+  let key = replies.sessions[0].session.session_key.clone();
+  let revision = service
+    .attention_revision_for_locator(&locator_for_header(ViewerProvider::Codex, &unread))
+    .unwrap();
+  assert!(
+    service
+      .acknowledge_session_attention(AcknowledgeSessionAttentionRequest {
+        session_key: key.clone(),
+        attention_revision: revision,
+      })
+      .unwrap()
+      .changed
+  );
+  let mut updates = Vec::new();
+  service.publish_session_lists(|update| updates.push(update));
+  assert_eq!(updates.len(), 1);
+  assert_eq!(updates[0].subscription_id, "unread");
+  assert_eq!(updates[0].base_cursor.as_ref(), Some(&replies.synced_through));
+  assert_eq!(updates[0].removed_keys, [key]);
+  assert!(updates[0].sessions.is_empty());
+  assert_eq!(loads.load(Ordering::SeqCst), 0);
+}

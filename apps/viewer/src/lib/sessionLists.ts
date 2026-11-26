@@ -138,7 +138,8 @@ export class SessionLists {
     const current = windows?.[0]?.request.query;
     const orderChanged = parent === null && (this.rootQuery?.order ?? "time") !== (query?.order ?? "time");
     if (parent === null) this.rootQuery = query;
-    const sameFilters = current?.search === query?.search && JSON.stringify(current?.providers) === JSON.stringify(query?.providers);
+    const sameFilters = current?.search === query?.search && (current?.activity ?? "all") === (query?.activity ?? "all")
+      && JSON.stringify(current?.providers) === JSON.stringify(query?.providers);
     const sameRanking = (current?.order ?? "time") === (query?.order ?? "time");
     if (windows && (!sameFilters || !sameRanking)) {
       const complete = windows.every((watch) => watch.page && !watch.opening) && windows[windows.length - 1]?.page?.next_cursor === null;

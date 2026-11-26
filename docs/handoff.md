@@ -4,6 +4,14 @@ Read `AGENTS.md` first for the project goal, stable architecture, and working ru
 
 ## Current Status
 
+The shared viewer opens to a session inbox. Its **Needs input**, **Running**
+and **Unread** queues filter indexed activity before pagination and include
+matching subagents directly. The sidebar shares the active queue, search,
+providers and ordering. **Workspace** returns to the inbox. Cmd/Ctrl+K focuses
+session search on desktop and opens the drawer on phones. The conversation
+header includes a prompt navigator for loaded history. See the
+[viewer workflow](../apps/viewer/README.md#using-the-viewer).
+
 Hubs require account ownership for all machines. Accounts have Hub-specific
 usernames and stable UUIDs. Email codes, GitHub OAuth and Apell Account OIDC use
 the same renewable 90-day browser session. Providers share the browser flow;
@@ -506,7 +514,7 @@ The viewer sidebar and conversation use a compact Codex-style layout with neutra
 light/dark colors, larger message text, inline expandable tool activity, and an
 aligned composer. Time-grouped session rows retain the title, show a separate
 first-line preview of the latest cached assistant message from that session, and
-show a small project name. Project-grouped rows show titles only. Previews use existing
+show a small project name. Both groupings show the provider and activity state. Previews use existing
 frontend semantic summaries and compact background messages, including
 intermediate assistant messages inside folded work groups. Child/subagent
 sessions have separate previews. A compact live-updates entry in the bottom status

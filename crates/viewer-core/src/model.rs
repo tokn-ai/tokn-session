@@ -75,8 +75,20 @@ pub struct SessionQuery {
   #[serde(default)]
   pub order: SessionOrder,
   #[serde(default)]
+  pub activity: SessionActivityFilter,
+  #[serde(default)]
   pub providers: Vec<ViewerProvider>,
   pub search: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionActivityFilter {
+  #[default]
+  All,
+  NeedsInput,
+  Running,
+  Unread,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

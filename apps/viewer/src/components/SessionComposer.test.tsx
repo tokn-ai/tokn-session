@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getSessionInputStatus, submitSessionInput } from "../lib/tauri";
 import type { SessionInputStatus, SessionSummary, SubmitSessionInputResponse } from "../lib/types";
 import { SessionComposer } from "./SessionComposer";
+import { SessionInputWorkspace } from "../lib/sessionInputWorkspace";
 import type { SessionControlController } from "../lib/useSessionControl";
 
 vi.mock("../lib/tauri", () => ({ getSessionInputStatus: vi.fn(), submitSessionInput: vi.fn() }));
@@ -200,9 +201,9 @@ describe("SessionComposer", () => {
     vi.mocked(getSessionInputStatus).mockResolvedValue({ ...RESUMABLE, available: false, message });
     render(<SessionComposer session={OWNED_PI} />);
     await screen.findByText(message);
-    expect(textbox()).toBeDisabled();
-    expect(textbox()).toHaveAttribute("placeholder", "Read-only session");
-    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(screen.getByText("Read-only session")).toBeVisible();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Send" })).not.toBeInTheDocument();
     fireEvent.submit(screen.getByRole("form"));
     expect(submitSessionInput).not.toHaveBeenCalled();
   });
@@ -234,10 +235,13 @@ describe("SessionComposer", () => {
     expect(textbox()).toBeDisabled();
     expect(screen.getByText("Checking message availability…")).toBeInTheDocument();
     await act(async () => availability.resolve({ ...AVAILABLE, available: false, message: "Open this session in Codex App first." }));
-    expect(textbox()).toBeDisabled();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     expect(screen.getByText("Open this session in Codex App first.")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Retry availability" }));
+    const retry = screen.getByRole("button", { name: "Retry availability" });
+    retry.focus();
+    fireEvent.click(retry);
     await ready();
+    expect(textbox()).toHaveFocus();
     expect(getSessionInputStatus).toHaveBeenLastCalledWith({ session_key: SESSION.session_key });
     expect(submitSessionInput).not.toHaveBeenCalled();
   });
@@ -246,8 +250,8 @@ describe("SessionComposer", () => {
     vi.mocked(getSessionInputStatus).mockRejectedValue(new Error("Unknown command"));
     render(<SessionComposer session={SESSION} />);
     await screen.findByText("Message input is unavailable on this connection. Retry to check availability. Reason: Unknown command");
-    expect(textbox()).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry availability" })).toBeEnabled();
   });
 
   it("rejects blank drafts and submits multiline text exactly, clearing it only after acceptance", async () => {
@@ -434,6 +438,31 @@ describe("SessionComposer", () => {
     render(<SessionComposer session={SESSION} />);
     await ready();
     expect(textbox()).toHaveValue("");
+  });
+
+  it("keeps pending and uncertain delivery locked across workspace navigation", async () => {
+    const pending = deferred<SubmitSessionInputResponse>();
+    vi.mocked(submitSessionInput).mockReturnValue(pending.promise);
+    const workspace = (open: boolean) => <SessionInputWorkspace>
+      {open ? <SessionComposer session={SESSION} /> : <main>Session inbox</main>}
+    </SessionInputWorkspace>;
+    const view = render(workspace(true));
+    await ready(); draft("Continue this task"); send();
+    view.rerender(workspace(false));
+    view.rerender(workspace(true));
+    expect(textbox()).toBeDisabled();
+    expect(textbox()).toHaveValue("Continue this task");
+    fireEvent.submit(screen.getByRole("form"));
+    await act(async () => pending.reject(new Error("Connection lost")));
+    await screen.findByRole("button", { name: "Edit message" });
+    view.rerender(workspace(false));
+    view.rerender(workspace(true));
+    expect(textbox()).toBeDisabled();
+    fireEvent.submit(screen.getByRole("form"));
+    expect(submitSessionInput).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Edit message" }));
+    await ready();
+    expect(textbox()).toHaveValue("Continue this task");
   });
 
   it("uses the latest acceptance callback with the original target after switching sessions", async () => {

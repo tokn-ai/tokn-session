@@ -3491,3 +3491,33 @@ describe("semantic session delivery", () => {
   });
 
 });
+
+describe("workspace activity queues", () => {
+  it("opens a filtered child, keeps its conversation when acknowledged, and returns to the inbox", async () => {
+    const root = { ...session("root"), title: "Parent conversation" };
+    const child = { ...session("child"), title: "Review the changes", parent_session_id: root.session_id, is_subagent: true, has_unread: true };
+    vi.mocked(listSessions).mockImplementation(async ({ query }) => ({
+      sessions: query.activity === "unread" ? [child] : [root], next_cursor: null, pending_providers: [], source_errors: [],
+    }));
+    vi.mocked(loadEventPage).mockResolvedValue(reasoningEventPage({ type: "message", role: "assistant", summary: "Review complete." }));
+    render(<ViewerPage remote />);
+    const inbox = screen.getByRole("main", { name: "Session workspace" });
+    await within(inbox).findByText("Parent conversation");
+    fireEvent.click(within(inbox).getByRole("button", { name: "Unread" }));
+    await within(inbox).findByText("Review the changes");
+    expect(within(inbox).queryByText("Parent conversation")).toBeNull();
+    expect(openSession).not.toHaveBeenCalled();
+    fireEvent.click(within(inbox).getByRole("button", { name: /Review the changes/ }));
+    await within(screen.getByRole("main")).findByText("Review complete.");
+    const request = vi.mocked(openSessionList).mock.calls.find(([entry]) => entry.query?.activity === "unread")![0];
+    act(() => listObserver!({ payload: { subscription_id: request.subscription_id, base_cursor: "list:first", synced_through: "list:read",
+      sessions: [], removed_keys: [child.session_key], next_cursor: null, pending_providers: [], source_errors: [] } }));
+    expect(screen.getByRole("heading", { name: child.title })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
+    expect(await screen.findByText("No unread replies reported")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "View all sessions" }));
+    expect(await within(screen.getByRole("main")).findByText(root.title)).toBeVisible();
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    await waitFor(() => expect(screen.getByRole("searchbox")).toHaveFocus());
+  });
+});

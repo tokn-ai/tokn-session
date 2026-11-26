@@ -1,0 +1,54 @@
+.conversation .session-header { display: flex; min-height: 62px; border-bottom: 1px solid var(--border); gap: 6px; }
+.session-header .conversation__identity { min-width: 0; flex: 1; }
+.session-header .conversation__title-row h2 { font-size: 15px; }
+.session-header__context { display: flex; align-items: center; gap: 9px; min-width: 0; margin-top: 4px; }
+.session-header__context .conversation__metadata { margin: 0; min-width: 0; }
+.session-header__context .activity-label { flex-shrink: 0; }
+.session-header__context .conversation__model { flex-shrink: 2; }
+.session-header__context .conversation__metadata summary { display: block; text-overflow: ellipsis; }
+.session-header__context summary svg { vertical-align: middle; }
+.prompt-nav__panel {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% - 2px);
+  right: 12px;
+  display: flex;
+  flex-direction: column;
+  width: min(360px, calc(100% - 24px));
+  max-height: min(440px, 58dvh);
+  padding: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow);
+}
+.prompt-nav__panel h3 { margin: 4px 6px 9px; font-size: 13px; font-weight: 600; }
+.prompt-nav__panel p { margin: 8px; color: var(--text-soft); font-size: 12px; }
+.prompt-nav__list { min-height: 0; overflow: auto; }
+.prompt-nav__list > .text-button { margin: 6px; }
+.prompt-nav__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 9px 7px;
+  color: var(--text);
+  background: transparent;
+  border-radius: 5px;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.prompt-nav__row:hover, .prompt-nav__row:focus-visible { background: var(--surface-hover); }
+.prompt-nav__row span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.prompt-nav__row small { flex: none; color: var(--text-muted); }
+.timeline > [data-reading-slot]:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 5px; }
+@media (max-width: 600px) {
+  .conversation .session-header { gap: 2px; padding-inline: 8px; }
+  .session-header .icon-button { width: 36px; flex-basis: 36px; }
+  .session-header .conversation__filter { width: 36px; }
+  .session-header__context { gap: 5px; }
+  .session-header__context .conversation__model, .session-header__context .activity-label { display: none; }
+  .session-header__context .provider-badge { display: inline-flex; }
+}

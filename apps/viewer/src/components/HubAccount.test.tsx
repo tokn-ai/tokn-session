@@ -325,8 +325,7 @@ it("asks before connecting a matching verified Apell email and keeps device appr
   const request = mockAccount({ apell: { complete: "link_required", link_confirmation: apell_confirmation }, email_configured: false });
   render(<StrictMode><HubAccount /></StrictMode>);
 
-  const heading = await screen.findByRole("heading", { name: "Connect to your Hub account?" });
-  expect(heading).toHaveFocus();
+  await waitFor(() => expect(screen.getByRole("heading", { name: "Connect to your Hub account?" })).toHaveFocus());
   expect(screen.getByText(identity.username)).toBeVisible();
   expect(screen.getByText("ABCD-EFGH")).toBeVisible();
   expect(window.location.search).toBe("?apell=complete&user_code=ABCD-EFGH&device=viewer");
@@ -350,7 +349,7 @@ it("lets a user leave the Apell confirmation and sign in by email", async () => 
   render(<HubAccount />);
 
   fireEvent.click(await screen.findByRole("button", { name: "Use an email code" }));
-  expect(await screen.findByLabelText("Email address")).toHaveFocus();
+  await waitFor(() => expect(screen.getByLabelText("Email address")).toHaveFocus());
   expect(window.location.search).toBe("");
   expect(request).not.toHaveBeenCalledWith(expect.stringContaining(`${apell_base}/confirm-link`), expect.anything());
 });
@@ -372,17 +371,17 @@ it("moves keyboard focus through sign-in steps and back to the retained email", 
   mockAccount({ signup: true });
   render(<HubAccount />);
   const email = await screen.findByLabelText("Email address");
-  expect(email).toHaveFocus();
+  await waitFor(() => expect(email).toHaveFocus());
   fireEvent.change(email, { target: { value: "alice@example.com" } });
   fireEvent.submit(email.closest("form")!);
 
   const code = await screen.findByRole("textbox", { name: "Digit 1 of 6" });
-  expect(code).toHaveFocus();
+  await waitFor(() => expect(code).toHaveFocus());
   fireEvent.change(code, { target: { value: "123456" } });
   fireEvent.submit(code.closest("form")!);
 
   const username = await screen.findByLabelText("Username");
-  expect(username).toHaveFocus();
+  await waitFor(() => expect(username).toHaveFocus());
   fireEvent.change(username, { target: { value: "alice" } });
   fireEvent.click(screen.getByRole("button", { name: "Change email" }));
 

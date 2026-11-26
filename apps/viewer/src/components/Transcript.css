@@ -1,0 +1,115 @@
+.transcript-message[data-presentation="bubble"] .message-event__surface {
+  padding: 8px 16px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px 14px 4px 14px;
+}
+
+.transcript-message[data-selected="true"] .message-event__surface {
+  border-color: var(--focus);
+}
+
+.message-byline {
+  display: flex;
+  min-width: 0;
+  min-height: 28px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  margin-bottom: 5px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.message-byline__sender {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.transcript-message:not([data-role="assistant"]) .message-byline__sender {
+  text-transform: capitalize;
+}
+
+.message-byline time {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.message-byline__phase {
+  color: var(--text-soft);
+}
+
+.message-byline__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-inline-start: auto;
+}
+
+.message-byline__actions .message-event__inspect {
+  min-width: 26px;
+  min-height: 26px;
+  margin: 0;
+  padding: 4px;
+}
+
+.message-byline__actions button:hover,
+.message-byline__actions button:focus-visible {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.transcript-message .message-event__actions {
+  margin-top: 5px;
+}
+
+.transcript-work .trajectory-section__header {
+  padding-inline-end: 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.transcript-work .trajectory-section__toggle {
+  grid-template-columns: 23px minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+}
+
+.transcript-work .trajectory-section__toggle > .chevron {
+  grid-column: 3;
+  margin: 0;
+}
+
+.transcript-work__icon {
+  display: grid;
+  place-items: center;
+  color: var(--text-soft);
+}
+
+.transcript-work[data-status="working"] .transcript-work__icon,
+.activity-group__running {
+  color: var(--focus);
+}
+
+.transcript-work .trajectory-section__label {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.transcript-work .trajectory-section__facts {
+  font-size: 11px;
+}
+
+@media (max-width: 600px) {
+  .transcript-message[data-presentation="bubble"] {
+    padding-inline-start: 12px;
+  }
+  .transcript-work .trajectory-section__summary {
+    display: grid;
+    gap: 0;
+  }
+}

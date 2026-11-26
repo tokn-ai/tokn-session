@@ -21,7 +21,12 @@ export function SessionDraftRows({ entries, selected_draft_id, show_project = tr
           <span className="session-row__title">{title}</span>
           <span className="session-row__time">{state}</span>
         </span>
-        {show_project ? <span className="session-row__project" title={project?.folder_path}>{project?.name ?? "Choose a project"}</span> : null}
+        <span className="session-row__meta">
+          <span className="session-row__provider" data-provider={draft.selection.provider === "open_code" ? "opencode" : draft.selection.provider}>
+            {DRAFT_AGENT_NAMES[draft.selection.provider]}
+          </span>
+          {show_project && <><span aria-hidden="true">·</span><span className="session-row__project" title={project?.folder_path}>{project?.name ?? "Choose a project"}</span></>}
+        </span>
       </span>
     </button>;
   })}</>;
