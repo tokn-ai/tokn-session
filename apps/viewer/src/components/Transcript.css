@@ -79,7 +79,8 @@
   cursor: pointer;
 }
 
-.message-disclosure:hover { color: var(--text); }
+.message-disclosure:hover:not([aria-disabled="true"]) { color: var(--text); }
+.message-disclosure[aria-disabled="true"] { cursor: default; }
 .message-disclosure[aria-expanded="true"] svg { transform: rotate(180deg); }
 .message-body-error { margin: 4px 0; color: var(--danger); font-size: 12px; }
 

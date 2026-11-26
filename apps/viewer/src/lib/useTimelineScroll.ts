@@ -1,6 +1,7 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 
-import { readReadingPosition, saveReadingPosition } from "./readingPosition";
+import { flushReadingPositions, readReadingPosition, saveReadingPosition } from "./readingPosition";
+import { createTimelineRowIndex, visibleTimelineRows } from "./timelineRows";
 
 interface Anchor {
   key: string;
@@ -23,14 +24,15 @@ interface TimelineScrollOptions {
 
 const BOTTOM_THRESHOLD = 48;
 
-function restorePosition(timeline: HTMLElement, position: ScrollPosition) {
-  const rows = new Map([...timeline.querySelectorAll<HTMLElement>("[data-scroll-key]")]
-    .map((element) => [element.dataset.scrollKey!, element]));
-  const anchor = position.anchors.find(({ key }) => rows.has(key));
-  const top = anchor
-    ? timeline.scrollTop + rows.get(anchor.key)!.getBoundingClientRect().top
-      - timeline.getBoundingClientRect().top - anchor.top
-    : position.top;
+function restorePosition(timeline: HTMLElement, position: ScrollPosition, rows?: Map<string, HTMLElement>) {
+  let top = position.top;
+  for (const anchor of position.anchors) {
+    const row = rows?.get(anchor.key);
+    if (row) {
+      top = timeline.scrollTop + row.getBoundingClientRect().top - timeline.getBoundingClientRect().top - anchor.top;
+      break;
+    }
+  }
   timeline.scrollTop = Math.max(0, Math.min(top, timeline.scrollHeight - timeline.clientHeight));
 }
 
@@ -40,6 +42,7 @@ export function useTimelineScroll({ session_key, initial_page_loaded, last_event
   const [returnPosition, setReturnPosition] = useState<ScrollPosition | null>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const rowIndex = useMemo(createTimelineRowIndex, []);
   const inputFrame = useRef<number | null>(null);
   const observation = useRef<{
     observer: ResizeObserver;
@@ -69,9 +72,7 @@ export function useTimelineScroll({ session_key, initial_page_loaded, last_event
     const timeline = timelineRef.current;
     if (!timeline) return;
     const viewport = timeline.getBoundingClientRect();
-    const visible = [...timeline.querySelectorAll<HTMLElement>("[data-scroll-key]")]
-      .map((element) => ({ element, rect: element.getBoundingClientRect() }))
-      .filter(({ rect }) => rect.bottom > viewport.top && rect.top < viewport.bottom);
+    const visible = contentRef.current ? visibleTimelineRows(rowIndex.get(contentRef.current).roots, viewport) : [];
     // Prefer the smallest row crossing the reading line. A turn can span many
     // screens; anchoring its outer box misses changes above a visible child.
     const ancestors = new Set<HTMLElement>();
@@ -156,7 +157,7 @@ export function useTimelineScroll({ session_key, initial_page_loaded, last_event
     if (state.current.following) {
       timeline.scrollTop = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
     } else if (previous) {
-      restorePosition(timeline, previous);
+      restorePosition(timeline, previous, contentRef.current ? rowIndex.get(contentRef.current).byKey : undefined);
     }
     capture();
   }
@@ -165,6 +166,7 @@ export function useTimelineScroll({ session_key, initial_page_loaded, last_event
   // Child-only changes (translation, font reflow) are covered by ResizeObserver.
   useLayoutEffect(() => {
     if (state.current.session_key !== session_key) {
+      flushReadingPositions();
       setIsFollowing(true);
       setReturnPosition(null);
       state.current = { session_key, initialized: false, following: true, user_scroll: false, downward_scroll: false, position: null };
@@ -200,11 +202,20 @@ export function useTimelineScroll({ session_key, initial_page_loaded, last_event
     reconcile();
   });
 
-  useLayoutEffect(() => () => {
-    if (inputFrame.current !== null) cancelAnimationFrame(inputFrame.current);
-    observation.current?.observer.disconnect();
-    observation.current = null;
-  }, []);
+  useLayoutEffect(() => {
+    const onVisibility = () => { if (document.visibilityState === "hidden") flushReadingPositions(); };
+    window.addEventListener("pagehide", flushReadingPositions);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("pagehide", flushReadingPositions);
+      document.removeEventListener("visibilitychange", onVisibility);
+      flushReadingPositions();
+      rowIndex.disconnect();
+      if (inputFrame.current !== null) cancelAnimationFrame(inputFrame.current);
+      observation.current?.observer.disconnect();
+      observation.current = null;
+    };
+  }, [rowIndex]);
 
   const reconcileRef = useRef(reconcile);
   reconcileRef.current = reconcile;
@@ -275,7 +286,7 @@ export function useTimelineScroll({ session_key, initial_page_loaded, last_event
     const timeline = timelineRef.current;
     if (!timeline || !returnPosition) return;
     pause();
-    restorePosition(timeline, returnPosition);
+    restorePosition(timeline, returnPosition, contentRef.current ? rowIndex.get(contentRef.current).byKey : undefined);
     timeline.focus({ preventScroll: true });
     capture();
     setReturnPosition(null);

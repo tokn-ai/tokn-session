@@ -10,8 +10,10 @@ matching subagents directly. The sidebar shares the active queue, search,
 providers and ordering. **Workspace** returns to the inbox. Cmd/Ctrl+K focuses
 session search on desktop and opens the drawer on phones. The conversation
 header can search loaded prompts. Readers can return to their previous position
-after a jump, including across live updates. Long messages expand inline, and collapsed work previews recent tools
-from the host projection. See the
+after a jump, including across live updates. Long messages expand inline, and
+collapsed work previews recent tools from the host projection. CI exercises
+keyboard retries and reading during live updates in Firefox at desktop and
+phone widths against the local Rust API. See the
 [viewer workflow](../apps/viewer/README.md#using-the-viewer).
 
 Hubs require account ownership for all machines. Accounts have Hub-specific

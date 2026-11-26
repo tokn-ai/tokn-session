@@ -109,6 +109,13 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm run check
 
+      - name: Exercise the session reader in Firefox
+        working-directory: apps/viewer
+        run: |
+          cargo build --locked -p tokn-viewer-api
+          pnpm exec playwright install --with-deps firefox
+          pnpm run test:browser
+
       - name: Checkout pinned Apell SDK
         uses: actions/checkout@v4
         with:

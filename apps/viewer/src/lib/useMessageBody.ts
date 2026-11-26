@@ -13,19 +13,20 @@ function messageSource(session_key: string | undefined, event_key: string, role:
     if (!readable || !session_key) throw new Error("Full message unavailable.");
     const detail = await loadEventDetail({ session_key, event_key });
     const value = detail.event;
-    if (!detail.is_hidden && detail.event_key === event_key && value && typeof value === "object"
-      && !Array.isArray(value) && value.truncated === true) {
+    const unavailable = "The full message is unavailable or exceeds the viewer’s size limit.";
+    const changed = "This message has changed. Refresh the conversation and try again.";
+    if (detail.is_hidden || detail.event_key !== event_key || !value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(unavailable);
+    }
+    if (revision !== null && detail.content_revision !== revision) throw new Error(changed);
+    if (value.truncated === true) {
       throw new MessageSizeLimit("This message exceeds the viewer’s size limit. Showing the available preview.");
     }
-    if (detail.is_hidden || detail.event_key !== event_key || !value || typeof value !== "object"
-      || Array.isArray(value) || value.type !== "message" || value.role !== role
-      || typeof value.text !== "string" || !value.text.trim()) {
-      throw new Error("The full message is unavailable or exceeds the viewer’s size limit.");
+    if (value.type !== "message" || value.role !== role || typeof value.text !== "string" || !value.text.trim()) {
+      throw new Error(unavailable);
     }
     const matches = truncated ? value.text.startsWith(summary.replace(/…$/, "")) : value.text === summary;
-    if (!matches || (revision !== null && detail.content_revision !== revision)) {
-      throw new Error("This message has changed. Refresh the conversation and try again.");
-    }
+    if (!matches) throw new Error(changed);
     return value.text;
   }
 
@@ -40,7 +41,8 @@ function messageSource(session_key: string | undefined, event_key: string, role:
 export type MessageSource = ReturnType<typeof messageSource>;
 
 type ReadingState = { source: MessageSource } & (
-  { status: "loading" | "collapsed" } | { status: "expanded"; text: string } | { status: "error"; message: string; retryable: boolean }
+  { status: "loading" | "collapsed" } | { status: "expanded"; text: string }
+  | { status: "error"; message: string } | { status: "limited"; message: string; expanded: boolean }
 );
 
 export function useMessageBody(event: EventSummary, session_key?: string) {
@@ -55,6 +57,10 @@ export function useMessageBody(event: EventSummary, session_key?: string) {
   const current = state?.source === source ? state : null;
 
   async function expand() {
+    if (current?.status === "limited") {
+      setState({ ...current, expanded: true });
+      return;
+    }
     if (!summary_truncated) {
       setState({ source, status: "expanded", text: summary });
       return;
@@ -65,11 +71,15 @@ export function useMessageBody(event: EventSummary, session_key?: string) {
       setState(previous => previous?.source === source ? { source, status: "expanded", text } : previous);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setState(previous => previous?.source === source
-        ? { source, status: "error", message, retryable: !(error instanceof MessageSizeLimit) } : previous);
+      const failure: ReadingState = error instanceof MessageSizeLimit
+        ? { source, status: "limited", message, expanded: true } : { source, status: "error", message };
+      setState(previous => previous?.source === source ? failure : previous);
     }
   }
-  return { source, current, expand, collapse: () => setState({ source, status: "collapsed" }) };
+  function collapse() {
+    setState(current?.status === "limited" ? { ...current, expanded: false } : { source, status: "collapsed" });
+  }
+  return { source, current, expand, collapse };
 }
 
 /** Bound the initial reading height without cutting through a word when possible. */

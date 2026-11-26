@@ -152,17 +152,47 @@ describe("reading long messages", () => {
     expect(screen.getByRole("button", { name: "Read full reply", expanded: false })).toBeEnabled();
   });
 
-  it("shows the entire server preview if the full message exceeds the detail limit", async () => {
+  it.each(["assistant", "user"] as const)("preserves focus and folds the available %s preview after a size limit", async (role) => {
     const summary = "Paragraph ".repeat(200) + "Last available paragraph…";
-    vi.mocked(loadEventDetail).mockResolvedValue(detail("", { event: {
-      truncated: true, representation: "normalized_event", limit_bytes: 524288, original_size_bytes: 600000,
-    } }));
-    render(card(message({ summary, summary_truncated: true })));
+    const read = deferred<EventDetail>();
+    vi.mocked(loadEventDetail).mockReturnValue(read.promise);
+    render(card(message({ role, summary, summary_truncated: true })));
     expect(screen.queryByText(/Last available paragraph/)).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Read full reply" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Showing the available preview");
+    const toggle = screen.getByRole("button", { name: role === "user" ? "Read full prompt" : "Read full reply" });
+    toggle.focus();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveFocus();
+    expect(toggle).toHaveAttribute("aria-disabled", "true");
+    expect(toggle).not.toBeDisabled();
+    fireEvent.click(toggle);
+    await act(async () => read.resolve(detail("", { event: {
+      truncated: true, representation: "normalized_event", limit_bytes: 524288, original_size_bytes: 600000,
+    } })));
+    expect(screen.getByRole("button", { name: "Show less", expanded: true })).toBe(toggle);
+    expect(toggle).toHaveFocus();
+    expect(toggle).toHaveAccessibleDescription(/Showing the available preview/);
     expect(screen.getByText(/Last available paragraph/)).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Retry full message" })).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(screen.getByRole("button", { name: "Show available preview", expanded: false })).toHaveFocus();
+    expect(screen.queryByText(/Last available paragraph/)).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(screen.getByText(/Last available paragraph/)).toBeVisible();
+    expect(loadEventDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an oversized detail for a different revision retryable", async () => {
+    vi.mocked(loadEventDetail)
+      .mockResolvedValueOnce(detail("", { content_revision: "other", event: { truncated: true } }))
+      .mockResolvedValueOnce(detail("Prefix and current ending.", { content_revision: "current" }));
+    render(card(message({ summary: "Prefix…", summary_truncated: true, content_revision: "current" })));
+    const toggle = screen.getByRole("button", { name: "Read full reply" });
+    toggle.focus();
+    fireEvent.click(toggle);
+    expect(await screen.findByRole("alert")).toHaveTextContent("This message has changed");
+    expect(screen.getByRole("button", { name: "Retry full message" })).toHaveFocus();
+    fireEvent.click(toggle);
+    expect(await screen.findByText("Prefix and current ending.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Show less" })).toHaveFocus();
   });
 });
 

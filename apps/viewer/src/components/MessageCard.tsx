@@ -39,7 +39,16 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
   const expandedText = body.current?.status === "expanded" ? body.current.text
     : body.current?.status !== "collapsed" && !translatedText ? translation.content : null;
   const expanded = expandedText !== null;
-  const availableText = body.current?.status === "error" ? event.summary : excerpt;
+  const limited = body.current?.status === "limited" ? body.current : null;
+  const readError = body.current?.status === "error" ? body.current.message : limited?.message;
+  const availableText = limited?.expanded ? event.summary : excerpt;
+  const previewExpanded = !!limited?.expanded && excerpt !== event.summary;
+  const loading = body.current?.status === "loading";
+  const previewUnavailable = limited !== null && excerpt === event.summary;
+  const disclosureDisabled = loading || previewUnavailable;
+  const toggleLabel = loading ? "Loading full message…" : expanded || previewExpanded ? "Show less"
+    : previewUnavailable ? "Full message unavailable" : limited ? "Show available preview"
+    : readError ? "Retry full message" : role === "user" ? "Read full prompt" : "Read full reply";
   const display_text = translatedText ?? expandedText ?? (availableText || event.title);
   const inlineDisclosure = usesMarkdown && event.type === "message" && !translatedText
     && (event.summary_truncated ? !!session_key : excerpt !== event.summary);
@@ -86,7 +95,7 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
         {event.type === "question_reply" && !event.is_hidden ? <span className="message-event__answer-heading">Recorded answers</span> : null}
         {role === "user" ? imageContent : null}
         {showText ? usesMarkdown ? (
-          <div id={contentId} aria-busy={translation.loading || body.current?.status === "loading"} lang={translation.showing_translation ? "zh-Hans" : undefined}>
+          <div id={contentId} aria-busy={translation.loading || loading} lang={translation.showing_translation ? "zh-Hans" : undefined}>
             <MarkdownContent class_name="message-event__text" content={display_text} partial={partialMarkdown} image_context={session_key && inline_images.size ? {
               session_key, event_key: event.event_key, revision: event.content_revision ?? null, bindings: inline_images,
             } : undefined} />
@@ -96,13 +105,17 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
             {event.is_hidden ? "Hidden extension message" : event.summary || event.title}
           </div>
         ) : null}
-        {inlineDisclosure && (body.current?.status !== "error" || body.current.retryable) && <button className="message-disclosure" aria-controls={contentId} aria-expanded={expanded}
-          disabled={body.current?.status === "loading"} type="button" onClick={expanded ? body.collapse : () => void body.expand()}>
-          {body.current?.status === "loading" ? "Loading full message…" : expanded ? "Show less"
-            : body.current?.status === "error" ? "Retry full message" : role === "user" ? "Read full prompt" : "Read full reply"}
+        {inlineDisclosure && <button className="message-disclosure" aria-controls={contentId} aria-expanded={expanded || previewExpanded}
+          aria-disabled={disclosureDisabled || undefined} aria-describedby={readError ? `${contentId}-notice` : undefined}
+          type="button" onClick={() => {
+            if (disclosureDisabled) return;
+            if (expanded || previewExpanded) body.collapse();
+            else void body.expand();
+          }}>
+          {toggleLabel}
           <ChevronIcon width={14} height={14} />
         </button>}
-        {body.current?.status === "error" && <p className="message-body-error" role="alert">{body.current.message}</p>}
+        {readError && <p className="message-body-error" id={`${contentId}-notice`} role="alert">{readError}</p>}
         {role !== "user" ? imageContent : null}
         {translation.error ? (
           <div className="message-translation__error" role="alert">

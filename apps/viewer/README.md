@@ -78,6 +78,16 @@ pnpm tauri build
 macOS builds also compile the small Swift bridge for Apple Translation. Use
 Xcode 16 or newer with the macOS 15 SDK; other platforms do not compile Swift.
 
+The session reader's browser tests use the built viewer, the local Rust API
+and a temporary Codex history. Run them from `apps/viewer` with:
+
+```sh
+pnpm run build
+cargo build --locked -p tokn-viewer-api
+pnpm exec playwright install firefox
+pnpm run test:browser
+```
+
 ## Response translation
 
 On macOS 15 or newer, **Translate → 简体中文** translates a visible assistant
@@ -145,7 +155,8 @@ Search matches titles, previews, IDs, projects, folders and agent identities.
 
 Message headers identify the speaker and time. Long prompts start folded.
 **Read full prompt** and **Read full reply** expand messages in the transcript.
-If a message exceeds the host's detail limit, the reader shows the entire available preview.
+If a message exceeds the host's detail limit, you can read, fold and reopen
+the available preview without another request.
 Fenced code blocks show their language when provided and offer a separate copy action
 when the clipboard is available. Copy appears once a streamed or clipped code block
 is complete. **Inspect** opens the underlying event.
