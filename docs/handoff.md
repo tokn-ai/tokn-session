@@ -9,7 +9,9 @@ and **Unread** queues filter indexed activity before pagination and include
 matching subagents directly. The sidebar shares the active queue, search,
 providers and ordering. **Workspace** returns to the inbox. Cmd/Ctrl+K focuses
 session search on desktop and opens the drawer on phones. The conversation
-header includes a prompt navigator for loaded history. See the
+header can search loaded prompts. Readers can return to their previous position
+after a jump, including across live updates. Long messages expand inline, and collapsed work previews recent tools
+from the host projection. See the
 [viewer workflow](../apps/viewer/README.md#using-the-viewer).
 
 Hubs require account ownership for all machines. Accounts have Hub-specific

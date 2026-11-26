@@ -33,7 +33,9 @@ import {
 import { DeferredActivityGroup } from "./DeferredActivityGroup";
 import { ActivityGroup, groupActivity } from "./ActivityGroup";
 import { modelChangeLabels } from "../lib/sessionModels";
-import { ShellOutputSection } from "./ShellOutputSection";
+import { ToolTextSection } from "./ToolTextSection";
+import { ToolInputDetails } from "./ToolInputDetails";
+import "./ToolActivity.css";
 import { MessageImages } from "./MessageImages";
 import { toolOutputImages } from "../lib/toolOutputImages";
 import { MessageCard } from "./MessageCard";
@@ -45,6 +47,7 @@ import { UsageCard, usageHeading } from "./UsageCard";
 import { AgentCommunicationCard, agentCommunicationHeading, isAgentCommunication } from "./AgentCommunicationCard";
 import { DetailRefreshError } from "./DetailRefreshError";
 import { isBookkeepingEvent } from "../lib/eventFilter";
+import { readingEventKey } from "../lib/readingPosition";
 
 interface EventCardProps {
   question_is_pending?: boolean;
@@ -92,6 +95,11 @@ function toolFallbackName(event: EventSummary, tool: ToolCardSummary): string {
   return humanize(tool.tool_name?.trim() || event.title || "Tool call");
 }
 
+const toolActions = new Map(Object.entries({
+  shell: "Shell", terminal: "Terminal", code_execution: "Code", file_read: "Read", file_write: "Write",
+  file_edit: "Edit", search: "Search", web: "Web", task: "Task",
+}));
+
 function toolHeading(event: EventSummary): TechnicalCardHeading {
   const tool = event.tool;
   if (!tool) {
@@ -104,10 +112,11 @@ function toolHeading(event: EventSummary): TechnicalCardHeading {
   }
 
   const fallback = toolFallbackName(event, tool);
+  const action = toolActions.get(tool.kind) ?? "Tool";
   switch (tool.kind) {
     case "code_execution":
       return {
-        action: "Code",
+        action,
         primary: tool.language?.trim()
           ? `${humanize(tool.language)} code`
           : fallback,
@@ -116,21 +125,21 @@ function toolHeading(event: EventSummary): TechnicalCardHeading {
       };
     case "shell":
       return {
-        action: "Shell",
+        action,
         primary: tool.command?.trim() || fallback,
         secondary: tool.cwd,
         monospace: tool.command !== null,
       };
     case "terminal": {
       const session = tool.terminal_session_id?.trim();
-      const action = tool.terminal_action;
-      const primary = action === "wait"
+      const terminalAction = tool.terminal_action;
+      const primary = terminalAction === "wait"
         ? `Wait for ${session ? `terminal ${session}` : "terminal"}`
-        : action === "send"
+        : terminalAction === "send"
           ? `Send ${tool.chars_len ?? 0} characters${session ? ` to terminal ${session}` : ""}`
           : fallback;
       return {
-        action: "Terminal",
+        action,
         primary,
         secondary: tool.wait_ms === null || tool.wait_ms === undefined
           ? null
@@ -140,49 +149,49 @@ function toolHeading(event: EventSummary): TechnicalCardHeading {
     }
     case "file_read":
       return {
-        action: "Read",
+        action,
         primary: tool.path?.trim() || fallback,
         secondary: null,
         monospace: tool.path !== null,
       };
     case "file_write":
       return {
-        action: "Write",
+        action,
         primary: tool.path?.trim() || fallback,
         secondary: tool.bytes === null ? null : formatBytes(tool.bytes),
         monospace: tool.path !== null,
       };
     case "file_edit":
       return {
-        action: "Edit",
+        action,
         primary: tool.path?.trim() || fallback,
         secondary: changeSummary(tool),
         monospace: tool.path !== null,
       };
     case "search":
       return {
-        action: "Search",
+        action,
         primary: tool.query?.trim() || fallback,
         secondary: null,
         monospace: false,
       };
     case "web":
       return {
-        action: "Web",
+        action,
         primary: tool.url?.trim() || fallback,
         secondary: null,
         monospace: tool.url !== null,
       };
     case "task":
       return {
-        action: "Task",
+        action,
         primary: tool.task_title?.trim() || fallback,
         secondary: null,
         monospace: false,
       };
     default:
       return {
-        action: "Tool",
+        action,
         primary: fallback,
         secondary: null,
         monospace: false,
@@ -274,6 +283,28 @@ function trajectoryFacts(trajectory: TrajectoryCardSummary): string {
     facts.push(pluralize(trajectory.unknown_count, "unknown event"));
   }
   return facts.length ? facts.join(" · ") : pluralize(trajectory.event_count, "event");
+}
+
+function WorkPreview({ trajectory, id }: { trajectory: TrajectoryCardSummary; id: string }) {
+  const previews = trajectory.tool_previews;
+  if (!previews?.length) return null;
+  const earlier = trajectory.tool_count - previews.length;
+  const earlierLabel = earlier > 0 ? pluralize(earlier, "earlier tool call") : "";
+  const rows = previews.map(({ kind, label, status }) => ({
+    action: toolActions.get(kind) ?? "Tool",
+    label,
+    status: ["failed", "running", "pending"].includes(status) ? status : "",
+  }));
+  const descriptions = rows.map((row) => [row.action, row.label, humanize(row.status)].filter(Boolean).join(" "));
+  return <span className="work-preview">
+    <span id={id} className="sr-only">{[earlierLabel, ...descriptions].filter(Boolean).join(". ")}</span>
+    {earlierLabel && <span className="work-preview__earlier" aria-hidden="true">{earlierLabel}</span>}
+    {rows.map((row, index) => <span key={index} className="work-preview__row" aria-hidden="true">
+      <span className="work-preview__kind">{row.action}</span>
+      <span className="work-preview__label" title={row.label}>{row.label}</span>
+      {row.status ? <span className="work-preview__state" data-status={row.status}>{humanize(row.status)}</span> : null}
+    </span>)}
+  </span>;
 }
 
 function useTrajectoryHeading(event: EventSummary): TechnicalCardHeading {
@@ -530,6 +561,8 @@ function TrajectorySection({
   const heading = useTrajectoryHeading(event);
   const regionId = `${button_id}-details`;
   const labelId = `${button_id}-label`;
+  const factsId = heading.secondary ? `${button_id}-facts` : undefined;
+  const previewId = !is_expanded && !event.is_hidden && event.trajectory?.tool_previews?.length ? `${button_id}-preview` : undefined;
   const visibleEvents = hide_lifecycle
     ? page?.events.filter((event) => !isBookkeepingEvent(event)) ?? []
     : page?.events ?? [];
@@ -544,7 +577,7 @@ function TrajectorySection({
     <div
       className="trajectory-section__item"
       data-error={childEvent.is_error || childEvent.type === "error"}
-      data-scroll-key={`${event.event_key}/${childEvent.event_key}`}
+      data-scroll-key={JSON.stringify([readingEventKey(event), readingEventKey(childEvent)])}
       key={childEvent.event_key}
       role="listitem"
     >
@@ -580,6 +613,7 @@ function TrajectorySection({
           aria-controls={regionId}
           aria-expanded={is_expanded}
           aria-label={heading.primary}
+          aria-describedby={[factsId, previewId].filter(Boolean).join(" ") || undefined}
           className="trajectory-section__toggle"
           onClick={() => on_toggle(event.event_key)}
           type="button"
@@ -592,10 +626,11 @@ function TrajectorySection({
               {heading.primary}
             </span>
             {heading.secondary ? (
-              <span className="trajectory-section__facts">{heading.secondary}</span>
+              <span className="trajectory-section__facts" id={factsId}>{heading.secondary}</span>
             ) : null}
           </span>
           <ChevronIcon className={is_expanded ? "chevron chevron--open" : "chevron"} />
+          {previewId && event.trajectory ? <WorkPreview trajectory={event.trajectory} id={previewId} /> : null}
         </button>
         <button
           aria-label={`Inspect ${heading.primary}`}
@@ -653,7 +688,11 @@ function TrajectorySection({
                     <DeferredActivityGroup key={group_key} event={group[0]} page={activity_pages?.get(group_key)}
                       selected_event_key={selected_event_key} on_load={on_activity_load} on_retry={on_retry} parent_visible={is_expanded}
                       on_visibility={on_activity_visibility}>
-                      {(children) => children.filter((child) => !hide_lifecycle || !isBookkeepingEvent(child)).map(renderChild)}
+                      {(children) => {
+                        const visible = children.filter((child) => !hide_lifecycle || !isBookkeepingEvent(child));
+                        return visible.length ? visible.map(renderChild)
+                          : <p className="event-filter-notice" role="status">Lifecycle events are hidden.</p>;
+                      }}
                     </DeferredActivityGroup>
                   ) : (
                     <ActivityGroup key={group_key} events={group} selected_event_key={selected_event_key}
@@ -678,7 +717,7 @@ function TrajectorySection({
 
 function ToolOutput({
   session_key,
-  detail,
+  detail: loaded_detail,
   error,
   event,
   is_loading,
@@ -691,6 +730,7 @@ function ToolOutput({
   is_loading: boolean;
   on_retry: () => void;
 }) {
+  const detail = loaded_detail?.event_key === event.event_key ? loaded_detail : null;
   if (event.is_hidden || detail?.is_hidden) {
     return <p className="tool-output__empty">Tool output is hidden by the provider.</p>;
   }
@@ -721,19 +761,9 @@ function ToolOutput({
   }
 
   const output = detail?.tool_output ?? null;
-  if ((!output || output.sections.length === 0) && !images.length) {
-    const isPending = event.tool?.status === "pending" || event.tool?.status === "running"
-      || (event.tool?.status === undefined && event.phase !== null && event.phase !== "finished");
-    return (
-      <div aria-busy={is_loading}>
-        <DetailRefreshError error={error} on_retry={on_retry} />
-        <p className="tool-output__empty" role="status">
-          {isPending ? "Output is not available yet." : "No output was captured for this tool call."}
-        </p>
-      </div>
-    );
-  }
-
+  const hasOutput = Boolean(output?.sections.length || images.length);
+  const isPending = event.tool?.status === "pending" || event.tool?.status === "running"
+    || (event.tool?.status === undefined && event.phase !== null && event.phase !== "finished");
   const toolLabel = toolHeading(event).primary;
   const isShell = event.tool?.kind === "shell" || event.tool?.kind === "terminal";
   return (
@@ -748,21 +778,14 @@ function ToolOutput({
           ) : null}
         </header>
       ) : null}
-      {output?.sections.map((section, index) => isShell ? (
-        <ShellOutputSection key={`${event.event_key}-${index}`} section={section} command={toolLabel} />
-      ) : (
-        <section className="tool-output__section" key={`${section.label ?? "output"}-${index}`}>
-          {section.label ? <h4>{section.label}</h4> : null}
-          <pre
-            aria-label={`${toolLabel} ${section.label ? `${section.label} output` : "output"}`}
-            data-format={section.format}
-            tabIndex={0}
-          >
-            {section.text}
-          </pre>
-        </section>
-      ))}
+      {detail && <ToolInputDetails kind={event.tool?.kind ?? "unknown"} record={detail.event} has_output={hasOutput} />}
+      {output?.sections.map((section, index) => <ToolTextSection key={`${event.event_key}-${index}`}
+        terminal={isShell} text={section.text} format={section.format} heading={section.label ?? "Output"}
+        label={`${toolLabel} ${section.label ? `${section.label} output` : "output"}`} />)}
       {imageContent}
+      {!hasOutput && <p className="tool-output__empty" role="status">
+        {isPending ? "Output is not available yet." : "No output was captured for this tool call."}
+      </p>}
       {output?.truncated ? (
         <p className="tool-output__notice" role="status">
           Output preview is truncated

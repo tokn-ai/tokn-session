@@ -67,6 +67,10 @@ export function SessionComposer({ session, on_accepted, input_refresh_key, model
     on_select={input.setModel} on_clear={input.clearModel} />;
   const status_text = input.sending ? input.resuming ? `Resuming ${provider} and sending your message…` : "Sending your message…"
     : input.notice ?? input.validation_notice ?? (input.checking ? "Checking message availability…" : input.availability?.message);
+  const connection = control && <SessionControlSelector control={control} input_busy={input.sending || input.delivery_uncertain}
+    running={session.is_running} />;
+  const foldConnection = !show_editor && control?.status?.can_select && !(control.status.is_running ?? session.is_running)
+    && !control.changing && !control.stopping;
 
   return (
     <form
@@ -86,7 +90,7 @@ export function SessionComposer({ session, on_accepted, input_refresh_key, model
       }}
     >
       <div className="session-composer__content">
-        {control ? <SessionControlSelector control={control} input_busy={input.sending || input.delivery_uncertain} running={session.is_running} /> : null}
+        {!foldConnection && connection}
         {show_editor && <>
           <label className="sr-only" htmlFor={inputId}>Message this session</label>
           <div className="session-composer__box">
@@ -153,17 +157,19 @@ export function SessionComposer({ session, on_accepted, input_refresh_key, model
             }} type="button">Edit message</button>
           ) : null}
           {read_only ? (
-            <button className="text-button composer-read-only__retry" disabled={input.checking} onClick={(event) => {
+            <button className="text-button composer-read-only__retry" title="Retry availability" disabled={input.checking} onClick={(event) => {
               if (document.activeElement === event.currentTarget) retry_focus.current = session.session_key;
               input.retryAvailability();
               if (model) void model.refresh();
             }} type="button">
-              <RefreshIcon /> Retry availability
+              <RefreshIcon /><span>Retry availability</span>
             </button>
           ) : null}
         </div>
-        {!show_editor && picker ? <details className="composer-read-only__model" key={session.session_key}>
-          <summary>Model details</summary>{picker}
+        {!show_editor && (picker || foldConnection) ? <details className="composer-read-only__model" key={session.session_key}>
+          <summary>{foldConnection ? (picker ? "Connection and model" : "Connection details") : "Model details"}</summary>
+          {foldConnection && connection}
+          {picker}
         </details> : null}
       </div>
     </form>

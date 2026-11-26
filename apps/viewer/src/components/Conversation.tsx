@@ -26,7 +26,7 @@ import {
 } from "../lib/state";
 import { ChevronIcon, FilterIcon, InspectorIcon, PanelIcon, SendIcon } from "./Icons";
 import { EventCard } from "./EventCard";
-import { PromptNavigator } from "./PromptNavigator";
+import { isVisiblePrompt, PromptNavigator } from "./PromptNavigator";
 import { sessionActivity } from "../lib/sessionActivity";
 import "./ConversationHeader.css";
 import { LoadingRows, StateView } from "./StateView";
@@ -153,19 +153,9 @@ export function Conversation({
     on_follow_change,
   });
 
-  function revealInHistory(element: HTMLElement | null | undefined) {
-    const timeline = scroll.timelineRef.current;
-    if (!element || !timeline?.contains(element)) return;
-    scroll.pause();
-    // Only move the history viewport. ScrollIntoView can also shift the app shell.
-    timeline.scrollTop += element.getBoundingClientRect().top - timeline.getBoundingClientRect().top - timeline.clientTop;
-    element.focus({ preventScroll: true });
-    scroll.pause();
-  }
-
   useLayoutEffect(() => {
     if (question_navigation) {
-      revealInHistory(document.getElementById(`${eventButtonId(question_navigation.event_key)}-label`)?.closest("button"));
+      scroll.reveal(document.getElementById(`${eventButtonId(question_navigation.event_key)}-label`)?.closest("button"));
     }
   }, [question_navigation, session.session_key]);
 
@@ -181,10 +171,18 @@ export function Conversation({
   const activity = sessionActivity(session);
 
   function jumpToPrompt(eventKey: string) {
-    const row = Array.from(scroll.timelineRef.current?.querySelectorAll<HTMLElement>("[data-reading-slot]") ?? [])
+    const row = Array.from(scroll.timelineRef.current?.querySelectorAll<HTMLElement>("[data-reading-prompt]") ?? [])
       .find((element) => element.dataset.eventKey === eventKey);
-    revealInHistory(row);
+    scroll.reveal(row);
   }
+
+  function jumpToLatest() {
+    scroll.jumpToLatest();
+    scroll.timelineRef.current?.focus({ preventScroll: true });
+    on_show_live_activity?.();
+  }
+
+  const showLatest = pending_live_activity || !scroll.isFollowing || has_newer;
 
   return (
     <SessionControlContext.Provider value={{ session_key: session.session_key, revision: control.revision, blocked: control.blocked }}>
@@ -240,7 +238,7 @@ export function Conversation({
           </div>
         </div>
         <PromptNavigator key={session.session_key} events={events} has_older={has_older} loading_older={is_loading_older}
-          on_older={loadOlder} on_jump={jumpToPrompt} />
+          timeline_ref={scroll.timelineRef} on_older={loadOlder} on_jump={jumpToPrompt} />
         <button
           aria-label={hideLifecycle ? "Show lifecycle" : "Hide lifecycle"}
           aria-pressed={hideLifecycle}
@@ -281,7 +279,16 @@ export function Conversation({
       <div className="conversation__history">
         <div
           className="conversation__timeline"
+          role="region"
+          aria-label="Conversation history"
+          tabIndex={0}
           ref={scroll.timelineRef}
+          onClickCapture={(event) => {
+            // Pointer and keyboard activation both reach capture before the disclosure changes layout.
+            if (event.target instanceof Element && event.target.closest(
+              '[data-reading-slot] button[aria-expanded="false"]:not(:disabled), [data-reading-slot] details:not([open]) > summary',
+            )) scroll.pause();
+          }}
           onScroll={scroll.onScroll}
           onWheel={(event) => {
             if (event.deltaY !== 0) scroll.noteUserScroll(event.deltaY < 0);
@@ -291,7 +298,12 @@ export function Conversation({
             if (event.target === event.currentTarget) scroll.noteUserScroll();
           }}
           onKeyDown={(event) => {
-            if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) {
+            if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey
+              || (event.target as Element).closest("input, textarea, select, [contenteditable], [role=slider]")) return;
+            if (event.key === "End" && showLatest && !(event.target as Element).closest("button, a")) {
+              event.preventDefault();
+              jumpToLatest();
+            } else if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) {
               scroll.noteUserScroll(["ArrowUp", "PageUp", "Home"].includes(event.key));
             }
           }}
@@ -366,7 +378,8 @@ export function Conversation({
               {visibleEvents.map((event) => (
                 <div tabIndex={-1} data-reading-slot={event.slot_key ?? event.event_key} data-reading-type={event.type}
                   data-reading-timestamp={event.timestamp ?? ""}
-                  data-event-key={event.event_key} data-scroll-key={event.event_key} key={`${session.session_key}:${event.event_key}`}>
+                  data-reading-prompt={isVisiblePrompt(event) || undefined}
+                  data-event-key={event.event_key} data-scroll-key={readingEventKey(event)} key={`${session.session_key}:${event.event_key}`}>
                 <EventCard
                   question_is_pending={outstanding_questions.some((question) => question.event_key === event.event_key)}
                   on_question_accepted={on_input_accepted}
@@ -436,21 +449,22 @@ export function Conversation({
             </div>
           ) : null}
         </div>
-        {pending_live_activity || !scroll.isFollowing ? (
+        {showLatest && <div className="conversation__reading-actions">
+          {scroll.canReturn && <button type="button" className="conversation__jump" onClick={scroll.returnToPosition}>
+            Back to reading position
+          </button>}
           <button
             aria-label={pending_live_activity ? "New activity · Jump to latest" : "Jump to latest"}
             className="conversation__jump"
-            title="Jump to latest"
+            data-new={pending_live_activity || undefined}
+            title="Jump to latest (End)"
             type="button"
-            onClick={() => {
-              scroll.jumpToLatest();
-              on_show_live_activity?.();
-            }}
+            onClick={jumpToLatest}
           >
-            {pending_live_activity ? <span>New activity</span> : null}
+            <span>{pending_live_activity ? "New activity" : "Jump to latest"}</span>
             <SendIcon />
           </button>
-        ) : null}
+        </div>}
       </div>
       <SessionInteractions session={session} refresh_key={input_refresh_key} on_accepted={on_input_accepted} />
       <SessionLiveOutput output={control.status?.live_output} />

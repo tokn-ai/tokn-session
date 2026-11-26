@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EventSummary, SessionSummary } from "../lib/types";
 import { Conversation } from "./Conversation";
@@ -67,6 +67,105 @@ it("jumps to a loaded prompt without opening its inspector or exposing hidden me
   fireEvent.click(screen.getByRole("button", { name: "Jump to prompt" }));
   fireEvent.click(screen.getByRole("button", { name: "Load earlier history" }));
   expect(view.on_load_older).toHaveBeenCalledOnce();
+});
+
+it("searches loaded prompts from the keyboard and returns to the same reading line after a live redraw", () => {
+  const prompts = ["Inspect the parser", "Review the tests", "Write a follow-up"];
+  function generation(revision: number) {
+    return prompts.map((summary, i) => event(`generation-${revision}-${i}`, {
+      slot_key: String(i), summary, type: "message", role: "user", is_bookkeeping: false,
+    }));
+  }
+  const view = props({ events: generation(1), has_older: true, on_show_live_activity: vi.fn() });
+  const rendered = render(<Conversation {...view} />);
+  const viewport = screen.getByRole("region", { name: "Conversation history" });
+  Object.defineProperties(viewport, { clientHeight: { value: 180 }, scrollHeight: { value: 1200 } });
+  vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 40, 360, 180));
+  let prepend = 0;
+  const measure = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    if (!this.dataset.readingSlot) return new DOMRect();
+    return new DOMRect(0, 40 + Number(this.dataset.readingSlot) * 200 + prepend - viewport.scrollTop, 360, 200);
+  });
+  try {
+    fireEvent.wheel(viewport, { deltaY: -120 });
+    viewport.scrollTop = 260;
+    fireEvent.scroll(viewport);
+    fireEvent.click(screen.getByRole("button", { name: "Jump to prompt" }));
+    const panel = within(screen.getByRole("region", { name: "Prompts in this session" }));
+    const input = panel.getByRole("searchbox", { name: "Search loaded prompts" });
+    expect(input).toHaveFocus();
+    expect(panel.getByRole("button", { name: /Review the tests/ })).toHaveAttribute("aria-current", "location");
+    viewport.scrollTop = 420;
+    fireEvent.scroll(viewport);
+    expect(panel.getByRole("button", { name: /Write a follow-up/ })).toHaveAttribute("aria-current", "location");
+    viewport.scrollTop = 260;
+    fireEvent.scroll(viewport);
+    fireEvent.change(input, { target: { value: "no match" } });
+    expect(panel.getByRole("status")).toHaveTextContent("No matching prompts");
+    expect(panel.getByRole("button", { name: "Load earlier history" })).toBeEnabled();
+    fireEvent.change(input, { target: { value: "PARSer" } });
+    expect(panel.queryByRole("button", { name: /Review the tests/ })).toBeNull();
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    const match = panel.getByRole("button", { name: "Inspect the parser" });
+    expect(match).toHaveFocus();
+    fireEvent.keyDown(match, { key: "ArrowUp" });
+    expect(input).toHaveFocus();
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(viewport.scrollTop).toBe(0);
+    expect(rendered.container.querySelector('[data-reading-slot="0"]')).toHaveFocus();
+
+    // The provider replaced every event key and inserted history before the saved line.
+    prepend = 300;
+    rendered.rerender(<Conversation {...view} events={generation(2)} />);
+    expect(viewport.scrollTop).toBe(300);
+    fireEvent.click(screen.getByRole("button", { name: "Back to reading position" }));
+    expect(viewport.scrollTop).toBe(560);
+    expect(viewport).toHaveFocus();
+    expect(screen.queryByRole("button", { name: "Back to reading position" })).toBeNull();
+    expect(view.on_show_live_activity).not.toHaveBeenCalled();
+  } finally {
+    measure.mockRestore();
+  }
+});
+
+it("offers a labeled jump to latest from a partial window and returns keyboard focus to history", () => {
+  const view = props({ events: [event("Reply", { type: "message", role: "assistant", is_bookkeeping: false })],
+    has_newer: true, on_show_live_activity: vi.fn() });
+  render(<Conversation {...view} />);
+  const viewport = screen.getByRole("region", { name: "Conversation history" });
+  const jump = screen.getByRole("button", { name: "Jump to latest" });
+  expect(jump).toHaveTextContent("Jump to latest");
+  fireEvent.keyDown(viewport, { key: "End" });
+  expect(view.on_show_live_activity).toHaveBeenCalledOnce();
+  expect(viewport).toHaveFocus();
+});
+
+it("holds the reading line when keyboard activation opens a long prompt at the live end", () => {
+  const view = props({ events: [event("prompt", {
+    type: "message", role: "user", is_bookkeeping: false,
+    summary: Array.from({ length: 120 }, (_, i) => `Line ${i + 1} of the prompt`).join("\n"),
+  })] });
+  const rendered = render(<Conversation {...view} />);
+  const viewport = screen.getByRole("region", { name: "Conversation history" });
+  const row = rendered.container.querySelector<HTMLElement>("[data-reading-slot]")!;
+  const button = screen.getByRole("button", { name: "Read full prompt" });
+  const extent = () => button.getAttribute("aria-expanded") === "true" ? 2100 : 700;
+  Object.defineProperties(viewport, { clientHeight: { value: 240 }, scrollHeight: { get: extent } });
+  vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 70, 480, 240));
+  vi.spyOn(row, "getBoundingClientRect").mockImplementation(() => new DOMRect(0, 70 - viewport.scrollTop, 480, extent()));
+  rendered.rerender(<Conversation {...view} />);
+  expect(viewport.scrollTop).toBe(460);
+  fireEvent.click(screen.getByRole("button", { name: "Inspect user message" }));
+  expect(view.on_follow_change).not.toHaveBeenCalled();
+  // Keyboard and assistive-technology activation dispatch a click with no preceding pointer event.
+  button.focus();
+  fireEvent.click(button, { detail: 0 });
+  expect(button).toHaveAttribute("aria-expanded", "true");
+  rendered.rerender(<Conversation {...view} />);
+  expect(viewport.scrollTop).toBe(460);
+  expect(view.on_follow_change).toHaveBeenLastCalledWith(false);
+  fireEvent.click(screen.getByRole("button", { name: "Jump to latest" }));
+  expect(viewport.scrollTop).toBe(1860);
 });
 
 describe("Conversation quick filter", () => {
@@ -230,7 +329,7 @@ describe("Conversation quick filter", () => {
     expect(screen.getByText("2 events hidden in this turn.")).toBeInTheDocument();
     expect(screen.queryByText(/Loaded .* of .* events/)).not.toBeInTheDocument();
     expect(view.on_trajectory_event_toggle).not.toHaveBeenCalled();
-    expect(view.on_follow_change).not.toHaveBeenCalled();
+    expect(view.on_follow_change).toHaveBeenCalledExactlyOnceWith(false);
     toggleFilter();
     expect(screen.getByRole("button", {name: "Recorded 3 events"})).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("button", {name: "Nested lifecycle"})).toBeInTheDocument();

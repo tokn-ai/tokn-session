@@ -37,7 +37,8 @@ export function DeferredActivityGroup({ event, page, selected_event_key, on_load
       <ChevronIcon className={expanded ? "chevron chevron--open" : "chevron"} />
     </button>
     <div id={id} hidden={!expanded} className="activity-group__events" role="list" aria-label={event.summary}>
-      {page?.events.length ? children(page.events) : expanded && !page?.error ? <p role="status">Loading activity…</p> : null}
+      {page?.events.length ? children(page.events) : expanded && !page?.error
+        ? <p role="status">{page?.has_loaded ? "No activity in this group." : "Loading activity…"}</p> : null}
       {page?.error ? <div role="alert">{page.error}<button type="button" className="text-button"
         onClick={() => on_retry?.(event.event_key)}>Try again</button></div> : null}
     </div>

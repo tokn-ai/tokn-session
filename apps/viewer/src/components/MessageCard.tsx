@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useId, useMemo } from "react";
 import { bindMarkdownImages } from "../lib/markdownImages";
 import type { EventSummary } from "../lib/types";
 import { formatTimestamp, providerLabel } from "../lib/state";
 import { useMessageTranslation } from "../lib/useMessageTranslation";
 import { MessageImages } from "./MessageImages";
 import { MarkdownContent } from "./MarkdownContent";
-import { InspectorIcon } from "./Icons";
+import { CopyTextButton } from "./CopyTextButton";
+import { messageExcerpt, useMessageBody } from "../lib/useMessageBody";
+import { ChevronIcon, InspectorIcon } from "./Icons";
 import { useTranslationEngine, useTranslationStatus } from "./TranslationProvider";
 import "./Transcript.css";
 
@@ -17,43 +19,33 @@ interface MessageCardProps {
   on_select: (event_key: string) => void;
 }
 
-function CopyMessageButton({ content, label }: { content: string; label: string }) {
-  const [notice, setNotice] = useState("");
-  useEffect(() => {
-    if (!notice) return;
-    const timer = window.setTimeout(() => setNotice(""), 3000);
-    return () => window.clearTimeout(timer);
-  }, [notice]);
-
-  return <>
-    <button aria-label={label} className="message-event__inspect" title={label} type="button"
-      onClick={async () => {
-        try {
-          await navigator.clipboard.writeText(content);
-          setNotice("Copied");
-        } catch {
-          setNotice("Copy unavailable");
-        }
-      }}>
-      <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
-        <rect x="8" y="8" width="12" height="13" rx="2" />
-        <path d="M15 5V4a1 1 0 0 0-1-1H5a2 2 0 0 0-2 2v10a1 1 0 0 0 1 1h1" />
-      </svg>
-    </button>
-    {notice ? <span className="message-byline__notice" role="status">{notice}</span> : null}
-  </>;
-}
-
 export function MessageCard({ event, session_key, button_id, is_selected, on_select }: MessageCardProps) {
   const status = useTranslationStatus();
   const engine = useTranslationEngine();
-  const translation = useMessageTranslation(event, session_key, engine);
+  const contentId = useId();
+  const body = useMessageBody(event, session_key);
+  const translation = useMessageTranslation(event, body.source, session_key, engine);
   const role = event.role ?? "unknown";
   const presentation = role === "user" ? "bubble" : role === "assistant" ? "transcript" : "technical";
   const hasImages = !event.is_hidden && !!event.images?.length;
   const showText = event.is_hidden || !!event.summary.trim() || !hasImages;
   const usesMarkdown = !event.is_hidden && (role === "user" || role === "assistant");
-  const display_text = translation.content || event.title;
+  let excerpt = event.summary;
+  if (event.type === "message" && usesMarkdown && (session_key || !event.summary_truncated)) {
+    if (role === "user") excerpt = messageExcerpt(event.summary, 800, 8);
+    else if (event.summary_truncated) excerpt = messageExcerpt(event.summary, 1600, 16);
+  }
+  const translatedText = translation.showing_translation ? translation.content : null;
+  const expandedText = body.current?.status === "expanded" ? body.current.text
+    : body.current?.status !== "collapsed" && !translatedText ? translation.content : null;
+  const expanded = expandedText !== null;
+  const availableText = body.current?.status === "error" ? event.summary : excerpt;
+  const display_text = translatedText ?? expandedText ?? (availableText || event.title);
+  const inlineDisclosure = usesMarkdown && event.type === "message" && !translatedText
+    && (event.summary_truncated ? !!session_key : excerpt !== event.summary);
+  const preview = !expanded && !translatedText && event.summary_truncated;
+  const partialMarkdown = preview || (!expanded && !translatedText && availableText !== event.summary);
+  const inspectFullMessage = preview && !event.is_hidden && !inlineDisclosure;
   const inline_images = useMemo(() => session_key && usesMarkdown && !translation.showing_translation
     ? bindMarkdownImages(display_text, event.images ?? []) : new Map(),
   [display_text, event.images, session_key, usesMarkdown, translation.showing_translation]);
@@ -64,8 +56,8 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
     : <span className="message-image__status">Image unavailable</span> : null;
   const canTranslate = Boolean(status && session_key && role === "assistant" && !event.is_hidden && event.summary.trim());
   const sender = role === "assistant" ? providerLabel(event.provider) || "Assistant" : role;
-  const fullMessage = event.summary_truncated && !event.is_hidden;
-  const canCopy = usesMarkdown && !!event.summary.trim() && typeof navigator.clipboard?.writeText === "function";
+  const canCopy = usesMarkdown && !!event.summary.trim();
+  const copyText = preview ? display_text : translatedText ?? expandedText ?? event.summary;
   const response = role === "assistant" && event.delivery === "final" && event.phase === "finished" && !event.is_hidden
     ? event.response_metadata : undefined;
   const model = response?.model;
@@ -78,24 +70,24 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
       data-kind={event.type} data-presentation={presentation} data-role={role} data-selected={is_selected}>
       <div className="message-event__surface">
         <header className="message-byline">
-          <span className="message-byline__sender">{sender}</span>
+          <span className="message-byline__sender" data-provider={role === "assistant" ? event.provider : undefined}>{sender}</span>
           {event.delivery === "commentary" ? <span className="message-byline__phase">Progress update</span> : null}
           {event.phase && event.phase !== "finished" ? <span className="message-byline__phase">{event.phase}</span> : null}
           {event.timestamp ? <time title={formatTimestamp(event.timestamp)}>{formatTimestamp(event.timestamp, "time")}</time> : null}
           <span className="message-byline__actions">
-            {canCopy ? <CopyMessageButton content={display_text} label={fullMessage && !translation.translated
+            {canCopy ? <CopyTextButton class_name="message-event__inspect" text={copyText} label={preview
               ? "Copy message preview" : translation.showing_translation ? "Copy translation" : "Copy message"} /> : null}
             <button aria-label={`Inspect ${role} message`} className="message-event__inspect" id={button_id}
-              onClick={() => on_select(event.event_key)} title={fullMessage ? "View full message" : "Inspect message"} type="button">
-              {fullMessage ? "View full message" : <InspectorIcon width={15} height={15} />}
+              onClick={() => on_select(event.event_key)} title={inspectFullMessage ? "View full message" : "Inspect message"} type="button">
+              {inspectFullMessage ? "View full message" : <InspectorIcon width={15} height={15} />}
             </button>
           </span>
         </header>
         {event.type === "question_reply" && !event.is_hidden ? <span className="message-event__answer-heading">Recorded answers</span> : null}
         {role === "user" ? imageContent : null}
         {showText ? usesMarkdown ? (
-          <div aria-busy={translation.loading} lang={translation.showing_translation ? "zh-Hans" : undefined}>
-            <MarkdownContent class_name="message-event__text" content={display_text} image_context={session_key && inline_images.size ? {
+          <div id={contentId} aria-busy={translation.loading || body.current?.status === "loading"} lang={translation.showing_translation ? "zh-Hans" : undefined}>
+            <MarkdownContent class_name="message-event__text" content={display_text} partial={partialMarkdown} image_context={session_key && inline_images.size ? {
               session_key, event_key: event.event_key, revision: event.content_revision ?? null, bindings: inline_images,
             } : undefined} />
           </div>
@@ -104,6 +96,13 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
             {event.is_hidden ? "Hidden extension message" : event.summary || event.title}
           </div>
         ) : null}
+        {inlineDisclosure && (body.current?.status !== "error" || body.current.retryable) && <button className="message-disclosure" aria-controls={contentId} aria-expanded={expanded}
+          disabled={body.current?.status === "loading"} type="button" onClick={expanded ? body.collapse : () => void body.expand()}>
+          {body.current?.status === "loading" ? "Loading full message…" : expanded ? "Show less"
+            : body.current?.status === "error" ? "Retry full message" : role === "user" ? "Read full prompt" : "Read full reply"}
+          <ChevronIcon width={14} height={14} />
+        </button>}
+        {body.current?.status === "error" && <p className="message-body-error" role="alert">{body.current.message}</p>}
         {role !== "user" ? imageContent : null}
         {translation.error ? (
           <div className="message-translation__error" role="alert">

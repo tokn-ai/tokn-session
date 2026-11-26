@@ -452,6 +452,23 @@ describe("EventCard subagent activity", () => {
 });
 
 describe("EventCard whole-turn trajectories", () => {
+  it("shows concrete recent operations and their status from the folded summary without loading children", () => {
+    const onLoad = vi.fn();
+    const turn = event({ type: "trajectory", trajectory: trajectory({
+      tool_count: 5,
+      tool_previews: [
+        { kind: "file_read", label: "src/config.rs", status: "completed" },
+        { kind: "shell", label: "cargo check", status: "failed" },
+        { kind: "task", label: "Inspect the configuration", status: "pending" },
+      ],
+    }) });
+    renderCard(turn, { on_activity_load: onLoad });
+    const toggle = screen.getByRole("button", { name: "Worked for 1h" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveAccessibleDescription(/5 tool calls.*2 earlier tool calls.*Read src\/config.rs.*Shell cargo check Failed.*Task Inspect the configuration Pending/);
+    expect(onLoad).not.toHaveBeenCalled();
+    expect(screen.queryByRole("list", { name: "Events in this turn" })).not.toBeInTheDocument();
+  });
   it("shows a ticking working duration and stops the timer when unmounted", () => {
     vi.useFakeTimers();
     try {
@@ -660,6 +677,43 @@ describe("EventCard tool output", () => {
     title: "exec_command",
     summary: "shell exit 0 cargo test",
     tool: tool(),
+  });
+
+  it("shows the requested file changes when an edit captured no output", () => {
+    const patch = "@@ -1 +1 @@\n-before\n+<after>";
+    renderCard({ ...toolEvent, tool: tool({ kind: "file_edit", path: "src/main.rs" }) }, {
+      is_expanded: true,
+      detail: detail({ event: { input: { "src/main.rs": { type: "update", unified_diff: patch } } } }),
+    });
+    expect(screen.getByLabelText("Requested changes · src/main.rs").textContent).toBe(patch);
+    expect(screen.getByText("No output was captured for this tool call.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Inspect src/main.rs" })).toBeVisible();
+  });
+
+  it("keeps tool input behind disclosure when results exist and bounds long non-shell output", async () => {
+    const result = Array.from({ length: 18 }, (_, index) => `result ${index}`).join("\n");
+    renderCard({ ...toolEvent, tool: tool({ kind: "search", query: "viewer" }) }, {
+      is_expanded: true,
+      detail: detail({ event: { input: { pattern: "viewer", limit: 18 } }, tool_output: {
+        sections: [{ label: "Results", text: result, format: "text" }], truncated: false,
+        source_event_key: toolEvent.event_key, original_size_bytes: result.length,
+      } }),
+    });
+    expect(screen.queryByLabelText("Tool input · Parameters")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("viewer Results output last lines")).toHaveTextContent("result 17");
+    fireEvent.click(screen.getByRole("button", { name: "Show 10 more lines" }));
+    expect(screen.getByLabelText("viewer Results output").textContent).toBe(result);
+    fireEvent.click(screen.getByText("Tool input"));
+    expect(await screen.findByLabelText("Tool input · Parameters")).toHaveTextContent('"limit": 18');
+  });
+
+  it("does not expose redacted input or substitute provider-native data", () => {
+    renderCard(toolEvent, {
+      is_expanded: true,
+      detail: detail({ event: { redacted: true, input: "hidden input", native: { input: "native payload" } } }),
+    });
+    expect(screen.queryByText("Tool input")).not.toBeInTheDocument();
+    expect(screen.queryByText(/hidden input|native payload/)).not.toBeInTheDocument();
   });
 
   it("expands independently from Inspector and exposes an explicitly labelled region", () => {

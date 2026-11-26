@@ -68,6 +68,19 @@ it("refreshes session control after the first accepted RPC activation", async ()
   expect(submitSessionInput).toHaveBeenCalledTimes(1);
 });
 
+it("folds connection options for idle read-only history and keeps Stop visible during a run", async () => {
+  vi.mocked(getSessionInputStatus).mockResolvedValue({ ...AVAILABLE, available: false, message: "Input unavailable." });
+  const route = control("rpc");
+  const view = render(<SessionComposer session={SESSION} control={route} />);
+  const disclosure = await screen.findByText("Connection details");
+  expect(disclosure.closest("details")).not.toHaveAttribute("open");
+  fireEvent.click(disclosure);
+  expect(screen.getByRole("combobox", { name: "Codex connection" })).toBeVisible();
+  view.rerender(<SessionComposer session={{ ...SESSION, is_running: true }} control={route} />);
+  expect(screen.getByRole("button", { name: "Stop" })).toBeVisible();
+  expect(screen.queryByText("Connection details")).not.toBeInTheDocument();
+});
+
 beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(getSessionInputStatus).mockResolvedValue(AVAILABLE);

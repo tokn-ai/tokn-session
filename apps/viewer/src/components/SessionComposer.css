@@ -111,7 +111,20 @@
 }
 
 @media (max-width: 500px) {
-  .composer-read-only { gap: 3px; }
-  .composer-read-only__retry { grid-column: 1 / -1; grid-row: auto; justify-self: start; }
+  .composer-read-only { gap: 2px 8px; padding: 8px 10px; }
+  .composer-read-only__retry {
+    grid-row: 1 / span 2;
+    min-width: 44px;
+    min-height: 44px;
+    justify-content: center;
+  }
+  .composer-read-only__retry span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
   .composer-toolbar__options { flex-basis: 7rem; }
 }

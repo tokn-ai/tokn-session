@@ -103,6 +103,69 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+describe("reading long messages", () => {
+  it("folds long prompts locally and keeps the complete original available", () => {
+    const lines = Array.from({ length: 12 }, (_, index) => `Instruction ${index + 1}`).join("\n");
+    render(card(message({ role: "user", summary: lines })));
+    expect(screen.queryByText(/Instruction 12/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Read full prompt", expanded: false }));
+    expect(screen.getByText(/Instruction 12/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Show less", expanded: true }));
+    expect(screen.queryByText(/Instruction 12/)).not.toBeInTheDocument();
+    expect(loadEventDetail).not.toHaveBeenCalled();
+  });
+
+  it("reads a full reply inline and reuses the verified body for expansion and translation", async () => {
+    const reply = message({ summary: "Result…", summary_truncated: true, content_revision: "revision" });
+    vi.mocked(loadEventDetail).mockResolvedValue(detail("Result with **details**.", { content_revision: "revision" }));
+    vi.mocked(translateText).mockImplementation(async ({ texts }) => ({ texts: texts.map(text => `译${text}`) }));
+    render(card(reply));
+    const open = () => fireEvent.click(screen.getByRole("button", { name: "Read full reply" }));
+    expect(loadEventDetail).not.toHaveBeenCalled();
+    open();
+    expect((await screen.findByText("details")).tagName).toBe("STRONG");
+    fireEvent.click(screen.getByRole("button", { name: "Show less" }));
+    expect(screen.queryByText("details")).not.toBeInTheDocument();
+    open();
+    await screen.findByText("details");
+    await startTranslation();
+    fireEvent.click(await screen.findByRole("button", { name: "Show original" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show less" }));
+    expect(screen.getByText("Result…")).toBeVisible();
+    expect(screen.queryByText("details")).not.toBeInTheDocument();
+    expect(loadEventDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries failed reads and discards late bodies after switching sessions", async () => {
+    const reply = message({ summary: "Prefix…", summary_truncated: true, content_revision: "current" });
+    const pending = deferred<EventDetail>();
+    vi.mocked(loadEventDetail)
+      .mockResolvedValueOnce(detail("Prefix stale text", { content_revision: "stale" }))
+      .mockReturnValueOnce(pending.promise);
+    const view = render(card(reply));
+    fireEvent.click(screen.getByRole("button", { name: "Read full reply" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("This message has changed");
+    fireEvent.click(screen.getByRole("button", { name: "Retry full message" }));
+    view.rerender(card(reply, "other-session"));
+    await act(async () => pending.resolve(detail("Prefix stale text", { content_revision: "current" })));
+    expect(screen.queryByText("Prefix stale text")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Read full reply", expanded: false })).toBeEnabled();
+  });
+
+  it("shows the entire server preview if the full message exceeds the detail limit", async () => {
+    const summary = "Paragraph ".repeat(200) + "Last available paragraph…";
+    vi.mocked(loadEventDetail).mockResolvedValue(detail("", { event: {
+      truncated: true, representation: "normalized_event", limit_bytes: 524288, original_size_bytes: 600000,
+    } }));
+    render(card(message({ summary, summary_truncated: true })));
+    expect(screen.queryByText(/Last available paragraph/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Read full reply" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Showing the available preview");
+    expect(screen.getByText(/Last available paragraph/)).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Retry full message" })).not.toBeInTheDocument();
+  });
+});
+
 describe("final response details", () => {
   const final_reply = message({
     delivery: "final",
@@ -404,7 +467,7 @@ describe("message translation flow", () => {
     vi.mocked(loadEventDetail).mockResolvedValue(invalid_detail);
     render(card(message()));
     await startTranslation();
-    expect(await screen.findByRole("alert")).toHaveTextContent("The full response is unavailable or too large to translate.");
+    expect(await screen.findByRole("alert")).toHaveTextContent("The full message is unavailable or exceeds the viewer’s size limit.");
     expect(translateText).not.toHaveBeenCalled();
   });
 
@@ -412,7 +475,7 @@ describe("message translation flow", () => {
     vi.mocked(loadEventDetail).mockResolvedValue(detail("New response."));
     render(card(message()));
     await startTranslation();
-    expect(await screen.findByRole("alert")).toHaveTextContent("This response has changed.");
+    expect(await screen.findByRole("alert")).toHaveTextContent("This message has changed.");
     expect(screen.getByText("Original response.")).toBeInTheDocument();
     expect(translateText).not.toHaveBeenCalled();
   });
@@ -635,7 +698,7 @@ describe("translation request lifetime", () => {
     }));
     render(card(message({ summary: "Original…", summary_truncated: true, content_revision: "first-content" })));
     await startTranslation();
-    expect(await screen.findByRole("alert")).toHaveTextContent("This response has changed. Refresh the conversation and try again.");
+    expect(await screen.findByRole("alert")).toHaveTextContent("This message has changed. Refresh the conversation and try again.");
     expect(screen.getByText("Original…")).toBeInTheDocument();
     expect(translateText).not.toHaveBeenCalled();
   });

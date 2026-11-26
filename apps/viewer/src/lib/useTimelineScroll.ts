@@ -23,9 +23,21 @@ interface TimelineScrollOptions {
 
 const BOTTOM_THRESHOLD = 48;
 
+function restorePosition(timeline: HTMLElement, position: ScrollPosition) {
+  const rows = new Map([...timeline.querySelectorAll<HTMLElement>("[data-scroll-key]")]
+    .map((element) => [element.dataset.scrollKey!, element]));
+  const anchor = position.anchors.find(({ key }) => rows.has(key));
+  const top = anchor
+    ? timeline.scrollTop + rows.get(anchor.key)!.getBoundingClientRect().top
+      - timeline.getBoundingClientRect().top - anchor.top
+    : position.top;
+  timeline.scrollTop = Math.max(0, Math.min(top, timeline.scrollHeight - timeline.clientHeight));
+}
+
 /** One owner for both React updates and asynchronous changes to layout. */
 export function useTimelineScroll({ session_key, initial_page_loaded, last_event, on_follow_change }: TimelineScrollOptions) {
   const [isFollowing, setIsFollowing] = useState(true);
+  const [returnPosition, setReturnPosition] = useState<ScrollPosition | null>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const inputFrame = useRef<number | null>(null);
@@ -48,6 +60,7 @@ export function useTimelineScroll({ session_key, initial_page_loaded, last_event
   function setFollowing(following: boolean) {
     if (state.current.following === following) return;
     state.current.following = following;
+    if (following) setReturnPosition(null);
     setIsFollowing(following);
     followCallback.current?.(following);
   }
@@ -143,16 +156,7 @@ export function useTimelineScroll({ session_key, initial_page_loaded, last_event
     if (state.current.following) {
       timeline.scrollTop = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
     } else if (previous) {
-      const elements = new Map([...timeline.querySelectorAll<HTMLElement>("[data-scroll-key]")]
-        .map((element) => [element.dataset.scrollKey!, element]));
-      const anchor = previous.anchors.find(({ key }) => elements.has(key));
-      if (anchor) {
-        const offset = elements.get(anchor.key)!.getBoundingClientRect().top - timeline.getBoundingClientRect().top;
-        const desired = timeline.scrollTop + offset - anchor.top;
-        timeline.scrollTop = Math.max(0, Math.min(desired, timeline.scrollHeight - timeline.clientHeight));
-      } else {
-        timeline.scrollTop = Math.max(0, Math.min(previous.top, timeline.scrollHeight - timeline.clientHeight));
-      }
+      restorePosition(timeline, previous);
     }
     capture();
   }
@@ -162,6 +166,7 @@ export function useTimelineScroll({ session_key, initial_page_loaded, last_event
   useLayoutEffect(() => {
     if (state.current.session_key !== session_key) {
       setIsFollowing(true);
+      setReturnPosition(null);
       state.current = { session_key, initialized: false, following: true, user_scroll: false, downward_scroll: false, position: null };
     }
     if (session_key && initial_page_loaded && !state.current.initialized) {
@@ -246,11 +251,36 @@ export function useTimelineScroll({ session_key, initial_page_loaded, last_event
   }
 
   function jumpToLatest() {
+    setReturnPosition(null);
     state.current.user_scroll = false;
     state.current.downward_scroll = false;
     setFollowing(true);
     reconcile();
   }
 
-  return { timelineRef, contentRef, onScroll, noteUserScroll, pause, jumpToLatest, isFollowing };
+  function reveal(element: HTMLElement | null | undefined) {
+    const timeline = timelineRef.current;
+    if (!element || !timeline?.contains(element)) return;
+    const offset = element.getBoundingClientRect().top - timeline.getBoundingClientRect().top - timeline.clientTop;
+    const wasReading = !state.current.following && timeline.scrollTop < timeline.scrollHeight - timeline.clientHeight - 1;
+    pause();
+    if (wasReading && !returnPosition && Math.abs(offset) > 1) setReturnPosition(state.current.position);
+    // scrollIntoView can also move the app shell or a containing dialog.
+    timeline.scrollTop += offset;
+    element.focus({ preventScroll: true });
+    capture();
+  }
+
+  function returnToPosition() {
+    const timeline = timelineRef.current;
+    if (!timeline || !returnPosition) return;
+    pause();
+    restorePosition(timeline, returnPosition);
+    timeline.focus({ preventScroll: true });
+    capture();
+    setReturnPosition(null);
+  }
+
+  return { timelineRef, contentRef, onScroll, noteUserScroll, pause, reveal, jumpToLatest,
+    returnToPosition, canReturn: !!returnPosition, isFollowing };
 }

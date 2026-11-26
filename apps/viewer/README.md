@@ -143,10 +143,17 @@ ordering. Use **Workspace** to return to the inbox. **Find session** or
 arrow keys move between results, and Enter opens the focused session.
 Search matches titles, previews, IDs, projects, folders and agent identities.
 
-Message headers identify the speaker and time. Use **Jump to prompt** to
-navigate user messages in loaded history, or load earlier history from that
-menu. Live replies render Markdown while reasoning and tool details can be
-expanded independently.
+Message headers identify the speaker and time. Long prompts start folded.
+**Read full prompt** and **Read full reply** expand messages in the transcript.
+If a message exceeds the host's detail limit, the reader shows the entire available preview.
+Fenced code blocks show their language when provided and offer a separate copy action
+when the clipboard is available. Copy appears once a streamed or clipped code block
+is complete. **Inspect** opens the underlying event.
+
+Use **Jump to prompt** to search loaded prompts, see the current reading position,
+or load earlier history. After jumping, you can return to where you were reading
+or jump to the latest activity. Live replies render Markdown while reasoning and
+tool details can be expanded independently.
 
 Historical agent-activity records become delegation cards when their native
 target id resolves to a canonical direct child of the selected session within
@@ -184,7 +191,10 @@ of creating a second **Worked** item. It shows
 observed, auto-expanding to show the newest work. Completion collapses it to
 **Worked for …**; it can be reopened manually. Providers without reliable turn
 signals show neutral **Work** until a final reply or turn boundary closes the
-run. Durations use provider timestamps, never file modification time.
+run. Durations use provider timestamps from the first contributing record through
+the last, including tools that start and finish in separate records. A folded group
+previews up to three recent tools with their commands or targets and any pending,
+running or failed status.
 Expanding it fetches its contained event rows in bounded pages and shows
 them as their normal event cards. Each row remains independently inspectable,
 and a recorded delegation can still open its verified direct child session.
@@ -196,6 +206,9 @@ the selected session after successful body updates, including progress that
 does not qualify for unread attention.
 
 Known shell, file, search, web, and task tools use compact semantic headers.
+File edits can show a recorded patch or the before and after text. Writes and code
+execution can show the submitted content. Long outputs initially show their first
+and last lines, with a control to reveal the captured lines between them.
 Expanding a tool fetches its output lazily, including the matching result when a
 provider records invocation and result separately under the same call id. The
 inline preview is bounded, selectable plain text or JSON; it never renders as

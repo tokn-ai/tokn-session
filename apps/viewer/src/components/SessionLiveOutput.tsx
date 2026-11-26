@@ -28,12 +28,12 @@ function LiveResponse({ output }: { output: LiveOutput }) {
         following.current = currentTarget.scrollHeight - currentTarget.scrollTop - currentTarget.clientHeight <= 12;
       }}>
       {output.parts.map((part, index) => part.kind === "reasoning"
-        ? <details key={index}><summary>Thinking</summary><MarkdownContent content={part.text} literal_html /></details>
+        ? <details key={index}><summary>Thinking</summary><MarkdownContent content={part.text} partial literal_html /></details>
         : part.kind === "tool" ? <p className="session-live-output__tool" key={index}>
             <ToolIcon width={14} height={14} /><strong>{part.text}</strong>
             {part.status ? <small>{part.status.replace(/_/g, " ")}</small> : null}
           </p>
-        : <MarkdownContent key={index} content={part.text} literal_html />)}
+        : <MarkdownContent key={index} content={part.text} partial literal_html />)}
       {output.truncated ? <small>Live preview truncated.</small> : null}
     </div>
   </section>;

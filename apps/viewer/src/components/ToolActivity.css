@@ -1,0 +1,81 @@
+.work-preview {
+  display: grid;
+  grid-column: 2 / -1;
+  min-width: 0;
+  gap: 4px;
+  padding: 3px 0 2px 10px;
+  border-inline-start: 1px solid var(--border-strong);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.work-preview__earlier,
+.work-preview__kind {
+  color: var(--text-muted);
+}
+
+.work-preview__row {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.work-preview__kind,
+.work-preview__state {
+  flex: none;
+}
+
+.work-preview__label {
+  color: var(--text-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, monospace;
+}
+
+.work-preview__state {
+  color: var(--focus);
+}
+
+.work-preview__state[data-status="failed"] {
+  color: var(--danger);
+}
+
+.tool-input {
+  min-width: 0;
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.tool-input summary {
+  width: fit-content;
+  padding: 5px 0;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tool-input__blocks {
+  display: grid;
+  gap: 10px;
+  margin: 4px 0 8px;
+}
+
+.tool-input__blocks h4 {
+  overflow-wrap: anywhere;
+}
+
+.tool-input__blocks pre,
+.tool-output .tool-output__section pre {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.shell-output > .tool-input,
+.shell-output > .tool-output__empty {
+  margin-inline: 12px;
+}
+
+.shell-output > .tool-input {
+  padding-block: 3px;
+}

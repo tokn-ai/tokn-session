@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -26,10 +27,11 @@ use crate::model::{
   ListSessionChildrenRequest, ListSessionChildrenResponse, ListSessionsRequest, ListSessionsResponse,
   LoadEventDetailRequest, LoadTrajectoryEventPageRequest, PageDirection, ProviderBody, ReasoningCardSummary,
   SessionActivityFilter, SessionIndexProgress, SessionLocator, SessionOrder, SessionSummary, SourceError,
-  ToolCardSummary, ToolOutputPreview, ToolOutputSection, TrajectoryCardSummary, TrajectoryEventPage, UsageCardSummary,
-  ViewerProvider, bounded_limit, decode_event_cursor, decode_event_key, decode_list_cursor, decode_session_key,
-  decode_trajectory_event_cursor, decode_trajectory_key, encode_event_cursor, encode_event_key, encode_list_cursor,
-  encode_session_key, encode_trajectory_event_cursor, encode_trajectory_key, parse_updated_at_ms, requested_offset,
+  ToolCardSummary, ToolOutputPreview, ToolOutputSection, TrajectoryCardSummary, TrajectoryEventPage,
+  TrajectoryToolPreview, UsageCardSummary, ViewerProvider, bounded_limit, decode_event_cursor, decode_event_key,
+  decode_list_cursor, decode_session_key, decode_trajectory_event_cursor, decode_trajectory_key, encode_event_cursor,
+  encode_event_key, encode_list_cursor, encode_session_key, encode_trajectory_event_cursor, encode_trajectory_key,
+  parse_updated_at_ms, requested_offset,
 };
 use crate::repository::activity::Activity;
 use crate::repository::{NativeRepository, SessionBodyIndexing, ViewerRepository};
@@ -72,6 +74,8 @@ const MAX_TOOL_CARD_STRING_CHARS: usize = 500;
 const MAX_TOOL_NAME_CHARS: usize = 120;
 const MAX_TOOL_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_TRAJECTORY_TIMESTAMP_CHARS: usize = 128;
+const MAX_TRAJECTORY_TOOL_PREVIEWS: usize = 3;
+const MAX_TRAJECTORY_TOOL_LABEL_CHARS: usize = 96;
 const MAX_TRAJECTORY_DETAIL_SOURCE_RECORDS: usize = 100;
 const MAX_TRAJECTORY_DETAIL_SOURCE_RECORD_BYTES: usize = 64 * 1024;
 const MAX_INDEXED_TIMESTAMP_CHARS: usize = 256;
@@ -3475,9 +3479,7 @@ fn source_event_detail(event_key: String, event: &AgentEvent) -> Result<EventDet
   let content_revision = match event {
     AgentEvent::ToolCall(_) => image_resources::event_image_revision(event),
     AgentEvent::Message(message) if has_images => Some(image_resources::message_revision(message)),
-    AgentEvent::Message(message)
-      if message.role == Role::Assistant && message.text.chars().count() > MAX_MESSAGE_SUMMARY_CHARS =>
-    {
+    AgentEvent::Message(message) if message.text.chars().nth(MAX_MESSAGE_SUMMARY_CHARS).is_some() => {
       Some(image_resources::message_revision(message))
     }
     _ => None,
@@ -5008,8 +5010,6 @@ fn trajectory_card_summary(trajectory: &Trajectory, events: &[AgentEvent]) -> Tr
   let mut usage_count = 0;
   let mut error_count = 0;
   let mut unknown_count = 0;
-  let mut first_timestamp = None;
-  let mut last_timestamp = None;
 
   for entry in &trajectory.entries {
     match entry {
@@ -5047,36 +5047,40 @@ fn trajectory_card_summary(trajectory: &Trajectory, events: &[AgentEvent]) -> Tr
       }
       TimelineEntry::Trajectory { .. } => {}
     }
-
-    if let Some((timestamp, timestamp_ms)) = timeline_entry_parseable_timestamp(entry, events) {
-      if first_timestamp.is_none() {
-        first_timestamp = Some((timestamp.clone(), timestamp_ms));
-      }
-      last_timestamp = Some((timestamp, timestamp_ms));
-    }
   }
 
+  // Finished tools occupy the result's timeline position. Use their original
+  // invocation and result positions to time the group, even when calls overlap.
+  let indices = trajectory_source_event_indices(trajectory);
+  let mut timestamps = indices
+    .iter()
+    .filter_map(|&index| timestamp_for_event(&events[index]))
+    .filter_map(|timestamp| Some((timestamp, parse_updated_at_ms(Some(timestamp))?)));
+  let first_timestamp = timestamps.next();
+  let mut last_timestamp = timestamps.next_back().or(first_timestamp);
   let status = trajectory_state::status(trajectory, events);
   if status == "complete"
     && let Some(timestamp) = trajectory_state::completion_timestamp(trajectory, events)
     && let Some(time) = parse_updated_at_ms(Some(timestamp))
     && last_timestamp.as_ref().is_some_and(|(_, last)| time >= *last)
   {
-    last_timestamp =
-      normalize_one_line_text(timestamp, MAX_TRAJECTORY_TIMESTAMP_CHARS).map(|timestamp| (timestamp, time));
+    last_timestamp = Some((timestamp, time));
   }
-  let started_at = first_timestamp.as_ref().map(|(timestamp, _)| timestamp.clone());
-  let ended_at = last_timestamp.as_ref().map(|(timestamp, _)| timestamp.clone());
+  let started_at =
+    first_timestamp.and_then(|(timestamp, _)| normalize_one_line_text(timestamp, MAX_TRAJECTORY_TIMESTAMP_CHARS));
+  let ended_at =
+    last_timestamp.and_then(|(timestamp, _)| normalize_one_line_text(timestamp, MAX_TRAJECTORY_TIMESTAMP_CHARS));
   let duration_ms = first_timestamp
     .zip(last_timestamp)
-    .and_then(|((_, start), (_, end))| (end >= start).then_some((end - start).to_string()));
+    .and_then(|((_, start), (_, end))| (end >= start).then(|| end.abs_diff(start).to_string()));
 
   TrajectoryCardSummary {
     status,
     event_count: trajectory.entries.len(),
-    source_event_count: trajectory_source_event_indices(trajectory).len(),
+    source_event_count: indices.len(),
     reasoning_count,
     tool_count,
+    tool_previews: trajectory_tool_previews(trajectory),
     agent_activity_count,
     lifecycle_count,
     usage_count,
@@ -5088,21 +5092,27 @@ fn trajectory_card_summary(trajectory: &Trajectory, events: &[AgentEvent]) -> Tr
   }
 }
 
-fn timeline_entry_parseable_timestamp(entry: &TimelineEntry, events: &[AgentEvent]) -> Option<(String, i64)> {
-  let timestamp = match entry {
-    TimelineEntry::Event { source_event_index } => events.get(*source_event_index).and_then(timestamp_for_event),
-    TimelineEntry::ToolOperation { operation, .. } => {
-      if operation.is_finished() {
-        operation.updated_at.as_deref().or(operation.started_at.as_deref())
-      } else {
-        operation.started_at.as_deref().or(operation.updated_at.as_deref())
-      }
-    }
-    TimelineEntry::Trajectory { .. } => None,
-  }?;
-  let timestamp_ms = parse_updated_at_ms(Some(timestamp))?;
-  let timestamp = normalize_one_line_text(timestamp, MAX_TRAJECTORY_TIMESTAMP_CHARS)?;
-  Some((timestamp, timestamp_ms))
+fn trajectory_tool_previews(trajectory: &Trajectory) -> Vec<TrajectoryToolPreview> {
+  let mut previews: Vec<_> = trajectory
+    .entries
+    .iter()
+    .rev()
+    .filter_map(|entry| {
+      let TimelineEntry::ToolOperation { operation, .. } = entry else {
+        return None;
+      };
+      let label = tool_operation_summary(operation, present_string(operation.tool_name.as_deref()));
+      Some(TrajectoryToolPreview {
+        kind: tool_kind_label(operation.tool_kind),
+        label: normalize_one_line_text(&label, MAX_TRAJECTORY_TOOL_LABEL_CHARS)
+          .unwrap_or_else(|| "Tool operation".to_owned()),
+        status: tool_operation_status_label(operation.status),
+      })
+    })
+    .take(MAX_TRAJECTORY_TOOL_PREVIEWS)
+    .collect();
+  previews.reverse();
+  previews
 }
 
 fn trajectory_source_event_indices(trajectory: &Trajectory) -> Vec<usize> {
@@ -5213,9 +5223,7 @@ fn event_summary_with_delegation_targets(
     }
   } else if summary_truncated {
     match event {
-      AgentEvent::Message(message) if !hidden && message.role == Role::Assistant => {
-        Some(image_resources::message_revision(message))
-      }
+      AgentEvent::Message(message) if !hidden => Some(image_resources::message_revision(message)),
       _ => None,
     }
   } else {
@@ -5291,8 +5299,10 @@ fn tool_operation_event_summary(source_event_index: usize, operation: &ToolOpera
       .to_string(),
     120,
   );
-  let (summary, summary_truncated) =
-    truncate_with_flag(tool_operation_summary(operation, &tool), MAX_TECHNICAL_SUMMARY_CHARS);
+  let (summary, summary_truncated) = truncate_with_flag(
+    tool_operation_summary(operation, tool.tool_name.as_deref()).into_owned(),
+    MAX_TECHNICAL_SUMMARY_CHARS,
+  );
   EventSummary {
     model_change: None,
     response_metadata: None,
@@ -5333,9 +5343,9 @@ fn tool_operation_event_summary(source_event_index: usize, operation: &ToolOpera
   }
 }
 
-fn tool_operation_summary(operation: &ToolOperation, card: &ToolCardSummary) -> String {
+fn tool_operation_summary<'a>(operation: &'a ToolOperation, fallback_name: Option<&'a str>) -> Cow<'a, str> {
   match operation.summary.as_ref() {
-    Some(ToolSummary::Shell { command, .. }) => command.clone().unwrap_or_else(|| "Shell operation".to_string()),
+    Some(ToolSummary::Shell { command, .. }) => command.as_deref().unwrap_or("Shell operation").into(),
     Some(ToolSummary::Terminal {
       session_id,
       action,
@@ -5348,24 +5358,26 @@ fn tool_operation_summary(operation: &ToolOperation, card: &ToolCardSummary) -> 
         wait_ms
           .map(|value| format!(" for up to {value} ms"))
           .unwrap_or_default(),
-      ),
+      )
+      .into(),
       Some(TerminalAction::Send) => format!(
         "Send {} characters to terminal {}",
         chars_len.unwrap_or(0),
         session_id.as_deref().unwrap_or("session"),
-      ),
-      None => "Terminal operation".to_string(),
+      )
+      .into(),
+      None => "Terminal operation".into(),
     },
     Some(ToolSummary::CodeExecution { language }) => {
-      format!("{} code execution", language.as_deref().unwrap_or("Unknown"))
+      format!("{} code execution", language.as_deref().unwrap_or("Unknown")).into()
     }
-    Some(ToolSummary::FileRead { path }) => path.clone().unwrap_or_else(|| "Read file".to_string()),
-    Some(ToolSummary::FileWrite { path, .. }) => path.clone().unwrap_or_else(|| "Write file".to_string()),
-    Some(ToolSummary::FileEdit { path, .. }) => path.clone().unwrap_or_else(|| "Edit file".to_string()),
-    Some(ToolSummary::Search { query }) => query.clone().unwrap_or_else(|| "Search".to_string()),
-    Some(ToolSummary::Web { url }) => url.clone().unwrap_or_else(|| "Web request".to_string()),
-    Some(ToolSummary::Task { title }) => title.clone().unwrap_or_else(|| "Task".to_string()),
-    None => card.tool_name.clone().unwrap_or_else(|| "Tool operation".to_string()),
+    Some(ToolSummary::FileRead { path }) => path.as_deref().unwrap_or("Read file").into(),
+    Some(ToolSummary::FileWrite { path, .. }) => path.as_deref().unwrap_or("Write file").into(),
+    Some(ToolSummary::FileEdit { path, .. }) => path.as_deref().unwrap_or("Edit file").into(),
+    Some(ToolSummary::Search { query }) => query.as_deref().unwrap_or("Search").into(),
+    Some(ToolSummary::Web { url }) => url.as_deref().unwrap_or("Web request").into(),
+    Some(ToolSummary::Task { title }) => title.as_deref().unwrap_or("Task").into(),
+    None => fallback_name.unwrap_or("Tool operation").into(),
   }
 }
 
@@ -6179,6 +6191,7 @@ mod tests {
   mod response_metadata;
   mod running_notifications;
   mod targeted_index;
+  mod trajectory_tools;
   mod usage_filter;
   use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
   use std::path::PathBuf;
@@ -11947,6 +11960,19 @@ mod tests {
       .unwrap();
     assert_eq!(detail.event["text"], full_text);
     assert_eq!(detail.content_revision, page.events[0].content_revision);
+  }
+
+  #[test]
+  fn truncated_user_prompt_and_detail_identify_the_same_complete_text() {
+    let text = "x".repeat(MAX_MESSAGE_SUMMARY_CHARS + 20);
+    let prompt = message_event_with_role(&text, Role::User, MessageDelivery::Unspecified);
+    let summary = event_summary(std::slice::from_ref(&prompt), 0, &prompt);
+    let detail = source_event_detail(summary.event_key.clone(), &prompt).unwrap();
+
+    assert!(summary.summary_truncated);
+    assert_eq!(detail.event["text"], text);
+    assert_eq!(summary.content_revision, Some(format!("{:x}", Sha256::digest(text))));
+    assert_eq!(detail.content_revision, summary.content_revision);
   }
 
   #[test]

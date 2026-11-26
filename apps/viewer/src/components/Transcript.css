@@ -65,6 +65,24 @@
   margin-top: 5px;
 }
 
+.message-disclosure {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 4px 0;
+  color: var(--text-soft);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.message-disclosure:hover { color: var(--text); }
+.message-disclosure[aria-expanded="true"] svg { transform: rotate(180deg); }
+.message-body-error { margin: 4px 0; color: var(--danger); font-size: 12px; }
+
 .transcript-work .trajectory-section__header {
   padding-inline-end: 4px;
   border: 1px solid var(--border);

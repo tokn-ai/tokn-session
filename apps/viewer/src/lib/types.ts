@@ -807,6 +807,8 @@ export interface TrajectoryCardSummary {
   status?: "working" | "complete" | "unknown";
   event_count: number;
   tool_count: number;
+  /** The most recent operations in recorded order, included with the folded turn. */
+  tool_previews?: { kind: ToolKind | string; label: string; status: ToolOperationStatus | string }[];
   reasoning_count: number;
   agent_activity_count: number;
   error_count: number;
@@ -1007,7 +1009,7 @@ export interface LoadEventDetailRequest {
 export interface EventDetail {
   event_key: string;
   event: JsonValue;
-  /** Digest of the full assistant message text, when supplied by the backend. */
+  /** Content revision shared with the message preview or bound image resources. */
   content_revision?: string | null;
   native: JsonValue | null;
   is_hidden: boolean;

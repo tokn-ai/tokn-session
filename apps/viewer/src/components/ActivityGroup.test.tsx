@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EventSummary } from "../lib/types";
 import { ActivityGroup, activitySummary, groupActivity } from "./ActivityGroup";
-import { ShellOutputSection } from "./ShellOutputSection";
+import { ToolTextSection } from "./ToolTextSection";
 
 afterEach(cleanup);
 function activity(key: string, kind: string, overrides: Partial<EventSummary> = {}): EventSummary {
@@ -70,7 +70,7 @@ describe("activity folding", () => {
 
   it("keeps the command opening and final result visible and restores exact output on expansion", () => {
     const text = Array.from({length: 12}, (_, index) => `line ${index}`).join("\n");
-    render(<ShellOutputSection command="cargo test" section={{label: "stdout", format: "text", text}} />);
+    render(<ToolTextSection heading="stdout" text={text} label="cargo test stdout output" terminal />);
     const output = screen.getByLabelText("cargo test stdout output");
     expect(output.textContent).toBe(text.split("\n").slice(0, 5).join("\n"));
     expect(screen.getByLabelText("cargo test stdout output last lines").textContent).toBe("line 9\nline 10\nline 11");
