@@ -16,6 +16,8 @@ export interface ReadingPosition {
 
 const STORAGE_KEY = "tokn.viewer.reading-positions.v1";
 const MAX_POSITIONS = 200;
+const pendingPositions = new Map<string, ReadingPosition>();
+let flushTimer: number | undefined;
 
 function positionKey(session_key: string) {
   return JSON.stringify([viewerStorageScope(), session_key]);
@@ -32,7 +34,8 @@ function positions(): Record<string, ReadingPosition> {
 
 export function readReadingPosition(session_key: string): ReadingPosition | null {
   try {
-    const value = positions()[positionKey(session_key)];
+    const key = positionKey(session_key);
+    const value = pendingPositions.get(key) ?? positions()[key];
     if (!value || typeof value.last_event !== "string" || typeof value.at_end !== "boolean"
       || !Array.isArray(value.anchors) || !value.anchors.length
       || !value.anchors.every((anchor) => typeof anchor.slot_key === "string"
@@ -43,13 +46,29 @@ export function readReadingPosition(session_key: string): ReadingPosition | null
 }
 
 export function saveReadingPosition(session_key: string, position: ReadingPosition) {
+  // Capture the machine now. A switch can retire its transport before cleanup.
+  const key = positionKey(session_key);
+  pendingPositions.delete(key);
+  pendingPositions.set(key, position);
+  flushTimer ??= window.setTimeout(flushReadingPositions, 200);
+}
+
+export function flushReadingPositions() {
+  window.clearTimeout(flushTimer);
+  flushTimer = undefined;
+  if (!pendingPositions.size) return;
   try {
     const all = positions();
-    const key = positionKey(session_key);
-    delete all[key];
-    all[key] = position;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(Object.fromEntries(Object.entries(all).slice(-MAX_POSITIONS))));
+    let changed = false;
+    for (const [key, position] of pendingPositions) {
+      if (JSON.stringify(all[key]) === JSON.stringify(position)) continue;
+      delete all[key];
+      all[key] = position;
+      changed = true;
+    }
+    if (changed) localStorage.setItem(STORAGE_KEY, JSON.stringify(Object.fromEntries(Object.entries(all).slice(-MAX_POSITIONS))));
   } catch { /* Reading remains usable with disabled or full storage. */ }
+  pendingPositions.clear();
 }
 
 export function readingEventKey(event: EventSummary): string {

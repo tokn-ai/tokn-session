@@ -1,19 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { loadEventDetail } from "./tauri";
+import { useEffect, useRef, useState } from "react";
+import type { MessageSource } from "./useMessageBody";
 import { translateMarkdown } from "./markdownTranslation";
 import { NativeTranslationError, normalizeTranslationFailure, type TranslationEngine, type TranslationJob, type TranslationProgress } from "./translationEngine";
 import type { EventSummary, TranslationRecovery } from "./types";
 
-interface TranslationSource {
-  session_key: string | undefined;
-  event_key: string;
-  summary: string;
-  summary_truncated: boolean;
-  content_revision: string | null;
-}
-
 interface TranslationState {
-  source: TranslationSource;
+  source: MessageSource;
   original: string | null;
   translated: string | null;
   show_translation: boolean;
@@ -26,24 +18,12 @@ interface TranslationState {
 }
 
 /** Results belong to the source text, never just its reusable event index. */
-export function useMessageTranslation(event: EventSummary, sessionKey?: string, engine?: TranslationEngine | null) {
-  // Older servers cannot identify changes beyond a truncated preview, so
-  // retain conservative invalidation until they provide a full-text revision.
-  const contentRevision = event.summary_truncated ? event.content_revision ?? null : null;
-  const truncatedObservation = event.summary_truncated && contentRevision === null ? event : null;
-  const source = useMemo<TranslationSource>(() => ({
-    session_key: sessionKey,
-    event_key: event.event_key,
-    summary: event.summary,
-    summary_truncated: event.summary_truncated,
-    content_revision: contentRevision,
-  }), [sessionKey, event.event_key, event.summary, event.summary_truncated,
-    event.is_hidden, event.role, contentRevision, truncatedObservation]);
+export function useMessageTranslation(event: EventSummary, source: MessageSource, sessionKey?: string, engine?: TranslationEngine | null) {
   const currentSource = useRef(source);
   currentSource.current = source;
   const currentEngine = useRef(engine);
   currentEngine.current = engine;
-  const active = useRef<{ source: TranslationSource; job: TranslationJob | null } | null>(null);
+  const active = useRef<{ source: MessageSource; job: TranslationJob | null } | null>(null);
   const settingsRequest = useRef<object | null>(null);
   const [state, setState] = useState<TranslationState | null>(null);
   const visible = state?.source === source ? state : null;
@@ -81,22 +61,8 @@ export function useMessageTranslation(event: EventSummary, sessionKey?: string, 
         if (isCurrent()) setState((previous) => previous?.source === source ? { ...previous, progress } : previous);
       });
       request.job = job;
-      const detail = await loadEventDetail({ session_key: sessionKey, event_key: event.event_key });
+      const original = await source.read();
       if (!isCurrent()) return;
-      const value = detail.event;
-      if (detail.is_hidden || detail.event_key !== event.event_key
-        || !value || typeof value !== "object" || Array.isArray(value)
-        || value.type !== "message" || value.role !== "assistant"
-        || typeof value.text !== "string" || !value.text.trim()) {
-        throw new Error("The full response is unavailable or too large to translate.");
-      }
-      const original = value.text;
-      const expected = source.summary_truncated ? source.summary.replace(/…$/, "") : source.summary;
-      const revisionChanged = source.content_revision !== null && detail.content_revision != null
-        && detail.content_revision !== source.content_revision;
-      if (revisionChanged || (source.summary_truncated ? !original.startsWith(expected) : original !== expected)) {
-        throw new Error("This response has changed. Refresh the conversation and try again.");
-      }
       setState((previous) => previous?.source === source ? { ...previous, original } : previous);
       const translated = await translateMarkdown(original, async (texts) => {
         if (!isCurrent()) throw new Error("Translation cancelled.");
@@ -146,7 +112,7 @@ export function useMessageTranslation(event: EventSummary, sessionKey?: string, 
   }
 
   return {
-    content: visible?.show_translation ? visible.translated! : visible?.original ?? event.summary,
+    content: visible?.show_translation ? visible.translated : visible?.original ?? null,
     loading: visible?.loading ?? false,
     translated: visible?.translated !== null && visible?.translated !== undefined,
     showing_translation: visible?.show_translation ?? false,

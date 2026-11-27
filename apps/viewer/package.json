@@ -6,10 +6,12 @@
   "scripts": {
     "dev": "pnpm run build:hub-wasm && vite",
     "dev:web": "pnpm run build:hub-wasm && tsx scripts/dev.ts",
+    "demo:session": "pnpm run build:hub-wasm && tsx scripts/dev.ts --demo",
     "build": "pnpm run build:hub-wasm && tsc && vite build",
     "check": "tsc -p tsconfig.tools.json && pnpm run build && pnpm run test",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:browser": "playwright test",
     "tauri": "tauri",
     "build:hub-wasm": "node --import tsx scripts/build-hub-wasm.ts",
     "build:apell": "pnpm run build:hub-wasm && node --import tsx scripts/build-apell.ts"
@@ -26,6 +28,7 @@
     "unified": "^11.0.5"
   },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
     "@tauri-apps/cli": "^2.12.1",
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.3",

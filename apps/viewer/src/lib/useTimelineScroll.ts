@@ -1,6 +1,7 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 
-import { readReadingPosition, saveReadingPosition } from "./readingPosition";
+import { flushReadingPositions, readReadingPosition, saveReadingPosition } from "./readingPosition";
+import { createTimelineRowIndex, visibleTimelineRows } from "./timelineRows";
 
 interface Anchor {
   key: string;
@@ -23,11 +24,25 @@ interface TimelineScrollOptions {
 
 const BOTTOM_THRESHOLD = 48;
 
+function restorePosition(timeline: HTMLElement, position: ScrollPosition, rows?: Map<string, HTMLElement>) {
+  let top = position.top;
+  for (const anchor of position.anchors) {
+    const row = rows?.get(anchor.key);
+    if (row) {
+      top = timeline.scrollTop + row.getBoundingClientRect().top - timeline.getBoundingClientRect().top - anchor.top;
+      break;
+    }
+  }
+  timeline.scrollTop = Math.max(0, Math.min(top, timeline.scrollHeight - timeline.clientHeight));
+}
+
 /** One owner for both React updates and asynchronous changes to layout. */
 export function useTimelineScroll({ session_key, initial_page_loaded, last_event, on_follow_change }: TimelineScrollOptions) {
   const [isFollowing, setIsFollowing] = useState(true);
+  const [returnPosition, setReturnPosition] = useState<ScrollPosition | null>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const rowIndex = useMemo(createTimelineRowIndex, []);
   const inputFrame = useRef<number | null>(null);
   const observation = useRef<{
     observer: ResizeObserver;
@@ -48,6 +63,7 @@ export function useTimelineScroll({ session_key, initial_page_loaded, last_event
   function setFollowing(following: boolean) {
     if (state.current.following === following) return;
     state.current.following = following;
+    if (following) setReturnPosition(null);
     setIsFollowing(following);
     followCallback.current?.(following);
   }
@@ -56,9 +72,7 @@ export function useTimelineScroll({ session_key, initial_page_loaded, last_event
     const timeline = timelineRef.current;
     if (!timeline) return;
     const viewport = timeline.getBoundingClientRect();
-    const visible = [...timeline.querySelectorAll<HTMLElement>("[data-scroll-key]")]
-      .map((element) => ({ element, rect: element.getBoundingClientRect() }))
-      .filter(({ rect }) => rect.bottom > viewport.top && rect.top < viewport.bottom);
+    const visible = contentRef.current ? visibleTimelineRows(rowIndex.get(contentRef.current).roots, viewport) : [];
     // Prefer the smallest row crossing the reading line. A turn can span many
     // screens; anchoring its outer box misses changes above a visible child.
     const ancestors = new Set<HTMLElement>();
@@ -143,16 +157,7 @@ export function useTimelineScroll({ session_key, initial_page_loaded, last_event
     if (state.current.following) {
       timeline.scrollTop = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
     } else if (previous) {
-      const elements = new Map([...timeline.querySelectorAll<HTMLElement>("[data-scroll-key]")]
-        .map((element) => [element.dataset.scrollKey!, element]));
-      const anchor = previous.anchors.find(({ key }) => elements.has(key));
-      if (anchor) {
-        const offset = elements.get(anchor.key)!.getBoundingClientRect().top - timeline.getBoundingClientRect().top;
-        const desired = timeline.scrollTop + offset - anchor.top;
-        timeline.scrollTop = Math.max(0, Math.min(desired, timeline.scrollHeight - timeline.clientHeight));
-      } else {
-        timeline.scrollTop = Math.max(0, Math.min(previous.top, timeline.scrollHeight - timeline.clientHeight));
-      }
+      restorePosition(timeline, previous, contentRef.current ? rowIndex.get(contentRef.current).byKey : undefined);
     }
     capture();
   }
@@ -161,7 +166,9 @@ export function useTimelineScroll({ session_key, initial_page_loaded, last_event
   // Child-only changes (translation, font reflow) are covered by ResizeObserver.
   useLayoutEffect(() => {
     if (state.current.session_key !== session_key) {
+      flushReadingPositions();
       setIsFollowing(true);
+      setReturnPosition(null);
       state.current = { session_key, initialized: false, following: true, user_scroll: false, downward_scroll: false, position: null };
     }
     if (session_key && initial_page_loaded && !state.current.initialized) {
@@ -195,11 +202,20 @@ export function useTimelineScroll({ session_key, initial_page_loaded, last_event
     reconcile();
   });
 
-  useLayoutEffect(() => () => {
-    if (inputFrame.current !== null) cancelAnimationFrame(inputFrame.current);
-    observation.current?.observer.disconnect();
-    observation.current = null;
-  }, []);
+  useLayoutEffect(() => {
+    const onVisibility = () => { if (document.visibilityState === "hidden") flushReadingPositions(); };
+    window.addEventListener("pagehide", flushReadingPositions);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("pagehide", flushReadingPositions);
+      document.removeEventListener("visibilitychange", onVisibility);
+      flushReadingPositions();
+      rowIndex.disconnect();
+      if (inputFrame.current !== null) cancelAnimationFrame(inputFrame.current);
+      observation.current?.observer.disconnect();
+      observation.current = null;
+    };
+  }, [rowIndex]);
 
   const reconcileRef = useRef(reconcile);
   reconcileRef.current = reconcile;
@@ -246,11 +262,36 @@ export function useTimelineScroll({ session_key, initial_page_loaded, last_event
   }
 
   function jumpToLatest() {
+    setReturnPosition(null);
     state.current.user_scroll = false;
     state.current.downward_scroll = false;
     setFollowing(true);
     reconcile();
   }
 
-  return { timelineRef, contentRef, onScroll, noteUserScroll, pause, jumpToLatest, isFollowing };
+  function reveal(element: HTMLElement | null | undefined, remember_position = true) {
+    const timeline = timelineRef.current;
+    if (!element || !timeline?.contains(element)) return;
+    const offset = element.getBoundingClientRect().top - timeline.getBoundingClientRect().top - timeline.clientTop;
+    const wasReading = !state.current.following && timeline.scrollTop < timeline.scrollHeight - timeline.clientHeight - 1;
+    pause();
+    if (remember_position && wasReading && !returnPosition && Math.abs(offset) > 1) setReturnPosition(state.current.position);
+    // scrollIntoView can also move the app shell or a containing dialog.
+    timeline.scrollTop += offset;
+    element.focus({ preventScroll: true });
+    capture();
+  }
+
+  function returnToPosition() {
+    const timeline = timelineRef.current;
+    if (!timeline || !returnPosition) return;
+    pause();
+    restorePosition(timeline, returnPosition, contentRef.current ? rowIndex.get(contentRef.current).byKey : undefined);
+    timeline.focus({ preventScroll: true });
+    capture();
+    setReturnPosition(null);
+  }
+
+  return { timelineRef, contentRef, onScroll, noteUserScroll, pause, reveal, jumpToLatest,
+    returnToPosition, canReturn: !!returnPosition, isFollowing };
 }

@@ -52,10 +52,11 @@ export function activitySummary(events: EventSummary[]): string {
   return summary.charAt(0).toUpperCase() + summary.slice(1);
 }
 
-export function ActivityGroup({ events, selected_event_key, reveal = false, children }: {
+export function ActivityGroup({ events, selected_event_key, reveal = false, inline = false, children }: {
   events: EventSummary[];
   selected_event_key?: string | null;
   reveal?: boolean;
+  inline?: boolean;
   children: ReactNode | (() => ReactNode);
 }) {
   const regionId = useId();
@@ -66,7 +67,7 @@ export function ActivityGroup({ events, selected_event_key, reveal = false, chil
   const [loaded, setLoaded] = useState(needsAttention || reveal);
   const hasSelection = events.some((event) => event.event_key === selected_event_key);
   useEffect(() => { if (hasSelection || needsAttention || reveal) { setExpanded(true); setLoaded(true); } }, [hasSelection, needsAttention, reveal, selected_event_key]);
-  if (events[0]?.type === "message" || events[0]?.type === "model_changed") return typeof children === "function" ? children() : children;
+  if (inline || events[0]?.type === "message" || events[0]?.type === "model_changed") return typeof children === "function" ? children() : children;
   const summary = activitySummary(events);
   const failures = events.filter((event) => event.is_error || event.type === "error"
     || event.tool?.status === "failed" || (event.tool?.exit_code != null && event.tool.exit_code !== 0)).length;

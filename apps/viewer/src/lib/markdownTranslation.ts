@@ -1,8 +1,6 @@
 import type { Nodes, Text } from "mdast";
 import { decodeString } from "micromark-util-decode-string";
-import remarkGfm from "remark-gfm";
-import remarkParse from "remark-parse";
-import { unified } from "unified";
+import { markdownParser } from "./markdownParser";
 
 const MAX_CONTENT_BYTES = 512 * 1024;
 const MAX_SEGMENT_BYTES = 16 * 1024;
@@ -11,7 +9,6 @@ const MAX_BATCH_SEGMENTS = 128;
 const MAX_SEGMENTS = 4096;
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const encoder = new TextEncoder();
-const parser = unified().use(remarkParse).use(remarkGfm);
 const token_pattern = /\\[!-/:-@\[-`{-~]|&(?:#(?:\d{1,7}|x[\da-f]{1,6})|[\da-z]{1,31});|[\s\S]/giu;
 
 interface SourceToken {
@@ -47,7 +44,7 @@ export async function translateMarkdown(
     throw new Error("This response is too large to translate (512 KiB maximum).");
   }
 
-  const tree = parser.parse(content);
+  const tree = markdownParser.parse(content);
   const replacements: Replacement[] = [];
   const reference_expansions: Replacement[] = [];
 
@@ -131,7 +128,7 @@ export async function translateMarkdown(
   // Escaping protects against newly introduced Markdown. Reparse as a final
   // guard against contextual emphasis and GFM's decoded-text autolink pass,
   // which can recognize even entity-escaped URLs introduced by a translator.
-  if (JSON.stringify(structure(tree)) !== JSON.stringify(structure(parser.parse(result)))) {
+  if (JSON.stringify(structure(tree)) !== JSON.stringify(structure(markdownParser.parse(result)))) {
     throw new Error("The translation changed Markdown formatting. Try again.");
   }
   return result;

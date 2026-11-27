@@ -9,7 +9,17 @@ and **Unread** queues filter indexed activity before pagination and include
 matching subagents directly. The sidebar shares the active queue, search,
 providers and ordering. **Workspace** returns to the inbox. Cmd/Ctrl+K focuses
 session search on desktop and opens the drawer on phones. The conversation
-header includes a prompt navigator for loaded history. See the
+header can search loaded prompts. Readers can return to their previous position
+after a jump, including across live updates. User prompts, work disclosures,
+agent replies and transient native output share one reading column. The
+session title opens metadata and the lifecycle filter. Codex goal-triggered
+turns show the authored goal and keep work together across compaction. The final
+reply shows the outcome from a matching completion receipt. Long messages expand
+inline, and opening a short work group reveals its operations directly. Run
+`pnpm run demo:session` in `apps/viewer` for a mock Codex rollout with a
+failing command, a file edit and a successful rerun. Firefox CI exercises
+prompt navigation, tool output, inspection, keyboard retries and live appends
+at desktop and phone widths and saves screenshots. See the
 [viewer workflow](../apps/viewer/README.md#using-the-viewer).
 
 Hubs require account ownership for all machines. Accounts have Hub-specific

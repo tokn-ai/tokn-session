@@ -1,6 +1,7 @@
 import { useEffect, useId } from "react";
+import { useSessionRowText } from "../lib/markdownPreview";
 import type { SessionActivityFilter, SessionChildrenState, SessionOrder, SessionSummary } from "../lib/types";
-import { formatRelativeTime, providerLabel, sessionDisplayTitle, subagentDetail } from "../lib/state";
+import { formatRelativeTime, providerLabel, subagentDetail } from "../lib/state";
 import { BranchIcon, ChevronIcon } from "./Icons";
 
 interface SessionBranchProps {
@@ -48,10 +49,9 @@ export function SessionBranch({
   const childrenState = session_children.get(session.session_key);
   const children = childrenState?.sessions ?? [];
   const relationship = isSubagent ? subagentDetail(session) : null;
-  const title = sessionDisplayTitle(session);
+  const { title, preview } = useSessionRowText(session, order === "time" ? session.latest_assistant_preview : null);
   const hasTimestamp = session.updated_at_ms !== null || !!session.timestamp;
   const timeId = `${metadataId}-time`;
-  const preview = session.latest_assistant_preview?.split(/\r?\n/).find((line) => line.trim())?.replace(/\s+/g, " ").trim();
   const project = session.project?.trim() || session.cwd?.split(/[\\/]/).filter(Boolean).slice(-1)[0] || "Unassigned project";
   const sessionDescription = isSubagent ? `subagent ${title}` : title;
   const requiredCount = session.question_attention?.required_count ?? 0;

@@ -464,8 +464,21 @@ pub struct QuestionSelectionSummary {
   pub written_answer_truncated: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GoalPresentation {
+  Prompt,
+  Work,
+  Completed {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<String>,
+  },
+}
+
 #[derive(Debug, Serialize)]
 pub struct EventSummary {
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub goal: Option<GoalPresentation>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub model_change: Option<ModelChangeSummary>,
   /// Provider-recorded metadata for a finished final assistant reply.
@@ -496,7 +509,7 @@ pub struct EventSummary {
   pub title: String,
   pub summary: String,
   pub summary_truncated: bool,
-  /// Full assistant-message content identity when the visible summary is truncated.
+  /// Content identity for a truncated message or a row with bound image resources.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub content_revision: Option<String>,
   pub is_hidden: bool,
@@ -557,6 +570,8 @@ pub struct TrajectoryCardSummary {
   pub source_event_count: usize,
   pub reasoning_count: usize,
   pub tool_count: usize,
+  /// Short display labels for up to three recent logical operations, in timeline order.
+  pub tool_previews: Vec<TrajectoryToolPreview>,
   pub agent_activity_count: usize,
   pub lifecycle_count: usize,
   pub usage_count: usize,
@@ -565,6 +580,13 @@ pub struct TrajectoryCardSummary {
   pub started_at: Option<String>,
   pub ended_at: Option<String>,
   pub duration_ms: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TrajectoryToolPreview {
+  pub kind: &'static str,
+  pub label: String,
+  pub status: &'static str,
 }
 
 /// Bounded presentation metadata for one historical agent-activity record.
@@ -680,7 +702,7 @@ pub struct TrajectoryEventPage {
 pub struct EventDetail {
   pub event_key: String,
   pub event: Value,
-  /// Full assistant-message content identity when its summary is truncated.
+  /// Matches the summary revision for a truncated message or bound image resources.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub content_revision: Option<String>,
   pub native: Option<Value>,

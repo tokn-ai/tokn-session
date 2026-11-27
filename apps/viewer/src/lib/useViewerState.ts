@@ -2565,6 +2565,10 @@ export function useViewerState(visible = true) {
     detail: detailIsOwned ? detail : null,
     detailLoading: inspectorOpen && detailTargetKey !== null && (!detailIsOwned || detailLoading),
     detailError: detailIsOwned ? detailError : null,
-    retryDetail: () => setDetailAttempt((attempt) => attempt + 1),
+    retryDetail: () => {
+      if (!selectedSessionKey || !selectedEventKey) return;
+      displayCache.current.resources.set(selectedSessionKey, "inspect", selectedEventKey, { status: "stale" });
+      setDetailAttempt((attempt) => attempt + 1);
+    },
   };
 }

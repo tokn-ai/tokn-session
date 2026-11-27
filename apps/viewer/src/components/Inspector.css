@@ -1,0 +1,57 @@
+.viewer-shell > .inspector[data-open="true"] { transition-property: opacity, transform; }
+
+.inspector .inspector__header {
+  min-height: 60px;
+  padding: 12px 16px;
+}
+
+.inspector .inspector__header h2 { font-size: 15px; }
+.inspector .event-facts { gap: 7px 12px; padding-block: 12px; }
+.inspector .event-facts dd { font-size: 12px; }
+.inspector .readable-content__text { font-size: 14px; }
+.inspector .inspector__content > pre { min-width: 0; font-size: 12px; line-height: 1.6; }
+.inspector .inspector__content:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+
+.inspector__tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 7px 10px;
+}
+
+.inspector__tools .inspector-tabs { padding: 0; }
+.inspector__tools button { min-height: 32px; font-size: 12px; }
+.inspector__copy { display: flex; flex-direction: row-reverse; gap: 4px; align-items: center; color: var(--text-muted); font-size: 11px; }
+.inspector__copy-button { display: grid; place-items: center; width: 32px; border-radius: 6px; color: var(--text-muted); background: transparent; cursor: pointer; }
+.inspector__copy-button:hover { background: var(--surface-hover); color: var(--text); }
+
+dialog.inspector--modal:not([open]) { display: none; }
+dialog.inspector--modal[open] {
+  position: fixed;
+  inset: var(--app-top) 0 auto auto;
+  width: min(420px, 100vw);
+  height: var(--app-height);
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+  border: 0;
+  background: var(--surface);
+  color: var(--text);
+}
+
+dialog.inspector--modal::backdrop { background: rgb(15 20 27 / 32%); }
+
+@media (pointer: coarse) {
+  .inspector__tools button, .inspector .inspector__header button { min-width: 44px; min-height: 44px; }
+}
+
+@media (max-height: 480px) {
+  .inspector .inspector__header { min-height: 44px; padding-block: 3px; }
+  .inspector .event-facts { display: flex; flex-wrap: wrap; padding-block: 4px; }
+  .inspector .event-facts div { display: flex; align-items: baseline; gap: 4px; }
+  .inspector .event-facts dt { margin: 0; }
+  .inspector .inspector__tools { padding-block: 2px; }
+}

@@ -343,7 +343,7 @@ describe("Sidebar session identity", () => {
   });
 
   it("shows separate title, main assistant preview, and project lines in time view", () => {
-    renderSidebar([session({ title: "Storage discussion", preview: "Original user prompt", latest_assistant_preview: "\nUse SQLite locally.\nExtra details stay in the conversation." })]);
+    renderSidebar([session({ title: "Storage discussion", preview: "Original user prompt", latest_assistant_preview: "\nUse **SQLite** [locally](https://example.com).\nExtra details stay in the conversation." })]);
     const row = screen.getByRole("button", { name: /Storage discussion, Codex session/ });
     expect(within(row).getByText("Use SQLite locally.")).toHaveClass("session-row__preview");
     expect(within(row).getByText("Use SQLite locally.")).not.toHaveClass("sr-only");

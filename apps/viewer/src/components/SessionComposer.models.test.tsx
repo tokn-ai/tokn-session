@@ -268,7 +268,8 @@ it("keeps old hosts read-only for model choice and recovers when Retry availabil
   vi.mocked(getSessionInputStatus).mockResolvedValueOnce({ available: false, max_length: 1000, message: "Bridge unavailable" });
   vi.mocked(getSessionModelStatus).mockResolvedValueOnce({ ...actual, supports_model_input: undefined, can_select: false });
   render(<Composer />);
-  fireEvent.click(await screen.findByRole("button", { name: "Retry availability" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Read-only session" }));
+  fireEvent.click(screen.getByRole("button", { name: "Retry availability" }));
   expect(await screen.findByRole("button", { name: /Model: First model/ })).toBeEnabled();
   expect(listSessionModels).not.toHaveBeenCalled();
 });

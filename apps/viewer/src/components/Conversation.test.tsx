@@ -1,52 +1,17 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { EventSummary, SessionSummary } from "../lib/types";
 import { Conversation } from "./Conversation";
+import { event, props, SESSION } from "./conversationTestFixtures";
 
 vi.mock("./SessionComposer", () => ({ SessionComposer: () => null }));
 
 afterEach(cleanup);
 beforeEach(() => localStorage.clear());
 
-const SESSION: SessionSummary = {
-  session_key: "codex:root", session_id: "root", parent_session_id: null,
-  is_subagent: false, provider: "codex", title: "Session title", preview: null,
-  project: null, cwd: null, updated_at_ms: null, timestamp: null,
-  agent_path: null, agent_nickname: null, agent_role: null, child_count: 0,
-  message_count: null, event_count: null, history_status: null, has_unread: false,
-};
-
-function event(key: string, overrides: Partial<EventSummary> = {}): EventSummary {
-  return {
-    event_key: key, type: "lifecycle", provider: "codex", timestamp: null,
-    phase: null, role: null, title: key, summary: `${key} detail`,
-    summary_truncated: false, is_hidden: false, is_error: false,
-    tool: null, usage: null, reasoning: null, is_bookkeeping: true,
-    ...overrides,
-  };
-}
-
-function props(overrides: Partial<React.ComponentProps<typeof Conversation>> = {}): React.ComponentProps<typeof Conversation> {
-  return {
-    session: SESSION, events: [], selected_event_key: null, expanded_event_key: null,
-    expanded_detail: null, expanded_detail_error: null, expanded_detail_loading: false,
-    initial_page_loaded: true, is_loading: false, is_loading_older: false,
-    is_loading_newer: false, error: null, has_older: false, has_newer: false,
-    total_events: 10, history_status: null, inspector_open: false,
-    on_sidebar_open: vi.fn(), on_inspector_toggle: vi.fn(), on_event_select: vi.fn(),
-    on_event_toggle: vi.fn(), trajectory_pages: new Map(), trajectory_expanded_key: null,
-    trajectory_expanded_event_key: null, trajectory_expanded_detail: null,
-    trajectory_expanded_detail_error: null, trajectory_expanded_detail_loading: false,
-    on_trajectory_retry: vi.fn(), on_trajectory_event_toggle: vi.fn(),
-    on_trajectory_retry_expanded_detail: vi.fn(), on_open_related_session: vi.fn(),
-    on_load_older: vi.fn(), on_load_newer: vi.fn(), on_retry: vi.fn(),
-    on_retry_expanded_detail: vi.fn(), on_follow_change: vi.fn(),
-    ...overrides,
-  };
-}
-
 function toggleFilter() {
-  fireEvent.click(screen.getByRole("button", { name: /^(Hide|Show) lifecycle$/ }));
+  const details = screen.getByRole("button", { name: /^Session details for / });
+  if (details.getAttribute("aria-expanded") !== "true") fireEvent.click(details);
+  fireEvent.click(screen.getByRole("checkbox", { name: "Show lifecycle events" }));
 }
 
 it("jumps to a loaded prompt without opening its inspector or exposing hidden messages", () => {
@@ -69,6 +34,172 @@ it("jumps to a loaded prompt without opening its inspector or exposing hidden me
   expect(view.on_load_older).toHaveBeenCalledOnce();
 });
 
+it("searches loaded prompts from the keyboard and returns to the same reading line after a live redraw", () => {
+  const prompts = ["Inspect the parser", "Review the tests", "Write a follow-up"];
+  function generation(revision: number) {
+    return prompts.map((summary, i) => event(`generation-${revision}-${i}`, {
+      slot_key: String(i), summary, type: "message", role: "user", is_bookkeeping: false,
+    }));
+  }
+  const view = props({ events: generation(1), has_older: true, on_show_live_activity: vi.fn() });
+  const rendered = render(<Conversation {...view} />);
+  const viewport = screen.getByRole("region", { name: "Conversation history" });
+  Object.defineProperties(viewport, { clientHeight: { value: 180 }, scrollHeight: { value: 1200 } });
+  vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 40, 360, 180));
+  let prepend = 0;
+  const measure = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    if (!this.dataset.readingSlot) return new DOMRect();
+    return new DOMRect(0, 40 + Number(this.dataset.readingSlot) * 200 + prepend - viewport.scrollTop, 360, 200);
+  });
+  try {
+    fireEvent.wheel(viewport, { deltaY: -120 });
+    viewport.scrollTop = 260;
+    fireEvent.scroll(viewport);
+    fireEvent.click(screen.getByRole("button", { name: "Jump to prompt" }));
+    const panel = within(screen.getByRole("region", { name: "Prompts in this session" }));
+    const input = panel.getByRole("searchbox", { name: "Search loaded prompts" });
+    expect(input).toHaveFocus();
+    expect(panel.getByRole("button", { name: /Review the tests/ })).toHaveAttribute("aria-current", "location");
+    viewport.scrollTop = 420;
+    fireEvent.scroll(viewport);
+    expect(panel.getByRole("button", { name: /Write a follow-up/ })).toHaveAttribute("aria-current", "location");
+    viewport.scrollTop = 260;
+    fireEvent.scroll(viewport);
+    fireEvent.change(input, { target: { value: "no match" } });
+    expect(panel.getByRole("status")).toHaveTextContent("No matching prompts");
+    expect(panel.getByRole("button", { name: "Load earlier history" })).toBeEnabled();
+    fireEvent.change(input, { target: { value: "PARSer" } });
+    expect(panel.queryByRole("button", { name: /Review the tests/ })).toBeNull();
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    const match = panel.getByRole("button", { name: "Inspect the parser" });
+    expect(match).toHaveFocus();
+    fireEvent.keyDown(match, { key: "ArrowUp" });
+    expect(input).toHaveFocus();
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(viewport.scrollTop).toBe(0);
+    expect(rendered.container.querySelector('[data-reading-slot="0"]')).toHaveFocus();
+
+    // The provider replaced every event key and inserted history before the saved line.
+    prepend = 300;
+    rendered.rerender(<Conversation {...view} events={generation(2)} />);
+    expect(viewport.scrollTop).toBe(300);
+    fireEvent.click(screen.getByRole("button", { name: "Back to reading position" }));
+    expect(viewport.scrollTop).toBe(560);
+    expect(viewport).toHaveFocus();
+    expect(screen.queryByRole("button", { name: "Back to reading position" })).toBeNull();
+    expect(view.on_show_live_activity).not.toHaveBeenCalled();
+  } finally {
+    measure.mockRestore();
+  }
+});
+
+it("offers a labeled jump to latest from a partial window and returns keyboard focus to history", () => {
+  const view = props({ events: [event("Reply", { type: "message", role: "assistant", is_bookkeeping: false })],
+    has_newer: true, on_show_live_activity: vi.fn() });
+  render(<Conversation {...view} />);
+  const viewport = screen.getByRole("region", { name: "Conversation history" });
+  const jump = screen.getByRole("button", { name: "Jump to latest" });
+  expect(jump).toHaveTextContent("Jump to latest");
+  fireEvent.keyDown(viewport, { key: "End" });
+  expect(view.on_show_live_activity).toHaveBeenCalledOnce();
+  expect(viewport).toHaveFocus();
+});
+
+it("steps across prompts at the bottom of the viewport and preserves the original reading line", () => {
+  const messages = ["Trace startup", "Inspect the cache", "Try a retry", "Review limits", "Summarize"];
+  const events = messages.map((summary, i) => event(String(i), { type: "message", role: "user", summary }));
+  events.splice(2, 0, event("hidden", { type: "message", role: "user", summary: "Hidden message", is_hidden: true }));
+  const conversation = props({ events });
+  const view = render(<Conversation {...conversation} />);
+  const viewport = screen.getByRole("region", { name: "Conversation history" });
+  let top = 660;
+  let prepend = 0;
+  Object.defineProperties(viewport, {
+    clientHeight: { value: 200 }, scrollHeight: { get: () => 860 + prepend },
+    scrollTop: { get: () => top, set: (value: number) => { top = Math.min(660 + prepend, Math.max(0, value)); } },
+  });
+  vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 360, 200));
+  const offsets = [30, 300, 740, 780, 800];
+  const rows = [...view.container.querySelectorAll<HTMLElement>("[data-reading-prompt]")];
+  rows.forEach((row, i) => vi.spyOn(row, "getBoundingClientRect")
+    .mockImplementation(() => new DOMRect(0, offsets[i] + prepend - top, 360, 40)));
+  fireEvent.wheel(viewport, { deltaY: -80 });
+  viewport.scrollTop = 320;
+  fireEvent.scroll(viewport);
+
+  const previous = screen.getByRole("button", { name: "Previous prompt" });
+  const next = screen.getByRole("button", { name: "Next prompt" });
+  const inspect = within(rows[1]).getByRole("button", { name: "Inspect user message" });
+  inspect.focus();
+  expect(fireEvent.keyDown(inspect, { altKey: true, key: "ArrowDown" })).toBe(true);
+  expect(inspect).toHaveFocus();
+  expect(top).toBe(320);
+  fireEvent.click(previous);
+  expect(rows[1]).toHaveFocus();
+  fireEvent.keyDown(rows[1], { altKey: true, key: "ArrowUp" });
+  expect(rows[0]).toHaveFocus();
+  expect(previous).toBeDisabled();
+  fireEvent.keyDown(rows[0], { altKey: true, key: "ArrowDown" });
+  expect(rows[1]).toHaveFocus();
+  // All three final prompts fit below the maximum scrollTop.
+  for (const row of rows.slice(2)) {
+    fireEvent.click(next);
+    expect(row).toHaveFocus();
+    expect(top).toBe(660);
+  }
+  expect(next).toBeDisabled();
+  prepend = 100;
+  view.rerender(<Conversation {...conversation} events={[...events]} />);
+  expect(top).toBe(760);
+  fireEvent.click(screen.getByRole("button", { name: "Jump to prompt" }));
+  const picker = within(screen.getByRole("region", { name: "Prompts in this session" }));
+  expect(picker.getByRole("button", { name: /Summarize/ })).toHaveAttribute("aria-current", "location");
+  const search = picker.getByRole("searchbox");
+  fireEvent.keyDown(search, { altKey: true, key: "ArrowDown" });
+  expect(search).toHaveFocus();
+  fireEvent.keyDown(search, { key: "Escape" });
+  fireEvent.click(previous);
+  expect(rows[3]).toHaveFocus();
+  fireEvent.click(screen.getByRole("button", { name: "Back to reading position" }));
+  expect(top).toBe(420);
+  expect(viewport).toHaveFocus();
+  fireEvent.click(screen.getByRole("button", { name: "Jump to latest" }));
+  fireEvent.click(previous);
+  expect(rows[1]).toHaveFocus();
+  fireEvent.click(previous);
+  expect(rows[0]).toHaveFocus();
+  expect(screen.queryByRole("button", { name: "Back to reading position" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Jump to latest" })).toBeVisible();
+});
+
+it("holds the reading line when keyboard activation opens a long prompt at the live end", () => {
+  const view = props({ events: [event("prompt", {
+    type: "message", role: "user", is_bookkeeping: false,
+    summary: Array.from({ length: 120 }, (_, i) => `Line ${i + 1} of the prompt`).join("\n"),
+  })] });
+  const rendered = render(<Conversation {...view} />);
+  const viewport = screen.getByRole("region", { name: "Conversation history" });
+  const row = rendered.container.querySelector<HTMLElement>("[data-reading-slot]")!;
+  const button = screen.getByRole("button", { name: "Read full prompt" });
+  const extent = () => button.getAttribute("aria-expanded") === "true" ? 2100 : 700;
+  Object.defineProperties(viewport, { clientHeight: { value: 240 }, scrollHeight: { get: extent } });
+  vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 70, 480, 240));
+  vi.spyOn(row, "getBoundingClientRect").mockImplementation(() => new DOMRect(0, 70 - viewport.scrollTop, 480, extent()));
+  rendered.rerender(<Conversation {...view} />);
+  expect(viewport.scrollTop).toBe(460);
+  fireEvent.click(screen.getByRole("button", { name: "Inspect user message" }));
+  expect(view.on_follow_change).not.toHaveBeenCalled();
+  // Keyboard and assistive-technology activation dispatch a click with no preceding pointer event.
+  button.focus();
+  fireEvent.click(button, { detail: 0 });
+  expect(button).toHaveAttribute("aria-expanded", "true");
+  rendered.rerender(<Conversation {...view} />);
+  expect(viewport.scrollTop).toBe(460);
+  expect(view.on_follow_change).toHaveBeenLastCalledWith(false);
+  fireEvent.click(screen.getByRole("button", { name: "Jump to latest" }));
+  expect(viewport.scrollTop).toBe(1860);
+});
+
 describe("Conversation quick filter", () => {
   it("keeps confirmed model separators visible while lifecycle is hidden", () => {
     const model = (model_id: string) => ({ model_provider: "openai", model_id, display_name: model_id });
@@ -88,14 +219,17 @@ describe("Conversation quick filter", () => {
   it("keeps session metadata behind a disclosure and closes it when switching sessions", () => {
     const view = props({ session: { ...SESSION, project: "Viewer", cwd: "/work/viewer" } });
     const { rerender } = render(<Conversation {...view} />);
-    const metadata = screen.getByText("Viewer", { selector: "summary" }).closest("details");
-    expect(metadata).not.toHaveAttribute("open");
-    fireEvent.click(screen.getByText("Viewer", { selector: "summary" }));
-    expect(metadata).toHaveAttribute("open");
-    expect(screen.getByText("/work/viewer")).toBeInTheDocument();
-    expect(screen.getByLabelText("Session root")).toBeInTheDocument();
+    const details = screen.getByRole("button", { name: "Session details for Session title" });
+    expect(details).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(details);
+    expect(screen.getByRole("region", { name: "Session details" })).toHaveFocus();
+    expect(screen.getByText("/work/viewer")).toBeVisible();
+    expect(screen.getByText("root")).toBeVisible();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(details).toHaveFocus();
+    fireEvent.click(details);
     rerender(<Conversation {...view} session={{ ...SESSION, session_key: "codex:next", project: "Next project" }} />);
-    expect(screen.getByText("Next project", { selector: "summary" }).closest("details")).not.toHaveAttribute("open");
+    expect(screen.getByRole("button", { name: /^Session details for / })).toHaveAttribute("aria-expanded", "false");
   });
   it("shows separate blocking and available question notices and opens their cards", () => {
     const on_question_open = vi.fn();
@@ -149,7 +283,8 @@ describe("Conversation quick filter", () => {
       event("Unknown provider event", { type: "unknown" }),
       event("Turn failed", { is_error: true }), event("Task outcome", { is_bookkeeping: false }),
     ] })} />);
-    expect(screen.getByRole("button", { name: "Show lifecycle" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: /^Session details for / }));
+    expect(screen.getByRole("checkbox", { name: "Show lifecycle events" })).not.toBeChecked();
     expect(screen.queryByRole("button", { name: "Turn started" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Context settings" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Mid-turn usage" })).not.toBeInTheDocument();
@@ -159,7 +294,7 @@ describe("Conversation quick filter", () => {
     expect(screen.getByText("3 events hidden in this loaded range.")).toBeInTheDocument();
     expect(screen.getByText(/10 events/)).toBeInTheDocument();
     toggleFilter();
-    expect(screen.getByRole("button", { name: "Hide lifecycle" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("checkbox", { name: "Show lifecycle events", hidden: true })).toBeChecked();
     expect(screen.getByRole("button", { name: "Turn started" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Mid-turn usage" })).toBeInTheDocument();
     expect(screen.queryByText(/events hidden/)).not.toBeInTheDocument();
@@ -200,7 +335,7 @@ describe("Conversation quick filter", () => {
     toggleFilter();
     rerender(<Conversation {...props({ session: { ...SESSION, session_key: "codex:next", session_id: "next" },
       events: [event("Second turn")] })} />);
-    expect(screen.getByRole("button", { name: "Hide lifecycle" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("checkbox", { name: "Show lifecycle events", hidden: true })).toBeChecked();
     expect(screen.getByRole("button", { name: "Second turn" })).toBeInTheDocument();
     toggleFilter();
     expect(screen.queryByRole("button", { name: "Second turn" })).not.toBeInTheDocument();
@@ -221,7 +356,7 @@ describe("Conversation quick filter", () => {
       }]])]]) });
     render(<Conversation {...view} />);
     const turnButton = screen.getByRole("button", { name: "Worked for 1s" });
-    fireEvent.click(screen.getByRole("button", { name: "Recorded 1 event" }));
+    expect(screen.queryByRole("button", { name: "Recorded 1 event" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Worked for 1s" })).toBe(turnButton);
     expect(turnButton).toHaveAttribute("aria-expanded", "true");
     expect(screen.queryByRole("button", { name: "Nested lifecycle" })).not.toBeInTheDocument();
@@ -232,7 +367,7 @@ describe("Conversation quick filter", () => {
     expect(view.on_trajectory_event_toggle).not.toHaveBeenCalled();
     expect(view.on_follow_change).not.toHaveBeenCalled();
     toggleFilter();
-    expect(screen.getByRole("button", {name: "Recorded 3 events"})).toHaveAttribute("aria-expanded", "true");
+    expect(screen.queryByRole("button", {name: "Recorded 3 events"})).not.toBeInTheDocument();
     expect(screen.getByRole("button", {name: "Nested lifecycle"})).toBeInTheDocument();
     expect(screen.getAllByRole("button", {name: /^Worked/})).toHaveLength(1);
   });

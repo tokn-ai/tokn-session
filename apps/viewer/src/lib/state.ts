@@ -337,3 +337,18 @@ export function formatTimestamp(timestamp: string | null, style: "full" | "time"
   }
   return (style === "time" ? timeOnly : dateAndTime).format(parsed);
 }
+
+/** Milliseconds are a decimal string on the wire to preserve the full Rust u64. */
+export function formatRecordedDuration(durationMs: string | null | undefined): string | null {
+  const source = durationMs?.trim() ?? "";
+  if (!/^\d+$/.test(source)) return null;
+  let seconds = BigInt(source) / 1000n;
+  const parts: string[] = [];
+  const units = [[86_400n, "d"], [3_600n, "h"], [60n, "m"], [1n, "s"]] as const;
+  for (const [size, suffix] of units) {
+    const count = seconds / size;
+    if (count) parts.push(`${count}${suffix}`);
+    seconds %= size;
+  }
+  return parts.join(" ") || "0s";
+}

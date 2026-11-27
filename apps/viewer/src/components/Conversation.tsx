@@ -1,14 +1,13 @@
-import type { ExpandedActivityState } from "../lib/types";
 import { useLayoutEffect, type ReactNode } from "react";
 import { useSessionModel } from "../lib/useSessionModel";
 import { SessionControlContext, useSessionControl } from "../lib/useSessionControl";
-import { modelLabel } from "../lib/sessionModels";
 import { readingEventKey } from "../lib/readingPosition";
 import { useTimelineScroll } from "../lib/useTimelineScroll";
 import { useViewerPreferences } from "../lib/viewerPreferences";
 import { isBookkeepingEvent } from "../lib/eventFilter";
 import type {
   EventDetail,
+  ExpandedActivityState,
   EventSummary,
   OutstandingQuestion,
   SessionHistoryStatus,
@@ -16,20 +15,14 @@ import type {
   SessionModelState,
   TrajectoryEventPageState,
 } from "../lib/types";
-import {
-  eventButtonId,
-  formatTimestamp,
-  providerLabel,
-  sessionDisplayTitle,
-  shortSessionId,
-  subagentDetail,
-} from "../lib/state";
-import { ChevronIcon, FilterIcon, InspectorIcon, PanelIcon, SendIcon } from "./Icons";
+import { eventButtonId } from "../lib/state";
+import { InspectorIcon, PanelIcon, SendIcon } from "./Icons";
 import { EventCard } from "./EventCard";
-import { PromptNavigator } from "./PromptNavigator";
+import { isVisiblePrompt, PromptNavigator } from "./PromptNavigator";
 import { sessionActivity } from "../lib/sessionActivity";
 import "./ConversationHeader.css";
 import { LoadingRows, StateView } from "./StateView";
+import { SessionDetails } from "./SessionDetails";
 import { SessionComposer } from "./SessionComposer";
 import { SessionInteractions } from "./SessionInteractions";
 import { SessionLiveOutput } from "./SessionLiveOutput";
@@ -153,19 +146,9 @@ export function Conversation({
     on_follow_change,
   });
 
-  function revealInHistory(element: HTMLElement | null | undefined) {
-    const timeline = scroll.timelineRef.current;
-    if (!element || !timeline?.contains(element)) return;
-    scroll.pause();
-    // Only move the history viewport. ScrollIntoView can also shift the app shell.
-    timeline.scrollTop += element.getBoundingClientRect().top - timeline.getBoundingClientRect().top - timeline.clientTop;
-    element.focus({ preventScroll: true });
-    scroll.pause();
-  }
-
   useLayoutEffect(() => {
     if (question_navigation) {
-      revealInHistory(document.getElementById(`${eventButtonId(question_navigation.event_key)}-label`)?.closest("button"));
+      scroll.reveal(document.getElementById(`${eventButtonId(question_navigation.event_key)}-label`)?.closest("button"));
     }
   }, [question_navigation, session.session_key]);
 
@@ -177,14 +160,19 @@ export function Conversation({
   const eventCount = total_events ?? session.event_count;
   const countLabel = eventCount !== null ? `${eventCount} events`
     : session.message_count !== null ? `${session.message_count} messages` : "Event count unavailable";
-  const childDetail = session.is_subagent ? subagentDetail(session) : null;
+  const hiddenLabel = hiddenCount ? `${hiddenCount} ${hiddenCount === 1 ? "event hidden" : "events hidden"} in this loaded range.` : null;
+  // A live response belongs at the latest end, never after a partial older page.
+  const liveOutput = has_newer ? undefined : control.status?.live_output;
+  const hasLiveOutput = Boolean(liveOutput?.parts.length);
   const activity = sessionActivity(session);
 
-  function jumpToPrompt(eventKey: string) {
-    const row = Array.from(scroll.timelineRef.current?.querySelectorAll<HTMLElement>("[data-reading-slot]") ?? [])
-      .find((element) => element.dataset.eventKey === eventKey);
-    revealInHistory(row);
+  function jumpToLatest() {
+    scroll.jumpToLatest();
+    scroll.timelineRef.current?.focus({ preventScroll: true });
+    on_show_live_activity?.();
   }
+
+  const showLatest = pending_live_activity || !scroll.isFollowing || has_newer;
 
   return (
     <SessionControlContext.Provider value={{ session_key: session.session_key, revision: control.revision, blocked: control.blocked }}>
@@ -199,72 +187,23 @@ export function Conversation({
           <PanelIcon />
         </button>
         <div className="conversation__identity">
-          <div className="conversation__title-row">
-            <h2 tabIndex={-1} title={sessionDisplayTitle(session)}>{sessionDisplayTitle(session)}</h2>
-          </div>
-          <div className="session-header__context">
-            <span className="provider-badge" data-provider={session.provider}>{providerLabel(session.provider)}</span>
-            <details className="conversation__metadata" key={session.session_key}>
-              <summary>
-                {session.is_subagent ? "Subagent · " : ""}{session.project ?? session.cwd ?? "Unassigned project"}
-                <ChevronIcon />
-              </summary>
-              <div className="conversation__metadata-panel">
-                <p title={`${session.cwd ?? "Unassigned project"}\nSession ${session.session_id}`}>
-                  {session.is_subagent ? (
-                    <>
-                      <span title={childDetail ?? undefined}>
-                        {childDetail ? `Subagent · ${childDetail}` : "Subagent"}
-                      </span>
-                      <span aria-hidden="true"> · </span>
-                    </>
-                  ) : null}
-                  {session.project ?? session.cwd ?? "Unassigned project"}
-                  <span aria-hidden="true"> · </span>
-                  <span
-                    aria-label={`Session ${session.session_id}`}
-                    className="conversation__session-id"
-                  >
-                    {shortSessionId(session.session_id)}
-                  </span>
-                  <span aria-hidden="true"> · </span>
-                  {countLabel}
-                </p>
-                <p className="conversation__path">{session.cwd}</p>
-              </div>
-            </details>
-            {model.state?.model && <span className="conversation__model" title={`${model.state.model.model_provider ?? session.provider} · ${model.state.model.model_id}`}>
-              {modelLabel(model.state.model)}{model.state.source === "recorded" ? " · Recorded" : model.state.source === "catalog" ? " · Model list" : ""}
-            </span>}
-            {activity.label && <span className="activity-label" data-tone={activity.tone}>{activity.label}</span>}
-          </div>
+          <SessionDetails key={session.session_key} session={session} model={model.state} count_label={countLabel}
+            hidden_label={visibleEvents.length ? hiddenLabel : null} show_lifecycle={!hideLifecycle}
+            on_lifecycle_change={show_lifecycle => updatePreferences({ show_lifecycle })} />
+          {activity.label && <span className="activity-label" data-tone={activity.tone}>{activity.label}</span>}
         </div>
         <PromptNavigator key={session.session_key} events={events} has_older={has_older} loading_older={is_loading_older}
-          on_older={loadOlder} on_jump={jumpToPrompt} />
-        <button
-          aria-label={hideLifecycle ? "Show lifecycle" : "Hide lifecycle"}
-          aria-pressed={hideLifecycle}
-          className="conversation__filter"
-          onClick={() => updatePreferences({ show_lifecycle: hideLifecycle })}
-          title={hideLifecycle
-            ? "Show lifecycle events and mid-turn usage again."
-            : "Hide routine lifecycle, session, configuration, and metadata events without content, plus mid-turn usage. Keep end-of-turn usage and meaningful activity."}
-          type="button"
-        >
-          <FilterIcon />
-          <span className="conversation__filter-label">{hideLifecycle ? "Show lifecycle" : "Hide lifecycle"}</span>
-        </button>
-        <button
+          following={scroll.isFollowing} timeline_ref={scroll.timelineRef} on_older={loadOlder} on_jump={scroll.reveal} />
+        {selected_event_key && <button
           aria-label={inspector_open ? "Close event inspector" : "Open event inspector"}
           aria-pressed={inspector_open}
           className="icon-button inspector-toggle"
-          disabled={!selected_event_key}
           onClick={on_inspector_toggle}
           title="Event inspector"
           type="button"
         >
           <InspectorIcon />
-        </button>
+        </button>}
       </header>
 
       {managed_controls}
@@ -281,7 +220,16 @@ export function Conversation({
       <div className="conversation__history">
         <div
           className="conversation__timeline"
+          role="region"
+          aria-label="Conversation history"
+          tabIndex={0}
           ref={scroll.timelineRef}
+          onClickCapture={(event) => {
+            // Pointer and keyboard activation both reach capture before the disclosure changes layout.
+            if (event.target instanceof Element && event.target.closest(
+              '[data-reading-slot] button[aria-expanded="false"]:not(:disabled), .timeline details:not([open]) > summary',
+            )) scroll.pause();
+          }}
           onScroll={scroll.onScroll}
           onWheel={(event) => {
             if (event.deltaY !== 0) scroll.noteUserScroll(event.deltaY < 0);
@@ -291,7 +239,12 @@ export function Conversation({
             if (event.target === event.currentTarget) scroll.noteUserScroll();
           }}
           onKeyDown={(event) => {
-            if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) {
+            if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey
+              || (event.target as Element).closest("input, textarea, select, [contenteditable], [role=slider]")) return;
+            if (event.key === "End" && showLatest && !(event.target as Element).closest("button, a")) {
+              event.preventDefault();
+              jumpToLatest();
+            } else if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) {
               scroll.noteUserScroll(["ArrowUp", "PageUp", "Home"].includes(event.key));
             }
           }}
@@ -301,13 +254,13 @@ export function Conversation({
               Showing last loaded history while live updates retry: {follow_error}
             </div>
           ) : null}
-          {is_loading && events.length === 0 ? (
+          {is_loading && !hasLiveOutput && events.length === 0 ? (
             <div className="timeline-loading">
               <LoadingRows count={5} />
             </div>
           ) : null}
 
-          {!is_loading && error && events.length === 0 ? (
+          {!is_loading && error && !hasLiveOutput && events.length === 0 ? (
             <StateView
               action_label="Try again"
               message={error}
@@ -317,14 +270,14 @@ export function Conversation({
             />
           ) : null}
 
-          {!is_loading && !error && events.length === 0 ? (
+          {!is_loading && !error && !hasLiveOutput && events.length === 0 ? (
             <StateView
               message="The provider returned a valid session with no normalized events."
               title="No events in this session"
             />
           ) : null}
 
-          {events.length > 0 ? (
+          {events.length > 0 || hasLiveOutput ? (
             <div className="timeline" aria-label="Session event timeline" ref={scroll.contentRef}>
               {history_status && history_status !== "complete" ? (
                 <div className="history-notice" role="status">
@@ -348,25 +301,20 @@ export function Conversation({
                 >
                   {is_loading_older ? "Loading earlier turns…" : "Load earlier turns"}
                 </button>
-              ) : (
-                <div className="timeline-boundary">
-                  <span />
-                  <span>Session start</span>
-                  <span />
-                </div>
-              )}
-
-              {hiddenCount > 0 ? (
-                <p className="event-filter-notice" role="status">
-                  {visibleEvents.length === 0 ? "No events match this filter in the loaded range. " : ""}
-                  {hiddenCount} {hiddenCount === 1 ? "event hidden" : "events hidden"} in this loaded range.
-                </p>
               ) : null}
+
+              {hiddenLabel && !visibleEvents.length && !hasLiveOutput && (
+                <p className="event-filter-notice" role="status">
+                  No events match this filter in the loaded range. {hiddenLabel}
+                </p>
+              )}
 
               {visibleEvents.map((event) => (
                 <div tabIndex={-1} data-reading-slot={event.slot_key ?? event.event_key} data-reading-type={event.type}
+                  data-goal-kind={event.goal?.kind}
                   data-reading-timestamp={event.timestamp ?? ""}
-                  data-event-key={event.event_key} data-scroll-key={event.event_key} key={`${session.session_key}:${event.event_key}`}>
+                  data-reading-prompt={isVisiblePrompt(event) || undefined}
+                  data-event-key={event.event_key} data-scroll-key={readingEventKey(event)} key={`${session.session_key}:${event.event_key}`}>
                 <EventCard
                   question_is_pending={outstanding_questions.some((question) => question.event_key === event.event_key)}
                   on_question_accepted={on_input_accepted}
@@ -426,34 +374,29 @@ export function Conversation({
                 >
                   {is_loading_newer ? "Loading newer events…" : "Load newer events"}
                 </button>
-              ) : (
-                <div className="timeline-boundary timeline-boundary--end">
-                  <span />
-                  <span>{formatTimestamp(events[events.length - 1]?.timestamp ?? null)}</span>
-                  <span />
-                </div>
-              )}
+              ) : null}
+              <SessionLiveOutput output={liveOutput} />
             </div>
           ) : null}
         </div>
-        {pending_live_activity || !scroll.isFollowing ? (
+        {showLatest && <div className="conversation__reading-actions">
+          {scroll.canReturn && <button type="button" className="conversation__jump" onClick={scroll.returnToPosition}>
+            Back to reading position
+          </button>}
           <button
             aria-label={pending_live_activity ? "New activity · Jump to latest" : "Jump to latest"}
             className="conversation__jump"
-            title="Jump to latest"
+            data-new={pending_live_activity || undefined}
+            title="Jump to latest (End)"
             type="button"
-            onClick={() => {
-              scroll.jumpToLatest();
-              on_show_live_activity?.();
-            }}
+            onClick={jumpToLatest}
           >
-            {pending_live_activity ? <span>New activity</span> : null}
+            <span>{pending_live_activity ? "New activity" : "Jump to latest"}</span>
             <SendIcon />
           </button>
-        ) : null}
+        </div>}
       </div>
       <SessionInteractions session={session} refresh_key={input_refresh_key} on_accepted={on_input_accepted} />
-      <SessionLiveOutput output={control.status?.live_output} />
       <SessionComposer session={session} on_accepted={on_input_accepted} model={model}
         control={control.enabled ? control : undefined}
         input_refresh_key={(input_refresh_key ?? 0) + model.input_revision} />

@@ -10,7 +10,7 @@ import type {
   TrajectoryEventPageState,
   UsageCardSummary,
 } from "../lib/types";
-import { EventCard, formatTrajectoryDuration } from "./EventCard";
+import { EventCard } from "./EventCard";
 
 afterEach(cleanup);
 
@@ -277,7 +277,7 @@ describe("EventCard conversation content", () => {
     }
   });
 
-  it("uses the user bubble presentation and keeps the user role label", () => {
+  it("identifies the user prompt by its accessible name and bubble presentation", () => {
     const { container } = renderCard(event({
       role: "user",
       title: "User message",
@@ -288,7 +288,7 @@ describe("EventCard conversation content", () => {
       "data-presentation",
       "bubble",
     );
-    expect(screen.getByText("user")).toBeInTheDocument();
+    expect(screen.getByRole("article", { name: "user message" })).toBeInTheDocument();
     expect(screen.getByText("My Request:")).toBeInTheDocument();
   });
 
@@ -372,9 +372,9 @@ describe("EventCard tool headings", () => {
     for (const [, , primary] of tools) {
       expect(screen.getByText(primary)).toBeInTheDocument();
     }
-    expect(screen.getByText("/work/repo")).toBeInTheDocument();
+    expect(screen.queryByText("/work/repo")).not.toBeInTheDocument();
     expect(screen.getByText("1.5 KB")).toBeInTheDocument();
-    expect(screen.getByText("+8 −3")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Edit: lib.rs" })).toHaveAccessibleDescription("+8 −3");
   });
 
   it("reports provider errors as failed even when the exit code is zero", () => {
@@ -452,6 +452,97 @@ describe("EventCard subagent activity", () => {
 });
 
 describe("EventCard whole-turn trajectories", () => {
+  it("keeps folded goal work to its elapsed time and reveals the original failed operation on expansion", () => {
+    const command = event({ type: "tool_call", event_key: "check", role: null, tool: tool({ command: "cargo check", exit_code: 1 }) });
+    const turn = event({ type: "trajectory", event_key: "work", goal: { kind: "work" }, trajectory: trajectory({
+      duration_ms: "98000", tool_count: 1, error_count: 1,
+      tool_previews: [{ kind: "shell", label: "cargo check", status: "failed" }],
+    }) });
+    const props = {
+      button_id: "work", event: turn, is_selected: false, detail: null, detail_error: null, detail_loading: false,
+      on_retry_detail: vi.fn(), on_select: vi.fn(), on_toggle: vi.fn(),
+    };
+    const { rerender } = render(<EventCard {...props} is_expanded={false} />);
+    const toggle = screen.getByRole("button", { name: "Worked for 1m 38s", expanded: false });
+    expect(toggle).toHaveTextContent(/^Worked for 1m 38s$/);
+    expect(toggle).not.toHaveAttribute("aria-describedby");
+    fireEvent.click(screen.getByRole("button", { name: "Inspect Worked for 1m 38s" }));
+    expect(props.on_select).toHaveBeenCalledWith("work");
+    fireEvent.click(toggle);
+    expect(props.on_toggle).toHaveBeenCalledWith("work");
+
+    rerender(<EventCard {...props} is_expanded trajectory_page={trajectoryPage({ events: [command], total_events: 1 })} />);
+    expect(screen.getByRole("button", { name: "Shell: cargo check" })).toHaveAccessibleDescription(/exit 1/);
+    expect(screen.getByRole("button", { name: "Inspect cargo check" })).toBeVisible();
+  });
+
+  it.each(["scoped", "flat"])("shows a single operation directly when opening a %s turn, with output and inspection still independent", (transport) => {
+    const work = event({ event_key: "turn", type: "trajectory", trajectory: trajectory({ reasoning_count: 0, agent_activity_count: 0 }) });
+    const routine = event({ event_key: "start", type: "lifecycle", title: "Turn started", is_bookkeeping: true });
+    const command = event({ event_key: "build", type: "tool_call", tool: tool({ exit_code: 7 }) });
+    const group = event({ event_key: "activity:start", type: "activity_group", summary: "1 command, 1 event",
+      child_keys: [routine.event_key, command.event_key], single_tool_key: command.event_key });
+    const members = trajectoryPage({ events: [routine, command], total_events: 2 });
+    const props = {
+      button_id: "work", event: work, is_selected: false, detail: null, detail_error: null, detail_loading: false,
+      on_retry_detail: vi.fn(), on_select: vi.fn(), on_toggle: vi.fn(), on_trajectory_event_toggle: vi.fn(),
+      hide_lifecycle: true, on_activity_load: vi.fn(), on_activity_visibility: vi.fn(), on_trajectory_retry: vi.fn(),
+      trajectory_page: transport === "scoped" ? trajectoryPage({ events: [group], total_events: 1 }) : members,
+    };
+    const { rerender } = render(<EventCard {...props} is_expanded={false} />);
+    expect(props.on_activity_load).not.toHaveBeenCalled();
+    rerender(<EventCard {...props} is_expanded />);
+    const pages = new Map([[group.event_key, members]]);
+    if (transport === "scoped") {
+      expect(props.on_activity_load).toHaveBeenCalledWith(group.event_key);
+      expect(screen.getByText("Loading activity…")).toBeVisible();
+      rerender(<EventCard {...props} is_expanded activity_pages={new Map([[group.event_key, trajectoryPage({ error: "Offline" })]])} />);
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+      expect(props.on_trajectory_retry).toHaveBeenCalledWith(group.event_key);
+      rerender(<EventCard {...props} is_expanded activity_pages={pages} />);
+    }
+    const toolToggle = screen.getByRole("button", { name: "Shell: cargo test", expanded: false });
+    expect(toolToggle).toHaveAccessibleDescription("exit 7");
+    expect(screen.queryByRole("button", { name: /1 command/ })).not.toBeInTheDocument();
+    expect(props.on_trajectory_event_toggle).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Inspect cargo test" }));
+    expect(props.on_select).toHaveBeenCalledWith(command.event_key);
+    fireEvent.click(toolToggle);
+    expect(props.on_trajectory_event_toggle).toHaveBeenCalledWith(work.event_key, command.event_key);
+    rerender(<EventCard {...props} is_expanded hide_lifecycle={false} activity_pages={pages}
+      trajectory_expanded_event_key={command.event_key} trajectory_expanded_detail={detail({ event_key: command.event_key,
+        tool_output: { sections: [{ label: "Output", text: "compiler stopped", format: "text" }],
+          truncated: false, original_size_bytes: 16, source_event_key: command.event_key } })} />);
+    expect(screen.getByText("compiler stopped")).toBeVisible();
+    expect(screen.getByLabelText("cargo test output")).toBeVisible();
+    expect(screen.getAllByText("cargo test")).toHaveLength(1);
+    expect(screen.getAllByText(/^exit 7$/i)).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Shell: cargo test" })).toHaveAccessibleDescription("exit 7 /work/repo");
+    expect(screen.queryByRole("heading", { name: "Output" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Turn started" })).toBeVisible();
+  });
+
+  it("shows concrete recent operations and their status from the folded summary without loading children", () => {
+    const onLoad = vi.fn();
+    const turn = event({ type: "trajectory", trajectory: trajectory({
+      tool_count: 5,
+      tool_previews: [
+        { kind: "file_read", label: "src/config.rs", status: "completed" },
+        { kind: "shell", label: "cargo check", status: "failed" },
+        { kind: "task", label: "Inspect the configuration", status: "pending" },
+      ],
+    }) });
+    renderCard(turn, { on_activity_load: onLoad });
+    const toggle = screen.getByRole("button", { name: "Worked for 1h" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveAccessibleDescription(/5 tool calls.*2 earlier tool calls.*Read src\/config.rs.*Shell cargo check Failed.*Task Inspect the configuration Pending/);
+    expect(screen.getByText("cargo check")).toBeVisible();
+    expect(screen.getByText("Failed")).toBeVisible();
+    expect(screen.getByText("+4")).toBeVisible();
+    expect(screen.queryByText("src/config.rs", { exact: true })).toBeNull();
+    expect(onLoad).not.toHaveBeenCalled();
+    expect(screen.queryByRole("list", { name: "Events in this turn" })).not.toBeInTheDocument();
+  });
   it("shows a ticking working duration and stops the timer when unmounted", () => {
     vi.useFakeTimers();
     try {
@@ -465,6 +556,21 @@ describe("EventCard whole-turn trajectories", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("shows the active operation and retains an earlier failure count in a live turn", () => {
+    renderCard(event({ type: "trajectory", trajectory: trajectory({
+      status: "working", started_at: null, tool_count: 2, error_count: 1,
+      tool_previews: [
+        { kind: "shell", label: "cargo test", status: "failed" },
+        { kind: "file_edit", label: "src/lexer.rs", status: "running" },
+      ],
+    }) }));
+    const toggle = screen.getByRole("button", { name: /^Working/ });
+    expect(toggle).toHaveAccessibleDescription(/Shell cargo test Failed.*Edit src\/lexer.rs Running/);
+    expect(screen.getByText("src/lexer.rs", { exact: true })).toBeVisible();
+    expect(screen.getByText("Running", { exact: true })).toBeVisible();
+    expect(screen.getByText("1 error", { exact: true })).toBeVisible();
   });
 
   it("does not claim unknown historical work is currently running", () => {
@@ -583,18 +689,39 @@ describe("EventCard whole-turn trajectories", () => {
   });
 
   it("retains exploration disclosure state while folding the enclosing work", () => {
-    const children = [event({event_key: "read", type: "tool_call", tool: tool({kind: "file_read", path: "a.rs"})}),
-      event({event_key: "search", type: "tool_call", tool: tool({kind: "search", query: "state"})})];
+    const children = ["a.rs", "b.rs", "c.rs", "d.rs"].map(path =>
+      event({ event_key: path, type: "tool_call", tool: tool({ kind: "file_read", path }) }));
+    children.push(event({ event_key: "search", type: "tool_call", tool: tool({ kind: "search", query: "state" }) }));
     const props = {button_id: "work", event: trajectoryEvent, is_selected: false, detail: null,
       detail_error: null, detail_loading: false, on_retry_detail: vi.fn(), on_select: vi.fn(), on_toggle: vi.fn(),
       trajectory_page: trajectoryPage({events: children})};
     const {rerender} = render(<EventCard {...props} is_expanded />);
-    fireEvent.click(screen.getByRole("button", {name: "Read 1 file, performed 1 search"}));
+    fireEvent.click(screen.getByRole("button", {name: "Read 4 files, performed 1 search"}));
     expect(screen.getByRole("button", {name: "Read: a.rs"})).toBeVisible();
     rerender(<EventCard {...props} is_expanded={false} trajectory_page={{ ...props.trajectory_page, has_loaded: false }} />);
     expect(screen.queryByRole("button", {name: "Read: a.rs"})).not.toBeInTheDocument();
     rerender(<EventCard {...props} is_expanded />);
     expect(screen.getByRole("button", {name: "Read: a.rs"})).toBeVisible();
+  });
+
+  it.each(["scoped", "flat"])("exposes the operations in a short %s sequence without a second summary or eager tool output", (transport) => {
+    const edit = event({ event_key: "fix", type: "tool_call", tool: tool({ kind: "file_edit", path: "src/lexer.rs" }) });
+    const test = event({ event_key: "test", type: "tool_call", tool: tool() });
+    const group = event({ event_key: "activity:fix", type: "activity_group", summary: "1 command, 1 file edit",
+      child_keys: [edit.event_key, test.event_key] });
+    const children = trajectoryPage({ events: [edit, test], total_events: 2 });
+    const onToggle = vi.fn();
+    renderCard(event({ type: "trajectory", trajectory: trajectory({ tool_count: 2 }) }), {
+      is_expanded: true,
+      trajectory_page: transport === "scoped" ? trajectoryPage({ events: [group], total_events: 1 }) : children,
+      activity_pages: new Map([[group.event_key, children]]), on_trajectory_event_toggle: onToggle,
+    });
+    const editToggle = screen.getByRole("button", { name: "Edit: src/lexer.rs", expanded: false });
+    const testToggle = screen.getByRole("button", { name: "Shell: cargo test", expanded: false });
+    expect(editToggle.compareDocumentPosition(testToggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /1 command/ })).toBeNull();
+    expect(onToggle).not.toHaveBeenCalled();
+    expect(screen.queryByText("Loading tool output…")).toBeNull();
   });
 
   it("retains errors and filter notices without offering partial group controls", () => {
@@ -643,14 +770,6 @@ describe("EventCard whole-turn trajectories", () => {
     expect(onRetry).toHaveBeenCalledWith(trajectoryEvent.event_key);
   });
 
-  it("formats whole-second durations without Number precision loss", () => {
-    expect(formatTrajectoryDuration("9007199254740993")).toBe("104249991d 8h 59m");
-    expect(formatTrajectoryDuration("0")).toBe("0s");
-    expect(formatTrajectoryDuration("999")).toBe("0s");
-    expect(formatTrajectoryDuration("1999")).toBe("1s");
-    expect(formatTrajectoryDuration("61234")).toBe("1m 1s");
-    expect(formatTrajectoryDuration("not-a-duration")).toBeNull();
-  });
 });
 
 describe("EventCard tool output", () => {
@@ -660,6 +779,77 @@ describe("EventCard tool output", () => {
     title: "exec_command",
     summary: "shell exit 0 cargo test",
     tool: tool(),
+  });
+
+  const editResult = {
+    sections: [{ label: "Output", text: "Updated file", format: "text" as const }],
+    truncated: false, original_size_bytes: 12, source_event_key: toolEvent.event_key,
+  };
+
+  it.each([false, true])("opens recorded file changes immediately (has captured output: %s)", (hasOutput) => {
+    const patch = "@@ -1 +1 @@\n-before\n+<after>";
+    renderCard({ ...toolEvent, tool: tool({ kind: "file_edit", path: "src/main.rs" }) }, {
+      is_expanded: true,
+      detail: detail({ event: { input: { "src/main.rs": { type: "update", unified_diff: patch } } },
+        tool_output: hasOutput ? editResult : null }),
+    });
+    const block = screen.getByLabelText("Requested changes · src/main.rs");
+    expect(block).toBeVisible();
+    expect(block.textContent).toBe(patch);
+    expect(block.querySelector("del")).toHaveTextContent("-before");
+    expect(block.querySelector("ins")).toHaveTextContent("+<after>");
+    expect(block.querySelector("after")).toBeNull();
+    expect(screen.getByText(hasOutput ? "Updated file" : "No output was captured for this tool call.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Inspect src/main.rs" })).toBeVisible();
+  });
+
+  it("shows exact before and after selections for recorded replacements and bounds long changes", () => {
+    const replacement = Array.from({ length: 12 }, (_, index) => `next line ${index}`).join("\n");
+    renderCard({ ...toolEvent, tool: tool({ kind: "file_edit" }) }, {
+      is_expanded: true,
+      detail: detail({ event: { input: { oldString: "  previous();", newString: replacement } }, tool_output: editResult }),
+    });
+    expect(screen.getByLabelText("Requested changes · Find").querySelector("del")?.textContent).toBe("  previous();");
+    expect(screen.getByLabelText("Requested changes · Replace with last lines").querySelector("ins")).toHaveTextContent("next line 11");
+    fireEvent.click(screen.getByRole("button", { name: "Show 4 more lines" }));
+    expect(screen.getByLabelText("Requested changes · Replace with").textContent).toBe(replacement);
+  });
+
+  it("leaves unrecognized edit parameters behind the input disclosure when there is an output", async () => {
+    renderCard({ ...toolEvent, tool: tool({ kind: "file_edit" }) }, {
+      is_expanded: true,
+      detail: detail({ event: { input: { operation: "provider-defined edit" } }, tool_output: editResult }),
+    });
+    expect(screen.getByText("Updated file")).toBeVisible();
+    expect(screen.queryByLabelText("Requested changes · Parameters")).toBeNull();
+    fireEvent.click(screen.getByText("Requested changes"));
+    expect(await screen.findByLabelText("Requested changes · Parameters")).toHaveTextContent("provider-defined edit");
+  });
+
+  it("keeps tool input behind disclosure when results exist and bounds long non-shell output", async () => {
+    const result = Array.from({ length: 18 }, (_, index) => `result ${index}`).join("\n");
+    renderCard({ ...toolEvent, tool: tool({ kind: "search", query: "viewer" }) }, {
+      is_expanded: true,
+      detail: detail({ event: { input: { pattern: "viewer", limit: 18 } }, tool_output: {
+        sections: [{ label: "Results", text: result, format: "text" }], truncated: false,
+        source_event_key: toolEvent.event_key, original_size_bytes: result.length,
+      } }),
+    });
+    expect(screen.queryByLabelText("Tool input · Parameters")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("viewer Results output last lines")).toHaveTextContent("result 17");
+    fireEvent.click(screen.getByRole("button", { name: "Show 10 more lines" }));
+    expect(screen.getByLabelText("viewer Results output").textContent).toBe(result);
+    fireEvent.click(screen.getByText("Tool input"));
+    expect(await screen.findByLabelText("Tool input · Parameters")).toHaveTextContent('"limit": 18');
+  });
+
+  it("does not expose redacted input or substitute provider-native data", () => {
+    renderCard(toolEvent, {
+      is_expanded: true,
+      detail: detail({ event: { redacted: true, input: "hidden input", native: { input: "native payload" } } }),
+    });
+    expect(screen.queryByText("Tool input")).not.toBeInTheDocument();
+    expect(screen.queryByText(/hidden input|native payload/)).not.toBeInTheDocument();
   });
 
   it("expands independently from Inspector and exposes an explicitly labelled region", () => {

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
+import { useSessionRowText } from "../lib/markdownPreview";
 import { SESSION_ACTIVITY_LABELS, sessionActivity } from "../lib/sessionActivity";
-import { formatRelativeTime, providerLabel, sessionDisplayTitle } from "../lib/state";
+import { formatRelativeTime, providerLabel } from "../lib/state";
 import { PROVIDERS, type SessionActivityFilter, type SessionSummary } from "../lib/types";
 import { BranchIcon, PanelIcon, SearchIcon, ServerIcon } from "./Icons";
 import { LoadingRows } from "./StateView";
@@ -36,8 +37,7 @@ const EMPTY: Record<SessionActivityFilter, string> = {
 
 function InboxRow({ session, filter, on_open }: Pick<SessionInboxProps, "on_open"> & { session: SessionSummary; filter: SessionActivityFilter }) {
   const activity = sessionActivity(session, filter);
-  const title = sessionDisplayTitle(session);
-  const preview = session.latest_assistant_preview?.trim() || session.preview?.trim();
+  const { title, preview } = useSessionRowText(session, session.latest_assistant_preview?.trim() || session.preview);
   const project = session.project || session.cwd?.split(/[\\/]/).filter(Boolean).slice(-1)[0];
   return <li>
     <button className="inbox-row" type="button" onClick={() => on_open(session.session_key, activity.question)}>

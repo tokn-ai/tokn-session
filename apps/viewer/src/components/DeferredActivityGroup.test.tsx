@@ -4,6 +4,19 @@ import type { EventSummary, TrajectoryEventPageState } from "../lib/types";
 import { DeferredActivityGroup } from "./DeferredActivityGroup";
 
 afterEach(cleanup);
+it("distinguishes an empty loaded activity group from an outstanding read", () => {
+  const event = { event_key: "activity:empty", type: "activity_group", summary: "Tool activity" } as EventSummary;
+  const children = vi.fn(() => null);
+  const { rerender } = render(<DeferredActivityGroup event={event} parent_visible>{children}</DeferredActivityGroup>);
+  fireEvent.click(screen.getByRole("button", { name: "Tool activity" }));
+  expect(screen.getByRole("status")).toHaveTextContent("Loading activity…");
+
+  const page: TrajectoryEventPageState = { total_events: 0, events: [], has_loaded: true, is_loading: false, error: null };
+  rerender(<DeferredActivityGroup event={event} page={page} parent_visible>{children}</DeferredActivityGroup>);
+  expect(screen.getByRole("status")).toHaveTextContent("No activity in this group.");
+  expect(children).not.toHaveBeenCalled();
+});
+
 it("reveals running or failed activity when its parent is visible and respects a manual collapse", () => {
   const event = { event_key: "activity:a", type: "activity_group", summary: "1 command", phase: "running" } as EventSummary;
   const props = { event, parent_visible: false, on_load: vi.fn(), children: () => null };

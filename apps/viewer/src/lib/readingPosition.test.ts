@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { loadReadingWindow, readReadingPosition, saveReadingPosition, type ReadingPosition } from "./readingPosition";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { flushReadingPositions, loadReadingWindow, readReadingPosition, saveReadingPosition, type ReadingPosition } from "./readingPosition";
 import { RemoteClient, selectMachine } from "./transport";
 import type { EventPageResponse, EventSummary } from "./types";
 
@@ -13,11 +13,13 @@ const page = (events: EventSummary[], previous_cursor: string | null = null): Ev
 });
 
 beforeEach(() => { localStorage.clear(); selectMachine(); });
+afterEach(flushReadingPositions);
 
 describe("reading positions", () => {
   it("persists positions separately by machine and session", () => {
     selectMachine(new RemoteClient("https://first.test", "secret"));
     saveReadingPosition("one", position);
+    flushReadingPositions();
     expect(readReadingPosition("one")).toEqual(position);
     expect(readReadingPosition("two")).toBeNull();
     selectMachine(new RemoteClient("https://second.test", "secret"));
@@ -33,6 +35,33 @@ describe("reading positions", () => {
     localStorage.setItem("tokn.viewer.reading-positions.v1", "broken");
     saveReadingPosition("one", position);
     expect(readReadingPosition("one")).toEqual(position);
+  });
+
+  it("flushes the latest position to its original machine during scrolling and skips identical writes", () => {
+    vi.useFakeTimers();
+    const writes = vi.spyOn(Storage.prototype, "setItem");
+    const first = new RemoteClient("https://first.test", "secret");
+    const second = new RemoteClient("https://second.test", "secret");
+    try {
+      selectMachine(first);
+      saveReadingPosition("one", position);
+      const updated = { ...position, anchors: [{ ...position.anchors[0], top: -90 }] };
+      saveReadingPosition("one", updated);
+      selectMachine(second);
+      saveReadingPosition("one", { ...position, at_end: true });
+      vi.advanceTimersByTime(250);
+      expect(writes).toHaveBeenCalledTimes(1);
+      expect(readReadingPosition("one")?.at_end).toBe(true);
+      selectMachine(first);
+      expect(readReadingPosition("one")).toEqual(updated);
+      saveReadingPosition("one", updated);
+      vi.advanceTimersByTime(250);
+      expect(writes).toHaveBeenCalledTimes(1);
+    } finally {
+      flushReadingPositions();
+      writes.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it("loads retained older turns until the saved anchor is available across generations", async () => {

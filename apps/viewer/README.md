@@ -62,6 +62,12 @@ the token from the address bar before rendering. Ctrl-C stops both processes.
 Set `TOKN_VIEWER_DEV_PORT` if port 1437 is occupied. The launcher uses a free
 loopback API port and requires no frontend build.
 
+To explore a mock Codex rollout, run `pnpm run demo:session` from `apps/viewer`
+and open the printed link. Select **Fix whitespace tokenization**. Its three
+turns reproduce a failing test, edit the lexer and verify the fix. The demo
+uses a temporary home and index. Ctrl-C removes both. The JSONL fixture is in
+[`fixtures/session-reader`](fixtures/session-reader).
+
 For separately managed processes, `pnpm run dev` starts Vite. Start
 `cargo run -p tokn-viewer-api -- --api-only` in another terminal, then open
 `http://localhost:1437` and connect using the prefilled address. Vite proxies
@@ -77,6 +83,21 @@ pnpm tauri build
 
 macOS builds also compile the small Swift bridge for Apple Translation. Use
 Xcode 16 or newer with the macOS 15 SDK; other platforms do not compile Swift.
+
+The session reader's browser tests use the built viewer, the local Rust API
+and a temporary Codex history. Run them from `apps/viewer` with:
+
+```sh
+pnpm run build
+cargo build --locked -p tokn-viewer-api
+pnpm exec playwright install firefox
+pnpm run test:browser
+```
+
+The Firefox tests capture the first turn, latest reply, prompt index, failed
+command, file edit and inspector on desktop and phone. A separate Qoder fixture
+shows a simulated running response alongside saved history. CI saves the PNGs in the
+`session-reader-previews` artifact.
 
 ## Response translation
 
@@ -109,7 +130,9 @@ closing the viewer.
 The host checks the available control route for each session. Supported agents
 offer **Send**, **Guide**, **Queue**, or **Stop** according to their runtime
 capabilities. The model menu and image attachments use the same session scope.
-A read-only session shows the host reason and a **Retry availability** action.
+Open **Read-only session** to see the host's reason, **Retry availability**
+and available connection and model controls. A failed availability check
+displays its error immediately.
 
 The footer reports acceptance or failure, including the backend's failure
 reason. After acceptance, the viewer refreshes history immediately and briefly
@@ -143,10 +166,26 @@ ordering. Use **Workspace** to return to the inbox. **Find session** or
 arrow keys move between results, and Enter opens the focused session.
 Search matches titles, previews, IDs, projects, folders and agent identities.
 
-Message headers identify the speaker and time. Use **Jump to prompt** to
-navigate user messages in loaded history, or load earlier history from that
-menu. Live replies render Markdown while reasoning and tool details can be
-expanded independently.
+User prompts sit on the right and agent replies read down the main column.
+Message actions sit beside a prompt or below a reply. Focus a message action to
+see the recorded speaker and time. Long prompts start folded.
+**Read full prompt** and **Read full reply** expand messages in the transcript.
+If a message exceeds the host's detail limit, you can read, fold and reopen
+the available preview without another request.
+Fenced code blocks show their language when provided and offer a separate copy action
+when the clipboard is available. Copy appears once a streamed or clipped code block
+is complete. **Inspect** opens the underlying event.
+
+A Codex goal appears as a blue prompt with **Sent as goal**. Expand **Worked
+for** to inspect individual operations, command failures, context compaction
+and turn accounting. The final reply shows **Goal achieved** when the rollout
+records completion. Its duration comes from the goal receipt and may differ
+from the time spent on work in the current turn.
+
+Use **Jump to prompt** to search loaded prompts or load earlier history. The
+arrows on either side step through prompts. **Alt+↑** and **Alt+↓** also step
+when the history or a prompt has keyboard focus. **Back to reading position**
+returns to the line where you started. **Jump to latest** resumes following.
 
 Historical agent-activity records become delegation cards when their native
 target id resolves to a canonical direct child of the selected session within
@@ -162,14 +201,18 @@ Earlier history is loaded on demand. Technical event headers expand in place,
 while their **Inspect** action opens the full inspector. Messages and reasoning
 have a readable **Content** view, while **Normalized** and **Native** expose the
 debugging representations.
+On desktop the inspector stays beside the conversation so you can compare
+events in the same tab. On phones it opens as a dialog. **Escape** returns
+focus to the inspection control. The JSON tabs offer a copy action when the
+clipboard is available.
 
-**Hide lifecycle** is a quick filter for routine lifecycle and bookkeeping
+Select the conversation title to see the provider, model, session ID and last
+update. **Show lifecycle events** in this panel controls routine bookkeeping
 rows without message content, including session settings, delivery markers, and
 successful turn completion. It applies to the conversation and expanded work
 sections, hiding intermediate usage while keeping the final accounting for each
 usage kind. Errors, messages, tools, agent communications, and unfamiliar events
-remain visible. Routine bookkeeping starts hidden. **Show lifecycle** restores
-those rows.
+remain visible. Routine bookkeeping starts hidden.
 Counts and pagination still describe the complete history, and hidden counts
 refer only to loaded rows.
 
@@ -178,16 +221,26 @@ Contiguous stretches of intermediate assistant progress and non-message work
 are grouped into a compact work trajectory item, keeping the
 surrounding conversation easy to scan. A non-final assistant message itself is
 enough to make a stretch fold; metadata-only stretches remain flat. Terminal
-bookkeeping after a final reply remains as ordinary chronological rows instead
-of creating a second **Worked** item. It shows
+bookkeeping after a final reply stays chronological. For a Codex goal turn with a
+recorded identity and a work disclosure, trailing usage belongs to that
+disclosure. Compaction during the same turn also remains available there. It shows
 **Working for …** with a ticking elapsed time when a provider turn-start is
 observed, auto-expanding to show the newest work. Completion collapses it to
 **Worked for …**; it can be reopened manually. Providers without reliable turn
 signals show neutral **Work** until a final reply or turn boundary closes the
-run. Durations use provider timestamps, never file modification time.
-Expanding it fetches its contained event rows in bounded pages and shows
-them as their normal event cards. Each row remains independently inspectable,
+run. Durations use provider timestamps from the first contributing record through
+the last, including tools that start and finish in separate records. A folded group
+shows a recent command or target and the additional tool count. Running or
+failed work takes priority in the preview.
+Expanding a short work group reveals its individual operations directly.
+Larger groups load in bounded pages. Select a command for its output or an
+edit for its recorded changes.
+Each row remains independently inspectable,
 and a recorded delegation can still open its verified direct child session.
+
+When a runtime supplies a live response, its text and tools appear beneath the
+latest recorded turn. The **Working** indicator clears when the preview ends.
+The same scroll position applies while the response streams.
 
 Relay batches refresh existing timeline and expanded child items without
 discarding loaded history. Scrolling follows new work only at the bottom;
@@ -196,6 +249,9 @@ the selected session after successful body updates, including progress that
 does not qualify for unread attention.
 
 Known shell, file, search, web, and task tools use compact semantic headers.
+File edits can show a recorded patch or the before and after text. Writes and code
+execution can show the submitted content. Long outputs initially show their first
+and last lines, with a control to reveal the captured lines between them.
 Expanding a tool fetches its output lazily, including the matching result when a
 provider records invocation and result separately under the same call id. The
 inline preview is bounded, selectable plain text or JSON; it never renders as

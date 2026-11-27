@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   AgentActivityCardSummary,
   EventDetail,
@@ -11,6 +11,7 @@ import type {
 } from "../lib/types";
 import {
   eventButtonId,
+  formatRecordedDuration,
   formatTimestamp,
   sessionDisplayTitle,
   shortSessionId,
@@ -19,9 +20,10 @@ import {
 } from "../lib/state";
 import {
   ChevronIcon,
-  ActivityIcon,
   BranchIcon,
+  EditFileIcon,
   InspectorIcon,
+  ReadFileIcon,
   ReasoningIcon,
   SearchIcon,
   TechnicalIcon,
@@ -33,7 +35,9 @@ import {
 import { DeferredActivityGroup } from "./DeferredActivityGroup";
 import { ActivityGroup, groupActivity } from "./ActivityGroup";
 import { modelChangeLabels } from "../lib/sessionModels";
-import { ShellOutputSection } from "./ShellOutputSection";
+import { ToolTextSection } from "./ToolTextSection";
+import { ToolInputDetails } from "./ToolInputDetails";
+import "./ToolActivity.css";
 import { MessageImages } from "./MessageImages";
 import { toolOutputImages } from "../lib/toolOutputImages";
 import { MessageCard } from "./MessageCard";
@@ -45,6 +49,7 @@ import { UsageCard, usageHeading } from "./UsageCard";
 import { AgentCommunicationCard, agentCommunicationHeading, isAgentCommunication } from "./AgentCommunicationCard";
 import { DetailRefreshError } from "./DetailRefreshError";
 import { isBookkeepingEvent } from "../lib/eventFilter";
+import { readingEventKey } from "../lib/readingPosition";
 
 interface EventCardProps {
   question_is_pending?: boolean;
@@ -92,6 +97,11 @@ function toolFallbackName(event: EventSummary, tool: ToolCardSummary): string {
   return humanize(tool.tool_name?.trim() || event.title || "Tool call");
 }
 
+const toolActions = new Map(Object.entries({
+  shell: "Shell", terminal: "Terminal", code_execution: "Code", file_read: "Read", file_write: "Write",
+  file_edit: "Edit", search: "Search", web: "Web", task: "Task",
+}));
+
 function toolHeading(event: EventSummary): TechnicalCardHeading {
   const tool = event.tool;
   if (!tool) {
@@ -104,10 +114,11 @@ function toolHeading(event: EventSummary): TechnicalCardHeading {
   }
 
   const fallback = toolFallbackName(event, tool);
+  const action = toolActions.get(tool.kind) ?? "Tool";
   switch (tool.kind) {
     case "code_execution":
       return {
-        action: "Code",
+        action,
         primary: tool.language?.trim()
           ? `${humanize(tool.language)} code`
           : fallback,
@@ -116,21 +127,21 @@ function toolHeading(event: EventSummary): TechnicalCardHeading {
       };
     case "shell":
       return {
-        action: "Shell",
+        action,
         primary: tool.command?.trim() || fallback,
         secondary: tool.cwd,
         monospace: tool.command !== null,
       };
     case "terminal": {
       const session = tool.terminal_session_id?.trim();
-      const action = tool.terminal_action;
-      const primary = action === "wait"
+      const terminalAction = tool.terminal_action;
+      const primary = terminalAction === "wait"
         ? `Wait for ${session ? `terminal ${session}` : "terminal"}`
-        : action === "send"
+        : terminalAction === "send"
           ? `Send ${tool.chars_len ?? 0} characters${session ? ` to terminal ${session}` : ""}`
           : fallback;
       return {
-        action: "Terminal",
+        action,
         primary,
         secondary: tool.wait_ms === null || tool.wait_ms === undefined
           ? null
@@ -140,49 +151,49 @@ function toolHeading(event: EventSummary): TechnicalCardHeading {
     }
     case "file_read":
       return {
-        action: "Read",
+        action,
         primary: tool.path?.trim() || fallback,
         secondary: null,
         monospace: tool.path !== null,
       };
     case "file_write":
       return {
-        action: "Write",
+        action,
         primary: tool.path?.trim() || fallback,
         secondary: tool.bytes === null ? null : formatBytes(tool.bytes),
         monospace: tool.path !== null,
       };
     case "file_edit":
       return {
-        action: "Edit",
+        action,
         primary: tool.path?.trim() || fallback,
         secondary: changeSummary(tool),
         monospace: tool.path !== null,
       };
     case "search":
       return {
-        action: "Search",
+        action,
         primary: tool.query?.trim() || fallback,
         secondary: null,
         monospace: false,
       };
     case "web":
       return {
-        action: "Web",
+        action,
         primary: tool.url?.trim() || fallback,
         secondary: null,
         monospace: tool.url !== null,
       };
     case "task":
       return {
-        action: "Task",
+        action,
         primary: tool.task_title?.trim() || fallback,
         secondary: null,
         monospace: false,
       };
     default:
       return {
-        action: "Tool",
+        action,
         primary: fallback,
         secondary: null,
         monospace: false,
@@ -219,43 +230,6 @@ function pluralize(count: number, singular: string, plural = `${singular}s`): st
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
-/**
- * Formats a decimal millisecond value without coercing it through Number.
- *
- * The backend keeps this as a string because it may be a Rust u64, which can
- * exceed JavaScript's safe integer range. BigInt lets the UI retain every
- * recorded value while displaying whole seconds rather than milliseconds.
- */
-export function formatTrajectoryDuration(durationMs: string | null): string | null {
-  const source = durationMs?.trim() ?? "";
-  if (!/^\d+$/.test(source)) {
-    return null;
-  }
-
-  let remaining: bigint;
-  try {
-    remaining = BigInt(source);
-  } catch {
-    return null;
-  }
-
-  const units: Array<[bigint, string]> = [
-    [86_400_000n, "d"],
-    [3_600_000n, "h"],
-    [60_000n, "m"],
-    [1_000n, "s"],
-  ];
-  const parts: string[] = [];
-  for (const [unitMs, label] of units) {
-    const count = remaining / unitMs;
-    if (count > 0n) {
-      parts.push(`${count.toString()}${label}`);
-      remaining %= unitMs;
-    }
-  }
-  return parts.join(" ") || "0s";
-}
-
 function trajectoryFacts(trajectory: TrajectoryCardSummary): string {
   const facts = [];
   if (trajectory.tool_count > 0) {
@@ -276,6 +250,31 @@ function trajectoryFacts(trajectory: TrajectoryCardSummary): string {
   return facts.length ? facts.join(" · ") : pluralize(trajectory.event_count, "event");
 }
 
+function WorkPreview({ trajectory, id }: { trajectory: TrajectoryCardSummary; id: string }) {
+  const previews = trajectory.tool_previews;
+  if (!previews?.length) return null;
+  const earlier = trajectory.tool_count - previews.length;
+  const earlierLabel = earlier > 0 ? pluralize(earlier, "earlier tool call") : "";
+  const rows = previews.map(({ kind, label, status }) => ({
+    action: toolActions.get(kind) ?? "Tool",
+    label,
+    status: ["failed", "running", "pending"].includes(status) ? status : "",
+  }));
+  const descriptions = rows.map((row) => [row.action, row.label, humanize(row.status)].filter(Boolean).join(" "));
+  // The recorded window contains at most three operations. Keep a current or
+  // failed operation in sight even if a later routine command has completed.
+  const recent = [...rows].reverse();
+  const active = trajectory.status === "working" && recent.find(row => row.status === "running" || row.status === "pending");
+  const current = active || recent.find(row => row.status === "failed") || recent[0];
+  return <span className="work-preview">
+    <span id={id} className="sr-only">{[earlierLabel, ...descriptions].filter(Boolean).join(". ")}</span>
+    {current.status && <span aria-hidden="true" className="work-preview__state" data-status={current.status}>{humanize(current.status)}</span>}
+    <span aria-hidden="true" className="work-preview__label" title={current.label}>{current.label}</span>
+    {trajectory.tool_count > 1 && <span aria-hidden="true" className="work-preview__count">+{trajectory.tool_count - 1}</span>}
+    {trajectory.error_count > 0 && current.status !== "failed" && <span aria-hidden="true" className="work-preview__state" data-status="failed">{pluralize(trajectory.error_count, "error")}</span>}
+  </span>;
+}
+
 function useTrajectoryHeading(event: EventSummary): TechnicalCardHeading {
   const trajectory = event.trajectory;
   const working = trajectory?.status === "working";
@@ -287,7 +286,7 @@ function useTrajectoryHeading(event: EventSummary): TechnicalCardHeading {
     return () => window.clearInterval(timer);
   }, [working, trajectory?.started_at]);
   const start = timestampMs(trajectory?.started_at ?? null);
-  const duration = formatTrajectoryDuration(working && Number.isFinite(start)
+  const duration = formatRecordedDuration(working && Number.isFinite(start)
     ? String(Math.max(0, now - start))
     : trajectory?.duration_ms ?? null);
   const verb = working ? "Working" : trajectory?.status === "unknown" ? "Work" : "Worked";
@@ -299,10 +298,37 @@ function useTrajectoryHeading(event: EventSummary): TechnicalCardHeading {
   };
 }
 
+/** Keep the ticking clock local so that open tool rows and logs do not rerender each second. */
+function WorkHeader({ event, button_id, expanded, on_select, on_toggle }: {
+  event: EventSummary; button_id: string; expanded: boolean;
+  on_select: (key: string) => void; on_toggle: (key: string) => void;
+}) {
+  const heading = useTrajectoryHeading(event);
+  const foldedGoal = !expanded && event.goal?.kind === "work";
+  const factsId = !foldedGoal && heading.secondary ? `${button_id}-facts` : undefined;
+  const previewId = !foldedGoal && !expanded && !event.is_hidden && event.trajectory?.tool_previews?.length ? `${button_id}-preview` : undefined;
+  const failures = foldedGoal ? 0 : event.trajectory?.error_count ?? 0;
+  return <div className="trajectory-section__header" data-folded-goal={foldedGoal || undefined}>
+    <button type="button" className="trajectory-section__toggle" aria-label={heading.primary}
+      aria-expanded={expanded} aria-controls={`${button_id}-details`}
+      aria-describedby={[factsId, previewId].filter(Boolean).join(" ") || undefined}
+      onClick={() => on_toggle(event.event_key)}>
+      {event.trajectory?.status === "working" && <span aria-hidden="true" className="inline-spinner" />}
+      <span className="trajectory-section__label" id={`${button_id}-label`}>{heading.primary}</span>
+      <ChevronIcon className={expanded ? "chevron chevron--open" : "chevron"} />
+      {factsId && <span id={factsId} className={previewId || expanded || failures ? "sr-only" : "trajectory-section__facts"}>{heading.secondary}</span>}
+      {previewId && event.trajectory && <WorkPreview trajectory={event.trajectory} id={previewId} />}
+      {!previewId && failures > 0 && <span aria-hidden="true" className="work-preview__state" data-status="failed">{pluralize(failures, "error")}</span>}
+    </button>
+    <button type="button" className="trajectory-section__inspect" id={button_id} aria-label={`Inspect ${heading.primary}`}
+      onClick={() => on_select(event.event_key)}><InspectorIcon /></button>
+  </div>;
+}
+
 function changeSummary(tool: ToolCardSummary): string | null {
   const changes = [
-    tool.added === null ? null : `+${tool.added}`,
-    tool.removed === null ? null : `−${tool.removed}`,
+    tool.added == null ? null : `+${tool.added}`,
+    tool.removed == null ? null : `−${tool.removed}`,
   ].filter((change): change is string => change !== null);
   return changes.length > 0 ? changes.join(" ") : null;
 }
@@ -346,6 +372,8 @@ function eventIcon(event: EventSummary) {
       return <TerminalIcon />;
     }
     if (event.tool?.kind === "search" || event.tool?.kind === "web") return <SearchIcon />;
+    if (event.tool?.kind === "file_edit" || event.tool?.kind === "file_write") return <EditFileIcon />;
+    if (event.tool?.kind === "file_read") return <ReadFileIcon />;
     return <ToolIcon />;
   }
   return <TechnicalIcon />;
@@ -527,24 +555,35 @@ function TrajectorySection({
   expanded_activity_keys?: Set<string>;
   expanded_activities?: Map<string, ExpandedActivityState>;
 }) {
-  const heading = useTrajectoryHeading(event);
   const regionId = `${button_id}-details`;
   const labelId = `${button_id}-label`;
-  const visibleEvents = hide_lifecycle
-    ? page?.events.filter((event) => !isBookkeepingEvent(event)) ?? []
-    : page?.events ?? [];
-  const hiddenCount = (page?.events.length ?? 0) - visibleEvents.length;
-  // Determine identity and boundaries before filtering: revealing lifecycle
-  // rows must not unload or collapse an already opened inner group.
-  const activityGroups = groupActivity(page?.events ?? []).map((group) => ({
-    group_key: group[0].event_key,
-    events: hide_lifecycle ? group.filter((child) => !isBookkeepingEvent(child)) : group,
-  })).filter((group) => group.events.length > 0);
+  // Determine identity and boundaries before filtering. Revealing routine rows
+  // must not unload a group's tool output or disturb its original chronology.
+  const activityGroups = useMemo(() => {
+    const groups = groupActivity(page?.events ?? []);
+    return groups.map(group => {
+      const substantive = group.filter(child => !isBookkeepingEvent(child));
+      const deferred = group[0].type === "activity_group";
+      const singleTool = deferred ? !!group[0].single_tool_key
+        : substantive.length === 1 && substantive[0].type === "tool_call" && !substantive[0].is_hidden;
+      const count = deferred ? group[0].child_keys?.length : group.length;
+      // A single short sequence already has a disclosure on the enclosing turn.
+      // Keep larger groups and groups separated by agent commentary independently lazy.
+      const shortSequence = groups.length === 1 && count !== undefined && count > 0 && count <= 4;
+      return {
+        group_key: group[0].event_key,
+        events: hide_lifecycle ? substantive : group,
+        hidden_count: hide_lifecycle ? group.length - substantive.length : 0,
+        inline: shortSequence || (event.trajectory?.tool_count === 1 && singleTool),
+      };
+    });
+  }, [page?.events, hide_lifecycle, event.trajectory?.tool_count]);
+  const hiddenCount = activityGroups.reduce((count, group) => count + group.hidden_count, 0);
+  const visibleCount = (page?.events.length ?? 0) - hiddenCount;
   const renderChild = (childEvent: EventSummary) => (
     <div
       className="trajectory-section__item"
-      data-error={childEvent.is_error || childEvent.type === "error"}
-      data-scroll-key={`${event.event_key}/${childEvent.event_key}`}
+      data-scroll-key={JSON.stringify([readingEventKey(event), readingEventKey(childEvent)])}
       key={childEvent.event_key}
       role="listitem"
     >
@@ -575,38 +614,7 @@ function TrajectorySection({
   );
   return (
     <section className="trajectory-section transcript-work" data-status={event.trajectory?.status} data-selected={is_selected}>
-      <div className="trajectory-section__header">
-        <button
-          aria-controls={regionId}
-          aria-expanded={is_expanded}
-          aria-label={heading.primary}
-          className="trajectory-section__toggle"
-          onClick={() => on_toggle(event.event_key)}
-          type="button"
-        >
-          <span aria-hidden="true" className="transcript-work__icon">
-            {event.trajectory?.status === "working" ? <span className="inline-spinner" /> : <ActivityIcon width={16} height={16} />}
-          </span>
-          <span className="trajectory-section__summary">
-            <span className="trajectory-section__label" id={labelId}>
-              {heading.primary}
-            </span>
-            {heading.secondary ? (
-              <span className="trajectory-section__facts">{heading.secondary}</span>
-            ) : null}
-          </span>
-          <ChevronIcon className={is_expanded ? "chevron chevron--open" : "chevron"} />
-        </button>
-        <button
-          aria-label={`Inspect ${heading.primary}`}
-          className="trajectory-section__inspect"
-          id={button_id}
-          onClick={() => on_select(event.event_key)}
-          type="button"
-        >
-          <InspectorIcon />
-        </button>
-      </div>
+      <WorkHeader event={event} button_id={button_id} expanded={is_expanded} on_toggle={on_toggle} on_select={on_select} />
 
       {is_expanded || page?.has_loaded || (page?.events.length ?? 0) > 0 ? (
         <div
@@ -642,21 +650,26 @@ function TrajectorySection({
 
               {hiddenCount > 0 ? (
                 <p className="event-filter-notice" role="status">
-                  {visibleEvents.length === 0 ? "No events match this filter in this turn. " : ""}
+                  {visibleCount === 0 ? "No events match this filter in this turn. " : ""}
                   {hiddenCount} {hiddenCount === 1 ? "event hidden" : "events hidden"} in this turn.
                 </p>
               ) : null}
 
-              {visibleEvents.length > 0 ? (
+              {visibleCount > 0 ? (
                 <div aria-label="Events in this turn" className="trajectory-section__events" role="list">
-                  {activityGroups.map(({ group_key, events: group }) => group[0].type === "activity_group" ? (
+                  {activityGroups.filter(group => group.events.length > 0).map(({ group_key, events: group, inline }) => group[0].type === "activity_group" ? (
                     <DeferredActivityGroup key={group_key} event={group[0]} page={activity_pages?.get(group_key)}
                       selected_event_key={selected_event_key} on_load={on_activity_load} on_retry={on_retry} parent_visible={is_expanded}
+                      inline={inline} reveal={group[0].child_keys?.some((key) => expanded_activity_keys?.has(key) ?? key === expanded_child_event_key)}
                       on_visibility={on_activity_visibility}>
-                      {(children) => children.filter((child) => !hide_lifecycle || !isBookkeepingEvent(child)).map(renderChild)}
+                      {(children) => {
+                        const visible = children.filter((child) => !hide_lifecycle || !isBookkeepingEvent(child));
+                        return visible.length ? visible.map(renderChild)
+                          : <p className="event-filter-notice" role="status">Lifecycle events are hidden.</p>;
+                      }}
                     </DeferredActivityGroup>
                   ) : (
-                    <ActivityGroup key={group_key} events={group} selected_event_key={selected_event_key}
+                    <ActivityGroup key={group_key} events={group} selected_event_key={selected_event_key} inline={inline}
                       reveal={group.some((child) => expanded_activity_keys?.has(child.event_key)
                         ?? child.event_key === expanded_child_event_key)}>
                       {() => group.map(renderChild)}
@@ -678,7 +691,7 @@ function TrajectorySection({
 
 function ToolOutput({
   session_key,
-  detail,
+  detail: loaded_detail,
   error,
   event,
   is_loading,
@@ -691,6 +704,7 @@ function ToolOutput({
   is_loading: boolean;
   on_retry: () => void;
 }) {
+  const detail = loaded_detail?.event_key === event.event_key ? loaded_detail : null;
   if (event.is_hidden || detail?.is_hidden) {
     return <p className="tool-output__empty">Tool output is hidden by the provider.</p>;
   }
@@ -721,48 +735,29 @@ function ToolOutput({
   }
 
   const output = detail?.tool_output ?? null;
-  if ((!output || output.sections.length === 0) && !images.length) {
-    const isPending = event.tool?.status === "pending" || event.tool?.status === "running"
-      || (event.tool?.status === undefined && event.phase !== null && event.phase !== "finished");
-    return (
-      <div aria-busy={is_loading}>
-        <DetailRefreshError error={error} on_retry={on_retry} />
-        <p className="tool-output__empty" role="status">
-          {isPending ? "Output is not available yet." : "No output was captured for this tool call."}
-        </p>
-      </div>
-    );
-  }
-
+  const hasOutput = Boolean(output?.sections.length || images.length);
+  const isPending = event.tool?.status === "pending" || event.tool?.status === "running"
+    || (event.tool?.status === undefined && event.phase !== null && event.phase !== "finished");
   const toolLabel = toolHeading(event).primary;
   const isShell = event.tool?.kind === "shell" || event.tool?.kind === "terminal";
+  const input = detail && <ToolInputDetails kind={event.tool?.kind ?? "unknown"} path={event.tool?.path} record={detail.event} has_output={hasOutput} />;
+  const sections = output?.sections ?? [];
+  const streams = sections.map((section, index) => {
+    const isGeneric = !section.label || section.label.toLowerCase() === "output";
+    return <ToolTextSection key={`${event.event_key}-${index}`}
+      terminal={isShell} text={section.text} format={section.format}
+      heading={sections.length === 1 && isShell && isGeneric ? undefined : section.label ?? "Output"}
+      label={`${toolLabel} ${isGeneric ? "output" : `${section.label} output`}`} />;
+  });
   return (
     <div aria-busy={is_loading} className={isShell ? "tool-output shell-output" : "tool-output"}>
       <DetailRefreshError error={error} on_retry={on_retry} />
-      {isShell ? (
-        <header className="shell-output__header">
-          {event.tool?.cwd ? <span className="shell-output__cwd" title={event.tool.cwd}>{event.tool.cwd}</span> : null}
-          <code className="shell-output__command"><span aria-hidden="true">{event.tool?.kind === "shell" ? "$ " : ""}</span>{event.tool?.command || toolLabel}</code>
-          {event.tool?.exit_code !== null && event.tool?.exit_code !== undefined ? (
-            <span className="shell-output__exit" data-error={event.tool.exit_code !== 0}>Exit {event.tool.exit_code}</span>
-          ) : null}
-        </header>
-      ) : null}
-      {output?.sections.map((section, index) => isShell ? (
-        <ShellOutputSection key={`${event.event_key}-${index}`} section={section} command={toolLabel} />
-      ) : (
-        <section className="tool-output__section" key={`${section.label ?? "output"}-${index}`}>
-          {section.label ? <h4>{section.label}</h4> : null}
-          <pre
-            aria-label={`${toolLabel} ${section.label ? `${section.label} output` : "output"}`}
-            data-format={section.format}
-            tabIndex={0}
-          >
-            {section.text}
-          </pre>
-        </section>
-      ))}
+      {!isShell && input}
+      {isShell && streams.length ? <div className="tool-output__streams">{streams}</div> : streams}
       {imageContent}
+      {!hasOutput && <p className="tool-output__empty" role="status">
+        {isPending ? "Output is not available yet." : "No output was captured for this tool call."}
+      </p>}
       {output?.truncated ? (
         <p className="tool-output__notice" role="status">
           Output preview is truncated
@@ -770,6 +765,7 @@ function ToolOutput({
           Inspect the event for the complete bounded detail.
         </p>
       ) : null}
+      {isShell && input}
     </div>
   );
 }
@@ -857,10 +853,13 @@ export function EventCard({
 
   const heading = cardHeading(event);
   const title = heading?.primary ?? event.title;
-  const status = eventStatus(event);
   const regionId = `${button_id}-details`;
   const labelId = `${button_id}-label`;
   const cardIsExpanded = usesControlledExpansion(event) ? is_expanded : isLocallyExpanded;
+  const isShell = event.tool?.kind === "shell" || event.tool?.kind === "terminal";
+  const status = eventStatus(event) ?? (isShell && cardIsExpanded && event.tool?.exit_code === 0
+    ? { label: "exit 0", tone: "success" } : null);
+  const secondary = event.tool?.kind === "shell" && !cardIsExpanded ? null : heading?.secondary;
   const isCommunication = isAgentCommunication(event);
   const subagentTarget = event.type === "agent_activity"
     ? (isCommunication ? event.agent_activity?.actor : event.agent_activity?.target) ?? null
@@ -871,13 +870,14 @@ export function EventCard({
       data-selected={is_selected}
       data-tone={eventTone(event)}
       data-expanded={cardIsExpanded}
-      data-shell={event.tool?.kind === "shell" || event.tool?.kind === "terminal"}
+      data-tool-kind={event.tool?.kind}
     >
       <div className="technical-event__header">
         <button
           aria-controls={regionId}
           aria-expanded={cardIsExpanded}
           aria-label={heading?.action ? `${heading.action}: ${title}` : title}
+          aria-describedby={[status && `${button_id}-status`, secondary && `${button_id}-context`].filter(Boolean).join(" ") || undefined}
           className="technical-event__toggle"
           onClick={() => {
             if (usesControlledExpansion(event)) {
@@ -891,7 +891,7 @@ export function EventCard({
           <span className="technical-event__icon">{eventIcon(event)}</span>
           <span className="technical-event__heading">
             <span className="technical-event__title-row">
-              {heading?.action ? <span className="tool-action">{heading.action}</span> : null}
+              {heading?.action && event.tool?.kind !== "shell" ? <span className="tool-action">{heading.action}</span> : null}
               <span
                 className="technical-event__title"
                 data-monospace={heading?.monospace || undefined}
@@ -901,15 +901,19 @@ export function EventCard({
                 {title}
               </span>
             </span>
-            {heading?.secondary && !(cardIsExpanded && (event.tool?.kind === "shell" || event.tool?.kind === "terminal")) ? (
-              <span className="technical-event__secondary" title={heading.secondary}>
-                {heading.secondary}
+            {secondary ? (
+              <span className="technical-event__secondary" title={secondary} id={`${button_id}-context`}>
+                {event.tool?.kind === "file_edit" ? <>
+                  {event.tool.added != null && <span className="tool-change__added">+{event.tool.added}</span>}
+                  {event.tool.added != null && event.tool.removed != null ? " " : null}
+                  {event.tool.removed != null && <span className="tool-change__removed">−{event.tool.removed}</span>}
+                </> : secondary}
               </span>
             ) : null}
           </span>
           <span className="technical-event__meta">
             {status ? (
-              <span className="event-phase" data-tone={status.tone}>{status.label}</span>
+              <span className="event-phase" data-tone={status.tone} id={`${button_id}-status`}>{status.label}</span>
             ) : null}
           </span>
           <time dateTime={event.timestamp ?? undefined} title={timestampLabel}>

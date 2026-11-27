@@ -103,6 +103,147 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+describe("recorded goals", () => {
+  it("labels the goal beneath its prompt and preserves full-message disclosure", () => {
+    const objective = Array.from({ length: 12 }, (_, index) => `Requirement ${index + 1}`).join("\n");
+    const { rerender } = render(card(message({ role: "user", summary: objective, goal: { kind: "prompt" } })));
+    const prompt = screen.getByRole("article", { name: "user message" });
+    expect(prompt).toHaveAttribute("data-goal-prompt");
+    expect(prompt.querySelector("footer")).toContainElement(screen.getByText("Sent as goal"));
+    fireEvent.click(screen.getByRole("button", { name: "Read full prompt" }));
+    expect(screen.getByText(/Requirement 12/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Inspect user message" })).toBeEnabled();
+
+    rerender(card(message({ role: "user", summary: "An ordinary prompt" })));
+    expect(prompt).not.toHaveAttribute("data-goal-prompt");
+    expect(screen.queryByText("Sent as goal")).not.toBeInTheDocument();
+  });
+
+  it("puts the recorded completion duration and reply time next to the final reply actions", () => {
+    const reply = message({ delivery: "final", goal: { kind: "completed", duration_ms: "94000" } });
+    const { rerender } = render(card(reply));
+    const article = screen.getByRole("article", { name: "Codex message" });
+    const footer = article.querySelector("footer");
+    expect(footer).toContainElement(screen.getByText("Goal achieved in 1m 34s"));
+    expect(footer).toContainElement(screen.getByRole("button", { name: "Inspect assistant message" }));
+    expect(footer?.querySelectorAll("time")).toHaveLength(1);
+    expect(footer?.querySelector(".message-goal-completion time")).toHaveAttribute("datetime", reply.timestamp);
+
+    rerender(card(message({ delivery: "final", goal: { kind: "completed" } })));
+    expect(screen.getByText("Goal achieved", { exact: true })).toBeVisible();
+    rerender(card(message({ delivery: "final" })));
+    expect(screen.queryByText(/Goal achieved/)).not.toBeInTheDocument();
+  });
+});
+
+describe("reading long messages", () => {
+  it("keeps prompt text alone in its bubble and puts timestamp and inspection after the message", () => {
+    const view = render(card(message({ role: "user", summary: "Looks good.", timestamp: "2026-01-02T12:30:00Z" })));
+    const prompt = screen.getByRole("article", { name: "user message" });
+    const bubble = prompt.querySelector(".message-event__surface");
+    expect(bubble).toHaveTextContent(/^Looks good\.$/);
+    expect(prompt.querySelector("footer")).toContainElement(screen.getByRole("button", { name: "Inspect user message" }));
+    expect(prompt.querySelector("footer time")).toHaveAttribute("datetime", "2026-01-02T12:30:00Z");
+
+    view.rerender(card(message({ provider: "zcode", summary: "Done." })));
+    const reply = screen.getByRole("article", { name: "ZCode message" });
+    expect(reply.querySelector(".message-event__surface")).toHaveTextContent(/^Done\.$/);
+    expect(reply.querySelector("header")).toBeNull();
+    expect(reply.querySelector("footer [data-provider]")).toHaveAttribute("data-provider", "zcode");
+  });
+
+  it("folds long prompts locally and keeps the complete original available", () => {
+    const lines = Array.from({ length: 12 }, (_, index) => `Instruction ${index + 1}`).join("\n");
+    render(card(message({ role: "user", summary: lines })));
+    expect(screen.queryByText(/Instruction 12/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Read full prompt", expanded: false }));
+    expect(screen.getByText(/Instruction 12/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Show less", expanded: true }));
+    expect(screen.queryByText(/Instruction 12/)).not.toBeInTheDocument();
+    expect(loadEventDetail).not.toHaveBeenCalled();
+  });
+
+  it("reads a full reply inline and reuses the verified body for expansion and translation", async () => {
+    const reply = message({ summary: "Result…", summary_truncated: true, content_revision: "revision" });
+    vi.mocked(loadEventDetail).mockResolvedValue(detail("Result with **details**.", { content_revision: "revision" }));
+    vi.mocked(translateText).mockImplementation(async ({ texts }) => ({ texts: texts.map(text => `译${text}`) }));
+    render(card(reply));
+    const open = () => fireEvent.click(screen.getByRole("button", { name: "Read full reply" }));
+    expect(loadEventDetail).not.toHaveBeenCalled();
+    open();
+    expect((await screen.findByText("details")).tagName).toBe("STRONG");
+    fireEvent.click(screen.getByRole("button", { name: "Show less" }));
+    expect(screen.queryByText("details")).not.toBeInTheDocument();
+    open();
+    await screen.findByText("details");
+    await startTranslation();
+    fireEvent.click(await screen.findByRole("button", { name: "Show original" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show less" }));
+    expect(screen.getByText("Result…")).toBeVisible();
+    expect(screen.queryByText("details")).not.toBeInTheDocument();
+    expect(loadEventDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries failed reads and discards late bodies after switching sessions", async () => {
+    const reply = message({ summary: "Prefix…", summary_truncated: true, content_revision: "current" });
+    const pending = deferred<EventDetail>();
+    vi.mocked(loadEventDetail)
+      .mockResolvedValueOnce(detail("Prefix stale text", { content_revision: "stale" }))
+      .mockReturnValueOnce(pending.promise);
+    const view = render(card(reply));
+    fireEvent.click(screen.getByRole("button", { name: "Read full reply" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("This message has changed");
+    fireEvent.click(screen.getByRole("button", { name: "Retry full message" }));
+    view.rerender(card(reply, "other-session"));
+    await act(async () => pending.resolve(detail("Prefix stale text", { content_revision: "current" })));
+    expect(screen.queryByText("Prefix stale text")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Read full reply", expanded: false })).toBeEnabled();
+  });
+
+  it.each(["assistant", "user"] as const)("preserves focus and folds the available %s preview after a size limit", async (role) => {
+    const summary = "Paragraph ".repeat(200) + "Last available paragraph…";
+    const read = deferred<EventDetail>();
+    vi.mocked(loadEventDetail).mockReturnValue(read.promise);
+    render(card(message({ role, summary, summary_truncated: true })));
+    expect(screen.queryByText(/Last available paragraph/)).not.toBeInTheDocument();
+    const toggle = screen.getByRole("button", { name: role === "user" ? "Read full prompt" : "Read full reply" });
+    toggle.focus();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveFocus();
+    expect(toggle).toHaveAttribute("aria-disabled", "true");
+    expect(toggle).not.toBeDisabled();
+    fireEvent.click(toggle);
+    await act(async () => read.resolve(detail("", { event: {
+      truncated: true, representation: "normalized_event", limit_bytes: 524288, original_size_bytes: 600000,
+    } })));
+    expect(screen.getByRole("button", { name: "Show less", expanded: true })).toBe(toggle);
+    expect(toggle).toHaveFocus();
+    expect(toggle).toHaveAccessibleDescription(/Showing the available preview/);
+    expect(screen.getByText(/Last available paragraph/)).toBeVisible();
+    fireEvent.click(toggle);
+    expect(screen.getByRole("button", { name: "Show available preview", expanded: false })).toHaveFocus();
+    expect(screen.queryByText(/Last available paragraph/)).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(screen.getByText(/Last available paragraph/)).toBeVisible();
+    expect(loadEventDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an oversized detail for a different revision retryable", async () => {
+    vi.mocked(loadEventDetail)
+      .mockResolvedValueOnce(detail("", { content_revision: "other", event: { truncated: true } }))
+      .mockResolvedValueOnce(detail("Prefix and current ending.", { content_revision: "current" }));
+    render(card(message({ summary: "Prefix…", summary_truncated: true, content_revision: "current" })));
+    const toggle = screen.getByRole("button", { name: "Read full reply" });
+    toggle.focus();
+    fireEvent.click(toggle);
+    expect(await screen.findByRole("alert")).toHaveTextContent("This message has changed");
+    expect(screen.getByRole("button", { name: "Retry full message" })).toHaveFocus();
+    fireEvent.click(toggle);
+    expect(await screen.findByText("Prefix and current ending.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Show less" })).toHaveFocus();
+  });
+});
+
 describe("final response details", () => {
   const final_reply = message({
     delivery: "final",
@@ -162,25 +303,21 @@ describe("message translation availability", () => {
     expect(screen.queryByRole("button", { name: /Translate/ })).not.toBeInTheDocument();
   });
 
-  it("explains unavailable desktop translation without starting a request", async () => {
+  it("omits unavailable desktop translation actions without starting a request", async () => {
     vi.mocked(getTranslationStatus).mockResolvedValue({ available: false, reason: "Requires macOS 15 or later." });
     render(card(message()));
-    const button = await screen.findByRole("button", { name: "Translate → 简体中文" });
-    expect(button).toBeDisabled();
-    expect(button).toHaveAttribute("title", "Requires macOS 15 or later.");
-    fireEvent.click(button);
+    await act(async () => {});
+    expect(screen.queryByRole("button", { name: /Translate/ })).toBeNull();
     expect(loadEventDetail).not.toHaveBeenCalled();
     expect(translateText).not.toHaveBeenCalled();
   });
 
-  it("explains unavailable browser translation without invoking native commands", async () => {
+  it("omits unavailable browser translation actions without invoking native commands", async () => {
     vi.mocked(viewerCapabilities).mockReturnValue({ native_translation: false } as ReturnType<typeof viewerCapabilities>);
     vi.mocked(browserTranslationEngine.getStatus).mockResolvedValue({ available: false, reason: "This browser does not support local translation." });
     render(card(message()));
-    const button = await screen.findByRole("button", { name: "Translate → 简体中文" });
-    expect(button).toBeDisabled();
-    expect(button).toHaveAttribute("title", "This browser does not support local translation.");
-    fireEvent.click(button);
+    await act(async () => {});
+    expect(screen.queryByRole("button", { name: /Translate/ })).toBeNull();
     expect(browserTranslationEngine.start).not.toHaveBeenCalled();
     expect(getTranslationStatus).not.toHaveBeenCalled();
     expect(loadEventDetail).not.toHaveBeenCalled();
@@ -404,7 +541,7 @@ describe("message translation flow", () => {
     vi.mocked(loadEventDetail).mockResolvedValue(invalid_detail);
     render(card(message()));
     await startTranslation();
-    expect(await screen.findByRole("alert")).toHaveTextContent("The full response is unavailable or too large to translate.");
+    expect(await screen.findByRole("alert")).toHaveTextContent("The full message is unavailable or exceeds the viewer’s size limit.");
     expect(translateText).not.toHaveBeenCalled();
   });
 
@@ -412,7 +549,7 @@ describe("message translation flow", () => {
     vi.mocked(loadEventDetail).mockResolvedValue(detail("New response."));
     render(card(message()));
     await startTranslation();
-    expect(await screen.findByRole("alert")).toHaveTextContent("This response has changed.");
+    expect(await screen.findByRole("alert")).toHaveTextContent("This message has changed.");
     expect(screen.getByText("Original response.")).toBeInTheDocument();
     expect(translateText).not.toHaveBeenCalled();
   });
@@ -635,7 +772,7 @@ describe("translation request lifetime", () => {
     }));
     render(card(message({ summary: "Original…", summary_truncated: true, content_revision: "first-content" })));
     await startTranslation();
-    expect(await screen.findByRole("alert")).toHaveTextContent("This response has changed. Refresh the conversation and try again.");
+    expect(await screen.findByRole("alert")).toHaveTextContent("This message has changed. Refresh the conversation and try again.");
     expect(screen.getByText("Original…")).toBeInTheDocument();
     expect(translateText).not.toHaveBeenCalled();
   });

@@ -68,6 +68,49 @@ it("refreshes session control after the first accepted RPC activation", async ()
   expect(submitSessionInput).toHaveBeenCalledTimes(1);
 });
 
+it("folds the reason, retry and connection in one read-only control and keeps Stop visible during a run", async () => {
+  vi.mocked(getSessionInputStatus).mockResolvedValue({ ...AVAILABLE, available: false, message: "Input unavailable." });
+  const route = control("rpc");
+  const view = render(<SessionComposer session={SESSION} control={route} />);
+  const disclosure = await screen.findByRole("button", { name: "Read-only session" });
+  expect(disclosure).toHaveAttribute("aria-expanded", "false");
+  expect(screen.getByText("Input unavailable.")).not.toBeVisible();
+  expect(screen.queryByRole("button", { name: "Retry availability" })).toBeNull();
+  fireEvent.click(disclosure);
+  expect(disclosure).toHaveAttribute("aria-expanded", "true");
+  expect(screen.getByText("Input unavailable.")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Retry availability" })).toBeVisible();
+  expect(screen.getByRole("combobox", { name: "Codex connection" })).toBeVisible();
+  fireEvent.click(disclosure);
+  view.rerender(<SessionComposer session={{ ...SESSION, is_running: true }} control={route} />);
+  expect(screen.getByRole("button", { name: "Stop" })).toBeVisible();
+  expect(disclosure).toHaveAttribute("aria-expanded", "false");
+});
+
+it("keeps a control failure actionable beside a collapsed status and resets disclosure when switching sessions", async () => {
+  vi.mocked(getSessionInputStatus).mockResolvedValue({ ...AVAILABLE, available: false, message: "Recorded history." });
+  const route = { ...control("rpc"), error: "Live control disconnected" };
+  const view = render(<SessionComposer session={SESSION} control={route} />);
+  const disclosure = await screen.findByRole("button", { name: "Read-only session" });
+  expect(screen.getByText("Live control disconnected")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Retry control" }));
+  expect(route.refresh).toHaveBeenCalledOnce();
+  fireEvent.click(disclosure);
+  view.rerender(<SessionComposer session={OTHER_SESSION} />);
+  expect(await screen.findByRole("button", { name: "Read-only session" })).toHaveAttribute("aria-expanded", "false");
+  expect(screen.getByText("Recorded history.")).not.toBeVisible();
+});
+
+it("does not advertise a pending availability check while a failed connection blocks input", async () => {
+  const route = { ...control("rpc", true), status: null, changing: false, error: "Could not reach the session." };
+  render(<SessionComposer session={SESSION} control={route} />);
+  expect(screen.getByText("Could not reach the session.")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Retry control" })).toBeEnabled();
+  expect(screen.queryByText("Checking message availability…")).toBeNull();
+  expect(screen.queryByRole("textbox")).toBeNull();
+  expect(getSessionInputStatus).not.toHaveBeenCalled();
+});
+
 beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(getSessionInputStatus).mockResolvedValue(AVAILABLE);
@@ -201,7 +244,7 @@ describe("SessionComposer", () => {
     vi.mocked(getSessionInputStatus).mockResolvedValue({ ...RESUMABLE, available: false, message });
     render(<SessionComposer session={OWNED_PI} />);
     await screen.findByText(message);
-    expect(screen.getByText("Read-only session")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Read-only session" })).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Send" })).not.toBeInTheDocument();
     fireEvent.submit(screen.getByRole("form"));
@@ -236,7 +279,9 @@ describe("SessionComposer", () => {
     expect(screen.getByText("Checking message availability…")).toBeInTheDocument();
     await act(async () => availability.resolve({ ...AVAILABLE, available: false, message: "Open this session in Codex App first." }));
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
-    expect(screen.getByText("Open this session in Codex App first.")).toBeInTheDocument();
+    expect(screen.getByText("Open this session in Codex App first.")).not.toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Read-only session" }));
+    expect(screen.getByText("Open this session in Codex App first.")).toBeVisible();
     const retry = screen.getByRole("button", { name: "Retry availability" });
     retry.focus();
     fireEvent.click(retry);
@@ -247,11 +292,18 @@ describe("SessionComposer", () => {
   });
 
   it("handles an older or disconnected server without enabling sends", async () => {
-    vi.mocked(getSessionInputStatus).mockRejectedValue(new Error("Unknown command"));
+    vi.mocked(getSessionInputStatus).mockRejectedValueOnce(new Error("Unknown command"))
+      .mockResolvedValue({ ...AVAILABLE, available: false, message: "Only saved history is available." });
     render(<SessionComposer session={SESSION} />);
-    await screen.findByText("Message input is unavailable on this connection. Retry to check availability. Reason: Unknown command");
+    expect(await screen.findByText("Couldn’t check message availability")).toBeVisible();
+    expect(screen.getByText("Message input is unavailable on this connection. Retry to check availability. Reason: Unknown command")).toBeVisible();
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Retry availability" })).toBeEnabled();
+    const retry = screen.getByRole("button", { name: "Retry availability" });
+    retry.focus();
+    fireEvent.click(retry);
+    expect(await screen.findByRole("button", { name: "Read-only session" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Only saved history is available.")).toBeVisible();
+    expect(retry).toHaveFocus();
   });
 
   it("rejects blank drafts and submits multiline text exactly, clearing it only after acceptance", async () => {

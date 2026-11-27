@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -26,10 +27,11 @@ use crate::model::{
   ListSessionChildrenRequest, ListSessionChildrenResponse, ListSessionsRequest, ListSessionsResponse,
   LoadEventDetailRequest, LoadTrajectoryEventPageRequest, PageDirection, ProviderBody, ReasoningCardSummary,
   SessionActivityFilter, SessionIndexProgress, SessionLocator, SessionOrder, SessionSummary, SourceError,
-  ToolCardSummary, ToolOutputPreview, ToolOutputSection, TrajectoryCardSummary, TrajectoryEventPage, UsageCardSummary,
-  ViewerProvider, bounded_limit, decode_event_cursor, decode_event_key, decode_list_cursor, decode_session_key,
-  decode_trajectory_event_cursor, decode_trajectory_key, encode_event_cursor, encode_event_key, encode_list_cursor,
-  encode_session_key, encode_trajectory_event_cursor, encode_trajectory_key, parse_updated_at_ms, requested_offset,
+  ToolCardSummary, ToolOutputPreview, ToolOutputSection, TrajectoryCardSummary, TrajectoryEventPage,
+  TrajectoryToolPreview, UsageCardSummary, ViewerProvider, bounded_limit, decode_event_cursor, decode_event_key,
+  decode_list_cursor, decode_session_key, decode_trajectory_event_cursor, decode_trajectory_key, encode_event_cursor,
+  encode_event_key, encode_list_cursor, encode_session_key, encode_trajectory_event_cursor, encode_trajectory_key,
+  parse_updated_at_ms, requested_offset,
 };
 use crate::repository::activity::Activity;
 use crate::repository::{NativeRepository, SessionBodyIndexing, ViewerRepository};
@@ -37,6 +39,7 @@ use crate::repository::{NativeRepository, SessionBodyIndexing, ViewerRepository}
 mod agent_activity;
 mod compaction;
 mod event_filter;
+mod goal_projection;
 mod image_resources;
 mod input;
 mod managed_sessions;
@@ -72,6 +75,8 @@ const MAX_TOOL_CARD_STRING_CHARS: usize = 500;
 const MAX_TOOL_NAME_CHARS: usize = 120;
 const MAX_TOOL_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_TRAJECTORY_TIMESTAMP_CHARS: usize = 128;
+const MAX_TRAJECTORY_TOOL_PREVIEWS: usize = 3;
+const MAX_TRAJECTORY_TOOL_LABEL_CHARS: usize = 96;
 const MAX_TRAJECTORY_DETAIL_SOURCE_RECORDS: usize = 100;
 const MAX_TRAJECTORY_DETAIL_SOURCE_RECORD_BYTES: usize = 64 * 1024;
 const MAX_INDEXED_TIMESTAMP_CHARS: usize = 256;
@@ -686,7 +691,16 @@ struct Trajectory {
   /// `trajectory.v1.*` key. Unlike the run's final position, this remains
   /// stable while an active trajectory gains appended events.
   start_source_event_index: usize,
+  /// Recorded goal work can own an earlier goal marker and later usage. Keep
+  /// its clock inside the actual execution and the reply in the conversation.
+  goal: Option<GoalSegment>,
   entries: Vec<TimelineEntry>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GoalSegment {
+  source_floor: usize,
+  reply_index: Option<usize>,
 }
 
 impl ViewerService {
@@ -3106,7 +3120,8 @@ impl ViewerService {
       loaded
     };
     let models = model_projection::ModelProjection::new(&loaded.events, loaded.reference.model_baseline.as_ref());
-    let timeline = timeline_entries_with_models(&loaded.events, &models);
+    let goals = goal_projection::GoalProjection::new(&loaded.events);
+    let timeline = timeline_entries_with_models(&loaded.events, &models, &goals);
     let identity = self.window_identity(&locator, &loaded, false)?;
     let total_events = timeline.len();
     let requested = requested_offset(request.cursor.as_deref(), request.offset, decode_event_cursor)?;
@@ -3125,11 +3140,9 @@ impl ViewerService {
     let events = timeline[start..end]
       .iter()
       .map(|entry| {
-        identity.summary(models.summary(timeline_entry_event_summary(
+        identity.summary(models.summary(goals.summary(
           entry,
-          &loaded.events,
-          &delegation_targets,
-          &intermediate_usage,
+          timeline_entry_event_summary(entry, &loaded.events, &delegation_targets, &intermediate_usage),
         )))
       })
       .collect();
@@ -3475,9 +3488,7 @@ fn source_event_detail(event_key: String, event: &AgentEvent) -> Result<EventDet
   let content_revision = match event {
     AgentEvent::ToolCall(_) => image_resources::event_image_revision(event),
     AgentEvent::Message(message) if has_images => Some(image_resources::message_revision(message)),
-    AgentEvent::Message(message)
-      if message.role == Role::Assistant && message.text.chars().count() > MAX_MESSAGE_SUMMARY_CHARS =>
-    {
+    AgentEvent::Message(message) if message.text.chars().nth(MAX_MESSAGE_SUMMARY_CHARS).is_some() => {
       Some(image_resources::message_revision(message))
     }
     _ => None,
@@ -4683,25 +4694,28 @@ fn base_timeline_entries(events: &[AgentEvent]) -> Vec<TimelineEntry> {
 #[cfg(test)]
 fn timeline_entries(events: &[AgentEvent]) -> Vec<TimelineEntry> {
   let models = model_projection::ModelProjection::new(events, None);
-  timeline_entries_with_models(events, &models)
+  timeline_entries_with_models(events, &models, &goal_projection::GoalProjection::new(events))
 }
 
 fn timeline_entries_with_models(
   events: &[AgentEvent],
   models: &model_projection::ModelProjection,
+  goals: &goal_projection::GoalProjection,
 ) -> Vec<TimelineEntry> {
   let base_entries = base_timeline_entries(events);
   let mut entries = Vec::with_capacity(base_entries.len());
   let mut pending = Vec::new();
-  // Codex writes a replaceable session token snapshot after a reply. Keep all
-  // post-final records as ordinary rows until a new prompt or a non-final
-  // assistant message proves that another turn has begun.
+  // Goal executions keep their compaction and accounting inside work. Other
+  // turns retain independently visible compaction, final usage and reply timing.
   let mut after_final_reply = false;
-
-  for entry in base_entries {
+  let mut goal_turn: Option<&tokn_session_core::LifecycleEvent> = None;
+  let mut goal_floor = None;
+  let mut base_entries = base_entries.into_iter().peekable();
+  while let Some(entry) = base_entries.next() {
+    let record = trajectory_state::source_record(&entry, events);
     // Providers can write turn-start before the user prompt. Keep that marker
     // with the work below the prompt instead of making a separate empty turn.
-    if matches!(&entry, TimelineEntry::Event { source_event_index } if matches!(&events[*source_event_index], AgentEvent::Message(m) if m.role == Role::User))
+    if matches!(record, Some(AgentEvent::Message(m)) if m.role == Role::User)
       && !pending.is_empty()
       && pending.iter().all(|e| trajectory_state::is_turn_start(e, events))
     {
@@ -4709,13 +4723,52 @@ fn timeline_entries_with_models(
       entries.push(entry);
       continue;
     }
-    if trajectory_state::is_turn_start(&entry, events) && !pending.is_empty() {
-      flush_trajectory_candidate(&mut entries, &mut pending, events);
+    if trajectory_state::is_turn_start(&entry, events) {
+      let start = record.and_then(trajectory_state::codex_start);
+      if let (Some(start), Some(active)) = (start, goal_turn)
+        && start.turn_id == active.turn_id
+        && start.session_id == active.session_id
+      {
+        // A provider can repeat the same start observation after a checkpoint.
+        // It is still inspectable, but does not create another execution.
+        pending.push(entry);
+        continue;
+      }
+      let prelude = matches!((start, pending.as_slice()), (Some(turn), [row]) if trajectory_state::is_goal_prelude(row, events, turn));
+      if !prelude {
+        flush_trajectory_candidate(&mut entries, &mut pending, events, goal_floor, None);
+      }
+      let index = timeline_entry_start_source_event_index(&entry);
+      goal_turn = start.filter(|_| prelude || index.is_some_and(|i| goals.is_goal_work(i)));
+      goal_floor = goal_turn.and(index);
     }
+    let turn_record =
+      record.filter(|event| goal_turn.is_some_and(|turn| trajectory_state::belongs_to_turn(event, turn)));
     if matches!(&entry, TimelineEntry::Event { source_event_index } if models.is_change(*source_event_index))
-      || is_trajectory_boundary(&entry, events)
+      || (!matches!(turn_record, Some(AgentEvent::Compaction(_))) && is_trajectory_boundary(&entry, events))
     {
-      flush_trajectory_candidate(&mut entries, &mut pending, events);
+      let mut reply = None;
+      if let (Some(turn), Some(AgentEvent::Message(message))) = (goal_turn, turn_record)
+        && is_final_assistant_message(message.role, message.delivery)
+        && pending.iter().any(|row| is_substantive_work_entry(row, events))
+      {
+        reply = timeline_entry_start_source_event_index(&entry);
+        while let Some(usage) = base_entries.next_if(|row| {
+          matches!(trajectory_state::source_record(row, events), Some(u @ AgentEvent::Usage(_)) if trajectory_state::belongs_to_turn(u, turn))
+        }) {
+          pending.push(usage);
+        }
+      }
+      flush_trajectory_candidate(&mut entries, &mut pending, events, goal_floor, reply);
+      // A question or a model switch divides visible work without ending
+      // the native execution. Late tool results keep their own invocation
+      // keys, but cannot move the resumed segment before its separator.
+      if matches!(record, Some(AgentEvent::SessionStarted(_)))
+        || matches!(record, Some(AgentEvent::Message(m)) if m.role == Role::User || is_final_assistant_message(m.role, m.delivery))
+      {
+        goal_turn = None;
+      }
+      goal_floor = goal_turn.and_then(|_| timeline_entry_start_source_event_index(&entry).map(|index| index + 1));
       update_after_final_reply(&entry, events, &mut after_final_reply);
       entries.push(entry);
     } else if after_final_reply && !starts_trajectory_after_final_reply(&entry, events) {
@@ -4723,11 +4776,15 @@ fn timeline_entries_with_models(
       // turn, these rows must remain chronologically outside that trajectory.
       entries.push(entry);
     } else {
+      if matches!(turn_record, Some(AgentEvent::Lifecycle(l)) if matches!(l.scope, tokn_session_core::LifecycleScope::Turn) && l.phase == Phase::Finished)
+      {
+        goal_turn = None;
+      }
       after_final_reply = false;
       pending.push(entry);
     }
   }
-  flush_trajectory_candidate(&mut entries, &mut pending, events);
+  flush_trajectory_candidate(&mut entries, &mut pending, events, goal_floor, None);
   entries
 }
 
@@ -4768,6 +4825,8 @@ fn flush_trajectory_candidate(
   output: &mut Vec<TimelineEntry>,
   pending: &mut Vec<TimelineEntry>,
   events: &[AgentEvent],
+  goal_floor: Option<usize>,
+  reply_index: Option<usize>,
 ) {
   if pending.is_empty() {
     return;
@@ -4777,7 +4836,28 @@ fn flush_trajectory_candidate(
     return;
   }
 
-  let Some(start_source_event_index) = pending.iter().filter_map(timeline_entry_start_source_event_index).min() else {
+  let goal = goal_floor.map(|source_floor| GoalSegment {
+    source_floor,
+    reply_index,
+  });
+  let anchor = pending
+    .iter()
+    .filter_map(|entry| {
+      let index = timeline_entry_start_source_event_index(entry)?;
+      let Some(floor) = goal_floor.filter(|&floor| index < floor) else {
+        return Some(index);
+      };
+      // An operation invoked in a previous segment occupies its result's later
+      // timeline position. Keep its original key on the child only.
+      match entry {
+        TimelineEntry::ToolOperation { operation, .. } => {
+          operation.timeline_source_event_index().filter(|i| *i >= floor)
+        }
+        _ => None,
+      }
+    })
+    .min();
+  let Some(start_source_event_index) = anchor else {
     // Every base timeline row should originate from at least one source
     // record. If that invariant is violated, retaining flat rows is safer
     // than inventing a synthetic key with no detail target.
@@ -4787,6 +4867,7 @@ fn flush_trajectory_candidate(
   output.push(TimelineEntry::Trajectory {
     trajectory: Trajectory {
       start_source_event_index,
+      goal,
       entries: std::mem::take(pending),
     },
   });
@@ -4870,7 +4951,7 @@ fn trajectory_for_start_with_models(
   start_source_event_index: usize,
   models: &model_projection::ModelProjection,
 ) -> Option<Trajectory> {
-  timeline_entries_with_models(events, models)
+  timeline_entries_with_models(events, models, &goal_projection::GoalProjection::new(events))
     .into_iter()
     .find_map(|entry| match entry {
       TimelineEntry::Trajectory { trajectory } if trajectory.start_source_event_index == start_source_event_index => {
@@ -4928,6 +5009,7 @@ fn trajectory_event_summary(trajectory: &Trajectory, events: &[AgentEvent]) -> E
   let summary = trajectory_summary(&card);
 
   EventSummary {
+    goal: None,
     model_change: None,
     response_metadata: None,
     images: None,
@@ -5008,8 +5090,6 @@ fn trajectory_card_summary(trajectory: &Trajectory, events: &[AgentEvent]) -> Tr
   let mut usage_count = 0;
   let mut error_count = 0;
   let mut unknown_count = 0;
-  let mut first_timestamp = None;
-  let mut last_timestamp = None;
 
   for entry in &trajectory.entries {
     match entry {
@@ -5047,36 +5127,62 @@ fn trajectory_card_summary(trajectory: &Trajectory, events: &[AgentEvent]) -> Tr
       }
       TimelineEntry::Trajectory { .. } => {}
     }
-
-    if let Some((timestamp, timestamp_ms)) = timeline_entry_parseable_timestamp(entry, events) {
-      if first_timestamp.is_none() {
-        first_timestamp = Some((timestamp.clone(), timestamp_ms));
-      }
-      last_timestamp = Some((timestamp, timestamp_ms));
-    }
   }
 
+  // Finished tools occupy the result's timeline position. Use their original
+  // invocation and result positions to time the group, even when calls overlap.
+  let indices = trajectory_source_event_indices(trajectory);
+  let timestamp_with_ms = |timestamp| Some((timestamp, parse_updated_at_ms(Some(timestamp))?));
+  let mut timestamps = indices
+    .iter()
+    .filter(|&&index| {
+      trajectory
+        .goal
+        .is_none_or(|goal| index >= goal.source_floor && goal.reply_index.is_none_or(|reply| index < reply))
+    })
+    .filter_map(|&index| timestamp_for_event(&events[index]))
+    .filter_map(timestamp_with_ms);
+  let first_timestamp = timestamps.next();
+  let mut last_timestamp = timestamps.next_back().or(first_timestamp);
   let status = trajectory_state::status(trajectory, events);
-  if status == "complete"
+  if let Some(GoalSegment {
+    source_floor,
+    reply_index: Some(reply),
+  }) = trajectory.goal
+  {
+    // Goal work ends at the last observed pre-reply activity. Later token
+    // reports remain inspectable and do not add time to the execution.
+    let goal_work_end = indices
+      .iter()
+      .rev()
+      .copied()
+      .filter(|&i| i >= source_floor && i < reply)
+      .filter_map(|i| trajectory_state::work_timestamp(&events[i]))
+      .find_map(timestamp_with_ms);
+    let reply_time = timestamp_for_event(&events[reply]).and_then(timestamp_with_ms);
+    last_timestamp = goal_work_end.or(reply_time).or(last_timestamp);
+  } else if status == "complete"
     && let Some(timestamp) = trajectory_state::completion_timestamp(trajectory, events)
     && let Some(time) = parse_updated_at_ms(Some(timestamp))
     && last_timestamp.as_ref().is_some_and(|(_, last)| time >= *last)
   {
-    last_timestamp =
-      normalize_one_line_text(timestamp, MAX_TRAJECTORY_TIMESTAMP_CHARS).map(|timestamp| (timestamp, time));
+    last_timestamp = Some((timestamp, time));
   }
-  let started_at = first_timestamp.as_ref().map(|(timestamp, _)| timestamp.clone());
-  let ended_at = last_timestamp.as_ref().map(|(timestamp, _)| timestamp.clone());
+  let started_at =
+    first_timestamp.and_then(|(timestamp, _)| normalize_one_line_text(timestamp, MAX_TRAJECTORY_TIMESTAMP_CHARS));
+  let ended_at =
+    last_timestamp.and_then(|(timestamp, _)| normalize_one_line_text(timestamp, MAX_TRAJECTORY_TIMESTAMP_CHARS));
   let duration_ms = first_timestamp
     .zip(last_timestamp)
-    .and_then(|((_, start), (_, end))| (end >= start).then_some((end - start).to_string()));
+    .and_then(|((_, start), (_, end))| (end >= start).then(|| end.abs_diff(start).to_string()));
 
   TrajectoryCardSummary {
     status,
     event_count: trajectory.entries.len(),
-    source_event_count: trajectory_source_event_indices(trajectory).len(),
+    source_event_count: indices.len(),
     reasoning_count,
     tool_count,
+    tool_previews: trajectory_tool_previews(trajectory),
     agent_activity_count,
     lifecycle_count,
     usage_count,
@@ -5088,21 +5194,27 @@ fn trajectory_card_summary(trajectory: &Trajectory, events: &[AgentEvent]) -> Tr
   }
 }
 
-fn timeline_entry_parseable_timestamp(entry: &TimelineEntry, events: &[AgentEvent]) -> Option<(String, i64)> {
-  let timestamp = match entry {
-    TimelineEntry::Event { source_event_index } => events.get(*source_event_index).and_then(timestamp_for_event),
-    TimelineEntry::ToolOperation { operation, .. } => {
-      if operation.is_finished() {
-        operation.updated_at.as_deref().or(operation.started_at.as_deref())
-      } else {
-        operation.started_at.as_deref().or(operation.updated_at.as_deref())
-      }
-    }
-    TimelineEntry::Trajectory { .. } => None,
-  }?;
-  let timestamp_ms = parse_updated_at_ms(Some(timestamp))?;
-  let timestamp = normalize_one_line_text(timestamp, MAX_TRAJECTORY_TIMESTAMP_CHARS)?;
-  Some((timestamp, timestamp_ms))
+fn trajectory_tool_previews(trajectory: &Trajectory) -> Vec<TrajectoryToolPreview> {
+  let mut previews: Vec<_> = trajectory
+    .entries
+    .iter()
+    .rev()
+    .filter_map(|entry| {
+      let TimelineEntry::ToolOperation { operation, .. } = entry else {
+        return None;
+      };
+      let label = tool_operation_summary(operation, present_string(operation.tool_name.as_deref()));
+      Some(TrajectoryToolPreview {
+        kind: tool_kind_label(operation.tool_kind),
+        label: normalize_one_line_text(&label, MAX_TRAJECTORY_TOOL_LABEL_CHARS)
+          .unwrap_or_else(|| "Tool operation".to_owned()),
+        status: tool_operation_status_label(operation),
+      })
+    })
+    .take(MAX_TRAJECTORY_TOOL_PREVIEWS)
+    .collect();
+  previews.reverse();
+  previews
 }
 
 fn trajectory_source_event_indices(trajectory: &Trajectory) -> Vec<usize> {
@@ -5213,9 +5325,7 @@ fn event_summary_with_delegation_targets(
     }
   } else if summary_truncated {
     match event {
-      AgentEvent::Message(message) if !hidden && message.role == Role::Assistant => {
-        Some(image_resources::message_revision(message))
-      }
+      AgentEvent::Message(message) if !hidden => Some(image_resources::message_revision(message)),
       _ => None,
     }
   } else {
@@ -5230,6 +5340,8 @@ fn event_summary_with_delegation_targets(
     })
     .flatten();
   EventSummary {
+    goal: matches!(event, AgentEvent::Message(message) if !hidden && message.is_user_goal())
+      .then_some(crate::model::GoalPresentation::Prompt),
     model_change: None,
     response_metadata: match event {
       AgentEvent::Message(message)
@@ -5291,9 +5403,12 @@ fn tool_operation_event_summary(source_event_index: usize, operation: &ToolOpera
       .to_string(),
     120,
   );
-  let (summary, summary_truncated) =
-    truncate_with_flag(tool_operation_summary(operation, &tool), MAX_TECHNICAL_SUMMARY_CHARS);
+  let (summary, summary_truncated) = truncate_with_flag(
+    tool_operation_summary(operation, tool.tool_name.as_deref()).into_owned(),
+    MAX_TECHNICAL_SUMMARY_CHARS,
+  );
   EventSummary {
+    goal: None,
     model_change: None,
     response_metadata: None,
     images: Some(image_resources::operation_images(operation)),
@@ -5333,9 +5448,9 @@ fn tool_operation_event_summary(source_event_index: usize, operation: &ToolOpera
   }
 }
 
-fn tool_operation_summary(operation: &ToolOperation, card: &ToolCardSummary) -> String {
+fn tool_operation_summary<'a>(operation: &'a ToolOperation, fallback_name: Option<&'a str>) -> Cow<'a, str> {
   match operation.summary.as_ref() {
-    Some(ToolSummary::Shell { command, .. }) => command.clone().unwrap_or_else(|| "Shell operation".to_string()),
+    Some(ToolSummary::Shell { command, .. }) => command.as_deref().unwrap_or("Shell operation").into(),
     Some(ToolSummary::Terminal {
       session_id,
       action,
@@ -5348,24 +5463,26 @@ fn tool_operation_summary(operation: &ToolOperation, card: &ToolCardSummary) -> 
         wait_ms
           .map(|value| format!(" for up to {value} ms"))
           .unwrap_or_default(),
-      ),
+      )
+      .into(),
       Some(TerminalAction::Send) => format!(
         "Send {} characters to terminal {}",
         chars_len.unwrap_or(0),
         session_id.as_deref().unwrap_or("session"),
-      ),
-      None => "Terminal operation".to_string(),
+      )
+      .into(),
+      None => "Terminal operation".into(),
     },
     Some(ToolSummary::CodeExecution { language }) => {
-      format!("{} code execution", language.as_deref().unwrap_or("Unknown"))
+      format!("{} code execution", language.as_deref().unwrap_or("Unknown")).into()
     }
-    Some(ToolSummary::FileRead { path }) => path.clone().unwrap_or_else(|| "Read file".to_string()),
-    Some(ToolSummary::FileWrite { path, .. }) => path.clone().unwrap_or_else(|| "Write file".to_string()),
-    Some(ToolSummary::FileEdit { path, .. }) => path.clone().unwrap_or_else(|| "Edit file".to_string()),
-    Some(ToolSummary::Search { query }) => query.clone().unwrap_or_else(|| "Search".to_string()),
-    Some(ToolSummary::Web { url }) => url.clone().unwrap_or_else(|| "Web request".to_string()),
-    Some(ToolSummary::Task { title }) => title.clone().unwrap_or_else(|| "Task".to_string()),
-    None => card.tool_name.clone().unwrap_or_else(|| "Tool operation".to_string()),
+    Some(ToolSummary::FileRead { path }) => path.as_deref().unwrap_or("Read file").into(),
+    Some(ToolSummary::FileWrite { path, .. }) => path.as_deref().unwrap_or("Write file").into(),
+    Some(ToolSummary::FileEdit { path, .. }) => path.as_deref().unwrap_or("Edit file").into(),
+    Some(ToolSummary::Search { query }) => query.as_deref().unwrap_or("Search").into(),
+    Some(ToolSummary::Web { url }) => url.as_deref().unwrap_or("Web request").into(),
+    Some(ToolSummary::Task { title }) => title.as_deref().unwrap_or("Task").into(),
+    None => fallback_name.unwrap_or("Tool operation").into(),
   }
 }
 
@@ -5491,7 +5608,7 @@ fn tool_operation_card_summary(operation: &ToolOperation) -> ToolCardSummary {
     kind: tool_kind_label(operation.tool_kind).to_string(),
     tool_name: present_string(operation.tool_name.as_deref()).map(str::to_string),
     tool_call_id: present_string(operation.tool_call_id.as_deref()).map(str::to_string),
-    status: tool_operation_status_label(operation.status).to_string(),
+    status: tool_operation_status_label(operation).to_string(),
     provider_tool_name: present_string(operation.provider_tool_name.as_deref()).map(str::to_string),
     language: None,
     command: None,
@@ -5557,8 +5674,12 @@ fn terminal_action_label(action: TerminalAction) -> &'static str {
   }
 }
 
-fn tool_operation_status_label(status: ToolOperationStatus) -> &'static str {
-  match status {
+fn tool_operation_status_label(operation: &ToolOperation) -> &'static str {
+  // A result may report successful tool delivery while its shell command failed.
+  if matches!(&operation.summary, Some(ToolSummary::Shell { exit_code: Some(code), .. }) if *code != 0) {
+    return "failed";
+  }
+  match operation.status {
     ToolOperationStatus::Pending => "pending",
     ToolOperationStatus::Running => "running",
     ToolOperationStatus::Completed => "completed",
@@ -6169,9 +6290,11 @@ fn truncate_with_flag(value: String, max_chars: usize) -> (String, bool) {
 mod tests {
   mod activity_backfill;
   mod background_performance;
+  mod codex_work;
   mod communications;
   mod error_inspection;
   mod event_filter;
+  mod goal_projection;
   mod history_cache;
   mod latest_message;
   mod live_session_list;
@@ -6179,6 +6302,7 @@ mod tests {
   mod response_metadata;
   mod running_notifications;
   mod targeted_index;
+  mod trajectory_tools;
   mod usage_filter;
   use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
   use std::path::PathBuf;
@@ -11947,6 +12071,19 @@ mod tests {
       .unwrap();
     assert_eq!(detail.event["text"], full_text);
     assert_eq!(detail.content_revision, page.events[0].content_revision);
+  }
+
+  #[test]
+  fn truncated_user_prompt_and_detail_identify_the_same_complete_text() {
+    let text = "x".repeat(MAX_MESSAGE_SUMMARY_CHARS + 20);
+    let prompt = message_event_with_role(&text, Role::User, MessageDelivery::Unspecified);
+    let summary = event_summary(std::slice::from_ref(&prompt), 0, &prompt);
+    let detail = source_event_detail(summary.event_key.clone(), &prompt).unwrap();
+
+    assert!(summary.summary_truncated);
+    assert_eq!(detail.event["text"], text);
+    assert_eq!(summary.content_revision, Some(format!("{:x}", Sha256::digest(text))));
+    assert_eq!(detail.content_revision, summary.content_revision);
   }
 
   #[test]

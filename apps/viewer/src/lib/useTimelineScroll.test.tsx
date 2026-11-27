@@ -1,11 +1,13 @@
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useTimelineScroll } from "./useTimelineScroll";
+import { readReadingPosition } from "./readingPosition";
 
 interface TimelineRow {
   key: string;
   top: number;
   height: number;
+  hidden?: boolean;
   children?: TimelineRow[];
 }
 
@@ -15,6 +17,7 @@ class TimelineLayout {
   height = 1000;
   viewport_height = 200;
   viewport_top = 100;
+  row_measurements = 0;
   private scroll_top = 0;
   rows: TimelineRow[] = Array.from({ length: 5 }, (_, index) => ({
     key: `row-${index}`,
@@ -56,6 +59,7 @@ class TimelineLayout {
 
   attachRow(element: HTMLDivElement, key: string) {
     element.getBoundingClientRect = () => {
+      this.row_measurements++;
       const row = this.row(key);
       return new DOMRect(0, this.viewport_top + row.top - this.top, 500, row.height);
     };
@@ -119,6 +123,7 @@ function TimelineHarness({
         data-reading-slot={row.key}
         data-reading-type="message"
         data-reading-timestamp=""
+        hidden={row.hidden}
         ref={(element) => { if (element) layout.attachRow(element, row.key); }}
       >
         {row.children?.map(renderRow)}
@@ -190,6 +195,31 @@ afterEach(() => {
 });
 
 describe("useTimelineScroll", () => {
+  it("bounds row measurements and coalesces bookmark writes while scrolling a long history", () => {
+    const layout = new TimelineLayout();
+    layout.rows = Array.from({ length: 1200 }, (_, i) => ({ key: `row-${i}`, top: i * 80, height: 80 }));
+    layout.height = layout.rows.length * 80;
+    const timeline = mountTimeline(layout, { last_event: "end" });
+    timeline.readAt(40_000);
+    const writes = vi.spyOn(Storage.prototype, "setItem");
+    layout.row_measurements = 0;
+    try {
+      for (let i = 1; i <= 20; i++) {
+        timeline.viewport.scrollTop = 40_000 + i;
+        fireEvent.scroll(timeline.viewport);
+      }
+      const readingLine = { slot_key: "row-500", top: -20 };
+      expect(readReadingPosition("session-one")?.anchors[0]).toMatchObject(readingLine);
+      expect.soft(layout.row_measurements).toBeLessThan(400);
+      expect.soft(writes).not.toHaveBeenCalled();
+      fireEvent(window, new Event("pagehide"));
+      expect(writes).toHaveBeenCalledTimes(1);
+      expect(Object.values(JSON.parse(writes.mock.calls[0][1]))[0]).toMatchObject({
+        anchors: [readingLine, { slot_key: "row-501" }, { slot_key: "row-502" }],
+      });
+    } finally { writes.mockRestore(); }
+  });
+
   it("waits for the initial page, then starts each session at the bottom", () => {
     const timeline = mountTimeline(undefined, { initial_page_loaded: false });
     expect(timeline.viewport.scrollTop).toBe(0);
@@ -349,6 +379,26 @@ describe("useTimelineScroll", () => {
 
     expect(timeline.viewport.scrollTop).toBe(770);
     expect(layout.row("visible-message").top - timeline.viewport.scrollTop).toBe(-50);
+  });
+
+  it("bounds layout reads inside a long turn and falls back when its anchored child is hidden", () => {
+    const layout = new TimelineLayout();
+    layout.height = 20_000;
+    const children = Array.from({ length: 500 }, (_, i) => ({ key: `child-${i}`, top: i * 40, height: 40, hidden: false }));
+    layout.rows = [{ key: "turn", top: 0, height: layout.height, children }];
+    const timeline = mountTimeline(layout);
+    timeline.readAt(7900);
+    layout.row_measurements = 0;
+    timeline.readAt(8045);
+    expect(layout.row_measurements).toBeLessThan(25);
+
+    // The primary anchor stays mounted behind a collapsed disclosure.
+    children[201].hidden = true;
+    for (const child of children.slice(202)) child.top -= 40;
+    layout.height -= 40;
+    layout.rows[0].height = layout.height;
+    timeline.commit();
+    expect(timeline.viewport.scrollTop).toBe(8005);
   });
 
   it("anchors the next visible child when the reading line is in a gap inside a trajectory", () => {

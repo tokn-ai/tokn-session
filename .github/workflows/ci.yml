@@ -109,6 +109,21 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm run check
 
+      - name: Exercise the session reader in Firefox
+        working-directory: apps/viewer
+        run: |
+          cargo build --locked -p tokn-viewer-api
+          pnpm exec playwright install --with-deps firefox
+          pnpm run test:browser
+
+      - name: Save mock session screenshots
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: session-reader-previews
+          path: apps/viewer/test-results/**/*.png
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Checkout pinned Apell SDK
         uses: actions/checkout@v4
         with:

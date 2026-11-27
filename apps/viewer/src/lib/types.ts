@@ -807,6 +807,8 @@ export interface TrajectoryCardSummary {
   status?: "working" | "complete" | "unknown";
   event_count: number;
   tool_count: number;
+  /** The most recent operations in recorded order, included with the folded turn. */
+  tool_previews?: { kind: ToolKind | string; label: string; status: ToolOperationStatus | string }[];
   reasoning_count: number;
   agent_activity_count: number;
   error_count: number;
@@ -864,6 +866,8 @@ export interface UploadImageChunkResponse {
 export interface ReleaseImageUploadRequest { target: ImageUploadTarget; upload_id: string }
 
 export interface EventSummary {
+  /** Recorded goal associations for the prompt, its work, and its final reply. */
+  goal?: { kind: "prompt" } | { kind: "work" } | { kind: "completed"; duration_ms?: string | null };
   model_change?: { previous: ModelIdentity; current: ModelIdentity };
   response_metadata?: {
     model?: { model: Pick<ModelIdentity, "model_provider" | "model_id">; origin: "request" | "response" };
@@ -872,6 +876,8 @@ export interface EventSummary {
   images?: MessageImageSummary[];
   question_selections?: QuestionSelectionSummary[];
   child_keys?: string[];
+  /** Activity group containing one visible operation and otherwise only routine records. */
+  single_tool_key?: string;
   delivery?: "commentary" | "final" | "unspecified";
   event_key: string;
   /** Stable source slot, used only to restore disclosure after a generation reset. */
@@ -1007,7 +1013,7 @@ export interface LoadEventDetailRequest {
 export interface EventDetail {
   event_key: string;
   event: JsonValue;
-  /** Digest of the full assistant message text, when supplied by the backend. */
+  /** Content revision shared with the message preview or bound image resources. */
   content_revision?: string | null;
   native: JsonValue | null;
   is_hidden: boolean;

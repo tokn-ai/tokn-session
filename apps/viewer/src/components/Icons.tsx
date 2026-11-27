@@ -26,6 +26,19 @@ export function SearchIcon(props: IconProps) {
   );
 }
 
+export function GoalIcon(props: IconProps) {
+  return <IconBase {...props} stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7">
+    <path d="M19.8 10.1a8.2 8.2 0 1 1-6-6M16 11a4.2 4.2 0 1 1-3-3M12 12l5-5" />
+    <path d="m16 5 3-3v3h3l-3 3h-3z" />
+  </IconBase>;
+}
+
+export function CompletedGoalIcon(props: IconProps) {
+  return <IconBase {...props} stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7">
+    <circle cx="12" cy="12" r="9" /><path d="m8 12 2.6 2.6L16 9" />
+  </IconBase>;
+}
+
 export function PanelIcon(props: IconProps) {
   return (
     <IconBase {...props}>
@@ -89,6 +102,22 @@ export function ToolIcon(props: IconProps) {
   return (
     <IconBase {...props}>
       <path d="M14.7 6.2a4.5 4.5 0 0 0-5.8 5.9L3.5 17.5a2.1 2.1 0 0 0 3 3l5.4-5.4a4.5 4.5 0 0 0 5.9-5.8l-2.7 2.6-3-3 2.6-2.7Z" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.6" />
+    </IconBase>
+  );
+}
+
+export function EditFileIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="m15 5 4 4M4.5 19.5l4.6-1 11-11a2.8 2.8 0 0 0-4-4l-11 11-1 5Z" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </IconBase>
+  );
+}
+
+export function ReadFileIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M13.5 3h-7a1.5 1.5 0 0 0-1.5 1.5v15A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5v-11L13.5 3Zm0 .5v5H19M8.5 13h7M8.5 16.5h5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
     </IconBase>
   );
 }
