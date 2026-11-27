@@ -283,6 +283,18 @@ impl Inner {
           "Codex returned an unexpected thread identity",
         ));
       }
+      // Cold path-based resume can ignore the requested thread ID. The native
+      // response must prove both the identity above and the exact source before
+      // this adapter records the thread as bound.
+      if method == "thread/resume"
+        && params["path"]
+          .as_str()
+          .is_some_and(|path| parsed.thread.path.as_deref() != Some(path))
+      {
+        return Err(InteractionError::uncertain(
+          "Codex returned a different rollout path for the resumed thread",
+        ));
+      }
       let mut thread = value["thread"].clone();
       for key in ["model", "modelProvider"] {
         if let Some(model) = value.get(key) {

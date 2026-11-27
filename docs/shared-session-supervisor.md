@@ -56,6 +56,12 @@ turn; it does not mean stopping the runtime or clearing its queued inbox.
 For a healthy bound Codex RPC session, the composer follows live execution
 state to show Stop as soon as the runtime starts a turn.
 
+If a locally managed Codex server reports that an exact thread ID is absent
+from its store, Tokn can resume the selected plain legacy rollout after
+rechecking its header. Codex must confirm both the thread ID and the rollout
+path before Tokn binds the session. Paginated history requires its original
+Codex home. An archived thread must be unarchived in Codex first.
+
 ## State and ownership
 
 Native protocols, adapter workflows, shared orchestration and host composition

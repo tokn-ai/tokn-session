@@ -27,6 +27,10 @@ impl Peer {
 }
 
 async fn attach() -> (CodexAdapter, Peer) {
+  peer_with_ownership(Ownership::Attached).await
+}
+
+async fn peer_with_ownership(ownership: Ownership) -> (CodexAdapter, Peer) {
   let (adapter, native) = tokio::io::duplex(1024 * 1024);
   let (reader, writer) = tokio::io::split(adapter);
   let (native_reader, native_writer) = tokio::io::split(native);
@@ -34,8 +38,15 @@ async fn attach() -> (CodexAdapter, Peer) {
     reader: framing::RpcReader::new(native_reader),
     writer: native_writer,
   };
-  let initialize =
-    tokio::spawn(async move { CodexAdapter::attach(EndpointOptions::new("test-codex"), reader, writer).await });
+  let initialize = tokio::spawn(async move {
+    let options = EndpointOptions::new("test-codex");
+    if ownership == Ownership::Attached {
+      CodexAdapter::attach(options, reader, writer).await
+    } else {
+      let (transport, incoming) = Transport::stdio(reader, writer, None, options.request_timeout);
+      CodexAdapter::initialize(options, ownership, transport, incoming, None).await
+    }
+  });
   let request = peer.next().await;
   assert_eq!(request["method"], "initialize");
   assert_eq!(request["params"]["clientInfo"]["name"], "tokn_session");
@@ -48,7 +59,7 @@ async fn attach() -> (CodexAdapter, Peer) {
   assert!(initialized.get("id").is_none());
   let adapter = initialize.await.unwrap().unwrap();
   assert_eq!(adapter.descriptor().provider, Provider::Codex);
-  assert_eq!(adapter.descriptor().ownership, Ownership::Attached);
+  assert_eq!(adapter.descriptor().ownership, ownership);
   (adapter, peer)
 }
 
@@ -58,6 +69,7 @@ async fn attach_bound() -> (CodexAdapter, Peer) {
   let resume = tokio::spawn(async move { copy.resume_thread("thread-one").await });
   let request = peer.next().await;
   assert_eq!(request["method"], "thread/resume");
+  assert_eq!(request["params"], json!({"threadId":"thread-one","excludeTurns":true}));
   peer
     .answer(
       &request,
@@ -66,6 +78,123 @@ async fn attach_bound() -> (CodexAdapter, Peer) {
     .await;
   assert_eq!(resume.await.unwrap().unwrap().session_id.as_deref(), Some("thread-one"));
   (adapter, peer)
+}
+
+#[test]
+fn classifies_only_known_resume_rejections_for_the_requested_id() {
+  use ThreadResumeFailure::{Archived, Other, RolloutNotFound};
+  let id = "thread-one";
+  let not_found = "Codex RPC -32600: no rollout found for thread id thread-one";
+  let archived =
+    "Codex RPC -32600: session thread-one is archived. Run `codex unarchive thread-one` to unarchive it first.";
+  for (kind, message, expected) in [
+    (ErrorKind::Rejected, not_found, RolloutNotFound),
+    (ErrorKind::Rejected, archived, Archived),
+    (ErrorKind::Unavailable, not_found, Other),
+    (
+      ErrorKind::Rejected,
+      "Codex RPC -32602: no rollout found for thread id thread-one",
+      Other,
+    ),
+    (
+      ErrorKind::Rejected,
+      "Codex RPC -32600: no rollout found for thread id thread-two",
+      Other,
+    ),
+    (
+      ErrorKind::Rejected,
+      "Codex RPC -32600: no rollout found for thread id thread-one (other context)",
+      Other,
+    ),
+    (
+      ErrorKind::Rejected,
+      "Codex RPC -32600: session thread-one is archived. Run `codex unarchive thread-two` to unarchive it first.",
+      Other,
+    ),
+  ] {
+    assert_eq!(
+      classify_thread_resume_failure(id, &InteractionError::new(kind, message)),
+      expected
+    );
+  }
+}
+
+#[tokio::test]
+async fn explicit_rollout_resume_checks_id_and_path_before_binding() {
+  let directory = tempfile::tempdir().unwrap();
+  let rollout = directory.path().join("fixture rollout.jsonl");
+  let other = directory.path().join("other.jsonl");
+  for (reply_id, reply_path, accepted) in [
+    ("thread-one", Some(&rollout), true),
+    ("thread-one", Some(&other), false),
+    ("thread-one", None, false),
+    ("thread-two", Some(&rollout), false),
+  ] {
+    let (adapter, mut peer) = peer_with_ownership(Ownership::Managed).await;
+    let copy = adapter.clone();
+    let path = rollout.clone();
+    let resume = tokio::spawn(async move { copy.resume_thread_from_rollout("thread-one", &path).await });
+    let request = peer.next().await;
+    assert_eq!(request["method"], "thread/resume");
+    assert_eq!(
+      request["params"],
+      json!({"threadId":"thread-one","path":rollout,"excludeTurns":true})
+    );
+    let mut native_thread = thread(reply_id, "idle");
+    if let Some(path) = reply_path {
+      native_thread["path"] = json!(path);
+    }
+    peer.answer(&request, json!({"thread":native_thread})).await;
+    let resumed = resume.await.unwrap();
+    if accepted {
+      assert_eq!(resumed.unwrap().session_id.as_deref(), Some("thread-one"));
+    } else {
+      assert_eq!(resumed.unwrap_err().kind, ErrorKind::Uncertain);
+    }
+    {
+      let snapshot = adapter.inner.snapshot.lock().unwrap();
+      assert_eq!(snapshot.bound.contains("thread-one"), accepted);
+      assert!(!snapshot.bound.contains("thread-two"));
+      assert_eq!(snapshot.sessions.contains_key("thread-one"), accepted);
+      assert!(!snapshot.sessions.contains_key("thread-two"));
+    }
+    adapter.close().await.unwrap();
+  }
+}
+
+#[tokio::test]
+async fn explicit_rollout_resume_refuses_attached_and_invalid_paths_without_writing() {
+  let directory = tempfile::tempdir().unwrap();
+  let (attached, mut peer) = attach().await;
+  let error = attached
+    .resume_thread_from_rollout("thread-one", &directory.path().join("fixture.jsonl"))
+    .await
+    .unwrap_err();
+  assert_eq!(error.kind, ErrorKind::Unsupported);
+  assert!(
+    tokio::time::timeout(Duration::from_millis(30), peer.reader.read_frame())
+      .await
+      .is_err()
+  );
+  attached.close().await.unwrap();
+
+  let (managed, mut peer) = peer_with_ownership(Ownership::Managed).await;
+  for invalid in [
+    PathBuf::from("relative.jsonl"),
+    directory.path().join("fixture.jsonl.zst"),
+  ] {
+    let error = managed
+      .resume_thread_from_rollout("thread-one", &invalid)
+      .await
+      .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::InvalidRequest);
+  }
+  assert!(
+    tokio::time::timeout(Duration::from_millis(30), peer.reader.read_frame())
+      .await
+      .is_err()
+  );
+  managed.close().await.unwrap();
 }
 
 pub(super) fn request(adapter: &CodexAdapter, id: &str, session: Option<&str>, command: Command) -> InteractionRequest {

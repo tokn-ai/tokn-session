@@ -179,6 +179,10 @@ activate sessions and transport failures never cause fallback or prompt replay.
 create/append, including the ChatGPT-bundled CLI on macOS. The CLI builds the
 resolver without the app-server transport and sends each native headless
 prompt through its own stdin pipe.
+A managed Codex runtime can open a verified plain legacy rollout after a
+definitive missing-thread response. Paginated history needs its original Codex
+home. Archived and missing histories have separate error messages. Attached
+runtimes receive only the native ID.
 Cross-process provider/native-ID leases coordinate RPC, owned Pi, and explicit
 Desktop control independently of runtime profile leases. Pi retains its existing
 driver; arbitrary Pi history adoption and remote-only RPC history remain

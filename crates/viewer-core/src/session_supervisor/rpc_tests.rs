@@ -120,6 +120,73 @@ async fn codex_default_rpc_inspection_does_not_connect_and_first_send_delivers_o
 }
 
 #[tokio::test]
+async fn attached_codex_resume_rejections_keep_native_details_and_history_path_private() {
+  const PRIVATE_PATH: &str = "/fixture/private/native-rollout.jsonl";
+  for kind in ["archived", "missing", "unrecognized"] {
+    let peer = CodexPeer::start(false).await;
+    let directory = tempfile::tempdir().unwrap();
+    let session = target(directory.path());
+    let id = &session.input.session_id;
+    let header = serde_json::json!({
+      "timestamp":"2026-01-01T00:00:00Z",
+      "type":"session_meta",
+      "payload":{"id":id,"cwd":directory.path()}
+    });
+    std::fs::write(&session.input.session_file, format!("{header}\n")).unwrap();
+    let native_message = match kind {
+      "archived" => format!("session {id} is archived. Run `codex unarchive {id}` to unarchive it first."),
+      "missing" => format!("no rollout found for thread id {id}"),
+      _ => format!("session {id} is archived. Private native detail: {PRIVATE_PATH}"),
+    };
+    peer.reject_resumes(serde_json::json!({
+      "code": -32600,
+      "message": native_message,
+      "data": {"path":PRIVATE_PATH}
+    }));
+
+    let supervisor =
+      SessionSupervisor::new(Some(directory.path().to_path_buf()), InteractionService::default()).unwrap();
+    configure(&supervisor, peer.endpoint.clone());
+    let broker = input::InputBroker::default();
+    let request = request();
+    let rejected = send(&broker, &supervisor, directory.path(), request.clone()).await;
+    assert_eq!(
+      rejected.status,
+      InputDeliveryStatus::NotSent,
+      "{kind}: {}",
+      rejected.message
+    );
+    for &expected in match kind {
+      "archived" => &["archived", "Unarchive"][..],
+      "missing" => &["could not find", "runtime"][..],
+      _ => &["rejected", "runtime"][..],
+    } {
+      assert!(rejected.message.contains(expected), "{kind}: {}", rejected.message);
+    }
+    assert!(!rejected.message.contains(PRIVATE_PATH));
+    assert!(!rejected.message.contains(&native_message));
+    assert!(!rejected.message.contains(id));
+    let repeat = send(&broker, &supervisor, directory.path(), request).await;
+    assert_eq!(repeat.status, InputDeliveryStatus::NotSent);
+    assert_eq!(repeat.message, rejected.message);
+
+    let resumes = peer.resume_parameters();
+    assert_eq!(resumes.len(), 1, "{kind}: repeated or attempted alternate resume");
+    assert_eq!(resumes[0]["threadId"], id.as_str());
+    assert!(resumes[0].get("path").is_none(), "local rollout sent to attached Codex");
+    assert!(
+      !peer
+        .methods()
+        .iter()
+        .any(|method| method.starts_with("turn/") || method == "thread/start"),
+      "{kind}: rejected bind started work"
+    );
+    assert!(supervisor.runtimes.binding(&session.session_key).is_none());
+    supervisor.shutdown().await;
+  }
+}
+
+#[tokio::test]
 async fn explicit_delivery_rejects_other_providers_before_activation() {
   let directory = tempfile::tempdir().unwrap();
   let supervisor = SessionSupervisor::new(Some(directory.path().to_path_buf()), InteractionService::default()).unwrap();

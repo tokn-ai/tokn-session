@@ -7,6 +7,8 @@ use std::{
   time::Duration,
 };
 use tokio::{sync::watch, task::JoinSet};
+#[cfg(unix)]
+mod codex_resume;
 mod http_peer;
 mod human_review;
 mod resolution;
@@ -19,6 +21,7 @@ pub(crate) struct CodexPeer {
   connections: Arc<AtomicUsize>,
   active: Arc<AtomicBool>,
   drop_prompt_ack: Arc<AtomicBool>,
+  resume_error: Arc<Mutex<Option<Value>>>,
   initialize_gate: Arc<tokio::sync::Semaphore>,
   stop: watch::Sender<bool>,
   task: tokio::task::JoinHandle<()>,
@@ -38,6 +41,8 @@ impl CodexPeer {
     let native_active = active.clone();
     let drop_prompt_ack = Arc::new(AtomicBool::new(false));
     let drop_ack = drop_prompt_ack.clone();
+    let resume_error = Arc::new(Mutex::new(None::<Value>));
+    let rejected_resume = resume_error.clone();
     let initialize_gate = Arc::new(tokio::sync::Semaphore::new(if gated { 0 } else { 32 }));
     let gate = initialize_gate.clone();
     let (stop, mut stopping) = watch::channel(false);
@@ -54,6 +59,7 @@ impl CodexPeer {
             let gate = gate.clone();
             let active = native_active.clone();
             let drop_ack = drop_ack.clone();
+            let rejected_resume = rejected_resume.clone();
             peers.spawn(async move {
               let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else { return };
               while let Some(Ok(frame)) = socket.next().await {
@@ -62,6 +68,15 @@ impl CodexPeer {
                 requests.lock().unwrap().push(request.clone());
                 if request["method"] == "turn/start" && drop_ack.load(Ordering::Relaxed) { break; }
                 let Some(id) = request.get("id") else { continue };
+                if request["method"] == "thread/resume" {
+                  let error = rejected_resume.lock().unwrap().clone();
+                  if let Some(error) = error {
+                    if socket.send(tokio_tungstenite::tungstenite::Message::Text(
+                      json!({"id":id,"error":error}).to_string().into()
+                    )).await.is_err() { break }
+                    continue;
+                  }
+                }
                 let result = match request["method"].as_str().unwrap_or_default() {
                   "initialize" => {
                     let permit = gate.acquire().await.unwrap();
@@ -99,6 +114,7 @@ impl CodexPeer {
       connections,
       active,
       drop_prompt_ack,
+      resume_error,
       initialize_gate,
       stop,
       task,
@@ -117,6 +133,21 @@ impl CodexPeer {
 
   pub(crate) fn drop_prompt_acknowledgements(&self) {
     self.drop_prompt_ack.store(true, Ordering::Relaxed);
+  }
+
+  pub(crate) fn reject_resumes(&self, error: Value) {
+    *self.resume_error.lock().unwrap() = Some(error);
+  }
+
+  pub(crate) fn resume_parameters(&self) -> Vec<Value> {
+    self
+      .requests
+      .lock()
+      .unwrap()
+      .iter()
+      .filter(|request| request["method"] == "thread/resume")
+      .map(|request| request["params"].clone())
+      .collect()
   }
 }
 

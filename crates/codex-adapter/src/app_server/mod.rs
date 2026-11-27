@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use std::{
   collections::{BTreeMap, BTreeSet},
   ffi::OsString,
-  path::PathBuf,
+  path::{Path, PathBuf},
   sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -76,6 +76,33 @@ pub struct CreatedThread {
   pub working_directory: PathBuf,
   pub history_path: Option<PathBuf>,
   pub ephemeral: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ThreadResumeFailure {
+  Archived,
+  RolloutNotFound,
+  Other,
+}
+
+/// Classify the known native rejections for this exact thread without exposing
+/// diagnostics that can include local paths or configuration.
+pub fn classify_thread_resume_failure(session_id: &str, error: &InteractionError) -> ThreadResumeFailure {
+  if error.kind != ErrorKind::Rejected || !mapping::valid_id(session_id) {
+    return ThreadResumeFailure::Other;
+  }
+  let Some(native) = error.message.strip_prefix("Codex RPC -32600: ") else {
+    return ThreadResumeFailure::Other;
+  };
+  if native == format!("no rollout found for thread id {session_id}") {
+    ThreadResumeFailure::RolloutNotFound
+  } else if native
+    == format!("session {session_id} is archived. Run `codex unarchive {session_id}` to unarchive it first.")
+  {
+    ThreadResumeFailure::Archived
+  } else {
+    ThreadResumeFailure::Other
+  }
 }
 
 #[derive(Clone)]
@@ -374,20 +401,46 @@ impl CodexAdapter {
   }
 
   pub async fn resume_thread(&self, session_id: &str) -> Result<SessionTarget, InteractionError> {
+    self.resume_thread_with_path(session_id, None).await
+  }
+
+  /// Resume a plain legacy rollout already verified and canonicalized by the host.
+  /// Only a managed local server may receive the host path.
+  pub async fn resume_thread_from_rollout(
+    &self,
+    session_id: &str,
+    path: &Path,
+  ) -> Result<SessionTarget, InteractionError> {
+    if self.inner.descriptor.ownership != Ownership::Managed {
+      return Err(InteractionError::unsupported(
+        "A host rollout path requires a locally managed Codex runtime",
+      ));
+    }
+    let path = path
+      .to_str()
+      .filter(|_| path.is_absolute() && path.extension().and_then(|extension| extension.to_str()) == Some("jsonl"))
+      .ok_or_else(|| InteractionError::invalid("A Codex rollout path must be an absolute Unicode .jsonl path"))?;
+    self.resume_thread_with_path(session_id, Some(path)).await
+  }
+
+  async fn resume_thread_with_path(
+    &self,
+    session_id: &str,
+    path: Option<&str>,
+  ) -> Result<SessionTarget, InteractionError> {
     self.inner.ensure_open()?;
     if !mapping::valid_id(session_id) {
       return Err(InteractionError::invalid("Invalid Codex thread ID"));
+    }
+    let mut params = json!({"threadId":session_id,"excludeTurns":true});
+    if let Some(path) = path {
+      params["path"] = json!(path);
     }
     let epoch = self.inner.epoch();
     let result = self
       .inner
       .transport
-      .rpc_with_context(
-        "thread/resume",
-        json!({"threadId":session_id,"excludeTurns":true}),
-        true,
-        Some(epoch),
-      )
+      .rpc_with_context("thread/resume", params, true, Some(epoch))
       .await?;
     self.bind_thread(result, Some(session_id))
   }
