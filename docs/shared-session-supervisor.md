@@ -25,6 +25,11 @@ profile, the host can discover local Codex/OpenCode/ZCode/DSH executables throug
 configurations do not write saved profiles. An invalid explicit executable
 override does not fall back to another binary.
 
+On macOS, automatic Codex discovery also searches the Codex CLI bundled in
+ChatGPT when `PATH` has no executable. The desktop app and `tokn-session
+create`/`append` share this executable resolution. The CLI runs a headless
+Codex command with the requested prompt on stdin.
+
 `interaction-core::runtime_plan` separates configuration identity from a running
 instance. `RuntimePlan` records provider, configuration/revision, ownership,
 reuse scope, lifecycle strategy and working directory. The host uses
@@ -48,6 +53,8 @@ idle, have no pending inputs/questions, and have current recovery proof before
 releasing it. Desktop switching also checks recorded activity. Releasing a
 session does not stop a server shared by other sessions. Stop cancels the native
 turn; it does not mean stopping the runtime or clearing its queued inbox.
+For a healthy bound Codex RPC session, the composer follows live execution
+state to show Stop as soon as the runtime starts a turn.
 
 ## State and ownership
 

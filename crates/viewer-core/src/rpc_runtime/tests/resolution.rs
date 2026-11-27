@@ -19,8 +19,31 @@ fn executable(directory: &Path, name: &str) -> PathBuf {
 fn install_environment(manager: &RpcRuntimeManager, bin: &Path) {
   manager.set_discovery_environment(discovery::DiscoveryEnvironment {
     path: Some(std::env::join_paths([bin]).unwrap()),
-    executables: BTreeMap::new(),
+    ..Default::default()
   });
+}
+
+#[test]
+fn codex_resolves_a_bundled_launcher_without_a_shell_path() {
+  let manager = manager();
+  let directory = tempfile::tempdir().unwrap();
+  let project = tempfile::tempdir().unwrap();
+  let launcher = executable(directory.path(), "bundled codex");
+  manager.set_discovery_environment(discovery::DiscoveryEnvironment {
+    bundled_codex: vec![launcher.clone()],
+    ..Default::default()
+  });
+  let plan = manager.resolve_plan(Provider::Codex, project.path(), None).unwrap();
+  let selected = plan.shared_runtime_selection().unwrap();
+  let resolved = manager
+    .0
+    .resolver
+    .resolve_profile(&selected.profile_id, selected.expected_revision)
+    .unwrap();
+  assert_eq!(
+    resolved.profile.executable.as_deref(),
+    launcher.canonicalize().unwrap().to_str()
+  );
 }
 
 #[tokio::test]
@@ -47,6 +70,7 @@ async fn qoder_discovery_accepts_both_official_commands_without_overriding_expli
       "TOKN_SESSION_QODER_EXECUTABLE".into(),
       bin.path().join("missing-qoder").into_os_string(),
     )]),
+    ..Default::default()
   });
   assert!(
     manager
@@ -126,6 +150,7 @@ fn discovered_identity_fences_provider_project_executable_and_replacement() {
     .into_iter()
     .map(|key| (key.to_owned(), exe.clone().into_os_string()))
     .collect(),
+    ..Default::default()
   };
   manager.set_discovery_environment(environment.clone());
   let first = manager.resolve_plan(Provider::Codex, project.path(), None).unwrap();

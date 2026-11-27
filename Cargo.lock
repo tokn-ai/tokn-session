@@ -6793,6 +6793,7 @@ dependencies = [
  "tempfile",
  "tokn-codex-protocol",
  "tokn-session-core",
+ "tokn-session-storage",
  "toml 1.1.4+spec-1.1.0",
  "zstd",
 ]

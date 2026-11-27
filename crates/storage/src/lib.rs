@@ -1,6 +1,8 @@
 //! Shared native paths and conservative migrations. Path discovery never migrates data.
 use std::path::{Path, PathBuf};
 
+mod executable;
+pub use executable::find_executable;
 mod migration;
 pub use migration::{
   directory_for_inspection, migrate_directory_with_alias, migrate_directory_with_alias_and_locks,

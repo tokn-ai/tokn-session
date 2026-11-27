@@ -212,6 +212,20 @@ impl SessionSupervisor {
   }
 
   pub(crate) async fn input_status(&self, target: &VerifiedSession) -> Result<input::InputCapability, DeliveryError> {
+    self.input_capability(target, true).await
+  }
+
+  pub(crate) async fn control_readiness(&self, target: &VerifiedSession) -> Result<(), DeliveryError> {
+    // Background control refreshes need route readiness. Reading native model
+    // settings here can itself emit state and trigger another refresh.
+    self.input_capability(target, false).await.map(drop)
+  }
+
+  async fn input_capability(
+    &self,
+    target: &VerifiedSession,
+    inspect_images: bool,
+  ) -> Result<input::InputCapability, DeliveryError> {
     if let Some(status) = self.managed.checked_input_status(&target.session_key).await {
       return status.map(|status| input::InputCapability {
         message: status.message,
@@ -224,7 +238,7 @@ impl SessionSupervisor {
     ) {
       (ViewerProvider::Codex, SessionTransport::Desktop) => input::status(&target.input).await,
       (ViewerProvider::Pi, _) => input::status(&target.input).await,
-      (_, SessionTransport::Rpc) => self.rpc_input_status(target).await,
+      (_, SessionTransport::Rpc) => self.rpc_input_status(target, inspect_images).await,
       _ => Err(DeliveryError::not_sent(
         "This transport is unavailable for this provider",
       )),

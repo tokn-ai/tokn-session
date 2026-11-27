@@ -19,3 +19,4 @@ toml = "1.1"
 zstd = "0.13"
 tokn-codex-protocol.workspace = true
 tokn-session-core.workspace = true
+tokn-session-storage.workspace = true

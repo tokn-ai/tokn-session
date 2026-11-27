@@ -40,6 +40,7 @@ export function useSessionControl(session: SessionSummary | null, refresh_key = 
   const active = useRef(false);
   const [view, setView] = useState(() => emptyView(owner));
   const value = view.owner === owner ? view : emptyView(owner);
+  const watch_codex_rpc = provider === "codex" && value.status?.can_select === true && value.status.transport === "rpc";
   const latest_status = useRef(value.status);
   latest_status.current = value.status;
   const completed = useRef(on_completed);
@@ -48,10 +49,10 @@ export function useSessionControl(session: SessionSummary | null, refresh_key = 
     if (!active.current || latest_owner.current !== target) return;
     setView((old) => apply(old.owner === target ? old : emptyView(target)));
   }, []);
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (quiet = false) => {
     if (!session_key || busy.current) return;
     const request = ++sequence.current;
-    update(owner, (old) => ({ ...old, checking: true, error: null }));
+    if (!quiet) update(owner, (old) => ({ ...old, checking: true, error: null }));
     try {
       const status = await getSessionControl({ session_key }, transport.invoke);
       if (sequence.current !== request) return;
@@ -85,19 +86,19 @@ export function useSessionControl(session: SessionSummary | null, refresh_key = 
   useEffect(() => { void refresh(); }, [refresh, session?.is_running, refresh_key]);
 
   useEffect(() => {
-    if (!session_key || !live_activity) return;
+    if (!session_key || (!live_activity && !watch_codex_rpc)) return;
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     void transport.listen("rpc-runtimes-changed", () => {
-      if (!cancelled) void refresh();
+      if (!cancelled) void refresh(watch_codex_rpc);
     }).then((stop) => {
       if (cancelled) stop();
-      else { unlisten = stop; void refresh(); }
+      else { unlisten = stop; void refresh(watch_codex_rpc); }
     }).catch(() => {
       if (!cancelled) update(owner, (old) => ({ ...old, error: "Live control updates are unavailable. Retry control to check this session." }));
     });
     return () => { cancelled = true; unlisten?.(); };
-  }, [owner, live_activity, refresh, session_key, transport, update]);
+  }, [owner, live_activity, watch_codex_rpc, refresh, session_key, transport, update]);
 
   async function choose(next: SessionTransport) {
     if (!session_key || !value.status?.can_select || busy.current || value.checking || next === value.status.transport) return;
@@ -132,7 +133,7 @@ export function useSessionControl(session: SessionSummary | null, refresh_key = 
     } finally {
       if (sequence.current === request) {
         busy.current = false;
-        if (live_activity) void refresh();
+        if (live_activity || watch_codex_rpc) void refresh(watch_codex_rpc);
       }
     }
   }

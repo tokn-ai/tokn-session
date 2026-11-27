@@ -17,6 +17,21 @@ a root session with its children. Unknown provider records remain visible in
 normalized output. `create` and `append` use a configurable executor for
 supported providers; run `tokn-session --help` for command options.
 
+Codex uses the local executable without requiring an executor configuration:
+
+```sh
+tokn-session create --source codex --cwd . "Describe this project"
+tokn-session append --source codex --cwd . --continue "What would you test next?"
+```
+
+Use `--session <id>` for a specific saved conversation. `--executor`,
+`TOKN_SESSION_CODEX_EXECUTOR`, and `TOKN_SESSION_EXECUTOR` can select a custom
+launcher. Otherwise the CLI uses the same local Codex executable discovery as
+the viewer, including `TOKN_SESSION_CODEX_EXECUTABLE` as a path or command name.
+Standard Codex execution sends the supplied prompt through stdin and streams
+native JSONL. A custom executor template with `{prompt}` controls its own arguments
+and stdin.
+
 For ZCode, configure a native CLI executor with `--executor` or
 `TOKN_SESSION_ZCODE_EXECUTOR`. Use the same working directory and storage for
 both calls. ZCode emits its native JSON event stream for ordinary prompts.

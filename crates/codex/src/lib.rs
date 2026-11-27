@@ -1,6 +1,7 @@
 mod bounded_lines;
 mod compaction;
 pub mod event;
+pub mod executable;
 mod history;
 pub mod normalize;
 mod records;

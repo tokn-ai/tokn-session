@@ -193,6 +193,7 @@ fn pinned_builtin_model_runtime_does_not_follow_a_new_saved_default_or_another_p
       "TOKN_SESSION_CODEX_EXECUTABLE".into(),
       std::env::current_exe().unwrap().into_os_string(),
     )]),
+    ..Default::default()
   };
   manager.set_discovery_environment(environment);
   let pinned = manager

@@ -56,6 +56,7 @@ it("switches only through the captured host command and blocks stale control sta
   render(<Controls />);
   const picker = await screen.findByRole("combobox", { name: "Codex connection" });
   await waitFor(() => expect(picker).toBeEnabled());
+  await waitFor(() => expect(machine.changes.size).toBe(1));
   fireEvent.change(picker, { target: { value: "desktop" } });
   expect(picker).toBeDisabled();
   expect(screen.getByText("Changing control…")).toBeVisible();
@@ -63,6 +64,7 @@ it("switches only through the captured host command and blocks stale control sta
   await act(async () => saving.resolve(status({ transport: "desktop", runtime_id: null, instance_id: null })));
   expect(picker).toBeEnabled();
   expect(picker).toHaveValue("desktop");
+  expect(machine.changes.size).toBe(0);
 });
 
 it("leaves a failed switch unconfirmed without selecting another route or retrying the mutation", async () => {
@@ -102,7 +104,7 @@ it("ignores delayed status and switch replies after selecting another session", 
   const saving = deferred<SessionControlStatus>();
   vi.mocked(setSessionControl).mockReturnValueOnce(saving.promise);
   act(() => { void result.current.choose("rpc"); });
-  vi.mocked(getSessionControl).mockResolvedValueOnce(status());
+  vi.mocked(getSessionControl).mockResolvedValue(status());
   rerender({ selected: session });
   await waitFor(() => expect(result.current.status?.session_key).toBe("one"));
   await act(async () => saving.resolve(status({ session_key: "two" })));
@@ -141,15 +143,16 @@ it("keeps ZCode composer availability independent of its Stop lookup", async () 
   expect(result.current.blocked).toBe(false);
 });
 
-it.each(["zcode", "qoder", "opencode", "dsh"] as const)("shows Stop from native %s activity before any historical output and clears it on completion", async (provider) => {
-  vi.mocked(getSessionControl).mockResolvedValue(status({ provider, can_select: false, is_running: false }));
+it.each(["codex", "zcode", "qoder", "opencode", "dsh"] as const)("shows Stop from native %s activity before any historical output and clears it on completion", async (provider) => {
+  const can_select = provider === "codex";
+  vi.mocked(getSessionControl).mockResolvedValue(status({ provider, can_select, is_running: false }));
   const view = render(<Controls selected={{ ...session, provider, is_running: false }} />);
   await waitFor(() => expect(machine.changes.size).toBe(1));
   expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
-  vi.mocked(getSessionControl).mockResolvedValue(status({ provider, can_select: false, is_running: true }));
+  vi.mocked(getSessionControl).mockResolvedValue(status({ provider, can_select, is_running: true }));
   act(() => { for (const changed of machine.changes) changed(); });
   expect(await screen.findByRole("button", { name: "Stop" })).toBeEnabled();
-  vi.mocked(getSessionControl).mockResolvedValue(status({ provider, can_select: false, is_running: false }));
+  vi.mocked(getSessionControl).mockResolvedValue(status({ provider, can_select, is_running: false }));
   act(() => { for (const changed of machine.changes) changed(); });
   await waitFor(() => expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument());
   view.unmount();
@@ -200,18 +203,34 @@ it("applies authoritative Qoder completion even when refreshing saved messages f
 });
 
 it("refreshes cancellation after activation and explicit input revisions without polling", async () => {
-  vi.mocked(getSessionControl).mockResolvedValueOnce(status({ can_cancel: false })).mockResolvedValue(status());
+  vi.mocked(getSessionControl).mockResolvedValue(status({ can_cancel: false }));
   const { result, rerender } = renderHook(({ running, revision }) => useSessionControl({ ...session, is_running: running }, revision), {
     initialProps: { running: false, revision: 0 },
   });
   await waitFor(() => expect(result.current.status?.can_cancel).toBe(false));
-  expect(getSessionControl).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(getSessionControl).toHaveBeenCalledTimes(2));
+  vi.mocked(getSessionControl).mockResolvedValue(status());
   rerender({ running: true, revision: 0 });
   await waitFor(() => expect(result.current.status?.can_cancel).toBe(true));
-  expect(getSessionControl).toHaveBeenCalledTimes(2);
+  expect(getSessionControl).toHaveBeenCalledTimes(3);
   rerender({ running: true, revision: 1 });
-  await waitFor(() => expect(getSessionControl).toHaveBeenCalledTimes(3));
+  await waitFor(() => expect(getSessionControl).toHaveBeenCalledTimes(4));
   await waitFor(() => expect(result.current.checking).toBe(false));
+});
+
+it("refreshes verified Codex RPC activity without blocking the composer", async () => {
+  vi.mocked(getSessionControl).mockResolvedValue(status({ is_running: true }));
+  const { result } = renderHook(() => useSessionControl(session));
+  await waitFor(() => expect(result.current.status?.is_running).toBe(true));
+  await waitFor(() => expect(getSessionControl).toHaveBeenCalledTimes(2));
+  const refresh = deferred<SessionControlStatus>();
+  vi.mocked(getSessionControl).mockReturnValueOnce(refresh.promise);
+  act(() => { for (const changed of machine.changes) changed(); });
+  expect(getSessionControl).toHaveBeenCalledTimes(3);
+  expect(result.current.blocked).toBe(false);
+  expect(result.current.status?.is_running).toBe(true);
+  await act(async () => refresh.resolve(status({ is_running: false })));
+  expect(result.current.status?.is_running).toBe(false);
 });
 
 it("keeps draft routing stable for ordinary checks and cancellation but retires a replaced runtime", async () => {

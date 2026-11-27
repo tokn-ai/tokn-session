@@ -50,6 +50,10 @@ compatibility is checked on connection. Discovered configurations are scoped to
 their project and pin executable metadata, so a replaced binary requires fresh
 resolution. The bounded transient inventory is not a saved-profile registry.
 
+When macOS launches the app without a shell `PATH` containing `codex`,
+automatic discovery can use the Codex CLI in the system or user's
+Applications folder inside ChatGPT.
+
 For a Codex app-server launched by the desktop Viewer, a managed `prompt-user`
 rule opens a native command review dialog when the local app is in the
 foreground. Review the command, working directory and any additional permissions

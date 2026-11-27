@@ -89,18 +89,30 @@ impl ViewerService {
 
   async fn control_status(&self, target: &VerifiedSession) -> Result<SessionControlStatus, String> {
     let transport = self.sessions.transport(target).await?;
-    let binding = self.sessions.runtimes.binding(&target.session_key);
-    let snapshot = self.sessions.runtimes.binding_snapshot(&target.session_key);
-    let connected = binding.is_some() && snapshot.is_some();
+    let binding = (transport == SessionTransport::Rpc)
+      .then(|| self.sessions.runtimes.binding(&target.session_key))
+      .flatten();
+    let snapshot = binding.as_ref().and_then(|binding| {
+      self
+        .sessions
+        .runtimes
+        .binding_snapshot(&target.session_key)
+        .filter(|snapshot| {
+          snapshot.descriptor.instance_id == binding.target.instance_id
+            && snapshot.connected
+            && !snapshot.recovery_required
+            && !snapshot.reattach_required
+        })
+    });
+    let connected = snapshot.is_some();
+    let rpc_can_cancel = connected
+      && binding.as_ref().is_some_and(|binding| {
+        binding
+          .capabilities
+          .supports(tokn_interaction_core::Operation::CancelTurn)
+      });
     let is_running = snapshot
       .as_ref()
-      .filter(|snapshot| {
-        matches!(
-          target.input.provider,
-          ViewerProvider::ZCode | ViewerProvider::Qoder | ViewerProvider::OpenCode | ViewerProvider::Dsh
-        ) && snapshot.connected
-          && !snapshot.recovery_required
-      })
       .and_then(|snapshot| {
         snapshot
           .states
@@ -112,7 +124,7 @@ impl ViewerService {
         tokn_interaction_core::ExecutionState::Idle | tokn_interaction_core::ExecutionState::Stopped => Some(false),
         tokn_interaction_core::ExecutionState::Unknown => None,
       });
-    let readiness = self.sessions.input_status(target).await;
+    let readiness = self.sessions.control_readiness(target).await;
     let live_output = (target.input.provider == ViewerProvider::Qoder && is_running == Some(true))
       .then(|| {
         binding
@@ -126,11 +138,7 @@ impl ViewerService {
       transport,
       can_select: target.input.provider == ViewerProvider::Codex,
       can_cancel: transport == SessionTransport::Rpc
-        && (binding.as_ref().is_some_and(|binding| {
-          binding
-            .capabilities
-            .supports(tokn_interaction_core::Operation::CancelTurn)
-        }) || self.sessions.managed.input_status(&target.session_key).is_some()),
+        && (rpc_can_cancel || self.sessions.managed.input_status(&target.session_key).is_some()),
       is_running,
       live_output,
       available: readiness.is_ok(),
