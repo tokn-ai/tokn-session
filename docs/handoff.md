@@ -12,8 +12,10 @@ session search on desktop and opens the drawer on phones. The conversation
 header can search loaded prompts. Readers can return to their previous position
 after a jump, including across live updates. User prompts, work disclosures,
 agent replies and transient native output share one reading column. The
-session title opens metadata and the lifecycle filter. Codex goal-triggered
-turns show the authored goal and keep work together across compaction. The final
+session title opens metadata and **Show technical events**, which reveals token
+usage and routine lifecycle records. Completed bookkeeping-only segments leave
+no work disclosure. Codex goal-triggered turns show the authored goal and keep
+work together across compaction. The final
 reply shows the outcome from a matching completion receipt. Long messages expand
 inline, and opening a short work group reveals its operations directly. Run
 `pnpm run demo:session` in `apps/viewer` for a mock Codex rollout with a
@@ -1269,8 +1271,7 @@ the project.
 
 The viewer switches to a native modal session drawer at 860px, preserving the
 mounted sidebar across resizing, containing keyboard focus, and focusing search
-on open. Provider filters wrap and include a reset action. Narrow conversation
-headers put the lifecycle filter on its own row. Both desktop and browser reserve
+on open. Provider filters wrap and include a reset action. Both desktop and browser reserve
 remaining height for the timeline. Relay controls live in the bottom status bar
 and open a floating Connection panel; index status is also a clickable panel
 trigger. Browser, Hub and paired-host connections use the same bottom placement,
@@ -1335,20 +1336,17 @@ provider-authoritative turn. Its identity uses the earliest normalized source
 event in the folded run, so it remains expandable when more work or a matching
 tool result is appended after the outer timeline loads.
 
-The conversation header's **Hide lifecycle** toggle filters rendered rows in
-both the main timeline and loaded trajectory pages. It defaults off and stays
-selected while switching sessions in the mounted viewer. Viewer-core supplies
-`EventSummary.is_bookkeeping` from validated event kinds and a conservative
-provider-record allowlist; missing flags from older backends keep rows visible.
-The active button reads **Show lifecycle**. Intermediate usage is classified
-against the full snapshot before paging, keeping the last accounting of each
-usage kind at a final reply or turn completion. Active-turn usage is hidden;
-orphan or conflicting-turn usage remains visible. Accounting scopes are never
-combined. Successful Codex completion markers can hide their final-message echo;
-substantive content, unknowns, errors, and exceptional lifecycle outcomes remain
-visible. The filter never changes stored history, cursor
-windows, selection/detail ownership, or underlying totals. Filtered empty
-ranges retain their pagination controls; hidden counts cover loaded rows only.
+**Show technical events** in Session details reveals routine lifecycle records
+and all three accounting kinds in both the main timeline and loaded work
+pages. The preference defaults off and persists on the device. Accounting
+keeps each source record, scope and total. Viewer-core identifies bookkeeping
+using validated kinds and a provider-record allowlist. Successful Codex
+completion markers can hide their final-message echo. Substantive content,
+unknowns, errors and exceptional lifecycle outcomes stay visible. A recorded
+active turn can show **Working** before its first operation. Completed
+bookkeeping-only segments remain individual technical records. The preference
+leaves stored history, cursors and event inspection intact. Filtered empty ranges
+retain pagination controls.
 
 Visible user and assistant messages, expanded reasoning, and readable inspector
 content render GitHub-flavored Markdown. Raw HTML is disabled, images become

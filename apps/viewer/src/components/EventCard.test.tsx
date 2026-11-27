@@ -452,6 +452,11 @@ describe("EventCard subagent activity", () => {
 });
 
 describe("EventCard whole-turn trajectories", () => {
+  it.each(["0", "600"])("describes completed subsecond work with %s ms of recorded activity", (duration_ms) => {
+    renderCard(event({ type: "trajectory", trajectory: trajectory({ status: "complete", duration_ms }) }));
+    expect(screen.getByRole("button", { name: "Worked for <1s" })).toBeVisible();
+  });
+
   it("keeps folded goal work to its elapsed time and reveals the original failed operation on expansion", () => {
     const command = event({ type: "tool_call", event_key: "check", role: null, tool: tool({ command: "cargo check", exit_code: 1 }) });
     const turn = event({ type: "trajectory", event_key: "work", goal: { kind: "work" }, trajectory: trajectory({

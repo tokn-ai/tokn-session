@@ -111,9 +111,6 @@ pub(super) fn status(trajectory: &Trajectory, events: &[AgentEvent]) -> &'static
   if trajectory.goal.is_some_and(|g| g.reply_index.is_some()) {
     return "complete";
   }
-  if superseding_boundary_timestamp(trajectory, events).is_some() {
-    return "complete";
-  }
   let end = trajectory_source_event_indices(trajectory)
     .into_iter()
     .max()
@@ -136,6 +133,9 @@ pub(super) fn status(trajectory: &Trajectory, events: &[AgentEvent]) -> &'static
       }
       _ => {}
     }
+  }
+  if superseding_boundary_timestamp(trajectory, events).is_some() {
+    return "complete";
   }
   for event in events[..=end].iter().rev() {
     match event {

@@ -120,9 +120,9 @@ test("shows a complete turn and opens session details at narrow widths", async (
   const details = page.getByRole("region", { name: "Session details" });
   await expect(details).toBeVisible();
   await expect(details.getByText("Codex", { exact: true })).toBeVisible();
-  const lifecycle = details.getByRole("checkbox", { name: "Show lifecycle events" });
-  await lifecycle.check();
-  await expect(lifecycle).toBeChecked();
+  const technical = details.getByRole("checkbox", { name: "Show technical events" });
+  await technical.check();
+  await expect(technical).toBeChecked();
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.keyboard.press("Escape");
   await expect(trigger).toBeFocused();

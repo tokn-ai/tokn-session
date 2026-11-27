@@ -34,6 +34,12 @@ test("reads a completed Codex goal as one turn and inspects the original work", 
     await expect(events).toBeVisible();
     await expect(events.getByText("Context compacted")).toBeVisible();
     await expect(events.getByText(/1 failure|exit 1/).first()).toBeVisible();
+    const usage = history.getByRole("button", { name: "Usage: 375 tokens" });
+    await expect(usage).toHaveCount(0);
+    await page.getByRole("button", { name: /^Session details for / }).click();
+    await page.getByRole("checkbox", { name: "Show technical events" }).check();
+    await page.keyboard.press("Escape");
+    await expect(events.getByRole("button", { name: "Usage: 375 tokens" })).toBeVisible();
     await work.click();
     await page.getByRole("button", { name: "Jump to prompt" }).click();
     await page.getByRole("region", { name: "Prompts in this session" }).getByRole("button", { name: new RegExp(objective) }).click();

@@ -177,8 +177,8 @@ when the clipboard is available. Copy appears once a streamed or clipped code bl
 is complete. **Inspect** opens the underlying event.
 
 A Codex goal appears as a blue prompt with **Sent as goal**. Expand **Worked
-for** to inspect individual operations, command failures, context compaction
-and turn accounting. The final reply shows **Goal achieved** when the rollout
+for** to inspect individual operations, command failures and context compaction.
+The final reply shows **Goal achieved** when the rollout
 records completion. Its duration comes from the goal receipt and may differ
 from the time spent on work in the current turn.
 
@@ -207,12 +207,10 @@ focus to the inspection control. The JSON tabs offer a copy action when the
 clipboard is available.
 
 Select the conversation title to see the provider, model, session ID and last
-update. **Show lifecycle events** in this panel controls routine bookkeeping
-rows without message content, including session settings, delivery markers, and
-successful turn completion. It applies to the conversation and expanded work
-sections, hiding intermediate usage while keeping the final accounting for each
-usage kind. Errors, messages, tools, agent communications, and unfamiliar events
-remain visible. Routine bookkeeping starts hidden.
+update. **Show technical events** reveals token usage, lifecycle markers and
+routine session records in the conversation and expanded work sections.
+Technical events start hidden. Errors, messages, tools, agent communications
+and unfamiliar events remain visible.
 Counts and pagination still describe the complete history, and hidden counts
 refer only to loaded rows.
 
@@ -220,10 +218,11 @@ User prompts and final assistant replies remain in the outer conversation.
 Contiguous stretches of intermediate assistant progress and non-message work
 are grouped into a compact work trajectory item, keeping the
 surrounding conversation easy to scan. A non-final assistant message itself is
-enough to make a stretch fold; metadata-only stretches remain flat. Terminal
-bookkeeping after a final reply stays chronological. For a Codex goal turn with a
-recorded identity and a work disclosure, trailing usage belongs to that
-disclosure. Compaction during the same turn also remains available there. It shows
+enough to make a stretch fold. Completed runs of bookkeeping alone stay flat and
+are visible through **Show technical events**. Terminal bookkeeping after a final
+reply stays chronological. For a Codex goal turn with a recorded identity and a
+work disclosure, trailing usage and compaction belong to that disclosure.
+The work row shows
 **Working for …** with a ticking elapsed time when a provider turn-start is
 observed, auto-expanding to show the newest work. Completion collapses it to
 **Worked for …**; it can be reopened manually. Providers without reliable turn

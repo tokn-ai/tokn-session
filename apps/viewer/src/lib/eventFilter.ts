@@ -10,6 +10,7 @@ export function isBookkeepingEvent(event: EventSummary): boolean {
     case "lifecycle":
     case "metadata":
     case "usage":
+    case "activity_group":
       return true;
     default:
       // Content, outcomes, and unfamiliar provider events stay visible

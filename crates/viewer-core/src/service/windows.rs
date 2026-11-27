@@ -145,9 +145,8 @@ impl ViewerService {
       .any(|entry| timeline_entry_has_targeted_agent_activity(entry, &loaded.events))
       .then(|| self.delegation_targets_for_parent(&locator))
       .unwrap_or_default();
-    let intermediate_usage = usage_filter::intermediate_usage(&loaded.events);
     let summarize = |entry: &TimelineEntry| {
-      let summary = timeline_entry_event_summary(entry, &loaded.events, &targets, &intermediate_usage);
+      let summary = timeline_entry_event_summary(entry, &loaded.events, &targets);
       identity.summary(models.summary(goals.summary(entry, summary)))
     };
     let events = entries.iter().map(|entry| summarize(entry)).collect::<Vec<_>>();

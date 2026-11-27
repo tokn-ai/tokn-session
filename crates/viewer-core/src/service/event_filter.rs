@@ -7,7 +7,10 @@ use tokn_session_core::{AgentEvent, LifecycleOutcome, MetadataEvent, MetadataKin
 
 pub(super) fn is_bookkeeping(event: &AgentEvent) -> bool {
   match event {
-    AgentEvent::SessionStarted(_) | AgentEvent::ProviderChanged(_) | AgentEvent::SessionSettingsApplied(_) => true,
+    AgentEvent::SessionStarted(_)
+    | AgentEvent::ProviderChanged(_)
+    | AgentEvent::SessionSettingsApplied(_)
+    | AgentEvent::Usage(_) => true,
     AgentEvent::Lifecycle(event) => {
       let has_completion_echo = matches!(event.provider, Provider::Codex)
         && matches!(event.phase, Phase::Finished)
@@ -20,8 +23,7 @@ pub(super) fn is_bookkeeping(event: &AgentEvent) -> bool {
         && !native_has_content(&event.native, has_completion_echo)
     }
     AgentEvent::Metadata(event) => routine_metadata(event),
-    // Usage needs full-turn context and is classified separately. Encrypted
-    // deliveries, tools, and new event variants remain visible by default.
+    // Encrypted deliveries, tools, and new event variants remain visible by default.
     _ => false,
   }
 }
