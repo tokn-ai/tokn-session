@@ -175,9 +175,10 @@ now route through one Rust `SessionSupervisor`. Codex defaults to app-server
 RPC with explicit per-thread Desktop selection; first Send verifies history and
 binds/resumes through host-selected runtime configuration. Inspection does not
 activate sessions and transport failures never cause fallback or prompt replay.
-Codex executable discovery is shared with CLI create/append and can use the
-ChatGPT-bundled CLI on macOS even without a shell PATH. The CLI sends each native
-headless prompt through its own stdin pipe.
+`codex-adapter` shares executable discovery between the viewer and CLI
+create/append, including the ChatGPT-bundled CLI on macOS. The CLI builds the
+resolver without the app-server transport and sends each native headless
+prompt through its own stdin pipe.
 Cross-process provider/native-ID leases coordinate RPC, owned Pi, and explicit
 Desktop control independently of runtime profile leases. Pi retains its existing
 driver; arbitrary Pi history adoption and remote-only RPC history remain

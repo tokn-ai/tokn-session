@@ -18,7 +18,7 @@ impl DiscoveryEnvironment {
   pub(crate) fn current() -> Self {
     Self {
       path: std::env::var_os("PATH"),
-      bundled_codex: tokn_session_codex::executable::bundled_executables(),
+      bundled_codex: tokn_codex_adapter::executable::bundled_executables(),
       executables: [
         Provider::Codex,
         Provider::OpenCode,
@@ -58,7 +58,7 @@ pub(crate) fn resolve_executable(
 
 fn provider_command(provider: Provider) -> Result<(&'static str, &'static str, &'static str), String> {
   match provider {
-    Provider::Codex => Ok(("Codex", "codex", tokn_session_codex::executable::EXECUTABLE_OVERRIDE)),
+    Provider::Codex => Ok(("Codex", "codex", tokn_codex_adapter::executable::EXECUTABLE_OVERRIDE)),
     Provider::OpenCode => Ok(("OpenCode", "opencode", "TOKN_SESSION_OPENCODE_EXECUTABLE")),
     Provider::ZCode => Ok(("ZCode", "zcode", "TOKN_SESSION_ZCODE_EXECUTABLE")),
     Provider::Qoder => Ok(("Qoder", "qodercli", "TOKN_SESSION_QODER_EXECUTABLE")),
@@ -80,7 +80,7 @@ pub(super) fn builtin_profile(
   let configured = environment.executables.get(key).map(OsString::as_os_str);
   let search_path = environment.path.as_deref();
   let executable = if provider == Provider::Codex {
-    tokn_session_codex::executable::resolve_with_environment(configured, search_path, &environment.bundled_codex)
+    tokn_codex_adapter::executable::resolve_with_environment(configured, search_path, &environment.bundled_codex)
       .map_err(|error| format!("{error} You can also configure an Agent runtimes profile on this machine."))?
   } else {
     resolve_executable(configured, search_path, command).or_else(|error| {

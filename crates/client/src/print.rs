@@ -241,7 +241,7 @@ fn executor_command<'a>(
   }
 
   let args = codex_print_args(action)?;
-  let mut command = Command::new(tokn_session_codex::executable::resolve_executable()?);
+  let mut command = Command::new(tokn_codex_adapter::executable::resolve_executable()?);
   command.args(args);
   Ok((command, Some(action_prompt(action))))
 }

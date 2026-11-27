@@ -1,5 +1,5 @@
 //! Host-only managed human checkpoints. No request enters the generic broker.
-use crate::{Inner, mapping, wire};
+use super::{Inner, mapping, wire};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{

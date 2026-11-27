@@ -1,4 +1,4 @@
-use crate::framing::{self, RpcReader, StderrTail};
+use super::framing::{self, RpcReader, StderrTail};
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use serde_json::{Value, json};
 use std::{
