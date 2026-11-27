@@ -101,11 +101,13 @@ shows a simulated running response alongside saved history. CI saves the PNGs in
 
 ## Response translation
 
-On macOS 15 or newer, **Translate → 简体中文** translates a visible assistant
-response using Apple's on-device Translation framework. The first use may show
-Apple's prompt to download language packs. No LLM or API key is needed. **Cancel**
-stops a pending request, and **Show original** switches back without another
-translation. Translation is currently available in the Mac desktop app only.
+The translation icon beside **Inspect message** translates an assistant reply to
+Simplified Chinese. The same button switches between the original and the
+translation. **Cancel** stops a pending request.
+
+Translation runs on the device. The desktop app uses Apple Translation on
+macOS 15 or newer. Supported browsers use their built-in translator. Either
+engine may need to download language models on first use.
 
 Internal engine errors offer **Open Translation Settings** to check language
 downloads on the viewing Mac. If downloaded languages still fail, remove and

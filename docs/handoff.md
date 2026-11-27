@@ -1352,8 +1352,10 @@ Visible user and assistant messages, expanded reasoning, and readable inspector
 content render GitHub-flavored Markdown. Raw HTML is disabled, images become
 inert placeholders, and links cannot navigate the WebView.
 
-Mac desktop responses have **Translate → 简体中文** using Apple Translation
-(macOS 15+). A small SwiftUI host in the existing window owns the native session
+Assistant replies use one translation icon beside **Inspect message** for
+translation, toggling the original and retry. Progress and cancellation appear
+below the footer controls. The desktop app uses Apple Translation on macOS 15+.
+A small SwiftUI host in the existing window owns the native session
 and Apple's language-download UI; async Tauri commands bridge bounded prose
 batches and cancellation. Native failures preserve Apple's failure reason and
 carry an explicit recovery hint for internal engine errors, which can include
@@ -1366,9 +1368,8 @@ retains the translation error and manual settings path; retry/navigation retires
 stale recovery state. Browser responses use the browser's local Translator
 and Language Detector APIs when available, with feature/language-pair checks,
 download progress, and a Continue translation action when model preparation
-requires a fresh user gesture. Unsupported or insecure browsers show a disabled
-action with an explanation. Browser translation needs HTTPS or a trustworthy
-loopback origin; it does not call a translation endpoint in viewer-api.
+requires a fresh user gesture. Browser translation needs HTTPS or a trustworthy
+loopback origin. Translation runs without a viewer-api translation endpoint.
 Other desktop platforms still lack a native translation engine.
 The frontend loads complete bounded message detail, translates Markdown text
 nodes, and retains code, URLs, and structure. Formatting boundaries limit

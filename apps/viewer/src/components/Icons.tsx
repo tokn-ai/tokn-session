@@ -57,6 +57,13 @@ export function InspectorIcon(props: IconProps) {
   );
 }
 
+export function TranslateIcon(props: IconProps) {
+  return <IconBase {...props} stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8">
+    <path d="M2 5h13M8.5 2.5V5M12.5 5a16 16 0 0 1-9 11M5 8a15 15 0 0 0 7 7" />
+    <path d="m13 21 4.5-10L22 21m-7.6-3h6.2" />
+  </IconBase>;
+}
+
 export function FilterIcon(props: IconProps) {
   return (
     <IconBase {...props}>
