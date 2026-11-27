@@ -221,13 +221,14 @@ fn metadata_with_content_or_diagnostics_survives() {
 }
 
 #[test]
-fn usage_and_content_variants_never_become_bookkeeping_even_when_empty() {
+fn usage_is_bookkeeping_for_every_provider_and_accounting_scope() {
   for provider in [
     Provider::Codex,
     Provider::Pi,
     Provider::Dsh,
     Provider::OpenCode,
     Provider::ZCode,
+    Provider::Qoder,
     Provider::WorkBuddy,
   ] {
     for kind in [
@@ -235,9 +236,13 @@ fn usage_and_content_variants_never_become_bookkeeping_even_when_empty() {
       UsageKind::SessionSnapshot,
       UsageKind::OperationTotal,
     ] {
-      assert!(!bookkeeping(&usage_event(kind, provider)));
+      assert!(bookkeeping(&usage_event(kind, provider)));
     }
   }
+}
+
+#[test]
+fn content_variants_never_become_bookkeeping_even_when_empty() {
   let mut encrypted = agent_activity("child", Some("/root/worker"));
   let AgentEvent::AgentActivity(activity) = &mut encrypted else {
     unreachable!()
@@ -311,7 +316,7 @@ fn actual_codex_records_keep_usage_and_content_while_projecting_routine_markers(
   assert_eq!(
     flags,
     [
-      true, true, true, true, true, true, false, true, false, true, false, true, false, false, false
+      true, true, true, true, true, true, true, true, false, true, false, true, false, false, false
     ]
   );
   assert!(matches!(&loaded.events[2], AgentEvent::ProviderChanged(event)
@@ -373,7 +378,7 @@ fn synthetic_rows_stay_visible_and_projection_keeps_raw_page_boundaries() {
     .iter()
     .find(|entry| matches!(entry, TimelineEntry::ToolOperation { .. }))
     .unwrap();
-  assert!(!timeline_entry_event_summary(tool, &events, &ActivityTargets::default(), &HashSet::new()).is_bookkeeping);
+  assert!(!timeline_entry_event_summary(tool, &events, &ActivityTargets::default()).is_bookkeeping);
 
   let service = service_with_session(loaded_session(vec![
     settings_event(),

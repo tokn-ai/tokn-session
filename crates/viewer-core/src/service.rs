@@ -59,7 +59,6 @@ mod session_control;
 mod session_interactions;
 mod session_models;
 mod trajectory_state;
-mod usage_filter;
 mod windows;
 
 use agent_activity::{ActivityTargets, agent_activity_card_summary};
@@ -3136,13 +3135,12 @@ impl ViewerService {
     let delegation_targets = has_targeted_agent_activity
       .then(|| self.delegation_targets_for_parent(&locator))
       .unwrap_or_default();
-    let intermediate_usage = usage_filter::intermediate_usage(&loaded.events);
     let events = timeline[start..end]
       .iter()
       .map(|entry| {
         identity.summary(models.summary(goals.summary(
           entry,
-          timeline_entry_event_summary(entry, &loaded.events, &delegation_targets, &intermediate_usage),
+          timeline_entry_event_summary(entry, &loaded.events, &delegation_targets),
         )))
       })
       .collect();
@@ -3225,17 +3223,9 @@ impl ViewerService {
     let delegation_targets = has_targeted_agent_activity
       .then(|| self.delegation_targets_for_parent(&locator))
       .unwrap_or_default();
-    let intermediate_usage = usage_filter::intermediate_usage(&loaded.events);
     let events = trajectory.entries[start..end]
       .iter()
-      .map(|entry| {
-        identity.summary(timeline_entry_event_summary(
-          entry,
-          &loaded.events,
-          &delegation_targets,
-          &intermediate_usage,
-        ))
-      })
+      .map(|entry| identity.summary(timeline_entry_event_summary(entry, &loaded.events, &delegation_targets)))
       .collect();
 
     Ok(TrajectoryEventPage {
@@ -4706,7 +4696,7 @@ fn timeline_entries_with_models(
   let mut entries = Vec::with_capacity(base_entries.len());
   let mut pending = Vec::new();
   // Goal executions keep their compaction and accounting inside work. Other
-  // turns retain independently visible compaction, final usage and reply timing.
+  // turns retain standalone compaction and keep accounting in source order.
   let mut after_final_reply = false;
   let mut goal_turn: Option<&tokn_session_core::LifecycleEvent> = None;
   let mut goal_floor = None;
@@ -4831,7 +4821,12 @@ fn flush_trajectory_candidate(
   if pending.is_empty() {
     return;
   }
-  if !pending.iter().any(|entry| is_substantive_work_entry(entry, events)) {
+  let substantive = pending.iter().any(|entry| is_substantive_work_entry(entry, events));
+  if !substantive
+    && !pending
+      .iter()
+      .any(|entry| trajectory_state::is_turn_start(entry, events))
+  {
     output.append(pending);
     return;
   }
@@ -4864,13 +4859,18 @@ fn flush_trajectory_candidate(
     output.append(pending);
     return;
   };
-  output.push(TimelineEntry::Trajectory {
-    trajectory: Trajectory {
-      start_source_event_index,
-      goal,
-      entries: std::mem::take(pending),
-    },
-  });
+  let mut trajectory = Trajectory {
+    start_source_event_index,
+    goal,
+    entries: std::mem::take(pending),
+  };
+  // A recorded start can show live progress before the first operation.
+  // Once closed, a segment containing only bookkeeping has no work to disclose.
+  if substantive || trajectory_state::status(&trajectory, events) == "working" {
+    output.push(TimelineEntry::Trajectory { trajectory });
+  } else {
+    output.append(&mut trajectory.entries);
+  }
 }
 
 fn is_trajectory_boundary(entry: &TimelineEntry, events: &[AgentEvent]) -> bool {
@@ -4901,10 +4901,8 @@ fn is_substantive_work_entry(entry: &TimelineEntry, events: &[AgentEvent]) -> bo
       // trace. Treat it as substantive so standalone commentary/delta runs
       // are consistently represented by the parent `Worked for …` item.
       Some(AgentEvent::Message(message)) => is_non_final_assistant_message(message.role, message.delivery),
-      Some(AgentEvent::Usage(usage)) => usage.kind != UsageKind::SessionSnapshot,
-      Some(
-        AgentEvent::Reasoning(_) | AgentEvent::AgentActivity(_) | AgentEvent::Lifecycle(_) | AgentEvent::Error(_),
-      ) => true,
+      Some(event @ AgentEvent::Lifecycle(_)) => !event_filter::is_bookkeeping(event),
+      Some(AgentEvent::Reasoning(_) | AgentEvent::AgentActivity(_) | AgentEvent::Error(_)) => true,
       _ => false,
     },
     TimelineEntry::Trajectory { .. } => false,
@@ -4981,7 +4979,6 @@ fn timeline_entry_event_summary(
   entry: &TimelineEntry,
   events: &[AgentEvent],
   delegation_targets: &ActivityTargets,
-  intermediate_usage: &HashSet<usize>,
 ) -> EventSummary {
   match entry {
     TimelineEntry::Event { source_event_index } => event_summary_with_delegation_targets(
@@ -4989,7 +4986,6 @@ fn timeline_entry_event_summary(
       *source_event_index,
       &events[*source_event_index],
       delegation_targets,
-      intermediate_usage,
     ),
     TimelineEntry::ToolOperation {
       source_event_index,
@@ -5256,13 +5252,7 @@ fn requested_trajectory_offset(
 
 #[cfg(test)]
 fn event_summary(events: &[AgentEvent], index: usize, event: &AgentEvent) -> EventSummary {
-  event_summary_with_delegation_targets(
-    events,
-    index,
-    event,
-    &ActivityTargets::default(),
-    &usage_filter::intermediate_usage(events),
-  )
+  event_summary_with_delegation_targets(events, index, event, &ActivityTargets::default())
 }
 
 fn event_summary_with_delegation_targets(
@@ -5270,7 +5260,6 @@ fn event_summary_with_delegation_targets(
   index: usize,
   event: &AgentEvent,
   delegation_targets: &ActivityTargets,
-  intermediate_usage: &HashSet<usize>,
 ) -> EventSummary {
   let projected = if matches!(event, AgentEvent::Compaction(_)) {
     compaction::for_source(events, index).map(|operation| AgentEvent::Compaction(operation.event))
@@ -5374,7 +5363,7 @@ fn event_summary_with_delegation_targets(
     summary_truncated,
     content_revision,
     is_hidden: hidden,
-    is_bookkeeping: !hidden && (event_filter::is_bookkeeping(event) || intermediate_usage.contains(&index)),
+    is_bookkeeping: !hidden && event_filter::is_bookkeeping(event),
     is_error: error_for_event(event),
     tool,
     usage,
@@ -6288,6 +6277,7 @@ fn truncate_with_flag(value: String, max_chars: usize) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
+  mod accounting;
   mod activity_backfill;
   mod background_performance;
   mod codex_work;
@@ -6303,7 +6293,6 @@ mod tests {
   mod running_notifications;
   mod targeted_index;
   mod trajectory_tools;
-  mod usage_filter;
   use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
   use std::path::PathBuf;
   use std::sync::Mutex;
@@ -10438,9 +10427,11 @@ mod tests {
   }
 
   #[test]
-  fn session_snapshot_alone_does_not_form_a_trajectory() {
+  fn accounting_alone_does_not_form_a_trajectory() {
     let events = vec![
       message_event_with_role("Request", Role::User, MessageDelivery::Unspecified),
+      usage_event(UsageKind::ModelCall, Provider::Codex),
+      usage_event(UsageKind::OperationTotal, Provider::OpenCode),
       usage_event(UsageKind::SessionSnapshot, Provider::Codex),
     ];
     let page = service_with_session(loaded_session(events))
@@ -10460,12 +10451,13 @@ mod tests {
         .iter()
         .map(|event| event.event_type.as_str())
         .collect::<Vec<_>>(),
-      ["message", "usage"]
+      ["message", "usage", "usage", "usage"]
     );
+    assert!(page.events[1..].iter().all(|row| row.is_bookkeeping));
   }
 
   #[test]
-  fn model_call_usage_is_flat_after_a_final_but_substantive_before_one() {
+  fn model_call_usage_is_flat_on_both_sides_of_a_final_reply() {
     let pre_final = service_with_session(loaded_session(vec![
       message_event_with_role("Request", Role::User, MessageDelivery::Unspecified),
       usage_event(UsageKind::ModelCall, Provider::Codex),
@@ -10486,9 +10478,9 @@ mod tests {
         .iter()
         .map(|event| event.event_type.as_str())
         .collect::<Vec<_>>(),
-      ["message", "trajectory", "message"]
+      ["message", "usage", "message"]
     );
-    assert_eq!(pre_final.events[1].trajectory.as_ref().unwrap().usage_count, 1);
+    assert!(pre_final.events[1].is_bookkeeping);
 
     let post_final = service_with_session(loaded_session(vec![
       message_event("Answer"),
@@ -10511,6 +10503,7 @@ mod tests {
         .collect::<Vec<_>>(),
       ["message", "usage"]
     );
+    assert!(post_final.events[1].is_bookkeeping);
   }
 
   #[test]
@@ -11453,8 +11446,7 @@ mod tests {
       .iter()
       .find(|entry| matches!(entry, TimelineEntry::ToolOperation { .. }))
       .expect("assembled tool operation should stay inside the trajectory");
-    let operation =
-      timeline_entry_event_summary(operation_entry, &events, &ActivityTargets::default(), &HashSet::new());
+    let operation = timeline_entry_event_summary(operation_entry, &events, &ActivityTargets::default());
     let operation_tool = operation.tool.as_ref().unwrap();
 
     let page = service_with_session(loaded_session(events))

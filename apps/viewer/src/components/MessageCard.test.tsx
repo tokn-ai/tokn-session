@@ -360,7 +360,7 @@ describe("browser message translation", () => {
     await waitFor(() => expect(browser_translate).toHaveBeenCalledWith(["Original response."]));
     await act(async () => pending_translation.resolve(["浏览器译文。"]));
     expect(await screen.findByText("浏览器译文。")).toBeInTheDocument();
-    expect(screen.getByText("简体中文 · Browser Translation")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show original" })).toHaveAttribute("title", "Show original · Browser Translation");
     expect(browser_dispose).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "Show original" }));
     expect(screen.getByText("Original response.")).toBeInTheDocument();
@@ -478,9 +478,25 @@ describe("message translation flow", () => {
     const pending_translation = deferred<TranslateTextResponse>();
     vi.mocked(loadEventDetail).mockReturnValue(pending_detail.promise);
     vi.mocked(translateText).mockReturnValue(pending_translation.promise);
-    render(card(message({ summary: "# Full answer…", summary_truncated: true })));
+    render(card(message({
+      summary: "# Full answer…",
+      summary_truncated: true,
+      delivery: "final",
+      response_metadata: { model: { model: { model_id: "model-alias", model_provider: "fixture" }, origin: "response" } },
+    })));
 
-    await startTranslation();
+    const translate = await screen.findByRole("button", { name: "Translate → 简体中文" });
+    const inspect = screen.getByRole("button", { name: "Inspect assistant message" });
+    const metadata = screen.getByRole("group", { name: "Response details" });
+    expect(inspect.nextElementSibling).toBe(translate);
+    expect(translate.parentElement?.nextElementSibling).toBe(metadata);
+    expect(translate).not.toHaveTextContent(/\S/);
+    expect(translate.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+    translate.focus();
+    fireEvent.click(translate);
+    expect(screen.getByRole("button", { name: "Translating…" })).toBe(translate);
+    expect(translate).toHaveAttribute("aria-disabled", "true");
+    expect(translate).toHaveFocus();
     expect(screen.getByRole("heading", { name: "Full answer…" })).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("Translating");
     expect(translateText).not.toHaveBeenCalled();
@@ -500,7 +516,11 @@ describe("message translation flow", () => {
     await act(async () => pending_translation.resolve({
       texts: request.texts.map((text) => text.replace("Full answer", "完整回答").replace("complete", "完整")),
     }));
-    expect(await screen.findByRole("button", { name: "Show original" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Show original" })).toBe(translate);
+    expect(translate).toHaveAttribute("data-showing-translation", "true");
+    expect(inspect.nextElementSibling).toBe(translate);
+    expect(translate.parentElement?.nextElementSibling).toBe(metadata);
+    expect(translate).toHaveFocus();
     expect(screen.getByRole("heading", { name: "完整回答" })).toBeInTheDocument();
     expect(screen.getByText("完整").tagName).toBe("STRONG");
     expect(screen.getByText("const untouched = true;")).toBeInTheDocument();
@@ -522,10 +542,12 @@ describe("message translation flow", () => {
   it("retains the original after failure and supports retry", async () => {
     vi.mocked(translateText).mockRejectedValueOnce(new Error("Language download failed."));
     render(card(message()));
-    await startTranslation();
+    const translate = await screen.findByRole("button", { name: "Translate → 简体中文" });
+    fireEvent.click(translate);
     expect(await screen.findByRole("alert")).toHaveTextContent("Language download failed.");
     expect(screen.getByText("Original response.")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Retry translation" }));
+    expect(screen.getByRole("button", { name: "Retry translation" })).toBe(translate);
+    fireEvent.click(translate);
     expect(await screen.findByText("中文译文。")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(translateText).toHaveBeenCalledTimes(2);
@@ -661,6 +683,7 @@ describe("translation request lifetime", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await act(async () => pending.resolve(detail()));
     expect(screen.getByRole("button", { name: "Translate → 简体中文" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Translate → 简体中文" })).toHaveFocus();
     expect(screen.getByText("Original response.")).toBeInTheDocument();
     expect(translateText).not.toHaveBeenCalled();
     expect(cancelTranslation).not.toHaveBeenCalled();

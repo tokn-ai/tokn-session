@@ -61,7 +61,7 @@ function ViewerPreferencesSection({ preferences, on_change, on_reset }: {
         <option value="time">Time</option><option value="project">Projects</option>
       </SelectField>
       <div className="settings-page__row">
-        <div><label htmlFor={`${id}-lifecycle`}>Lifecycle events</label><p id={`${id}-lifecycle-description`}>Show session bookkeeping inside activity groups.</p></div>
+        <div><label htmlFor={`${id}-lifecycle`}>Technical events</label><p id={`${id}-lifecycle-description`}>Show token usage and routine lifecycle events in conversations and work groups.</p></div>
         <input aria-describedby={`${id}-lifecycle-description`} id={`${id}-lifecycle`} type="checkbox" checked={preferences.show_lifecycle} onChange={(event) => on_change({ show_lifecycle: event.currentTarget.checked })} />
       </div>
     </div>

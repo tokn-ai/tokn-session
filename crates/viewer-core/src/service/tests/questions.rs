@@ -70,13 +70,7 @@ fn questions_stay_outside_work_trajectories_and_keep_structured_native_detail() 
       .any(|entry| matches!(entry, TimelineEntry::Event { source_event_index } if *source_event_index == index))
   );
   assert!(!crate::service::event_filter::is_bookkeeping(&events[index]));
-  let summary = event_summary_with_delegation_targets(
-    &events,
-    index,
-    &events[index],
-    &ActivityTargets::default(),
-    &HashSet::new(),
-  );
+  let summary = event_summary_with_delegation_targets(&events, index, &events[index], &ActivityTargets::default());
   assert_eq!(summary.event_type, "question_request");
   assert_eq!(summary.summary, "Which **storage engine**?");
   assert!(summary.role.is_none());
@@ -106,13 +100,7 @@ fn parsed_answers_are_visible_user_rows_with_linked_question_and_native_result()
       .iter()
       .any(|entry| matches!(entry, TimelineEntry::Event { source_event_index } if *source_event_index == index))
   );
-  let summary = event_summary_with_delegation_targets(
-    &events,
-    index,
-    &events[index],
-    &ActivityTargets::default(),
-    &HashSet::new(),
-  );
+  let summary = event_summary_with_delegation_targets(&events, index, &events[index], &ActivityTargets::default());
   assert_eq!(summary.event_type, "question_reply");
   assert_eq!(summary.role.as_deref(), Some("user"));
   assert_eq!(

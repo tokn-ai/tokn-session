@@ -64,7 +64,7 @@ provider revision protocol. This tradeoff is explicit rather than claiming
 metadata alone proves immutability.
 
 Append-only source records also do not imply immutable rendered cards. Tool
-results, compaction pairs, and terminal usage can revise earlier projections.
+results, compaction pairs, and turn completion can revise earlier projections.
 Any future projection cache must preserve those dependencies.
 
 ## Measurements

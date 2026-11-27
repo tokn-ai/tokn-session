@@ -1,0 +1,15 @@
+{"timestamp":"2026-06-02T10:00:00.000Z","type":"session_meta","payload":{"id":"3d4fa291-2faa-439d-890d-6d91f9a3342d","cwd":"/fixture/parser-demo"}}
+{"timestamp":"2026-06-02T10:00:00.100Z","type":"event_msg","payload":{"type":"task_started","turn_id":"parser-check"}}
+{"timestamp":"2026-06-02T10:00:00.100Z","type":"event_msg","payload":{"type":"user_message","message":"Check whether the parser suite passes."}}
+{"timestamp":"2026-06-02T10:00:00.200Z","type":"event_msg","payload":{"type":"exec_command_begin","call_id":"check-parser","command":["make","check-parser"],"cwd":"/fixture/parser-demo"}}
+{"timestamp":"2026-06-02T10:00:00.600Z","type":"event_msg","payload":{"type":"exec_command_end","call_id":"check-parser","command":["make","check-parser"],"cwd":"/fixture/parser-demo","exit_code":0,"stdout":"Parser tests: 8 passed","stderr":"","aggregated_output":"Parser tests: 8 passed","status":"completed"}}
+{"timestamp":"2026-06-02T10:00:00.800Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"All eight parser tests passed."}]}}
+{"timestamp":"2026-06-02T10:00:00.900Z","type":"token_usage_record","payload":{"turn_id":"parser-check","response_id":"parser-check-response","usage":{"input_tokens":240,"cached_input_tokens":140,"output_tokens":30,"reasoning_output_tokens":5,"total_tokens":270}}}
+{"timestamp":"2026-06-02T10:00:00.900Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":14300,"cached_input_tokens":12000,"output_tokens":280,"reasoning_output_tokens":80,"total_tokens":14580},"last_token_usage":{"input_tokens":240,"cached_input_tokens":140,"output_tokens":30,"reasoning_output_tokens":5,"total_tokens":270}}}}
+{"timestamp":"2026-06-02T10:00:00.900Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"parser-check"}}
+{"timestamp":"2026-06-02T10:00:02.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"parser-recap"}}
+{"timestamp":"2026-06-02T10:00:02.000Z","type":"world_state","payload":{"full":false,"state":{}}}
+{"timestamp":"2026-06-02T10:00:02.000Z","type":"turn_context","payload":{"turn_id":"parser-recap"}}
+{"timestamp":"2026-06-02T10:00:02.001Z","type":"event_msg","payload":{"type":"user_message","message":"Which command ran?"}}
+{"timestamp":"2026-06-02T10:00:02.300Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"The suite ran with `make check-parser`."}]}}
+{"timestamp":"2026-06-02T10:00:02.300Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"parser-recap"}}

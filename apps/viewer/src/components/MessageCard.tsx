@@ -1,4 +1,4 @@
-import { useId, useMemo } from "react";
+import { useId, useMemo, useRef } from "react";
 import { bindMarkdownImages } from "../lib/markdownImages";
 import type { EventSummary } from "../lib/types";
 import { formatRecordedDuration, formatTimestamp, providerLabel } from "../lib/state";
@@ -7,7 +7,7 @@ import { MessageImages } from "./MessageImages";
 import { MarkdownContent } from "./MarkdownContent";
 import { CopyTextButton } from "./CopyTextButton";
 import { messageExcerpt, useMessageBody } from "../lib/useMessageBody";
-import { ChevronIcon, CompletedGoalIcon, GoalIcon, InspectorIcon } from "./Icons";
+import { ChevronIcon, CompletedGoalIcon, GoalIcon, InspectorIcon, TranslateIcon } from "./Icons";
 import { useTranslationEngine, useTranslationStatus } from "./TranslationProvider";
 import "./Transcript.css";
 
@@ -23,6 +23,7 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
   const status = useTranslationStatus();
   const engine = useTranslationEngine();
   const contentId = useId();
+  const translationButton = useRef<HTMLButtonElement>(null);
   const body = useMessageBody(event, session_key);
   const translation = useMessageTranslation(event, body.source, session_key, engine);
   const role = event.role ?? "unknown";
@@ -64,6 +65,9 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
     ? <MessageImages session_key={session_key} event_key={event.event_key} revision={event.content_revision} images={tray_images} />
     : <span className="message-image__status">Image unavailable</span> : null;
   const canTranslate = Boolean(status?.available && session_key && role === "assistant" && !event.is_hidden && event.summary.trim());
+  const translationAction = translation.loading ? "Translating…"
+    : translation.translated ? translation.showing_translation ? "Show original" : "Show translation"
+    : translation.error ? "Retry translation" : "Translate → 简体中文";
   const sender = role === "assistant" ? providerLabel(event.provider) || "Assistant" : role;
   const canCopy = usesMarkdown && !!event.summary.trim();
   const copyText = preview ? display_text : translatedText ?? expandedText ?? event.summary;
@@ -147,9 +151,19 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
             onClick={() => on_select(event.event_key)} title={inspectFullMessage ? "View full message" : "Inspect message"} type="button">
             {inspectFullMessage ? "View full message" : <InspectorIcon width={15} height={15} />}
           </button>
-          {canTranslate && !translation.loading && !translation.translated && !translation.error && <button
-            aria-label="Translate → 简体中文" className="message-event__inspect" onClick={() => { void translation.translate(); }}
-            title={engine?.description} type="button">Translate</button>}
+          {canTranslate && <button ref={translationButton} type="button"
+            className="message-event__inspect message-translation__action"
+            data-showing-translation={translation.showing_translation || undefined}
+            aria-label={translationAction} aria-controls={contentId} aria-disabled={translation.loading || undefined}
+            title={translation.translated && engine ? `${translationAction} · ${engine.label}`
+              : translation.loading || translation.error ? translationAction : engine?.description}
+            onClick={() => {
+              if (translation.loading) return;
+              if (translation.translated) translation.toggle();
+              else void translation.translate();
+            }}>
+            <TranslateIcon width={15} height={15} />
+          </button>}
         </div>
         {completion && <span className="message-goal-completion">
           <span className="message-goal-label"><CompletedGoalIcon />{goalDuration ? `Goal achieved in ${goalDuration}` : "Goal achieved"}</span>
@@ -159,29 +173,26 @@ export function MessageCard({ event, session_key, button_id, is_selected, on_sel
           {model && <span title={[model_source, model.model.model_provider].filter(Boolean).join(" · ")}>{model.model.model_id}</span>}
           {fast && <span>{fast}</span>}
         </span> : null}
-        {canTranslate && (translation.loading || translation.translated || translation.error) && (
-          <div className="message-utilities__translation">
-            {translation.loading ? <>
-              <span className="message-translation__status" role="status">
-                {!translation.progress?.resume && <span className="inline-spinner" aria-hidden="true" />}
-                {translation.progress?.message ?? "Translating…"}
-              </span>
-              {translation.progress?.resume && <button className="message-event__inspect" onClick={translation.progress.resume}
-                type="button">Continue translation</button>}
-              <button className="message-event__inspect" onClick={translation.cancel} type="button">Cancel</button>
-            </> : translation.translated ? <>
-              <span className="message-translation__status">{translation.showing_translation ? `简体中文 · ${engine?.label}` : "Original"}</span>
-              <button className="message-event__inspect" onClick={translation.toggle} type="button">
-                {translation.showing_translation ? "Show original" : "Show translation"}
-              </button>
-            </> : <button className="message-event__inspect" onClick={() => { void translation.translate(); }}
-              title={engine?.description} type="button">Retry translation</button>}
-          </div>
-        )}
         {(role === "assistant" || event.timestamp) && <span className="message-byline">
           {role === "assistant" && <span className="message-byline__sender" data-provider={event.provider}>{sender}</span>}
           {!completion && timestamp}
         </span>}
+        {canTranslate && translation.loading && (
+          <div className="message-utilities__translation">
+            <span className="message-translation__status" role="status">
+              {!translation.progress?.resume && <span className="inline-spinner" aria-hidden="true" />}
+              {translation.progress?.message ?? translationAction}
+            </span>
+            {translation.progress?.resume && <button className="message-event__inspect" type="button" onClick={() => {
+              translation.progress?.resume?.();
+              translationButton.current?.focus();
+            }}>Continue translation</button>}
+            <button className="message-event__inspect" type="button" onClick={() => {
+              translation.cancel();
+              translationButton.current?.focus();
+            }}>Cancel</button>
+          </div>
+        )}
       </footer>
     </article>
   );

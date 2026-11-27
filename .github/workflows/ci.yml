@@ -72,7 +72,8 @@ jobs:
 
   viewer:
     name: Session viewer
-    runs-on: ubuntu-latest
+    # The 26.04 runner's Microsoft apt source can block Firefox dependency setup.
+    runs-on: ubuntu-24.04
     outputs:
       apell_artifact_id: ${{ steps.apell_package.outputs.artifact-id }}
 

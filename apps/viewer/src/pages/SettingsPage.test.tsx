@@ -62,7 +62,9 @@ describe("SettingsPage", () => {
     expect(screen.getByRole("heading", { name: "Viewer preferences" })).toBeInTheDocument();
     expect(screen.getByText("This device", { selector: ".settings-page__scope" })).toBeInTheDocument();
     fireEvent.change(screen.getByRole("combobox", { name: "Sidebar grouping" }), { target: { value: "project" } });
-    fireEvent.click(screen.getByRole("checkbox", { name: "Lifecycle events" }));
+    const technical = screen.getByRole("checkbox", { name: "Technical events" });
+    expect(technical).toHaveAccessibleDescription("Show token usage and routine lifecycle events in conversations and work groups.");
+    fireEvent.click(technical);
     fireEvent.change(screen.getByRole("combobox", { name: "Background sessions" }), { target: { value: "sidebar" } });
     fireEvent.change(screen.getByRole("combobox", { name: "Background delivery" }), { target: { value: "final" } });
     fireEvent.change(screen.getByRole("combobox", { name: "Conversation delivery" }), { target: { value: "all" } });

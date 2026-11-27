@@ -44,9 +44,11 @@ export function SessionDetails({ session, model, count_label, hidden_label, show
         <dt>History</dt><dd>{count_label}</dd>
       </dl>
       <label className="session-details__filter">
-        <input type="checkbox" checked={show_lifecycle} onChange={event => on_lifecycle_change(event.currentTarget.checked)} />
-        Show lifecycle events
+        <input type="checkbox" aria-describedby={`${id}-events-description`} checked={show_lifecycle}
+          onChange={event => on_lifecycle_change(event.currentTarget.checked)} />
+        Show technical events
       </label>
+      <p id={`${id}-events-description`}>Includes token usage and routine lifecycle events.</p>
       {hidden_label && <p>{hidden_label}</p>}
     </div>
   </div>;

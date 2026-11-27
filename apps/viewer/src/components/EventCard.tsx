@@ -289,10 +289,11 @@ function useTrajectoryHeading(event: EventSummary): TechnicalCardHeading {
   const duration = formatRecordedDuration(working && Number.isFinite(start)
     ? String(Math.max(0, now - start))
     : trajectory?.duration_ms ?? null);
+  const elapsed = trajectory?.status === "complete" && duration === "0s" ? "<1s" : duration;
   const verb = working ? "Working" : trajectory?.status === "unknown" ? "Work" : "Worked";
   return {
     action: "Turn",
-    primary: duration ? `${verb} for ${duration}` : verb,
+    primary: elapsed ? `${verb} for ${elapsed}` : verb,
     secondary: trajectory ? trajectoryFacts(trajectory) : event.summary || null,
     monospace: false,
   };
@@ -665,7 +666,7 @@ function TrajectorySection({
                       {(children) => {
                         const visible = children.filter((child) => !hide_lifecycle || !isBookkeepingEvent(child));
                         return visible.length ? visible.map(renderChild)
-                          : <p className="event-filter-notice" role="status">Lifecycle events are hidden.</p>;
+                          : <p className="event-filter-notice" role="status">Technical events are hidden.</p>;
                       }}
                     </DeferredActivityGroup>
                   ) : (

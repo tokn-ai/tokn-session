@@ -98,8 +98,8 @@
   line-height: 1.4;
 }
 
-.message-utilities__buttons, .message-utilities__translation { gap: 2px; }
-.message-utilities__translation { gap: 4px 7px; }
+.message-utilities__buttons { gap: 2px; }
+.message-utilities__translation { flex-basis: 100%; gap: 4px 7px; }
 
 .message-goal-label, .message-goal-completion {
   display: inline-flex;
@@ -130,6 +130,15 @@
 }
 .message-utilities .message-event__inspect:hover,
 .message-utilities .message-event__inspect:focus-visible { color: var(--text); background: var(--surface-hover); }
+
+.message-utilities .message-translation__action[data-showing-translation] {
+  color: var(--focus);
+  background: var(--surface-hover);
+}
+.message-utilities .message-translation__action[aria-disabled="true"] {
+  cursor: default;
+  opacity: .6;
+}
 
 .message-byline { gap: 6px; font-size: 11px; opacity: 0; }
 .message-byline time { font-variant-numeric: tabular-nums; white-space: nowrap; }

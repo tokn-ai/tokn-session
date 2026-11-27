@@ -155,6 +155,8 @@ fn identified_turn_keeps_compaction_and_accounting_in_one_stable_inspectable_run
   );
   assert_eq!(children[3].event_key, encode_event_key(4));
   assert!(children[3].compaction.is_some());
+  assert!(children[6].is_bookkeeping && children[7].is_bookkeeping);
+  assert_eq!(children[6].event_key, encode_event_key(8));
   assert_eq!(children[7].event_key, encode_event_key(9));
 }
 
@@ -166,8 +168,15 @@ fn compaction_requires_a_matching_codex_turn_and_accounting_cannot_cross_turns()
     unreachable!()
   };
   usage.turn_id = Some("different-turn".into());
-  let isolated = page(&[goal_marker(), final_reply.clone(), foreign_usage]);
-  assert_eq!(isolated.events.last().unwrap().event_type, "usage");
+  let isolated = page(&[
+    goal_marker(),
+    message_event_with_role("Checking", Role::Assistant, MessageDelivery::Commentary),
+    final_reply.clone(),
+    foreign_usage,
+  ]);
+  assert_eq!(isolated.events[0].trajectory.as_ref().unwrap().usage_count, 0);
+  assert_eq!(isolated.events[2].event_type, "usage");
+  assert!(isolated.events[2].is_bookkeeping);
   for provider in [Provider::Pi, Provider::Dsh] {
     let rows = page(&[marker(provider), compaction(provider), final_reply.clone()]);
     assert_eq!(rows.events[1].event_type, "compaction");
@@ -196,6 +205,7 @@ fn ordinary_codex_work_includes_time_spent_generating_its_final_reply() {
   assert_eq!(work.duration_ms.as_deref(), Some("120000"));
   assert_eq!(work.usage_count, 0);
   assert_eq!(response.events[2].event_type, "usage");
+  assert!(response.events[2].is_bookkeeping);
 }
 
 #[test]
@@ -222,7 +232,7 @@ fn a_question_separates_work_without_ending_native_turn_ownership() {
       .iter()
       .map(|row| row.event_type.as_str())
       .collect::<Vec<_>>(),
-    ["trajectory", "question_request", "trajectory", "message"]
+    ["lifecycle", "question_request", "trajectory", "message"]
   );
   assert_eq!(response.events[2].trajectory.as_ref().unwrap().usage_count, 1);
 
@@ -238,7 +248,7 @@ fn a_question_separates_work_without_ending_native_turn_ownership() {
       .iter()
       .map(|row| row.event_type.as_str())
       .collect::<Vec<_>>(),
-    ["trajectory", "question_request", "message", "usage"]
+    ["lifecycle", "question_request", "message", "usage"]
   );
 }
 

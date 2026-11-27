@@ -12,7 +12,7 @@ function event(overrides: Partial<EventSummary>): EventSummary {
 }
 
 describe("bookkeeping filter classification", () => {
-  it.each(["session_started", "provider_changed", "session_settings_applied", "lifecycle", "metadata", "usage"])(
+  it.each(["session_started", "provider_changed", "session_settings_applied", "lifecycle", "metadata", "usage", "activity_group"])(
     "requires explicit backend classification for %s", (type) => {
       expect(isBookkeepingEvent(event({ type, is_bookkeeping: true }))).toBe(true);
       expect(isBookkeepingEvent(event({ type, is_bookkeeping: false }))).toBe(false);
@@ -26,9 +26,7 @@ describe("bookkeeping filter classification", () => {
     },
   );
 
-  it("preserves errors reported through lifecycle, metadata, or usage records", () => {
-    expect(isBookkeepingEvent(event({ is_bookkeeping: true, is_error: true }))).toBe(false);
-    expect(isBookkeepingEvent(event({ type: "metadata", is_bookkeeping: true, is_error: true }))).toBe(false);
-    expect(isBookkeepingEvent(event({ type: "usage", is_bookkeeping: true, is_error: true }))).toBe(false);
+  it.each(["lifecycle", "metadata", "usage", "activity_group"])("preserves reported errors in %s", (type) => {
+    expect(isBookkeepingEvent(event({ type, is_bookkeeping: true, is_error: true }))).toBe(false);
   });
 });
