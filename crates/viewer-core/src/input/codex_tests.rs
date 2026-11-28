@@ -64,7 +64,7 @@ fn success(request: &Value, result: Value) -> Value {
 
 #[tokio::test]
 #[cfg(unix)]
-async fn retry_connects_after_desktop_replaces_a_stale_socket() {
+async fn new_connection_distinguishes_refusing_missing_and_available_desktop_sockets() {
   let FakeRouter {
     endpoint,
     listener,
@@ -73,9 +73,16 @@ async fn retry_connects_after_desktop_replaces_a_stale_socket() {
   drop(listener);
   let error = DesktopClient::connect(&endpoint, REQUEST_TIMEOUT).await.err().unwrap();
   assert!(!error.may_have_been_sent);
-  assert!(error.message.contains("Quit and reopen"));
+  assert_eq!(
+    error.message,
+    "Codex Desktop's local control endpoint refused the connection."
+  );
 
   std::fs::remove_file(&endpoint).unwrap();
+  let error = DesktopClient::connect(&endpoint, REQUEST_TIMEOUT).await.err().unwrap();
+  assert!(!error.may_have_been_sent);
+  assert_eq!(error.message, "Codex Desktop's local control endpoint is missing.");
+
   let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
   let server = tokio::spawn(async move {
     let mut stream: Box<dyn IpcStream> = Box::new(listener.accept().await.unwrap().0);
@@ -565,7 +572,7 @@ async fn missing_endpoint_is_not_a_delivery_attempt() {
     Err(error) => error,
   };
   assert!(!error.may_have_been_sent);
-  assert!(error.message.contains("Open Codex Desktop"));
+  assert_eq!(error.message, "Codex Desktop's local control endpoint is missing.");
 }
 
 #[tokio::test]

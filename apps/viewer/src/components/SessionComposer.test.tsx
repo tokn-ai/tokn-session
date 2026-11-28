@@ -88,7 +88,7 @@ it("folds the reason, retry and connection in one read-only control and keeps St
 });
 
 it.each(["input", "control"])("merges the Desktop refusal and preserves the retry while the %s check finishes first", async (first) => {
-  const message = "Codex Desktop is refusing local connections. Quit and reopen it, then retry.";
+  const message = "Codex Desktop's local control endpoint refused the connection.";
   const desktop = control("desktop");
   const route = { ...desktop, status: { ...desktop.status!, transport: "desktop" as const, available: false, message } };
   const recheck = deferred<void>();
@@ -124,8 +124,8 @@ it.each(["input", "control"])("merges the Desktop refusal and preserves the retr
   expect(textbox()).toHaveFocus();
 });
 
-it("unlocks the shared retry when a companion control check rejects", async () => {
-  const message = "Codex Desktop is refusing local connections. Quit and reopen it, then retry.";
+it("unlocks the shared retry when the Desktop endpoint remains missing and a companion check rejects", async () => {
+  const message = "Codex Desktop's local control endpoint is missing.";
   const desktop = control("desktop");
   const route = { ...desktop, status: { ...desktop.status!, transport: "desktop" as const, available: false, message } };
   vi.mocked(route.refresh).mockRejectedValueOnce(new Error("Connection interrupted"));

@@ -429,8 +429,8 @@ async fn read_frame(stream: &mut (impl AsyncRead + Unpin)) -> Result<Value, Stri
 
 fn connection_error(error: std::io::Error) -> DeliveryError {
   let message = match error.kind() {
-    ErrorKind::NotFound => "Open Codex Desktop, then retry the connection.",
-    ErrorKind::ConnectionRefused => "Codex Desktop is refusing local connections. Quit and reopen it, then retry.",
+    ErrorKind::NotFound => "Codex Desktop's local control endpoint is missing.",
+    ErrorKind::ConnectionRefused => "Codex Desktop's local control endpoint refused the connection.",
     ErrorKind::PermissionDenied => "Tokn does not have permission to connect to Codex Desktop.",
     _ => return DeliveryError::not_sent(format!("Could not connect to Codex Desktop: {error}")),
   };
