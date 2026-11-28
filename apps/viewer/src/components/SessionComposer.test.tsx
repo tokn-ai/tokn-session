@@ -87,6 +87,77 @@ it("folds the reason, retry and connection in one read-only control and keeps St
   expect(disclosure).toHaveAttribute("aria-expanded", "false");
 });
 
+it.each(["input", "control"])("merges the Desktop refusal and preserves the retry while the %s check finishes first", async (first) => {
+  const message = "Codex Desktop's local control endpoint refused the connection.";
+  const desktop = control("desktop");
+  const route = { ...desktop, status: { ...desktop.status!, transport: "desktop" as const, available: false, message } };
+  const recheck = deferred<void>();
+  vi.mocked(route.refresh).mockReturnValue(recheck.promise);
+  const availability = deferred<SessionInputStatus>();
+  vi.mocked(getSessionInputStatus).mockResolvedValueOnce({ ...AVAILABLE, available: false, message }).mockReturnValueOnce(availability.promise);
+  const view = render(<SessionComposer session={SESSION} control={route} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Read-only session" }));
+  expect(screen.getByText(message)).toBeVisible();
+  expect(screen.getByRole("combobox", { name: "Codex connection" })).toHaveValue("desktop");
+  const retry = screen.getByRole("button", { name: /retry/i });
+  expect(retry).toHaveAccessibleName("Retry connection");
+  retry.focus();
+  fireEvent.click(retry);
+  const finishControl = () => act(async () => {
+    view.rerender(<SessionComposer session={SESSION} control={{ ...route, status: { ...route.status, available: true, message: "" } }} />);
+    recheck.resolve();
+  });
+  const finishInput = () => act(async () => availability.resolve(AVAILABLE));
+  await (first === "control" ? finishControl() : finishInput());
+  expect(screen.getByRole("button", { name: /retry/i })).toBe(retry);
+  expect(retry).toHaveAttribute("aria-disabled", "true");
+  expect(retry).toHaveFocus();
+  expect(screen.getByText("Checking message availability…")).toBeVisible();
+  expect(screen.queryByText(message)).toBeNull();
+  fireEvent.click(retry);
+  expect(route.refresh).toHaveBeenCalledExactlyOnceWith(true);
+  expect(getSessionInputStatus).toHaveBeenCalledTimes(2);
+  expect(route.choose).not.toHaveBeenCalled();
+  expect(submitSessionInput).not.toHaveBeenCalled();
+  await (first === "control" ? finishInput() : finishControl());
+  await ready();
+  expect(textbox()).toHaveFocus();
+});
+
+it("unlocks the shared retry when the Desktop endpoint remains missing and a companion check rejects", async () => {
+  const message = "Codex Desktop's local control endpoint is missing.";
+  const desktop = control("desktop");
+  const route = { ...desktop, status: { ...desktop.status!, transport: "desktop" as const, available: false, message } };
+  vi.mocked(route.refresh).mockRejectedValueOnce(new Error("Connection interrupted"));
+  vi.mocked(getSessionInputStatus).mockResolvedValue({ ...AVAILABLE, available: false, message });
+  render(<SessionComposer session={SESSION} control={route} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Read-only session" }));
+  const retry = screen.getByRole("button", { name: "Retry connection" });
+  retry.focus();
+  fireEvent.click(retry);
+  await waitFor(() => expect(retry).not.toHaveAttribute("aria-disabled"));
+  expect(retry).toHaveFocus();
+  expect(screen.getByText(message)).toBeVisible();
+  expect(getSessionInputStatus).toHaveBeenCalledTimes(2);
+});
+
+it.each(["different reason", "control error", "control notice", "RPC route"])("keeps separate retry actions for %s", async (scenario) => {
+  const desktop = control("desktop");
+  const reason = "Input is unavailable.";
+  const separate = "Control could not be verified.";
+  const route = { ...desktop, status: { ...desktop.status!, available: false,
+    transport: scenario === "RPC route" ? "rpc" as const : "desktop" as const,
+    message: scenario === "different reason" ? separate : reason },
+    error: scenario === "control error" ? separate : null, notice: scenario === "control notice" ? separate : null };
+  vi.mocked(getSessionInputStatus).mockResolvedValue({ ...AVAILABLE, available: false, message: reason });
+  render(<SessionComposer session={SESSION} control={route} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Read-only session" }));
+  expect(screen.getByRole("button", { name: "Retry availability" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Retry control" })).toBeEnabled();
+  expect(screen.getAllByText(reason)[0]).toBeVisible();
+  if (scenario !== "RPC route") expect(screen.getByText(separate)).toBeVisible();
+});
+
 it("keeps a control failure actionable beside a collapsed status and resets disclosure when switching sessions", async () => {
   vi.mocked(getSessionInputStatus).mockResolvedValue({ ...AVAILABLE, available: false, message: "Recorded history." });
   const route = { ...control("rpc"), error: "Live control disconnected" };

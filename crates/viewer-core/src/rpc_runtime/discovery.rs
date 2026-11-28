@@ -11,12 +11,14 @@ use std::{
 pub(crate) struct DiscoveryEnvironment {
   pub path: Option<OsString>,
   pub executables: BTreeMap<String, OsString>,
+  pub bundled_codex: Vec<PathBuf>,
 }
 
 impl DiscoveryEnvironment {
   pub(crate) fn current() -> Self {
     Self {
       path: std::env::var_os("PATH"),
+      bundled_codex: tokn_codex_adapter::executable::bundled_executables(),
       executables: [
         Provider::Codex,
         Provider::OpenCode,
@@ -44,17 +46,7 @@ pub(crate) fn resolve_executable(
   let command = configured
     .map(PathBuf::from)
     .unwrap_or_else(|| PathBuf::from(command_name));
-  let path = if command.is_absolute() {
-    executable_candidates(&command).find(|candidate| executable_ready(candidate))
-  } else {
-    search_path.and_then(|paths| {
-      std::env::split_paths(paths)
-        .filter(|directory| directory.is_absolute())
-        .flat_map(|directory| executable_candidates(&directory.join(&command)))
-        .find(|candidate| executable_ready(candidate))
-    })
-  }
-  .ok_or_else(|| {
+  let path = tokn_session_storage::find_executable(&command, search_path).ok_or_else(|| {
     if configured.is_some() {
       format!("The configured {command_name} executable is unavailable; fix its path or runtime profile")
     } else {
@@ -64,36 +56,9 @@ pub(crate) fn resolve_executable(
   std::fs::canonicalize(path).map_err(|_| format!("Could not resolve the {command_name} executable"))
 }
 
-fn executable_candidates(command: &Path) -> std::vec::IntoIter<PathBuf> {
-  let mut candidates = vec![command.to_path_buf()];
-  // The Pi driver and explicit environment overrides commonly supply bare
-  // command names. Windows installations also expose package-manager shims.
-  // Preserve explicit extensions: a missing configured file must not select
-  // another command or silently replace its requested extension.
-  if cfg!(windows) && command.extension().is_none() {
-    candidates.extend(["exe", "com", "cmd", "bat"].map(|extension| command.with_extension(extension)));
-  }
-  candidates.into_iter()
-}
-
-fn executable_ready(path: &Path) -> bool {
-  let Ok(metadata) = path.metadata() else { return false };
-  if !metadata.is_file() {
-    return false;
-  }
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::PermissionsExt;
-    if metadata.permissions().mode() & 0o111 == 0 {
-      return false;
-    }
-  }
-  true
-}
-
 fn provider_command(provider: Provider) -> Result<(&'static str, &'static str, &'static str), String> {
   match provider {
-    Provider::Codex => Ok(("Codex", "codex", "TOKN_SESSION_CODEX_EXECUTABLE")),
+    Provider::Codex => Ok(("Codex", "codex", tokn_codex_adapter::executable::EXECUTABLE_OVERRIDE)),
     Provider::OpenCode => Ok(("OpenCode", "opencode", "TOKN_SESSION_OPENCODE_EXECUTABLE")),
     Provider::ZCode => Ok(("ZCode", "zcode", "TOKN_SESSION_ZCODE_EXECUTABLE")),
     Provider::Qoder => Ok(("Qoder", "qodercli", "TOKN_SESSION_QODER_EXECUTABLE")),
@@ -113,13 +78,19 @@ pub(super) fn builtin_profile(
     return Err("The session working directory is unavailable".into());
   }
   let configured = environment.executables.get(key).map(OsString::as_os_str);
-  let executable = resolve_executable(configured, environment.path.as_deref(), command).or_else(|error| {
-    if provider == Provider::Qoder && configured.is_none() {
-      resolve_executable(None, environment.path.as_deref(), "qoder")
-    } else {
-      Err(error)
-    }
-  })?;
+  let search_path = environment.path.as_deref();
+  let executable = if provider == Provider::Codex {
+    tokn_codex_adapter::executable::resolve_with_environment(configured, search_path, &environment.bundled_codex)
+      .map_err(|error| format!("{error} You can also configure an Agent runtimes profile on this machine."))?
+  } else {
+    resolve_executable(configured, search_path, command).or_else(|error| {
+      if provider == Provider::Qoder && configured.is_none() {
+        resolve_executable(None, search_path, "qoder")
+      } else {
+        Err(error)
+      }
+    })?
+  };
   let mut profile = RpcResolvedProfile {
     revision: 0,
     profile: RpcRuntimeProfile {

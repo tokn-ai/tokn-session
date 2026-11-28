@@ -1,5 +1,12 @@
 use super::*;
+use serde_json::Value;
 use std::{collections::BTreeMap, ffi::OsString, path::Path, time::Duration};
+use tokn_codex_adapter::{CodexAdapter, ThreadResumeFailure, classify_thread_resume_failure};
+
+const CODEX_ARCHIVED: &str = "This Codex thread is archived. Unarchive it in Codex, then try again.";
+const CODEX_ROLLOUT_NOT_FOUND: &str =
+  "Codex could not find this thread in the selected runtime. Check that the runtime uses this thread's Codex home.";
+const CODEX_PAGINATED_ROLLOUT_NOT_FOUND: &str = "Codex could not find this chat in the selected runtime. In Settings → Agent runtimes, use a Codex profile with this chat's original CODEX_HOME.";
 
 #[derive(Clone)]
 pub(super) enum Handle {
@@ -30,14 +37,89 @@ impl Handle {
   }
   pub(super) async fn bind_native(&self, id: &str) -> Result<(), String> {
     if let Self::Codex(adapter) = self {
-      adapter
-        .resume_thread(id)
-        .await
-        .map_err(|_| "Could not resume the selected Codex thread")?;
+      bind_codex(adapter, id, None).await?;
     }
     Ok(())
   }
 }
+
+fn codex_resume_message(id: &str, error: &InteractionError) -> String {
+  let message = match classify_thread_resume_failure(id, error) {
+    ThreadResumeFailure::Archived => CODEX_ARCHIVED,
+    ThreadResumeFailure::RolloutNotFound => CODEX_ROLLOUT_NOT_FOUND,
+    ThreadResumeFailure::Other => match error.kind {
+      ErrorKind::Unavailable => {
+        "The Codex runtime became unavailable while opening this thread. Reconnect it and try again."
+      }
+      ErrorKind::Uncertain => {
+        "Codex did not confirm it opened the selected thread. Reconnect the runtime before retrying."
+      }
+      _ => {
+        "Codex rejected this thread before message delivery. Check that it opens in Codex and uses the selected runtime's Codex home."
+      }
+    },
+  };
+  message.into()
+}
+
+async fn bind_codex(adapter: &CodexAdapter, id: &str, history_key: Option<&str>) -> Result<(), String> {
+  let Err(error) = adapter.resume_thread(id).await else {
+    return Ok(());
+  };
+  if let Some(key) = history_key
+    && adapter.descriptor().ownership == Ownership::Managed
+    && classify_thread_resume_failure(id, &error) == ThreadResumeFailure::RolloutNotFound
+  {
+    // The native lookup definitively rejected this ID. A local app server may
+    // recover a verified legacy rollout without selecting another runtime.
+    let path = verified_codex_rollout(key, id).await?;
+    adapter
+      .resume_thread_from_rollout(id, &path)
+      .await
+      .map_err(|error| codex_resume_message(id, &error))?;
+    return Ok(());
+  }
+  Err(codex_resume_message(id, &error))
+}
+
+async fn verified_codex_rollout(key: &str, id: &str) -> Result<PathBuf, String> {
+  let locator = crate::model::decode_session_key(key).map_err(|_| "Could not verify the selected Codex history")?;
+  if locator.provider != crate::model::ViewerProvider::Codex || locator.session_id != id {
+    return Err("The selected history does not match the Codex thread".into());
+  }
+  tokio::task::spawn_blocking(move || {
+    let path = tokn_session_codex::resolve_rollout_path(&locator.source_path)
+      .canonicalize()
+      .map_err(|_| "The selected Codex history is unavailable. Refresh the conversation.")?;
+    if path
+      .ancestors()
+      .any(|ancestor| ancestor.file_name().is_some_and(|name| name == "archived_sessions"))
+    {
+      return Err(CODEX_ARCHIVED);
+    }
+    if path.extension().is_none_or(|extension| extension != "jsonl") {
+      return Err(CODEX_ROLLOUT_NOT_FOUND);
+    }
+    let header = tokn_session_codex::history_header(&path)
+      .map_err(|_| "Could not verify the selected Codex history. Refresh the conversation.")?;
+    if header.native()["payload"]["id"].as_str() != Some(locator.session_id.as_str()) {
+      return Err("The selected Codex history changed. Refresh the conversation.");
+    }
+    // Paginated histories use a thread store that resolves native IDs in
+    // its own Codex home even when an explicit rollout path is supplied.
+    match &header.native()["payload"]["history_mode"] {
+      Value::Null => {}
+      Value::String(mode) if mode == "legacy" => {}
+      Value::String(mode) if mode == "paginated" => return Err(CODEX_PAGINATED_ROLLOUT_NOT_FOUND),
+      _ => return Err(CODEX_ROLLOUT_NOT_FOUND),
+    }
+    Ok(path)
+  })
+  .await
+  .map_err(|_| "Could not verify the selected Codex history".to_owned())?
+  .map_err(str::to_owned)
+}
+
 fn env(profile: &RpcResolvedProfile) -> BTreeMap<OsString, OsString> {
   profile
     .environment
@@ -391,6 +473,9 @@ impl core_runtime::RuntimeHandle for Handle {
 
   fn bind_history<'a>(&'a self, key: &'a str, id: &'a str) -> AdapterFuture<'a, Result<(), String>> {
     Box::pin(async move {
+      if let Self::Codex(adapter) = self {
+        return bind_codex(adapter, id, Some(key)).await;
+      }
       if let Self::Qoder {
         adapter,
         history_root,

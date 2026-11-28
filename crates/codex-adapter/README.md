@@ -1,17 +1,23 @@
 # tokn-codex-adapter
 
+The `executable` module resolves the Codex launcher for both CLI and viewer
+hosts. It checks an explicit override, the process PATH, and standard ChatGPT
+install locations on macOS. Disable default features to use discovery alone.
+
 Rust adapter for Codex's public `app-server` RPC. Depends on the standalone
 `tokn-codex-rpc-protocol` wire types and the provider-independent
 `tokn-interaction-core` contract. Historical rollouts and the viewer's existing
 Codex Desktop IPC input path remain separate.
 
-`CodexAdapter::spawn` owns an explicitly configured `codex app-server --listen
-stdio://` child. `attach` accepts stdio handles supplied by their owner;
-`connect` attaches to an explicit WS(S) endpoint with optional bearer
-authentication. Executables, arguments, environment, endpoints, and credentials
+The default `app-server` feature enables live control. `CodexAdapter::spawn`
+owns an explicitly configured `codex app-server --listen
+stdio://` child. `attach` accepts stdio handles supplied by their owner.
+`connect` attaches to a WS(S) endpoint with optional bearer authentication,
+or on Unix to `unix:///absolute/path` using the native WebSocket upgrade.
+Unix endpoints use filesystem permissions and accept literal paths including spaces.
+Executables, arguments, environment, endpoints, and credentials
 are host configuration. There is no process discovery, credential extraction,
-or automatic attachment to Desktop. Native WebSocket transport is experimental;
-Unix socket transport is not implemented here.
+or automatic attachment to Desktop. Native TCP WebSocket transport is experimental.
 
 Initialization happens once per transport, with experimental API opt-in for
 native question/approval metadata. Create a thread with `create_thread`, or

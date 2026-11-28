@@ -9,6 +9,7 @@ impl SessionSupervisor {
   pub(super) async fn rpc_input_status(
     &self,
     target: &VerifiedSession,
+    inspect_images: bool,
   ) -> Result<input::InputCapability, DeliveryError> {
     let provider = target.provider().map_err(DeliveryError::not_sent)?;
     if let Some(binding) = self.runtimes.binding(&target.session_key) {
@@ -16,7 +17,7 @@ impl SessionSupervisor {
         .runtimes
         .binding_snapshot(&target.session_key)
         .ok_or_else(|| DeliveryError::not_sent("RPC runtime disconnected; reconnect it before sending"))?;
-      if snapshot.recovery_required {
+      if !snapshot.connected || snapshot.recovery_required || snapshot.reattach_required {
         return Err(DeliveryError::not_sent(
           "RPC state requires recovery; reconnect the runtime before sending",
         ));
@@ -26,10 +27,12 @@ impl SessionSupervisor {
       }
       let images_available = if target.input.provider == ViewerProvider::Qoder {
         binding.capabilities.image_input
-      } else if matches!(
-        target.input.provider,
-        ViewerProvider::Codex | ViewerProvider::OpenCode | ViewerProvider::ZCode
-      ) {
+      } else if inspect_images
+        && matches!(
+          target.input.provider,
+          ViewerProvider::Codex | ViewerProvider::OpenCode | ViewerProvider::ZCode
+        )
+      {
         self.rpc_models(target, true).await.ok().is_some_and(|catalog| {
           catalog.status.state.model.as_ref().is_some_and(|current| {
             catalog.models.iter().any(|choice| {

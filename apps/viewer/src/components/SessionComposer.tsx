@@ -81,28 +81,41 @@ export function SessionComposer({ session, on_accepted, input_refresh_key, model
   const picker = model && <SessionModelPicker key={session.session_key} model={model} provider={provider}
     input_busy={input.sending || input.delivery_uncertain} selected_model={input.model_draft}
     on_select={input.setModel} on_clear={input.clearModel} />;
+  const shared_desktop_failure = read_only && !input.availability_error && !input.sending && !input.delivery_uncertain
+    && session.provider === "codex" && control?.enabled && control.status?.can_select
+    && control.status.session_key === session.session_key && control.status.transport === "desktop"
+    && !control.checking && !control.changing && !control.stopping && !control.error && !control.notice
+    && ((input.checking_connection && control.status.available) || (!control.status.available && !!control.status.message.trim()
+      && control.status.message.trim() === input.availability?.message.trim()));
+  const retryAvailability = (button: HTMLButtonElement, checkControl = false) => {
+    if (document.activeElement === button) retry_focus.current = session.session_key;
+    input.retryAvailability(checkControl);
+    if (model) void model.refresh();
+  };
   const status_text = input.sending ? input.resuming ? `Resuming ${provider} and sending your message…` : "Sending your message…"
     : input.notice ?? input.validation_notice ?? (control_failed ? (show_editor ? "Check the session connection to send your draft." : null)
-      : input.checking ? "Checking message availability…" : input.availability?.message);
+      : input.checking ? "Checking message availability…" : shared_desktop_failure ? null : input.availability?.message);
+  const shared_reason_only = shared_desktop_failure && !status_text;
   const connection = control && <SessionControlSelector control={control} input_busy={input.sending || input.delivery_uncertain}
-    running={session.is_running} />;
+    running={session.is_running} shared_connection={shared_desktop_failure ? {
+      status_id: shared_reason_only ? `${inputId}-status` : undefined,
+      checking: input.checking,
+      retry: (button) => retryAvailability(button, true),
+    } : undefined} />;
   const foldConnection = !show_editor && !(control?.status?.is_running ?? session.is_running)
     && !control?.changing && !control?.stopping && !control?.error && !control?.notice;
   const needs_attention = show_editor || control_failed || input.availability_error || !!input.notice || !!input.validation_notice;
   const read_only_title = input.availability_error ? "Couldn’t check message availability" : "Read-only session";
-  const status = <div className="session-composer__status" id={`${inputId}-status`} role="status">
+  const status = shared_reason_only ? null : <div className="session-composer__status" id={`${inputId}-status`} role="status">
     {status_text && <span>{status_text}</span>}
-    {read_only && !input.checking && input.availability?.message && input.availability.message !== status_text
+    {read_only && !shared_desktop_failure && !input.checking && input.availability?.message && input.availability.message !== status_text
       ? <span>{input.availability.message}</span> : null}
     {input.delivery_uncertain && <button className="text-button" onClick={() => {
       input.editMessage();
       requestAnimationFrame(() => textarea.current?.focus());
     }} type="button">Edit message</button>}
-    {read_only && <button className="text-button composer-read-only__retry" disabled={input.checking} onClick={(event) => {
-      if (document.activeElement === event.currentTarget) retry_focus.current = session.session_key;
-      input.retryAvailability();
-      if (model) void model.refresh();
-    }} type="button"><RefreshIcon />Retry availability</button>}
+    {read_only && !shared_desktop_failure && <button className="text-button composer-read-only__retry" disabled={input.checking}
+      onClick={(event) => retryAvailability(event.currentTarget)} type="button"><RefreshIcon />Retry availability</button>}
   </div>;
 
   return (

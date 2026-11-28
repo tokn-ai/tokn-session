@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -72,28 +73,41 @@ fn run_print_session(request: PrintSessionRequest) -> Result<(), String> {
       request.source.as_str()
     ));
   }
-  let executor = request
-    .executor
-    .or_else(|| executor_from_env(request.source))
-    .ok_or_else(|| executor_required_error(request.source))?;
-  let mut command = executor_command(request.source, &executor, &request.action)?;
+  let executor = request.executor.or_else(|| executor_from_env(request.source));
+  let (mut command, stdin_prompt) = executor_command(request.source, executor.as_deref(), &request.action)?;
   if let Some(cwd) = request.cwd {
     command.current_dir(cwd);
   }
 
-  let status = command
-    .stdin(Stdio::inherit())
+  let program = command.get_program().to_string_lossy().into_owned();
+  let mut child = command
+    .stdin(if stdin_prompt.is_some() {
+      Stdio::piped()
+    } else {
+      Stdio::inherit()
+    })
     .stdout(Stdio::inherit())
     .stderr(Stdio::inherit())
-    .status()
-    .map_err(|err| format!("failed to run executor `{executor}`: {err}"))?;
+    .spawn()
+    .map_err(|err| format!("failed to run executor `{program}`: {err}"))?;
 
+  let prompt_result = stdin_prompt.map_or(Ok(()), |prompt| {
+    child
+      .stdin
+      .take()
+      .ok_or_else(|| "Codex executor stdin is unavailable".to_owned())?
+      .write_all(prompt.as_bytes())
+      .map_err(|err| format!("failed to send the prompt to the Codex executor: {err}"))
+  });
+  let status = child
+    .wait()
+    .map_err(|err| format!("failed to wait for executor `{program}`: {err}"))?;
   if status.success() {
-    return Ok(());
+    return prompt_result;
   }
 
   Err(format!(
-    "executor `{executor}` exited with {}",
+    "executor `{program}` exited with {}",
     status
       .code()
       .map(|code| code.to_string())
@@ -105,7 +119,7 @@ fn print_args(source: Source, action: &PrintAction) -> Result<Vec<String>, Strin
   Ok(match source {
     Source::Dsh => return Err("dsh create/append are not implemented".into()),
     Source::Pi => pi_print_args(action),
-    Source::Codex => codex_print_args(action),
+    Source::Codex => codex_print_args(action)?,
     Source::OpenCode => opencode_print_args(action),
     Source::WorkBuddy => return Err("workbuddy create/append are not implemented".into()),
     Source::ZCode => zcode_print_args(action)?,
@@ -146,24 +160,24 @@ fn zcode_print_args(action: &PrintAction) -> Result<Vec<String>, String> {
   Ok(args)
 }
 
-fn codex_print_args(action: &PrintAction) -> Vec<String> {
-  match action {
-    PrintAction::Create { prompt } => vec!["exec".to_string(), "--json".to_string(), prompt.clone()],
-    PrintAction::Continue { prompt } => vec![
-      "exec".to_string(),
-      "--json".to_string(),
-      "resume".to_string(),
-      "--last".to_string(),
-      prompt.clone(),
-    ],
-    PrintAction::Session { session_id, prompt } => vec![
-      "exec".to_string(),
-      "--json".to_string(),
-      "resume".to_string(),
-      session_id.clone(),
-      prompt.clone(),
-    ],
+fn codex_print_args(action: &PrintAction) -> Result<Vec<String>, String> {
+  if action_prompt(action).trim().is_empty() {
+    return Err("Codex requires a nonempty prompt".into());
   }
+  let mut args = vec!["exec".to_owned(), "--json".to_owned()];
+  match action {
+    PrintAction::Create { .. } => {}
+    PrintAction::Continue { .. } => args.extend(["resume".to_owned(), "--last".to_owned()]),
+    PrintAction::Session { session_id, .. } => {
+      if session_id.trim().is_empty() || session_id.starts_with('-') {
+        return Err("Codex requires a nonempty session ID that does not start with '-'".into());
+      }
+      args.extend(["resume".to_owned(), session_id.clone()]);
+    }
+  }
+  // The prompt goes to native stdin so its text cannot select a flag or subcommand.
+  args.push("-".into());
+  Ok(args)
 }
 
 fn pi_print_args(action: &PrintAction) -> Vec<String> {
@@ -211,33 +225,45 @@ fn executor_required_error(source: Source) -> String {
   )
 }
 
-fn executor_command(source: Source, executor: &str, action: &PrintAction) -> Result<Command, String> {
-  let mut parts = print_argv(source, executor, action)?;
-  let program = parts.remove(0);
-  let mut command = Command::new(program);
-  command.args(parts);
-  Ok(command)
+fn executor_command<'a>(
+  source: Source,
+  executor: Option<&str>,
+  action: &'a PrintAction,
+) -> Result<(Command, Option<&'a str>), String> {
+  if let Some(executor) = executor {
+    let (mut parts, pipe_prompt) = print_argv(source, executor, action)?;
+    let mut command = Command::new(parts.remove(0));
+    command.args(parts);
+    return Ok((command, pipe_prompt.then(|| action_prompt(action))));
+  }
+  if source != Source::Codex {
+    return Err(executor_required_error(source));
+  }
+
+  let args = codex_print_args(action)?;
+  let mut command = Command::new(tokn_codex_adapter::executable::resolve_executable()?);
+  command.args(args);
+  Ok((command, Some(action_prompt(action))))
 }
 
-fn print_argv(source: Source, executor: &str, action: &PrintAction) -> Result<Vec<String>, String> {
+fn print_argv(source: Source, executor: &str, action: &PrintAction) -> Result<(Vec<String>, bool), String> {
   let mut parts = split_command_line(executor)?;
   if parts.is_empty() {
     return Err("executor cannot be empty".to_string());
   }
 
-  let has_prompt_placeholder = parts.iter().any(|part| part == "{prompt}");
-  if has_prompt_placeholder {
+  if parts.iter().any(|part| part == "{prompt}") {
     let prompt = action_prompt(action);
     for part in &mut parts {
       if part == "{prompt}" {
         *part = prompt.to_string();
       }
     }
-  } else {
-    parts.extend(print_args(source, action)?);
+    return Ok((parts, false));
   }
 
-  Ok(parts)
+  parts.extend(print_args(source, action)?);
+  Ok((parts, source == Source::Codex))
 }
 
 fn action_prompt(action: &PrintAction) -> &str {
@@ -312,7 +338,7 @@ mod tests {
 
   #[test]
   fn print_argv_appends_opencode_create_args_after_executor_launcher() {
-    let args = print_argv(
+    let (args, pipe_prompt) = print_argv(
       Source::OpenCode,
       "tokn-gateway proxy opencode --npx --",
       &PrintAction::Create {
@@ -321,6 +347,7 @@ mod tests {
     )
     .unwrap();
 
+    assert!(!pipe_prompt);
     assert_eq!(
       args,
       vec![
@@ -339,7 +366,7 @@ mod tests {
 
   #[test]
   fn print_argv_appends_opencode_session_args_after_executor_launcher() {
-    let args = print_argv(
+    let (args, pipe_prompt) = print_argv(
       Source::OpenCode,
       "tokn-gateway proxy opencode --npx --",
       &PrintAction::Session {
@@ -349,6 +376,7 @@ mod tests {
     )
     .unwrap();
 
+    assert!(!pipe_prompt);
     assert_eq!(
       args,
       vec![
@@ -369,7 +397,7 @@ mod tests {
 
   #[test]
   fn print_argv_appends_opencode_continue_args_after_executor_launcher() {
-    let args = print_argv(
+    let (args, pipe_prompt) = print_argv(
       Source::OpenCode,
       "tokn-gateway proxy opencode --npx --",
       &PrintAction::Continue {
@@ -378,6 +406,7 @@ mod tests {
     )
     .unwrap();
 
+    assert!(!pipe_prompt);
     assert_eq!(
       args,
       vec![
@@ -397,7 +426,7 @@ mod tests {
 
   #[test]
   fn print_argv_uses_placeholder_as_advanced_full_command_override() {
-    let args = print_argv(
+    let (args, pipe_prompt) = print_argv(
       Source::OpenCode,
       "custom-agent --message {prompt}",
       &PrintAction::Create {
@@ -406,6 +435,7 @@ mod tests {
     )
     .unwrap();
 
+    assert!(!pipe_prompt);
     assert_eq!(args, vec!["custom-agent", "--message", "create a todo app"]);
   }
 
@@ -444,7 +474,9 @@ mod tests {
         ],
       ),
     ] {
-      assert_eq!(print_argv(Source::ZCode, "zcode", &action).unwrap(), expected);
+      let (args, pipe_prompt) = print_argv(Source::ZCode, "zcode", &action).unwrap();
+      assert_eq!(args, expected);
+      assert!(!pipe_prompt);
     }
   }
 

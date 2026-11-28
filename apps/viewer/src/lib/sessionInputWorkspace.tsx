@@ -11,6 +11,7 @@ interface InputState {
   availability: SessionInputStatus | null;
   availability_error: boolean;
   checking: boolean;
+  checking_connection: boolean;
   check_id: number;
   sending: boolean;
   resuming: boolean;
@@ -19,7 +20,7 @@ interface InputState {
 }
 
 const EMPTY_INPUT: InputState = {
-  draft: "", model_draft: null, images: [], availability: null, availability_error: false, checking: true, check_id: 0,
+  draft: "", model_draft: null, images: [], availability: null, availability_error: false, checking: true, checking_connection: false, check_id: 0,
   sending: false, resuming: false, delivery_uncertain: false, notice: null,
 };
 

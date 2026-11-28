@@ -63,6 +63,41 @@ fn success(request: &Value, result: Value) -> Value {
 }
 
 #[tokio::test]
+#[cfg(unix)]
+async fn new_connection_distinguishes_refusing_missing_and_available_desktop_sockets() {
+  let FakeRouter {
+    endpoint,
+    listener,
+    _directory,
+  } = FakeRouter::new();
+  drop(listener);
+  let error = DesktopClient::connect(&endpoint, REQUEST_TIMEOUT).await.err().unwrap();
+  assert!(!error.may_have_been_sent);
+  assert_eq!(
+    error.message,
+    "Codex Desktop's local control endpoint refused the connection."
+  );
+
+  std::fs::remove_file(&endpoint).unwrap();
+  let error = DesktopClient::connect(&endpoint, REQUEST_TIMEOUT).await.err().unwrap();
+  assert!(!error.may_have_been_sent);
+  assert_eq!(error.message, "Codex Desktop's local control endpoint is missing.");
+
+  let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+  let server = tokio::spawn(async move {
+    let mut stream: Box<dyn IpcStream> = Box::new(listener.accept().await.unwrap().0);
+    let request = read_frame(&mut stream).await.unwrap();
+    assert_eq!(request["method"], "initialize");
+    write_frame(&mut stream, &success(&request, json!({"clientId": "viewer-client"}))).await;
+    assert_eq!(stream.read(&mut [0]).await.unwrap(), 0);
+  });
+  let client = DesktopClient::connect(&endpoint, REQUEST_TIMEOUT).await.unwrap();
+  assert_eq!(client.client_id, "viewer-client");
+  drop(client);
+  server.await.unwrap();
+}
+
+#[tokio::test]
 #[cfg(any(unix, windows))]
 async fn model_status_reads_the_real_owner_and_keeps_unverified_catalog_closed() {
   let (mut client, server) = initialized_client(|mut stream| async move {
@@ -537,7 +572,7 @@ async fn missing_endpoint_is_not_a_delivery_attempt() {
     Err(error) => error,
   };
   assert!(!error.may_have_been_sent);
-  assert!(error.message.contains("unavailable"));
+  assert_eq!(error.message, "Codex Desktop's local control endpoint is missing.");
 }
 
 #[tokio::test]

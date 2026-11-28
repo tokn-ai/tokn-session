@@ -3,6 +3,7 @@
 //! Sending is deliberately limited to the owning Desktop process. In
 //! particular, an unavailable router never starts another Codex process.
 
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -165,9 +166,7 @@ impl DesktopClient {
     endpoint: &std::path::Path,
     request_timeout: Duration,
   ) -> Result<Self, DeliveryError> {
-    let stream = connect_stream(endpoint)
-      .await
-      .map_err(|error| DeliveryError::not_sent(format!("Codex Desktop is unavailable: {error}")))?;
+    let stream = connect_stream(endpoint).await.map_err(connection_error)?;
     let mut client = Self {
       stream,
       client_id: "initializing-client".to_owned(),
@@ -426,6 +425,16 @@ async fn read_frame(stream: &mut (impl AsyncRead + Unpin)) -> Result<Value, Stri
     .await
     .map_err(|error| format!("Codex Desktop IPC read failed: {error}"))?;
   serde_json::from_slice(&payload).map_err(|error| format!("Codex Desktop returned invalid IPC JSON: {error}"))
+}
+
+fn connection_error(error: std::io::Error) -> DeliveryError {
+  let message = match error.kind() {
+    ErrorKind::NotFound => "Codex Desktop's local control endpoint is missing.",
+    ErrorKind::ConnectionRefused => "Codex Desktop's local control endpoint refused the connection.",
+    ErrorKind::PermissionDenied => "Tokn does not have permission to connect to Codex Desktop.",
+    _ => return DeliveryError::not_sent(format!("Could not connect to Codex Desktop: {error}")),
+  };
+  DeliveryError::not_sent(message)
 }
 
 async fn connect_stream(endpoint: &std::path::Path) -> std::io::Result<Box<dyn IpcStream>> {

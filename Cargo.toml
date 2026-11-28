@@ -53,7 +53,7 @@ repository = "https://github.com/tokn-ai/tokn-session"
 [workspace.dependencies]
 tokn-interaction-core = { version = "0.1.1", path = "crates/interaction-core" }
 tokn-codex-rpc-protocol = { version = "0.1.1", path = "crates/codex-rpc-protocol" }
-tokn-codex-adapter = { version = "0.1.1", path = "crates/codex-adapter" }
+tokn-codex-adapter = { version = "0.1.1", path = "crates/codex-adapter", default-features = false }
 tokn-pi-rpc-protocol = { version = "0.1.1", path = "crates/pi-rpc-protocol" }
 tokn-pi-adapter = { version = "0.1.1", path = "crates/pi-adapter" }
 tokn-opencode-rpc-protocol = { version = "0.1.1", path = "crates/opencode-rpc-protocol" }

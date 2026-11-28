@@ -53,7 +53,9 @@ export function RpcRuntimeProfileForm({ profile, revision, busy, on_save, on_val
       {draft.mode === "managed" ? <>
         {textField("executable", "Executable", "Absolute executable path on the selected machine.")}
         {supportsRpcLaunchArguments(draft.provider) && <div className="rpc-profile-form__field"><label htmlFor={`${id}-arguments`}>Arguments</label><textarea id={`${id}-arguments`} value={draft.arguments} rows={3} spellCheck={false} onChange={(event) => change({ arguments: event.currentTarget.value })} /><p>JSON array of arguments. The host adds the provider’s RPC launch options.</p></div>}
-      </> : textField("endpoint", "RPC endpoint", draft.provider === "codex" ? "A Codex app-server ws:// or wss:// address." : "The agent’s HTTP or HTTPS API address.")}
+      </> : textField("endpoint", "RPC endpoint", draft.provider === "codex"
+        ? "A Codex app-server ws:// or wss:// address, or unix:///absolute/path.sock on Unix hosts. Unix sockets use filesystem permissions."
+        : "The agent’s HTTP or HTTPS API address.")}
       {(draft.mode === "managed" || draft.provider === "open_code") && textField("working_directory", "Working directory", "Required absolute project folder path on the selected machine.")}
       {draft.mode === "managed" ? <>
         <div className="rpc-profile-form__field"><label htmlFor={`${id}-environment-action`}>Environment variables</label><select id={`${id}-environment-action`} value={draft.environment_action} onChange={(event) => change({ environment_action: event.currentTarget.value as RpcRuntimeDraft["environment_action"] })}>

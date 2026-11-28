@@ -1,5 +1,5 @@
-use crate::framing::{self, RpcReader, StderrTail};
-use futures_util::{SinkExt, StreamExt, stream::SplitSink};
+use super::framing::{self, RpcReader, StderrTail};
+use futures_util::{Sink, SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{
   collections::HashMap,
@@ -16,7 +16,7 @@ use tokio::{
   task::JoinHandle,
 };
 use tokio_tungstenite::{
-  MaybeTlsStream, WebSocketStream,
+  WebSocketStream,
   tungstenite::{Message, client::IntoClientRequest, protocol::WebSocketConfig},
 };
 use tokn_codex_rpc_protocol::{self as wire, RpcId};
@@ -25,7 +25,6 @@ use tokn_interaction_core::{ErrorKind, InteractionError};
 const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_PENDING: usize = 128;
 const MAX_INCOMING: usize = 1024;
-type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 type CleanupResult = Option<Result<(), InteractionError>>;
 
 pub(super) enum Incoming {
@@ -56,7 +55,7 @@ pub(super) enum Incoming {
 
 enum Writer {
   Stdio(Box<dyn AsyncWrite + Unpin + Send>),
-  WebSocket(SplitSink<Socket, Message>),
+  WebSocket(Box<dyn Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Send + Unpin>),
 }
 
 struct Pending {
@@ -125,6 +124,35 @@ impl Transport {
     bearer: Option<&str>,
     request_timeout: Duration,
   ) -> Result<(Arc<Self>, mpsc::Receiver<Incoming>), InteractionError> {
+    if request_timeout.is_zero() {
+      return Err(InteractionError::invalid(
+        "Codex requires a positive connection timeout",
+      ));
+    }
+    let mut config = WebSocketConfig::default();
+    config.max_message_size = Some(framing::MAX_FRAME_BYTES);
+    config.max_frame_size = Some(framing::MAX_FRAME_BYTES);
+    #[cfg(unix)]
+    if endpoint.starts_with("unix://") {
+      let path = super::unix_socket_path(endpoint)
+        .ok_or_else(|| InteractionError::invalid("Codex Unix endpoints require an explicit absolute socket path"))?;
+      if bearer.is_some() {
+        return Err(InteractionError::invalid(
+          "Codex Unix sockets use local filesystem permissions",
+        ));
+      }
+      let (socket, _) = tokio::time::timeout(request_timeout, async {
+        let stream = tokio::net::UnixStream::connect(path)
+          .await
+          .map_err(|_| InteractionError::unavailable("Could not connect to Codex Unix socket"))?;
+        tokio_tungstenite::client_async_with_config("ws://localhost/rpc", stream, Some(config))
+          .await
+          .map_err(|_| InteractionError::unavailable("Could not upgrade Codex Unix socket to WebSocket"))
+      })
+      .await
+      .map_err(|_| InteractionError::unavailable("Codex Unix WebSocket connection timed out"))??;
+      return Ok(Self::from_websocket(socket, request_timeout));
+    }
     let mut request = endpoint
       .into_client_request()
       .map_err(|_| InteractionError::invalid("Invalid Codex WebSocket endpoint"))?;
@@ -135,7 +163,6 @@ impl Transport {
         .authority()
         .is_some_and(|authority| authority.as_str().contains('@'))
       || endpoint.contains('#')
-      || request_timeout.is_zero()
     {
       return Err(InteractionError::invalid(
         "Codex endpoint must be an explicit WS(S) URL without credentials or fragment, with a positive timeout",
@@ -152,9 +179,6 @@ impl Transport {
           .map_err(|_| InteractionError::invalid("Invalid Codex authorization header"))?,
       );
     }
-    let mut config = WebSocketConfig::default();
-    config.max_message_size = Some(framing::MAX_FRAME_BYTES);
-    config.max_frame_size = Some(framing::MAX_FRAME_BYTES);
     let (socket, _) = tokio::time::timeout(
       request_timeout,
       tokio_tungstenite::connect_async_with_config(request, Some(config), false),
@@ -162,8 +186,15 @@ impl Transport {
     .await
     .map_err(|_| InteractionError::unavailable("Codex WebSocket connection timed out"))?
     .map_err(|_| InteractionError::unavailable("Could not connect to Codex WebSocket endpoint"))?;
+    Ok(Self::from_websocket(socket, request_timeout))
+  }
+
+  fn from_websocket<S>(socket: WebSocketStream<S>, request_timeout: Duration) -> (Arc<Self>, mpsc::Receiver<Incoming>)
+  where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+  {
     let (writer, mut reader) = socket.split();
-    let (transport, incoming) = Self::new(Writer::WebSocket(writer), None, request_timeout);
+    let (transport, incoming) = Self::new(Writer::WebSocket(Box::new(writer)), None, request_timeout);
     let weak = Arc::downgrade(&transport);
     let task = tokio::spawn(async move {
       loop {
@@ -198,7 +229,7 @@ impl Transport {
       }
     });
     transport.track(task);
-    Ok((transport, incoming))
+    (transport, incoming)
   }
 
   fn new(writer: Writer, mut child: Option<Child>, request_timeout: Duration) -> (Arc<Self>, mpsc::Receiver<Incoming>) {

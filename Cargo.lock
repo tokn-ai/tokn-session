@@ -6491,6 +6491,7 @@ name = "tokn-codex-adapter"
 version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
+ "dirs 6.0.0",
  "futures-util",
  "serde_json",
  "sha2 0.10.9",
@@ -6499,6 +6500,7 @@ dependencies = [
  "tokio-tungstenite 0.26.2",
  "tokn-codex-rpc-protocol",
  "tokn-interaction-core",
+ "tokn-session-storage",
  "uuid",
 ]
 
@@ -6768,6 +6770,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokn-codex-adapter",
  "tokn-interaction-core",
  "tokn-qoder-adapter",
  "tokn-session-codex",

@@ -12,5 +12,7 @@ export function isolatedViewerEnvironment(home: string): NodeJS.ProcessEnv {
   return {
     HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home,
     TMPDIR: home, TEMP: home, TMP: home, SystemRoot: process.env.SystemRoot,
+    // The demo is a saved rollout. Do not discover the host's bundled Codex.
+    TOKN_SESSION_CODEX_EXECUTABLE: join(home, "unavailable", "codex"),
   };
 }

@@ -12,7 +12,7 @@ license.workspace = true
 tokn-interaction-core.workspace = true
 tokn-pi-rpc-protocol.workspace = true
 tokn-pi-adapter.workspace = true
-tokn-codex-adapter.workspace = true
+tokn-codex-adapter = { workspace = true, features = ["app-server"] }
 tokn-opencode-adapter.workspace = true
 tokn-zcode-adapter.workspace = true
 tokn-qoder-adapter.workspace = true

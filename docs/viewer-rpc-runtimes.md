@@ -8,7 +8,7 @@ an agent, resume history, or send a prompt.
 
 ## Profiles and storage
 
-Profiles support managed Codex/Pi/OpenCode/ZCode/Qoder/DSH processes, attached Codex WS(S),
+Profiles support managed Codex/Pi/OpenCode/ZCode/Qoder/DSH processes, attached Codex WS(S) or Unix sockets,
 OpenCode legacy/current V2 HTTP/SSE, and DSH Gateway/legacy ApiProxy servers. Pi attachment needs explicit
 IO handles and is not available through profiles. Managed profiles require an
 absolute executable and working folder; attached OpenCode also requires its
@@ -18,6 +18,12 @@ For current DSH, the profile's private bearer-token field holds its launch token
 the adapter exchanges it for the native API Cookie. Managed DSH reads the owned
 child's tokenized readiness URL and suppresses browser opening. Current OpenCode
 rejects an explicit workspace binding when its directory cannot attest that ID.
+
+On a Unix host, set an attached Codex profile's endpoint to
+`unix:///absolute/path.sock` to use a shared `codex app-server --listen unix://PATH`.
+The path is resolved on the selected host. Clear any saved bearer credentials
+for this profile. The server and each client need access to the same socket
+through its filesystem permissions.
 
 Native storage defaults to `~/.tokn/sessions/viewer/rpc-runtimes.json`, beside
 the configured viewer index, with private permissions, bounded size, atomic
@@ -49,6 +55,10 @@ canonical paths and executable metadata without launching agents; native
 compatibility is checked on connection. Discovered configurations are scoped to
 their project and pin executable metadata, so a replaced binary requires fresh
 resolution. The bounded transient inventory is not a saved-profile registry.
+
+When macOS launches the app without a shell `PATH` containing `codex`,
+automatic discovery can use the Codex CLI in the system or user's
+Applications folder inside ChatGPT.
 
 For a Codex app-server launched by the desktop Viewer, a managed `prompt-user`
 rule opens a native command review dialog when the local app is in the
@@ -90,7 +100,7 @@ history. Executable paths, environment values and credentials remain host-side.
 
 Reads expose environment variable names and credential kinds, never their
 values. Writes can retain, replace, or clear saved environment/authentication.
-Attached OpenCode supports Basic authentication; attached Codex and legacy DSH
+Attached OpenCode supports Basic authentication. Codex WS(S) and legacy DSH
 support Bearer authentication. Current DSH exchanges its saved launch token for
 the native API Cookie. Managed OpenCode credentials use environment variables;
 managed DSH reads its owned child's launch token. Public

@@ -9,6 +9,7 @@ repository.workspace = true
 readme = "README.md"
 
 [dependencies]
+tokn-codex-adapter.workspace = true
 tokn-session-dsh.workspace = true
 tokn-session-codex.workspace = true
 tokn-session-core.workspace = true

@@ -175,6 +175,16 @@ now route through one Rust `SessionSupervisor`. Codex defaults to app-server
 RPC with explicit per-thread Desktop selection; first Send verifies history and
 binds/resumes through host-selected runtime configuration. Inspection does not
 activate sessions and transport failures never cause fallback or prompt replay.
+`codex-adapter` shares executable discovery between the viewer and CLI
+create/append, including the ChatGPT-bundled CLI on macOS. The CLI builds the
+resolver without the app-server transport and sends each native headless
+prompt through its own stdin pipe.
+A managed Codex runtime can open a verified plain legacy rollout after a
+definitive missing-thread response. Paginated history needs its original Codex
+home. Archived and missing histories have separate error messages. Attached
+runtimes receive only the native ID. On Unix hosts, an attached Codex profile
+can use an explicit `unix:///absolute/path.sock` endpoint. It upgrades the local
+stream to the app-server WebSocket protocol and uses filesystem permissions.
 Cross-process provider/native-ID leases coordinate RPC, owned Pi, and explicit
 Desktop control independently of runtime profile leases. Pi retains its existing
 driver; arbitrary Pi history adoption and remote-only RPC history remain
@@ -223,7 +233,7 @@ Live interaction has a provider-independent `interaction-core`, dedicated
 Codex/Pi/OpenCode/DSH RPC protocol crates, and native adapters including ZCode.
 The core owns instance-bound dispatch, capabilities, live pending
 interactions, cancellation-safe admissions, and bounded receipts; protocol and
-core crates do not import providers. Codex uses app-server stdio/WS(S), Pi uses
+core crates do not import providers. Codex uses app-server stdio, WS(S), and Unix sockets. Pi uses
 stdio, OpenCode legacy/current V2 HTTP/SSE, DSH Gateway HTTP/WebSocket with legacy ApiProxy attachment,
 and ZCode app-server NDJSON. Adapters support owned launch. Where supported,
 explicit attachment never
@@ -1293,10 +1303,13 @@ reported without preventing the other providers from loading.
 
 The conversation footer sends multiline messages through native Rust live-input
 transports in `viewer-core`, shared by Tauri and authenticated HTTP commands.
-Root Codex tasks use the owning Desktop IPC client without a CLI fallback;
-text inputs include `text_elements: []`, which the Desktop renderer requires
-even though app-server accepts its omission. Without it, a turn can execute and
-persist successfully while its optimistic Desktop view crashes.
+The Desktop route for root Codex tasks uses the owning client through legacy
+local IPC. Text inputs include `text_elements: []`, which the Desktop renderer
+requires to render the optimistic turn.
+Some Desktop launches lack this endpoint. A socket file can also exist without
+accepting connections. The viewer reports the missing and refusing endpoint
+conditions separately. When the composer and connection selector report the same
+condition, **Retry connection** rechecks both.
 Existing Pi sessions use their exact live session's opt-in input bridge;
 locally created viewer-owned Pi sessions use their managed RPC process. Both
 start idle turns or queue busy follow-ups. Other providers, Codex subagents, and External snapshot

@@ -4,7 +4,7 @@ use crate::{
   model::{InputDeliveryStatus, SubmitSessionInputRequest},
   repository::ViewerRepository,
   rpc_profiles::{RpcCredentials, RpcRuntimeProfileInput, RpcSaveProfileRequest},
-  session_supervisor::CancelSessionTurnRequest,
+  session_supervisor::{CancelSessionTurnRequest, SessionControlRequest, SessionControlStatus},
   workspace::{CreateProjectSessionRequest, ManagedSessionRequest, RegisterProjectRequest},
 };
 use futures_util::{SinkExt, StreamExt};
@@ -185,6 +185,7 @@ async fn save_zcode_fixture(
 struct CodexPeer {
   endpoint: String,
   requests: Arc<Mutex<Vec<Value>>>,
+  notifications: tokio::sync::broadcast::Sender<Value>,
   task: tokio::task::JoinHandle<()>,
 }
 
@@ -198,6 +199,8 @@ impl CodexPeer {
     let endpoint = format!("ws://{}", listener.local_addr().unwrap());
     let requests = Arc::new(Mutex::new(Vec::new()));
     let recorded = requests.clone();
+    let (notifications, _) = tokio::sync::broadcast::channel::<Value>(8);
+    let peer_notifications = notifications.clone();
     let task = tokio::spawn(async move {
       let mut peers = tokio::task::JoinSet::new();
       loop {
@@ -207,10 +210,21 @@ impl CodexPeer {
         let requests = recorded.clone();
         let history = history.clone();
         let cwd = cwd.clone();
+        let mut notifications = peer_notifications.subscribe();
         peers.spawn(async move {
           let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
           let mut active = false;
-          while let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) = socket.next().await {
+          loop {
+            let frame = tokio::select! {
+              Ok(notification) = notifications.recv() => {
+                if socket.send(tokio_tungstenite::tungstenite::Message::Text(notification.to_string().into())).await.is_err() {
+                  break;
+                }
+                continue;
+              }
+              frame = socket.next() => frame,
+            };
+            let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) = frame else { break };
             let request: Value = serde_json::from_str(&text).unwrap();
             requests.lock().unwrap().push(request.clone());
             let Some(id) = request.get("id") else { continue };
@@ -248,6 +262,7 @@ impl CodexPeer {
     Self {
       endpoint,
       requests,
+      notifications,
       task,
     }
   }
@@ -260,6 +275,19 @@ impl CodexPeer {
       .iter()
       .filter(|request| request["method"] == method)
       .count()
+  }
+
+  fn notify_turn(&self, method: &str, status: &str) {
+    self
+      .notifications
+      .send(json!({
+        "method":method,
+        "params":{
+          "threadId":"created-codex",
+          "turn":{"id":"test-turn","status":status,"items":[]}
+        }
+      }))
+      .unwrap();
   }
 }
 
@@ -302,6 +330,25 @@ async fn settled(service: &ViewerService, request_id: &str) -> CreationSnapshot 
       service.creation_manager().unwrap().get(request_id)
     )
   })
+}
+
+async fn control_running(service: &ViewerService, session_key: &str, running: bool) -> SessionControlStatus {
+  tokio::time::timeout(Duration::from_secs(2), async {
+    loop {
+      let status = service
+        .get_session_control(SessionControlRequest {
+          session_key: session_key.into(),
+        })
+        .await
+        .unwrap();
+      if status.is_running == Some(running) {
+        return status;
+      }
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await
+  .expect("verified native activity must reach session control")
 }
 
 #[tokio::test]
@@ -368,15 +415,34 @@ async fn codex_creation_indexes_real_history_and_reuses_one_runtime_for_followup
   assert_eq!(first.status, InputDeliveryStatus::Accepted);
   assert_eq!(duplicate.status, first.status);
   assert_eq!(peer.count("turn/start"), 2);
+  let thread_reads = peer.count("thread/read");
+  let model_reads = peer.count("model/list");
+  peer.notify_turn("turn/started", "inProgress");
+  let running = control_running(&service, &key, true).await;
+  assert!(running.available && running.can_cancel);
+  assert_eq!(std::fs::read_to_string(history).unwrap().lines().count(), 1);
+  assert_eq!(
+    peer.count("thread/read"),
+    thread_reads,
+    "Stop readiness uses the bound local snapshot"
+  );
+  assert_eq!(
+    peer.count("model/list"),
+    model_reads,
+    "Stop readiness does not load a model catalog"
+  );
   let cancellation = service
     .cancel_session_turn(CancelSessionTurnRequest {
       request_id: uuid::Uuid::new_v4().to_string(),
-      session_key: key,
+      session_key: key.clone(),
     })
     .await
     .unwrap();
   assert_eq!(cancellation.status, InputDeliveryStatus::Accepted);
   assert_eq!(peer.count("turn/interrupt"), 1);
+  peer.notify_turn("turn/completed", "interrupted");
+  let idle = control_running(&service, &key, false).await;
+  assert_eq!(idle.instance_id, running.instance_id);
   assert_eq!(
     peer.count("thread/resume"),
     0,
@@ -837,6 +903,7 @@ async fn all_provider_options_share_typed_plans_without_launching_agents() {
       .into_iter()
       .map(|key| (key.to_owned(), executable.clone().into_os_string()))
       .collect(),
+      ..Default::default()
     });
   let options = service
     .get_session_creation_options(SessionCreationOptionsRequest {
