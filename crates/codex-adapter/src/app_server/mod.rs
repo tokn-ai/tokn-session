@@ -37,6 +37,7 @@ pub struct EndpointOptions {
   pub instance_id: String,
   pub request_timeout: Duration,
 }
+
 impl EndpointOptions {
   pub fn new(runtime_id: impl Into<String>) -> Self {
     Self {
@@ -45,6 +46,19 @@ impl EndpointOptions {
       request_timeout: Duration::from_secs(20),
     }
   }
+}
+
+/// Explicit native path for a Codex WebSocket-over-Unix endpoint on this host.
+pub fn unix_socket_path(endpoint: &str) -> Option<&Path> {
+  let path = endpoint.strip_prefix("unix://")?;
+  (cfg!(unix)
+    && path.starts_with('/')
+    && !path.starts_with("//")
+    && !path.ends_with('/')
+    && path.trim_end() == path
+    && !path.chars().any(char::is_control)
+    && !path.contains(['?', '#']))
+  .then(|| Path::new(path))
 }
 
 /// Native launch settings and credentials remain host-owned.
@@ -167,7 +181,7 @@ impl CodexAdapter {
     Self::initialize(options, Ownership::Attached, transport, incoming, None).await
   }
 
-  /// Attach to an explicitly configured WebSocket app-server, with optional bearer auth.
+  /// Attach to an app-server over WS(S) with optional bearer auth, or an explicit Unix socket.
   pub async fn connect(
     options: EndpointOptions,
     endpoint: &str,

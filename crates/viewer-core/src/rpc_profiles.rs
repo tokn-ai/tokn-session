@@ -616,9 +616,17 @@ fn schema_issues(profile: &StoredProfile) -> Vec<RpcProfileValidationIssue> {
           "OpenCode attachment requires its project working directory",
         );
       }
+      let codex_unix = profile.provider == Provider::Codex
+        && profile
+          .endpoint
+          .as_deref()
+          .is_some_and(|endpoint| tokn_codex_adapter::unix_socket_path(endpoint).is_some());
       let endpoint_ok = profile.endpoint.as_ref().is_some_and(|endpoint| {
         if endpoint.len() > 4096 || endpoint.chars().any(char::is_control) || endpoint.trim() != endpoint {
           return false;
+        }
+        if codex_unix {
+          return true;
         }
         // Url normalizes empty userinfo away; native WebSocket transports also
         // reject that authority form, so validate the original authority too.
@@ -649,10 +657,16 @@ fn schema_issues(profile: &StoredProfile) -> Vec<RpcProfileValidationIssue> {
         issue(
           &mut issues,
           "endpoint",
-          "Use a Codex WS(S) URL or an OpenCode/DSH HTTP(S) origin without credentials, query, or fragment",
+          "Use a Codex WS(S) or absolute Unix socket URL, or an OpenCode/DSH HTTP(S) origin without credentials, query, or fragment",
         );
       }
-      if !matches!(profile.credentials, RpcCredentials::None)
+      if codex_unix && !matches!(profile.credentials, RpcCredentials::None) {
+        issue(
+          &mut issues,
+          "credentials",
+          "Clear credentials to use a Codex Unix socket. Access uses local filesystem permissions.",
+        );
+      } else if !matches!(profile.credentials, RpcCredentials::None)
         && !matches!(
           (&profile.credentials, profile.provider),
           (RpcCredentials::Basic { .. }, Provider::OpenCode)
@@ -1037,6 +1051,24 @@ mod tests {
       );
     }
     assert!(store.snapshot().unwrap().profiles.is_empty());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn attached_codex_unix_profiles_use_filesystem_permissions() {
+    let store = RpcProfileStore::new(None).unwrap();
+    let mut input = attached();
+    input.endpoint = Some("unix:///tmp/codex-control.sock".into());
+    let result = store.validate(input.clone()).unwrap();
+    assert!(!result.valid);
+    assert_eq!(result.issues[0].field, "credentials");
+
+    input.credentials = Some(RpcCredentials::None);
+    assert!(store.validate(input.clone()).unwrap().valid);
+    let saved = save(&store, input);
+    let profile = &saved.profiles[0];
+    assert_eq!(profile.endpoint.as_deref(), Some("unix:///tmp/codex-control.sock"));
+    assert!(profile.credential_kind.is_none());
   }
 
   #[test]

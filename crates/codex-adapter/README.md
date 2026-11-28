@@ -11,12 +11,13 @@ Codex Desktop IPC input path remain separate.
 
 The default `app-server` feature enables live control. `CodexAdapter::spawn`
 owns an explicitly configured `codex app-server --listen
-stdio://` child. `attach` accepts stdio handles supplied by their owner;
-`connect` attaches to an explicit WS(S) endpoint with optional bearer
-authentication. Executables, arguments, environment, endpoints, and credentials
+stdio://` child. `attach` accepts stdio handles supplied by their owner.
+`connect` attaches to a WS(S) endpoint with optional bearer authentication,
+or on Unix to `unix:///absolute/path` using the native WebSocket upgrade.
+Unix endpoints use filesystem permissions and accept literal paths including spaces.
+Executables, arguments, environment, endpoints, and credentials
 are host configuration. There is no process discovery, credential extraction,
-or automatic attachment to Desktop. Native WebSocket transport is experimental;
-Unix socket transport is not implemented here.
+or automatic attachment to Desktop. Native TCP WebSocket transport is experimental.
 
 Initialization happens once per transport, with experimental API opt-in for
 native question/approval metadata. Create a thread with `create_thread`, or

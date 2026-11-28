@@ -30,6 +30,87 @@ async fn attach() -> (CodexAdapter, Peer) {
   peer_with_ownership(Ownership::Attached).await
 }
 
+#[cfg(unix)]
+#[test]
+fn unix_socket_endpoints_require_an_explicit_local_path() {
+  assert_eq!(
+    unix_socket_path("unix:///tmp/socket with spaces"),
+    Some(Path::new("/tmp/socket with spaces"))
+  );
+  for endpoint in [
+    "unix://",
+    "unix:///",
+    "unix://host/path",
+    "unix:////host/path",
+    "unix:///path?query",
+    "unix:///path#fragment",
+    "unix:///line\nfeed",
+    "ws://localhost/rpc",
+  ] {
+    assert_eq!(unix_socket_path(endpoint), None, "{endpoint:?}");
+  }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn attaches_to_a_unix_app_server_using_the_native_websocket_upgrade() {
+  use futures_util::{SinkExt, StreamExt};
+  use tokio_tungstenite::tungstenite::Message;
+
+  let directory = tempfile::tempdir().unwrap();
+  let path = directory.path().join("control socket");
+  let endpoint = format!("unix://{}", path.display());
+  let listener = tokio::net::UnixListener::bind(&path).unwrap();
+  let server = tokio::spawn(async move {
+    let (stream, _) = listener.accept().await.unwrap();
+    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+    let frame = socket.next().await.unwrap().unwrap().into_text().unwrap();
+    let request: Value = serde_json::from_str(&frame).unwrap();
+    assert_eq!(request["method"], "initialize");
+    let reply = json!({"id":request["id"],"result":{"userAgent":"fixture"}});
+    socket.send(Message::Text(reply.to_string().into())).await.unwrap();
+    let frame = socket.next().await.unwrap().unwrap().into_text().unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&frame).unwrap()["method"], "initialized");
+    assert!(matches!(socket.next().await, Some(Ok(Message::Close(_)))));
+  });
+  let options = EndpointOptions::new("unix-fixture");
+  assert!(
+    matches!(CodexAdapter::connect(options.clone(), &endpoint, Some("unused")).await, Err(error) if error.kind == ErrorKind::InvalidRequest)
+  );
+  let adapter = CodexAdapter::connect(options, &endpoint, None).await.unwrap();
+  assert_eq!(adapter.descriptor().ownership, Ownership::Attached);
+  adapter.close().await.unwrap();
+  server.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stalled_unix_upgrade_times_out_and_releases_the_connection() {
+  use tokio::io::AsyncReadExt;
+
+  let directory = tempfile::tempdir().unwrap();
+  let path = directory.path().join("control.sock");
+  let listener = tokio::net::UnixListener::bind(&path).unwrap();
+  let endpoint = format!("unix://{}", path.display());
+  let mut options = EndpointOptions::new("unix-fixture");
+  options.request_timeout = Duration::from_millis(100);
+  let (result, accepted) = tokio::join!(CodexAdapter::connect(options, &endpoint, None), listener.accept());
+  assert!(matches!(result, Err(error) if error.kind == ErrorKind::Unavailable && error.message.contains("timed out")));
+  let (mut peer, _) = accepted.unwrap();
+  let mut received = Vec::new();
+  tokio::time::timeout(Duration::from_secs(2), peer.read_to_end(&mut received))
+    .await
+    .expect("client retained the stalled connection")
+    .unwrap();
+  let handshake = String::from_utf8(received).unwrap();
+  assert_eq!(handshake.lines().next(), Some("GET /rpc HTTP/1.1"));
+  assert!(
+    handshake
+      .lines()
+      .any(|line| line.eq_ignore_ascii_case("host: localhost"))
+  );
+}
+
 async fn peer_with_ownership(ownership: Ownership) -> (CodexAdapter, Peer) {
   let (adapter, native) = tokio::io::duplex(1024 * 1024);
   let (reader, writer) = tokio::io::split(adapter);

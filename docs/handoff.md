@@ -182,7 +182,9 @@ prompt through its own stdin pipe.
 A managed Codex runtime can open a verified plain legacy rollout after a
 definitive missing-thread response. Paginated history needs its original Codex
 home. Archived and missing histories have separate error messages. Attached
-runtimes receive only the native ID.
+runtimes receive only the native ID. On Unix hosts, an attached Codex profile
+can use an explicit `unix:///absolute/path.sock` endpoint. It upgrades the local
+stream to the app-server WebSocket protocol and uses filesystem permissions.
 Cross-process provider/native-ID leases coordinate RPC, owned Pi, and explicit
 Desktop control independently of runtime profile leases. Pi retains its existing
 driver; arbitrary Pi history adoption and remote-only RPC history remain
@@ -231,7 +233,7 @@ Live interaction has a provider-independent `interaction-core`, dedicated
 Codex/Pi/OpenCode/DSH RPC protocol crates, and native adapters including ZCode.
 The core owns instance-bound dispatch, capabilities, live pending
 interactions, cancellation-safe admissions, and bounded receipts; protocol and
-core crates do not import providers. Codex uses app-server stdio/WS(S), Pi uses
+core crates do not import providers. Codex uses app-server stdio, WS(S), and Unix sockets. Pi uses
 stdio, OpenCode legacy/current V2 HTTP/SSE, DSH Gateway HTTP/WebSocket with legacy ApiProxy attachment,
 and ZCode app-server NDJSON. Adapters support owned launch. Where supported,
 explicit attachment never

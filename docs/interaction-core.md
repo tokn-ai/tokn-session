@@ -19,9 +19,9 @@ Adapters depend on the core contract. The host composes
 them with `InteractionService::register(Arc<dyn InteractionAdapter>)`.
 Historical `*-protocol` crates and `AgentEvent` keep their existing role.
 
-Codex uses managed stdio or explicit attached stdio/WS(S). Create/resume binds
-and subscribes a thread before control; metadata/state inspection never resumes
-it. Native model catalogs provide verified choices for these registered
+Codex uses managed stdio or explicit attached stdio, WS(S), and Unix sockets.
+Create/resume binds and subscribes a thread before control. Metadata and state
+inspection do not resume it. Native model catalogs provide verified choices for these registered
 app-server runtimes. The viewer defaults to RPC and offers its existing Desktop
 route as an explicit per-thread alternative. See the
 [Codex adapter](../crates/codex-adapter/README.md) for native guarantees, callback
