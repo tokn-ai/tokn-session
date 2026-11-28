@@ -31,9 +31,12 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
     return () => { if (store.on_accepted === accepted) store.on_accepted = undefined; };
   }, [model, on_accepted, session_key, store]);
 
-  const checkAvailability = useCallback(async (key: string, target_session: string, send?: CommandInvoker) => {
+  const checkAvailability = useCallback(async (key: string, target_session: string, send?: CommandInvoker, control_check?: Promise<void>) => {
     const checkId = ++store.next_check;
-    update(key, (state) => ({ ...state, checking: true, check_id: checkId }));
+    // Control reports its own diagnostics. A rejection on that read must
+    // still allow the independent availability result to settle.
+    const connection = control_check && Promise.allSettled([control_check]);
+    update(key, (state) => ({ ...state, checking: true, checking_connection: !!connection, check_id: checkId }));
     let availability: SessionInputStatus;
     let availability_error = false;
     try {
@@ -50,8 +53,9 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
         max_length: DEFAULT_MAX_LENGTH,
       };
     }
+    if (connection) await connection;
     update(key, (state) => state.check_id === checkId
-      ? { ...state, checking: false, availability, availability_error }
+      ? { ...state, checking: false, checking_connection: false, availability, availability_error }
       : state);
   }, [store, update]);
 
@@ -67,7 +71,7 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
         ? !!control?.binding_key && old.control_binding !== control.binding_key
         : revision_changed;
       return { ...old, control_revision: control?.revision, control_binding: control?.binding_key ?? old.control_binding,
-        checking: true, check_id, availability: !control?.blocked && !revision_changed && !binding_changed ? old.availability : null,
+        checking: true, checking_connection: false, check_id, availability: !control?.blocked && !revision_changed && !binding_changed ? old.availability : null,
         model_draft: binding_changed ? null : old.model_draft };
     });
     if (!control?.blocked) void checkAvailability(key, session_key);
@@ -260,8 +264,11 @@ export function useSessionInput(session_key: string | null, on_accepted?: (sessi
     editMessage() {
       if (session_key) update(scopedKey(session_key), (value) => ({ ...value, delivery_uncertain: false, notice: null }));
     },
-    retryAvailability() {
-      if (session_key && !control?.blocked) void checkAvailability(scopedKey(session_key), session_key);
+    retryAvailability(checkControl = false) {
+      // A quiet control read keeps the same binding active. Its regular busy
+      // transition would invalidate this simultaneous input read and start another.
+      if (session_key && !control?.blocked) void checkAvailability(scopedKey(session_key), session_key, undefined,
+        checkControl ? control?.refresh(true) : undefined);
     },
     send,
   };

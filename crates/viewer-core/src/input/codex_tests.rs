@@ -63,6 +63,34 @@ fn success(request: &Value, result: Value) -> Value {
 }
 
 #[tokio::test]
+#[cfg(unix)]
+async fn retry_connects_after_desktop_replaces_a_stale_socket() {
+  let FakeRouter {
+    endpoint,
+    listener,
+    _directory,
+  } = FakeRouter::new();
+  drop(listener);
+  let error = DesktopClient::connect(&endpoint, REQUEST_TIMEOUT).await.err().unwrap();
+  assert!(!error.may_have_been_sent);
+  assert!(error.message.contains("Quit and reopen"));
+
+  std::fs::remove_file(&endpoint).unwrap();
+  let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+  let server = tokio::spawn(async move {
+    let mut stream: Box<dyn IpcStream> = Box::new(listener.accept().await.unwrap().0);
+    let request = read_frame(&mut stream).await.unwrap();
+    assert_eq!(request["method"], "initialize");
+    write_frame(&mut stream, &success(&request, json!({"clientId": "viewer-client"}))).await;
+    assert_eq!(stream.read(&mut [0]).await.unwrap(), 0);
+  });
+  let client = DesktopClient::connect(&endpoint, REQUEST_TIMEOUT).await.unwrap();
+  assert_eq!(client.client_id, "viewer-client");
+  drop(client);
+  server.await.unwrap();
+}
+
+#[tokio::test]
 #[cfg(any(unix, windows))]
 async fn model_status_reads_the_real_owner_and_keeps_unverified_catalog_closed() {
   let (mut client, server) = initialized_client(|mut stream| async move {
@@ -537,7 +565,7 @@ async fn missing_endpoint_is_not_a_delivery_attempt() {
     Err(error) => error,
   };
   assert!(!error.may_have_been_sent);
-  assert!(error.message.contains("unavailable"));
+  assert!(error.message.contains("Open Codex Desktop"));
 }
 
 #[tokio::test]

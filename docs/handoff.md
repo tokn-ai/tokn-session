@@ -1305,6 +1305,10 @@ Root Codex tasks use the owning Desktop IPC client without a CLI fallback;
 text inputs include `text_elements: []`, which the Desktop renderer requires
 even though app-server accepts its omission. Without it, a turn can execute and
 persist successfully while its optimistic Desktop view crashes.
+A Desktop socket file can exist without accepting connections. The viewer asks
+the user to quit and reopen Desktop when a connection is refused. When the
+composer and connection selector report the same refusal, **Retry connection**
+rechecks both.
 Existing Pi sessions use their exact live session's opt-in input bridge;
 locally created viewer-owned Pi sessions use their managed RPC process. Both
 start idle turns or queue busy follow-ups. Other providers, Codex subagents, and External snapshot
